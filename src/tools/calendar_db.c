@@ -766,6 +766,43 @@ int calendar_db_occurrence_delete_for_event(int64_t event_id) {
    return result;
 }
 
+int calendar_db_events_nearest(const int64_t *calendar_ids,
+                               int calendar_count,
+                               time_t range_start,
+                               time_t range_end,
+                               time_t now,
+                               calendar_occurrence_t *out,
+                               int max_count,
+                               int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out || !count_out || max_count <= 0)
+      return FAILURE;
+   if (calendar_count <= 0)
+      return SUCCESS;
+
+   char id_json[768];
+   build_cal_id_json(calendar_ids, calendar_count, id_json, sizeof(id_json));
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = s_db.stmt_cal_events_nearest;
+   sqlite3_reset(st);
+   sqlite3_bind_text(st, 1, id_json, -1, SQLITE_STATIC);
+   sqlite3_bind_int64(st, 2, (int64_t)range_start);
+   sqlite3_bind_int64(st, 3, (int64_t)range_end);
+   sqlite3_bind_int64(st, 4, (int64_t)now);
+   sqlite3_bind_int(st, 5, max_count);
+   int count = 0;
+   while (count < max_count && sqlite3_step(st) == SQLITE_ROW) {
+      row_to_occurrence(st, &out[count]);
+      count++;
+   }
+   sqlite3_reset(st);
+   AUTH_DB_UNLOCK();
+   *count_out = count;
+   return SUCCESS;
+}
+
 int calendar_db_occurrences_in_range(const int64_t *calendar_ids,
                                      int calendar_count,
                                      time_t range_start,

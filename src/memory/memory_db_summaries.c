@@ -416,9 +416,12 @@ int memory_db_summary_search_semantic(int user_id,
                                       int max_scan,
                                       memory_summary_t *out_summaries,
                                       float *out_scores,
-                                      int *count_out) {
+                                      int *count_out,
+                                      memory_summary_pool_t *pool_out) {
    if (count_out)
       *count_out = 0;
+   if (pool_out)
+      memset(pool_out, 0, sizeof(*pool_out));
    if (!query_vec || query_dims <= 0 || max_summaries <= 0 || !out_summaries || !out_scores ||
        user_id <= 0)
       return MEMORY_DB_FAILURE;
@@ -470,6 +473,10 @@ int memory_db_summary_search_semantic(int user_id,
       float row_norm = memory_embeddings_l2_norm(row_vec, query_dims);
       float score = memory_embeddings_cosine_with_norms(query_vec, row_vec, query_dims, q_norm,
                                                         row_norm);
+      if (pool_out) {
+         pool_out->scored++;
+         pool_out->cosine_sum += score;
+      }
 
       int min_idx = 0;
       if (heap_n >= max_summaries) {

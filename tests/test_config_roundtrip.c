@@ -266,12 +266,14 @@ static void test_focus_document_min_relevance_roundtrip(void) {
    g_written.memory.focus_injection.document_min_relevance = 0.62f;
    g_written.memory.focus_injection.fact_min_relevance = 0.26f;
    g_written.memory.focus_injection.entity_min_relevance = 0.52f;
+   g_written.memory.focus_injection.summary_min_relevance = 0.18f;
 
    round_trip();
 
    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.62f, g_read.memory.focus_injection.document_min_relevance);
    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.26f, g_read.memory.focus_injection.fact_min_relevance);
    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.52f, g_read.memory.focus_injection.entity_min_relevance);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.18f, g_read.memory.focus_injection.summary_min_relevance);
 }
 
 static void test_memory_fact_cache_mb_roundtrip(void) {

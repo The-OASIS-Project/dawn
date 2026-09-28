@@ -32,6 +32,20 @@
 extern "C" {
 #endif
 
+/** Longest text shown for one item (a longer one is cut, with "..."). */
+#define RECALL_LINE_TEXT_MAX 240
+/** Longest document label a read-pointer carries. */
+#define RECALL_FNAME_MAX 300
+/**
+ * @brief Bytes recall_format_result prints for candidate @p c: its capped
+ * line, its read-pointer and the line's bullet and newline.  For
+ * focus_limits_t.item_bytes, so recall's budget counts what it shows.  Not
+ * counted: the per-call section headers and footer, and the ~30-byte
+ * "(already in current context)" note an item already injected this turn
+ * gets (not known while the budget is packed).
+ */
+int recall_format_item_bytes(const focus_candidate_t *c);
+
 /**
  * @brief Render a composed cross-source recall result for the LLM.
  *

@@ -51,6 +51,7 @@
 #include "core/path_utils.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
+#include "tools/calendar_query_window.h"
 #include "tools/email_db.h"
 #include "tools/oauth_client.h"
 
@@ -1019,24 +1020,10 @@ int calendar_service_range(int user_id,
     * into a temp buffer and merge, so the max_count cap applies to the COMBINED
     * start-ordered set — a window that fills the cap with timed events must
     * still surface the soonest all-day events instead of dropping them all.
-    * Same localtime_r/tm_gmtoff date approximation calendar_service_today uses. */
-   struct tm start_tm;
-   struct tm end_tm;
-   localtime_r(&start, &start_tm);
-   localtime_r(&end, &end_tm);
-
-   char start_date[16];
-   iso8601_format_date(start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday, start_date,
-                       sizeof(start_date));
-
-   /* Exclusive upper date bound = day after the window's end day, so an all-day
-    * event on the final day is included. */
-   struct tm end_next = end_tm;
-   end_next.tm_mday += 1;
-   mktime(&end_next); /* normalize */
-   char end_date[16];
-   iso8601_format_date(end_next.tm_year + 1900, end_next.tm_mon + 1, end_next.tm_mday, end_date,
-                       sizeof(end_date));
+    * The window is [start, end), like the timed query. */
+   char start_date[CALENDAR_DATE_LEN];
+   char end_date[CALENDAR_DATE_LEN];
+   calendar_window_dates(start, end, start_date, end_date);
 
    calendar_occurrence_t *allday = malloc((size_t)max_count * sizeof(*allday));
    int allday_count = 0;

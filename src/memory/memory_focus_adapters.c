@@ -807,12 +807,14 @@ static int summary_adapter_query(int user_id,
    memory_summary_t sem_summaries[10];
    float sem_scores[10] = { 0 };
    int sem_n = 0;
+   memory_summary_pool_t pool = { 0 };
    if (query_embedding != NULL && embed_dim > 0) {
       const int scan_cap = (g_config.memory.focus_injection.summary_max_scan > 0)
                                ? g_config.memory.focus_injection.summary_max_scan
                                : MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
       int rc = memory_db_summary_search_semantic(user_id, query_embedding, (int)embed_dim, since_ts,
-                                                 cap, scan_cap, sem_summaries, sem_scores, &sem_n);
+                                                 cap, scan_cap, sem_summaries, sem_scores, &sem_n,
+                                                 &pool);
       if (rc != MEMORY_DB_SUCCESS) {
          OLOG_WARNING("summary_adapter: semantic search failed for user %d; keyword-only this turn",
                       user_id);
@@ -822,6 +824,15 @@ static int summary_adapter_query(int user_id,
 
    if (kw_n <= 0 && sem_n <= 0)
       return SUCCESS;
+
+   /* Relevance gate for summaries found only by meaning.  The semantic search
+    * always returns its top ten, related or not; like facts, entities and
+    * documents, a summary must stand out from the user's typical summary for
+    * this query: relevance = (cos - pool_mean) / (1 - pool_mean), measured over
+    * the summaries actually scored.  A keyword match keeps its floor.  A pool
+    * too small for a baseline isn't gated. */
+   const float min_rel = g_config.memory.focus_injection.summary_min_relevance;
+   const bool gated = min_rel > 0.0f && pool.scored >= EMBEDDING_RELEVANCE_MIN_POOL;
 
    /* Merge by summary id.  O(kw_n * sem_n) is fine at N <= 10 each. */
    summary_merge_entry_t merged[SUMMARY_MERGE_BUFLEN];
@@ -858,6 +869,10 @@ static int summary_adapter_query(int user_id,
       if (existing >= 0) {
          if (sem_scores[i] > merged[existing].score)
             merged[existing].score = sem_scores[i];
+         continue;
+      }
+      if (gated &&
+          embedding_corpus_relevance(sem_scores[i], pool.cosine_sum, pool.scored) < min_rel) {
          continue;
       }
       merged[m].summary = sem_summaries[i];

@@ -99,6 +99,28 @@ bool memory_terms_has(const memory_terms_t *terms, const char *word);
 int memory_terms_count_in(const memory_terms_t *terms, const char *stem_line);
 
 /**
+ * @brief Whether @p query names @p name, and how many of the name's content
+ *        words it matched (0: not named)
+ *
+ *   - two or more content words ("Harbor Lane Relocation"): two must match;
+ *   - a one-word name ("Quillon"): that word must;
+ *   - one content word among other words ("The Quillmen", "X Corp", "Borra
+ *     Borra"): the name must appear in @p query as a phrase, since its other
+ *     words turn up scattered through any long message.
+ *
+ * @param terms          @p query's content words (memory_terms_from_text)
+ * @param name_stems     @p name's content words (memory_terms_stem_line)
+ * @param content_words  How many that is (0: never named)
+ * @param words          @p name's word count (memory_terms_word_count)
+ */
+int memory_terms_names(const memory_terms_t *terms,
+                       const char *query,
+                       const char *name,
+                       const char *name_stems,
+                       int content_words,
+                       int words);
+
+/**
  * @brief Whether @p matched of @p of words is enough to say a text is named
  *
  * At least two of them, or all of fewer.  A count of words, so it means the

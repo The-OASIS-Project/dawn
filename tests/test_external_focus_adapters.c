@@ -138,6 +138,7 @@ static void seed_occurrence(int idx,
       strncpy(o->event_uid, event_uid, sizeof(o->event_uid) - 1);
    o->dtstart = dtstart;
    o->dtend = dtstart + 3600;
+   o->event_id = id; /* one event per occurrence unless a test shares them */
    o->is_cancelled = false;
 }
 
@@ -548,9 +549,11 @@ static void test_calendar_range_only_path(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   /* query_text NULL → search path NOT consulted. */
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   /* A schedule question: the window's pull, plus the named-event lookup. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_events_nearest);
    TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
    const focus_candidate_t *fc = NULL;
    for (int i = 0; i < result.candidate_count; i++)
@@ -563,25 +566,29 @@ static void test_calendar_range_only_path(void) {
    focus_result_free(&result);
 }
 
-static void test_calendar_search_path_assigns_semantic_score(void) {
+/* An event the message names is found outside any window it asks about, and
+ * scores by how much of its title matched ("Pepper" is one of two distinctive
+ * words in "Pepper birthday": 0.5 + 0.2 * 0.5). */
+static void test_calendar_named_event_found_beyond_the_window(void) {
    const time_t now = 1700000000;
    const int64_t cal = seed_basic_user_calendar(1);
-   /* The occurrence is OUTSIDE the 1d-past..7d-future range so the
-    * range path won't surface it; only the search path will.  The
-    * adapter then assigns the search-hit semantic score (0.7). */
    seed_occurrence(0, 5000, cal, "Pepper birthday", now + 30 * 86400, "uid-x");
    s_ext_mock.occurrence_count = 1;
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "Pepper", NULL, 0, now, 5, &result));
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_search);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when is Pepper's party?", NULL, 0, now,
+                                                5, &result));
+   /* No time asked about: the named-event lookup only. */
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_events_nearest);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
    const focus_candidate_t *fc = NULL;
    for (int i = 0; i < result.candidate_count; i++)
       if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
          fc = &result.candidates[i];
    TEST_ASSERT_NOT_NULL(fc);
-   TEST_ASSERT_TRUE(fc->semantic_score > 0.6f && fc->semantic_score < 0.8f);
+   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.6f, fc->semantic_score);
    focus_result_free(&result);
 }
 
@@ -594,8 +601,8 @@ static void test_calendar_consulted_without_query_embedding(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
    /* requires_embedding=false → adapter STILL consulted with NULL embed. */
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         focus_compose(1, false, NULL, /*qembed*/ NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", /*qembed*/ NULL,
+                                                0, now, 5, &result));
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
    bool saw = false;
    for (int i = 0; i < result.candidate_count; i++)
@@ -605,7 +612,165 @@ static void test_calendar_consulted_without_query_embedding(void) {
    focus_result_free(&result);
 }
 
-static void test_calendar_empty_query_text_takes_range_path(void) {
+static bool has_event(const focus_compose_result_t *r, const char *needle) {
+   for (int i = 0; i < r->candidate_count; i++) {
+      if (strcmp(r->candidates[i].source_id, "calendar_event") == 0 &&
+          strstr(r->candidates[i].text, needle) != NULL)
+         return true;
+   }
+   return false;
+}
+
+/* A message about something else gets no calendar, however soon the events;
+ * asked about tomorrow, it gets tomorrow's and not next week's. */
+static void test_calendar_time_aware(void) {
+   setenv("TZ", "UTC", 1);
+   tzset();
+   const time_t now = 1790769600; /* Wednesday 12:00 UTC */
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Pottery class", now + 3600, NULL);
+   seed_occurrence(1, 5001, cal, "Chiropractor", now + 86400, NULL);
+   seed_occurrence(2, 5002, cal, "Choir practice", now + 6 * 86400, NULL);
+   s_ext_mock.occurrence_count = 3;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "recall the marigold project plan", NULL,
+                                                0, now, 10, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "Pottery"));
+   TEST_ASSERT_FALSE(has_event(&result, "Chiropractor"));
+   focus_result_free(&result);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's tomorrow look like", NULL, 0, now,
+                                                10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "Chiropractor"));
+   TEST_ASSERT_FALSE(has_event(&result, "Pottery"));
+   TEST_ASSERT_FALSE(has_event(&result, "Choir practice"));
+   focus_result_free(&result);
+
+   /* Named, an event outside any window still comes back. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when is choir practice", NULL, 0, now,
+                                                10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "Choir practice"));
+   TEST_ASSERT_FALSE(has_event(&result, "Chiropractor"));
+   focus_result_free(&result);
+   unsetenv("TZ");
+   tzset();
+}
+
+/* Events created separately under one title count as one title: the nearest
+ * stands for them, and a word they share is still unique among titles. */
+static void test_calendar_shared_titles(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Choir practice", now + 9 * 86400, NULL);
+   seed_occurrence(1, 5001, cal, "Choir practice", now + 2 * 86400, NULL);
+   seed_occurrence(2, 5002, cal, "Choir fundraiser", now + 20 * 86400, NULL);
+   s_ext_mock.occurrence_count = 3;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "when is practice", NULL, 0, now, 10, &result));
+   int practices = 0;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0 &&
+          strstr(result.candidates[i].text, "Choir practice")) {
+         practices++;
+         TEST_ASSERT_EQUAL_STRING("calendar_occ:5001", result.candidates[i].item_id);
+      }
+   }
+   TEST_ASSERT_EQUAL_INT(1, practices);
+   TEST_ASSERT_FALSE(has_event(&result, "fundraiser"));
+   focus_result_free(&result);
+}
+
+/* All-day events: in a window by date, found by name, shown as a date. */
+static void test_calendar_all_day_events(void) {
+   setenv("TZ", "America/New_York", 1);
+   tzset();
+   const time_t now = 1790769600; /* Wednesday 2026-09-30 08:00 EDT */
+   const int64_t cal = seed_basic_user_calendar(1);
+   /* Stored like the sync does: dtstart/dtend at the date's UTC midnight. */
+   seed_occurrence(0, 5000, cal, "Quilt regatta", 1790812800, NULL); /* 2026-10-01 */
+   s_ext_mock.occurrences[0].all_day = true;
+   s_ext_mock.occurrences[0].dtend = 1790812800 + 86400;
+   snprintf(s_ext_mock.occurrences[0].dtstart_date, sizeof(s_ext_mock.occurrences[0].dtstart_date),
+            "2026-10-01");
+   snprintf(s_ext_mock.occurrences[0].dtend_date, sizeof(s_ext_mock.occurrences[0].dtend_date),
+            "2026-10-02");
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   /* Today's window doesn't reach it (its UTC midnight is today evening locally). */
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "what's on today", NULL, 0, now, 10, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "Quilt"));
+   focus_result_free(&result);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "anything tomorrow", NULL, 0, now, 10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "[2026-10-01 all day] Quilt regatta"));
+   focus_result_free(&result);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when is the quilt regatta", NULL, 0, now,
+                                                10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "all day] Quilt regatta"));
+   focus_result_free(&result);
+   unsetenv("TZ");
+   tzset();
+}
+
+/* The assistant named after a weekday: addressing it isn't asking about that
+ * day, placing the word as a day is.  A failed named-event lookup still
+ * leaves the window's events. */
+static void test_calendar_assistant_weekday_name(void) {
+   setenv("TZ", "UTC", 1);
+   tzset();
+   const time_t now = 1790769600; /* Wednesday 12:00 UTC */
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Pottery class", now + 2 * 86400, NULL); /* Friday */
+   s_ext_mock.occurrence_count = 1;
+   snprintf(g_config.general.ai_name, sizeof(g_config.general.ai_name), "friday");
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "friday, what's the weather", NULL, 0,
+                                                now, 10, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "Pottery"));
+   focus_result_free(&result);
+
+   s_ext_mock.fail_events_nearest = true;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "friday, anything on friday", NULL, 0,
+                                                now, 10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "Pottery"));
+   focus_result_free(&result);
+   g_config.general.ai_name[0] = '\0';
+   unsetenv("TZ");
+   tzset();
+}
+
+/* A generic word ("call") doesn't name an event; a distinctive one does. */
+static void test_calendar_generic_title_words(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Call with the bank", now + 20 * 86400, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "call mom", NULL, 0, now, 5, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "bank"));
+   focus_result_free(&result);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when do I talk to the bank", NULL, 0,
+                                                now, 5, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "bank"));
+   focus_result_free(&result);
+}
+
+/* An empty message asks about nothing: no calendar. */
+static void test_calendar_empty_query_returns_nothing(void) {
    const time_t now = 1700000000;
    const int64_t cal = seed_basic_user_calendar(1);
    seed_occurrence(0, 5000, cal, "lunch", now + 3600, NULL);
@@ -613,10 +778,11 @@ static void test_calendar_empty_query_text_takes_range_path(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   /* "" → adapter treats as no query, takes range-only path. */
    TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "", NULL, 0, now, 5, &result));
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
-   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_events_nearest);
+   for (int i = 0; i < result.candidate_count; i++)
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "calendar_event"));
    focus_result_free(&result);
 }
 
@@ -633,7 +799,8 @@ static void test_calendar_inactive_calendar_excluded(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 10, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 10,
+                                                &result));
    bool saw_active = false, saw_inactive = false;
    for (int i = 0; i < result.candidate_count; i++) {
       if (strcmp(result.candidates[i].source_id, "calendar_event") != 0)
@@ -719,9 +886,10 @@ static void test_no_network_calls_during_compose(void) {
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_chunk_search_load);
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_account_list);
    TEST_ASSERT_TRUE(s_ext_mock.call_count_calendar_list >= 1);
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
-   /* search path also fires because query_text was non-empty. */
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_search);
+   /* No time asked about: only the named-event lookup reads occurrences. */
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_events_nearest);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
    focus_result_free(&result);
 }
 
@@ -784,7 +952,10 @@ static void test_calendar_failure_zeros_outparams(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   /* A schedule question, so the failing window pull is reached. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
    for (int i = 0; i < result.candidate_count; i++)
       TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "calendar_event"));
    focus_result_free(&result);
@@ -810,7 +981,8 @@ static void test_calendar_multi_account_cap(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 32, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 32,
+                                                &result));
    /* Only 3 calendar_list calls fire (cap = EXTERNAL_MAX_ACCOUNTS_PER_COMPOSE). */
    TEST_ASSERT_EQUAL_INT(3, s_ext_mock.call_count_calendar_list);
    /* Only the first-3 accounts' events surface. */
@@ -865,7 +1037,8 @@ static void test_calendar_item_id_never_contains_ical_uid(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
    const focus_candidate_t *fc = NULL;
    for (int i = 0; i < result.candidate_count; i++)
       if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
@@ -891,7 +1064,8 @@ static void test_calendar_today_higher_recency_than_far_future(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 10, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 10,
+                                                &result));
    const focus_candidate_t *today = NULL, *future = NULL;
    for (int i = 0; i < result.candidate_count; i++) {
       if (strcmp(result.candidates[i].source_id, "calendar_event") != 0)
@@ -917,7 +1091,8 @@ static void test_calendar_yesterday_still_surfaces(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
    bool saw = false;
    for (int i = 0; i < result.candidate_count; i++)
       if (strcmp(result.candidates[i].source_id, "calendar_event") == 0 &&
@@ -967,8 +1142,8 @@ static void test_end_to_end_compose_with_both_adapters(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         focus_compose(1, false, "doc", embed_q, EXT_MOCK_DIMS, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "the doc and my calendar", embed_q,
+                                                EXT_MOCK_DIMS, now, 5, &result));
    bool saw_doc = false, saw_cal = false;
    for (int i = 0; i < result.candidate_count; i++) {
       if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
@@ -1131,9 +1306,14 @@ int main(void) {
 
    /* Calendar adapter happy paths */
    RUN_TEST(test_calendar_range_only_path);
-   RUN_TEST(test_calendar_search_path_assigns_semantic_score);
+   RUN_TEST(test_calendar_named_event_found_beyond_the_window);
    RUN_TEST(test_calendar_consulted_without_query_embedding);
-   RUN_TEST(test_calendar_empty_query_text_takes_range_path);
+   RUN_TEST(test_calendar_empty_query_returns_nothing);
+   RUN_TEST(test_calendar_time_aware);
+   RUN_TEST(test_calendar_generic_title_words);
+   RUN_TEST(test_calendar_shared_titles);
+   RUN_TEST(test_calendar_all_day_events);
+   RUN_TEST(test_calendar_assistant_weekday_name);
    RUN_TEST(test_calendar_inactive_calendar_excluded);
 
    /* Empty-result behavior */

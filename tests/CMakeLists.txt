@@ -673,6 +673,17 @@ dawn_add_unit_test(test_document_db
    LIBS    dawn_common unity sqlite3 pthread stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Which stretch of the calendar a message asks about (pure; pinned to UTC).
+dawn_add_unit_test(test_calendar_query_window
+   SOURCES test_calendar_query_window.c
+           ${SRC_ROOT}/src/tools/calendar_query_window.c
+           ${SRC_ROOT}/src/core/iso8601.c
+           ${SRC_ROOT}/src/core/time_query_parser.c
+           ${SRC_ROOT}/src/memory/memory_terms.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
+   LIBS    dawn_common unity pthread m stemmer
+   LABEL   ci)
+
 # v61: the "bios" search-quality test — exact-label lexical ranking (conv 809).
 # Uses the REAL auth_db (v61 schema + prepared statements) via AUTH_DB_SOURCES,
 # which already bundles memory_stem.c + memory_bm25.c.
@@ -902,6 +913,8 @@ dawn_add_unit_test(test_external_focus_adapters
            ${SRC_ROOT}/src/tools/document_embed_cache.c
            ${SRC_ROOT}/src/tools/document_rank.c
            ${SRC_ROOT}/src/tools/calendar_focus_adapter.c
+           ${SRC_ROOT}/src/tools/calendar_query_window.c
+           ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/tools/external_focus_adapters_init.c
            ${SRC_ROOT}/src/core/focus/focus_source.c
            ${SRC_ROOT}/src/core/focus/focus_recency.c

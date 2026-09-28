@@ -299,9 +299,65 @@ int calendar_db_occurrences_in_range(const int64_t *calendar_ids,
    for (int i = 0; i < s_ext_mock.occurrence_count && n < max_count; i++) {
       if (!calendar_id_in_set(s_ext_mock.occurrence_calendar_id[i], calendar_ids, calendar_count))
          continue;
-      if (!occ_in_range(&s_ext_mock.occurrences[i], range_start, range_end))
+      if (s_ext_mock.occurrences[i].all_day ||
+          !occ_in_range(&s_ext_mock.occurrences[i], range_start, range_end))
          continue;
       out[n++] = s_ext_mock.occurrences[i];
+   }
+   *count_out = n;
+   return SUCCESS;
+}
+
+/* Mirrors the production query: per event, the occurrence nearest to now
+ * within the range; nearest first; at most max_count. */
+int calendar_db_events_nearest(const int64_t *calendar_ids,
+                               int calendar_count,
+                               time_t range_start,
+                               time_t range_end,
+                               time_t now,
+                               calendar_occurrence_t *out,
+                               int max_count,
+                               int *count_out) {
+   s_ext_mock.call_count_events_nearest++;
+   if (s_ext_mock.fail_events_nearest) {
+      if (count_out)
+         *count_out = 0;
+      return FAILURE;
+   }
+   if (out == NULL || count_out == NULL)
+      return FAILURE;
+   int n = 0;
+   for (int i = 0; i < s_ext_mock.occurrence_count; i++) {
+      const calendar_occurrence_t *o = &s_ext_mock.occurrences[i];
+      if (!calendar_id_in_set(s_ext_mock.occurrence_calendar_id[i], calendar_ids, calendar_count) ||
+          !occ_in_range(o, range_start, range_end))
+         continue;
+      const time_t d = o->dtstart > now ? o->dtstart - now : now - o->dtstart;
+      int slot = -1;
+      for (int j = 0; j < n; j++)
+         if (out[j].event_id == o->event_id)
+            slot = j;
+      if (slot < 0) {
+         if (n >= max_count)
+            continue;
+         out[n++] = *o;
+      } else {
+         const time_t ds = out[slot].dtstart > now ? out[slot].dtstart - now
+                                                   : now - out[slot].dtstart;
+         if (d < ds)
+            out[slot] = *o;
+      }
+   }
+   /* Nearest first (insertion sort; mock sizes are tiny). */
+   for (int i = 1; i < n; i++) {
+      calendar_occurrence_t key = out[i];
+      const time_t dk = key.dtstart > now ? key.dtstart - now : now - key.dtstart;
+      int j = i - 1;
+      while (j >= 0 && (out[j].dtstart > now ? out[j].dtstart - now : now - out[j].dtstart) > dk) {
+         out[j + 1] = out[j];
+         j--;
+      }
+      out[j + 1] = key;
    }
    *count_out = n;
    return SUCCESS;
@@ -449,6 +505,8 @@ int calendar_db_occurrence_delete_for_event(int64_t id) {
    (void)id;
    abort();
 }
+/* Mirrors the production date-keyed query: all-day, not cancelled, and
+ * dtstart_date < end, dtend_date > start (ISO dates compare as strings). */
 int calendar_db_allday_occurrences_in_range(const int64_t *ids,
                                             int n,
                                             const char *s,
@@ -456,14 +514,20 @@ int calendar_db_allday_occurrences_in_range(const int64_t *ids,
                                             calendar_occurrence_t *o,
                                             int m,
                                             int *c) {
-   (void)ids;
-   (void)n;
-   (void)s;
-   (void)e;
-   (void)o;
-   (void)m;
-   (void)c;
-   abort();
+   s_ext_mock.call_count_allday_in_range++;
+   if (!o || !c)
+      return FAILURE;
+   int k = 0;
+   for (int i = 0; i < s_ext_mock.occurrence_count && k < m; i++) {
+      const calendar_occurrence_t *occ = &s_ext_mock.occurrences[i];
+      if (!occ->all_day || occ->is_cancelled ||
+          !calendar_id_in_set(s_ext_mock.occurrence_calendar_id[i], ids, n) ||
+          strcmp(occ->dtstart_date, e) >= 0 || strcmp(occ->dtend_date, s) <= 0)
+         continue;
+      o[k++] = *occ;
+   }
+   *c = k;
+   return SUCCESS;
 }
 int calendar_db_next_occurrence(const int64_t *ids, int n, time_t a, calendar_occurrence_t *o) {
    (void)ids;

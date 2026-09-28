@@ -389,62 +389,11 @@ static bool query_words_covered(const memory_terms_t *q, const char *a, const ch
    return true;
 }
 
-/* Whether @p name appears in @p query as a phrase: its words, case-folded,
- * back to back and in order. */
-static bool phrase_in(const char *query, const char *name) {
-   const char *qs = NULL;
-   size_t ql = 0;
-   for (const char *q = query; q && (q = memory_terms_next_word(q, &qs, &ql)) != NULL;) {
-      /* Try the name starting at this query word. */
-      const char *qw = qs;
-      size_t qwl = ql;
-      const char *qnext = q;
-      const char *ns = NULL;
-      size_t nl = 0;
-      bool all = true;
-      for (const char *n = name; (n = memory_terms_next_word(n, &ns, &nl)) != NULL;) {
-         if (!qw || nl != qwl) {
-            all = false;
-            break;
-         }
-         for (size_t k = 0; k < nl && all; k++) {
-            all = memory_terms_fold_at(ns, k) == memory_terms_fold_at(qw, k);
-         }
-         if (!all) {
-            break;
-         }
-         qnext = qnext ? memory_terms_next_word(qnext, &qw, &qwl) : NULL;
-         if (!qnext) {
-            qw = NULL;
-         }
-      }
-      if (all) {
-         return true;
-      }
-   }
-   return false;
-}
-
-/* Whether the query names entity @p i, and how many of its content words it
- * matched (0: not named):
- *   - two or more content words ("Harbor Lane Relocation"): two must match;
- *   - a one-word name ("Quillon"): that word must;
- *   - one content word among other words ("The Quillmen", "Why We Build",
- *     "X Corp", "Borra Borra"): the name must appear as a phrase, since its
- *     other words turn up scattered through any long message. */
+/* Whether the query names entity @p i (memory_terms_names), and how many of
+ * its content words it matched (0: not named). */
 static int name_match(const entity_slot_t *s, const memory_terms_t *q, const char *query, int i) {
-   const int c = s->name_terms[i];
-   if (c == 0) {
-      return 0;
-   }
-   const int matched = memory_terms_count_in(q, s->name_stems[i]);
-   if (c >= 2) {
-      return matched >= 2 ? matched : 0;
-   }
-   if (matched == 0) {
-      return 0;
-   }
-   return (s->name_words[i] <= 1 || phrase_in(query, s->names[i])) ? 1 : 0;
+   return memory_terms_names(q, query, s->names[i], s->name_stems[i], s->name_terms[i],
+                             s->name_words[i]);
 }
 
 /* Whether named entry @p b covers @p a: A's matched content words all belong

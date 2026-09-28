@@ -870,6 +870,7 @@ list(APPEND DAWN_SOURCES
     src/tools/document_embed_cache.c
     src/tools/document_rank.c
     src/tools/calendar_focus_adapter.c
+    src/tools/calendar_query_window.c
     src/tools/external_focus_adapters_init.c
 )
 

@@ -556,6 +556,58 @@ static void test_byte_budget_truncation(void) {
    focus_result_free(&result);
 }
 
+/* A caller's shown size for a candidate: its text, capped at 20 bytes. */
+static int shown_bytes_capped_at_20(const focus_candidate_t *c) {
+   const int len = (int)strlen(c->text);
+   return len > 20 ? 20 : len;
+}
+
+/* 8a. A candidate that doesn't fit is skipped, and smaller ones ranked below
+ *     it still fill the budget. */
+static void test_byte_budget_skips_and_packs(void) {
+   static char body[3][41];
+   const char *texts[] = { body[0], body[1], body[2] };
+   memset(body[0], 'a', 40);
+   body[0][40] = '\0';
+   memset(body[1], 'b', 40);
+   body[1][40] = '\0';
+   memset(body[2], 'c', 10);
+   body[2][10] = '\0';
+
+   float sem[] = { 0.9f, 0.8f, 0.7f };
+   float rec[] = { 0.0f, 0.0f, 0.0f };
+   float imp[] = { 0.0f, 0.0f, 0.0f };
+
+   register_fake("memory_fact", FOCUS_SOURCE_INTERNAL, false);
+   s_fake[0].candidate_count = 3;
+   s_fake[0].texts = texts;
+   s_fake[0].semantic_scores = sem;
+   s_fake[0].recency_scores = rec;
+   s_fake[0].importance_scores = imp;
+
+   g_config.memory.focus_injection.weight_recency = 0.0f;
+   g_config.memory.focus_injection.weight_importance = 0.0f;
+   g_config.memory.focus_injection.weight_source = 0.0f;
+   g_config.memory.focus_injection.focus_budget_bytes = 60;
+
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 0, 5, &result));
+   TEST_ASSERT_EQUAL_INT(2, result.candidate_count); /* 40 + 10; the second 40 skipped */
+   TEST_ASSERT_EQUAL_STRING(body[0], result.candidates[0].text);
+   TEST_ASSERT_EQUAL_STRING(body[2], result.candidates[1].text);
+   focus_result_free(&result);
+
+   /* A caller that shows capped lines charges what it shows: all three fit. */
+   const focus_limits_t limits = { .top_k = 0,
+                                   .min_score = -1.0f,
+                                   .budget_bytes = 60,
+                                   .item_bytes = shown_bytes_capped_at_20 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose_ex(1, false, NULL, NULL, 0, 0, 5, &limits, &result));
+   TEST_ASSERT_EQUAL_INT(3, result.candidate_count);
+   focus_result_free(&result);
+}
+
 /* 8b. UTF-8-safe truncation — focus_utf8_safe_cap must never cut inside a
  *     multi-byte character, or the truncated text is invalid UTF-8 and breaks
  *     the context_injection WebSocket text frame (browser drops the socket). */
@@ -786,6 +838,7 @@ int main(void) {
    RUN_TEST(test_filter_on_retrieval_skips_external);
    RUN_TEST(test_requires_embedding_skipped_without_query);
    RUN_TEST(test_byte_budget_truncation);
+   RUN_TEST(test_byte_budget_skips_and_packs);
    RUN_TEST(test_utf8_safe_cap);
    RUN_TEST(test_memory_ownership_cycle);
    RUN_TEST(test_double_register_same_source_id_fails);

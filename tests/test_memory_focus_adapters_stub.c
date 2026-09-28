@@ -382,7 +382,8 @@ int memory_db_summary_search_since(int user_id,
                                    int *count_out) {
    (void)keywords;
    int n = 0;
-   for (int i = 0; i < s_mock.summary_count && n < max_summaries; i++) {
+   for (int i = 0; !s_mock.summary_keyword_off && i < s_mock.summary_count && n < max_summaries;
+        i++) {
       if (s_mock.summaries[i].user_id != user_id)
          continue;
       if (s_mock.summaries[i].created_at < since_ts)
@@ -654,17 +655,26 @@ int memory_db_summary_search_semantic(int user_id,
                                       int max_scan,
                                       memory_summary_t *out_summaries,
                                       float *out_scores,
-                                      int *count_out) {
-   (void)user_id;
+                                      int *count_out,
+                                      memory_summary_pool_t *pool_out) {
    (void)query_vec;
    (void)query_dims;
-   (void)since_ts;
-   (void)max_summaries;
    (void)max_scan;
-   (void)out_summaries;
-   (void)out_scores;
+   int n = 0;
+   for (int i = 0; i < s_mock.summary_count && n < max_summaries; i++) {
+      if (s_mock.summaries[i].user_id != user_id || s_mock.summaries[i].created_at < since_ts ||
+          s_mock.summary_sem_score[i] <= 0.0f)
+         continue;
+      out_summaries[n] = s_mock.summaries[i];
+      out_scores[n] = s_mock.summary_sem_score[i];
+      n++;
+   }
    if (count_out != NULL)
-      *count_out = 0;
+      *count_out = n;
+   if (pool_out != NULL) {
+      pool_out->scored = s_mock.summary_pool_scored;
+      pool_out->cosine_sum = s_mock.summary_pool_sum;
+   }
    return MEMORY_DB_SUCCESS;
 }
 

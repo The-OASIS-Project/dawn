@@ -698,6 +698,64 @@ static void test_entity_longest_match_wins(void) {
    TEST_ASSERT_EQUAL_INT(2, n);
 }
 
+/* Summaries found only by meaning must stand out from the pool; a keyword
+ * match always counts; a small pool isn't gated. */
+static void test_summary_relevance_gate(void) {
+   const time_t now = 1790000000;
+   seed_summary(0, 11, 1, "the relevant summary", now - 3600, false);
+   seed_summary(1, 12, 1, "a typical summary", now - 3600, false);
+   s_mock.summary_count = 2;
+   s_mock.summary_keyword_off = true;
+   s_mock.summary_sem_score[0] = 0.80f; /* relevance (0.8-0.5)/0.5 = 0.60 */
+   s_mock.summary_sem_score[1] = 0.55f; /* relevance 0.10 */
+   s_mock.summary_pool_scored = 100;
+   s_mock.summary_pool_sum = 50.0; /* mean cosine 0.5 */
+   s_mock.embeddings_available = true;
+   s_mock.entity_dim = MOCK_DIMS;
+   g_config.memory.focus_injection.summary_min_relevance = 0.22f;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q_match_e1, MOCK_DIMS,
+                                                now, 8, &result));
+   bool relevant = false, typical = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strstr(result.candidates[i].text, "the relevant summary"))
+         relevant = true;
+      if (strstr(result.candidates[i].text, "a typical summary"))
+         typical = true;
+   }
+   TEST_ASSERT_TRUE(relevant);
+   TEST_ASSERT_FALSE(typical);
+   focus_result_free(&result);
+
+   /* A keyword match counts whatever its similarity. */
+   s_mock.summary_keyword_off = false;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q_match_e1, MOCK_DIMS,
+                                                now, 8, &result));
+   typical = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strstr(result.candidates[i].text, "a typical summary"))
+         typical = true;
+   }
+   TEST_ASSERT_TRUE(typical);
+   focus_result_free(&result);
+
+   /* Too small a pool for a baseline: not gated. */
+   s_mock.summary_keyword_off = true;
+   s_mock.summary_pool_scored = 10;
+   s_mock.summary_pool_sum = 5.0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q_match_e1, MOCK_DIMS,
+                                                now, 8, &result));
+   typical = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strstr(result.candidates[i].text, "a typical summary"))
+         typical = true;
+   }
+   TEST_ASSERT_TRUE(typical);
+   focus_result_free(&result);
+}
+
 /* Each user keeps a copy; changing one user's entities reloads only theirs. */
 static void test_entity_cache_per_user(void) {
    seed_entity(0, 1, 1, "Quillon", "organization", false, embed_e1, NULL);
@@ -995,6 +1053,7 @@ int main(void) {
    RUN_TEST(test_entity_small_pool);
    RUN_TEST(test_entity_named_late_in_long_message);
    RUN_TEST(test_entity_cache_per_user);
+   RUN_TEST(test_summary_relevance_gate);
    RUN_TEST(test_entity_longest_match_wins);
 
    /* NULL safety */

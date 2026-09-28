@@ -1507,6 +1507,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "document_min_relevance",
                                                 "fact_min_relevance",
                                                 "entity_min_relevance",
+                                                "summary_min_relevance",
                                                 "classifier_enabled",
                                                 "weight_semantic",
                                                 "weight_recency",
@@ -1539,6 +1540,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(focus, "document_min_relevance", fi->document_min_relevance);
       PARSE_DOUBLE(focus, "fact_min_relevance", fi->fact_min_relevance);
       PARSE_DOUBLE(focus, "entity_min_relevance", fi->entity_min_relevance);
+      PARSE_DOUBLE(focus, "summary_min_relevance", fi->summary_min_relevance);
       PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);
       PARSE_DOUBLE(focus, "weight_semantic", fi->weight_semantic);
       PARSE_DOUBLE(focus, "weight_recency", fi->weight_recency);

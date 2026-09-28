@@ -71,6 +71,13 @@ typedef struct {
    memory_summary_t summaries[MOCK_MAX_SUMMARIES];
    memory_provenance_t summary_provenance[MOCK_MAX_SUMMARIES];
    int summary_count;
+   /* Semantic path: a summary with a score > 0 is returned by
+    * memory_db_summary_search_semantic with that cosine; the pool the search
+    * reports is summary_pool_scored rows summing to summary_pool_sum. */
+   float summary_sem_score[MOCK_MAX_SUMMARIES];
+   int summary_pool_scored;
+   double summary_pool_sum;
+   bool summary_keyword_off; /* keyword search finds nothing */
 
    /* Embedding engine */
    bool embeddings_available;

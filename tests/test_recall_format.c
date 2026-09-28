@@ -107,6 +107,37 @@ static void test_grouping_and_pointers(void) {
    free_candidates(cands, 4);
 }
 
+/* recall_format_item_bytes reports exactly the bytes an item's line prints,
+ * bullet and newline included, for every family and a line cut at the cap. */
+static void test_item_bytes_match_the_printed_line(void) {
+   char long_text[600];
+   memset(long_text, 'x', sizeof(long_text) - 1);
+   long_text[0] = '[';
+   memcpy(long_text + 1, "guide.md] ", 10);
+   long_text[sizeof(long_text) - 1] = '\0';
+   focus_candidate_t cands[5];
+   cands[0] = mk("memory_fact", "fact:12", "Prefers window seats.");
+   cands[1] = mk("memory_summary", "summary:3", "Talked about the garden.");
+   cands[2] = mk("document_chunk", "document_chunk:9", long_text);
+   cands[3] = mk("calendar_event", "calendar_occ:4", "[2026-10-02 09:00] Pottery class");
+   cands[4] = mk("memory_entity", "entity:5", "Marigold Project (project)");
+   for (int i = 0; i < 5; i++) {
+      focus_compose_result_t res;
+      memset(&res, 0, sizeof(res));
+      res.candidates = &cands[i];
+      res.candidate_count = 1;
+      char *out = recall_format_result("q", &res, NULL, 0);
+      TEST_ASSERT_NOT_NULL(out);
+      const char *line = strstr(out, "  \xE2\x80\xA2 ");
+      TEST_ASSERT_NOT_NULL(line);
+      const char *end = strchr(line, '\n');
+      TEST_ASSERT_NOT_NULL(end);
+      TEST_ASSERT_EQUAL_INT((int)(end + 1 - line), recall_format_item_bytes(&cands[i]));
+      free(out);
+   }
+   free_candidates(cands, 5);
+}
+
 static void test_empty_families_listed(void) {
    focus_candidate_t cands[1];
    cands[0] = mk("memory_fact", "fact:1", "Only a memory fact here.");
@@ -165,6 +196,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_zero_results_is_explicit);
    RUN_TEST(test_grouping_and_pointers);
+   RUN_TEST(test_item_bytes_match_the_printed_line);
    RUN_TEST(test_empty_families_listed);
    RUN_TEST(test_null_injected_emits_overlap_note);
    RUN_TEST(test_injected_id_is_marked);

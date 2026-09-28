@@ -933,6 +933,13 @@ int memory_db_summary_update_embedding(int user_id,
  * compile-time default. */
 #define MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT 4096
 
+/** The summaries a semantic search scored: for relevance measured from the
+ * pool's mean (embedding_corpus_relevance). */
+typedef struct {
+   int scored;        /**< rows with a current-dimension embedding scored */
+   double cosine_sum; /**< sum of their cosines to the query */
+} memory_summary_pool_t;
+
 /**
  * @brief Semantic top-N search over user's embedded summaries.
  *
@@ -959,6 +966,9 @@ int memory_db_summary_update_embedding(int user_id,
  * @param out_summaries  output array of memory_summary_t (caller allocates)
  * @param out_scores     output array of cosine scores aligned with out_summaries
  * @param count_out      number of returned matches
+ * @param pool_out       [out] the rows actually scored and their cosine sum,
+ *                       for relevance measured from the pool's mean
+ *                       (embedding_corpus_relevance); may be NULL
  * @return MEMORY_DB_SUCCESS / MEMORY_DB_FAILURE
  */
 int memory_db_summary_search_semantic(int user_id,
@@ -969,7 +979,8 @@ int memory_db_summary_search_semantic(int user_id,
                                       int max_scan,
                                       memory_summary_t *out_summaries,
                                       float *out_scores,
-                                      int *count_out);
+                                      int *count_out,
+                                      memory_summary_pool_t *pool_out);
 
 /**
  * @brief List summaries missing an embedding (or with stale dimensions).

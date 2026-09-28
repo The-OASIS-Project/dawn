@@ -43,16 +43,22 @@
  *   3. For each account: calendar_db_calendar_list(account_id, ...)
  *      → aggregate active (is_active==true) calendar_ids into a flat
  *      int64_t array.  account_id chain is user-scoped transitively.
- *   4. calendar_db_occurrences_in_range(cal_ids, cal_count,
- *      now - 86400, now + 7*86400, ...) — recent past + 1-week
- *      lookahead.  SQL filters cancelled occurrences.
- *   5. If query_text non-NULL/non-empty: also call
- *      calendar_db_occurrences_search(cal_ids, cal_count, query, ...)
- *      and merge unique by occurrence.id (DB row id).  Search-path
- *      occurrences receive an additional semantic_score = 0.7
- *      "presence-of-text-match" heuristic; range-only occurrences
- *      get FOCUS_SCORE_NA semantic.
- *   6. Render "[YYYY-MM-DD HH:MM] <summary>: <description-fragment>"
+ *   4. If the message asks about a time or the schedule
+ *      (calendar_query_window: "today", "next week", "on friday", "my
+ *      calendar", "last week", ...): calendar_db_occurrences_in_range over
+ *      that window, plus calendar_db_allday_occurrences_in_range over its
+ *      dates (calendar_window_dates).  A message about something else gets
+ *      no window: no ambient list of the coming week on unrelated turns.
+ *   5. Events the message names: calendar_db_events_nearest gives each
+ *      event's occurrence nearest to now (timed or all-day), from a month
+ *      back to three months ahead, and one is kept per distinct title.  An event is named
+ *      when the message contains its title's distinctive words (titles are
+ *      labels the user refers to by a key word; generic words like
+ *      "meeting" or "call" don't count).  Named events get semantic_score
+ *      0.5-0.7 by the share of the title matched; window-only occurrences
+ *      get FOCUS_SCORE_NA.  Merged unique by occurrence.id.
+ *   6. Render "[YYYY-MM-DD HH:MM] <summary>" ("[YYYY-MM-DD all day]
+ *      <summary>" for an all-day event)
  *      through focus_candidate_init (FOCUS_TEXT_MAX_BYTES truncation).
  *   7. Compute asymmetric recency: past events 7-day half-life;
  *      future events 14-day half-life.  Importance = base + (within
@@ -74,8 +80,9 @@
  * calls in any function or its helpers):
  *   - calendar_db_account_list             (calendar_db.c:221)
  *   - calendar_db_calendar_list            (calendar_db.c:415)
- *   - calendar_db_occurrences_in_range     (calendar_db.c:649)
- *   - calendar_db_occurrences_search       (calendar_db.c:725)
+ *   - calendar_db_occurrences_in_range
+ *   - calendar_db_allday_occurrences_in_range
+ *   - calendar_db_events_nearest
  *
  * Filter-on-retrieval is FRAMEWORK-OWNED + trust-tier-gated.  This
  * adapter does NOT call `memory_filter_check()` — `focus_compose()`
@@ -94,11 +101,14 @@
 #include <string.h>
 #include <time.h>
 
+#include "config/dawn_config.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_terms.h"
 #include "tools/calendar_db.h"
+#include "tools/calendar_query_window.h"
 #include "tools/external_focus_adapters_internal.h"
 
 /* Constants — file-static, all TODO(1j) for bench-driven tuning. */
@@ -117,17 +127,20 @@
 #define CALENDAR_TODAY_BOOST 0.2f
 #define CALENDAR_DEFAULT_IMPORTANCE 0.5f
 
-/* Window the range-path query covers around `now`.
- * Past 1 day catches just-finished events the user may ask about;
- * forward 1 week is the practical horizon for "what's coming up". */
-#define CALENDAR_PAST_WINDOW_SECONDS (1 * 86400)
-#define CALENDAR_FUTURE_WINDOW_SECONDS (7 * 86400)
+/* Heuristic semantic score for an event the message names (vs. one that is
+ * only in the window asked about): base + span * the share of the title's
+ * distinctive words matched, 0.5 to 0.7.  Adapter doesn't embed; this is the
+ * "named" presence signal handed to the framework ranker. */
+#define CALENDAR_NAMED_BASE_SEMANTIC 0.5f
+#define CALENDAR_NAMED_SPAN_SEMANTIC 0.2f
 
-/* Heuristic semantic score assigned to occurrences that came from
- * the LIKE %query% search path (vs. range-only).  Adapter doesn't
- * embed; this is the "the keyword matched" presence signal handed
- * to the framework ranker. */
-#define CALENDAR_SEARCH_HIT_SEMANTIC 0.7f
+/* Where named events are looked for: a month back, three months ahead.
+ * Wider than any one question's window so an event named without a date
+ * ("my piano lesson") is found; past the pull cap, the events farthest
+ * from now are left out. */
+#define CALENDAR_NAMED_PAST_SECONDS (30 * 86400)
+#define CALENDAR_NAMED_FUTURE_SECONDS (90 * 86400)
+#define CALENDAR_NAMED_PULL_MAX 128
 
 /* Per-account upper bound on calendars + per-pull upper bound on
  * occurrences.  Keep them low — the focus pool is itself capped at
@@ -150,6 +163,21 @@
 /* Aggregate work buffers (stack) sized to the static caps above so
  * we never heap-allocate during the DB walk; only the final
  * `focus_candidate_t` array is heap-allocated. */
+
+/* When an occurrence starts, locally.  An all-day one is its date's local
+ * midnight (its stored dtstart is the date's UTC midnight). */
+static time_t occ_local_start(const calendar_occurrence_t *occ) {
+   int y = 0;
+   int m = 0;
+   int d = 0;
+   if (occ->all_day && sscanf(occ->dtstart_date, "%4d-%2d-%2d", &y, &m, &d) == 3) {
+      struct tm tm = { .tm_year = y - 1900, .tm_mon = m - 1, .tm_mday = d, .tm_isdst = -1 };
+      const time_t t = mktime(&tm);
+      if (t != (time_t)-1)
+         return t;
+   }
+   return occ->dtstart;
+}
 
 static bool same_local_day(time_t a, time_t b) {
    struct tm ta, tb;
@@ -179,15 +207,169 @@ static double calendar_recency_decay(time_t event_ts, time_t now) {
 static int format_event_text(const calendar_occurrence_t *occ, char *out, size_t outlen) {
    /* Render localtime (matches DAWN's user-facing convention; CalDAV
     * dtstart is stored as epoch seconds in the DB, timezone-agnostic). */
-   struct tm tm;
-   if (localtime_r(&occ->dtstart, &tm) == NULL)
-      return FAILURE;
    const char *summary = (occ->summary[0] != '\0') ? occ->summary : "(untitled event)";
-   const int n = snprintf(out, outlen, "[%04d-%02d-%02d %02d:%02d] %s", tm.tm_year + 1900,
-                          tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, summary);
+   int n;
+   if (occ->all_day && occ->dtstart_date[0] != '\0') {
+      /* All-day events are dates, not times: dtstart is the date's UTC
+       * midnight, which localtime would show as the evening before. */
+      n = snprintf(out, outlen, "[%s all day] %s", occ->dtstart_date, summary);
+   } else {
+      struct tm tm;
+      if (localtime_r(&occ->dtstart, &tm) == NULL)
+         return FAILURE;
+      n = snprintf(out, outlen, "[%04d-%02d-%02d %02d:%02d] %s", tm.tm_year + 1900, tm.tm_mon + 1,
+                   tm.tm_mday, tm.tm_hour, tm.tm_min, summary);
+   }
    if (n < 0 || (size_t)n >= outlen)
       return FAILURE;
    return SUCCESS;
+}
+
+/* Words in event titles that say what kind of entry it is, not which one
+ * ("Call with the bank"): stems, never enough to name an event. */
+static const char *const GENERIC_TITLE_STEMS[] = { "meet",    "call", "appoint", "event",
+                                                   "session", "sync", "remind",  "task" };
+
+/* Longest title stem line kept. */
+#define TITLE_STEMS_MAX 256
+
+static bool is_generic_stem(const char *w, size_t len) {
+   for (size_t g = 0; g < sizeof(GENERIC_TITLE_STEMS) / sizeof(GENERIC_TITLE_STEMS[0]); g++) {
+      if (strlen(GENERIC_TITLE_STEMS[g]) == len && strncmp(GENERIC_TITLE_STEMS[g], w, len) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* How many of @p lines contain word @p w (@p len bytes). */
+static int titles_with(char (*lines)[TITLE_STEMS_MAX], int n, const char *w, size_t len) {
+   int count = 0;
+   for (int i = 0; i < n; i++) {
+      for (const char *p = lines[i]; *p;) {
+         const char *end = strchr(p, ' ');
+         const size_t wl = end ? (size_t)(end - p) : strlen(p);
+         if (wl == len && strncmp(p, w, len) == 0) {
+            count++;
+            break;
+         }
+         if (!end) {
+            break;
+         }
+         p = end + 1;
+      }
+   }
+   return count;
+}
+
+/* Whether the message names title @p i and how much of it matched (0..1).
+ * Titles are short labels the user refers to by a key word ("the dentist"),
+ * so a title is named when two of its distinctive words match, or half of
+ * them including one no other title has.  Generic words ("meeting") never
+ * count, and a word many titles share (the user's own name, a franchise)
+ * doesn't name one of them on its own.  @p lines holds distinct titles. */
+static bool title_named(const memory_terms_t *terms,
+                        char (*lines)[TITLE_STEMS_MAX],
+                        int n,
+                        int i,
+                        float *share) {
+   int distinct = 0;
+   int matched = 0;
+   bool unique_match = false;
+   char word[MEMORY_TERM_LEN];
+   for (const char *p = lines[i]; *p;) {
+      const char *end = strchr(p, ' ');
+      const size_t len = end ? (size_t)(end - p) : strlen(p);
+      if (len > 0 && len < sizeof(word) && !is_generic_stem(p, len)) {
+         distinct++;
+         memcpy(word, p, len);
+         word[len] = '\0';
+         if (memory_terms_has(terms, word)) {
+            matched++;
+            unique_match = unique_match || titles_with(lines, n, p, len) == 1;
+         }
+      }
+      if (!end) {
+         break;
+      }
+      p = end + 1;
+   }
+   *share = distinct > 0 ? (float)matched / (float)distinct : 0.0f;
+   return matched >= 2 || (matched > 0 && 2 * matched >= distinct && unique_match);
+}
+
+/* Events the message names: each event's occurrence nearest to now within
+ * the named-event window, kept when the message names its title
+ * (title_named).  Events sharing a title (one created per week) count as one
+ * title, and the nearest stands for them.
+ * *@p out (heap, caller frees) holds them, and @p *scores (heap) how much of
+ * each title matched, 0..1. */
+static int find_named_events(const int64_t *calendar_ids,
+                             int total_calendars,
+                             const char *query,
+                             time_t now,
+                             calendar_occurrence_t **out,
+                             float **scores,
+                             int *count) {
+   *out = NULL;
+   *scores = NULL;
+   *count = 0;
+   calendar_occurrence_t *events = malloc(CALENDAR_NAMED_PULL_MAX * sizeof(*events));
+   memory_terms_t *terms = malloc(sizeof(*terms));
+   char(*lines)[TITLE_STEMS_MAX] = malloc(CALENDAR_NAMED_PULL_MAX * sizeof(*lines));
+   float *share = malloc(CALENDAR_NAMED_PULL_MAX * sizeof(*share));
+   bool *is_named = malloc(CALENDAR_NAMED_PULL_MAX * sizeof(*is_named));
+   int n = 0;
+   int rc = FAILURE;
+   if (!events || !terms || !lines || !share || !is_named ||
+       calendar_db_events_nearest(calendar_ids, total_calendars, now - CALENDAR_NAMED_PAST_SECONDS,
+                                  now + CALENDAR_NAMED_FUTURE_SECONDS, now, events,
+                                  CALENDAR_NAMED_PULL_MAX, &n) != SUCCESS) {
+      goto done;
+   }
+   memory_terms_from_text(query, true, terms);
+   rc = SUCCESS;
+   if (terms->count == 0 || n == 0) {
+      goto done;
+   }
+   /* One entry per distinct title, nearest first (the order they came in). */
+   int kept = 0;
+   for (int i = 0; i < n; i++) {
+      memory_terms_stem_line(events[i].summary, true, lines[kept], sizeof(lines[kept]));
+      bool seen = false;
+      for (int j = 0; j < kept && !seen; j++) {
+         seen = strcmp(lines[j], lines[kept]) == 0;
+      }
+      if (!seen) {
+         events[kept++] = events[i];
+      }
+   }
+   /* Decide every title against the full set first (a word's rarity is
+    * measured across all titles), then compact the named ones. */
+   int named = 0;
+   for (int i = 0; i < kept; i++) {
+      is_named[i] = title_named(terms, lines, kept, i, &share[i]);
+   }
+   for (int i = 0; i < kept; i++) {
+      if (is_named[i]) {
+         share[named] = share[i];
+         events[named++] = events[i];
+      }
+   }
+   if (named > 0) {
+      *out = events;
+      *scores = share;
+      *count = named;
+      events = NULL;
+      share = NULL;
+   }
+done:
+   free(events);
+   free(terms);
+   free(lines);
+   free(share);
+   free(is_named);
+   return rc;
 }
 
 static int calendar_adapter_query(int user_id,
@@ -210,18 +392,19 @@ static int calendar_adapter_query(int user_id,
    if (max_candidates <= 0)
       return SUCCESS;
 
-   /* Stack-frame note: this function carries ~175 KB on the stack
-    * (range_buf[64] + search_buf[64] of calendar_occurrence_t at
-    * ~1.4 KB each + accounts[16] + smaller buffers).  Safe under
-    * the default 8 MB pthread stack but worth knowing if this ever
-    * runs on a constrained-stack thread (ESP32 satellite scratch).
-    * Heap allocations + cleanup are funneled through a single
-    * `cleanup:` epilogue at the end of the function so adding a
-    * future workspace buffer means one calloc + one free, not
-    * chasing every error branch. */
+   /* Occurrence buffers (~1.4 KB each) are on the heap.  Heap
+    * allocations + cleanup are funneled through a single `cleanup:`
+    * epilogue at the end of the function so adding a future workspace
+    * buffer means one calloc + one free, not chasing every error
+    * branch. */
 
    calendar_occurrence_t *merged = NULL;
-   bool *from_search = NULL;
+   calendar_occurrence_t *range_buf = NULL;
+   calendar_occurrence_t *named_buf = NULL;
+   float *named_match = NULL; /* per named event: share of its title matched */
+   int range_count = 0;
+   int named_count = 0;
+   float *named_score = NULL; /* per merged entry; < 0 when window-only */
    focus_candidate_t *out = NULL;
    int rc = SUCCESS;
    int produced = 0;
@@ -274,57 +457,63 @@ static int calendar_adapter_query(int user_id,
    if (total_calendars <= 0)
       goto cleanup; /* SUCCESS, zero candidates */
 
-   /* Step 3: range-window pull. */
-   calendar_occurrence_t range_buf[MAX_OCCURRENCES_PER_PULL];
-   int range_count = 0;
-   const time_t range_start = now - CALENDAR_PAST_WINDOW_SECONDS;
-   const time_t range_end = now + CALENDAR_FUTURE_WINDOW_SECONDS;
-   if (calendar_db_occurrences_in_range(calendar_ids, total_calendars, range_start, range_end,
-                                        range_buf, MAX_OCCURRENCES_PER_PULL,
-                                        &range_count) != SUCCESS) {
-      OLOG_ERROR("calendar_adapter: calendar_db_occurrences_in_range failed");
-      rc = FAILURE;
-      goto cleanup;
-   }
-
-   /* Step 4: optional query_text search; merged with range pull,
-    * deduped by occ.id.  query_text is user-controlled; do NOT log
-    * it on failure — log a length+sentinel only, matching the
-    * project log-redaction convention used for memory_facts. */
-   calendar_occurrence_t search_buf[MAX_OCCURRENCES_PER_PULL];
-   int search_count = 0;
-   const bool have_query = (query_text != NULL && query_text[0] != '\0');
-   if (have_query) {
-      if (calendar_db_occurrences_search(calendar_ids, total_calendars, query_text, search_buf,
-                                         MAX_OCCURRENCES_PER_PULL, &search_count) != SUCCESS) {
-         OLOG_WARNING("calendar_adapter: calendar_db_occurrences_search failed (query_len=%zu) — "
-                      "falling back to range-only",
-                      strlen(query_text));
-         search_count = 0;
+   /* Step 3: the window the message asks about, if any (a time or the
+    * schedule).  An unrelated message gets no ambient list of the coming
+    * week: reminders are the scheduler's job. */
+   calendar_window_t win;
+   calendar_query_window(query_text, g_config.general.ai_name, now, &win);
+   if (win.asks) {
+      /* Timed events, then all-day ones (a separate, date-keyed query), each
+       * up to MAX_OCCURRENCES_PER_PULL. */
+      range_buf = calloc(2 * MAX_OCCURRENCES_PER_PULL, sizeof(*range_buf));
+      if (!range_buf ||
+          calendar_db_occurrences_in_range(calendar_ids, total_calendars, win.start, win.end,
+                                           range_buf, MAX_OCCURRENCES_PER_PULL,
+                                           &range_count) != SUCCESS) {
+         OLOG_ERROR("calendar_adapter: calendar_db_occurrences_in_range failed");
+         rc = FAILURE;
+         goto cleanup;
+      }
+      char start_date[CALENDAR_DATE_LEN];
+      char end_date[CALENDAR_DATE_LEN];
+      calendar_window_dates(win.start, win.end, start_date, end_date);
+      int allday_count = 0;
+      if (calendar_db_allday_occurrences_in_range(calendar_ids, total_calendars, start_date,
+                                                  end_date, range_buf + range_count,
+                                                  MAX_OCCURRENCES_PER_PULL,
+                                                  &allday_count) == SUCCESS) {
+         range_count += allday_count;
+      } else {
+         OLOG_WARNING("calendar_adapter: all-day occurrences lookup failed — timed only");
       }
    }
 
-   /* Merge/dedupe.  Order: search hits first (so they keep their
-    * search-hit semantic score), then range hits not already seen.
-    * Intermediate "merged" view tracks the source for each entry. */
-   const int max_merged = range_count + search_count;
+   /* Step 4: events the message names.  query_text is user-controlled; do NOT
+    * log it. */
+   if (query_text != NULL && query_text[0] != '\0' &&
+       find_named_events(calendar_ids, total_calendars, query_text, now, &named_buf, &named_match,
+                         &named_count) != SUCCESS) {
+      OLOG_WARNING("calendar_adapter: named-event lookup failed (query_len=%zu)",
+                   strlen(query_text));
+      named_count = 0;
+   }
+
+   /* Merge/dedupe: named events first (so they keep their semantic score),
+    * then the window's, not already seen. */
+   const int max_merged = range_count + named_count;
    if (max_merged <= 0)
       goto cleanup; /* SUCCESS, zero candidates */
-
-   /* Stack-allocate the merge state — bounded by 2 *
-    * MAX_OCCURRENCES_PER_PULL = 128 entries × ~1 KB occurrence struct
-    * = ~128 KB worst case.  Use heap to keep stack predictable. */
    merged = calloc((size_t)max_merged, sizeof(*merged));
-   from_search = calloc((size_t)max_merged, sizeof(*from_search));
-   if (merged == NULL || from_search == NULL) {
+   named_score = calloc((size_t)max_merged, sizeof(*named_score));
+   if (merged == NULL || named_score == NULL) {
       OLOG_ERROR("calendar_adapter: OOM allocating merge workspace (max=%d)", max_merged);
       rc = FAILURE;
       goto cleanup;
    }
    int merged_n = 0;
-   for (int i = 0; i < search_count && merged_n < max_merged; i++) {
-      merged[merged_n] = search_buf[i];
-      from_search[merged_n] = true;
+   for (int i = 0; i < named_count && merged_n < max_merged; i++) {
+      merged[merged_n] = named_buf[i];
+      named_score[merged_n] = named_match[i];
       merged_n++;
    }
    for (int i = 0; i < range_count && merged_n < max_merged; i++) {
@@ -338,16 +527,16 @@ static int calendar_adapter_query(int user_id,
       if (dup)
          continue;
       merged[merged_n] = range_buf[i];
-      from_search[merged_n] = false;
+      named_score[merged_n] = -1.0f;
       merged_n++;
    }
    if (merged_n <= 0)
       goto cleanup; /* SUCCESS, zero candidates */
 
-   /* Trim to max_candidates.  Order chosen here is "search hits
-    * first then range" rather than score-sorted because the
-    * framework's ranker re-sorts everything anyway; what matters
-    * is that we don't drop search hits when range pool is large. */
+   /* Trim to max_candidates.  Order chosen here is "named first then
+    * window" rather than score-sorted because the framework's ranker
+    * re-sorts everything anyway; what matters is that we don't drop named
+    * events when the window is large. */
    const int kept = (merged_n > max_candidates) ? max_candidates : merged_n;
 
    out = calloc((size_t)kept, sizeof(*out));
@@ -386,20 +575,26 @@ static int calendar_adapter_query(int user_id,
          goto cleanup;
       }
 
-      const float semantic = from_search[i] ? CALENDAR_SEARCH_HIT_SEMANTIC : FOCUS_SCORE_NA;
-      const float recency = (float)calendar_recency_decay(occ->dtstart, now);
+      /* A named event's score grows with how much of its title matched, so a
+       * one-word overlap with a long title ranks below a full match. */
+      const float semantic = named_score[i] >= 0.0f
+                                 ? CALENDAR_NAMED_BASE_SEMANTIC +
+                                       CALENDAR_NAMED_SPAN_SEMANTIC * named_score[i]
+                                 : FOCUS_SCORE_NA;
+      const time_t starts = occ_local_start(occ);
+      const float recency = (float)calendar_recency_decay(starts, now);
 
       float importance = CALENDAR_DEFAULT_IMPORTANCE;
-      const time_t delta = occ->dtstart - now;
+      const time_t delta = starts - now;
       if (delta > 0 && delta < 86400)
          importance += CALENDAR_IMMINENT_BOOST;
-      if (same_local_day(occ->dtstart, now))
+      if (same_local_day(starts, now))
          importance += CALENDAR_TODAY_BOOST;
       if (importance > 1.0f)
          importance = 1.0f;
 
       if (focus_candidate_init(&out[produced], "calendar_event", FOCUS_SOURCE_EXTERNAL, rendered,
-                               item_id, occ->dtstart, semantic, recency, importance,
+                               item_id, starts, semantic, recency, importance,
                                &truncated_warned) != SUCCESS) {
          OLOG_ERROR("calendar_adapter: focus_candidate_init failed (occ_id=%lld)",
                     (long long)occ->id);
@@ -415,7 +610,10 @@ static int calendar_adapter_query(int user_id,
 
 cleanup:
    free(merged);
-   free(from_search);
+   free(range_buf);
+   free(named_buf);
+   free(named_match);
+   free(named_score);
    if (rc == SUCCESS && out != NULL) {
       *out_candidates = out;
       *out_count = produced;

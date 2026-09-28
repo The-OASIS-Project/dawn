@@ -473,6 +473,11 @@ void config_set_defaults(dawn_config_t *config) {
     * under 0.37.  Names mentioned in a long message are caught by the name
     * check instead, since the message's embedding dilutes them. */
    config->memory.focus_injection.entity_min_relevance = 0.40f;
+   /* Calibrated 2026-09 on a real month of ~120 summaries: summaries about a
+    * short query's topic scored 0.24-0.58, unrelated ones at most 0.21.
+    * Summaries are long, so their relevance runs lower than facts' or
+    * entities'. */
+   config->memory.focus_injection.summary_min_relevance = 0.22f;
    config->memory.focus_injection.classifier_enabled = false;
    config->memory.focus_injection.summary_max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.

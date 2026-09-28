@@ -77,6 +77,7 @@ typedef struct {
    bool fail_account_list; /* force account_list FAILURE */
    bool fail_occurrences_in_range;
    bool fail_occurrences_search;
+   bool fail_events_nearest;
 
    /* Call-counting counters for the network-invariant assertions —
     * the test asserts that ONLY the expected DB-layer calls fired
@@ -93,6 +94,8 @@ typedef struct {
    int call_count_calendar_list;
    int call_count_occurrences_in_range;
    int call_count_occurrences_search;
+   int call_count_events_nearest;
+   int call_count_allday_in_range;
 } ext_mock_state_t;
 
 extern ext_mock_state_t s_ext_mock;

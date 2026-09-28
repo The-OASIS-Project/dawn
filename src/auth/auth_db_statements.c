@@ -2390,6 +2390,27 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Each event's occurrence nearest to now: SQLite returns the other columns
+    * from the row holding MIN() (its bare-column rule for a lone MIN/MAX).
+    * All-day occurrences included: they carry the UTC midnight of their date
+    * in dtstart/dtend, close enough to rank by distance. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT o.id, o.event_id, o.dtstart, o.dtend, o.all_day, "
+                           "o.dtstart_date, o.dtend_date, o.summary, o.location, "
+                           "o.is_override, o.is_cancelled, o.recurrence_id, e.uid, "
+                           "e.calendar_id, MIN(ABS(o.dtstart - ?4)) AS dist "
+                           "FROM calendar_occurrences o "
+                           "JOIN calendar_events e ON o.event_id = e.id "
+                           "WHERE e.calendar_id IN (SELECT value FROM json_each(?1)) "
+                           "AND o.is_cancelled = 0 "
+                           "AND o.dtstart < ?3 AND o.dtend > ?2 "
+                           "GROUP BY o.event_id ORDER BY dist, o.id LIMIT ?5",
+                           -1, &s_db.stmt_cal_events_nearest, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_events_nearest failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT o.id, o.event_id, o.dtstart, o.dtend, o.all_day, "
                            "o.dtstart_date, o.dtend_date, o.summary, o.location, "
@@ -3061,6 +3082,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_cal_occ_delete_for_event);
    if (s_db.stmt_cal_occ_in_range)
       sqlite3_finalize(s_db.stmt_cal_occ_in_range);
+   if (s_db.stmt_cal_events_nearest)
+      sqlite3_finalize(s_db.stmt_cal_events_nearest);
    if (s_db.stmt_cal_occ_allday_in_range)
       sqlite3_finalize(s_db.stmt_cal_occ_allday_in_range);
    if (s_db.stmt_cal_occ_search)

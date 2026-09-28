@@ -131,6 +131,9 @@ static char *recall_callback(const char *action, char *value, int *should_respon
       .top_k = rc->top_k,
       .min_score = rc->min_score,
       .budget_bytes = rc->budget_bytes,
+      /* Recall shows each item as one capped line with a read-pointer, so
+       * that, not the full text, is what an item costs. */
+      .item_bytes = recall_format_item_bytes,
    };
 
    focus_compose_result_t result;

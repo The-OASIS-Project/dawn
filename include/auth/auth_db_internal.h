@@ -465,6 +465,7 @@ typedef struct {
    sqlite3_stmt *stmt_cal_occ_insert;
    sqlite3_stmt *stmt_cal_occ_delete_for_event;
    sqlite3_stmt *stmt_cal_occ_in_range;
+   sqlite3_stmt *stmt_cal_events_nearest;
    sqlite3_stmt *stmt_cal_occ_allday_in_range;
    sqlite3_stmt *stmt_cal_occ_search;
    sqlite3_stmt *stmt_cal_occ_next;

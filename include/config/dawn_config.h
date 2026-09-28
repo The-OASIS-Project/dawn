@@ -608,6 +608,9 @@ typedef struct {
    float fact_min_relevance;     /* Facts: same corpus-relative measure against the user's
                                     other facts; injection only (not the memory tool).
                                     0 disables. */
+   float summary_min_relevance;  /* Conversation summaries found by meaning: same measure
+                                    against the user's summaries of the last 30 days.
+                                    Keyword matches aren't gated.  0 disables. */
    float entity_min_relevance;   /* Entities: same measure against the user's other entities,
                                     for those the query doesn't name (a named entity always
                                     counts).  Injection, recall and the memory tool.

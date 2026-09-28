@@ -283,6 +283,61 @@ int memory_terms_word_count(const char *text) {
    return n;
 }
 
+/* Whether @p name appears in @p query as a phrase: its words, case-folded,
+ * back to back and in order. */
+static bool phrase_in(const char *query, const char *name) {
+   const char *qs = NULL;
+   size_t ql = 0;
+   for (const char *q = query; q && (q = memory_terms_next_word(q, &qs, &ql)) != NULL;) {
+      /* Try the name starting at this query word. */
+      const char *qw = qs;
+      size_t qwl = ql;
+      const char *qnext = q;
+      const char *ns = NULL;
+      size_t nl = 0;
+      bool all = true;
+      for (const char *n = name; (n = memory_terms_next_word(n, &ns, &nl)) != NULL;) {
+         if (!qw || nl != qwl) {
+            all = false;
+            break;
+         }
+         for (size_t k = 0; k < nl && all; k++) {
+            all = memory_terms_fold_at(ns, k) == memory_terms_fold_at(qw, k);
+         }
+         if (!all) {
+            break;
+         }
+         qnext = qnext ? memory_terms_next_word(qnext, &qw, &qwl) : NULL;
+         if (!qnext) {
+            qw = NULL;
+         }
+      }
+      if (all) {
+         return true;
+      }
+   }
+   return false;
+}
+
+int memory_terms_names(const memory_terms_t *terms,
+                       const char *query,
+                       const char *name,
+                       const char *name_stems,
+                       int content_words,
+                       int words) {
+   if (!terms || !query || !name || !name_stems || content_words <= 0) {
+      return 0;
+   }
+   const int matched = memory_terms_count_in(terms, name_stems);
+   if (content_words >= 2) {
+      return matched >= 2 ? matched : 0;
+   }
+   if (matched == 0) {
+      return 0;
+   }
+   return (words <= 1 || phrase_in(query, name)) ? 1 : 0;
+}
+
 bool memory_terms_enough(int matched, int of) {
    if (of <= 0) {
       return false;

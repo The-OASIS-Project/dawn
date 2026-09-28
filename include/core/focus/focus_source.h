@@ -278,7 +278,8 @@ typedef struct focus_compose_result_s {
  * in `g_config.memory.focus_injection`.  The unified `recall` tool needs a
  * larger, separate budget for a deep cross-source gather.  `focus_limits_t`
  * overrides ONLY the three trim values; a NULL pointer or a zero/negative field
- * falls back to the config value for that field.  Ranking WEIGHTS are NOT
+ * falls back to the config value for that field (item_bytes has no config
+ * counterpart: unset, a candidate costs its full text).  Ranking WEIGHTS are NOT
  * overridable here — they stay config-sourced and shared, so recall changes how
  * MUCH is kept, not HOW it is ranked.
  * ============================================================================= */
@@ -286,6 +287,10 @@ typedef struct {
    int top_k;        /* > 0 overrides focus_injection.top_k              */
    float min_score;  /* >= 0 overrides focus_injection.min_score         */
    int budget_bytes; /* > 0 overrides focus_injection.focus_budget_bytes */
+   /* Non-NULL: the bytes the caller will show for a candidate, charged
+    * against the budget instead of its full text (recall shows each item
+    * as a capped line with a pointer to the rest). */
+   int (*item_bytes)(const focus_candidate_t *c);
 } focus_limits_t;
 
 /* =============================================================================

@@ -216,6 +216,24 @@ int calendar_db_occurrence_insert(const calendar_occurrence_t *occ, int64_t *id_
 int calendar_db_occurrence_delete_for_event(int64_t event_id);
 
 /**
+ * Each event's occurrence nearest to @p now within [range_start, range_end),
+ * across given calendar IDs: one row per event, nearest first, at most
+ * @p max_count (so a limit drops the farthest events, not a stretch of time).
+ * Non-cancelled occurrences, timed and all-day (all-day ones compared by
+ * the UTC midnight of their date).
+ * @param count_out  Number of occurrences written to out (0 if none)
+ * @return 0 on success, 1 on failure
+ */
+int calendar_db_events_nearest(const int64_t *calendar_ids,
+                               int calendar_count,
+                               time_t range_start,
+                               time_t range_end,
+                               time_t now,
+                               calendar_occurrence_t *out,
+                               int max_count,
+                               int *count_out);
+
+/**
  * Query occurrences in a time range across given calendar IDs.
  * Only returns non-cancelled occurrences.
  * @param count_out  Number of occurrences written to out (0 if none)
