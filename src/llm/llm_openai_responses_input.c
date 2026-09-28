@@ -27,6 +27,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_claude_parts.h"
+#include "llm/llm_turn_blocks.h"
+#include "logging.h"
+
 /*
  * Prompt-cache layout (see docs/RESPONSES_CACHE_REORDER_PLAN.md).
  *
@@ -188,6 +192,101 @@ static bool responses_mark_cache_breakpoint(struct json_object *item) {
    return true;
 }
 
+/* A Claude tool_result part as a function_call_output item. */
+static void responses_add_claude_tool_result(struct json_object *part, struct json_object *input) {
+   struct json_object *id = NULL;
+   const char *call_id = json_object_object_get_ex(part, "tool_use_id", &id)
+                             ? json_object_get_string(id)
+                             : NULL;
+   if (!call_id) {
+      return; /* unpairable: sending it would be an API error */
+   }
+   char *text = llm_claude_tool_result_text(part);
+   struct json_object *item = text ? json_object_new_object() : NULL;
+   if (item) {
+      json_object_object_add(item, "type", json_object_new_string("function_call_output"));
+      json_object_object_add(item, "call_id", json_object_new_string(call_id));
+      json_object_object_add(item, "output", json_object_new_string(text));
+      json_object_array_add(input, item);
+   }
+   free(text);
+}
+
+/* A Claude base64 image part as an input_image part. */
+static void responses_add_claude_image(struct json_object *part, struct json_object *parts) {
+   char *url = llm_claude_image_data_url(part);
+   struct json_object *img = url ? json_object_new_object() : NULL;
+   if (img) {
+      json_object_object_add(img, "type", json_object_new_string("input_image"));
+      json_object_object_add(img, "image_url", json_object_new_string(url));
+      json_object_array_add(parts, img);
+   }
+   free(url);
+}
+
+/* The call_id of a function_call or function_call_output item, or NULL. */
+static const char *pairing_id(struct json_object *item, bool *is_call) {
+   struct json_object *t = NULL, *id = NULL;
+   if (!json_object_object_get_ex(item, "type", &t) || !json_object_get_string(t)) {
+      return NULL;
+   }
+   const char *type = json_object_get_string(t);
+   *is_call = strcmp(type, "function_call") == 0;
+   if (!*is_call && strcmp(type, "function_call_output") != 0) {
+      return NULL;
+   }
+   return json_object_object_get_ex(item, "call_id", &id) ? json_object_get_string(id) : NULL;
+}
+
+/* @p input without any function call or output that lacks its partner: a
+ * history compacted mid-exchange, or converted from another provider, can hold
+ * one, and either alone fails the request.  Each output pairs with the
+ * nearest unanswered call of its id before it (servers that number calls per
+ * turn reuse ids).  Takes @p input; returns the result. */
+static struct json_object *drop_unpaired_calls(struct json_object *input) {
+   const size_t n = json_object_array_length(input);
+   bool *keep = calloc(n ? n : 1, sizeof(*keep));
+   struct json_object *out = keep ? json_object_new_array() : NULL;
+   if (!out) {
+      free(keep);
+      return input;
+   }
+   for (size_t j = 0; j < n; j++) {
+      bool is_call = false;
+      const char *id = pairing_id(json_object_array_get_idx(input, j), &is_call);
+      if (!id) {
+         keep[j] = true;
+         continue;
+      }
+      if (is_call) {
+         continue; /* a call is kept by the output that answers it */
+      }
+      /* An output answers the nearest call of its id before it not yet answered. */
+      for (size_t i = j; i-- > 0;) {
+         bool other_is_call = false;
+         const char *other = pairing_id(json_object_array_get_idx(input, i), &other_is_call);
+         if (other && other_is_call && !keep[i] && strcmp(other, id) == 0) {
+            keep[i] = keep[j] = true;
+            break;
+         }
+      }
+   }
+   size_t dropped = 0;
+   for (size_t i = 0; i < n; i++) {
+      if (keep[i]) {
+         json_object_array_add(out, json_object_get(json_object_array_get_idx(input, i)));
+      } else {
+         dropped++;
+      }
+   }
+   if (dropped > 0) {
+      OLOG_WARNING("Responses: dropped %zu function call item(s) without a partner", dropped);
+   }
+   free(keep);
+   json_object_put(input);
+   return out;
+}
+
 struct json_object *llm_responses_build_input(struct json_object *history,
                                               const char *input_text,
                                               const char **vision_images,
@@ -195,7 +294,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
                                               int vision_image_count,
                                               const char *volatile_block,
                                               int leading_system_run,
-                                              bool enable_cache_breakpoint) {
+                                              bool enable_cache_breakpoint,
+                                              const char *carrier,
+                                              const char *model) {
    struct json_object *input = json_object_new_array();
    if (!input)
       return NULL;
@@ -251,67 +352,12 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          continue;
       }
 
-      /* Assistant message: emit reasoning items first, then text, then function_call items */
+      /* Assistant message: rendered from its blocks, in the order produced (OpenAI's
+       * own reasoning items included, other vendors' left out). */
       if (strcmp(role, "assistant") == 0) {
-         /* Echoed reasoning items (Mode B round-trip) */
-         struct json_object *prov_state, *openai_resp, *r_items;
-         if (json_object_object_get_ex(msg, "_provider_state", &prov_state) &&
-             json_object_object_get_ex(prov_state, "openai_responses", &openai_resp) &&
-             json_object_object_get_ex(openai_resp, "reasoning_items", &r_items) &&
-             json_object_get_type(r_items) == json_type_array) {
-            int n = json_object_array_length(r_items);
-            for (int k = 0; k < n; k++) {
-               struct json_object *item = json_object_array_get_idx(r_items, k);
-               json_object_array_add(input, json_object_get(item));
-            }
-         }
-
-         /* Pre-tool assistant text (if any) */
-         struct json_object *content_obj;
-         if (json_object_object_get_ex(msg, "content", &content_obj)) {
-            const char *txt = json_object_get_string(content_obj);
-            if (txt && *txt) {
-               struct json_object *item = json_object_new_object();
-               json_object_object_add(item, "type", json_object_new_string("message"));
-               json_object_object_add(item, "role", json_object_new_string("assistant"));
-               struct json_object *content_array = json_object_new_array();
-               struct json_object *part = json_object_new_object();
-               json_object_object_add(part, "type", json_object_new_string("output_text"));
-               json_object_object_add(part, "text", json_object_new_string(txt));
-               json_object_array_add(content_array, part);
-               json_object_object_add(item, "content", content_array);
-               json_object_array_add(input, item);
-            }
-         }
-
-         /* Tool calls → function_call items */
-         struct json_object *tool_calls;
-         if (json_object_object_get_ex(msg, "tool_calls", &tool_calls) &&
-             json_object_get_type(tool_calls) == json_type_array) {
-            int n = json_object_array_length(tool_calls);
-            for (int k = 0; k < n; k++) {
-               struct json_object *tc = json_object_array_get_idx(tool_calls, k);
-               struct json_object *id_obj, *fn_obj;
-               if (!json_object_object_get_ex(tc, "id", &id_obj))
-                  continue;
-               if (!json_object_object_get_ex(tc, "function", &fn_obj))
-                  continue;
-               struct json_object *name_obj, *args_obj;
-               if (!json_object_object_get_ex(fn_obj, "name", &name_obj))
-                  continue;
-               if (!json_object_object_get_ex(fn_obj, "arguments", &args_obj))
-                  continue;
-               struct json_object *item = json_object_new_object();
-               json_object_object_add(item, "type", json_object_new_string("function_call"));
-               json_object_object_add(item, "call_id",
-                                      json_object_new_string(json_object_get_string(id_obj)));
-               json_object_object_add(item, "name",
-                                      json_object_new_string(json_object_get_string(name_obj)));
-               json_object_object_add(item, "arguments",
-                                      json_object_new_string(json_object_get_string(args_obj)));
-               json_object_array_add(input, item);
-            }
-         }
+         struct json_object *blocks = llm_turn_message_blocks(msg);
+         llm_turn_blocks_render_responses(blocks, input, carrier, model);
+         json_object_put(blocks);
          continue;
       }
 
@@ -334,7 +380,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
                                    json_object_new_string(json_object_get_string(content_obj)));
             json_object_array_add(content_array, part);
          } else if (json_object_get_type(content_obj) == json_type_array) {
-            /* Chat-completions multimodal array → translate text/image_url parts */
+            /* A multimodal array (chat-completions or Claude parts) → input parts.
+             * A Claude tool_result becomes its own function_call_output item, ahead
+             * of the message (the call it answers came just before it). */
             int n = json_object_array_length(content_obj);
             for (int k = 0; k < n; k++) {
                struct json_object *part_in = json_object_array_get_idx(content_obj, k);
@@ -342,7 +390,14 @@ struct json_object *llm_responses_build_input(struct json_object *history,
                if (!json_object_object_get_ex(part_in, "type", &type_obj))
                   continue;
                const char *t = json_object_get_string(type_obj);
-               if (strcmp(t, "text") == 0) {
+               if (!t) {
+                  continue;
+               }
+               if (strcmp(t, "tool_result") == 0) {
+                  responses_add_claude_tool_result(part_in, input);
+               } else if (strcmp(t, "image") == 0) {
+                  responses_add_claude_image(part_in, content_array);
+               } else if (strcmp(t, "text") == 0) {
                   struct json_object *txt_obj;
                   if (json_object_object_get_ex(part_in, "text", &txt_obj)) {
                      struct json_object *part = json_object_new_object();
@@ -366,8 +421,14 @@ struct json_object *llm_responses_build_input(struct json_object *history,
             }
          }
 
-         json_object_object_add(item, "content", content_array);
-         json_object_array_add(input, item);
+         if (json_object_array_length(content_array) > 0) {
+            json_object_object_add(item, "content", content_array);
+            json_object_array_add(input, item);
+         } else {
+            /* Only tool results: they were emitted as their own items. */
+            json_object_put(content_array);
+            json_object_put(item);
+         }
       }
    }
 
@@ -436,6 +497,10 @@ struct json_object *llm_responses_build_input(struct json_object *history,
       json_object_object_add(item, "content", content_array);
       json_object_array_add(input, item);
    }
+
+   /* After the question is placed: dropping an unpaired call first could make an
+    * earlier question the tail, and the new one would replace it. */
+   input = drop_unpaired_calls(input);
 
    /* Reposition the volatile TURN CONTEXT block as a user item IMMEDIATELY BEFORE the
     * current question (the last user-role item in the fully-assembled input, after

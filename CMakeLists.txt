@@ -612,6 +612,7 @@ set(DAWN_SOURCES
     src/llm/llm_claude_binding.c
     src/llm/llm_claude_blocks.c
     src/llm/llm_turn_blocks.c
+    src/llm/llm_claude_parts.c
     src/llm/llm_context_merge.c
     src/llm/llm_pricing.c
     src/llm/llm_local_provider.c

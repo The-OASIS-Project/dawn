@@ -60,7 +60,7 @@ static void test_internal_keys_never_go_on_the_wire(void) {
                                                     "\"signature\":\"S\"}"));
    llm_turn_blocks_add_text(blocks, "Hello.");
    json_object_object_add(answer, LLM_TURN_BLOCKS_KEY, blocks);
-   json_object_object_add(answer, "_provider_state", json_object_new_object());
+   json_object_object_add(answer, "_internal_probe", json_object_new_object());
    json_object_array_add(history, answer);
    json_object_array_add(history, msg("user", "Bye"));
 
@@ -68,7 +68,7 @@ static void test_internal_keys_never_go_on_the_wire(void) {
    TEST_ASSERT_EQUAL_INT(3, json_object_array_length(prepared));
    json_object *out = json_object_array_get_idx(prepared, 1);
    TEST_ASSERT_FALSE(json_object_object_get_ex(out, LLM_TURN_BLOCKS_KEY, NULL));
-   TEST_ASSERT_FALSE(json_object_object_get_ex(out, "_provider_state", NULL));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(out, "_internal_probe", NULL));
    TEST_ASSERT_EQUAL_STRING("Hello.",
                             json_object_get_string(json_object_object_get(out, "content")));
    /* The history itself is untouched (the keys still describe the turn). */

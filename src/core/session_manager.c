@@ -1575,9 +1575,8 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
     * session_destroy() runs for them.  A SESSION_TYPE_JOB guard on this line
     * would be dead code: memory_trigger_extraction() itself refuses background-job
     * and private conversations, for every caller. */
-   /* Deep-copy history with provider-private fields stripped. The OpenAI
-    * Responses path stashes encrypted reasoning blobs under _provider_state
-    * which are session-bound to OpenAI and must not be forwarded to the
+   /* Deep-copy history with DAWN's own keys stripped: a turn's blocks carry
+    * reasoning a vendor issued for itself, which must not reach the
     * memory-extraction LLM (which may be Claude/Gemini/local).  Extraction
     * starts after the lock is released: building its fallback reads the LLM
     * settings under llm_config_mutex, never held together with this one. */

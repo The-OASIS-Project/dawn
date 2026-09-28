@@ -1030,7 +1030,9 @@ dawn_add_unit_test(test_llm_model_version
 dawn_add_unit_test(test_responses_input
    SOURCES test_responses_input.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
-   LIBS    unity ${JSONC_LIBRARIES}
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_iso8601
@@ -1523,6 +1525,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_context.c
            ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
@@ -1606,6 +1609,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_context.c
            ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c

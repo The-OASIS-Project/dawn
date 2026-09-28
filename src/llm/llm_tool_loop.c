@@ -341,6 +341,30 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    session_release(s);
 }
 
+_Static_assert(LLM_TURN_CALLS_MAX >= LLM_TOOLS_MAX_PARALLEL_CALLS,
+               "a turn's blocks must be able to hold every call that runs");
+
+/* The response's blocks with their tool calls replaced by the calls that ran
+ * (llm_turn_blocks_with_calls): the calls the stream carried and the calls
+ * admitted and answered can differ (a cap, an over-long id, a stream cut
+ * short), and a replay must hold each call with its result.  NULL without
+ * blocks. */
+static json_object *blocks_as_run(const llm_tool_response_t *response, bool calls_ran) {
+   if (!response || !response->blocks) {
+      return NULL;
+   }
+   llm_turn_call_t calls[LLM_TOOLS_MAX_PARALLEL_CALLS];
+   int n = 0;
+   for (int i = 0; calls_ran && i < response->tool_calls.count && i < LLM_TOOLS_MAX_PARALLEL_CALLS;
+        i++) {
+      calls[n].id = response->tool_calls.calls[i].id;
+      calls[n].name = response->tool_calls.calls[i].name;
+      calls[n].arguments = response->tool_calls.calls[i].arguments;
+      n++;
+   }
+   return llm_turn_blocks_with_calls(response->blocks, calls, n);
+}
+
 /* Stash BOTH final-turn signals on the session in ONE lookup:
  *   - the finish/stop reason, so a background-job worker can tell a cut-off answer
  *     ("max_tokens"/"length") from a clean finish; and
@@ -362,13 +386,15 @@ static void tool_loop_stash_final(uint32_t session_id,
    const char *reason = result != NULL ? result->finish_reason : NULL;
    bool have_reason = (reason != NULL && reason[0] != '\0');
    char *json = build_reasoning_json(result, provider_label);
-   struct json_object *blocks = result != NULL ? result->blocks : NULL;
+   /* A final answer ran no calls: its blocks keep none. */
+   struct json_object *blocks = blocks_as_run(result, false);
    if (!have_reason && json == NULL && blocks == NULL) {
       return; /* nothing to write — skip the lookup entirely */
    }
    session_t *s = session_get_for_reconnect(session_id);
    if (s == NULL) {
       free(json);
+      json_object_put(blocks);
       return;
    }
    if (have_reason) {
@@ -380,7 +406,7 @@ static void tool_loop_stash_final(uint32_t session_id,
    }
    if (blocks != NULL) {
       json_object_put(s->final_answer.blocks);
-      s->final_answer.blocks = json_object_get(blocks); /* the answer's blocks */
+      s->final_answer.blocks = blocks; /* the answer's blocks (take ownership) */
    }
    session_release(s);
 }
@@ -445,13 +471,11 @@ static void append_openai_tool_history(struct json_object *history,
    }
    json_object_object_add(assistant_msg, "tool_calls", tc_array);
 
-   /* OpenAI Responses API round-trip: attach opaque per-provider state
-    * (reasoning items + response_id) so the next iteration can echo it. */
-   if (response->provider_state_json && *response->provider_state_json) {
-      json_object *prov = json_tokener_parse(response->provider_state_json);
-      if (prov) {
-         json_object_object_add(assistant_msg, "_provider_state", prov);
-      }
+   /* The turn's blocks, where the path captured them (OpenAI Responses): its
+    * reasoning items go back with the next request, its calls as they ran. */
+   json_object *blocks = blocks_as_run(response, true);
+   if (blocks) {
+      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, blocks);
    }
 
    session_history_append(history, assistant_msg);
@@ -475,14 +499,16 @@ static void append_claude_tool_history(struct json_object *history,
    /* The turn exactly as the model produced it: every block in order, each
     * thinking block with its own signature (empty text or not).  The blocks
     * travel with the message; each formatter renders them for its provider. */
-   json_object *rendered = llm_turn_blocks_render_claude(response->blocks);
+   json_object *blocks = blocks_as_run(response, true);
+   json_object *rendered = llm_turn_blocks_render_claude(blocks);
    if (rendered) {
       json_object_object_add(assistant_msg, "content", rendered);
-      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, json_object_get(response->blocks));
+      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, blocks);
       session_history_append(history, assistant_msg);
       llm_tools_add_results_claude(history, results);
       return;
    }
+   json_object_put(blocks);
 
    /* A path without blocks: the text and tool calls (its reasoning, if any,
     * can't be replayed without the blocks it came in). */

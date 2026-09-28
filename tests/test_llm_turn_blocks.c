@@ -255,7 +255,7 @@ static json_object *answer_with_blocks(const char *text, const char *thinking, c
    llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "m", native);
    llm_turn_blocks_add_text(blocks, text);
    json_object_object_add(m, LLM_TURN_BLOCKS_KEY, blocks);
-   json_object_object_add(m, "_provider_state", json_object_new_object());
+   json_object_object_add(m, "_internal_probe", json_object_new_object());
    return m;
 }
 
@@ -266,7 +266,7 @@ static void test_strip_internal_removes_every_internal_key(void) {
    json_object *clean = llm_history_strip_internal(history);
    json_object *m = json_object_array_get_idx(clean, 0);
    TEST_ASSERT_FALSE(json_object_object_get_ex(m, LLM_TURN_BLOCKS_KEY, NULL));
-   TEST_ASSERT_FALSE(json_object_object_get_ex(m, "_provider_state", NULL));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(m, "_internal_probe", NULL));
    TEST_ASSERT_NULL(strstr(json_object_to_json_string(clean), "secret reasoning"));
    /* A deep copy: the original keeps them. */
    TEST_ASSERT_TRUE(
@@ -343,6 +343,96 @@ static void test_opaque_blocks_count_toward_context(void) {
    json_object_put(m);
 }
 
+/* Responses rendering: a run of text is one assistant message; a tool call
+ * ends it; OpenAI reasoning goes back verbatim; Anthropic reasoning doesn't. */
+static void test_render_responses(void) {
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_text(blocks, "one");
+   llm_turn_blocks_add_text(blocks, "two");
+   llm_turn_blocks_add_tool_call(blocks, "call_1", "search", "");
+   struct json_object *r = json_object_new_object();
+   json_object_object_add(r, "type", json_object_new_string("reasoning"));
+   json_object_object_add(r, "encrypted_content", json_object_new_string("ENC"));
+   llm_turn_blocks_add_reasoning(blocks, "api.openai.com", LLM_FORMAT_OPENAI, "m", r);
+   struct json_object *t = json_object_new_object();
+   json_object_object_add(t, "type", json_object_new_string("thinking"));
+   json_object_object_add(t, "thinking", json_object_new_string("hidden"));
+   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "c", t);
+   llm_turn_blocks_add_text(blocks, "three");
+
+   struct json_object *input = json_object_new_array();
+   llm_turn_blocks_render_responses(blocks, input, "api.openai.com", "m");
+   TEST_ASSERT_EQUAL_INT(4, json_object_array_length(input));
+   struct json_object *first = json_object_array_get_idx(input, 0), *content, *v;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(first, "content", &content));
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(content)); /* "one" + "two" */
+   struct json_object *call = json_object_array_get_idx(input, 1);
+   TEST_ASSERT_TRUE(json_object_object_get_ex(call, "arguments", &v));
+   TEST_ASSERT_EQUAL_STRING("{}", json_object_get_string(v));
+   struct json_object *reasoning = json_object_array_get_idx(input, 2);
+   TEST_ASSERT_TRUE(json_object_object_get_ex(reasoning, "encrypted_content", &v));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(input), "hidden"));
+
+   /* The encrypted content stands in for the reasoning in size estimates. */
+   struct json_object *m = json_object_new_object();
+   json_object_object_add(m, LLM_TURN_BLOCKS_KEY, json_object_get(blocks));
+   TEST_ASSERT_EQUAL_INT(3 + 6, (int)llm_turn_message_reasoning_chars(m)); /* ENC + hidden */
+   json_object_put(m);
+   json_object_put(input);
+   json_object_put(blocks);
+}
+
+/* A turn's calls are the calls that ran: one that didn't run goes, one that
+ * ran without a block is added after the last call kept, text and reasoning
+ * keep their places; a final answer keeps no calls. */
+static void test_blocks_with_calls(void) {
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_text(blocks, "before");
+   llm_turn_blocks_add_tool_call(blocks, "c1", "a", "{\"full\":true}");
+   llm_turn_blocks_add_tool_call(blocks, "c9", "never", "{}"); /* didn't run */
+   llm_turn_blocks_add_text(blocks, "after");
+   const llm_turn_call_t ran[] = { { "c1", "a", "{\"cut\":1}" }, { "c2", "b", "{}" } };
+
+   struct json_object *out = llm_turn_blocks_with_calls(blocks, ran, 2);
+   TEST_ASSERT_EQUAL_INT(4, json_object_array_length(out));
+   const char *order[] = { "before", "c1", "c2", "after" };
+   for (int i = 0; i < 4; i++) {
+      struct json_object *b = json_object_array_get_idx(out, i), *v;
+      const char *key = (i == 1 || i == 2) ? "id" : "text";
+      TEST_ASSERT_TRUE(json_object_object_get_ex(b, key, &v));
+      TEST_ASSERT_EQUAL_STRING(order[i], json_object_get_string(v));
+   }
+   struct json_object *args;
+   TEST_ASSERT_TRUE(
+       json_object_object_get_ex(json_object_array_get_idx(out, 1), "arguments", &args));
+   TEST_ASSERT_EQUAL_STRING("{\"full\":true}", json_object_get_string(args)); /* as sent */
+   json_object_put(out);
+
+   out = llm_turn_blocks_with_calls(blocks, NULL, 0);
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(out)); /* the text only */
+   json_object_put(out);
+   json_object_put(blocks);
+}
+
+/* A message recorded without blocks reads the same as one with them. */
+static void test_message_blocks(void) {
+   struct json_object *m = json_object_new_object();
+   json_object_object_add(m, "role", json_object_new_string("assistant"));
+   json_object_object_add(m, "content", json_object_new_string("hi"));
+   struct json_object *tcs = json_object_new_array(), *tc = json_object_new_object(),
+                      *fn = json_object_new_object();
+   json_object_object_add(tc, "id", json_object_new_string("c1"));
+   json_object_object_add(fn, "name", json_object_new_string("a"));
+   json_object_object_add(fn, "arguments", json_object_new_string("{}"));
+   json_object_object_add(tc, "function", fn);
+   json_object_array_add(tcs, tc);
+   json_object_object_add(m, "tool_calls", tcs);
+   struct json_object *b = llm_turn_message_blocks(m);
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(b));
+   json_object_put(b);
+   json_object_put(m);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_capture_keeps_every_block_in_order);
@@ -357,5 +447,8 @@ int main(void) {
    RUN_TEST(test_reasoning_counts_toward_context);
    RUN_TEST(test_copies_drop_every_internal_key);
    RUN_TEST(test_opaque_blocks_count_toward_context);
+   RUN_TEST(test_render_responses);
+   RUN_TEST(test_blocks_with_calls);
+   RUN_TEST(test_message_blocks);
    return UNITY_END();
 }

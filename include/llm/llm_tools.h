@@ -240,10 +240,7 @@ typedef struct llm_tool_response {
                                 *   Freed with the response. */
    int reasoning_tokens; /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
    /* OpenAI Responses API round-trip fields (NULL for chat-completions / Claude paths) */
-   char *response_id;         /**< response.id from /v1/responses (Mode A future use) */
-   char *provider_state_json; /**< Opaque JSON blob to attach as _provider_state on the
-                               *   resulting assistant message (e.g. encrypted reasoning
-                               *   items for the next turn). Caller must free. */
+   char *response_id; /**< response.id from /v1/responses (Mode A future use) */
 } llm_tool_response_t;
 
 /* =============================================================================

@@ -2694,10 +2694,6 @@ void llm_tool_response_free(llm_tool_response_t *response) {
          free(response->response_id);
          response->response_id = NULL;
       }
-      if (response->provider_state_json) {
-         free(response->provider_state_json);
-         response->provider_state_json = NULL;
-      }
    }
 }
 

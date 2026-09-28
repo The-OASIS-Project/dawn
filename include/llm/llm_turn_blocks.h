@@ -30,6 +30,8 @@
  *   { "type": "tool_call", "id": ..., "name": ..., "arguments": "<json text>" }
  *   { "type": "reasoning", "carrier": "anthropic", "format": "anthropic",
  *     "model": ..., "native": {...} }
+ *   (OpenAI Responses: carrier the endpoint and key, format "openai", native
+ *   a reasoning item {type, id, summary, encrypted_content})
  *   { "type": "opaque", "carrier": ..., "format": ..., "model": ..., "native": {...} }
  *
  * "carrier" is who issued it (the API it came through); "format" is whose
@@ -42,8 +44,8 @@
  * a per-call reasoning "sig"); this shape is versioned where it's persisted.
  *
  * Every key DAWN puts on a history message for itself starts with '_' (this
- * one, "_provider_state"): none of them go on the wire or into a text another
- * model reads (llm_history_wire_copy / llm_history_strip_internal).
+ * one included): none of them go on the wire or into a text another model
+ * reads (llm_history_wire_copy / llm_history_strip_internal).
  */
 
 #ifndef LLM_TURN_BLOCKS_H
@@ -64,6 +66,10 @@ struct json_object;
 /** Carriers (who issued a reasoning block) and formats (whose object it is). */
 #define LLM_CARRIER_ANTHROPIC "anthropic"
 #define LLM_FORMAT_ANTHROPIC "anthropic"
+#define LLM_FORMAT_OPENAI "openai"
+/* OpenAI-format reasoning is carried by the endpoint and organization that
+ * issued it: its carrier is the endpoint's host and a fingerprint of the API
+ * key ("api.openai.com#1a2b3c4d"). */
 
 /** A new, empty block list (caller owns it; NULL on allocation failure). */
 struct json_object *llm_turn_blocks_new(void);
@@ -128,6 +134,61 @@ struct json_object *llm_turn_blocks_render_claude(struct json_object *blocks);
 struct json_object *llm_turn_blocks_with_final_text(struct json_object *blocks,
                                                     const char *final_text);
 
+/**
+ * @brief Render blocks as OpenAI Responses input items, appended to @p input
+ *
+ * Each run of text as one assistant message (output_text), tool calls as
+ * function_call items under their call_id, and OpenAI reasoning items verbatim
+ * when they came from @p carrier (the endpoint and key) and @p model: an item
+ * is encrypted for the model and organization that produced it.  Other reasoning
+ * and opaque content are left out.
+ *
+ * @param carrier The request's endpoint and key (see LLM_FORMAT_OPENAI)
+ * @param model   The request's model (NULL: any)
+ */
+void llm_turn_blocks_render_responses(struct json_object *blocks,
+                                      struct json_object *input,
+                                      const char *carrier,
+                                      const char *model);
+
+/** Most tool calls one turn reconciles (at least the parallel tool-call limit). */
+#define LLM_TURN_CALLS_MAX 16
+
+/** A tool call that ran: what a turn's blocks record for it. */
+typedef struct {
+   const char *id;
+   const char *name;
+   const char *arguments;
+} llm_turn_call_t;
+
+/**
+ * @brief The blocks with their tool calls replaced by the calls that ran
+ *
+ * A turn's blocks come from the response as streamed; the calls DAWN runs (and
+ * answers) are admitted separately, under limits of their own.  The two must
+ * agree, or a replay carries a call with no result (or a result with no call):
+ * an API error on every later request.  A tool_call block whose id ran is kept
+ * as the model sent it (the run copy may be cut to fit a buffer); one that
+ * didn't run is dropped; a call that ran without a block goes after the last
+ * call kept (or at the end), as it ran.  Text and
+ * reasoning keep their order.  With no calls (a final answer), no tool calls.
+ *
+ * @return New blocks (caller owns them), or NULL
+ */
+struct json_object *llm_turn_blocks_with_calls(struct json_object *blocks,
+                                               const llm_turn_call_t *calls,
+                                               int count);
+
+/**
+ * @brief An assistant message's blocks, however it was recorded
+ *
+ * Its blocks when it has them; a Claude content array read into blocks (from
+ * before blocks existed); otherwise its text and chat-completions tool_calls.
+ *
+ * @return Blocks (caller owns a reference), or NULL
+ */
+struct json_object *llm_turn_message_blocks(struct json_object *message);
+
 /** Whether any block is reasoning from @p carrier. */
 bool llm_turn_blocks_has_reasoning(struct json_object *blocks, const char *carrier);
 
@@ -144,7 +205,9 @@ void llm_turn_message_set_text(struct json_object *message, const char *text);
  * @brief Characters a message replays beyond its content, for size estimates
  *
  * Reasoning (its text; for an empty-text block, its signature as a stand-in for
- * the hidden reasoning it encodes) and opaque blocks (their whole JSON).
+ * the hidden reasoning it encodes; for an OpenAI reasoning item, its encrypted
+ * content and summary) and opaque blocks (their whole JSON).  Every vendor's
+ * reasoning counts, whichever the next request goes to.
  */
 size_t llm_turn_message_reasoning_chars(struct json_object *message);
 

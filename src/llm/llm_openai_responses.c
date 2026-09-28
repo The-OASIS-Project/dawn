@@ -22,16 +22,18 @@
  * rather than relying on server state via previous_response_id, so resumed
  * conversations and operator-driven history mutation continue to work.
  *
- * Cross-turn reasoning items live in-memory only on the assistant message JSON
- * under _provider_state.openai_responses.reasoning_items; they are not persisted
- * to the auth_db (consistent with how tool_calls are not persisted today).
+ * The turn's output items (reasoning, text, function calls) are captured in
+ * order as provider-neutral blocks (llm_turn_blocks.h); the next request
+ * replays OpenAI's own reasoning items from them.
  */
 
 #include "llm/llm_openai_responses.h"
 
+#include <ctype.h>
 #include <curl/curl.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +51,7 @@
 #include "llm/llm_openai_responses_input.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "llm/sse_parser.h"
 #include "logging.h"
 #include "ui/metrics.h"
@@ -108,11 +111,16 @@ typedef struct {
    int fc_count;
    int active_fc_index; /* -1 when no function_call item open */
 
-   /* Reasoning items collected for cross-turn round-trip. JSON array, growable.
-    * `reasoning_items_bytes` tracks the aggregate size of stored encrypted_content
-    * payloads so we can cap and prevent payload-bloat DoS from a misbehaving upstream. */
-   struct json_object *reasoning_items;
-   size_t reasoning_items_bytes;
+   /* The turn's output items as blocks, in order (llm_turn_blocks.h).  Their
+    * sizes are capped so a misbehaving upstream can't bloat every later
+    * request: reasoning on its own, everything together as well (a turn over
+    * that keeps no blocks, and replays as plain text and tool calls). */
+   struct json_object *blocks;
+   size_t reasoning_bytes;
+   size_t block_bytes;
+   bool blocks_over;
+   const char *model;
+   char carrier[128]; /* who issued its reasoning (reasoning_carrier) */
 
    /* Final response.id captured at response.completed */
    char response_id[64];
@@ -200,6 +208,45 @@ static bool is_current_session_remote_local(void) {
    return s->type != SESSION_TYPE_LOCAL;
 }
 
+/* The host of @p url ("https://api.openai.com/v1" → "api.openai.com"). */
+static void url_host(const char *url, char *out, size_t out_len) {
+   if (out_len == 0) {
+      return;
+   }
+   const char *start = url ? strstr(url, "://") : NULL;
+   start = start ? start + 3 : (url ? url : "");
+   size_t n = strcspn(start, "/?#");
+   const char *at = memchr(start, '@', n); /* never carry credentials */
+   if (at) {
+      n -= (size_t)(at + 1 - start);
+      start = at + 1;
+   }
+   if (n >= out_len) {
+      n = out_len - 1;
+   }
+   for (size_t i = 0; i < n; i++) {
+      out[i] = (char)tolower((unsigned char)start[i]);
+   }
+   out[n] = '\0';
+}
+
+/* The carrier of this request's reasoning: the endpoint's host and a short
+ * fingerprint of the API key (an item is encrypted for the organization that
+ * produced it; another key may belong to another one).  FNV-1a, 32 bits: it
+ * tells keys apart, and says nothing useful about one. */
+static void reasoning_carrier(const char *base_url,
+                              const char *api_key,
+                              char *out,
+                              size_t out_len) {
+   char host[96];
+   url_host(base_url, host, sizeof(host));
+   uint32_t h = 2166136261u;
+   for (const char *k = api_key ? api_key : ""; *k; k++) {
+      h = (h ^ (uint8_t)*k) * 16777619u;
+   }
+   snprintf(out, out_len, "%s#%08x", host, h);
+}
+
 /**
  * @brief Build the full Responses request JSON payload.
  *
@@ -213,6 +260,7 @@ static struct json_object *build_responses_request(struct json_object *history,
                                                    const size_t *vision_image_sizes,
                                                    int vision_image_count,
                                                    const char *model_name,
+                                                   const char *carrier,
                                                    int iteration,
                                                    const char *prior_response_id) {
    struct json_object *root = json_object_new_object();
@@ -331,10 +379,9 @@ static struct json_object *build_responses_request(struct json_object *history,
       json_object_object_add(root, "input", input);
       free(volatile_ctx);
    } else {
-      struct json_object *input = llm_responses_build_input(history, input_text, vision_images,
-                                                            vision_image_sizes, vision_image_count,
-                                                            volatile_ctx, leading_run,
-                                                            cache_explicit_supported);
+      struct json_object *input = llm_responses_build_input(
+          history, input_text, vision_images, vision_image_sizes, vision_image_count, volatile_ctx,
+          leading_run, cache_explicit_supported, carrier, model_name);
       free(volatile_ctx);
       if (!input) {
          json_object_put(root);
@@ -369,6 +416,142 @@ static struct json_object *build_responses_request(struct json_object *history,
 /* =============================================================================
  * SSE event handler
  * ============================================================================= */
+
+/* Largest aggregate reasoning (encrypted content and summary) a turn keeps
+ * for replay, and largest total of all its blocks. */
+#define RESPONSES_REASONING_BYTES_CAP (256 * 1024)
+#define RESPONSES_BLOCK_BYTES_CAP (4 * 1024 * 1024)
+
+/* Count @p bytes toward the turn's blocks; past the cap, keep none. */
+static bool responses_blocks_fit(responses_stream_ctx_t *rctx, size_t bytes) {
+   if (rctx->blocks_over) {
+      return false;
+   }
+   if (rctx->block_bytes + bytes > RESPONSES_BLOCK_BYTES_CAP) {
+      OLOG_WARNING("Responses: turn output over %d bytes; its blocks aren't kept (replayed as "
+                   "text and tool calls)",
+                   RESPONSES_BLOCK_BYTES_CAP);
+      rctx->blocks_over = true;
+      json_object_put(rctx->blocks);
+      rctx->blocks = NULL;
+      return false;
+   }
+   rctx->block_bytes += bytes;
+   return true;
+}
+
+/* A reasoning item's summary rebuilt from its text parts (not the upstream
+ * object as sent).  Adds the text's size to @p bytes. */
+static struct json_object *responses_summary(struct json_object *item, size_t *bytes) {
+   struct json_object *in = NULL;
+   struct json_object *out = json_object_new_array();
+   if (!out || !json_object_object_get_ex(item, "summary", &in) ||
+       !json_object_is_type(in, json_type_array)) {
+      return out;
+   }
+   const size_t n = json_object_array_length(in);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *text = NULL;
+      if (!json_object_object_get_ex(json_object_array_get_idx(in, i), "text", &text)) {
+         continue;
+      }
+      const char *t = json_object_get_string(text);
+      if (!t) {
+         continue;
+      }
+      struct json_object *part = json_object_new_object();
+      if (!part) {
+         continue;
+      }
+      json_object_object_add(part, "type", json_object_new_string("summary_text"));
+      json_object_object_add(part, "text", json_object_new_string(t));
+      json_object_array_add(out, part);
+      *bytes += strlen(t);
+   }
+   return out;
+}
+
+/* A string field of an output item, or NULL. */
+static const char *item_str(struct json_object *item, const char *key) {
+   struct json_object *v = NULL;
+   return json_object_object_get_ex(item, key, &v) ? json_object_get_string(v) : NULL;
+}
+
+/**
+ * @brief Record a finished output item as the turn's next block
+ *
+ * Reasoning keeps only what a replay needs (type, id, summary,
+ * encrypted_content); a message's output_text parts become text; a function
+ * call becomes a tool call under its call_id (the tool loop reconciles these
+ * with the calls that ran).  Other item types aren't replayed.
+ */
+static void responses_capture_item(responses_stream_ctx_t *rctx,
+                                   const char *type,
+                                   struct json_object *item) {
+   if (rctx->blocks_over) {
+      return;
+   }
+   if (!rctx->blocks) {
+      rctx->blocks = llm_turn_blocks_new();
+      if (!rctx->blocks) {
+         return;
+      }
+   }
+   if (strcmp(type, "reasoning") == 0) {
+      const char *enc = item_str(item, "encrypted_content");
+      size_t size = enc ? strlen(enc) : 0;
+      struct json_object *summary = responses_summary(item, &size);
+      if (rctx->reasoning_bytes + size > RESPONSES_REASONING_BYTES_CAP) {
+         OLOG_WARNING("Responses: reasoning items %zu+%zu bytes exceed the %d cap; not kept "
+                      "for replay",
+                      rctx->reasoning_bytes, size, RESPONSES_REASONING_BYTES_CAP);
+         json_object_put(summary);
+         return;
+      }
+      struct json_object *native = json_object_new_object();
+      if (!native || !summary || !responses_blocks_fit(rctx, size)) {
+         json_object_put(native);
+         json_object_put(summary);
+         return;
+      }
+      json_object_object_add(native, "type", json_object_new_string("reasoning"));
+      const char *id = item_str(item, "id");
+      if (id) {
+         json_object_object_add(native, "id", json_object_new_string(id));
+      }
+      json_object_object_add(native, "summary", summary);
+      if (enc) {
+         json_object_object_add(native, "encrypted_content", json_object_new_string(enc));
+      }
+      rctx->reasoning_bytes += size;
+      llm_turn_blocks_add_reasoning(rctx->blocks, rctx->carrier, LLM_FORMAT_OPENAI, rctx->model,
+                                    native);
+   } else if (strcmp(type, "message") == 0) {
+      struct json_object *content;
+      if (!json_object_object_get_ex(item, "content", &content) ||
+          !json_object_is_type(content, json_type_array)) {
+         return;
+      }
+      const size_t n = json_object_array_length(content);
+      for (size_t i = 0; i < n; i++) {
+         struct json_object *part = json_object_array_get_idx(content, i);
+         const char *ptype = item_str(part, "type");
+         const char *text = item_str(part, "text");
+         if (ptype && strcmp(ptype, "output_text") == 0 && text &&
+             responses_blocks_fit(rctx, strlen(text))) {
+            llm_turn_blocks_add_text(rctx->blocks, text);
+         }
+      }
+   } else if (strcmp(type, "function_call") == 0) {
+      const char *call_id = item_str(item, "call_id");
+      const char *name = item_str(item, "name");
+      const char *args = item_str(item, "arguments");
+      const size_t size = (args ? strlen(args) : 0) + (name ? strlen(name) : 0);
+      if (call_id && name && responses_blocks_fit(rctx, size)) {
+         llm_turn_blocks_add_tool_call(rctx->blocks, call_id, name, args);
+      }
+   }
+}
 
 /**
  * @brief Locate or create a function_call slot keyed by item_id.
@@ -514,7 +697,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *type_obj;
          if (json_object_object_get_ex(item, "type", &type_obj)) {
             const char *t = json_object_get_string(type_obj);
-            if (strcmp(t, "function_call") == 0) {
+            if (t && strcmp(t, "function_call") == 0) {
                struct json_object *id_obj, *call_id_obj, *name_obj;
                const char *item_id = NULL;
                if (json_object_object_get_ex(item, "id", &id_obj)) {
@@ -534,7 +717,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                   rctx->fc_args_len[idx] = 0;
                   rctx->stream_ctx->has_tool_calls = 1;
                }
-            } else if (strcmp(t, "reasoning") == 0) {
+            } else if (t && strcmp(t, "reasoning") == 0) {
                /* Reasoning items are captured on .done (encrypted_content
                 * isn't populated until the item closes). No-op here. */
             }
@@ -545,6 +728,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *type_obj, *item_inner;
          if (json_object_object_get_ex(root, "item", &item_inner) &&
              json_object_object_get_ex(item_inner, "type", &type_obj) &&
+             json_object_get_string(type_obj) &&
              strcmp(json_object_get_string(type_obj), "reasoning") == 0) {
             webui_send_thinking_start(ws, "openai");
          }
@@ -582,51 +766,11 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *type_obj;
          if (json_object_object_get_ex(item, "type", &type_obj)) {
             const char *t = json_object_get_string(type_obj);
-            if (strcmp(t, "reasoning") == 0) {
-               if (!rctx->reasoning_items) {
-                  rctx->reasoning_items = json_object_new_array();
-               }
-               /* Cap aggregate size of round-trip reasoning items. A misbehaving
-                * upstream proxy could feed multi-MB blobs that bloat every
-                * subsequent request payload until OpenAI rejects with HTTP 413
-                * (DoS-by-bloat). Cap is per-turn; oldest-style not necessary
-                * since reasoning_items lives only for this single response. */
-               static const size_t REASONING_ITEMS_BYTES_CAP = 256 * 1024;
-               struct json_object *enc_obj_check;
-               size_t incoming_size = 0;
-               if (json_object_object_get_ex(item, "encrypted_content", &enc_obj_check)) {
-                  const char *e = json_object_get_string(enc_obj_check);
-                  if (e)
-                     incoming_size = strlen(e);
-               }
-               if (rctx->reasoning_items_bytes + incoming_size > REASONING_ITEMS_BYTES_CAP) {
-                  OLOG_WARNING("Responses: reasoning items aggregate size %zu+%zu would exceed "
-                               "%zu cap; dropping further items this turn",
-                               rctx->reasoning_items_bytes, incoming_size,
-                               REASONING_ITEMS_BYTES_CAP);
-               } else {
-                  /* Keep id, type, summary, encrypted_content — strip everything
-                   * else to minimize wire size on the round-trip request. */
-                  struct json_object *trimmed = json_object_new_object();
-                  json_object_object_add(trimmed, "type", json_object_new_string("reasoning"));
-                  struct json_object *id_obj, *enc_obj, *sum_obj;
-                  if (json_object_object_get_ex(item, "id", &id_obj)) {
-                     json_object_object_add(trimmed, "id",
-                                            json_object_new_string(json_object_get_string(id_obj)));
-                  }
-                  if (json_object_object_get_ex(item, "encrypted_content", &enc_obj)) {
-                     json_object_object_add(trimmed, "encrypted_content",
-                                            json_object_new_string(
-                                                json_object_get_string(enc_obj)));
-                  }
-                  if (json_object_object_get_ex(item, "summary", &sum_obj)) {
-                     json_object_object_add(trimmed, "summary", json_object_get(sum_obj));
-                  }
-                  json_object_array_add(rctx->reasoning_items, trimmed);
-                  rctx->reasoning_items_bytes += incoming_size;
-               }
-            } else if (strcmp(t, "function_call") == 0) {
+            if (t && strcmp(t, "function_call") == 0) {
                rctx->active_fc_index = -1;
+            }
+            if (t) {
+               responses_capture_item(rctx, t, item);
             }
          }
       }
@@ -635,6 +779,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *item_inner, *type_obj;
          if (json_object_object_get_ex(root, "item", &item_inner) &&
              json_object_object_get_ex(item_inner, "type", &type_obj) &&
+             json_object_get_string(type_obj) &&
              strcmp(json_object_get_string(type_obj), "reasoning") == 0) {
             webui_send_thinking_end(ws, rctx->stream_ctx->thinking_size > 0);
          }
@@ -809,10 +954,16 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       return 1;
    }
 
+   /* Whose reasoning this request may replay, and whose this turn's is: the
+    * endpoint and the key's organization. */
+   char carrier[128];
+   reasoning_carrier(base_url, api_key, carrier, sizeof(carrier));
+
    /* Build request JSON */
    struct json_object *root = build_responses_request(conversation_history, input_text,
                                                       vision_images, vision_image_sizes,
-                                                      vision_image_count, model_name, iteration,
+                                                      vision_image_count, model_name, carrier,
+                                                      iteration,
                                                       /*prior_response_id=*/NULL);
    if (!root) {
       OLOG_ERROR("Responses: failed to build request");
@@ -830,6 +981,8 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    responses_stream_ctx_t rctx;
    memset(&rctx, 0, sizeof(rctx));
    rctx.active_fc_index = -1;
+   rctx.model = model_name;
+   snprintf(rctx.carrier, sizeof(rctx.carrier), "%s", carrier);
    curl_buffer_init_with_max(&rctx.raw_response, RESPONSES_RAW_BUFFER_MAX);
 
    rctx.stream_ctx = llm_stream_create(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, chunk_callback,
@@ -865,8 +1018,6 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          llm_stream_free(rctx.stream_ctx);
          json_object_put(root);
          curl_buffer_free(&rctx.raw_response);
-         if (rctx.reasoning_items)
-            json_object_put(rctx.reasoning_items);
          return 1;
       }
 
@@ -937,8 +1088,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       llm_stream_free(rctx.stream_ctx);
       json_object_put(root);
       curl_buffer_free(&rctx.raw_response);
-      if (rctx.reasoning_items)
-         json_object_put(rctx.reasoning_items);
+      json_object_put(rctx.blocks);
       return 1;
    }
 
@@ -962,8 +1112,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       llm_stream_free(rctx.stream_ctx);
       json_object_put(root);
       curl_buffer_free(&rctx.raw_response);
-      if (rctx.reasoning_items)
-         json_object_put(rctx.reasoning_items);
+      json_object_put(rctx.blocks);
       return 1;
    }
 
@@ -986,20 +1135,9 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    if (rctx.response_id[0] != '\0') {
       result->response_id = strdup(rctx.response_id);
    }
-   if (rctx.reasoning_items && json_object_array_length(rctx.reasoning_items) > 0) {
-      /* Wrap as {"openai_responses": {"reasoning_items": [...]}} so the assistant
-       * message field _provider_state can hold per-provider state. */
-      struct json_object *prov = json_object_new_object();
-      struct json_object *openai_resp = json_object_new_object();
-      json_object_object_add(openai_resp, "reasoning_items", json_object_get(rctx.reasoning_items));
-      json_object_object_add(prov, "openai_responses", openai_resp);
-      const char *s = json_object_to_json_string_ext(prov, JSON_C_TO_STRING_PLAIN |
-                                                               JSON_C_TO_STRING_NOSLASHESCAPE);
-      if (s) {
-         result->provider_state_json = strdup(s);
-      }
-      json_object_put(prov);
-   }
+   /* The turn's blocks: what the next request replays. */
+   result->blocks = rctx.blocks;
+   rctx.blocks = NULL;
 
 #ifdef ENABLE_WEBUI
    if (rctx.reasoning_tokens > 0) {
@@ -1012,8 +1150,6 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
 
    sse_parser_free(rctx.sse_parser);
    llm_stream_free(rctx.stream_ctx);
-   if (rctx.reasoning_items)
-      json_object_put(rctx.reasoning_items);
    json_object_put(root);
    curl_buffer_free(&rctx.raw_response);
 
