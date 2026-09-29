@@ -508,11 +508,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      }
                   }
                } else if (strcmp(new_type, "reset") == 0) {
-                  /* Reset to defaults from dawn.toml */
-                  session_clear_llm_config(conn->session);
-                  OLOG_INFO("WebUI: Session %u LLM config reset to defaults",
+                  /* Reset to defaults from dawn.toml, in the working copy:
+                   * anything else this request sets applies over them, and the
+                   * one set below commits all of it or none. */
+                  llm_get_default_config(&config);
+                  has_changes = true;
+                  OLOG_INFO("WebUI: Session %u LLM config reset to defaults requested",
                             conn->session->session_id);
-                  has_changes = false; /* Already handled */
                }
             }
          }
@@ -669,6 +671,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
           * whether the user's own change was adjusted, never for a restore. */
          if (has_changes) {
             int rc = session_set_llm_config(conn->session, &config);
+            if (rc == 0) {
+               /* What the session got: a provider without a key falls back. */
+               session_get_llm_config(conn->session, &config);
+            }
             if (rc == 0 && !from_restore) {
                reasoning_adjusted = webui_reasoning_adjusted(&config, sent_mode, sent_effort);
             }
@@ -679,7 +685,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                OLOG_INFO("WebUI: Session %u LLM config updated (type=%d, provider=%d)",
                          conn->session->session_id, config.type, config.cloud_provider);
 
-               /* If local model or LLM type changed, context size may differ */
+               /* If the local model or the LLM type changed, a reset included,
+                * the context size may differ. */
                if (config.type == LLM_LOCAL &&
                    (strcmp(old_model, config.model) != 0 || old_type != config.type)) {
                   llm_context_refresh_local();
@@ -723,26 +730,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                 json_object_new_string(
                                     cloud_provider_to_string(current.cloud_provider)));
 
-         /* Get model name - prefer session model, fall back to config */
-         const char *model_name = NULL;
-         if (current.model[0] != '\0') {
-            /* Session has explicit model set */
-            model_name = current.model;
-         } else {
-            /* Fall back to config default based on type/provider */
-            const dawn_config_t *cfg = config_get();
-            if (current.type == LLM_LOCAL) {
-               model_name = cfg->llm.local.model[0] ? cfg->llm.local.model : "";
-            } else if (current.cloud_provider == CLOUD_PROVIDER_OPENAI) {
-               model_name = llm_get_default_openai_model();
-            } else if (current.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-               model_name = llm_get_default_claude_model();
-            } else if (current.cloud_provider == CLOUD_PROVIDER_GEMINI) {
-               model_name = llm_get_default_gemini_model();
-            } else if (current.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-               model_name = llm_get_default_openrouter_model();
-            }
-         }
+         /* The model that runs, as get_config reports it (the resolver drops a
+          * bare id under the OpenRouter gateway, for one). */
+         llm_resolved_config_t resolved;
+         const char *model_name = llm_resolve_config(&current, &resolved) == 0
+                                      ? webui_effective_model_name(&resolved)
+                                      : current.model;
          json_object_object_add(resp_payload, "model",
                                 json_object_new_string(model_name ? model_name : ""));
 

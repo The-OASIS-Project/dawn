@@ -1702,18 +1702,6 @@ void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    pthread_mutex_unlock(&session->llm_config_mutex);
 }
 
-void session_clear_llm_config(session_t *session) {
-   if (!session) {
-      return;
-   }
-
-   pthread_mutex_lock(&session->llm_config_mutex);
-   llm_get_default_config(&session->llm_config);
-   pthread_mutex_unlock(&session->llm_config_mutex);
-
-   OLOG_INFO("Session %u: LLM config reset to defaults", session->session_id);
-}
-
 // =============================================================================
 // Utility Functions
 // =============================================================================

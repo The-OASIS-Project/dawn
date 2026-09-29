@@ -1872,17 +1872,6 @@ int session_set_turn_llm_config(session_t *session, const session_llm_config_t *
  */
 void session_get_llm_config(session_t *session, session_llm_config_t *config);
 
-/**
- * @brief Reset session LLM config to defaults from dawn.toml
- *
- * Resets session to use default settings from configuration file.
- * Changes only affect this session, not others.
- *
- * @param session Session to reset
- *
- * @locks session->llm_config_mutex
- */
-void session_clear_llm_config(session_t *session);
 #endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
