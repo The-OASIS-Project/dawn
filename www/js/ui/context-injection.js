@@ -47,6 +47,8 @@
  *   @property {{semantic:number,recency:number,importance:number,source:number}}
  *            score_breakdown
  *   @property {number} applied_source_weight
+ *   @property {number} [item_timestamp]    -- unix seconds the item was learned, saved or
+ *                                             happens; omitted when it has none
  *   @property {{conversation_id:number,msg_id_start:number,msg_id_end:number}}
  *            [provenance]                  -- omitted entirely when unavailable
  */
@@ -178,12 +180,23 @@
       );
    }
 
+   /** The item's date as the model sees it (YYYY-MM-DD, local), or '' without
+    *  a valid timestamp. */
+   function itemDate(ts) {
+      if (typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) return '';
+      const d = new Date(ts * 1000);
+      if (Number.isNaN(d.getTime())) return '';
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+   }
+
    /** Cache derived strings on the item so we don't re-sanitize/re-format on
     *  every render path (M2 + M3). */
    function decorate(item) {
       if (!item || typeof item !== 'object') return item;
       if (item._decorated) return item;
       item._safeSourceId = sanitizeSourceId(item.source_id || 'unknown');
+      item._date = itemDate(item.item_timestamp);
       item._safeText = sanitizeText(item.text || '');
       item._previewLine = previewLine(item._safeText);
       item._scoreTitle = buildScoreTitle(item);
@@ -209,7 +222,9 @@
       const sourceLabel = document.createElement('span');
       sourceLabel.className = 'dawn-context-injection-source';
       /* M9: bracket the identifier so it reads as a key, not as content. */
-      sourceLabel.textContent = `[${item._safeSourceId}]`;
+      sourceLabel.textContent = item._date
+         ? `[${item._safeSourceId} ${item._date}]`
+         : `[${item._safeSourceId}]`;
       header.appendChild(sourceLabel);
 
       /* M6: trust-tier label is a plain span — dawn-badge defaults conflict

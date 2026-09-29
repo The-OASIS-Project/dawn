@@ -1265,7 +1265,7 @@ static const tool_metadata_t phone_metadata = {
        "Calls and SMS require confirmation before executing (say 'confirm' after review). "
        "The 'target' field can be a contact name (resolved via contacts) or a phone number.",
    .params = phone_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(phone_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_DANGEROUS,

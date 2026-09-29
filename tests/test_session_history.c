@@ -28,6 +28,7 @@
 
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_history_kind.h"
 #include "unity.h"
 
 static session_t *s;
@@ -151,6 +152,13 @@ static const char *model_seen_with(uint64_t token) {
    pthread_create(&t, NULL, probe_model, &p);
    pthread_join(t, NULL);
    return p.model;
+}
+
+static struct json_object *msg(const char *role, const char *content) {
+   struct json_object *m = json_object_new_object();
+   json_object_object_add(m, "role", json_object_new_string(role));
+   json_object_object_add(m, "content", json_object_new_string(content));
+   return m;
 }
 
 /* ---- fixture -------------------------------------------------------------- */
@@ -1195,8 +1203,46 @@ void test_replace_reply_text_in_the_turn(void) {
    session_turn_end(s);
 }
 
+/* The question before this turn's: context rows and replies don't count,
+ * and a first question has none. */
+static void test_previous_question_skips_the_current_one(void) {
+   struct json_object *h = s->conversation_history;
+   json_object_array_add(h, msg("user", "what's my garage code?"));
+   json_object_array_add(h, msg("assistant", "It's on file."));
+   struct json_object *ctx = msg("user", "--- TURN CONTEXT ---");
+   llm_history_set_kind(ctx, MESSAGE_KIND_TURN_CONTEXT);
+   json_object_array_add(h, ctx);
+   char *prev = session_previous_question_dup(s);
+   TEST_ASSERT_NULL(prev); /* the garage question is this turn's own */
+   json_object_array_add(h, msg("user", "what's that for?"));
+   prev = session_previous_question_dup(s);
+   TEST_ASSERT_EQUAL_STRING("what's my garage code?", prev);
+   free(prev);
+}
+
+/* A turn on its own copy reads the copy, from the question it answers,
+ * never the conversation being viewed. */
+static void test_previous_question_reads_the_turns_own_history(void) {
+   load_live(3, 2); /* the user is viewing 3 */
+   json_object_array_add(s->conversation_history, msg("user", "a question in three"));
+   s_stored[5] = 4;
+   session_turn_begin(s, 5, 1);
+   session_add_turn_message(s, "user", "what about five?");
+   session_add_turn_message(s, "assistant", "five is fine");
+   session_add_turn_message(s, "user", "and then?");
+   /* A context row after the question doesn't count as one. */
+   struct json_object *ctx = msg("user", "--- TURN CONTEXT ---");
+   llm_history_set_kind(ctx, MESSAGE_KIND_TURN_CONTEXT);
+   json_object_array_add(turn(), ctx);
+   char *prev = session_previous_question_dup(s);
+   TEST_ASSERT_EQUAL_STRING("what about five?", prev);
+   free(prev);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_previous_question_skips_the_current_one);
+   RUN_TEST(test_previous_question_reads_the_turns_own_history);
    RUN_TEST(test_turn_on_loaded_conversation_uses_live_history);
    RUN_TEST(test_turn_for_other_conversation_runs_on_its_own_history);
    RUN_TEST(test_fresh_chat_adopts_new_conversation);

@@ -329,7 +329,7 @@ static const tool_metadata_t doc_manage_metadata = {
        "the WebUI). To READ or SEARCH stored content, use document_read / document_search "
        "instead.",
    .params = doc_manage_params,
-   .param_count = 6,
+   .param_count = TOOL_PARAM_COUNT(doc_manage_params),
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_DANGEROUS, /* mutates + deletes user data */
    .default_local = true,

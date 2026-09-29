@@ -32,6 +32,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_handles.h"
 #include "core/focus/focus_source.h"
 #include "core/session_manager.h"
@@ -247,6 +248,58 @@ static void apply_dedup_locked(session_t *session,
    result->candidate_count = kept;
 }
 
+/* A question this short ("what's that for?", "and the other one?") leans on
+ * the one before it, so retrieval's embedding reads both. */
+#define FOCUS_FOLLOWUP_MAX_WORDS 6
+/* The earlier question's bytes, at most, that go with it. */
+#define FOCUS_FOLLOWUP_PREV_MAX_BYTES 600
+
+static int word_count(const char *text) {
+   int words = 0;
+   bool in_word = false;
+   for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+      const bool space = *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r';
+      words += !space && !in_word;
+      in_word = !space;
+   }
+   return words;
+}
+
+/* The text retrieval embeds: a short follow-up with the previous question in
+ * front of it (heap, caller frees), else NULL (embed the turn's own text).
+ * Only the embedding reads it: keyword and date matching stay on the turn's
+ * own words, so a "tomorrow?" isn't read as the "today" asked about before. */
+static char *followup_embed_text(session_t *session, const char *turn_text) {
+   if (!session || word_count(turn_text) > FOCUS_FOLLOWUP_MAX_WORDS) {
+      return NULL;
+   }
+   char *prev = session_previous_question_dup(session);
+   if (!prev) {
+      return NULL;
+   }
+   const size_t prev_len = focus_utf8_safe_cap(prev, FOCUS_FOLLOWUP_PREV_MAX_BYTES);
+   const size_t turn_len = strlen(turn_text);
+   char *text = malloc(prev_len + 1 + turn_len + 1);
+   if (text) {
+      memcpy(text, prev, prev_len);
+      text[prev_len] = '\n';
+      memcpy(text + prev_len + 1, turn_text, turn_len + 1);
+   }
+   free(prev);
+   return text;
+}
+
+/* " YYYY-MM-DD" (local time) for an item's timestamp, or "" without one: the
+ * model can tell an old item from a current one (see the context rules). */
+static void item_date(time_t ts, char *buf, size_t size) {
+   struct tm tm_storage;
+   buf[0] = '\0';
+   if (ts > 0 && localtime_r(&ts, &tm_storage) != NULL &&
+       strftime(buf, size, " %Y-%m-%d", &tm_storage) == 0) {
+      buf[0] = '\0';
+   }
+}
+
 int build_focus_block(session_t *session,
                       int user_id,
                       int64_t conv_id,
@@ -294,8 +347,14 @@ int build_focus_block(session_t *session,
    int embed_dims = 0;
    const float *query_ptr = NULL;
    if (memory_embeddings_available()) {
-      if (memory_embeddings_embed(user_turn_text, query_embed, &embed_dims) == SUCCESS &&
-          embed_dims > 0) {
+      char *followup = followup_embed_text(session, user_turn_text);
+      if (followup) {
+         OLOG_INFO("focus: short follow-up; its embedding reads the previous question too");
+      }
+      const int embed_rc = memory_embeddings_embed(followup ? followup : user_turn_text,
+                                                   query_embed, &embed_dims);
+      free(followup);
+      if (embed_rc == SUCCESS && embed_dims > 0) {
          query_ptr = query_embed;
       } else {
          OLOG_WARNING("focus: embedding compute failed for user_id=%d — "
@@ -439,9 +498,11 @@ int build_focus_block(session_t *session,
             continue;
          }
          const char *item = text;
+         char date[16];
+         item_date(c->item_timestamp, date, sizeof(date));
          int rc_append;
          if (numbered) {
-            rc_append = strbuf_appendf(&sb, "[M%d %s] %s\n", handle, c->source_id, item);
+            rc_append = strbuf_appendf(&sb, "[M%d %s%s] %s\n", handle, c->source_id, date, item);
             if (rc_append >= 0 && citation_on) {
                /* Commit the entry only after the text is in the block. */
                citation_stash_entry_t *e = &local_stash.entries[m_ordinal++];
@@ -456,7 +517,7 @@ int build_focus_block(session_t *session,
                local_stash.count = m_ordinal;
             }
          } else {
-            rc_append = strbuf_appendf(&sb, "[%s] %s\n", c->source_id, item);
+            rc_append = strbuf_appendf(&sb, "[%s%s] %s\n", c->source_id, date, item);
          }
          free(text);
 

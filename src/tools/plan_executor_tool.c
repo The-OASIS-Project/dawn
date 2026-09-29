@@ -131,7 +131,7 @@ static const tool_metadata_t plan_executor_metadata = {
                   "If a step's tool is rejected, the result reports the failure; do not "
                   "claim the action succeeded.",
    .params = plan_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(plan_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
 

@@ -329,7 +329,7 @@ static const tool_metadata_t load_guidelines_metadata = {
        "Load design guidelines before creating a visual. Call this BEFORE render_visual. "
        "Returns detailed rules for creating high-quality SVG/HTML visuals.",
    .params = load_guidelines_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(load_guidelines_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,
@@ -379,7 +379,7 @@ static const tool_metadata_t render_visual_metadata = {
                   "IMPORTANT: Always call render_visual_load_guidelines first to load "
                   "the design guidelines for the type of visual you want to create.",
    .params = render_visual_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(render_visual_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,

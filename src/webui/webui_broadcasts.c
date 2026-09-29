@@ -1308,6 +1308,12 @@ void webui_broadcast_context_injection(int user_id,
       if (owned)
          free(owned_text);
 
+      /* When the item was learned, saved or happens (the date the model sees
+       * after its source); omitted when it has none. */
+      if (c->item_timestamp > 0) {
+         json_object_object_add(item, "item_timestamp",
+                                json_object_new_int64((int64_t)c->item_timestamp));
+      }
       json_object_object_add(item, "score",
                              json_object_new_double(b != NULL ? b->final_score : 0.0));
 

@@ -126,7 +126,7 @@ static const tool_metadata_t context_expand_metadata = {
                   "Use start_id/end_id for raw messages, or node_id for multi-resolution "
                   "drill-down (shows the prior summary level).",
    .params = context_expand_params,
-   .param_count = 5,
+   .param_count = TOOL_PARAM_COUNT(context_expand_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,

@@ -144,7 +144,7 @@ static const tool_metadata_t image_search_metadata = {
        "Voice-only satellite → do NOT call this tool; describe the subject verbally instead. "
        "Use specific, descriptive queries for best results.",
    .params = image_search_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(image_search_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK,

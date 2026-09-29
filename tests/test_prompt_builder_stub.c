@@ -329,6 +329,14 @@ int focus_handles_assign(struct session *session,
  * fix).  Tests do not publish a dispatch session, so
  * no session is passed (NULL) and this stub never fires — but
  * the symbol must resolve at link time. */
+/* The previous question session_previous_question_dup gives, or NULL. */
+const char *pb_previous_question = NULL;
+
+char *session_previous_question_dup(struct session *session) {
+   (void)session;
+   return pb_previous_question ? strdup(pb_previous_question) : NULL;
+}
+
 int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
@@ -379,6 +387,7 @@ typedef struct {
    int dims;
    bool fail_embed;
    int embed_call_count;
+   char last_text[512]; /* the text last embedded */
 } pb_embed_mock_t;
 
 static pb_embed_mock_t s_embed = { 0 };
@@ -400,7 +409,7 @@ int memory_embeddings_dims(void) {
 }
 
 int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
-   (void)text;
+   snprintf(s_embed.last_text, sizeof(s_embed.last_text), "%s", text ? text : "");
    s_embed.embed_call_count++;
    if (s_embed.fail_embed)
       return FAILURE;

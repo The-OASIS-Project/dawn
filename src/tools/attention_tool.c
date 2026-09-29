@@ -183,7 +183,7 @@ static const tool_metadata_t attention_metadata = {
        "for setting up PROACTIVE alerts — to read a current value right now, use suit_status or "
        "system_status instead.",
    .params = attention_params,
-   .param_count = 9,
+   .param_count = TOOL_PARAM_COUNT(attention_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,

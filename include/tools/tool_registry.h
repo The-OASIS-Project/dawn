@@ -93,6 +93,17 @@ typedef enum {
  *   with tool_param_extract_custom().
  */
 
+/** A tool's param count, from its params array: never written by hand, so a
+ *  param added to the array can't be left out of the count. */
+#define TOOL_PARAM_COUNT(params)                                                       \
+   ((int)(sizeof(params) / sizeof((params)[0]) +                                       \
+          0 * sizeof(struct {                                                          \
+             int unused;                                                               \
+             _Static_assert(!__builtin_types_compatible_p(__typeof__(params),          \
+                                                          __typeof__(&(params)[0])),   \
+                            "TOOL_PARAM_COUNT needs the params array, not a pointer"); \
+          })))
+
 /**
  * @brief How a parameter maps to the device/action/value model
  */

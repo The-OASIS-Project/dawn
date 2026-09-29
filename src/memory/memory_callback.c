@@ -1910,8 +1910,10 @@ static char *memory_action_find_contact(int user_id, const char *value) {
  * ============================================================================= */
 
 static char *memory_action_list_contacts(int user_id, const char *value) {
+   /* The field_type param, else (as the tool describes it too) the query. */
    char field_type[32] = "";
-   if (value)
+   if (value && (!tool_param_extract_custom(value, "field_type", field_type, sizeof(field_type)) ||
+                 !field_type[0]))
       tool_param_extract_base(value, field_type, sizeof(field_type));
 
    contact_result_t results[20];

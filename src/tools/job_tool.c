@@ -534,7 +534,7 @@ static const tool_metadata_t job_metadata = {
        "update]' message carrying the full result; react to it and take any obvious next step.",
 
    .params = job_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(job_params),
    .capabilities = TOOL_CAP_NONE,
    .default_local = true,
    .default_remote = true,

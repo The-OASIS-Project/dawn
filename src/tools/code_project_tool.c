@@ -166,7 +166,7 @@ static const tool_metadata_t s_meta = {
    .description = "Manage code projects: list available repos, set the active project for code "
                   "questions, or check indexing status.",
    .params = s_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(s_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
    .default_local = true,

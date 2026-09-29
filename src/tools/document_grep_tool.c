@@ -120,7 +120,7 @@ static const tool_metadata_t doc_grep_metadata = {
                   "about X' question, call 'recall' FIRST; use grep to drill in for an exact "
                   "string. Deterministic: no ranking, no embeddings. Paginated via offset.",
    .params = doc_grep_params,
-   .param_count = 4,
+   .param_count = TOOL_PARAM_COUNT(doc_grep_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
    .is_available = doc_grep_is_available,

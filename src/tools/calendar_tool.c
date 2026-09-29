@@ -631,7 +631,7 @@ static const tool_metadata_t calendar_metadata = {
                   "create events ('add a meeting tomorrow at 2pm'), "
                   "update or delete events by UID.",
    .params = calendar_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(calendar_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SECRETS | TOOL_CAP_SCHEDULABLE,

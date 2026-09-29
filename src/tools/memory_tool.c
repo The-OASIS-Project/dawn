@@ -360,7 +360,7 @@ static const tool_metadata_t memory_metadata = {
                   "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
-   .param_count = 16,
+   .param_count = TOOL_PARAM_COUNT(memory_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,

@@ -203,7 +203,7 @@ static const tool_metadata_t stat_metadata = {
        "sensor. If STAT is offline or the data is stale, that is reported instead of guessed "
        "values.",
    .params = stat_params,
-   .param_count = 3,
+   .param_count = TOOL_PARAM_COUNT(stat_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_SCHEDULABLE | TOOL_CAP_INFORMATIONAL,

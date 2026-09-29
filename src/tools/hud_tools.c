@@ -110,7 +110,7 @@ static const tool_metadata_t hud_control_metadata = {
    .description = "Control HUD (Heads-Up Display) elements. Enable or disable display overlays "
                   "like the armor display, minimap, object detection, or info panel.",
    .params = hud_control_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(hud_control_params),
 
    .device_map = NULL,
    .device_map_count = 0,
@@ -178,7 +178,7 @@ static const tool_metadata_t hud_mode_metadata = {
                   "from the connected helmet — see the `mode` parameter's "
                   "enum_values for the live set.",
    .params = hud_mode_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(hud_mode_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
@@ -228,7 +228,7 @@ static const tool_metadata_t faceplate_metadata = {
 
    .description = "Control the helmet faceplate/visor. Open or close the faceplate.",
    .params = faceplate_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(faceplate_params),
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
@@ -292,7 +292,7 @@ static const tool_metadata_t recording_metadata = {
    .description = "Control video recording and streaming. Start or stop recording, streaming, "
                   "or both simultaneously.",
    .params = recording_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(recording_params),
 
    .device_map = recording_device_map,
    .device_map_count = 3,
@@ -341,7 +341,7 @@ static const tool_metadata_t visual_offset_metadata = {
 
    .description = "Adjust the 3D visual offset for stereoscopic display alignment.",
    .params = visual_offset_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(visual_offset_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,

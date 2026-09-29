@@ -71,7 +71,7 @@ static const tool_metadata_t recall_metadata = {
        "text. This is the high-level context tool; the per-source search tools are for targeted "
        "follow-ups.",
    .params = recall_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(recall_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
    .is_available = recall_is_available,

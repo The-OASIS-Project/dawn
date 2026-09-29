@@ -81,6 +81,7 @@ typedef struct {
    int dims;
    bool fail_embed;
    int embed_call_count;
+   char last_text[512]; /* the text last embedded */
 } pb_embed_mock_t;
 
 void pb_focus_reset(void);
@@ -210,12 +211,53 @@ static void test_focus_renders_candidate_lines(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS,
                          build_focus_block(s_dispatch, 99, 0, 0, "what's coming up?", &block));
    TEST_ASSERT_NOT_NULL(block);
-   TEST_ASSERT_NOT_NULL(strstr(block, "[memory_fact] Pepper birthday March 14"));
-   TEST_ASSERT_NOT_NULL(strstr(block, "[calendar_event] [2026-05-09 14:00] standup"));
+   /* Each item carries its date (the stub stamps 1700000000), in local time. */
+   const time_t ts = 1700000000;
+   struct tm tm_storage;
+   char date[16];
+   strftime(date, sizeof(date), "%Y-%m-%d", localtime_r(&ts, &tm_storage));
+   char want[128];
+   snprintf(want, sizeof(want), "[memory_fact %s] Pepper birthday March 14", date);
+   TEST_ASSERT_NOT_NULL(strstr(block, want));
+   snprintf(want, sizeof(want), "[calendar_event %s] [2026-05-09 14:00] standup", date);
+   TEST_ASSERT_NOT_NULL(strstr(block, want));
    /* Block is bare (no framing — composer adds those). */
    TEST_ASSERT_NULL_MESSAGE(strstr(block, "TURN CONTEXT"),
                             "build_focus_block must NOT include framing markers");
    free(block);
+}
+
+extern const char *pb_previous_question;
+
+/* A short follow-up embeds the previous question with it; the words retrieval
+ * matches stay the turn's own.  A full question embeds alone. */
+static void test_focus_followup_embeds_previous_question(void) {
+   session_t s;
+   pb_session_init(&s, 7);
+   set_dispatch(&s);
+   pb_embed_state()->available = true;
+   pb_embed_state()->dims = 4;
+   pb_previous_question = "what's my garage code?";
+
+   char *block = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 5, 0, 0, "what's that for?", &block));
+   free(block);
+   TEST_ASSERT_EQUAL_STRING("what's my garage code?\nwhat's that for?",
+                            pb_embed_state()->last_text);
+   TEST_ASSERT_EQUAL_STRING("what's that for?", pb_focus_state()->last_query_text);
+
+   block = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 5, 0, 0,
+                                                    "what is the weather going to be in town "
+                                                    "tomorrow",
+                                                    &block));
+   free(block);
+   TEST_ASSERT_EQUAL_STRING("what is the weather going to be in town tomorrow",
+                            pb_embed_state()->last_text);
+   pb_previous_question = NULL;
+   set_dispatch(NULL);
+   pb_session_destroy(&s);
 }
 
 static void test_focus_passes_user_id_and_text(void) {
@@ -1163,6 +1205,7 @@ int main(void) {
 
    /* Happy paths (11-15) */
    RUN_TEST(test_focus_renders_candidate_lines);
+   RUN_TEST(test_focus_followup_embeds_previous_question);
    RUN_TEST(test_focus_passes_user_id_and_text);
    RUN_TEST(test_focus_zero_candidates_returns_null_block);
    RUN_TEST(test_focus_embedding_unavailable_passes_null);

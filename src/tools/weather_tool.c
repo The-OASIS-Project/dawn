@@ -78,7 +78,7 @@ static const tool_metadata_t weather_metadata = {
                   "'tomorrow' for today and tomorrow, or 'week' for a 7-day forecast. "
                   "Location is optional if a default is configured.",
    .params = weather_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(weather_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE | TOOL_CAP_INFORMATIONAL,

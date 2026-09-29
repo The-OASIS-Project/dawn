@@ -253,7 +253,7 @@ static const tool_metadata_t music_metadata = {
        "(search items:[\"Prince\",\"Queen\"]) and enqueue the paths. All track numbers are "
        "1-based.",
    .params = music_params,
-   .param_count = 11,
+   .param_count = TOOL_PARAM_COUNT(music_params),
 
    .device_type = TOOL_DEVICE_TYPE_MUSIC,
    .capabilities = TOOL_CAP_FILESYSTEM | TOOL_CAP_SCHEDULABLE,

@@ -78,7 +78,7 @@ A conversation's request is **append-only**: nothing already sent to the model i
 - **`directives`** — the surface's standing directions, the full set every turn (`build_directives`): tools unavailable here right now (`llm_tools_build_disabled_hint`), a satellite's or the local mic's room, a messaging channel, spoken output + speech-to-text input (local mic, satellites, WebUI with voice on), a background job's headless mode. A detached reinvoke turn sets `session->keeps_directions` and sends none, so the conversation's stay in force.
 - **`tool_names` / `tool_schemas`** — the tool set to freeze (every registered tool except the research-only ones, independent of what is enabled right now: `llm_tools_freeze_names`) and a hash of each schema (`llm_tools_schema_hashes`).
 - **`memory_body`** — preferences + recent conversation summaries (`memory_build_context`, unframed).
-- **`volatile_block`** — this turn's context, unframed: `[system_time]` and the ranked focus items (`build_focus_block`), each held item numbered `[M<n> source]` for the whole conversation (`focus_handles.c`).
+- **`volatile_block`** — this turn's context, unframed: `[system_time]` and the ranked focus items (`build_focus_block`), each held item numbered `[M<n> source date]` for the whole conversation (`focus_handles.c`; the date is when the item was learned, saved or happens). Retrieval embeds a short follow-up (six words or fewer) together with the previous question, so "what's that for?" finds what the conversation was about; keyword and date matching stay on the turn's own words.
 
 The builder runs for guests too (user 0: no memory, no user context).
 

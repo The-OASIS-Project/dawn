@@ -84,7 +84,7 @@ static const tool_metadata_t volume_metadata = {
 
    .description = "Get or set the music volume level.",
    .params = volume_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(volume_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_SCHEDULABLE,

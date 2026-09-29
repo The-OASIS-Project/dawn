@@ -530,6 +530,11 @@ int focus_handles_assign(struct session *session,
  * Signature mirrors the declaration in include/core/session_manager.h.  Same
  * shape as tests/test_prompt_builder_stub.c. */
 struct session;
+char *session_previous_question_dup(struct session *session) {
+   (void)session;
+   return NULL;
+}
+
 int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;

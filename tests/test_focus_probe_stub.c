@@ -127,6 +127,11 @@ int focus_handles_assign(struct session *session,
  * run turns, so returning 0 is the safe no-op (caller falls back to the captured
  * value).
  * ============================================================================= */
+char *session_previous_question_dup(struct session *session) {
+   (void)session;
+   return NULL;
+}
+
 int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;

@@ -932,6 +932,7 @@ dawn_add_unit_test(test_memory_focus_adapters
 # manager runtime: focus_compose / memory_embeddings are programmable stubs.
 dawn_add_unit_test(test_prompt_builder
    SOURCES test_prompt_builder.c test_prompt_builder_stub.c
+           ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/webui/build_focus_block.c

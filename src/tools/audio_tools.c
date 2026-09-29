@@ -147,7 +147,7 @@ static const tool_metadata_t voice_amplifier_metadata = {
    .description =
        "Control the voice amplifier/PA system for projecting voice through external speakers.",
    .params = voice_amplifier_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(voice_amplifier_params),
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
@@ -213,7 +213,7 @@ static const tool_metadata_t audio_device_metadata = {
 
    .description = "Switch audio input or output devices.",
    .params = audio_device_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(audio_device_params),
 
    .device_map = audio_device_map,
    .device_map_count = 2,

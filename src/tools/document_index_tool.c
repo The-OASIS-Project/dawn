@@ -393,7 +393,7 @@ static const tool_metadata_t doc_index_metadata = {
                   "document. Use this when the user asks you to save, remember, or index "
                   "a web page or document URL for reference.",
    .params = doc_index_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(doc_index_params),
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK,
    .callback = doc_index_callback,

@@ -702,6 +702,48 @@ int64_t session_get_last_user_msg_id(session_t *session) {
    return id;
 }
 
+char *session_previous_question_dup(session_t *session) {
+   if (!session) {
+      return NULL;
+   }
+   char *text = NULL;
+   pthread_mutex_lock(&session->history_mutex);
+   /* The turn's own history (its copy when it runs on one), from the
+    * question it answers; without a turn, the newest question is taken
+    * to be it. */
+   struct json_object *history = turn_target_locked(session);
+   const int n = history ? (int)json_object_array_length(history) : 0;
+   int from = n - 1;
+   bool past_current = false;
+   if (session->turn_user_msg) {
+      for (int i = n - 1; i >= 0; i--) {
+         if (json_object_array_get_idx(history, i) == session->turn_user_msg) {
+            from = i - 1;
+            past_current = true;
+            break;
+         }
+      }
+   }
+   for (int i = from; i >= 0 && !text; i--) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      if (llm_history_is_context(msg) || !llm_history_is_question(msg) ||
+          llm_history_kind_of(msg) != MESSAGE_KIND_NONE) {
+         continue;
+      }
+      if (!past_current) {
+         past_current = true; /* the question this turn answers */
+         continue;
+      }
+      const char *q = llm_history_question_text(msg);
+      if (q && q[0]) {
+         text = strdup(q);
+      }
+      break;
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+   return text;
+}
+
 static bool add_message_with_images_impl(session_t *session,
                                          const char *role,
                                          const char *text,

@@ -85,7 +85,7 @@ static const tool_metadata_t doc_search_metadata = {
                   "note, prefer document_read with its exact label. Returns excerpts with source "
                   "citations. Do NOT use this for general web searches.",
    .params = doc_search_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(doc_search_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
    .is_available = doc_search_is_available,

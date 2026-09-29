@@ -67,7 +67,7 @@ static const tool_metadata_t viewing_metadata = {
                   "attached in your current context, say so plainly instead of guessing or "
                   "claiming a capture happened — call this tool again for a fresh look.",
    .params = viewing_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(viewing_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,

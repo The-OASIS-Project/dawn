@@ -102,7 +102,7 @@ static const tool_metadata_t switch_llm_metadata = {
        "use the local LLM server, 'cloud' to use cloud AI, or specify a provider name like "
        "'openai', 'claude', or 'gemini'.",
    .params = switch_llm_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(switch_llm_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_NONE,

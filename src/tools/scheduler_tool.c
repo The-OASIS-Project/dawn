@@ -1532,7 +1532,7 @@ static const tool_metadata_t scheduler_metadata = {
        "{\"name\":\"Morning Briefing\",\"add_steps\":[{\"tool_name\":\"search\","
        "\"tool_action\":\"news\",\"tool_value\":\"AAPL NVDA TSLA stock news today\"}]}",
    .params = scheduler_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(scheduler_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,

@@ -151,7 +151,7 @@ static const tool_metadata_t schwab_metadata = {
                   "(recent trades/dividends/deposits/withdrawals/fees over a date window). "
                   "Read-only.",
    .params = schwab_params,
-   .param_count = 8,
+   .param_count = TOOL_PARAM_COUNT(schwab_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SECRETS | TOOL_CAP_INFORMATIONAL |

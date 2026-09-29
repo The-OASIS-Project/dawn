@@ -652,7 +652,7 @@ static const tool_metadata_t messaging_metadata = {
                   "conversation and are rejected if scheduled — do not offer to schedule them. "
                   "Each user manages their own channels via the WebUI Settings panel.",
    .params = messaging_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(messaging_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE,

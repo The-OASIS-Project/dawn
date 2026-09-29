@@ -1716,6 +1716,7 @@ only to the user's session(s) currently viewing `conversation_id`.
          "score": 0.82,
          "score_breakdown": { "semantic": 0.5, "recency": 0.1, "importance": 0.2, "source": 0.02 },
          "applied_source_weight": 1.0,
+         "item_timestamp": 1787500000,
          "provenance": { "conversation_id": 1000, "msg_id_start": 12, "msg_id_end": 14 }
       }
    ],
@@ -1723,6 +1724,8 @@ only to the user's session(s) currently viewing `conversation_id`.
 }
 ```
 - `source_type`: `internal`, `external`, or `user-content`
+- `item_timestamp`: unix seconds the item was learned, saved or happens (the date the model
+  sees after the item's source); omitted when it has none
 - `provenance`: omitted entirely when unavailable (never a zero-stub)
 
 #### `memory_extraction_notice`

@@ -410,7 +410,7 @@ static const tool_metadata_t research_plan_metadata = {
        "because after the first couple of rounds the plan is frozen and you converge on "
        "it (you cannot keep adding questions late).",
    .params = research_plan_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(research_plan_params),
    .capabilities = TOOL_CAP_NONE,
    .default_local = true,
    .default_remote = true,
@@ -442,7 +442,7 @@ static const tool_metadata_t research_record_metadata = {
                   "research ledger.  The final report is built from these recorded claims, so "
                   "record every finding you want represented, each with its source.",
    .params = research_record_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(research_record_params),
    .capabilities = TOOL_CAP_NONE,
    .default_local = true,
    .default_remote = true,
@@ -581,7 +581,7 @@ static const tool_metadata_t research_mark_unanswerable_metadata = {
        "finish on the questions you CAN answer instead of grinding to the budget on one "
        "you can't. Use sparingly and only after real effort.",
    .params = research_unanswerable_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(research_unanswerable_params),
    .capabilities = TOOL_CAP_NONE,
    .default_local = true,
    .default_remote = true,

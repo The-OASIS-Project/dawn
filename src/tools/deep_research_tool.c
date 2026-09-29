@@ -827,7 +827,7 @@ static const tool_metadata_t deep_research_metadata = {
        "conversation.  Check progress with status.",
 
    .params = deep_research_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(deep_research_params),
    .capabilities = TOOL_CAP_NETWORK,
    .default_local = true,
    .default_remote = true,

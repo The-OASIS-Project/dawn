@@ -146,7 +146,7 @@ static const tool_metadata_t suit_metadata = {
        "(use system_status for CPU/battery/fan of the compute unit). If a feed is offline or "
        "stale, that is reported instead of guessed values.",
    .params = suit_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(suit_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_SCHEDULABLE | TOOL_CAP_INFORMATIONAL,

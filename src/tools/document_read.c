@@ -108,7 +108,7 @@ static const tool_metadata_t doc_read_metadata = {
                   "(or a numeric id from a 'document_manage' list to target one exact document), "
                   "then use start_chunk to read more.",
    .params = doc_read_params,
-   .param_count = 4,
+   .param_count = TOOL_PARAM_COUNT(doc_read_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
    .is_available = doc_read_is_available,

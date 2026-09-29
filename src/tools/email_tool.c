@@ -1081,7 +1081,7 @@ static const tool_metadata_t email_metadata = {
                   "For 'send', the 'to' field can be a contact name (resolved via contacts) "
                   "or a direct email address.",
    .params = email_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(email_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_DANGEROUS | TOOL_CAP_SCHEDULABLE,

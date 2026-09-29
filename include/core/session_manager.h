@@ -1486,6 +1486,15 @@ void session_stamp_last_message_id(session_t *session, const char *role, int64_t
 int64_t session_get_last_user_msg_id(session_t *session);
 
 /**
+ * @brief The user's question before the one this turn answers (the newest
+ *        ordinary question in the history), or NULL.
+ *
+ * @note Thread-safe — acquires `session->history_mutex`.
+ * @return Heap copy (caller frees), or NULL when there is none.
+ */
+char *session_previous_question_dup(session_t *session);
+
+/**
  * @brief Add message with images to session's conversation history
  *
  * Creates a multi-part content message in OpenAI format:

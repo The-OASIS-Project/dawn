@@ -56,7 +56,7 @@ static const tool_metadata_t tts_tool_metadata = {
 
    .description = "Speak text aloud using text-to-speech.",
    .params = tts_tool_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(tts_tool_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_NONE,

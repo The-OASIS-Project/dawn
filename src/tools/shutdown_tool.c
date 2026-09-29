@@ -197,7 +197,7 @@ static const tool_metadata_t shutdown_metadata = {
    .description = "Initiate system shutdown. Requires explicit config enable "
                   "and optional passphrase for security.",
    .params = shutdown_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(shutdown_params),
 
    /* Device Mapping */
    .device_map = NULL,
