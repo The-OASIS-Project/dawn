@@ -3320,6 +3320,32 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
+   /* v92: messages.llm_blocks (an assistant turn's stored blocks, read only to
+    * rebuild an LLM context), the trigger that drops them when a row's text
+    * changes, and a re-render of voice rows saved as raw Claude block arrays.
+    * Idempotent (probe-guarded ALTER, IF NOT EXISTS trigger, a scrub that
+    * finds nothing once run). */
+   bool v92_ok = (current_version >= 92);
+   if (current_version < 92) {
+      if (auth_db_migrations_v92(s_db.db) == AUTH_DB_SUCCESS) {
+         v92_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v92 migration (message turn blocks) failed");
+      }
+   }
+
+   /* v93: voice rows whose tool calls the old voice save dropped (an empty
+    * assistant turn, results without a call id) become text notes.  After v92,
+    * whose columns it reads.  Idempotent. */
+   bool v93_ok = (current_version >= 93);
+   if (current_version < 93) {
+      if (auth_db_migrations_v93(s_db.db) == AUTH_DB_SUCCESS) {
+         v93_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v93 migration (voice rows without tool calls) failed");
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3344,7 +3370,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
                               v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
-                              v90_ok && v91_ok;
+                              v90_ok && v91_ok && v92_ok && v93_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

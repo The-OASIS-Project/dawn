@@ -35,6 +35,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/job_dispatch.h"
@@ -43,6 +44,7 @@
 #include "core/text_input_dispatch.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (job_worker is ENABLE_WEBUI-only) */
@@ -134,7 +136,7 @@ static void job_worker_run(job_work_t *work) {
    if (work->resume) {
       bool continued = false;
       size_t restored = 0;
-      struct json_object *hist = memory_history_load_from_db(work->conv_id, work->user_id,
+      struct json_object *hist = memory_history_load_for_llm(work->conv_id, work->user_id,
                                                              &restored);
       if (hist != NULL && restored > 0) {
          session_replace_history(s, hist, work->conv_id);
@@ -218,7 +220,9 @@ static void job_worker_run(job_work_t *work) {
     * expansion and focus read it from the turn, like every other surface). */
    session_turn_begin(s, work->conv_id, work->user_id);
    char *response = core_text_input_dispatch(s, dispatch_text, NULL, NULL, NULL, 0, &opts);
-   session_turn_end(s);
+   /* The reply's own blocks.  The turn stays open until the answer is saved,
+    * so the row is written while the turn is this one. */
+   struct json_object *reply_blocks = session_take_reply_blocks(s);
    free(framed_goal);
    session_set_tool_persist_hook(s, NULL, NULL);
    session_set_tool_iteration_hook(s, NULL, NULL);
@@ -287,14 +291,24 @@ static void job_worker_run(job_work_t *work) {
       free(last);
    }
 
+   /* Saved with the reply's blocks, so a resume replays the answer as the model
+    * produced it.  A truncation notice is DAWN's, not the model's: the blocks keep
+    * the model's text. */
    int64_t final_msg_id = 0;
-   if (have_answer && !already_persisted &&
-       conv_db_add_message_with_tools(work->conv_id, work->user_id, "assistant", response, NULL,
-                                      NULL, NULL, &final_msg_id) != AUTH_DB_SUCCESS) {
-      OLOG_WARNING("job_worker: failed to persist final answer to conv %lld",
-                   (long long)work->conv_id);
-      final_msg_id = 0;
+   if (have_answer && !already_persisted) {
+      char *stored = llm_turn_blocks_answer_stored(reply_blocks);
+      const conv_message_row_t row = { .role = "assistant",
+                                       .content = response,
+                                       .llm_blocks = stored };
+      if (conv_db_add_row(work->conv_id, work->user_id, &row, &final_msg_id) != AUTH_DB_SUCCESS) {
+         OLOG_WARNING("job_worker: failed to persist final answer to conv %lld",
+                      (long long)work->conv_id);
+         final_msg_id = 0;
+      }
+      free(stored);
    }
+   json_object_put(reply_blocks);
+   reply_blocks = NULL;
    /* §6.3: hand the ANSWER BODY to event-only consumers.  Without this a TUI
     * tailing this job sees every step and then never learns the conclusion.  Skip
     * when the row was already persisted (item 2) — the body is already on the stream. */
@@ -305,6 +319,7 @@ static void job_worker_run(job_work_t *work) {
       conv_event_notify_message_appended(work->conv_id, work->user_id, final_msg_id, "assistant",
                                          response, NULL, atomic_load(&s->current_stream_id));
    }
+   session_turn_end(s);
 
    /* `shutdown_stop` (the daemon pulled the rug, vs a human asking for the stop) was
     * resolved with the other two signals above.  Its !user_cancelled term matters

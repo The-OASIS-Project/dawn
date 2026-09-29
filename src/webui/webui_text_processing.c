@@ -38,6 +38,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/session_manager.h"
@@ -47,6 +48,7 @@
 #include "dawn.h"
 #include "image_store.h"
 #include "llm/llm_context.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_image_rehydrate.h"
@@ -86,19 +88,26 @@ typedef struct {
  * (session_bind_created_conversation), write it here, on the turn's own thread,
  * before anything else of the turn, so the user row precedes the reply. */
 /* Write an earlier turn's exchange this turn adopted (it ended before the
- * conversation existed), ahead of this turn's own rows. */
+ * conversation existed), ahead of this turn's own rows, the reply with the
+ * blocks it was captured with. */
 static void write_prior_exchange(session_t *session,
                                  int user_id,
                                  int64_t conv_id,
                                  const char *user,
-                                 const char *reply) {
+                                 const char *reply,
+                                 struct json_object *reply_blocks) {
    int64_t user_row = 0;
    int64_t reply_row = 0;
    if (user_id > 0 && user) {
       (void)conv_db_add_message_ex(conv_id, user_id, "user", user, &user_row);
    }
    if (user_id > 0 && reply) {
-      (void)conv_db_add_message_ex(conv_id, user_id, "assistant", reply, &reply_row);
+      char *stored = llm_turn_blocks_answer_stored(reply_blocks);
+      const conv_message_row_t row = { .role = "assistant",
+                                       .content = reply,
+                                       .llm_blocks = stored };
+      (void)conv_db_add_row(conv_id, user_id, &row, &reply_row);
+      free(stored);
    }
    session_stamp_claimed(session, user_row, reply_row);
 }
@@ -112,11 +121,13 @@ static void persist_pending_user_row(session_t *session, int user_id) {
    int64_t conv_id = 0;
    char *prior_user = NULL;
    char *prior_reply = NULL;
-   if (session_turn_take_prior(session, &conv_id, &prior_user, &prior_reply)) {
-      write_prior_exchange(session, user_id, conv_id, prior_user, prior_reply);
+   struct json_object *prior_blocks = NULL;
+   if (session_turn_take_prior(session, &conv_id, &prior_user, &prior_reply, &prior_blocks)) {
+      write_prior_exchange(session, user_id, conv_id, prior_user, prior_reply, prior_blocks);
    }
    free(prior_user);
    free(prior_reply);
+   json_object_put(prior_blocks);
    char *pending = session_turn_take_pending(session, "user", &conv_id);
    if (!pending) {
       return;
@@ -147,16 +158,10 @@ static void persist_pending_user_row(session_t *session, int user_id) {
  * stable for the connection, so it is snapshotted at setup.  (webui_tool_persist_ctx_t
  * is declared in webui_internal.h so the shared arm/disarm helper + the voice path can
  * reference it.) */
-static void webui_tool_persist_cb(void *userdata,
-                                  const char *role,
-                                  const char *content,
-                                  const char *tool_calls_json,
-                                  const char *tool_call_id,
-                                  const char *reasoning_json,
-                                  bool is_error) {
+static int64_t webui_tool_persist_cb(void *userdata, const session_tool_row_t *row) {
    webui_tool_persist_ctx_t *ctx = (webui_tool_persist_ctx_t *)userdata;
-   if (!ctx || !ctx->session || !role) {
-      return;
+   if (!ctx || !ctx->session || !row || !row->role) {
+      return 0;
    }
    /* Persist to the conversation THIS TURN belongs to (captured at dispatch /
     * back-filled at conversation creation), NOT the live view — otherwise
@@ -165,15 +170,23 @@ static void webui_tool_persist_cb(void *userdata,
     * (conv_id 0) is skipped rather than mis-attributed. */
    int64_t conv_id = ctx->session->stream_conversation_id;
    if (conv_id <= 0) {
-      return; /* turn not tagged with a conversation — skip rather than guess */
+      return 0; /* turn not tagged with a conversation — skip rather than guess */
    }
    persist_pending_user_row(ctx->session, ctx->auth_user_id);
-   if (conv_db_add_message_with_tools_ex(conv_id, ctx->auth_user_id, role, content ? content : "",
-                                         tool_calls_json, tool_call_id, reasoning_json, is_error,
-                                         NULL) != AUTH_DB_SUCCESS) {
+   const conv_message_row_t db_row = { .role = row->role,
+                                       .content = row->content ? row->content : "",
+                                       .tool_calls = row->tool_calls,
+                                       .tool_call_id = row->tool_call_id,
+                                       .reasoning = row->reasoning,
+                                       .llm_blocks = row->llm_blocks,
+                                       .is_error = row->is_error };
+   int64_t id = 0;
+   if (conv_db_add_row(conv_id, ctx->auth_user_id, &db_row, &id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("WebUI: failed to persist tool-turn %s row to conv %lld (may orphan on reload)",
-                   role, (long long)conv_id);
+                   row->role, (long long)conv_id);
+      return 0;
    }
+   return id;
 }
 
 /* Iteration-boundary hook: close the current streaming bubble (if one is open) so this
@@ -293,7 +306,7 @@ static void finish_turn(session_t *session) {
    while (session_turn_finish(session, &unsaved) == SESSION_TURN_WRITE_UNSAVED) {
       if (unsaved.prior_user || unsaved.prior_reply) {
          write_prior_exchange(session, user_id, unsaved.conv, unsaved.prior_user,
-                              unsaved.prior_reply);
+                              unsaved.prior_reply, unsaved.prior_reply_blocks);
       }
       if (user_id > 0) {
          int64_t msg_id = 0;
@@ -307,6 +320,7 @@ static void finish_turn(session_t *session) {
       }
       free(unsaved.prior_user);
       free(unsaved.prior_reply);
+      json_object_put(unsaved.prior_reply_blocks);
       free(unsaved.user);
       free(unsaved.reply);
    }

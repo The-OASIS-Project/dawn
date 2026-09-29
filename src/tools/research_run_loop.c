@@ -517,6 +517,7 @@ static char *research_assemble_report(const char *prose, const char *evidence, c
  * research worker otherwise writes no messages there).  Best-effort. */
 static void research_persist_report_to_job_conv(const research_run_t *run0, const char *body) {
    int64_t msg_id = 0;
+   /* no-blocks: the report DAWN compiled from its evidence ledger. */
    if (conv_db_add_message_with_tools(run0->conversation_id, run0->user_id, "assistant", body, NULL,
                                       NULL, NULL, &msg_id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("research: failed to persist report to job conv %lld",

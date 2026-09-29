@@ -88,16 +88,12 @@ void handle_unlock_user(ws_connection_t *conn, struct json_object *payload);
  * @param conn Connection with authenticated user
  * @param conv Conversation metadata (already fetched via conv_db_get)
  * @param conv_id Conversation ID
- * @param preloaded_msgs Optional pre-fetched message array (json_object array
- *        with "role" and "content" fields per element). If NULL, messages are
- *        fetched from the DB. Caller retains ownership; not freed by this function.
  * @param count_out [out] Messages restored (may be NULL)
  * @return SUCCESS, or FAILURE (DB read failed; history untouched)
  */
 int webui_restore_conversation_context(ws_connection_t *conn,
                                        const conversation_t *conv,
                                        int64_t conv_id,
-                                       json_object *preloaded_msgs,
                                        int *count_out);
 
 /* =============================================================================

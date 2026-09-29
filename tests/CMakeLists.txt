@@ -113,6 +113,9 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v73.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v74.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v75.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v92.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v93.c
+    ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -218,7 +221,7 @@ dawn_add_unit_test(test_auth_db_mcp
    SOURCES test_auth_db_mcp.c
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/auth/auth_db_mcp.c
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Schema v56 code_projects migration + code_project_db CRUD/visibility/CASCADE.
@@ -226,7 +229,7 @@ dawn_add_unit_test(test_code_project_db
    SOURCES test_code_project_db.c
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/tools/code_project_db.c
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # libgit2 clone wrapper — only when code projects (and thus libgit2) are enabled.
@@ -258,7 +261,7 @@ dawn_add_unit_test(test_mcp_bridge
            ${SRC_ROOT}/src/tools/code_project_db.c
            ${SRC_ROOT}/src/tools/code_project_namemap.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
@@ -288,7 +291,7 @@ dawn_add_unit_test(test_image_store
            ${SRC_ROOT}/src/image_store.c
            ${SRC_ROOT}/src/blob_store.c
            ${SRC_ROOT}/src/blob_store_util.c
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Document-original store + blob engine dedup/orphan/caps + v68 stmt_blob_*.
@@ -298,7 +301,7 @@ dawn_add_unit_test(test_document_original_store
            ${SRC_ROOT}/src/document_original_store.c
            ${SRC_ROOT}/src/blob_store.c
            ${SRC_ROOT}/src/blob_store_util.c
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # v68 migration applied to an EXISTING pre-v68 DB (base-schema-before-migration
@@ -306,7 +309,7 @@ dawn_add_unit_test(test_document_original_store
 dawn_add_unit_test(test_blob_migration
    SOURCES test_blob_migration.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # v69: conversations.is_pinned upgrade (seeds a real v68 DB → verifies the
@@ -315,7 +318,7 @@ dawn_add_unit_test(test_blob_migration
 dawn_add_unit_test(test_v69_migration
    SOURCES test_v69_migration.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # v70: code_projects.name NOCASE unique index upgrade (seeds a real v69 DB with a
@@ -323,7 +326,7 @@ dawn_add_unit_test(test_v69_migration
 dawn_add_unit_test(test_v70_migration
    SOURCES test_v70_migration.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_ota_manifest
@@ -338,7 +341,7 @@ dawn_add_unit_test(test_ota
            ${SRC_ROOT}/src/core/ota_db.c
            ${SRC_ROOT}/src/core/ota_manifest.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer ${SODIUM_LIBRARIES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${SODIUM_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Fleet rollout orchestrator (canary-then-fan-out state machine + slot-claim
@@ -479,6 +482,7 @@ dawn_add_unit_test(test_suit_service
 dawn_add_unit_test(test_session_history
    SOURCES test_session_history.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -629,7 +633,7 @@ dawn_add_unit_test(test_memory_db_alias
            # surface change.
            ${SRC_ROOT}/src/config/config_defaults.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Document extract has conditional MuPDF / libzip+libxml2 linking, so the
@@ -693,7 +697,7 @@ dawn_add_unit_test(test_document_search_bm25
            ${SRC_ROOT}/src/tools/document_db.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # document_manage edit/append pure text ops (B1a) — no storage deps
@@ -968,8 +972,20 @@ dawn_add_unit_test(test_llm_turn_blocks
    SOURCES test_llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# The rows a history message saves as: canonical rows pinned by fixture, the
+# turn's blocks alongside, no vendor data in client-visible fields.
+dawn_add_unit_test(test_llm_history_rows
+   SOURCES test_llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -995,7 +1011,7 @@ dawn_add_unit_test(test_llm_pricing
 dawn_add_unit_test(test_llm_claude_binding
    SOURCES test_llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
-   LIBS    dawn_common unity json-c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Anthropic betas: request fields, header, and which 400s turn one off.
@@ -1148,7 +1164,7 @@ dawn_add_unit_test(test_memory_note_bridge
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_stem
@@ -1222,7 +1238,9 @@ dawn_add_unit_test(test_flaresolverr_error_detection
 dawn_add_unit_test(test_crypto_store
    SOURCES test_crypto_store.c test_crypto_store_stub.c
            ${SRC_ROOT}/src/core/crypto_store.c
-   LIBS    dawn_common unity sodium pthread
+           ${SRC_ROOT}/src/llm/llm_key_tag.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+   LIBS    dawn_common unity sodium pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_input_queue
@@ -1254,19 +1272,27 @@ dawn_add_unit_test(test_auth_db_migrations_v75
 dawn_add_unit_test(test_conv_db_events
    SOURCES test_conv_db_events.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# messages.llm_blocks: replay-only read, assistant-only CHECK, watermark GC,
+# edit trigger, and the v92 re-render of legacy voice rows.
+dawn_add_unit_test(test_conv_db_llm_blocks
+   SOURCES test_conv_db_llm_blocks.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_conv_db_jobs
    SOURCES test_conv_db_jobs.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_auth_db_research
    SOURCES test_auth_db_research.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_research_run
@@ -1287,6 +1313,8 @@ dawn_add_unit_test(test_research_allowlist
 dawn_add_unit_test(test_history_reload_watermark
    SOURCES test_history_reload_watermark.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -1300,6 +1328,7 @@ dawn_add_unit_test(test_history_reload_watermark
 dawn_add_unit_test(test_history_strip_markers
    SOURCES test_history_strip_markers.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -1363,13 +1392,13 @@ dawn_add_unit_test(test_calendar_db
    SOURCES test_calendar_db.c
            ${SRC_ROOT}/src/tools/calendar_db.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_auth_db
    SOURCES test_auth_db.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_tool_registry
@@ -1421,7 +1450,7 @@ dawn_add_unit_test(test_email_db
    SOURCES test_email_db.c test_email_db_stub.c
            ${SRC_ROOT}/src/tools/email_db.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # =============================================================================
@@ -1533,6 +1562,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_openai.c
            ${SRC_ROOT}/src/llm/llm_openai_cache.c
            ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
+           ${SRC_ROOT}/src/llm/llm_key_tag.c
+           ${SRC_ROOT}/src/core/crypto_store.c
            ${SRC_ROOT}/src/llm/llm_openai_history.c
            ${SRC_ROOT}/src/llm/llm_streaming.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
@@ -1549,6 +1580,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/core/ocp_helpers.c
@@ -1559,7 +1592,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
-   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer
+   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
 
 # The remember tool end to end (memory_callback.c on a real schema), linked like
@@ -1619,6 +1652,8 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_openai.c
            ${SRC_ROOT}/src/llm/llm_openai_cache.c
            ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
+           ${SRC_ROOT}/src/llm/llm_key_tag.c
+           ${SRC_ROOT}/src/core/crypto_store.c
            ${SRC_ROOT}/src/llm/llm_openai_history.c
            ${SRC_ROOT}/src/llm/llm_streaming.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
@@ -1635,6 +1670,8 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/core/ocp_helpers.c
@@ -1645,7 +1682,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
-   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer
+   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 

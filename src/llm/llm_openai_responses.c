@@ -46,6 +46,7 @@
 #include "llm/llm_capabilities.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_key_tag.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
@@ -919,7 +920,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    /* Whose reasoning this request may replay, and whose this turn's is: the
     * endpoint and the key's organization. */
    char carrier[LLM_CARRIER_MAX];
-   llm_turn_blocks_carrier(base_url, api_key, carrier, sizeof(carrier));
+   llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
 
    /* Build request JSON */
    struct json_object *root = build_responses_request(conversation_history, input_text,

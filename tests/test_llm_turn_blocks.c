@@ -31,6 +31,9 @@
 #include "llm/llm_turn_blocks.h"
 #include "unity.h"
 
+/* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
+#define TEST_CLAUDE_CARRIER "api.anthropic.com#0123456789abcdef"
+
 void setUp(void) {
 }
 void tearDown(void) {
@@ -130,9 +133,10 @@ static void test_capture_keeps_every_block_in_order(void) {
 
 static void test_blocks_replay_to_claude_verbatim(void) {
    json_object *content = capture_rich_response();
-   json_object *blocks = llm_turn_blocks_from_claude(content, "claude-opus-5-5");
+   json_object *blocks = llm_turn_blocks_from_claude(content, TEST_CLAUDE_CARRIER,
+                                                     "claude-opus-5-5");
    TEST_ASSERT_NOT_NULL(blocks);
-   json_object *rendered = llm_turn_blocks_render_claude(blocks);
+   json_object *rendered = llm_turn_blocks_render_claude(blocks, TEST_CLAUDE_CARRIER);
    /* The replay is the response as received, block for block. */
    TEST_ASSERT_EQUAL_STRING(json_object_to_json_string_ext(content, JSON_C_TO_STRING_PLAIN),
                             json_object_to_json_string_ext(rendered, JSON_C_TO_STRING_PLAIN));
@@ -146,7 +150,7 @@ static void test_foreign_reasoning_is_left_out(void) {
    llm_turn_blocks_add_reasoning(blocks, "openai", "openai-responses", "gpt-5.6-luna",
                                  json_tokener_parse("{\"type\":\"reasoning\",\"id\":\"rs_1\"}"));
    llm_turn_blocks_add_text(blocks, "Hello.");
-   json_object *rendered = llm_turn_blocks_render_claude(blocks);
+   json_object *rendered = llm_turn_blocks_render_claude(blocks, TEST_CLAUDE_CARRIER);
    TEST_ASSERT_EQUAL_INT(1, json_object_array_length(rendered));
    TEST_ASSERT_EQUAL_STRING("text", str_at(rendered, 0, "type"));
    json_object_put(rendered);
@@ -155,7 +159,7 @@ static void test_foreign_reasoning_is_left_out(void) {
 
 static void test_final_text_replaces_the_answer_keeping_reasoning(void) {
    json_object *blocks = llm_turn_blocks_new();
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC,
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC,
                                  "claude-opus-5-5",
                                  json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"t\","
                                                     "\"signature\":\"S\"}"));
@@ -170,7 +174,7 @@ static void test_final_text_replaces_the_answer_keeping_reasoning(void) {
 
    /* No text block: the answer goes at the end. */
    blocks = llm_turn_blocks_new();
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "m",
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC, "m",
                                  json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"\","
                                                     "\"signature\":\"S\"}"));
    final = llm_turn_blocks_with_final_text(blocks, "Answer.");
@@ -205,8 +209,9 @@ static void test_unknown_blocks_are_kept_for_their_vendor(void) {
    json_object *content = json_tokener_parse(
        "[{\"type\":\"server_tool_use\",\"id\":\"srv_1\",\"name\":\"web_search\",\"input\":{}},"
        "{\"type\":\"text\",\"text\":\"Found it.\"}]");
-   json_object *blocks = llm_turn_blocks_from_claude(content, "claude-opus-5-5");
-   json_object *rendered = llm_turn_blocks_render_claude(blocks);
+   json_object *blocks = llm_turn_blocks_from_claude(content, TEST_CLAUDE_CARRIER,
+                                                     "claude-opus-5-5");
+   json_object *rendered = llm_turn_blocks_render_claude(blocks, TEST_CLAUDE_CARRIER);
    TEST_ASSERT_EQUAL_STRING(json_object_to_json_string_ext(content, JSON_C_TO_STRING_PLAIN),
                             json_object_to_json_string_ext(rendered, JSON_C_TO_STRING_PLAIN));
    json_object_put(rendered);
@@ -252,7 +257,7 @@ static json_object *answer_with_blocks(const char *text, const char *thinking, c
    json_object_object_add(native, "type", json_object_new_string("thinking"));
    json_object_object_add(native, "thinking", json_object_new_string(thinking));
    json_object_object_add(native, "signature", json_object_new_string(sig));
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "m", native);
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC, "m", native);
    llm_turn_blocks_add_text(blocks, text);
    json_object_object_add(m, LLM_TURN_BLOCKS_KEY, blocks);
    json_object_object_add(m, "_internal_probe", json_object_new_object());
@@ -282,7 +287,7 @@ static void test_set_text_keeps_blocks_in_step(void) {
    TEST_ASSERT_EQUAL_STRING("A long reply",
                             json_object_get_string(json_object_object_get(m, "content")));
    json_object *rendered = llm_turn_blocks_render_claude(
-       json_object_object_get(m, LLM_TURN_BLOCKS_KEY));
+       json_object_object_get(m, LLM_TURN_BLOCKS_KEY), TEST_CLAUDE_CARRIER);
    TEST_ASSERT_EQUAL_INT(2, json_object_array_length(rendered));
    TEST_ASSERT_EQUAL_STRING("A long reply", str_at(rendered, 1, "text"));
    TEST_ASSERT_EQUAL_STRING("SIG", str_at(rendered, 0, "signature"));
@@ -357,7 +362,7 @@ static void test_render_responses(void) {
    struct json_object *t = json_object_new_object();
    json_object_object_add(t, "type", json_object_new_string("thinking"));
    json_object_object_add(t, "thinking", json_object_new_string("hidden"));
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "c", t);
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC, "c", t);
    llm_turn_blocks_add_text(blocks, "three");
 
    struct json_object *input = json_object_new_array();
@@ -553,7 +558,7 @@ static void test_render_chat(void) {
    struct json_object *t = json_object_new_object();
    json_object_object_add(t, "type", json_object_new_string("thinking"));
    json_object_object_add(t, "thinking", json_object_new_string("hidden"));
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "c", t);
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC, "c", t);
    llm_turn_blocks_add_text(blocks, "one");
    llm_turn_blocks_add_text(blocks, "two");
    llm_turn_blocks_add_signed_tool_call(blocks, "c1", "weather", "{}", C, "m", "GEMSIG");
@@ -584,16 +589,46 @@ static void test_render_chat(void) {
    json_object_put(blocks);
 }
 
-/* The carrier: the host (lower case, no credentials) and a key fingerprint. */
+/* The carrier: the endpoint (no credentials, query or trailing '/') and the
+ * key's tag.  The path counts: two gateways on one host are two carriers. */
 static void test_carrier(void) {
-   char a[LLM_CARRIER_MAX], b[LLM_CARRIER_MAX], c[LLM_CARRIER_MAX];
-   llm_turn_blocks_carrier("https://User:Pass@API.Example.com/v1", "key-1", a, sizeof(a));
-   llm_turn_blocks_carrier("https://api.example.com/v1", "key-1", b, sizeof(b));
-   llm_turn_blocks_carrier("https://api.example.com/v1", "key-2", c, sizeof(c));
+   char a[LLM_CARRIER_MAX], b[LLM_CARRIER_MAX], c[LLM_CARRIER_MAX], d[LLM_CARRIER_MAX];
+   llm_turn_blocks_carrier("https://User:Pass@API.Example.com/v1/?x=1", "0123456789abcdef", a,
+                           sizeof(a));
+   llm_turn_blocks_carrier("https://api.example.com/v1", "0123456789abcdef", b, sizeof(b));
+   llm_turn_blocks_carrier("https://api.example.com/team-b/v1", "0123456789abcdef", c, sizeof(c));
+   llm_turn_blocks_carrier("http://api.example.com/v1", "0123456789abcdef", d, sizeof(d));
    TEST_ASSERT_EQUAL_STRING(a, b);
    TEST_ASSERT_NULL(strstr(a, "Pass"));
-   TEST_ASSERT_EQUAL_INT(0, strncmp(a, "api.example.com#", 16));
+   TEST_ASSERT_EQUAL_INT(0, strncmp(a, "api.example.com/", 16));
+   TEST_ASSERT_NOT_NULL(strstr(a, "#0123456789abcdef"));
    TEST_ASSERT_NOT_EQUAL(0, strcmp(b, c));
+   TEST_ASSERT_NOT_EQUAL(0, strcmp(b, d));
+   TEST_ASSERT_TRUE(strlen(a) < LLM_CARRIER_MAX);
+
+   /* A long host is cut, never the key tag; and credentials end at the last '@'. */
+   char url[160], e[LLM_CARRIER_MAX];
+   snprintf(url, sizeof(url), "https://%.*s.example.com/v1", 95,
+            "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
+            "hhhhhhhhhhhhhhhh");
+   llm_turn_blocks_carrier(url, "0123456789abcdef", e, sizeof(e));
+   TEST_ASSERT_NOT_NULL(strstr(e, "#0123456789abcdef"));
+   llm_turn_blocks_carrier("https://u:p@ss@host.example.com/v1", "0123456789abcdef", e, sizeof(e));
+   TEST_ASSERT_NULL(strstr(e, "ss@"));
+   TEST_ASSERT_EQUAL_INT(0, strncmp(e, "host.example.com/", 17));
+}
+
+/* No carrier matches nothing: blocks from a legacy array (carrier "") never
+ * replay, even to a request that passes "". */
+static void test_empty_carrier_never_matches(void) {
+   json_object *content = json_tokener_parse(
+       "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"SIG\"}]");
+   json_object *blocks = llm_turn_blocks_from_claude(content, "", "m");
+   json_object *rendered = llm_turn_blocks_render_claude(blocks, "");
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(rendered), "SIG"));
+   json_object_put(rendered);
+   json_object_put(blocks);
+   json_object_put(content);
 }
 
 /* The copy for extraction, summaries and logs has no reasoning: a Claude
@@ -605,6 +640,7 @@ static void test_strip_internal_drops_thinking_parts(void) {
        "{\"role\":\"assistant\",\"content\":["
        "{\"type\":\"thinking\",\"thinking\":\"private plan\",\"signature\":\"SIG\"},"
        "{\"type\":\"redacted_thinking\",\"data\":\"ENC\"},"
+       "{\"type\":\"web_search_tool_result\",\"content\":{\"encrypted_content\":\"OPQ\"}},"
        "{\"type\":\"text\",\"text\":\"Checking.\"},"
        "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"weather\",\"input\":{}}]}");
    json_object_array_add(history, turn);
@@ -614,11 +650,185 @@ static void test_strip_internal_drops_thinking_parts(void) {
    TEST_ASSERT_NULL(strstr(text, "private plan"));
    TEST_ASSERT_NULL(strstr(text, "SIG"));
    TEST_ASSERT_NULL(strstr(text, "ENC"));
+   TEST_ASSERT_NULL(strstr(text, "OPQ"));
    TEST_ASSERT_NOT_NULL(strstr(text, "Checking."));
    TEST_ASSERT_NOT_NULL(strstr(text, "t1"));
    TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(history), "private plan"));
    json_object_put(copy);
    json_object_put(history);
+}
+
+/* A turn with every kind of block, and data a careless round trip would
+ * change: slashes, non-ASCII text, a precise double, key order. */
+static struct json_object *every_kind_of_block(void) {
+   struct json_object *b = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(
+       b, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC, "claude-opus-5-5",
+       json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"a/b \\u00e9t\u00e9 \\\"q\\\"\","
+                          "\"signature\":\"S+/=\"}"));
+   llm_turn_blocks_add_text(b, "See https://example.com/x \u2014 caf\u00e9");
+   llm_turn_blocks_add_signed_tool_call(b, "c1", "weather", "{\"lat\":33.7490000001,\"z\":1}",
+                                        "gemini.example#01", "g", "GEMSIG/+=");
+   json_object_array_add(b, json_tokener_parse(
+                                "{\"type\":\"opaque\",\"carrier\":\"anthropic\",\"format\":"
+                                "\"anthropic\",\"native\":{\"type\":\"server_tool_use\","
+                                "\"input\":{\"q\":[1,2.50,{\"k\":null}]}}}"));
+   return b;
+}
+
+/* Stored and reloaded, a turn replays byte for byte what it did before. */
+static void test_stored_round_trip_is_exact(void) {
+   struct json_object *blocks = every_kind_of_block();
+   char *stored = llm_turn_blocks_to_stored(blocks);
+   TEST_ASSERT_NOT_NULL(stored);
+   TEST_ASSERT_NULL_MESSAGE(strstr(stored, "\\/"), stored);
+   TEST_ASSERT_EQUAL_INT(0, strncmp(stored, "{\"v\":1,\"blocks\":[", 17));
+
+   struct json_object *back = llm_turn_blocks_from_stored(stored, strlen(stored), 1);
+   TEST_ASSERT_NOT_NULL(back);
+   const int flags = JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE;
+   TEST_ASSERT_EQUAL_STRING(json_object_to_json_string_ext(blocks, flags),
+                            json_object_to_json_string_ext(back, flags));
+
+   struct json_object *before = llm_turn_blocks_render_claude(blocks, TEST_CLAUDE_CARRIER);
+   struct json_object *after = llm_turn_blocks_render_claude(back, TEST_CLAUDE_CARRIER);
+   TEST_ASSERT_EQUAL_STRING(json_object_to_json_string_ext(before, flags),
+                            json_object_to_json_string_ext(after, flags));
+   struct json_object *chat_before = llm_turn_blocks_render_chat(blocks, "gemini.example#01", "g");
+   struct json_object *chat_after = llm_turn_blocks_render_chat(back, "gemini.example#01", "g");
+   TEST_ASSERT_EQUAL_STRING(json_object_to_json_string_ext(chat_before, flags),
+                            json_object_to_json_string_ext(chat_after, flags));
+
+   /* Stored again, the same bytes. */
+   char *again = llm_turn_blocks_to_stored(back);
+   TEST_ASSERT_EQUAL_STRING(stored, again);
+
+   free(again);
+   free(stored);
+   json_object_put(chat_before);
+   json_object_put(chat_after);
+   json_object_put(before);
+   json_object_put(after);
+   json_object_put(back);
+   json_object_put(blocks);
+   TEST_ASSERT_NULL(llm_turn_blocks_to_stored(NULL));
+}
+
+/* Anything but a valid envelope loads without blocks. */
+static void test_stored_fails_closed(void) {
+   static const char *const bad[] = {
+      "",
+      "[]",
+      "{\"v\":2,\"blocks\":[]}",
+      "{\"v\":\"1\",\"blocks\":[]}",
+      "{\"v\":1}",
+      "{\"v\":1,\"blocks\":{}}",
+      "{\"v\":1,\"blocks\":[{\"type\":\"text\"}]}",
+      "{\"v\":1,\"blocks\":[{\"type\":\"image\",\"url\":\"x\"}]}",
+      "{\"v\":1,\"blocks\":[{\"type\":\"tool_call\",\"id\":\"a\",\"name\":\"b\"}]}",
+      "{\"v\":1,\"blocks\":[{\"type\":\"tool_call\",\"id\":\"a\",\"name\":\"b\","
+      "\"arguments\":\"{}\",\"sig\":{\"carrier\":\"c\"}}]}",
+      "{\"v\":1,\"blocks\":[{\"type\":\"reasoning\",\"carrier\":\"c\",\"format\":\"f\"}]}",
+      "{\"v\":1,\"blocks\":[{\"type\":\"reasoning\",\"carrier\":\"c\",\"format\":\"f\","
+      "\"native\":\"x\"}]}",
+      "{\"v\":1,\"blocks\":[{\"type\":\"opaque\",\"format\":\"f\",\"native\":{}}]}",
+      "{\"v\":1,\"blocks\":[]} trailing",
+      "{\"v\":1,\"blocks\":[",
+   };
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      TEST_ASSERT_NULL_MESSAGE(llm_turn_blocks_from_stored(bad[i], strlen(bad[i]), (long long)i),
+                               bad[i]);
+   }
+
+   /* Nested past the depth limit. */
+   char deep[512];
+   size_t n = (size_t)snprintf(deep, sizeof(deep),
+                               "{\"v\":1,\"blocks\":[{\"type\":\"opaque\",\"carrier\":\"c\","
+                               "\"format\":\"f\",\"native\":{\"a\":");
+   for (int i = 0; i < 70; i++)
+      deep[n++] = '[';
+   for (int i = 0; i < 70; i++)
+      deep[n++] = ']';
+   memcpy(deep + n, "}}]}", 5);
+   TEST_ASSERT_NULL(llm_turn_blocks_from_stored(deep, strlen(deep), 99));
+
+   /* Too many blocks. */
+   struct json_object *many = llm_turn_blocks_new();
+   for (int i = 0; i <= LLM_TURN_BLOCKS_STORED_ENTRIES_MAX; i++)
+      llm_turn_blocks_add_text(many, "x");
+   char *stored = llm_turn_blocks_to_stored(many);
+   TEST_ASSERT_NOT_NULL(stored);
+   TEST_ASSERT_NULL(llm_turn_blocks_from_stored(stored, strlen(stored), 100));
+   free(stored);
+   json_object_put(many);
+
+   /* A length that cuts the text short is not the whole value. */
+   const char *ok = "{\"v\":1,\"blocks\":[{\"type\":\"text\",\"text\":\"hi\"}]}";
+   struct json_object *good = llm_turn_blocks_from_stored(ok, strlen(ok), 101);
+   TEST_ASSERT_NOT_NULL(good);
+   json_object_put(good);
+   TEST_ASSERT_NULL(llm_turn_blocks_from_stored(ok, strlen(ok) - 1, 102));
+}
+
+/* Blocks replay only with the row whose calls they record. */
+static bool calls_match_text(struct json_object *blocks, const char *tool_calls) {
+   struct json_object *calls = tool_calls ? json_tokener_parse(tool_calls) : NULL;
+   const bool match = llm_turn_blocks_calls_match(blocks, calls);
+   json_object_put(calls);
+   return match;
+}
+
+static void test_calls_match(void) {
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_text(blocks, "Checking.");
+   TEST_ASSERT_TRUE(calls_match_text(blocks, NULL));
+   TEST_ASSERT_TRUE(calls_match_text(blocks, "[]"));
+   TEST_ASSERT_FALSE(calls_match_text(blocks, "[{\"id\":\"a\"}]"));
+
+   llm_turn_blocks_add_tool_call(blocks, "a", "x", "{}");
+   llm_turn_blocks_add_tool_call(blocks, "b", "y", "{}");
+   TEST_ASSERT_TRUE(calls_match_text(blocks, "[{\"id\":\"a\"},{\"id\":\"b\"}]"));
+   TEST_ASSERT_FALSE(calls_match_text(blocks, "[{\"id\":\"b\"},{\"id\":\"a\"}]"));
+   TEST_ASSERT_FALSE(calls_match_text(blocks, "[{\"id\":\"a\"}]"));
+   TEST_ASSERT_FALSE(calls_match_text(blocks, NULL));
+   TEST_ASSERT_FALSE(calls_match_text(blocks, "{\"id\":\"a\"}"));
+   json_object_put(blocks);
+}
+
+/* A reply row's blocks record no tool calls. */
+static void test_answer_stored(void) {
+   TEST_ASSERT_NULL(llm_turn_blocks_answer_stored(NULL));
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_text(blocks, "Done.");
+   char *stored = llm_turn_blocks_answer_stored(blocks);
+   TEST_ASSERT_NOT_NULL(stored);
+   free(stored);
+   llm_turn_blocks_add_tool_call(blocks, "a", "x", "{}");
+   TEST_ASSERT_NULL(llm_turn_blocks_answer_stored(blocks));
+   json_object_put(blocks);
+}
+
+/* Claude reasoning goes back only to the endpoint and key that issued it: not
+ * to a gateway, another account, or a copy of the database elsewhere. */
+static void test_claude_reasoning_stays_with_its_carrier(void) {
+   json_object *content = json_tokener_parse(
+       "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"SIG\"},"
+       "{\"type\":\"text\",\"text\":\"Hi.\"}]");
+   json_object *blocks = llm_turn_blocks_from_claude(content, TEST_CLAUDE_CARRIER, "m");
+   json_object *mine = llm_turn_blocks_render_claude(blocks, TEST_CLAUDE_CARRIER);
+   json_object *gateway = llm_turn_blocks_render_claude(blocks,
+                                                        "gateway.example.com#0123456789abcdef");
+   json_object *other_key = llm_turn_blocks_render_claude(blocks,
+                                                          "api.anthropic.com#fedcba9876543210");
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(mine), "SIG"));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(gateway), "SIG"));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(other_key), "SIG"));
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(gateway), "Hi."));
+   json_object_put(mine);
+   json_object_put(gateway);
+   json_object_put(other_key);
+   json_object_put(blocks);
+   json_object_put(content);
 }
 
 int main(void) {
@@ -638,6 +848,11 @@ int main(void) {
    RUN_TEST(test_opaque_blocks_count_toward_context);
    RUN_TEST(test_render_responses);
    RUN_TEST(test_blocks_with_calls);
+   RUN_TEST(test_stored_round_trip_is_exact);
+   RUN_TEST(test_stored_fails_closed);
+   RUN_TEST(test_calls_match);
+   RUN_TEST(test_answer_stored);
+   RUN_TEST(test_claude_reasoning_stays_with_its_carrier);
    RUN_TEST(test_message_blocks);
    RUN_TEST(test_reasoning_details_merge);
    RUN_TEST(test_reasoning_details_small_deltas);
@@ -645,5 +860,6 @@ int main(void) {
    RUN_TEST(test_openrouter_entry_counts_whole);
    RUN_TEST(test_render_chat);
    RUN_TEST(test_carrier);
+   RUN_TEST(test_empty_carrier_never_matches);
    return UNITY_END();
 }

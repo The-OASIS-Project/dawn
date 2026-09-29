@@ -39,8 +39,13 @@
 #include <unistd.h>
 
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_messages.h"
 #include "logging.h"
 #include "utils/string_utils.h"
+
+/* Batches of compacted rows' blocks cleared per cleanup run (each batch is a
+ * short hold of the lock); the rest wait for the next run. */
+#define BLOCK_SWEEP_BATCHES 32
 
 /* Vacuum rate limit: once per 24 hours */
 #define VACUUM_COOLDOWN_SEC (24 * 60 * 60)
@@ -112,6 +117,20 @@ int auth_db_run_cleanup(void) {
    s_db.last_cleanup = now;
 
    pthread_mutex_unlock(&s_db.mutex);
+
+   /* Stored turn blocks a compaction left out of every reload's reach (each
+    * batch takes the lock itself). */
+   int cleared = 0;
+   int total = 0;
+   for (int batch = 0; batch < BLOCK_SWEEP_BATCHES; batch++) {
+      if (conv_db_sweep_compacted_blocks(&cleared) != AUTH_DB_SUCCESS || cleared == 0) {
+         break;
+      }
+      total += cleared;
+   }
+   if (total > 0) {
+      OLOG_INFO("auth_db: cleared stored blocks from %d compacted message(s)", total);
+   }
 
    return AUTH_DB_SUCCESS;
 }

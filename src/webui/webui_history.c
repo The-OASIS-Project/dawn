@@ -30,6 +30,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/conv_stream.h"
@@ -39,6 +40,7 @@
 #include "image_store.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
@@ -506,9 +508,10 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
           * exchange unsaved: it belongs here, ahead of any turn still running. */
          char *user_text = NULL;
          char *reply_text = NULL;
+         struct json_object *reply_blocks = NULL;
          bool adopted = false;
          if (session_bind_created_conversation(conn->session, conv_id, &user_text, &reply_text,
-                                               &adopted)) {
+                                               &reply_blocks, &adopted)) {
             /* Stamped with their row ids, as every saved message in the live
              * history is (extraction and compaction key on them). */
             int64_t user_row = 0;
@@ -518,8 +521,13 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
                                             &user_row);
             }
             if (reply_text) {
-               (void)conv_db_add_message_ex(conv_id, conn->auth_user_id, "assistant", reply_text,
-                                            &reply_row);
+               /* With the blocks the reply was captured with (its own turn's). */
+               char *stored = llm_turn_blocks_answer_stored(reply_blocks);
+               const conv_message_row_t row = { .role = "assistant",
+                                                .content = reply_text,
+                                                .llm_blocks = stored };
+               (void)conv_db_add_row(conv_id, conn->auth_user_id, &row, &reply_row);
+               free(stored);
             }
             session_stamp_claimed(conn->session, user_row, reply_row);
             OLOG_INFO("WebUI: saved an ended turn's first exchange to new conversation %lld",
@@ -527,6 +535,7 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
          }
          free(user_text);
          free(reply_text);
+         json_object_put(reply_blocks);
          if (adopted) {
             OLOG_INFO("WebUI: in-flight turn adopted new conversation %lld", (long long)conv_id);
          }
@@ -1099,14 +1108,12 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
              * the newly-loaded one — messages then went to the wrong thread. */
             if (existing_count <= 1 ||
                 atomic_load(&conn->session->history_conversation_id) != conv_id) {
-               /* v67: when a compaction watermark is set, the display array (all_msgs)
-                * is the FULL transcript, but the LLM context must be bounded to
-                * post-watermark messages.  Pass NULL so restore does its own bounded
-                * fetch (conv_db_get_messages_after); display stays full. */
-               json_object *restore_msgs = (conv.context_watermark_msg_id > 0) ? NULL : all_msgs;
+               /* The restore reads its own rows: the display array (all_msgs) is the
+                * full transcript as the browser sees it, while the LLM context is
+                * bounded by the compaction watermark and carries each turn's
+                * stored blocks, which never reach a client. */
                int restored = 0;
-               if (webui_restore_conversation_context(conn, &conv, conv_id, restore_msgs,
-                                                      &restored) == SUCCESS) {
+               if (webui_restore_conversation_context(conn, &conv, conv_id, &restored) == SUCCESS) {
                   OLOG_INFO("WebUI: Restored %d messages to session %u context (conv %lld)",
                             restored, conn->session->session_id, (long long)conv_id);
                }

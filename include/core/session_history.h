@@ -171,13 +171,23 @@ void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may
  */
 void session_turn_end(session_t *session);
 
+/**
+ * @brief Take the blocks of the reply the running turn produced
+ *
+ * For the writer saving that reply, on the thread running the turn, before the
+ * turn ends: they are cleared at turn begin and end, so they are always this
+ * turn's.  NULL when it produced none.  Caller owns them.
+ */
+struct json_object *session_take_reply_blocks(session_t *session);
+
 /** What a finishing turn has yet to write (session_turn_finish()); caller frees the strings. */
 typedef struct {
    int64_t conv;      /* the conversation to write them to */
    char *prior_user;  /* an earlier turn's exchange this turn adopted: written */
    char *prior_reply; /* first, then stamped with session_stamp_claimed() */
-   char *user;        /* this turn's own user message (persisted form) */
-   char *reply;       /* and reply */
+   struct json_object *prior_reply_blocks; /* its blocks (caller owns; may be NULL) */
+   char *user;                             /* this turn's own user message (persisted form) */
+   char *reply;                            /* and reply */
 } session_turn_unsaved_t;
 
 /** session_turn_finish(): the turn ended. */
@@ -311,14 +321,16 @@ char *session_turn_take_pending(session_t *session, const char *role, int64_t *c
  *   @p adopted_out is set.  Its own worker writes its messages.
  * - A turn that ended before the conversation existed left its exchange: when
  *   a running turn is adopted, that turn writes it ahead of its own
- *   (session_turn_take_prior()); otherwise returns true with the user message
- *   and reply (either may be NULL; caller frees both) for the caller to write
- *   to @p conv_id, then pass the rows' ids to session_stamp_claimed().
+ *   (session_turn_take_prior()); otherwise returns true with the user message,
+ *   the reply and the reply's blocks (any may be NULL; caller frees all three)
+ *   for the caller to write to @p conv_id, then pass the rows' ids to
+ *   session_stamp_claimed().
  */
 bool session_bind_created_conversation(session_t *session,
                                        int64_t conv_id,
                                        char **user_out,
                                        char **reply_out,
+                                       struct json_object **reply_blocks_out,
                                        bool *adopted_out);
 
 /**
@@ -334,13 +346,15 @@ void session_stamp_claimed(session_t *session, int64_t user_row_id, int64_t repl
  * @brief Take the earlier exchange a running turn adopted, to write first
  *
  * For the turn's own code once its conversation is known: returns true with the
- * exchange (either may be NULL; caller frees) and the conversation.  Write the
- * rows before the turn's own, then session_stamp_claimed().
+ * exchange and the reply's blocks (any may be NULL; caller frees) and the
+ * conversation.  Write the rows before the turn's own, then
+ * session_stamp_claimed().
  */
 bool session_turn_take_prior(session_t *session,
                              int64_t *conv_out,
                              char **user_out,
-                             char **reply_out);
+                             char **reply_out,
+                             struct json_object **reply_blocks_out);
 
 
 /**

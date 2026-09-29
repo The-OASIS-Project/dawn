@@ -40,7 +40,9 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_rows.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_key_tag.h"
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_rate_limit.h"
@@ -121,24 +123,26 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
    return out;
 }
 
+/* A string field of a row object, or NULL. */
+static const char *str_field(struct json_object *obj, const char *key) {
+   struct json_object *v = NULL;
+   return json_object_object_get_ex(obj, key, &v) ? json_object_get_string(v) : NULL;
+}
+
 /* Persist the tool messages just appended to history in [before_len, end) via the
  * session's tool-persist hook (if set), in OpenAI-canonical form.  Runs on the
  * worker thread with NO lock held, so conv_db (auth_db lock) is safe to call here.
- * OpenAI-format history is already canonical; Claude-format is normalized through the
- * shared converter so the stored shape is provider-neutral.
+ * Every format goes through llm_history_rows_append, so the stored shape is
+ * provider-neutral and an assistant row carries its turn's stored blocks.
  *
  * @p reasoning_json is the display-only reasoning JSON for THIS iteration's assistant
  * message (NULL if none).  It attaches to the single assistant row this iteration
- * appended — guaranteed unique because convert_claude_tool_to_openai() and
- * append_openai_tool_history() collapse text + all tool_use into exactly one assistant
- * row and fan out only role:tool result rows.
+ * appended — guaranteed unique because an assistant turn is always one row
+ * (llm_history_rows_append) and only role:tool result rows fan out.
  *
  * A persisted capture-image message (see llm_tools_add_results_openai/claude,
  * llm_tools.c) is DELIBERATELY excluded here: it carries neither tool_calls
- * nor tool_call_id, so it's dropped by both loops below regardless of
- * provider — Claude's convert_claude_tool_to_openai() returns 0 for it
- * (no tool_use/tool_result blocks) and OpenAI's plain passthrough still fails
- * the tool_calls/tool_call_id gate in the second loop.  This is intentional,
+ * nor tool_call_id, so the walk below skips its row regardless of provider.  This is intentional,
  * not a gap: conv_db reload expects images as `[IMAGE:id]` markers pointing
  * at the image store (see webui_image_rehydrate.c), not raw embedded base64
  * in a message row — writing the base64 JSON verbatim here would produce a
@@ -177,13 +181,12 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
       return;
    }
 
+   /* The rows each appended message saves as (llm_history_rows_append): the
+    * canonical shape the walk below reads, whatever the history's format, and
+    * for an assistant turn its stored blocks. */
    for (int i = before_len; i < after; i++) {
-      struct json_object *msg = json_object_array_get_idx(params->conversation_history, i);
-      if (params->history_format == LLM_HISTORY_CLAUDE) {
-         convert_claude_tool_to_openai(msg, canonical);
-      } else {
-         json_object_array_add(canonical, json_object_get(msg));
-      }
+      llm_history_rows_append(json_object_array_get_idx(params->conversation_history, i),
+                              canonical);
    }
 
    /* The event log is conversation-scoped; the turn's conversation was captured
@@ -259,7 +262,13 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
          if (cb) {
             /* Assistant tool_calls row — never a failure verdict itself (that rides the
              * role:tool result rows below). */
-            cb(ud, role, content ? content : "", tc_json, NULL, reasoning_json, false);
+            const session_tool_row_t row = { .role = role,
+                                             .content = content ? content : "",
+                                             .tool_calls = tc_json,
+                                             .reasoning = reasoning_json,
+                                             .llm_blocks = str_field(m,
+                                                                     LLM_HISTORY_ROW_STORED_KEY) };
+            (void)cb(ud, &row);
          }
          /* One tool_call event per call in the batch: an iteration can invoke
           * several tools, and a tailer wants them individually, not as one blob. */
@@ -307,7 +316,11 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
             r_is_error = json_object_get_boolean(eo);
          }
          if (cb) {
-            cb(ud, role, content ? content : "", NULL, tcid, NULL, r_is_error);
+            const session_tool_row_t row = { .role = role,
+                                             .content = content ? content : "",
+                                             .tool_call_id = tcid,
+                                             .is_error = r_is_error };
+            (void)cb(ud, &row);
          }
          if (ev_live) {
             /* Recover the tool name from the batch's tool_calls (mapped above) so
@@ -482,7 +495,8 @@ static void append_openai_tool_history(struct json_object *history,
  */
 static void append_claude_tool_history(struct json_object *history,
                                        const llm_tool_response_t *response,
-                                       const tool_result_list_t *results) {
+                                       const tool_result_list_t *results,
+                                       const char *carrier) {
    json_object *assistant_msg = json_object_new_object();
    json_object_object_add(assistant_msg, "role", json_object_new_string("assistant"));
 
@@ -490,7 +504,7 @@ static void append_claude_tool_history(struct json_object *history,
     * thinking block with its own signature (empty text or not).  The blocks
     * travel with the message; each formatter renders them for its provider. */
    json_object *blocks = blocks_as_run(response, true);
-   json_object *rendered = llm_turn_blocks_render_claude(blocks);
+   json_object *rendered = llm_turn_blocks_render_claude(blocks, carrier);
    if (rendered) {
       json_object_object_add(assistant_msg, "content", rendered);
       json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, blocks);
@@ -954,7 +968,9 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       /* Step 8: Append assistant message + tool results to history */
       int hist_before = json_object_array_length(params->conversation_history);
       if (params->history_format == LLM_HISTORY_CLAUDE) {
-         append_claude_tool_history(params->conversation_history, &result, results);
+         char carrier[LLM_CARRIER_MAX];
+         llm_request_carrier(params->base_url, params->api_key, carrier, sizeof(carrier));
+         append_claude_tool_history(params->conversation_history, &result, results, carrier);
       } else {
          append_openai_tool_history(params->conversation_history, &result, results);
       }

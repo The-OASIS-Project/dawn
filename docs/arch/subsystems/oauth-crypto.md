@@ -22,6 +22,10 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Key file: `dawn.key` (auto-generated on first use, 256-bit)
    - Used by OAuth (token encryption) and email (password encryption)
    - `crypto_store_encrypt()` / `crypto_store_decrypt()` API
+   - `crypto_store_keyed_digest()`: a BLAKE2b digest under a per-purpose subkey
+     (`crypto_kdf`) of the same key. Stable on one install, meaningless without
+     its key file. Used for the API-key tag in stored LLM turn blocks
+     (`llm_key_tag`), so a stored row can't be used to test guesses at a key.
 
 ## OAuth Flow
 

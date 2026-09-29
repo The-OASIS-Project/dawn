@@ -199,7 +199,7 @@ void reload_session_history_if_stale(session_t *session,
              provider, provider_address, (long long)db_max, (long long)slot_last_known);
 
    size_t restored_chars = 0;
-   struct json_object *loaded = memory_history_load_from_db(conv_id, user_id, &restored_chars);
+   struct json_object *loaded = memory_history_load_for_llm(conv_id, user_id, &restored_chars);
    if (!loaded) {
       return;
    }
@@ -448,7 +448,7 @@ session_t *get_or_create_messaging_session(const char *provider,
    int64_t restored_max_msg_id = 0;
    if (conversation_id > 0 && user_id > 0) {
       size_t restored_chars = 0;
-      struct json_object *loaded = memory_history_load_from_db(conversation_id, user_id,
+      struct json_object *loaded = memory_history_load_for_llm(conversation_id, user_id,
                                                                &restored_chars);
       if (loaded) {
          size_t restored_count = (size_t)json_object_array_length(loaded);

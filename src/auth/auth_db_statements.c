@@ -379,17 +379,6 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
-       "reasoning, created_at, is_error) "
-       "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
-       "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ? AND user_id = ?)",
-       -1, &s_db.stmt_msg_add, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare msg_add failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
 
    rc = sqlite3_prepare_v2(
        s_db.db,
@@ -447,18 +436,6 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* v67: compaction watermark + summary, on the same conversation row (no fork).
-    * The trailing `? >= context_watermark_msg_id` is a monotonic guard so a stale
-    * async compaction can't rewind a watermark already advanced by a later pass. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "UPDATE conversations SET compaction_summary = ?, context_watermark_msg_id = ? "
-       "WHERE id = ? AND user_id = ? AND ? >= context_watermark_msg_id",
-       -1, &s_db.stmt_conv_set_watermark, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare conv_set_watermark failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
 
    rc = sqlite3_prepare_v2(
        s_db.db,
@@ -2640,10 +2617,15 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Message rows: the insert, the replay read and the compaction watermark. */
+   if (auth_db_messages_prepare() != AUTH_DB_SUCCESS)
+      return AUTH_DB_FAILURE;
+
    return AUTH_DB_SUCCESS;
 }
 
 void auth_db_finalize_statements(void) {
+   auth_db_messages_finalize();
    if (s_db.stmt_create_user)
       sqlite3_finalize(s_db.stmt_create_user);
    if (s_db.stmt_get_user)
@@ -2718,8 +2700,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_job_pending_followups);
    if (s_db.stmt_event_append)
       sqlite3_finalize(s_db.stmt_event_append);
-   if (s_db.stmt_msg_add)
-      sqlite3_finalize(s_db.stmt_msg_add);
    if (s_db.stmt_msg_get)
       sqlite3_finalize(s_db.stmt_msg_get);
    if (s_db.stmt_msg_get_after)
@@ -2730,8 +2710,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_conv_update_meta);
    if (s_db.stmt_conv_update_context)
       sqlite3_finalize(s_db.stmt_conv_update_context);
-   if (s_db.stmt_conv_set_watermark)
-      sqlite3_finalize(s_db.stmt_conv_set_watermark);
    if (s_db.stmt_conv_create_origin)
       sqlite3_finalize(s_db.stmt_conv_create_origin);
    if (s_db.stmt_conv_reassign)

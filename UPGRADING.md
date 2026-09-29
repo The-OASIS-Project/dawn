@@ -12,6 +12,51 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-29 — Reloaded conversations replay as the model produced them; old voice conversations cleaned up
+
+**What changed.**
+- **Each reply is now saved with its model's reasoning, for the model only.** When
+  a conversation is reopened, resumed as a background job, or continued from a
+  messaging channel, each earlier reply goes back to the model exactly as that
+  model produced it, reasoning included, instead of as plain text. Replies keep
+  their quality, and cloud providers can reuse their prompt cache. The reasoning
+  sits in a new database column that is never shown in the WebUI, exported,
+  searched or sent to any other model. Only the provider that produced it gets
+  it back (and, where a provider ties it to an account, only through the same
+  API key). It is removed once a conversation is compacted past it. A database
+  copied to another DAWN install can't replay it there.
+- **Old voice conversations are cleaned up automatically.** Before this
+  version, saving a voice conversation lost part of every turn that used a
+  tool:
+  - With Claude, the model's raw reply structure (tool calls, results, and any
+    reasoning) was stored as the message text, so reasoning reached memory
+    extraction and a reloaded conversation gave the model raw blocks instead of
+    real tool calls.
+  - With other models, the tool calls were dropped: the turn was saved as an
+    empty assistant message (an empty box in the WebUI) and its results were
+    saved without the call they answer, so the WebUI didn't show them.
+
+  On the first start after upgrading, DAWN rewrites those messages: calls and
+  results become proper tool entries where they can be paired, reasoning is
+  dropped, and where the call itself was never saved the turn becomes a note
+  ("[Tool Call: its name and arguments weren't saved]") followed by its results
+  ("[Tool Result: …]"), shown as tool entries in debug mode. The daemon log
+  says how many rows were rewritten. Messages DAWN saves from now on keep
+  their tool calls.
+
+**What you need to do.** Nothing. The database migrates itself on first start
+(schema versions 92 and 93).
+
+**Worth knowing.**
+- Backups made before the upgrade still hold the old voice messages, reasoning
+  included. Delete or keep them as you would any backup with private content.
+- Facts memory already extracted from those old voice conversations stay as
+  they are.
+- Rolling back to an older DAWN version is safe: older versions ignore the new
+  column.
+
+---
+
 ## 2026-09-27 — Memory: private-conversation fix, forget what a conversation taught, imported memories now searchable; unassigned satellites are guests
 
 **What changed.**

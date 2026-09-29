@@ -98,14 +98,9 @@ typedef struct {
  * @brief Tool-loop persist hook: write a structured tool-turn row (assistant
  *        tool_calls / role:tool result) to the conversation named by
  *        @p userdata (a job_persist_ctx_t*).  Matches session_tool_persist_fn.
+ * @return The row's id, or 0 when it wasn't saved
  */
-void job_dispatch_tool_persist_cb(void *userdata,
-                                  const char *role,
-                                  const char *content,
-                                  const char *tool_calls_json,
-                                  const char *tool_call_id,
-                                  const char *reasoning_json,
-                                  bool is_error);
+int64_t job_dispatch_tool_persist_cb(void *userdata, const session_tool_row_t *row);
 
 #ifdef __cplusplus
 }

@@ -241,6 +241,10 @@ static const char *SCHEMA_SQL =
     "   reasoning TEXT,"    /* assistant rows: display-only reasoning JSON (v57) */
     "   created_at INTEGER NOT NULL,"
     "   is_error INTEGER NOT NULL DEFAULT 0," /* role='tool' rows: 1 = confirmed failure (v81) */
+    /* assistant rows: the turn's stored blocks, read only to rebuild an LLM
+     * context (v92). Last column so the v92 ALTER yields the same table. */
+    "   llm_blocks_len INTEGER,"
+    "   llm_blocks TEXT " CONV_LLM_BLOCKS_CHECK_SQL ","
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"

@@ -125,6 +125,8 @@ static void drop_unclaimed_locked(session_t *session) {
    free(session->unclaimed_reply);
    session->unclaimed_user = NULL;
    session->unclaimed_reply = NULL;
+   json_object_put(session->unclaimed_reply_blocks);
+   session->unclaimed_reply_blocks = NULL;
    release_msg_locked(session, session->unclaimed_user_msg);
    release_msg_locked(session, session->unclaimed_reply_msg);
    session->unclaimed_user_msg = NULL;
@@ -345,6 +347,17 @@ void session_final_answer_clear(session_t *session) {
    session->final_answer.reasoning_json = NULL;
    json_object_put(session->final_answer.blocks);
    session->final_answer.blocks = NULL;
+   json_object_put(session->final_answer.reply_blocks);
+   session->final_answer.reply_blocks = NULL;
+}
+
+struct json_object *session_take_reply_blocks(session_t *session) {
+   if (!session) {
+      return NULL;
+   }
+   struct json_object *blocks = session->final_answer.reply_blocks;
+   session->final_answer.reply_blocks = NULL;
+   return blocks;
 }
 
 bool session_add_turn_assistant(session_t *session,
@@ -462,6 +475,52 @@ char *session_render_notices_locked(session_t *session, int viewer_user_id) {
       }
    }
    return out;
+}
+
+/* Caller holds history_mutex.  Set @p msg's text (and its blocks' text) when
+ * its content is plain text; an array (images) is left alone. */
+static bool replace_text_locked(struct json_object *msg, const char *text) {
+   struct json_object *content = NULL;
+   if (!msg || !json_object_object_get_ex(msg, "content", &content) ||
+       !json_object_is_type(content, json_type_string)) {
+      return false;
+   }
+   /* Text and blocks together: no provider replays the old text. */
+   llm_turn_message_set_text(msg, text);
+   return true;
+}
+
+bool session_replace_last_message_content(session_t *session,
+                                          const char *role,
+                                          const char *new_content) {
+   if (!session || !role || !new_content) {
+      return false;
+   }
+   bool replaced = false;
+   pthread_mutex_lock(&session->history_mutex);
+   if (strcmp(role, "assistant") == 0 && session->turn_active && session->turn_reply) {
+      /* The running turn's reply, wherever it sits (the turn's own copy, and
+       * its mirror in a reloaded live history). */
+      replaced = replace_text_locked(session->turn_reply, new_content);
+      if (replaced && session->turn_reply_mirror) {
+         (void)replace_text_locked(session->turn_reply_mirror, new_content);
+      }
+   } else {
+      struct json_object *hist = turn_target_locked(session);
+      const int len = hist ? (int)json_object_array_length(hist) : 0;
+      for (int i = len - 1; i >= 0; i--) {
+         struct json_object *msg = json_object_array_get_idx(hist, i);
+         struct json_object *r = NULL;
+         const char *rs = json_object_object_get_ex(msg, "role", &r) ? json_object_get_string(r)
+                                                                     : NULL;
+         if (rs && strcmp(rs, role) == 0) {
+            replaced = replace_text_locked(msg, new_content);
+            break;
+         }
+      }
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+   return replaced;
 }
 
 void session_stamp_last_message_id(session_t *session, const char *role, int64_t msg_id) {
@@ -951,6 +1010,8 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
    session->turn_llm_config_set = true;
    pthread_mutex_unlock(&session->llm_config_mutex);
    session_set_turn_token(token);
+   /* Nothing an earlier turn left can be this turn's reply's blocks. */
+   json_object_put(session_take_reply_blocks(session));
 
    pthread_mutex_lock(&session->history_mutex);
    if (session->turn_active) {
@@ -1382,6 +1443,7 @@ bool session_bind_created_conversation(session_t *session,
                                        int64_t conv_id,
                                        char **user_out,
                                        char **reply_out,
+                                       struct json_object **reply_blocks_out,
                                        bool *adopted_out) {
    if (user_out) {
       *user_out = NULL;
@@ -1389,10 +1451,13 @@ bool session_bind_created_conversation(session_t *session,
    if (reply_out) {
       *reply_out = NULL;
    }
+   if (reply_blocks_out) {
+      *reply_blocks_out = NULL;
+   }
    if (adopted_out) {
       *adopted_out = false;
    }
-   if (!session || conv_id <= 0 || !user_out || !reply_out || !adopted_out) {
+   if (!session || conv_id <= 0 || !user_out || !reply_out || !reply_blocks_out || !adopted_out) {
       return false;
    }
    pthread_mutex_lock(&session->history_mutex);
@@ -1416,15 +1481,19 @@ bool session_bind_created_conversation(session_t *session,
           * thread (which also stamps them: it reads those messages). */
          free(session->turn_prior_user);
          free(session->turn_prior_reply);
+         json_object_put(session->turn_prior_reply_blocks);
          session->turn_prior_user = session->unclaimed_user;
          session->turn_prior_reply = session->unclaimed_reply;
+         session->turn_prior_reply_blocks = session->unclaimed_reply_blocks;
       } else {
          *user_out = session->unclaimed_user;
          *reply_out = session->unclaimed_reply;
+         *reply_blocks_out = session->unclaimed_reply_blocks;
          hand_out = true;
       }
       session->unclaimed_user = NULL;
       session->unclaimed_reply = NULL;
+      session->unclaimed_reply_blocks = NULL;
       /* The live history holds that exchange and nothing else of any
        * conversation's: it is this conversation's now. */
       if (was_unbound) {
@@ -1484,10 +1553,12 @@ void session_stamp_claimed(session_t *session, int64_t user_row_id, int64_t repl
 bool session_turn_take_prior(session_t *session,
                              int64_t *conv_out,
                              char **user_out,
-                             char **reply_out) {
+                             char **reply_out,
+                             struct json_object **reply_blocks_out) {
    *conv_out = 0;
    *user_out = NULL;
    *reply_out = NULL;
+   *reply_blocks_out = NULL;
    if (!session) {
       return false;
    }
@@ -1498,8 +1569,10 @@ bool session_turn_take_prior(session_t *session,
       *conv_out = session->turn_history_conv;
       *user_out = session->turn_prior_user;
       *reply_out = session->turn_prior_reply;
+      *reply_blocks_out = session->turn_prior_reply_blocks;
       session->turn_prior_user = NULL;
       session->turn_prior_reply = NULL;
+      session->turn_prior_reply_blocks = NULL;
    }
    pthread_mutex_unlock(&session->history_mutex);
    return have;
@@ -1569,10 +1642,12 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
       out->conv = session->turn_history_conv;
       out->prior_user = session->turn_prior_user;
       out->prior_reply = session->turn_prior_reply;
+      out->prior_reply_blocks = session->turn_prior_reply_blocks;
       out->user = session->turn_pending_user;
       out->reply = session->turn_pending_reply;
       session->turn_prior_user = NULL;
       session->turn_prior_reply = NULL;
+      session->turn_prior_reply_blocks = NULL;
       session->turn_pending_user = NULL;
       session->turn_pending_reply = NULL;
       pthread_mutex_unlock(&session->history_mutex);
@@ -1654,8 +1729,10 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
                    session->session_id);
       free(session->turn_prior_user);
       free(session->turn_prior_reply);
+      json_object_put(session->turn_prior_reply_blocks);
       session->turn_prior_user = NULL;
       session->turn_prior_reply = NULL;
+      session->turn_prior_reply_blocks = NULL;
    }
    /* Facts this turn saved and never got a conversation for: they wait for the
     * one the live history becomes when that is the history it wrote (a new
@@ -1706,6 +1783,8 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          }
          if (session->unclaimed_reply) {
             session->unclaimed_reply_msg = reply ? json_object_get(reply) : NULL;
+            /* The ending turn's thread: its reply's blocks go with the reply. */
+            session->unclaimed_reply_blocks = session_take_reply_blocks(session);
          }
       } else {
          OLOG_WARNING("Session %u: a turn ended with unsaved messages and no one to write them",
@@ -1715,6 +1794,11 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
       }
       session->turn_pending_user = NULL;
       session->turn_pending_reply = NULL;
+   }
+   /* A reply's blocks are its own turn's: every writer takes them before the
+    * turn ends, and what nobody took must not reach the next turn's row. */
+   if (was_active) {
+      json_object_put(session_take_reply_blocks(session));
    }
    if (session->turn_reply) {
       json_object_put(session->turn_reply);

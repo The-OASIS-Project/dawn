@@ -43,6 +43,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 
 /* =============================================================================
  * Constants
@@ -64,7 +65,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 91
+#define AUTH_DB_SCHEMA_VERSION 93
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -107,6 +108,20 @@
 /* Helper macro for stringifying values in SQL */
 #define STRINGIFY_HELPER(x) #x
 #define STRINGIFY(x) STRINGIFY_HELPER(x)
+
+/* messages.llm_blocks (v92): stored blocks belong to assistant rows only, stay
+ * within CONV_LLM_BLOCKS_MAX bytes, and llm_blocks_len holds their byte length
+ * (set together, cleared together).  The length column comes BEFORE the blocks
+ * so a size or presence check never reads the blob's overflow pages.  Shared by
+ * the base schema and the v92 ALTER so both build the same columns. */
+/* Each comparison is guarded against NULL: a CHECK that evaluates to NULL
+ * passes, so "len = length(blocks)" alone would let one column be set without
+ * the other. */
+#define CONV_LLM_BLOCKS_CHECK_SQL                                                  \
+   "CHECK((llm_blocks IS NULL AND llm_blocks_len IS NULL) OR (role = 'assistant' " \
+   "AND llm_blocks IS NOT NULL AND llm_blocks_len IS NOT NULL "                    \
+   "AND llm_blocks_len = length(CAST(llm_blocks AS BLOB)) "                        \
+   "AND llm_blocks_len <= " STRINGIFY(CONV_LLM_BLOCKS_MAX) "))"
 
 /* Deep-research tables (v75), as ONE shared DDL string so the base SCHEMA_SQL
  * (auth_db_schema.c, fresh installs) and the v75 migration
@@ -269,6 +284,10 @@ typedef struct {
    sqlite3_stmt *stmt_msg_add;
    sqlite3_stmt *stmt_msg_get;
    sqlite3_stmt *stmt_msg_get_after;
+   sqlite3_stmt *stmt_msg_get_llm;      /* replay read with llm_blocks (auth_db_messages.c) */
+   sqlite3_stmt *stmt_msg_llm_sizes;    /* block sizes for the per-load budget */
+   sqlite3_stmt *stmt_msg_gc_blocks;    /* blocks dropped below the watermark */
+   sqlite3_stmt *stmt_msg_sweep_blocks; /* the same, across conversations */
    sqlite3_stmt *stmt_msg_get_admin;
    sqlite3_stmt *stmt_conv_update_meta;
    sqlite3_stmt *stmt_conv_update_context;
@@ -710,6 +729,26 @@ int auth_db_migrations_v66(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v67(sqlite3 *db);
+
+/**
+ * @brief v92 migration: messages.llm_blocks (an assistant turn's stored blocks),
+ *        the trigger that drops them when a row's text changes, and a one-time
+ *        re-render of voice rows saved as raw Claude block arrays. Idempotent.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v92(sqlite3 *db);
+
+/**
+ * @brief v93 migration: voice rows whose tool calls the old voice save dropped
+ *        (an empty assistant turn, results with no call id) become text notes.
+ *        Idempotent.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v93(sqlite3 *db);
+
+/** Prepare / finalize the message-row statements (auth_db_messages.c). */
+int auth_db_messages_prepare(void);
+void auth_db_messages_finalize(void);
 
 /**
  * @brief v68 migration: generic blobs table + documents.original_blob_id.

@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "core/job_dispatch.h"
 #include "core/memory_filter.h"
 #include "core/rate_limiter.h"
@@ -47,6 +48,7 @@
 #include "core/text_input_dispatch.h"
 #include "core/wake_word.h"
 #include "dawn_error.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
@@ -545,7 +547,9 @@ static void process_inbound(inbound_item_t *item) {
    /* The turn belongs to the channel's conversation (see session_turn_begin). */
    session_turn_begin(session, conv_id, item->user_id);
    char *response = core_text_input_dispatch(session, item->body, NULL, NULL, NULL, 0, &opts);
-   session_turn_end(session);
+   /* The reply's own blocks.  The turn stays open until the reply is saved, so
+    * the row, its id and any truncation land on this turn's history. */
+   struct json_object *reply_blocks = session_take_reply_blocks(session);
    session_set_tool_persist_hook(session, NULL, NULL);
 
    /* Stop the typing keepalive before doing anything else with the
@@ -560,6 +564,8 @@ static void process_inbound(inbound_item_t *item) {
    }
 
    if (!response || response[0] == '\0') {
+      json_object_put(reply_blocks);
+      session_turn_end(session);
       session_release(session);
       free(response);
       return;
@@ -587,6 +593,12 @@ static void process_inbound(inbound_item_t *item) {
       if (truncate_outbound_in_place(response, cfg.max_outbound_chars)) {
          OLOG_WARNING("messaging: truncated %s outbound %zu→%zu chars for %s:%s", item->provider,
                       original_len, strlen(response), item->provider, item->provider_address);
+         /* The saved blocks carry what was sent, as the history now does. */
+         struct json_object *sent = reply_blocks
+                                        ? llm_turn_blocks_with_final_text(reply_blocks, response)
+                                        : NULL;
+         json_object_put(reply_blocks);
+         reply_blocks = sent;
          if (!session_replace_last_message_content(session, "assistant", response)) {
             /* Either the assistant message uses multi-part content
              * (vision) or history was mutated under us — log only. */
@@ -606,8 +618,12 @@ static void process_inbound(inbound_item_t *item) {
     * still goes to the driver. */
    if (conv_id > 0) {
       int64_t assistant_msg_id = 0;
-      int rc = conv_db_add_message_ex(conv_id, item->user_id, "assistant", response,
-                                      &assistant_msg_id);
+      char *stored = llm_turn_blocks_answer_stored(reply_blocks);
+      const conv_message_row_t row = { .role = "assistant",
+                                       .content = response,
+                                       .llm_blocks = stored };
+      int rc = conv_db_add_row(conv_id, item->user_id, &row, &assistant_msg_id);
+      free(stored);
       if (rc == AUTH_DB_SUCCESS && assistant_msg_id > 0) {
          session_stamp_last_message_id(session, "assistant", assistant_msg_id);
          /* Bump slot's last_known_msg_id to the assistant message.
@@ -634,6 +650,10 @@ static void process_inbound(inbound_item_t *item) {
                       (long long)conv_id, rc);
       }
    }
+
+   json_object_put(reply_blocks);
+   reply_blocks = NULL;
+   session_turn_end(session);
 
    /* Touch last_used_at so the SMS active-conversation window slides
     * forward.  Also drives outbound rate-limit accounting and the

@@ -45,6 +45,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
@@ -2023,9 +2024,19 @@ int memory_trigger_extraction(int user_id,
       return 0;
    }
 
-   ctx->conversation_json = strdup(
-       json_object_to_json_string_ext(filtered, JSON_C_TO_STRING_PLAIN));
+   /* Every caller passes a stripped history; this is the backstop, so no
+    * reasoning a vendor issued for itself reaches the extraction model. */
+   struct json_object *safe = llm_history_strip_internal(filtered);
    json_object_put(filtered);
+   if (!safe) {
+      free(ctx);
+      pthread_mutex_lock(&s_extraction_mutex);
+      extraction_slot_release_locked(user_id);
+      pthread_mutex_unlock(&s_extraction_mutex);
+      return 1;
+   }
+   ctx->conversation_json = strdup(json_object_to_json_string_ext(safe, JSON_C_TO_STRING_PLAIN));
+   json_object_put(safe);
 
    if (!ctx->conversation_json) {
       free(ctx);

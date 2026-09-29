@@ -46,7 +46,7 @@
  * "opaque" block is vendor content DAWN doesn't interpret: replayed verbatim
  * to its vendor (an omission would be a history edit there) and left out
  * elsewhere.  A tool_call may later carry vendor data of its own ("call_id",
- * a per-call reasoning "sig"); this shape is versioned where it's persisted.
+ * a per-call reasoning "sig"); the stored shape carries a version.
  *
  * Every key DAWN puts on a history message for itself starts with '_' (this
  * one included): none of them go on the wire or into a text another model
@@ -68,8 +68,8 @@ struct json_object;
 /** The history message key the blocks live under. */
 #define LLM_TURN_BLOCKS_KEY "_blocks"
 
-/** Carriers (who issued a reasoning block) and formats (whose object it is). */
-#define LLM_CARRIER_ANTHROPIC "anthropic"
+/** Formats (whose object a vendor block is).  A block's carrier (who issued
+ * it) is the request's endpoint and key: llm_request_carrier(). */
 #define LLM_FORMAT_ANTHROPIC "anthropic"
 #define LLM_FORMAT_OPENAI "openai"
 /* OpenRouter's reasoning_details entries (any upstream vendor: the entry's own
@@ -80,9 +80,11 @@ struct json_object;
 
 /** Room for a carrier (llm_turn_blocks_carrier). */
 #define LLM_CARRIER_MAX 128
-/* OpenAI-format reasoning is carried by the endpoint and organization that
- * issued it: its carrier is the endpoint's host and a fingerprint of the API
- * key ("api.openai.com#1a2b3c4d"). */
+/* Reasoning is carried by the endpoint and organization that issued it: its
+ * carrier is the endpoint (host, and a digest of scheme, host and path) and
+ * the API key's tag, for every vendor.  A
+ * vendor signs or encrypts it for its own organization, and a stored turn must
+ * never go to another endpoint (a gateway, another account, another install). */
 
 /** A new, empty block list (caller owns it; NULL on allocation failure). */
 struct json_object *llm_turn_blocks_new(void);
@@ -93,15 +95,16 @@ void llm_turn_blocks_add_text(struct json_object *blocks, const char *text);
 /**
  * @brief The carrier of a request's reasoning: its endpoint and API key
  *
- * The endpoint's host and a short fingerprint of the key
- * ("api.openai.com#1a2b3c4d"): reasoning is encrypted or signed for the
- * organization that produced it, and another key may belong to another one.
- * The fingerprint (FNV-1a, 32 bits) tells keys apart and says nothing useful
- * about one.  Credentials in the URL are never included.
+ * The endpoint and the key's tag ("api.openai.com/<endpoint digest>#<tag>",
+ * the tag from llm_key_tag): reasoning is encrypted or signed for the
+ * organization that produced it, and another key or another gateway on the
+ * same host (routed by path) may belong to another one.  The digest covers
+ * scheme, host and path; credentials, query and fragment are never included.
  *
+ * @param key_tag The request key's tag (llm_key_tag)
  * @param out At least LLM_CARRIER_MAX bytes
  */
-void llm_turn_blocks_carrier(const char *base_url, const char *api_key, char *out, size_t out_len);
+void llm_turn_blocks_carrier(const char *base_url, const char *key_tag, char *out, size_t out_len);
 
 /** Append a tool call; @p arguments is its JSON argument text ("" = {}). */
 void llm_turn_blocks_add_tool_call(struct json_object *blocks,
@@ -146,21 +149,25 @@ bool llm_turn_blocks_is_own(struct json_object *block, const char *carrier, cons
  * call, and any other block type is kept as Anthropic opaque content.
  *
  * @param content The response's content blocks, in order
+ * @param carrier The request's carrier (llm_request_carrier); "" for none
  * @param model The model that produced them
  * @return New blocks (caller owns them), or NULL
  */
-struct json_object *llm_turn_blocks_from_claude(struct json_object *content, const char *model);
+struct json_object *llm_turn_blocks_from_claude(struct json_object *content,
+                                                const char *carrier,
+                                                const char *model);
 
 /**
  * @brief Render blocks as a Claude assistant content array
  *
  * Anthropic reasoning and opaque content verbatim, text as text, tool calls as
- * tool_use (their arguments parsed; unparsable arguments become {}).  Other
- * vendors' reasoning and opaque content are left out.
+ * tool_use (their arguments parsed; unparsable arguments become {}).
+ * Reasoning and opaque content from any other carrier are left out.
  *
+ * @param carrier The request's carrier (llm_request_carrier)
  * @return A new array (caller owns it), or NULL
  */
-struct json_object *llm_turn_blocks_render_claude(struct json_object *blocks);
+struct json_object *llm_turn_blocks_render_claude(struct json_object *blocks, const char *carrier);
 
 /**
  * @brief The final answer's blocks, with its text replaced by @p final_text
@@ -284,6 +291,62 @@ struct json_object *llm_history_wire_copy(struct json_object *history);
  * its shape.  Caller owns it; NULL on failure.
  */
 struct json_object *llm_history_strip_internal(struct json_object *history);
+
+/* ---- The stored shape (llm_turn_blocks_stored.c) ---- */
+
+/** Version of the stored envelope ({"v":1,"blocks":[...]}). */
+#define LLM_TURN_BLOCKS_STORED_VERSION 1
+
+/**
+ * Largest stored value, in bytes: the database's cap on `messages.llm_blocks`
+ * (CONV_LLM_BLOCKS_MAX), so what is written is what reloads.
+ */
+#define LLM_TURN_BLOCKS_STORED_MAX 4194304
+
+/** Most blocks a stored turn may hold. */
+#define LLM_TURN_BLOCKS_STORED_ENTRIES_MAX 4096
+
+/**
+ * @brief Blocks as the text stored with their assistant row
+ *
+ * A versioned envelope, serialized exactly (no slash escaping, strings and
+ * numbers as received), so a reload replays the bytes that were sent.
+ *
+ * @return A malloc'd string (caller frees), or NULL when there are no blocks,
+ *         on allocation failure, or when it would pass
+ *         LLM_TURN_BLOCKS_STORED_MAX (logged; the row then saves without them)
+ */
+char *llm_turn_blocks_to_stored(struct json_object *blocks);
+
+/**
+ * @brief A final answer's blocks as stored text
+ *
+ * llm_turn_blocks_to_stored() for the reply row of a turn, which records no
+ * tool calls: blocks that hold any aren't that row's (logged) and give NULL.
+ * NULL @p blocks gives NULL.
+ */
+char *llm_turn_blocks_answer_stored(struct json_object *blocks);
+
+/**
+ * @brief Blocks from a row's stored text, or NULL when it isn't valid
+ *
+ * Fails closed: the text must parse within a depth limit, carry the known
+ * version, hold at most LLM_TURN_BLOCKS_STORED_ENTRIES_MAX blocks, and every
+ * block must be a known type with its required fields.  Anything else loads
+ * the row without blocks (logged by @p row_id and reason, never the content).
+ *
+ * @return New blocks (caller owns them), or NULL
+ */
+struct json_object *llm_turn_blocks_from_stored(const char *text, size_t len, long long row_id);
+
+/**
+ * @brief Whether blocks record the same tool calls as a message's tool_calls
+ *
+ * The same call ids in the same order (NULL or an empty array: no calls).
+ * Blocks that disagree with their message describe some other turn and aren't
+ * replayed.
+ */
+bool llm_turn_blocks_calls_match(struct json_object *blocks, struct json_object *tool_calls);
 
 #ifdef __cplusplus
 }

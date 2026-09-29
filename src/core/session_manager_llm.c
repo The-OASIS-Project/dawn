@@ -133,6 +133,27 @@ typedef struct {
    char endpoint_buf[128];             /* Buffer for endpoint (outlives stack) */
 } llm_call_ctx_t;
 
+/* A private copy of the reply's blocks for the writer that saves it
+ * (session_take_reply_blocks): the history's copy is shared from here on. */
+static void keep_reply_blocks(session_t *session, struct json_object *blocks) {
+   json_object_put(session->final_answer.reply_blocks);
+   session->final_answer.reply_blocks = NULL;
+   if (blocks && json_object_deep_copy(blocks, &session->final_answer.reply_blocks, NULL) != 0) {
+      session->final_answer.reply_blocks = NULL;
+   }
+}
+
+/* A cancelled reply the caller saves anyway: its blocks, as the history would
+ * have held them. */
+static void keep_cancelled_reply_blocks(session_t *session, const char *text) {
+   struct json_object *blocks = NULL;
+   if (session->final_answer.blocks && text && *text) {
+      blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, text);
+   }
+   json_object_put(session->final_answer.reply_blocks);
+   session->final_answer.reply_blocks = blocks;
+}
+
 /**
  * @brief Prepare for LLM call - common setup for all LLM call variants
  *
@@ -335,6 +356,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          if (llm_response_finalize(session, response, &fin) == SUCCESS) {
             free(response);
             session->cancelled_final_response = fin.text; /* caller takes + frees */
+            keep_cancelled_reply_blocks(session, fin.text);
          } else {
             /* Degraded (llm_response_finalize alloc-failed): strip the tag grammar in
              * place — the strips need no allocation — so residual <cited>/<command>/
@@ -344,6 +366,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
             text_filter_command_strip(response, false);
             text_filter_cited_strip(response);
             session->cancelled_final_response = response;
+            keep_cancelled_reply_blocks(session, response);
          }
       } else {
          free(response);
@@ -386,6 +409,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          json_object_put(session->final_answer.blocks);
          session->final_answer.blocks = NULL;
       }
+      keep_reply_blocks(session, blocks);
       session_add_turn_assistant(session, response, blocks);
       json_object_put(blocks);
    } else {

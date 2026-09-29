@@ -29,14 +29,25 @@
 #define MEMORY_HISTORY_LOADER_H
 
 #include <json-c/json.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief A row as a loader callback sees it
+ *
+ * Append the row's message to the loader's array (at most one per row).  The
+ * row's stored blocks are not the callback's to read: the loader attaches them
+ * to that message itself (see memory_history_load_rows).
+ */
+typedef int (*memory_history_row_cb)(const conversation_llm_row_t *row, void *ctx);
 
 /**
  * @brief Load a conversation's context rows past its compaction point
@@ -47,6 +58,12 @@ extern "C" {
  * at the start of what was loaded answer a call inside the summary; they are
  * dropped (llm_history_drop_leading_results), on every such load.
  *
+ * With @p with_blocks, an assistant row's stored blocks are attached to the
+ * message @p cb appended for it (under LLM_TURN_BLOCKS_KEY), once the read is
+ * done: only when they parse (llm_turn_blocks_from_stored) and record the
+ * message's tool calls.  Only a load that becomes an LLM context replayed to
+ * a vendor asks for them.
+ *
  * @param rows        The array @p cb appends to (the new rows start at its
  *                    current length)
  * @param chars_out   Receives the length of dropped rows' text (may be NULL)
@@ -55,7 +72,8 @@ extern "C" {
 int memory_history_load_rows(int64_t conv_id,
                              int user_id,
                              int64_t watermark,
-                             message_callback_t cb,
+                             bool with_blocks,
+                             memory_history_row_cb cb,
                              void *ctx,
                              struct json_object *rows,
                              size_t *chars_out);
@@ -65,8 +83,9 @@ int memory_history_load_rows(int64_t conv_id,
  *
  * Reads rows from the messages table for (conv_id, user_id), strips inline
  * image markers, and assembles {"role","content","id"} entries in original
- * order.  The returned array is owned by the caller and must be released
- * with json_object_put().
+ * order.  Carries no stored blocks: for extraction and summaries, which never
+ * replay a turn to its vendor.  The returned array is owned by the caller and
+ * must be released with json_object_put().
  *
  * @param conv_id        conversation ID
  * @param user_id        owning user ID (defense-in-depth ownership check)
@@ -76,6 +95,14 @@ int memory_history_load_rows(int64_t conv_id,
  * @return owned json_object array, or NULL on failure
  */
 struct json_object *memory_history_load_from_db(int64_t conv_id, int user_id, size_t *text_len_out);
+
+/**
+ * @brief memory_history_load_from_db() for a context the LLM continues
+ *
+ * The same history, with each assistant turn's stored blocks, so the turns
+ * replay as the model produced them.
+ */
+struct json_object *memory_history_load_for_llm(int64_t conv_id, int user_id, size_t *text_len_out);
 
 /**
  * @brief Replace `[IMAGE:...]` markers in `src` with `[image]`.

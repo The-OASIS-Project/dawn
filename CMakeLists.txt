@@ -612,6 +612,9 @@ set(DAWN_SOURCES
     src/llm/llm_claude_binding.c
     src/llm/llm_claude_blocks.c
     src/llm/llm_turn_blocks.c
+    src/llm/llm_turn_blocks_stored.c
+    src/llm/llm_key_tag.c
+    src/llm/llm_history_rows.c
     src/llm/llm_claude_parts.c
     src/llm/llm_reasoning_details.c
     src/llm/llm_compaction_range.c
@@ -764,6 +767,7 @@ endif()
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
+        src/core/session_voice_save.c
         src/core/session_history.c
         src/core/turn_queue.c
         src/core/session_manager_llm.c
@@ -903,6 +907,9 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v73.c
     src/auth/auth_db_migrations_v74.c
     src/auth/auth_db_migrations_v75.c
+    src/auth/auth_db_migrations_v92.c
+    src/auth/auth_db_migrations_v93.c
+    src/auth/auth_db_messages.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
@@ -1057,6 +1064,16 @@ add_custom_target(no_raw_strncpy_check
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Checking safe_strscpy migration invariant: no raw strncpy in swept dirs")
 add_dependencies(dawn no_raw_strncpy_check)
+
+# Stored-turn-blocks CI invariant: messages.llm_blocks holds reasoning a vendor
+# issued for itself, so it is read only to rebuild an LLM context and never
+# reaches a client, a search, an export or another model; and an assistant row
+# written without blocks says why.  See scripts/check_llm_blocks_confined.sh.
+add_custom_target(llm_blocks_confined_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_llm_blocks_confined.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking stored-turn-blocks invariant: replay path only")
+add_dependencies(dawn llm_blocks_confined_check)
 
 # Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
 # in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or

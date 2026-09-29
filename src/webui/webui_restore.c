@@ -31,6 +31,7 @@
 #include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "utils/string_utils.h"
@@ -125,7 +126,7 @@ static char *restore_strip_leading_dawn_markers(const char *content) {
  * @brief Message callback for session context restoration.
  * Builds JSON objects with role + content for iterating into session_add_message.
  */
-static int webui_session_restore_msg_cb(const conversation_message_t *msg, void *context) {
+static int webui_session_restore_msg_cb(const conversation_llm_row_t *msg, void *context) {
    json_object *arr = (json_object *)context;
    json_object *obj = json_object_new_object();
    /* The row id rides along into the context so memory extraction can verify
@@ -174,35 +175,30 @@ static void copy_row_id(json_object *src, json_object *dst) {
 static json_object *webui_build_conversation_context(int user_id,
                                                      const conversation_t *conv,
                                                      int64_t conv_id,
-                                                     json_object *preloaded_msgs,
                                                      bool full_system_prompt,
                                                      bool *has_system_out,
                                                      int *count_out) {
    *has_system_out = false;
    *count_out = 0;
-   json_object *all_msgs = preloaded_msgs;
+   json_object *all_msgs = json_object_new_array();
    if (!all_msgs) {
-      all_msgs = json_object_new_array();
-      if (!all_msgs) {
-         return NULL;
-      }
-      /* v67: bound restored context to messages after the compaction watermark;
-       * the injected summary (below) stands in for the compacted prefix. The
-       * full transcript is still shown in the UI (display load is unbounded). */
-      const int rc = memory_history_load_rows(conv_id, user_id, conv->context_watermark_msg_id,
-                                              webui_session_restore_msg_cb, all_msgs, all_msgs,
-                                              NULL);
-      if (rc != AUTH_DB_SUCCESS) {
-         json_object_put(all_msgs);
-         return NULL;
-      }
+      return NULL;
+   }
+   /* v67: bound restored context to messages after the compaction watermark;
+    * the injected summary (below) stands in for the compacted prefix. The
+    * full transcript is still shown in the UI (display load is unbounded).
+    * Each assistant turn comes back with its stored blocks, so it replays as
+    * the model produced it. */
+   const int rc = memory_history_load_rows(conv_id, user_id, conv->context_watermark_msg_id, true,
+                                           webui_session_restore_msg_cb, all_msgs, all_msgs, NULL);
+   if (rc != AUTH_DB_SUCCESS) {
+      json_object_put(all_msgs);
+      return NULL;
    }
 
    json_object *hist = json_object_new_array();
    if (!hist) {
-      if (all_msgs != preloaded_msgs) {
-         json_object_put(all_msgs);
-      }
+      json_object_put(all_msgs);
       return NULL;
    }
    int count = json_object_array_length(all_msgs);
@@ -300,15 +296,17 @@ static json_object *webui_build_conversation_context(int user_id,
          }
          if (m) {
             copy_row_id(msg, m);
+            json_object *blocks = NULL;
+            if (json_object_object_get_ex(msg, LLM_TURN_BLOCKS_KEY, &blocks)) {
+               json_object_object_add(m, LLM_TURN_BLOCKS_KEY, json_object_get(blocks));
+            }
             json_object_array_add(hist, m);
          }
          free(stripped_content);
       }
    }
 
-   if (all_msgs != preloaded_msgs) {
-      json_object_put(all_msgs);
-   }
+   json_object_put(all_msgs);
    *has_system_out = has_system;
    *count_out = count;
    return hist;
@@ -392,15 +390,14 @@ static int webui_restore_session_context(session_t *session,
                                          int user_id,
                                          const conversation_t *conv,
                                          int64_t conv_id,
-                                         json_object *preloaded_msgs,
                                          int *count_out) {
    if (count_out) {
       *count_out = 0;
    }
    bool has_system = false;
    int count = 0;
-   json_object *hist = webui_build_conversation_context(user_id, conv, conv_id, preloaded_msgs,
-                                                        true, &has_system, &count);
+   json_object *hist = webui_build_conversation_context(user_id, conv, conv_id, true, &has_system,
+                                                        &count);
    if (!hist) {
       return FAILURE;
    }
@@ -420,10 +417,9 @@ static int webui_restore_session_context(session_t *session,
 int webui_restore_conversation_context(ws_connection_t *conn,
                                        const conversation_t *conv,
                                        int64_t conv_id,
-                                       json_object *preloaded_msgs,
                                        int *count_out) {
    return webui_restore_session_context(conn->session, conn->auth_user_id, conv, conv_id,
-                                        preloaded_msgs, count_out);
+                                        count_out);
 }
 
 /* session_turn_begin's loader: the context of a conversation other than the one
@@ -446,8 +442,8 @@ json_object *webui_turn_history_loader(int user_id,
    int count = 0;
    /* A turn rebuilds its system messages before every LLM call, so the loaded
     * copy needs only a placeholder, not the user's full prompt. */
-   json_object *hist = webui_build_conversation_context(user_id, &conv, conv_id, NULL, false,
-                                                        &has_system, &count);
+   json_object *hist = webui_build_conversation_context(user_id, &conv, conv_id, false, &has_system,
+                                                        &count);
    if (hist) {
       *has_cfg_out = conversation_llm_config(&conv, base, cfg_out);
    }

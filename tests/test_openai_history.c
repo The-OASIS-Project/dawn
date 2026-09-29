@@ -29,6 +29,9 @@
 #include "llm/llm_turn_blocks.h"
 #include "unity.h"
 
+/* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
+#define TEST_CLAUDE_CARRIER "api.anthropic.com#0123456789abcdef"
+
 /* ---- stubs ---- */
 int is_vision_enabled_for_current_llm(void) {
    return 1;
@@ -54,7 +57,7 @@ static void test_internal_keys_never_go_on_the_wire(void) {
    json_object_array_add(history, msg("user", "Hi"));
    json_object *answer = msg("assistant", "Hello.");
    json_object *blocks = llm_turn_blocks_new();
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC,
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC,
                                  "claude-opus-5-5",
                                  json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"x\","
                                                     "\"signature\":\"S\"}"));
@@ -144,7 +147,8 @@ static void test_claude_turn_with_blocks_keeps_its_result(void) {
    json_object *turn = json_object_new_object();
    json_object_object_add(turn, "role", json_object_new_string("assistant"));
    json_object_object_add(turn, LLM_TURN_BLOCKS_KEY,
-                          llm_turn_blocks_from_claude(content, "claude-opus-5-5"));
+                          llm_turn_blocks_from_claude(content, TEST_CLAUDE_CARRIER,
+                                                      "claude-opus-5-5"));
    json_object_object_add(turn, "content", content);
    json_object_array_add(history, turn);
    json_object_array_add(history, json_tokener_parse("{\"role\":\"user\",\"content\":[{\"type\":"

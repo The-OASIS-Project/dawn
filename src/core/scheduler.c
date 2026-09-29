@@ -722,6 +722,7 @@ static void briefing_persist_tool_steps(int64_t conv_id,
       json_object_object_add(tc, "function", func);
       json_object_array_add(tc_array, tc);
    }
+   /* no-blocks: the briefing's own tool steps, not a model turn. */
    if (conv_db_add_message_with_tools(conv_id, user_id, "assistant", "",
                                       json_object_to_json_string(tc_array), NULL, NULL,
                                       NULL) != AUTH_DB_SUCCESS) {
@@ -1050,6 +1051,7 @@ static void *briefing_thread_func(void *arg) {
           * they remain useful if the user opens the briefing conv in the WebUI,
           * so we persist rather than special-case the messaging path. */
          briefing_persist_tool_steps(conv_id, event->user_id, persist_steps, persist_count);
+         /* no-blocks: a briefing summary is posted text, not a turn to replay. */
          conv_db_add_message(conv_id, event->user_id, "assistant", final_text);
       }
 

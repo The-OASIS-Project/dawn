@@ -21,11 +21,17 @@
  */
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
+#include "llm/llm_turn_blocks.h"
 #include "memory/memory_history_loader.h"
 #include "unity.h"
+
+/* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
+#define TEST_CLAUDE_CARRIER "api.anthropic.com#0123456789abcdef"
 
 static int s_user_id;
 
@@ -108,9 +114,74 @@ static void test_point_at_a_turn(void) {
    json_object_put(h);
 }
 
+/* A row as stored: blocks with a thinking signature and one tool call. */
+static int64_t add_with_blocks(int64_t conv, const char *call_id, const char *calls_json) {
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC, "m",
+                                 json_tokener_parse("{\"type\":\"thinking\",\"thinking\":"
+                                                    "\"plan\",\"signature\":\"SIG\"}"));
+   llm_turn_blocks_add_text(blocks, "Checking.");
+   llm_turn_blocks_add_tool_call(blocks, call_id, "weather", "{}");
+   char *stored = llm_turn_blocks_to_stored(blocks);
+   json_object_put(blocks);
+   TEST_ASSERT_NOT_NULL(stored);
+   const conv_message_row_t row = { .role = "assistant",
+                                    .content = "Checking.",
+                                    .tool_calls = calls_json,
+                                    .llm_blocks = stored };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user_id, &row, &id));
+   free(stored);
+   return id;
+}
+
+static struct json_object *message_with_id(struct json_object *h, int64_t id) {
+   for (size_t i = 0; i < json_object_array_length(h); i++) {
+      struct json_object *m = json_object_array_get_idx(h, i), *v = NULL;
+      if (json_object_object_get_ex(m, "id", &v) && json_object_get_int64(v) == id)
+         return m;
+   }
+   return NULL;
+}
+
+/* A replay load brings each turn's blocks back; nothing else does. */
+static void test_blocks_reload_for_replay_only(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user_id, "chat", &conv));
+   add(conv, "user", "weather?", NULL, NULL);
+   const char *calls = "[{\"id\":\"c1\",\"type\":\"function\",\"function\":"
+                       "{\"name\":\"weather\",\"arguments\":\"{}\"}}]";
+   const int64_t turn = add_with_blocks(conv, "c1", calls);
+   add(conv, "tool", "sunny", NULL, "c1");
+   /* Blocks naming another call than their row's: not replayed. */
+   const int64_t stale = add_with_blocks(conv, "c9", calls);
+
+   struct json_object *h = memory_history_load_for_llm(conv, s_user_id, NULL);
+   TEST_ASSERT_NOT_NULL(h);
+   struct json_object *blocks = NULL;
+   TEST_ASSERT_TRUE(
+       json_object_object_get_ex(message_with_id(h, turn), LLM_TURN_BLOCKS_KEY, &blocks));
+   struct json_object *claude = llm_turn_blocks_render_claude(blocks, TEST_CLAUDE_CARRIER);
+   const char *wire = json_object_to_json_string_ext(claude, JSON_C_TO_STRING_PLAIN);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(wire, "\"signature\":\"SIG\""), wire);
+   TEST_ASSERT_NOT_NULL(strstr(wire, "\"id\":\"c1\""));
+   json_object_put(claude);
+   TEST_ASSERT_FALSE(
+       json_object_object_get_ex(message_with_id(h, stale), LLM_TURN_BLOCKS_KEY, NULL));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(h), "_blocks_raw"));
+   json_object_put(h);
+
+   /* Extraction and summaries load the same rows without them. */
+   h = memory_history_load_from_db(conv, s_user_id, NULL);
+   TEST_ASSERT_NOT_NULL(h);
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(h), "SIG"));
+   json_object_put(h);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_point_inside_a_tool_exchange);
    RUN_TEST(test_point_at_a_turn);
+   RUN_TEST(test_blocks_reload_for_replay_only);
    return UNITY_END();
 }

@@ -27,6 +27,7 @@
 #include "auth/auth_db.h"
 #include "dawn_error.h"
 #include "llm/llm_compaction_range.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
 typedef struct {
@@ -80,7 +81,7 @@ char *memory_history_strip_image_markers(const char *src) {
    return dst;
 }
 
-static int append_message_to_history(const conversation_message_t *msg, void *ctx_ptr) {
+static int append_message_to_history(const conversation_llm_row_t *msg, void *ctx_ptr) {
    history_build_ctx_t *ctx = (history_build_ctx_t *)ctx_ptr;
    if (!ctx || !ctx->array || !msg) {
       return 0;
@@ -132,19 +133,111 @@ static int append_message_to_history(const conversation_message_t *msg, void *ct
    return 0;
 }
 
+/* The loader's wrap of a caller's row callback: the stored blocks stay here. */
+typedef struct {
+   memory_history_row_cb cb;
+   void *ctx;
+   struct json_object *rows;
+   bool with_blocks;
+} load_ctx_t;
+
+/* Key a message carries its row's stored text under between the read and the
+ * parse; never seen outside this file. */
+#define BLOCKS_RAW_KEY "_blocks_raw"
+
+static int on_llm_row(const conversation_llm_row_t *row, void *p) {
+   load_ctx_t *lc = p;
+   conversation_llm_row_t shown = *row;
+   shown.llm_blocks = NULL;
+   shown.llm_blocks_len = 0;
+   const size_t before = json_object_array_length(lc->rows);
+   const int stop = lc->cb(&shown, lc->ctx);
+   /* Copied now (the row's text is gone after the callback) and parsed after
+    * the read, outside the database lock. */
+   if (lc->with_blocks && row->llm_blocks && json_object_array_length(lc->rows) == before + 1) {
+      struct json_object *raw = json_object_new_string_len(row->llm_blocks,
+                                                           (int)row->llm_blocks_len);
+      if (raw) {
+         json_object_object_add(json_object_array_get_idx(lc->rows, before), BLOCKS_RAW_KEY, raw);
+      }
+   }
+   return stop;
+}
+
+/* A display row as the loader's row type (no blocks). */
+static int on_message(const conversation_message_t *msg, void *p) {
+   conversation_llm_row_t row = { .id = msg->id,
+                                  .content = msg->content,
+                                  .tool_calls = msg->tool_calls,
+                                  .tool_call_id = msg->tool_call_id,
+                                  .created_at = msg->created_at,
+                                  .is_error = msg->is_error };
+   memcpy(row.role, msg->role, sizeof(row.role));
+   return on_llm_row(&row, p);
+}
+
+static int64_t message_id(struct json_object *msg) {
+   struct json_object *id = NULL;
+   return json_object_object_get_ex(msg, "id", &id) ? json_object_get_int64(id) : 0;
+}
+
+/* Replace each message's stored text with its blocks, when they parse and
+ * record the message's tool calls. */
+static void attach_blocks(struct json_object *rows, int from) {
+   const int n = (int)json_object_array_length(rows);
+   for (int i = from; i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(rows, i);
+      struct json_object *raw = NULL;
+      if (!json_object_object_get_ex(msg, BLOCKS_RAW_KEY, &raw)) {
+         continue;
+      }
+      struct json_object *blocks = llm_turn_blocks_from_stored(
+          json_object_get_string(raw), (size_t)json_object_get_string_len(raw),
+          (long long)message_id(msg));
+      struct json_object *calls = NULL;
+      json_object_object_get_ex(msg, "tool_calls", &calls);
+      if (blocks && llm_turn_blocks_calls_match(blocks, calls)) {
+         json_object_object_add(msg, LLM_TURN_BLOCKS_KEY, blocks);
+      } else {
+         if (blocks) {
+            OLOG_WARNING("memory_history_loader: row %lld's blocks don't match its tool calls; "
+                         "loaded without them",
+                         (long long)message_id(msg));
+         }
+         json_object_put(blocks);
+      }
+      json_object_object_del(msg, BLOCKS_RAW_KEY);
+   }
+}
+
 int memory_history_load_rows(int64_t conv_id,
                              int user_id,
                              int64_t watermark,
-                             message_callback_t cb,
+                             bool with_blocks,
+                             memory_history_row_cb cb,
                              void *ctx,
                              struct json_object *rows,
                              size_t *chars_out) {
    if (chars_out) {
       *chars_out = 0;
    }
-   const int from = rows ? (int)json_object_array_length(rows) : 0;
-   const int rc = (watermark > 0) ? conv_db_get_messages_after(conv_id, user_id, watermark, cb, ctx)
-                                  : conv_db_get_messages(conv_id, user_id, cb, ctx);
+   if (!cb || !rows) {
+      return AUTH_DB_INVALID;
+   }
+   const int from = (int)json_object_array_length(rows);
+   load_ctx_t lc = { .cb = cb, .ctx = ctx, .rows = rows, .with_blocks = with_blocks };
+   int rc;
+   if (with_blocks) {
+      rc = conv_db_get_messages_for_llm(conv_id, user_id, watermark > 0 ? watermark : 0, on_llm_row,
+                                        &lc);
+   } else {
+      rc = (watermark > 0)
+               ? conv_db_get_messages_after(conv_id, user_id, watermark, on_message, &lc)
+               : conv_db_get_messages(conv_id, user_id, on_message, &lc);
+   }
+   if (with_blocks) {
+      attach_blocks(rows, from);
+   }
    if (rc == AUTH_DB_SUCCESS && watermark > 0) {
       /* A point recorded inside a tool exchange leaves results whose call is
        * in the summary: drop them, on every load. */
@@ -153,9 +246,10 @@ int memory_history_load_rows(int64_t conv_id,
    return rc;
 }
 
-struct json_object *memory_history_load_from_db(int64_t conv_id,
-                                                int user_id,
-                                                size_t *text_len_out) {
+static struct json_object *load_history(int64_t conv_id,
+                                        int user_id,
+                                        bool with_blocks,
+                                        size_t *text_len_out) {
    history_build_ctx_t ctx = { .array = json_object_new_array(), .total_text_len = 0 };
    if (!ctx.array) {
       return NULL;
@@ -189,8 +283,9 @@ struct json_object *memory_history_load_from_db(int64_t conv_id,
    conv_free(&conv);
 
    size_t dropped_chars = 0;
-   const int rc = memory_history_load_rows(conv_id, user_id, watermark, append_message_to_history,
-                                           &ctx, ctx.array, &dropped_chars);
+   const int rc = memory_history_load_rows(conv_id, user_id, watermark, with_blocks,
+                                           append_message_to_history, &ctx, ctx.array,
+                                           &dropped_chars);
    if (rc != AUTH_DB_SUCCESS) {
       json_object_put(ctx.array);
       return NULL;
@@ -201,4 +296,16 @@ struct json_object *memory_history_load_from_db(int64_t conv_id,
    }
 
    return ctx.array;
+}
+
+struct json_object *memory_history_load_from_db(int64_t conv_id,
+                                                int user_id,
+                                                size_t *text_len_out) {
+   return load_history(conv_id, user_id, false, text_len_out);
+}
+
+struct json_object *memory_history_load_for_llm(int64_t conv_id,
+                                                int user_id,
+                                                size_t *text_len_out) {
+   return load_history(conv_id, user_id, true, text_len_out);
 }

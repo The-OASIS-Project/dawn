@@ -373,24 +373,35 @@ typedef struct {
 } async_compaction_t;
 
 /**
- * @brief Tool-turn persist callback (E2 structured tool-call persistence).
+ * @brief One row a tool turn saves (the persist hook's argument)
  *
- * Fired by the LLM tool loop once per appended tool message, in OpenAI-canonical
- * form. @p tool_calls_json is the assistant's tool_calls JSON array (NULL for
- * non-assistant rows); @p tool_call_id is the matching id on role="tool" rows
- * (NULL otherwise); @p reasoning_json is display-only reasoning JSON on the assistant
- * tool_calls row (NULL otherwise, and never read into the LLM context); @p is_error is set
- * only on role="tool" result rows (true = confirmed failure) so a reloaded conversation can
- * red the failed tool pill, matching the live tool_step signal. The implementation persists to
- * conv_db.
+ * @p tool_calls is the assistant row's OpenAI tool_calls JSON array (NULL
+ * otherwise); @p tool_call_id the call a role="tool" row answers (NULL
+ * otherwise); @p reasoning display-only reasoning JSON on the assistant row
+ * (never read into the LLM context); @p llm_blocks the assistant turn's stored
+ * blocks (llm_turn_blocks_to_stored; NULL otherwise); @p is_error set only on a
+ * role="tool" row whose call failed, so a reloaded conversation reds its pill.
  */
-typedef void (*session_tool_persist_fn)(void *userdata,
-                                        const char *role,
-                                        const char *content,
-                                        const char *tool_calls_json,
-                                        const char *tool_call_id,
-                                        const char *reasoning_json,
-                                        bool is_error);
+typedef struct {
+   const char *role;
+   const char *content;
+   const char *tool_calls;
+   const char *tool_call_id;
+   const char *reasoning;
+   const char *llm_blocks;
+   bool is_error;
+} session_tool_row_t;
+
+/**
+ * @brief Tool-turn persist callback
+ *
+ * Fired by the LLM tool loop once per row of each appended tool message, in
+ * OpenAI-canonical form (llm_history_rows_append).  The implementation writes
+ * it to the turn's conversation.
+ *
+ * @return The new row's id, or 0 when it wasn't saved
+ */
+typedef int64_t (*session_tool_persist_fn)(void *userdata, const session_tool_row_t *row);
 
 /**
  * @brief Tool-loop iteration-boundary callback.
@@ -555,6 +566,7 @@ typedef struct session {
    char *turn_pending_reply;       // the reply, likewise
    char *unclaimed_user;           // an ended turn's unsaved exchange (see
    char *unclaimed_reply;          // session_bind_created_conversation), and when it ended
+   struct json_object *unclaimed_reply_blocks;  // that reply's blocks (owned)
    time_t unclaimed_at;
    struct json_object *turn_reply;         // the turn's assistant reply (owned ref): its row id
                                            // is stamped on this object, wherever it now sits
@@ -570,6 +582,7 @@ typedef struct session {
    int64_t claimed_reply_row;  // (it reads those messages without the lock)
    char *turn_prior_user;      // a claimed exchange the adopting turn writes first
    char *turn_prior_reply;
+   struct json_object *turn_prior_reply_blocks;  // that reply's blocks (owned)
    // Message refs another thread let go of while a turn was running: released
    // by that turn (json-c reference counts aren't atomic, and the turn reads
    // its history's messages without the lock).
@@ -649,9 +662,15 @@ typedef struct session {
    // asymmetry is intentional.  No lock (single-writer-in-dispatch / read-post-dispatch,
    // same discipline as stream_conversation_id).  Cleared together by
    // session_final_answer_clear() at turn start and at session teardown.
+   //   - reply_blocks: the blocks of the reply this turn produced, as it joined the
+   //     history (or would have, for a reply a cancel kept from it): a private copy,
+   //     taken by whichever writer saves the reply (session_take_reply_blocks), so the
+   //     row carries its own turn's blocks and never an earlier turn's.  Also cleared
+   //     at turn begin and turn end (session_turn_begin / _end).
    struct {
       char *reasoning_json;
       struct json_object *blocks;
+      struct json_object *reply_blocks;
    } final_answer;
 
    // Whether THIS turn's step events (tool_call/tool_result) should be persisted
@@ -1638,6 +1657,7 @@ bool session_add_turn_message(session_t *session, const char *role, const char *
 /** Drop the final answer's stash (reasoning + blocks): turn start and teardown. */
 void session_final_answer_clear(session_t *session);
 
+
 bool session_add_turn_assistant(session_t *session,
                                 const char *content,
                                 struct json_object *blocks);
@@ -1851,9 +1871,10 @@ char *session_get_last_message_content(session_t *session, const char *role);
 /**
  * @brief Replace the content of the most recent message with the given role.
  *
- * Walks `session->conversation_history` backwards, finds the first
- * message whose `role` matches, and replaces its `content` field with
- * `new_content`.  Used by the messaging engine to align session
+ * During a turn, for "assistant": the turn's own reply (wherever it sits,
+ * and its copy in a reloaded live history).  Otherwise the newest message
+ * of @p role in the history the turn works on.  Its text and its blocks'
+ * text change together.  Used by the messaging engine to align session
  * history with what was actually delivered when outbound truncation
  * happens — the LLM then sees the truncated text rather than the
  * full one when composing the next turn.

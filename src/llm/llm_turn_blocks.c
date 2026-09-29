@@ -29,6 +29,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_key_tag.h"
+
 
 static const char *str_of(struct json_object *obj, const char *key) {
    struct json_object *v = NULL;
@@ -140,7 +142,9 @@ static bool replays_to(struct json_object *v,
                        const char *format,
                        const char *carrier,
                        const char *model) {
-   if (!is(str_of(v, "carrier"), carrier) || !is(str_of(v, "format"), format)) {
+   /* An empty carrier is no carrier: it never matches, not even another. */
+   if (!carrier || !*carrier || !is(str_of(v, "carrier"), carrier) ||
+       !is(str_of(v, "format"), format)) {
       return false;
    }
    const char *from = str_of(v, "model");
@@ -166,7 +170,9 @@ static struct json_object *copy_of(struct json_object *obj) {
    return out;
 }
 
-struct json_object *llm_turn_blocks_from_claude(struct json_object *content, const char *model) {
+struct json_object *llm_turn_blocks_from_claude(struct json_object *content,
+                                                const char *carrier,
+                                                const char *model) {
    if (!content || !json_object_is_type(content, json_type_array)) {
       return NULL;
    }
@@ -184,17 +190,16 @@ struct json_object *llm_turn_blocks_from_claude(struct json_object *content, con
              blocks, str_of(block, "id"), str_of(block, "name"),
              input ? json_object_to_json_string_ext(input, JSON_C_TO_STRING_PLAIN) : "{}");
       } else if (is(type, "thinking") || is(type, "redacted_thinking")) {
-         llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, model,
+         llm_turn_blocks_add_reasoning(blocks, carrier, LLM_FORMAT_ANTHROPIC, model,
                                        copy_of(block));
       } else if (type) {
-         add_vendor_block(blocks, "opaque", LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, model,
-                          copy_of(block));
+         add_vendor_block(blocks, "opaque", carrier, LLM_FORMAT_ANTHROPIC, model, copy_of(block));
       }
    }
    return blocks;
 }
 
-struct json_object *llm_turn_blocks_render_claude(struct json_object *blocks) {
+struct json_object *llm_turn_blocks_render_claude(struct json_object *blocks, const char *carrier) {
    if (!blocks || !json_object_is_type(blocks, json_type_array)) {
       return NULL;
    }
@@ -221,7 +226,7 @@ struct json_object *llm_turn_blocks_render_claude(struct json_object *blocks) {
          }
          json_object_object_add(use, "input", input);
          json_object_array_add(content, use);
-      } else if (llm_turn_blocks_is_own(b, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC)) {
+      } else if (llm_turn_blocks_is_own(b, carrier, LLM_FORMAT_ANTHROPIC)) {
          struct json_object *native = NULL;
          if (json_object_object_get_ex(b, "native", &native)) {
             struct json_object *copy = copy_of(native);
@@ -445,7 +450,8 @@ struct json_object *llm_turn_message_blocks(struct json_object *message) {
    struct json_object *content = NULL;
    json_object_object_get_ex(message, "content", &content);
    if (content && json_object_is_type(content, json_type_array)) {
-      return llm_turn_blocks_from_claude(content, NULL);
+      /* No carrier: its reasoning replays nowhere. */
+      return llm_turn_blocks_from_claude(content, "", NULL);
    }
    struct json_object *out = llm_turn_blocks_new();
    if (!out) {
@@ -648,9 +654,9 @@ struct json_object *llm_history_wire_copy(struct json_object *history) {
    return copy_history(history, false);
 }
 
-/* Remove, in place, the content parts of @p history's messages that carry a
- * vendor's own reasoning: a Claude turn's content array holds its thinking
- * (text and signature) and redacted thinking beside the text. */
+/* Keep only the parts another reader may see: text, tool calls and results,
+ * images.  Thinking, redacted thinking and any vendor's opaque content (a
+ * server tool's encrypted result, say) go. */
 static void drop_reasoning_parts(struct json_object *history) {
    const size_t n = json_object_array_length(history);
    for (size_t i = 0; i < n; i++) {
@@ -661,7 +667,8 @@ static void drop_reasoning_parts(struct json_object *history) {
       }
       for (size_t j = json_object_array_length(content); j-- > 0;) {
          const char *type = str_of(json_object_array_get_idx(content, j), "type");
-         if (is(type, "thinking") || is(type, "redacted_thinking")) {
+         if (!is(type, "text") && !is(type, "tool_use") && !is(type, "tool_result") &&
+             !is(type, "image") && !is(type, "image_url")) {
             json_object_array_del_idx(content, j, 1);
          }
       }
@@ -676,38 +683,87 @@ struct json_object *llm_history_strip_internal(struct json_object *history) {
    return copy;
 }
 
-/* The host of @p url ("https://api.openai.com/v1" → "api.openai.com"). */
-static void url_host(const char *url, char *out, size_t out_len) {
-   if (out_len == 0) {
-      return;
+/* @p url's parts that name an endpoint: scheme and host lower-cased (no
+ * credentials), then the path, without a query, fragment or trailing '/'.
+ * The host alone goes to @p host. */
+static void url_endpoint(const char *url,
+                         char *host,
+                         size_t host_len,
+                         char *endpoint,
+                         size_t endpoint_len) {
+   const char *u = url ? url : "";
+   const char *sep = strstr(u, "://");
+   const char *start = sep ? sep + 3 : u;
+   size_t e = 0;
+   /* scheme */
+   const char *scheme = sep ? u : "https";
+   const size_t scheme_len = sep ? (size_t)(sep - u) : 5;
+   for (size_t i = 0; i < scheme_len && e + 1 < endpoint_len; i++) {
+      endpoint[e++] = (char)tolower((unsigned char)scheme[i]);
    }
-   const char *start = url ? strstr(url, "://") : NULL;
-   start = start ? start + 3 : (url ? url : "");
+   for (const char *p = "://"; *p && e + 1 < endpoint_len; p++) {
+      endpoint[e++] = *p;
+   }
+   /* host (never credentials: the userinfo ends at the LAST '@' of the
+    * authority, since a malformed password may hold another) */
    size_t n = strcspn(start, "/?#");
-   const char *at = memchr(start, '@', n); /* never carry credentials */
+   const char *at = NULL;
+   for (size_t i = 0; i < n; i++) {
+      if (start[i] == '@') {
+         at = start + i;
+      }
+   }
    if (at) {
       n -= (size_t)(at + 1 - start);
       start = at + 1;
    }
-   if (n >= out_len) {
-      n = out_len - 1;
-   }
+   size_t h = 0;
    for (size_t i = 0; i < n; i++) {
-      out[i] = (char)tolower((unsigned char)start[i]);
+      const char c = (char)tolower((unsigned char)start[i]);
+      if (h + 1 < host_len) {
+         host[h++] = c;
+      }
+      if (e + 1 < endpoint_len) {
+         endpoint[e++] = c;
+      }
    }
-   out[n] = '\0';
+   /* path */
+   const char *path = start + n;
+   size_t plen = strcspn(path, "?#");
+   while (plen > 0 && path[plen - 1] == '/') {
+      plen--;
+   }
+   for (size_t i = 0; i < plen && e + 1 < endpoint_len; i++) {
+      endpoint[e++] = path[i];
+   }
+   if (host_len > 0) {
+      host[h] = '\0';
+   }
+   if (endpoint_len > 0) {
+      endpoint[e] = '\0';
+   }
 }
 
-/* The carrier of this request's reasoning: the endpoint's host and a short
- * fingerprint of the API key (an item is encrypted for the organization that
- * produced it; another key may belong to another one).  FNV-1a, 32 bits: it
- * tells keys apart, and says nothing useful about one. */
-void llm_turn_blocks_carrier(const char *base_url, const char *api_key, char *out, size_t out_len) {
-   char host[96];
-   url_host(base_url, host, sizeof(host));
-   uint32_t h = 2166136261u;
-   for (const char *k = api_key ? api_key : ""; *k; k++) {
-      h = (h ^ (uint8_t)*k) * 16777619u;
+/* The carrier of this request's reasoning: the endpoint (its host, readable,
+ * and a digest of scheme, host and path, so two gateways or accounts routed
+ * by path on one host stay apart) and the API key's tag (an item is encrypted
+ * for the organization that produced it; another key may belong to another
+ * one).  The digest isn't secret: it tells endpoints apart. */
+/* Host room in a carrier: "<host>/<16 hex>#<16-char key tag>" fits
+ * LLM_CARRIER_MAX with its terminator. */
+#define CARRIER_DIGEST_CHARS 16
+#define CARRIER_TAG_CHARS (LLM_KEY_TAG_MAX - 1)
+#define CARRIER_HOST_MAX (LLM_CARRIER_MAX - 1 - CARRIER_DIGEST_CHARS - 1 - CARRIER_TAG_CHARS)
+
+_Static_assert(CARRIER_HOST_MAX > 32, "a carrier leaves room for a host");
+
+void llm_turn_blocks_carrier(const char *base_url, const char *key_tag, char *out, size_t out_len) {
+   char host[CARRIER_HOST_MAX];
+   char endpoint[1024];
+   url_endpoint(base_url, host, sizeof(host), endpoint, sizeof(endpoint));
+   uint64_t h = 14695981039346656037ULL; /* FNV-1a, 64 bits */
+   for (const char *p = endpoint; *p; p++) {
+      h = (h ^ (uint8_t)*p) * 1099511628211ULL;
    }
-   snprintf(out, out_len, "%s#%08x", host, h);
+   snprintf(out, out_len, "%s/%016llx#%s", host, (unsigned long long)h, key_tag ? key_tag : "");
 }

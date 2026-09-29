@@ -36,6 +36,7 @@
 #include "llm/llm_claude_betas.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_key_tag.h"
 #include "llm/llm_openai.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
@@ -100,9 +101,11 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
    // Convert OpenAI format to Claude format.
    // Always iteration 0: non-streaming does not support tool execution loops,
    // so orphaned tool_use filtering is always needed to clean up any history artifacts.
+   char carrier[LLM_CARRIER_MAX];
+   llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
    json_object *request = convert_to_claude_format(conversation_history, input_text, vision_images,
                                                    vision_image_sizes, vision_image_count, model,
-                                                   0);
+                                                   carrier, 0);
 
    claude_betas_t betas;
    claude_betas_add(request, base_url, &betas);
@@ -484,8 +487,12 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    }
 
    /* Convert to Claude format */
+   /* Whose stored reasoning this request may send back, and whose this turn's is. */
+   char carrier[LLM_CARRIER_MAX];
+   llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
    request = convert_to_claude_format(conversation_history, input_text, vision_images,
-                                      vision_image_sizes, vision_image_count, model, iteration);
+                                      vision_image_sizes, vision_image_count, model, carrier,
+                                      iteration);
    if (!request) {
       OLOG_ERROR("Failed to convert conversation to Claude format");
       return 1;
@@ -672,7 +679,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    result->thinking_content = llm_stream_get_thinking(stream_ctx);
    /* The turn's blocks exactly as sent: what the next request replays. */
    struct json_object *native = llm_stream_take_claude_content(stream_ctx);
-   result->blocks = llm_turn_blocks_from_claude(native, model);
+   result->blocks = llm_turn_blocks_from_claude(native, carrier, model);
    json_object_put(native);
    result->reasoning_tokens = stream_ctx->reasoning_tokens;
 

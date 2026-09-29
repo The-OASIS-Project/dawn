@@ -575,7 +575,7 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
                                   int n_fired) {
    /* Hydrate the parent conversation's history so the model reacts in context. */
    size_t restored = 0;
-   struct json_object *hist = memory_history_load_from_db(w->parent_conv, w->user_id, &restored);
+   struct json_object *hist = memory_history_load_for_llm(w->parent_conv, w->user_id, &restored);
    if (hist != NULL) {
       session_replace_history(s, hist, w->parent_conv);
    }
@@ -590,7 +590,6 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
    /* The turn belongs to the parent conversation (see session_turn_begin). */
    session_turn_begin(s, w->parent_conv, w->user_id);
    char *response = core_text_input_dispatch(s, envelope, NULL, NULL, NULL, 0, &opts);
-   session_turn_end(s);
    session_set_tool_iteration_hook(s, NULL, NULL);
    session_set_tool_persist_hook(s, NULL, NULL);
 
@@ -630,6 +629,8 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
       OLOG_WARNING("job_reinvoke: detached re-engage of parent %lld empty/cancelled; retrying",
                    (long long)w->parent_conv);
    }
+   /* The reply was saved inside its turn, with its own blocks. */
+   session_turn_end(s);
    free(response);
    job_manager_end(s);
 }

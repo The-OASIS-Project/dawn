@@ -32,14 +32,6 @@
 
 static session_t *s;
 
-/* ---- stubs ---------------------------------------------------------------- */
-
-struct json_object *llm_history_strip_internal(struct json_object *history) {
-   struct json_object *copy = NULL;
-   json_object_deep_copy(history, &copy, NULL);
-   return copy;
-}
-
 /* The fake database: conversation id -> number of stored (non-system) messages. */
 static int s_stored[100];
 static int s_loader_calls;
@@ -411,16 +403,22 @@ void test_off_thread_conversation_tags_the_stream(void) {
  * adopted it (any claimed exchange is discarded). */
 static bool adopt(int64_t conv) {
    char *user = NULL, *reply = NULL;
+   struct json_object *blocks = NULL;
    bool adopted = false;
-   (void)session_bind_created_conversation(s, conv, &user, &reply, &adopted);
+   (void)session_bind_created_conversation(s, conv, &user, &reply, &blocks, &adopted);
    free(user);
    free(reply);
+   json_object_put(blocks);
    return adopted;
 }
 
+static struct json_object *s_claimed_blocks;
+
 static bool claim(int64_t conv, char **user, char **reply) {
    bool adopted = false;
-   return session_bind_created_conversation(s, conv, user, reply, &adopted);
+   json_object_put(s_claimed_blocks);
+   s_claimed_blocks = NULL;
+   return session_bind_created_conversation(s, conv, user, reply, &s_claimed_blocks, &adopted);
 }
 
 void test_adopt_only_a_waiting_turn(void) {
@@ -824,14 +822,17 @@ void test_claimed_binding_gives_the_pin_its_identity(void) {
    bool adopted = false;
    /* One step: claimed and adopted together.  The adopting turn writes the
     * claimed exchange, ahead of its own rows. */
-   TEST_ASSERT_FALSE(session_bind_created_conversation(s, 9, &user, &reply, &adopted));
+   struct json_object *blocks = NULL;
+   TEST_ASSERT_FALSE(session_bind_created_conversation(s, 9, &user, &reply, &blocks, &adopted));
+   TEST_ASSERT_NULL(blocks);
    TEST_ASSERT_TRUE(adopted);
    TEST_ASSERT_NULL(user);
    TEST_ASSERT_EQUAL_INT64(9, session_history_conversation_of(s, turn()));
    TEST_ASSERT_TRUE(turn() == s->conversation_history);
    int64_t conv = 0;
-   TEST_ASSERT_TRUE(session_turn_take_prior(s, &conv, &user, &reply));
+   TEST_ASSERT_TRUE(session_turn_take_prior(s, &conv, &user, &reply, &blocks));
    TEST_ASSERT_EQUAL_INT64(9, conv);
+   TEST_ASSERT_NULL(blocks); /* no reply, so no blocks */
    TEST_ASSERT_EQUAL_STRING("first", user);
    free(user);
    free(reply);
@@ -1113,11 +1114,75 @@ void test_sidebar_load_keeps_the_exchange_for_its_conversation(void) {
    free(reply);
 }
 
+/* The reply an ended turn couldn't save keeps its own turn's blocks until a
+ * conversation claims it, and a later turn's don't replace them. */
+void test_claimed_reply_carries_its_own_blocks(void) {
+   session_turn_begin(s, 0, 1);
+   session_turn_await_conversation(s);
+   session_turn_set_pending(s, "user", "hello");
+   session_turn_set_pending(s, "assistant", "hi there");
+   s->final_answer.reply_blocks = json_tokener_parse("[{\"type\":\"text\",\"text\":\"mine\"}]");
+   session_turn_end(s);
+   TEST_ASSERT_NULL(s->final_answer.reply_blocks); /* moved with the reply */
+   /* A later turn's stash is its own, not the claimed reply's. */
+   s->final_answer.reply_blocks = json_tokener_parse("[{\"type\":\"text\",\"text\":\"later\"}]");
+   char *user = NULL, *reply = NULL;
+   TEST_ASSERT_TRUE(claim(9, &user, &reply));
+   TEST_ASSERT_NOT_NULL(s_claimed_blocks);
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(s_claimed_blocks), "mine"));
+   json_object_put(s_claimed_blocks);
+   s_claimed_blocks = NULL;
+   free(user);
+   free(reply);
+   session_final_answer_clear(s);
+}
+
+/* A reply's blocks are its own turn's: a writer takes them inside the turn,
+ * and what nobody took is gone before the next turn can save a row. */
+void test_reply_blocks_never_outlive_their_turn(void) {
+   /* Taken inside the turn: the writer has them. */
+   session_turn_begin(s, 3, 1);
+   s->final_answer.reply_blocks = json_tokener_parse("[{\"type\":\"text\",\"text\":\"a\"}]");
+   struct json_object *taken = session_take_reply_blocks(s);
+   TEST_ASSERT_NOT_NULL(taken);
+   json_object_put(taken);
+   session_turn_end(s);
+
+   /* Not taken (a voice turn with no conversation, say): dropped at the end. */
+   session_turn_begin(s, 3, 1);
+   s->final_answer.reply_blocks = json_tokener_parse("[{\"type\":\"text\",\"text\":\"b\"}]");
+   session_turn_end(s);
+   TEST_ASSERT_NULL(s->final_answer.reply_blocks);
+
+   /* Left outside any turn: the next turn starts without them. */
+   s->final_answer.reply_blocks = json_tokener_parse("[{\"type\":\"text\",\"text\":\"c\"}]");
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_NULL(session_take_reply_blocks(s));
+   session_turn_end(s);
+}
+
+/* A reply cut to what was sent changes where the turn's reply is, text and
+ * blocks together. */
+void test_replace_reply_text_in_the_turn(void) {
+   session_turn_begin(s, 3, 1);
+   struct json_object *blocks = json_tokener_parse("[{\"type\":\"text\",\"text\":\"full reply\"}]");
+   TEST_ASSERT_TRUE(session_add_turn_assistant(s, "full reply", blocks));
+   json_object_put(blocks);
+   TEST_ASSERT_TRUE(session_replace_last_message_content(s, "assistant", "full"));
+   const char *wire = json_object_to_json_string(s->turn_reply);
+   TEST_ASSERT_NULL_MESSAGE(strstr(wire, "full reply"), wire);
+   TEST_ASSERT_NOT_NULL(strstr(wire, "\"full\""));
+   session_turn_end(s);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_turn_on_loaded_conversation_uses_live_history);
    RUN_TEST(test_turn_for_other_conversation_runs_on_its_own_history);
    RUN_TEST(test_fresh_chat_adopts_new_conversation);
+   RUN_TEST(test_claimed_reply_carries_its_own_blocks);
+   RUN_TEST(test_reply_blocks_never_outlive_their_turn);
+   RUN_TEST(test_replace_reply_text_in_the_turn);
    RUN_TEST(test_fresh_chat_does_not_adopt_conversation_with_history);
    RUN_TEST(test_load_failure_runs_on_empty_private_history);
    RUN_TEST(test_late_conversation_on_fresh_chat_binds);

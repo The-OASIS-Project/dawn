@@ -74,6 +74,24 @@ int crypto_store_decrypt(const unsigned char *ciphertext,
                          size_t *out_written);
 
 /**
+ * Keyed digest of @p msg under a subkey derived from the store's key.
+ *
+ * The subkey is crypto_kdf-derived for @p context (exactly 8 characters, one
+ * per use, so digests for one purpose say nothing about another); the digest
+ * is BLAKE2b.  The same input gives the same digest across restarts on this
+ * install, and one that can't be computed or guessed without the key file.
+ *
+ * @param context  8-character purpose label
+ * @param out_len  crypto_generichash_BYTES_MIN (16) to _MAX (64)
+ * @return 0 on success, 1 on failure (store not ready, bad arguments)
+ */
+int crypto_store_keyed_digest(const char *context,
+                              const void *msg,
+                              size_t msg_len,
+                              unsigned char *out,
+                              size_t out_len);
+
+/**
  * Zero the encryption key from memory. Call during shutdown.
  */
 void crypto_store_shutdown(void);

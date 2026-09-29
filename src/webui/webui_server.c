@@ -3343,7 +3343,7 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
       if (rc == AUTH_DB_SUCCESS) {
          if (!conv.is_archived) {
             int count = 0;
-            if (webui_restore_conversation_context(conn, &conv, conn->active_conversation_id, NULL,
+            if (webui_restore_conversation_context(conn, &conv, conn->active_conversation_id,
                                                    &count) == SUCCESS) {
                restored = true;
                OLOG_INFO("WebUI: Restored conversation %lld (%d messages) into new session %u",

@@ -555,6 +555,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const size_t *vision_image_sizes,
                                       int vision_image_count,
                                       const char *model,
+                                      const char *carrier,
                                       int iteration) {
    (void)vision_image_sizes;  // Sizes not needed for base64 strings
    json_object *claude_request = json_object_new_object();
@@ -670,7 +671,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       json_object *blocks_obj = NULL;
       if (strcmp(role, "assistant") == 0 &&
           json_object_object_get_ex(msg, LLM_TURN_BLOCKS_KEY, &blocks_obj)) {
-         rendered_blocks = llm_turn_blocks_render_claude(blocks_obj);
+         rendered_blocks = llm_turn_blocks_render_claude(blocks_obj, carrier);
          if (rendered_blocks) {
             content_obj = rendered_blocks;
          }

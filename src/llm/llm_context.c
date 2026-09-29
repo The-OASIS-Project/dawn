@@ -1319,18 +1319,23 @@ static char *compact_with_llm(struct json_object *to_summarize,
                               llm_type_t type,
                               cloud_provider_t provider,
                               const char *model) {
+   /* The summarizer never sees reasoning a vendor issued for itself: with no
+    * stripped copy there is no summary. */
    struct json_object *clean = llm_history_strip_internal(to_summarize);
+   if (!clean) {
+      OLOG_ERROR("llm_context: out of memory preparing the summary input; not summarizing");
+      return NULL;
+   }
    /* Persisted tool-captured images (see llm_tools_add_results_openai/claude)
     * would otherwise get JSON-serialized whole below — hundreds of KB of
     * base64 shipped as literal prompt text to the summarizer for zero
     * summarization value. */
-   struct json_object *no_vision = llm_history_strip_vision_content(clean ? clean : to_summarize);
+   struct json_object *no_vision = llm_history_strip_vision_content(clean);
    if (no_vision) {
-      if (clean)
-         json_object_put(clean);
+      json_object_put(clean);
       clean = no_vision;
    }
-   const char *json_str = json_object_to_json_string(clean ? clean : to_summarize);
+   const char *json_str = json_object_to_json_string(clean);
    size_t json_len = strlen(json_str);
 
    /* Boundary uses a fixed nonce that cannot appear in valid JSON output
@@ -1352,13 +1357,11 @@ static char *compact_with_llm(struct json_object *to_summarize,
    size_t prompt_len = strlen(prefix) + json_len + strlen(suffix) + 1;
    char *prompt = malloc(prompt_len);
    if (!prompt) {
-      if (clean)
-         json_object_put(clean);
+      json_object_put(clean);
       return NULL;
    }
    snprintf(prompt, prompt_len, "%s%s%s", prefix, json_str, suffix);
-   if (clean)
-      json_object_put(clean);
+   json_object_put(clean);
 
    struct json_object *request = json_object_new_array();
    struct json_object *user_msg = json_object_new_object();

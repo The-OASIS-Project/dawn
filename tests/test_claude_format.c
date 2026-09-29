@@ -43,6 +43,9 @@
 #include "tools/toml.h"
 #include "unity.h"
 
+/* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
+#define TEST_CLAUDE_CARRIER "api.anthropic.com#0123456789abcdef"
+
 /* ---- Stubs for the config / tool-registry deps the converter references.
  *      (log_message comes from dawn_common.) ---- */
 dawn_config_t g_config;
@@ -159,7 +162,8 @@ static void test_parallel_tool_results_no_double_free(void) {
       add_tool_result(conv, i);
    }
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
+                                               TEST_CLAUDE_CARRIER, 0);
    TEST_ASSERT_NOT_NULL(req);
 
    /* The N tool_results must coalesce into ONE user message holding N blocks. */
@@ -182,7 +186,8 @@ static void test_single_tool_result_ok(void) {
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0);
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
+                                               TEST_CLAUDE_CARRIER, 0);
    TEST_ASSERT_NOT_NULL(req);
    json_object_put(req);
    json_object_put(conv);
@@ -221,7 +226,8 @@ static const char *effort_of(json_object *req) {
 
 static json_object *request_for(const char *model) {
    json_object *conv = one_user_turn();
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, model, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, model,
+                                               TEST_CLAUDE_CARRIER, 0);
    json_object_put(conv);
    TEST_ASSERT_NOT_NULL(req);
    return req;
@@ -287,7 +293,8 @@ static void test_tool_use_without_thinking_keeps_reasoning(void) {
    json_object *conv = one_user_turn();
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0);
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5", 1);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5",
+                                               TEST_CLAUDE_CARRIER, 1);
    json_object_put(conv);
    TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
    TEST_ASSERT_EQUAL_STRING("medium", effort_of(req));
@@ -302,7 +309,7 @@ static void test_final_answer_replays_its_blocks(void) {
    json_object_object_add(answer, "role", json_object_new_string("assistant"));
    json_object_object_add(answer, "content", json_object_new_string("Clean answer."));
    json_object *blocks = llm_turn_blocks_new();
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC,
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC,
                                  "claude-opus-5-5",
                                  json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"\","
                                                     "\"signature\":\"SIG\"}"));
@@ -314,7 +321,8 @@ static void test_final_answer_replays_its_blocks(void) {
    json_object_object_add(next, "content", json_object_new_string("And tomorrow?"));
    json_object_array_add(conv, next);
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5", 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5",
+                                               TEST_CLAUDE_CARRIER, 0);
    json_object *messages = NULL;
    TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
    json_object *assistant = json_object_array_get_idx(messages, 1);
@@ -346,7 +354,8 @@ static void test_results_without_their_call_become_notes(void) {
    add_tool_result(conv, 5); /* its call is in the summary */
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0); /* answered properly */
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
+                                               TEST_CLAUDE_CARRIER, 0);
    TEST_ASSERT_NOT_NULL(req);
    const char *wire = json_object_to_json_string(req);
    TEST_ASSERT_NULL(strstr(wire, "\"call_05\""));
@@ -371,7 +380,8 @@ static void test_calls_and_results_are_paired(void) {
    json_object_object_add(lost, "content", json_object_new_string("stray"));
    json_object_array_add(conv, lost);
    add_tool_result(conv, 1);
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
+                                               TEST_CLAUDE_CARRIER, 0);
    TEST_ASSERT_NOT_NULL(req);
    json_object *messages = NULL;
    TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
@@ -438,7 +448,8 @@ static void test_reasoning_only_turn_and_user_text(void) {
    json_object_array_add(conv, u);
    add_tool_result(conv, 3); /* follows the user's text; its call isn't anywhere */
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
+                                               TEST_CLAUDE_CARRIER, 0);
    TEST_ASSERT_NOT_NULL(req);
    const char *wire = json_object_to_json_string(req);
    TEST_ASSERT_NULL(strstr(wire, "SIG"));

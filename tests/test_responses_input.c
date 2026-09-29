@@ -31,6 +31,9 @@
 #include "llm/llm_turn_blocks.h"
 #include "unity.h"
 
+/* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
+#define TEST_CLAUDE_CARRIER "api.anthropic.com#0123456789abcdef"
+
 /* The endpoint the requests go to (the carrier of its reasoning). */
 #define HOST "api.openai.com"
 
@@ -274,7 +277,7 @@ static void test_assistant_blocks_in_order(void) {
    struct json_object *t = json_object_new_object();
    json_object_object_add(t, "type", json_object_new_string("thinking"));
    json_object_object_add(t, "signature", json_object_new_string("SIG"));
-   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "c", t);
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC, "c", t);
    llm_turn_blocks_add_text(blocks, "Checking.");
    llm_turn_blocks_add_tool_call(blocks, "call_7", "weather", "{\"city\":\"x\"}");
 

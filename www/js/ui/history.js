@@ -811,7 +811,8 @@
             }
          };
          (async () => {
-            for (const msg of messages) {
+            for (let mi = 0; mi < messages.length; mi++) {
+               const msg = messages[mi];
                // A newer conversation load started — abandon this stale render so the two
                // don't interleave (the awaits below yield, letting a new load slip in).
                if (renderToken !== historyState.loadRenderToken) return;
@@ -842,6 +843,20 @@
                      ]);
                   }
                   tagEntries(entryStart, msg.created_at, msg.id);
+                  continue;
+               }
+
+               // A tool turn saved as text notes (older voice conversations): the same
+               // pills as a structured turn, from what the notes say.
+               const notes =
+                  typeof DawnToolNotes !== 'undefined' ? DawnToolNotes.collect(messages, mi) : null;
+               if (notes && typeof DawnToolPills !== 'undefined') {
+                  if (notes.prose.trim()) {
+                     await DawnTranscript.addEntry(msg.role, notes.prose, msg.reasoning);
+                  }
+                  DawnToolPills.renderReloadGroup(notes.items);
+                  tagEntries(entryStart, msg.created_at, msg.id);
+                  mi += notes.consumed;
                   continue;
                }
 

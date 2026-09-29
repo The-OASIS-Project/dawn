@@ -48,6 +48,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "core/attention/attention.h"
 #include "core/conv_event.h"
 #include "core/focus/focus_candidate_helpers.h"
@@ -58,6 +59,7 @@
 #include "core/scheduler.h"
 #include "dawn_error.h"
 #include "image_store.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
@@ -785,6 +787,11 @@ int webui_persist_final_answer(session_t *session,
     * tool-worker thread — do NOT "consistency-fix" the two to match.) */
    char *reasoning = session->final_answer.reasoning_json;
    session->final_answer.reasoning_json = NULL;
+   /* The reply's own blocks, saved with its row so a reload replays the turn as
+    * the model produced it (same single-writer discipline as the reasoning). */
+   struct json_object *reply_blocks = session_take_reply_blocks(session);
+   char *stored_blocks = llm_turn_blocks_answer_stored(reply_blocks);
+   json_object_put(reply_blocks);
 
    /* Take the accumulated visual under tools_mutex, then RELEASE before the body build /
     * DB write / fan-out — never hold a leaf lock across the persist (lock-ordering). */
@@ -820,8 +827,11 @@ int webui_persist_final_answer(session_t *session,
    int64_t msg_id = 0;
    int rc = 1;
    for (int attempt = 0; attempt < 3; attempt++) {
-      rc = conv_db_add_message_with_tools(conv_id, (int)user_id, "assistant", persist_body, NULL,
-                                          NULL, reasoning, &msg_id);
+      const conv_message_row_t row = { .role = "assistant",
+                                       .content = persist_body,
+                                       .reasoning = reasoning,
+                                       .llm_blocks = stored_blocks };
+      rc = conv_db_add_row(conv_id, (int)user_id, &row, &msg_id);
       if (rc == AUTH_DB_SUCCESS) {
          break;
       }
@@ -855,6 +865,7 @@ int webui_persist_final_answer(session_t *session,
 
    free(combined);
    free(visual);
+   free(stored_blocks);
    free(reasoning);
    return rc;
 }

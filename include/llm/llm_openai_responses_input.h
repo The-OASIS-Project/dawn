@@ -64,7 +64,8 @@ char *llm_responses_extract_volatile_context(struct json_object *history);
  * input_text block before the volatile (caller must pass false for pre-5.6 models, which
  * reject the field, and must pair a true value with root `prompt_cache_options`).
  * Assistant turns render from their blocks (llm_turn_blocks.h): reasoning items go
- * back only when they came from `carrier` (the endpoint's host) and `model`.  A
+ * back only when they came from `carrier` (llm_request_carrier: the endpoint
+ * and key) and `model`.  A
  * function call and its output are sent only as a pair: either alone is an API
  * error.  New array (caller json_object_put), or NULL on error. */
 struct json_object *llm_responses_build_input(struct json_object *history,

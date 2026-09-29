@@ -37,6 +37,7 @@
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_key_tag.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_cache.h"
@@ -264,7 +265,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
     * endpoint and key (llm_turn_blocks_carrier). */
    const char *model_name = resolve_model(model, api_key);
    char carrier[LLM_CARRIER_MAX];
-   llm_turn_blocks_carrier(base_url, api_key, carrier, sizeof(carrier));
+   llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
 
    json_object *converted_history = llm_openai_prepare_chat_history(conversation_history, carrier,
                                                                     model_name);
@@ -576,7 +577,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
     * endpoint and key (llm_turn_blocks_carrier). */
    const char *model_name = resolve_model(model, api_key);
    char carrier[LLM_CARRIER_MAX];
-   llm_turn_blocks_carrier(base_url, api_key, carrier, sizeof(carrier));
+   llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
 
    json_object *converted_history = llm_openai_prepare_chat_history(conversation_history, carrier,
                                                                     model_name);

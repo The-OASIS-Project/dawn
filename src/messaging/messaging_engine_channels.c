@@ -889,6 +889,7 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
          int64_t conv_id = resolve_channel_conversation_id(provider, provider_address, user_id);
          if (conv_id > 0) {
             int64_t msg_id = 0;
+            /* no-blocks: a channel post DAWN sent, not a model turn. */
             if (conv_db_add_message_ex(conv_id, user_id, "assistant", text, &msg_id) ==
                     AUTH_DB_SUCCESS &&
                 msg_id > 0) {
