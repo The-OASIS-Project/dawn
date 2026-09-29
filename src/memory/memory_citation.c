@@ -25,15 +25,18 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#define AUTH_DB_INTERNAL_ALLOWED   /* this module owns a memory-table writer */
-#include "auth/auth_db_internal.h" /* s_db, AUTH_DB_LOCK_* */
-#include "config/dawn_config.h"    /* g_config */
-#include "core/session_manager.h"  /* session_t, citation_stash_t, tool_cited_set_t */
+#define AUTH_DB_INTERNAL_ALLOWED      /* this module owns a memory-table writer */
+#include "auth/auth_db_internal.h"    /* s_db, AUTH_DB_LOCK_* */
+#include "config/dawn_config.h"       /* g_config */
+#include "core/focus/focus_handles.h" /* the conversation's earlier handles */
+#include "core/session_manager.h"     /* session_t, citation_stash_t, tool_cited_set_t */
 #include "logging.h"
 #include "memory/memory_citation_internal.h" /* memory_citation_csv_append + resolve_cited */
 #include "memory/memory_db.h"                /* memory_db_fact_reinforce_citation (Phase 2) */
+#include "utils/string_utils.h"
 
 /* CSV buffer for the injected / tool-surfaced / cited id lists.  Sized for the
  * realistic worst case: the tool universe can hold MAX_TOOL_CITED_FACTS (96)
@@ -143,15 +146,32 @@ void memory_citation_capture(session_t *session, const char *response_text) {
     * set attributes to the wrong turn. */
    citation_stash_t stash;
    tool_cited_set_t tool_set;
+   citation_prior_t *prior = NULL; /* the conversation's items from earlier turns */
+   int prior_count = 0;
    pthread_mutex_lock(&session->history_mutex);
    stash = session->citation_stash;
    tool_set = session->tool_cited_set;
+   /* The earlier items are this turn's conversation's only: a table of
+    * another (the user moved on) names other items by the same handles. */
+   const focus_handles_t *handles = session->focus_handles;
+   if (handles && handles->count > 0 &&
+       handles->conv_id == atomic_load(&session->stream_conversation_id)) {
+      prior = calloc((size_t)handles->count, sizeof(*prior));
+      for (int i = 0; prior && i < handles->count; i++) {
+         prior[prior_count].handle = handles->items[i].handle;
+         safe_strscpy(prior[prior_count].item_id, handles->items[i].item_id);
+         prior_count++;
+      }
+   }
    pthread_mutex_unlock(&session->history_mutex);
 
-   /* Proceed when EITHER channel surfaced something.  A tool-only turn (focus
+   /* Proceed when ANY channel surfaced something.  A tool-only turn (focus
     * disabled / short-circuited but memory searched) is exactly what Option B
-    * exists to measure, so an empty focus stash is no longer a bail-out. */
-   if (stash.count <= 0 && tool_set.count <= 0) {
+    * exists to measure, so an empty focus stash is no longer a bail-out; nor is
+    * a turn that surfaced nothing new but may cite what an earlier one did. */
+   if (stash.count <= 0 && tool_set.count <= 0 &&
+       (prior_count <= 0 || strstr(response_text, CITED_TAG_OPEN) == NULL)) {
+      free(prior);
       return;
    }
    if (stash.count > MAX_CITATION_STASH) {
@@ -201,9 +221,11 @@ void memory_citation_capture(session_t *session, const char *response_text) {
    int cited_tool_count = 0;
    int dropped = 0;
    int dropped_tool = 0;
-   memory_citation_resolve_cited(response_text, &stash, &tool_set, cited_all, sizeof(cited_all),
-                                 cited_focus, sizeof(cited_focus), &cited_focus_count,
-                                 &cited_tool_count, &dropped, &dropped_tool);
+   memory_citation_resolve_cited(response_text, &stash, prior, prior_count, &tool_set, cited_all,
+                                 sizeof(cited_all), cited_focus, sizeof(cited_focus),
+                                 &cited_focus_count, &cited_tool_count, &dropped, &dropped_tool);
+   free(prior);
+   prior = NULL;
 
    int64_t conv_id = atomic_load(&session->stream_conversation_id);
    int64_t msg_id = session_get_last_user_msg_id(session); /* the user turn this reply answers */

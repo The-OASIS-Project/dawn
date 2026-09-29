@@ -25,8 +25,12 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_conv_prefix.h"
+#include "core/image_rehydrate.h"
+#include "core/prefix_message.h"
 #include "dawn_error.h"
 #include "llm/llm_compaction_range.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
@@ -152,6 +156,16 @@ static int on_llm_row(const conversation_llm_row_t *row, void *p) {
    shown.llm_blocks_len = 0;
    const size_t before = json_object_array_length(lc->rows);
    const int stop = lc->cb(&shown, lc->ctx);
+   /* A request-context row keeps its kind (llm_history_kind.h), and the
+    * question it was saved with. */
+   if (row->kind && json_object_array_length(lc->rows) == before + 1) {
+      struct json_object *msg = json_object_array_get_idx(lc->rows, before);
+      llm_history_set_kind(msg, message_kind_parse(row->kind));
+      if (row->context_of > 0) {
+         json_object_object_add(msg, LLM_HISTORY_CONTEXT_OF_KEY,
+                                json_object_new_int64(row->context_of));
+      }
+   }
    /* Copied now (the row's text is gone after the callback) and parsed after
     * the read, outside the database lock. */
    if (lc->with_blocks && row->llm_blocks && json_object_array_length(lc->rows) == before + 1) {
@@ -246,10 +260,252 @@ int memory_history_load_rows(int64_t conv_id,
    return rc;
 }
 
-static struct json_object *load_history(int64_t conv_id,
-                                        int user_id,
-                                        bool with_blocks,
-                                        size_t *text_len_out) {
+/* ------------------------------------------------------------------------
+ * A model's request, rebuilt: the one builder every load that continues a
+ * conversation goes through, so each rebuilds the bytes its turns were sent.
+ * ------------------------------------------------------------------------ */
+
+/* Skip leading ASCII whitespace; returns the first non-whitespace char. */
+static const char *skip_ws(const char *s) {
+   while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+      s++;
+   }
+   return s;
+}
+
+/* If @p s begins with "<dawn:" then (optional whitespace) @p kw, return a
+ * pointer just past @p kw; else NULL.  Whitespace-tolerant so a malformed
+ * imitated marker ("<dawn: reasoning") still matches. */
+static const char *match_dawn_open(const char *s, const char *kw) {
+   static const char prefix[] = "<dawn:";
+   if (strncmp(s, prefix, sizeof(prefix) - 1) != 0) {
+      return NULL;
+   }
+   const char *p = skip_ws(s + sizeof(prefix) - 1);
+   size_t klen = strlen(kw);
+   return (strncmp(p, kw, klen) == 0) ? p + klen : NULL;
+}
+
+/* Just past the next "</dawn:" (ws?) "thinking" (ws?) ">", or NULL. */
+static const char *find_dawn_close_thinking(const char *s) {
+   for (const char *c = strstr(s, "</dawn:"); c; c = strstr(c + 1, "</dawn:")) {
+      const char *p = skip_ws(c + 7); /* strlen("</dawn:") */
+      if (strncmp(p, "thinking", 8) != 0) {
+         continue;
+      }
+      p = skip_ws(p + 8);
+      if (*p == '>') {
+         return p + 1;
+      }
+   }
+   return NULL;
+}
+
+/*
+ * Strip ONLY leading legacy display markers from assistant content before it
+ * enters a model's request.  An older client prepended "<dawn:reasoning .../>"
+ * and "<dawn:thinking ...>...</dawn:thinking>" blocks to saved assistant
+ * content; they are a DISPLAY artifact and must never reach a model — one
+ * restored onto such a conversation imitates the marker format in its own
+ * output.  Only the leading block(s), assistant messages only: a mid-message
+ * mention of these tags (discussing DAWN's code) is left alone.  A new copy, or
+ * NULL when nothing was stripped.
+ */
+static char *strip_leading_dawn_markers(const char *content) {
+   if (!content) {
+      return NULL;
+   }
+   const char *p = content;
+   for (;;) {
+      const char *q = skip_ws(p);
+      if (match_dawn_open(q, "reasoning")) {
+         const char *gt = strchr(q, '>');
+         if (!gt) {
+            break; /* malformed/unterminated: keep the remainder intact */
+         }
+         p = gt + 1;
+         continue;
+      }
+      if (match_dawn_open(q, "thinking")) {
+         const char *close = find_dawn_close_thinking(q);
+         if (!close) {
+            break; /* unterminated block: don't eat the real answer */
+         }
+         p = close;
+         continue;
+      }
+      break;
+   }
+   if (p == content) {
+      return NULL;
+   }
+   return strdup(skip_ws(p)); /* trim the blank line before the real answer */
+}
+
+/* A row as read, under the database lock: copied only (no file reads). */
+static int stage_row(const conversation_llm_row_t *row, void *ctx) {
+   struct json_object *arr = ctx;
+   struct json_object *obj = json_object_new_object();
+   if (!obj) {
+      return 1;
+   }
+   json_object_object_add(obj, "id", json_object_new_int64(row->id));
+   json_object_object_add(obj, "role", json_object_new_string(row->role));
+   json_object_object_add(obj, "content", json_object_new_string(row->content ? row->content : ""));
+   if (row->tool_calls && row->tool_calls[0]) {
+      struct json_object *tc = json_tokener_parse(row->tool_calls);
+      if (tc) {
+         json_object_object_add(obj, "tool_calls", tc);
+      }
+   }
+   if (row->tool_call_id && row->tool_call_id[0]) {
+      json_object_object_add(obj, "tool_call_id", json_object_new_string(row->tool_call_id));
+   }
+   json_object_array_add(arr, obj);
+   return 0;
+}
+
+/* A staged row as the message a model's request carries: a turn's images
+ * back in its question (owner-checked), request context as the text it was
+ * sent, tool fields and the turn's blocks as they were. */
+static struct json_object *request_message(int user_id, struct json_object *row) {
+   const char *role = json_object_get_string(json_object_object_get(row, "role"));
+   const char *content = json_object_get_string(json_object_object_get(row, "content"));
+   char *stripped = (role && strcmp(role, "assistant") == 0) ? strip_leading_dawn_markers(content)
+                                                             : NULL;
+   if (stripped) {
+      content = stripped;
+   }
+   struct json_object *tc = NULL;
+   struct json_object *tcid = NULL;
+   const bool has_tc = json_object_object_get_ex(row, "tool_calls", &tc);
+   const bool has_tcid = json_object_object_get_ex(row, "tool_call_id", &tcid);
+   const message_kind_t kind = llm_history_kind_of(row);
+   struct json_object *m = NULL;
+   if (has_tc || has_tcid || kind != MESSAGE_KIND_NONE) {
+      /* Tool fields as stored; request context as text (a marker quoted in it
+       * is no image of this turn's). */
+      m = json_object_new_object();
+      if (m) {
+         json_object_object_add(m, "role", json_object_new_string(role ? role : "user"));
+         json_object_object_add(m, "content", json_object_new_string(content ? content : ""));
+         if (has_tc) {
+            json_object_object_add(m, "tool_calls", json_object_get(tc));
+         }
+         if (has_tcid) {
+            json_object_object_add(m, "tool_call_id", json_object_get(tcid));
+         }
+      }
+   } else {
+      m = image_rehydrate_message(user_id, role ? role : "user", content ? content : "");
+   }
+   free(stripped);
+   if (!m) {
+      return NULL;
+   }
+   llm_history_set_kind(m, kind);
+   static const char *const carried[] = { "id", LLM_HISTORY_CONTEXT_OF_KEY, LLM_TURN_BLOCKS_KEY };
+   for (size_t i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
+      struct json_object *v = NULL;
+      if (json_object_object_get_ex(row, carried[i], &v)) {
+         json_object_object_add(m, carried[i], json_object_get(v));
+      }
+   }
+   return m;
+}
+
+/* Whether @p msg is a system message of no kind (one saved before prompts were
+ * frozen, or a placeholder). */
+static bool plain_system(struct json_object *msg) {
+   struct json_object *role = NULL;
+   return json_object_object_get_ex(msg, "role", &role) &&
+          strcmp(json_object_get_string(role), "system") == 0 &&
+          llm_history_kind_of(msg) == MESSAGE_KIND_NONE;
+}
+
+struct json_object *memory_history_request_context(int64_t conv_id,
+                                                   int user_id,
+                                                   int64_t watermark,
+                                                   const char *compaction_summary,
+                                                   size_t *text_len_out,
+                                                   int *rows_out) {
+   if (text_len_out) {
+      *text_len_out = 0;
+   }
+   if (rows_out) {
+      *rows_out = 0;
+   }
+   struct json_object *staged = json_object_new_array();
+   if (!staged) {
+      return NULL;
+   }
+   if (memory_history_load_rows(conv_id, user_id, watermark > 0 ? watermark : 0, true, stage_row,
+                                staged, staged, NULL) != AUTH_DB_SUCCESS) {
+      json_object_put(staged);
+      return NULL;
+   }
+   struct json_object *hist = json_object_new_array();
+   if (!hist) {
+      json_object_put(staged);
+      return NULL;
+   }
+   const int n = (int)json_object_array_length(staged);
+   size_t text_len = 0;
+   int i = 0;
+   /* A system message the conversation was saved with leads; the compaction
+    * summary follows it. */
+   if (n > 0 && plain_system(json_object_array_get_idx(staged, 0))) {
+      struct json_object *m = request_message(user_id, json_object_array_get_idx(staged, 0));
+      if (m) {
+         json_object_array_add(hist, m);
+      }
+      i = 1;
+   }
+   if (watermark > 0 && compaction_summary && compaction_summary[0]) {
+      /* The reconstructed [COMPACTED ...] marker keeps a context_expand handle
+       * to the compacted originals.  Assistant role, as the live compaction
+       * marker is (llm_context.c). */
+      char note[CONV_SUMMARY_MAX];
+      conv_db_format_compaction_context(conv_id, compaction_summary, note, sizeof(note));
+      struct json_object *m = json_object_new_object();
+      if (m) {
+         json_object_object_add(m, "role", json_object_new_string("assistant"));
+         json_object_object_add(m, "content", json_object_new_string(note));
+         json_object_array_add(hist, m);
+         text_len += strlen(note);
+      }
+   }
+   for (; i < n; i++) {
+      struct json_object *row = json_object_array_get_idx(staged, i);
+      const char *content = json_object_get_string(json_object_object_get(row, "content"));
+      text_len += content ? strlen(content) : 0;
+      struct json_object *m = request_message(user_id, row);
+      if (m) {
+         json_object_array_add(hist, m);
+      }
+   }
+   json_object_put(staged);
+
+   /* Each turn's context goes back into its question, as it was sent, and the
+    * conversation's frozen prompt leads it. */
+   if (llm_history_fold_context(hist, 0) != 0) {
+      OLOG_WARNING("memory_history_loader: conv %lld: turn context left unfolded (out of memory)",
+                   (long long)conv_id);
+   }
+   struct json_object *prefix = prefix_message_stored(conv_id, user_id);
+   if (prefix) {
+      (void)prefix_message_install(hist, prefix);
+   }
+   if (text_len_out) {
+      *text_len_out = text_len;
+   }
+   if (rows_out) {
+      *rows_out = n;
+   }
+   return hist;
+}
+
+static struct json_object *load_history(int64_t conv_id, int user_id, size_t *text_len_out) {
    history_build_ctx_t ctx = { .array = json_object_new_array(), .total_text_len = 0 };
    if (!ctx.array) {
       return NULL;
@@ -268,10 +524,10 @@ static struct json_object *load_history(int64_t conv_id,
          struct json_object *summary_msg = json_object_new_object();
          if (summary_msg) {
             char note[CONV_SUMMARY_MAX];
-            /* Same reconstructed [COMPACTED ...] marker as the WebUI restore path, so a
-             * reloaded messaging session also keeps a context_expand handle.  ASSISTANT
-             * role (not system): the per-turn two-system-message rebuild drops extra
-             * system messages — matches the live compaction marker so it survives. */
+            /* Same reconstructed [COMPACTED ...] marker as a request rebuild
+             * (memory_history_request_context), so what reads this history sees
+             * where the compacted part was.  Assistant role, as the live
+             * compaction marker is. */
             conv_db_format_compaction_context(conv_id, conv.compaction_summary, note, sizeof(note));
             json_object_object_add(summary_msg, "role", json_object_new_string("assistant"));
             json_object_object_add(summary_msg, "content", json_object_new_string(note));
@@ -283,7 +539,7 @@ static struct json_object *load_history(int64_t conv_id,
    conv_free(&conv);
 
    size_t dropped_chars = 0;
-   const int rc = memory_history_load_rows(conv_id, user_id, watermark, with_blocks,
+   const int rc = memory_history_load_rows(conv_id, user_id, watermark, false,
                                            append_message_to_history, &ctx, ctx.array,
                                            &dropped_chars);
    if (rc != AUTH_DB_SUCCESS) {
@@ -301,11 +557,24 @@ static struct json_object *load_history(int64_t conv_id,
 struct json_object *memory_history_load_from_db(int64_t conv_id,
                                                 int user_id,
                                                 size_t *text_len_out) {
-   return load_history(conv_id, user_id, false, text_len_out);
+   return load_history(conv_id, user_id, text_len_out);
 }
 
 struct json_object *memory_history_load_for_llm(int64_t conv_id,
                                                 int user_id,
                                                 size_t *text_len_out) {
-   return load_history(conv_id, user_id, true, text_len_out);
+   if (text_len_out) {
+      *text_len_out = 0;
+   }
+   conversation_t conv = { 0 };
+   if (conv_db_get(conv_id, user_id, &conv) != AUTH_DB_SUCCESS) {
+      conv_free(&conv);
+      return NULL;
+   }
+   struct json_object *hist = memory_history_request_context(conv_id, user_id,
+                                                             conv.context_watermark_msg_id,
+                                                             conv.compaction_summary, text_len_out,
+                                                             NULL);
+   conv_free(&conv);
+   return hist;
 }

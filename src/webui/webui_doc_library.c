@@ -32,8 +32,10 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
 #include "blob_store.h" /* BLOB_ID_LEN */
 #include "config/dawn_config.h"
+#include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
@@ -322,15 +324,21 @@ void handle_doc_library_delete(ws_connection_t *conn, json_object *payload) {
           * FK nulls note_doc_id on delete).  Owner-scoped to the note's owner so
           * an admin deleting another user's note removes that user's gloss.
           * Best-effort + harmless for non-note docs (no gloss exists). */
+         conv_db_withdraw_intent_begin(conn->auth_user_id); /* the user removing it */
          (void)memory_note_bridge_delete_gloss(doc.user_id, doc_id);
          /* v61: delete_indexed also removes the contentless FTS rows (no orphan
           * postings); applies to notes AND uploaded docs, all now FTS-indexed. */
          int rc = document_db_delete_indexed(doc_id);
+         conv_db_withdraw_intent_end();
          json_object_object_add(resp_payload, "success", json_object_new_boolean(rc == SUCCESS));
          if (rc != 0) {
             json_object_object_add(resp_payload, "error", json_object_new_string("Delete failed"));
          } else {
             json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
+            /* Its passages leave the conversations they were sent into, the
+             * owner's and any other user's (a shared document): the removal
+             * is recorded as the remover's. */
+            session_withdraw_forgotten_async(conn->auth_user_id, false);
             if (doc.user_id != conn->auth_user_id) {
                OLOG_INFO("doc_library: admin user %d deleted document %lld (%s) owned by user %d",
                          conn->auth_user_id, (long long)doc_id, doc.filename, doc.user_id);

@@ -35,13 +35,21 @@ extern "C" {
 /* Append @p s to a comma-separated CSV buffer, bounded (never overflows). */
 void memory_citation_csv_append(char *buf, size_t bufsz, size_t *len, const char *s);
 
+/** An item an earlier turn of the conversation injected: its handle and id. */
+typedef struct {
+   int handle;
+   char item_id[64];
+} citation_prior_t;
+
 /**
  * @brief Parse every <cited>…</cited> tag out of @p text and resolve the citations.
  *
  * Pure (no I/O) — the unit-testable core of memory_citation_capture().  Two token
- * shapes are recognized inside a tag: `M<n>` / bare `<n>` (a focus ordinal,
- * validated against @p stash) and `ID:<n>` (a tool fact id, validated against
- * @p tool_set).  Fills:
+ * shapes are recognized inside a tag: `M<n>` / bare `<n>` (a focus handle,
+ * validated against this turn's @p stash, then the conversation's earlier
+ * items in @p prior) and `ID:<n>` (a tool fact id, validated against
+ * @p tool_set).  A cite of an earlier item counts toward @p cited_all only (it
+ * is not this turn's Context-panel row).  Fills:
  *   - @p cited_all   : CSV of every distinct cited canonical id (focus + tool) — audit.
  *   - @p cited_focus : CSV of the focus-cited subset only — Aurora broadcast.
  * and the four counts (any out-param may be NULL).  Cross-provenance de-duplicated
@@ -50,6 +58,8 @@ void memory_citation_csv_append(char *buf, size_t bufsz, size_t *len, const char
  */
 void memory_citation_resolve_cited(const char *text,
                                    const citation_stash_t *stash,
+                                   const citation_prior_t *prior,
+                                   int prior_count,
                                    const tool_cited_set_t *tool_set,
                                    char *cited_all,
                                    size_t cited_all_sz,

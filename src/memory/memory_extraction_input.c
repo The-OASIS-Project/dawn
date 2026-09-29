@@ -31,6 +31,7 @@
 
 #include "auth/auth_db.h"
 #include "core/automated_event.h"
+#include "llm/llm_history_kind.h"
 #include "logging.h"
 #include "memory/memory_note_guard.h"
 #include "utils/string_utils.h"
@@ -217,6 +218,10 @@ struct json_object *memory_extraction_build_input(int user_id,
       if (!json_object_object_get_ex(msg, "role", &role_obj))
          continue;
       if (strcmp(json_object_get_string(role_obj), "system") == 0)
+         continue;
+      /* Request context (a directive, an envelope, a loop note) is DAWN's own,
+       * not something the conversation said. */
+      if (llm_history_is_context(msg))
          continue;
       /* A job-result envelope is DAWN's own injected event, not the user speaking. */
       struct json_object *content_obj;

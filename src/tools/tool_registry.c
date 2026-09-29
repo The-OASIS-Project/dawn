@@ -28,6 +28,7 @@
 
 #include <json-c/json.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +36,6 @@
 
 #include "config/dawn_config.h"
 #include "core/device_types.h"
-#include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
@@ -89,6 +89,9 @@ static bool s_initialized = false;
 static bool s_locked = false;
 static bool s_available = false;  /* True if init succeeded, false for degraded mode */
 static bool s_cache_valid = true; /* Schema cache validity */
+/* Rises on every change that can change a tool's schema or the set of tools
+ * (tool_registry_generation). */
+static _Atomic uint64_t s_generation;
 static pthread_mutex_t s_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* =============================================================================
@@ -298,6 +301,7 @@ int tool_registry_init(void) {
    s_override_count = 0;
    s_locked = false;
    s_cache_valid = true;
+   atomic_fetch_add(&s_generation, 1);
 
    /* Initialize hash tables */
    hash_init();
@@ -405,6 +409,7 @@ void tool_registry_shutdown(void) {
    s_override_count = 0;
    s_locked = false;
    s_cache_valid = true;
+   atomic_fetch_add(&s_generation, 1);
    s_initialized = false;
 
    hash_init();
@@ -514,6 +519,7 @@ int tool_registry_register(const tool_metadata_t *metadata) {
    s_tool_count++;
    OLOG_INFO("Registered tool: %s (caps=0x%x)", metadata->name, metadata->capabilities);
 
+   atomic_fetch_add(&s_generation, 1); /* after the change, never before */
    pthread_mutex_unlock(&s_registry_mutex);
    return SUCCESS;
 }
@@ -712,6 +718,7 @@ int tool_registry_parse_configs(const char *config_path) {
       }
    }
 
+   atomic_fetch_add(&s_generation, 1); /* after the change */
    pthread_mutex_unlock(&s_registry_mutex);
 
    toml_free(root);
@@ -1080,6 +1087,7 @@ int tool_registry_update_param_enum(const char *tool_name,
 
    /* Invalidate schema cache */
    s_cache_valid = false;
+   atomic_fetch_add(&s_generation, 1);
 
    OLOG_INFO("tool_registry: Updated enum for %s.%s with %d values (%d sanitized)", tool_name,
              param_name, valid_count, count - valid_count);
@@ -1091,15 +1099,18 @@ int tool_registry_update_param_enum(const char *tool_name,
 void tool_registry_invalidate_cache(void) {
    pthread_mutex_lock(&s_registry_mutex);
    s_cache_valid = false;
+   atomic_fetch_add(&s_generation, 1);
    pthread_mutex_unlock(&s_registry_mutex);
 
    /* Also invalidate LLM tools cache and system-prompt hint for coherence */
    llm_tools_invalidate_cache();
    invalidate_system_instructions();
-   /* Propagate the refreshed prompt to every active session */
-   session_manager_refresh_all_prompts();
 
    OLOG_INFO("tool_registry: Schema cache invalidated (including LLM tools and prompt)");
+}
+
+uint64_t tool_registry_generation(void) {
+   return atomic_load(&s_generation);
 }
 
 bool tool_registry_is_cache_valid(void) {

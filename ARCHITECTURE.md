@@ -125,7 +125,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 |---|---|---|
 | **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`LOG_INFO/WARNING/ERROR`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
 | **ASR** | Speech recognition abstraction (Strategy pattern) over Whisper and Vosk, plus Silero VAD and chunking for long utterances. Whisper on Jetson GPU is the default; Vosk is retained for CPU-only builds. | [asr.md](docs/arch/subsystems/asr.md) |
-| **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one OpenAI-compatible key/endpoint), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. System prompts are composed in two segments — a stable prefix + a volatile tail (`src/core/prompt_compose.c`) — so providers can cache the prefix across turns. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
+| **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one OpenAI-compatible key/endpoint), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. A conversation's request is append-only (`src/core/session_prefix.c`): its system prompt and tool set are frozen on its first turn, and later changes (instructions, the surface's directions, each turn's context) are appended where they happen, so providers cache the whole conversation and signed reasoning stays replayable. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
 | **TTS** | Piper + ONNX Runtime with preprocessing for natural phrasing. Mutex-protected so the main loop, network server, and streaming buffer can all synthesize safely. | [tts.md](docs/arch/subsystems/tts.md) |
 | **DAP2 Satellite** | WebSocket protocol for all remote clients: WebUI browser (Opus), Tier 1 Raspberry Pi (local ASR/TTS, text-only), and Tier 2 ESP32 (raw PCM). A single server on port 3000 serves all three — adding a new client type means a new registration handler, not a new server. | [satellite.md](docs/arch/subsystems/satellite.md) |
 | **Satellite OTA** | Signed over-the-air updates for Tier 1 Pi (.deb) and Tier 2 ESP32 (device-apply). Releases are libsodium-signed binary manifests (TweetNaCl verify on the ESP32); the signing key lives offline and never on the daemon (`tools/ota_keytool.c`). Fleet rollout does a canary wave then deferred fan-out, driven off the main-loop 1-second heartbeat (no dedicated thread). WebUI fleet panel + `dawn-admin ota` CLI + runtime release rescan. | [OTA_DESIGN.md](docs/OTA_DESIGN.md) |
@@ -166,13 +166,14 @@ Layer 1 (Core Infrastructure)
 ├── src/tools/tool_registry.c/h    - Tool registration and lookup (deps: logging, config)
 ├── src/core/command_router.c/h    - Request/response routing (deps: logging)
 ├── src/core/command_executor.c/h  - Unified command executor (deps: tool_registry)
-├── src/core/session_manager.c/h   - Session lifecycle (deps: logging, config)
+├── src/core/session_manager.c/h   - Session lifecycle (deps: logging, config); with session_history.c and
+│                                    session_prefix.c it forms one session unit that reaches Layer 2 (see Layer 2)
 ├── src/core/worker_pool.c/h       - Concurrent tool execution (deps: logging)
 ├── src/core/wake_word.c/h         - Wake-word matching (shared daemon + satellites)
 ├── src/core/time_query_parser.c/h - Stateless temporal-expression recognizer (deps: libc, math)
 ├── src/core/utterance_dedup.c/h   - Cross-device utterance dedup (leaf lock, deps: logging)
 ├── src/core/text_input_dispatch.c - Shared text-input → LLM entry path (deps: session_manager)
-├── src/core/prompt_compose.c      - Two-segment prompt composer (stable prefix + volatile tail)
+├── src/core/prompt_sections.c     - Named system-prompt sections (composed_prompt_t)
 ├── src/core/ws_reconnect.c/h      - Reconnect/backoff helper for persistent WS clients (deps: none; consumers: Discord, Slack, HA realtime WS)
 └── src/input_queue.c/h            - Thread-safe input queue (deps: logging)
 
@@ -183,6 +184,11 @@ Layer 2 (Services)
 │   ├── llm_claude.c               - Anthropic Claude (deps: llm_interface)
 │   ├── llm_tools.c                - Tool execution (deps: tool_registry)
 │   ├── llm_turn_blocks*.c         - Provider-neutral turn blocks + their stored shape (deps: Layer 0)
+│   ├── llm_history_kind.c         - Kind-marked history messages; folds stored context rows back in front of their questions (deps: Layer 0)
+│   ├── llm_context_text.c         - Tagged framing, neutralizing untrusted text, withdrawing forgotten lines (pure, deps: Layer 0)
+│   ├── llm_tools_filter.c         - Which tools a request advertises (frozen set, research allowlist, surface) (deps: tool table)
+│   ├── llm_tools_results.c        - Tool results into history (per provider) + tool calls parsed from responses
+│   ├── llm_tools_dup.c            - Duplicate tool-call detection within a turn
 │   ├── llm_history_rows.c         - A history message → the rows it saves as (deps: turn blocks)
 │   └── llm_key_tag.c              - API-key tag / request carrier for vendor reasoning (deps: crypto_store)
 ├── src/core/embedding_engine.c    - Shared embedding infrastructure (deps: Layer 0-1)
@@ -190,6 +196,12 @@ Layer 2 (Services)
 ├── src/core/scheduler.c           - Scheduler engine + background thread (deps: Layer 0-1)
 ├── src/core/session_manager_llm.c - LLM-call orchestration extracted from session_manager (deps: Layer 0-1, llm)
 ├── src/core/session_voice_save.c  - Saves a voice session's conversation as rows (deps: Layer 0-1, llm, memory)
+├── src/core/session_prefix.c      - Append-only conversation request: freezes the prefix, appends changes + turn context, saves each turn's record, withdraws forgotten items live (deps: Layer 0-1, llm, auth)
+│                                    session_manager.c (the dispatch) and session_history.c (history lifecycle) call into it and it back into them:
+│                                    read the three as one Layer-2 session unit
+├── src/core/prefix_in_force.c     - What a conversation has in force (section/directive/tool-schema hashes) and the deltas to append (deps: llm)
+├── src/core/prefix_message.c      - The one maker of a conversation's frozen prefix message (deps: llm)
+├── src/core/image_rehydrate.c     - Rebuilds image content from stored markers for replay (deps: image_store)
 ├── src/core/ota*.c                - OTA release store, signed manifests, fleet rollout (deps: Layer 0-1, crypto_store; rollout pushes via a registered fn pointer to avoid a Layer-4 dep)
 ├── src/tts/                       - Text-to-speech (deps: Layer 0-1)
 ├── src/asr/                       - Daemon-side ASR interface, Vosk, chunking (deps: Layer 0-1)
@@ -197,7 +209,10 @@ Layer 2 (Services)
 ├── src/mosquitto_comms.c          - MQTT integration (deps: Layer 0-1, tool_registry)
 ├── src/memory/                    - Persistent memory + contacts (deps: Layer 0-1, embedding_engine)
 └── src/auth/                      - User auth, settings, per-user prefs, conversation rows
-                                     (auth_db_messages.c: the one message insert + the LLM replay read) (deps: Layer 0-1)
+                                     (auth_db_messages.c: the one message insert + the LLM replay read;
+                                      auth_db_conv_prefix.c: a conversation's frozen prefix + turn records;
+                                      auth_db_withdraw.c: withdrawing a user's removals from stored context) (deps: Layer 0-1;
+                                      auth_db_withdraw.c also uses the pure llm/llm_context_text.c line helpers)
 
 Layer 3 (Tools)
 ├── src/tools/weather_tool.c           - Weather API (deps: Layer 0-2)
@@ -374,7 +389,6 @@ Global daemon locks (src/dawn.c):
   llm_mutex              — LLM worker thread ↔ main thread buffer transfer
   tts_mutex              — TTS engine (Piper) serialization
   conversation_mutex     — conversation history list
-  direct_mode_prompt_mutex — direct-mode prompt reload
 
 Per-session locks (src/core/session_manager.c):
   session->history_mutex    — session conversation history
@@ -393,6 +407,8 @@ Per-module locks (scoped to a single subsystem):
   utterance_dedup::s_mutex (utterance_dedup.c)    — cross-device dedup slots (leaf)
   attention::s_mutex (src/core/attention/attention_core.c) — SAGE watch cache + event queue + metrics (leaf)
   turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
+  llm_tools::llm_tools_mutex (src/llm/llm_tools*.c)         — the LLM tool table + cached schema hashes; taken BEFORE the tool registry's own mutex (schemas are built from registry lookups), never after it
+  session_prefix::s_withdraw_mutex (src/core/session_prefix.c) — the withdraw worker's queue (LEAF: never held across a withdrawal)
   job_manager::s_pool_mutex (src/core/job_manager.c)       — background-job session pool (REGISTRY tier, like session_manager_rwlock: released before any ref-cond wait, session_free, or conv_db_*/scheduler_* callout)
   job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
   memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)
@@ -748,8 +764,8 @@ and prompt processing costs ~nothing — its 0.75 s median total is essentially
 generation time alone. Production is not so lucky: the same logs show 1,749
 full re-process events from cache misses, and that is why the production median
 is 3.8 s while a benchmark at a *larger* prompt finishes in under a second.
-DAWN's two-segment prompt design (`prompt_compose.c`, stable prefix + volatile
-tail) exists precisely to keep that prefix cacheable. Full detail, per-model rates and the
+DAWN's append-only conversation requests (`session_prefix.c`: a frozen system
+prompt, later changes appended) exist precisely to keep that prefix cacheable. Full detail, per-model rates and the
 measured size→TTFT curve live in
 [services/llama-server/README.md](services/llama-server/README.md#latency-what-actually-governs-perceived-speed).
 

@@ -37,6 +37,7 @@
 #include "config/dawn_config.h"
 #include "llm/llm_capabilities.h"
 #include "llm/llm_claude_format.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -81,6 +82,26 @@ local_provider_t llm_local_detect_provider(const char *endpoint) {
 struct json_object *llm_tools_get_claude_format_filtered(bool r) {
    (void)r;
    return NULL;
+}
+/* The conversation's frozen set, as names only (llm_tools_request_tools). */
+struct json_object *llm_tools_request_tools(struct json_object *history,
+                                            bool r,
+                                            bool claude,
+                                            const char **source) {
+   (void)r;
+   (void)claude;
+   if (source)
+      *source = "stub";
+   struct json_object *names = llm_history_frozen_tools(history);
+   if (!names)
+      return NULL;
+   struct json_object *out = json_object_new_array();
+   for (size_t i = 0; i < json_object_array_length(names); i++) {
+      struct json_object *tool = json_object_new_object();
+      json_object_object_add(tool, "name", json_object_get(json_object_array_get_idx(names, i)));
+      json_object_array_add(out, tool);
+   }
+   return out;
 }
 int llm_tools_get_enabled_count_filtered(bool r) {
    (void)r;

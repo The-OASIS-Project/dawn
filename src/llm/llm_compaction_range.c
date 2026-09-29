@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "llm/llm_history_kind.h"
 #include "logging.h"
 
 static const char *role_of(struct json_object *msg) {
@@ -92,9 +93,12 @@ int llm_compaction_keep_start(struct json_object *history, int start_idx, int ke
    const int history_len = history ? (int)json_object_array_length(history) : 0;
    int end_idx = history_len - keep_messages;
 
-   /* Move back past the tool calls and results the cut would split, then onto
-    * the user message that started them. */
-   while (end_idx > start_idx && is_tool_message(json_object_array_get_idx(history, end_idx - 1))) {
+   /* Move back past the tool calls and results the cut would split, and the
+    * request context between them (a directive, a loop note: it belongs to the
+    * turn it sits in), then onto the user message that started them. */
+   while (end_idx > start_idx &&
+          (is_tool_message(json_object_array_get_idx(history, end_idx - 1)) ||
+           llm_history_is_context(json_object_array_get_idx(history, end_idx - 1)))) {
       end_idx--;
    }
    if (end_idx > start_idx &&

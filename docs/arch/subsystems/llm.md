@@ -64,53 +64,48 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Gates all cloud LLM call paths; local providers bypass
    - Interrupt-aware blocking (wakes on shutdown signal)
 
-## Prompt construction (two-segment, cache-aware)
+## Prompt construction (append-only, cache-aware)
 
-The system prompt is assembled by `dawn_build_prompt()` (`src/webui/webui_auth_helpers.c:779`) into a `composed_prompt_t` (`include/core/session_manager.h`) with exactly two fields:
+A conversation's request is **append-only**: nothing already sent to the model is rewritten. That keeps the provider's prompt cache valid across the whole conversation, and keeps a model's signed reasoning replayable (Anthropic refuses reasoning whose earlier prompt changed). It is built in three layers:
 
-- **`stable_prefix`** — persona, rules, identity, memory, and surface context. Byte-identical across turns unless settings change. The Anthropic `cache_control: ephemeral` breakpoint attaches here (`src/llm/llm_claude_format.c:987`).
-- **`volatile_block`** — per-turn retrievals (`[system_time]` + ranked focus candidates). Rebuilt every turn; never cache-eligible.
+1. **The prompt builder** — `dawn_build_prompt()` (`src/webui/webui_auth_helpers.c`), registered as the session prompt builder. For each turn it returns a `composed_prompt_t` (`include/core/prompt_parts.h`) describing what a conversation *starting now* would get, plus this turn's context. It does not decide what reaches the model.
+2. **The prefix engine** — `session_prefix_apply_turn()` (`src/core/session_prefix.c`, API in `include/core/session_prefix.h`). It compares the composed prompt with what the conversation already has in force and appends only the differences, as kind-marked messages.
+3. **The renderers** — each provider formatter turns those kind-marked messages into its own wire shape.
 
-This split (commit `e4dc72f`, "cache the system prefix end-to-end across providers") lets the bulk of the prompt hit the provider cache while per-turn context refreshes for free. Session-stable content — USER MEMORY preferences + recent summaries — deliberately lives in the stable prefix, not the volatile block, so it costs nothing per turn after the first cache write.
+### What the builder returns
 
-> File:line references below are in `src/webui/webui_auth_helpers.c` unless another file is named.
+- **`sections[]`** — the system prompt in named sections (`prompt_sections_add`, `src/core/prompt_sections.c`): `identity_override`, `persona`, `rules`, `tool_defaults` (guests only), `user_context`, `user_identity`, `memory_rules`, `citation_rules`, `tool_discipline`, `recall_routing`, `background_deliveries`, `context_rules`. `stable_prefix` is their join. The base prompt is **surface-neutral**: one `get_command_prompt()` for every surface; nothing about the room, voice or channel is in it.
+- **`directives`** — the surface's standing directions, the full set every turn (`build_directives`): tools unavailable here right now (`llm_tools_build_disabled_hint`), a satellite's or the local mic's room, a messaging channel, spoken output + speech-to-text input (local mic, satellites, WebUI with voice on), a background job's headless mode. A detached reinvoke turn sets `session->keeps_directions` and sends none, so the conversation's stay in force.
+- **`tool_names` / `tool_schemas`** — the tool set to freeze (every registered tool except the research-only ones, independent of what is enabled right now: `llm_tools_freeze_names`) and a hash of each schema (`llm_tools_schema_hashes`).
+- **`memory_body`** — preferences + recent conversation summaries (`memory_build_context`, unframed).
+- **`volatile_block`** — this turn's context, unframed: `[system_time]` and the ranked focus items (`build_focus_block`), each held item numbered `[M<n> source]` for the whole conversation (`focus_handles.c`).
 
-### Segment order
+The builder runs for guests too (user 0: no memory, no user context).
 
-The stable prefix is built first (`build_stable_segment`, `:435`), **then** satellite/messaging context is appended in `dawn_build_prompt` (`:812`–`815`), **then** the drift hash is taken — so the surface-context block lands *after* the tool-call footer, not before it.
+### What the prefix engine appends
 
-**Stable prefix** (`messages[0]`, cached):
+- **The frozen prefix** — `messages[0]`, `MESSAGE_KIND_PREFIX`, made only by `src/core/prefix_message.c` (CI guard `scripts/check_message_kind_confined.sh`). Set by the conversation's first turn and never changed. It fixes the prompt, a per-conversation **tag** (`dawn-ctx-` + 8 random hex digits) filled into `context_rules`, and the frozen tool set. A conversation saved before prefixes were frozen adopts one on its next turn, as a declared **boundary**: earlier turns replay without their reasoning (text and tool calls stay), and the conversation's floor (`conversations.reasoning_floor_msg_id`) rises.
+- **What is in force** — `_in_force` on the prefix (`src/core/prefix_in_force.c`, persisted as `conversations.in_force_hash`): each section's hash and text, the directives' hash, the tool schemas' hashes. A section that changed since (a persona edit) is appended after the turn's question as `MESSAGE_KIND_INSTRUCTION`, naming what changed with the new text; changed directives as `MESSAGE_KIND_DIRECTIVE`. The newest of each is in force. A frozen tool's schema changing is logged; the tool set itself changing (an MCP server connecting) is a boundary.
+- **The turn's context** — in front of the question: `--- USER MEMORY (tag) ---` when it changed since the conversation last had it (`MESSAGE_KIND_MEMORY`), then `--- TURN CONTEXT (tag) ---` (`MESSAGE_KIND_TURN_CONTEXT`) with the context, a per-turn note, and new device notices for the turn's user. Both are anchored to the question row (`messages.context_of`). A background job's report (`MESSAGE_KIND_ENVELOPE`) gets its context as a separate message before it, so the report stays one untrusted block.
+- **Tool-loop notes** — `MESSAGE_KIND_LOOP_NOTE`, persisted with the turn.
 
-1. **Persona** — `get_persona_description()` (`src/llm/llm_command_parser.c`).
-2. **System instructions** — `get_system_instructions(true)`: core rules + feature rules (vision, search, weather, …).
-3. **TOOL DEFAULTS** — localization fallback (location/room/units/tz, `TOOL_DEFAULTS_HEADER_TEXT`). Emitted only for **unauthenticated** callers; `strip_tool_defaults()` (`:301`) removes it for authenticated users because the User Context block supersedes it.
-4. **User Context** — persona traits + location + timezone + units from `auth_db_get_user_settings()`. "append" mode adds a `## User Context` block; "replace" mode substitutes a custom persona (`build_stable_segment`, `:435`–`559`).
-5. **User Identity** — `## User Identity` (real name, preferred address, aliases) when set; no-ops otherwise (`build_identity_block`, `:139`).
-6. **USER MEMORY** — preferences + recent conversation summaries via `memory_build_context()` (`src/memory/memory_context.c`); no-ops when empty.
-7. **Memory instructions footer** — `k_memory_instructions_footer` (`:255`); appended only when a memory body was emitted, so its "the above is only a summary" referent stays valid.
-8. **Tool-call discipline footer** — `k_tool_call_discipline_footer` (`:274`); always emitted (no auth/memory gate). See below.
-9. **Surface context** — exactly one of: DAP2 satellite `Room=` / `HomeAssistant_Area=` (`append_satellite_context_to_stable`, `:727`) **or** messaging provider/channel (`append_messaging_context_to_stable`, `:648`). Mutually exclusive by session type; appended after the base segment (`:812`–`815`).
+The turn's record (what it appended, the prefix and tool set it ran under, its boundary) is saved once its question row exists (`session_prefix_question_saved`, from every question writer), in one transaction (`conv_db_save_turn`). A reload rebuilds the same request (`memory_history_request_context`, `src/memory/memory_history_loader.c`): the context rows fold back in front of their questions (`llm_history_kind.c`).
 
-— *cache boundary; drift hash computed here* —
+**Untrusted text.** Everything DAWN puts in front of the model but didn't write passes through `llm_context_neutralize()` (`src/llm/llm_context_text.c`). That covers focus items, remembered preferences and summaries, tool results (`llm_tools_execute`, the scheduler's direct briefing calls, the MQTT device-data relay), a job's title and result, device notices, and compaction summaries. Matching runs on a shadow of the text that sees through invisible characters and lookalike letters. It rewrites only the spans that imitate DAWN's framing or carry a tag-shaped string (whose digits it withholds), and keeps every other byte. It is linear in the text's length. `context_rules` tells the model that only tagged framing and system messages are DAWN's. The conversation's own secret is masked in tool results, the persisted reply and compaction summaries (`session_prefix_mask_secret`). A tool call carrying it, in any encoding, is refused (`call_carries_tag`).
 
-**Volatile block** (`messages[1]`, never cached) — `build_volatile_segment()` (`:582`) wraps `build_focus_block()` (`src/webui/build_focus_block.c:246`):
+**Forgetting.** A user's removal (forgetting a memory, deleting one in the memory panel, forgetting a conversation, deleting or replacing a document, deleting all memories, deleting an account) is recorded by TEMP delete triggers that fire only while the removal is marked (`conv_db_withdraw_intent_begin`, `src/auth/auth_db_withdraw.c`). Nightly decay, merges and a note's re-indexing record nothing. `session_withdraw_forgotten` then withdraws each removed item from every conversation it was injected into: stored rows (`conv_db_withdraw`) and every live session's history. `scripts/check_user_removal_marked.sh` fails the build when a user-facing delete isn't marked. Its `[M<n>]` lines are rewritten, and the conversation's reasoning floor rises (pending until a turn built after the removal is saved), since earlier reasoning may repeat it. A turn built before a removal and saved after it is withdrawn as it is saved, inside `conv_db_save_turn`, and its reasoning goes behind the floor even if another session's turn has already settled it (`conversations.reasoning_floor_seq` keeps the last withdrawal that changed the conversation). Removals are ordered by the withdrawal sequence (`conv_db_withdraw_seq`, the `withdrawn_items` AUTOINCREMENT high-water mark), not by the clock. `document_chunks` ids are never reused (AUTOINCREMENT), so a removed chunk's record can't name a new one.
 
-10. `--- TURN CONTEXT ---` framing header.
-11. **`[system_time]`** — fresh `time()`-derived line, prepended when a dispatch session is present and the focus result is non-empty (`build_focus_block.c:369`). Lives here, not in the cached prefix, so the cache key doesn't churn across day boundaries.
-12. **Ranked focus candidates** — `[<source_id>] <text>` lines: memory facts/entities/relations/summaries, calendar events, document chunks, after per-session dedup.
-13. `--- END TURN CONTEXT ---` framing footer.
+### Tools on the wire
 
-### Drift hash and the cache boundary
-
-`session_update_system_messages()` (`src/core/session_manager.c:1685`) pushes both segments into the conversation history and computes an FNV-1a hash of the stable prefix (`:1718`). If the hash changes mid-session it logs a cache-invalidation warning. **This is why satellite/messaging context is appended inside `dawn_build_prompt` before this point** (`:803`–`807`): a mid-session room or HA-area change would otherwise silently bust the Anthropic cache with no drift-log signal.
-
-### Tool-call discipline footer
-
-`k_tool_call_discipline_footer` (`:274`, appended via `append_tool_discipline_footer`, `:383`) is a **universal** anti-bluff rule: when a reply commits to an action ("I'll search…", "I'll send…", "let me look that up"), the corresponding tool call must be in the **same turn** — not promised for later, not narrated as if it already happened. Aspirational offers ("if you'd like, I can…") don't require a call until the user accepts. It applies to every action-bearing tool (scheduler, search, url_fetch, email, calendar, memory, messaging, home_assistant, music, weather, …); the originating failure was a verbal "I've scheduled that" with no `scheduler.create` call. It always emits and lives in the cached prefix, so it costs nothing per turn. The scheduler tool descriptor carries its own louder "NO VERBAL COMMITMENTS" clause; this footer is the general-purpose version for every other tool. (Messaging-surface context for this rule is described in `docs/MESSAGING_CHANNELS_DESIGN.md` §10.5.)
+`llm_tools_request_tools()` (`src/llm/llm_tools_filter.c`) picks a request's tools: none on a suppressed turn, the read-only allowlist in a research session, else the conversation's frozen set, or the currently enabled set with no frozen set. A frozen tool not available here right now stays listed, is named in the directives, and is refused if called (`llm_tools_enabled_for_session`). A forced final call (iteration cap) keeps the tools with `tool_choice: none`, so the cached prefix is unchanged.
 
 ### Provider handling
 
-Assembly is provider-agnostic — the two-segment `composed_prompt_t` is serialized per provider downstream: Claude attaches `cache_control` to the first system message (plus a second breakpoint on the final tool schema, `src/llm/llm_claude_format.c`); the OpenAI **Responses** API — which has no cache-breakpoint mechanism and requires the changing content *last* for its automatic prefix cache — puts only the **stable** segment in `instructions` (byte-stable) and repositions the **volatile** segment as a user item immediately before the current question, so `[instructions][tools][history]` caches cross-turn (`src/llm/llm_openai_responses_input.c`, `docs/RESPONSES_CACHE_REORDER_PLAN.md`; live-verified 0 → ~93% cross-turn cached); Chat Completions collapses the two into one leading system block (`llm_openai_cache.c`) — it shares the Responses cross-turn gap, unfixed since Claude was the primary provider. Commit `e4dc72f` also unified cache-token accounting across providers (Claude `cache_creation`/`cache_read` tokens, Responses API usage struct). Gemini caching is documented as unreliable upstream — see the Gemini native-API notes in `docs/TODO.md`.
+- **Claude** (`llm_claude_format.c`): the prefix is the top-level `system` with `cache_control`, plus a breakpoint on the last tool. Instructions and directives go as mid-conversation system messages for models listed under `models.toml [mid_system]`; otherwise as a user-turn note headed `[Operator note <tag>]`. The turn's context goes into the question's user message.
+- **OpenAI Responses** (`llm_openai_responses_input.c`): the prefix is `instructions` (byte-stable), notes are system items, and the context goes as an item before the question.
+- **Chat Completions** (`llm_openai_history.c`): the prefix is the first system message. Notes are system messages on native OpenAI (`api.openai.com`); on other carriers (OpenRouter, Gemini, local) they are tagged in-band notes. The context goes into the question's message.
+
+Cache-token accounting is unified across providers (Claude `cache_creation`/`cache_read`, the Responses usage struct). Gemini caching is unreliable upstream; see the Gemini native-API notes in `docs/TODO.md`.
 
 ## Turn blocks: replay and persistence
 

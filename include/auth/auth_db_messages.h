@@ -71,6 +71,8 @@ typedef struct {
    const char *tool_call_id; /**< tool: the call this result answers */
    const char *reasoning;    /**< assistant: display-only reasoning JSON */
    const char *llm_blocks;   /**< assistant: stored turn blocks (llm_turn_blocks_to_stored) */
+   const char *kind;         /**< request-context kind (message_kind.h); NULL = ordinary */
+   int64_t context_of;       /**< a kinded row: the question it belongs to; 0 = none */
    bool is_error;            /**< tool: 1 = confirmed failure */
 } conv_message_row_t;
 
@@ -79,6 +81,11 @@ typedef struct {
  *
  * Updates the conversation's updated_at and message count. `llm_blocks` is
  * accepted on assistant rows only, and only up to CONV_LLM_BLOCKS_MAX bytes.
+ * A row with a `kind` (request context) must name a kind whose role matches
+ * (message_kind.h); it is saved without touching the message count, the
+ * conversation's order in the list, or anyone's view of it.  Its `context_of`,
+ * when set, must name a user row (ordinary or an envelope) of the same
+ * conversation.
  *
  * @param id_out Receives the new row id (0 on failure); may be NULL.
  * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN
@@ -100,6 +107,8 @@ typedef struct {
    const char *tool_call_id;
    const char *llm_blocks; /**< NULL when absent, over the cap, or past the load budget */
    size_t llm_blocks_len;
+   const char *kind;   /**< request-context kind, or NULL for an ordinary message */
+   int64_t context_of; /**< a kinded row's question, or 0 */
    time_t created_at;
    int is_error;
 } conversation_llm_row_t;

@@ -33,6 +33,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "llm/llm_capabilities.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_tools.h"
@@ -153,8 +154,26 @@ static json_object *convert_content_block_to_claude(json_object *block) {
 
    const char *block_type = json_object_get_string(type_obj);
    if (!block_type || strcmp(block_type, "image_url") != 0) {
-      // Not image_url - just copy the block (already has type)
-      return json_object_get(block);
+      /* Not image_url: the block as it is, less any key of DAWN's own (a
+       * turn's context parts carry their kind). */
+      bool internal = false;
+      json_object_object_foreach(block, key, val) {
+         (void)val;
+         internal = internal || key[0] == '_';
+      }
+      if (!internal) {
+         return json_object_get(block);
+      }
+      json_object *copy = json_object_new_object();
+      if (!copy) {
+         return NULL;
+      }
+      json_object_object_foreach(block, k, v) {
+         if (k[0] != '_') {
+            json_object_object_add(copy, k, json_object_get(v));
+         }
+      }
+      return copy;
    }
 
    // This is an OpenAI image_url block - convert to Claude format
@@ -231,6 +250,29 @@ static json_object *convert_content_block_to_claude(json_object *block) {
  * @param vision_images Array of base64-encoded image data
  * @param vision_image_count Number of images in the array
  */
+static const char *msg_role(json_object *msg);
+static const char *part_type(json_object *part);
+static bool parts_have_type(json_object *parts, const char *type);
+static json_object *text_block(const char *text);
+
+/* How an operator's note opens on a model that can't take it as a system
+ * message (llm_operator_note_label: with the conversation's tag). */
+#define OPERATOR_NOTE_OPEN "[Operator note"
+
+/* Whether @p text is one of DAWN's own blocks (an operator's note, a framed
+ * turn context or memory), never the question.  None found: the question's
+ * text and images go after them. */
+static bool is_dawn_block(const char *text) {
+   static const char *const k_opens[] = { OPERATOR_NOTE_OPEN, "--- TURN CONTEXT",
+                                          "--- USER MEMORY" };
+   for (size_t i = 0; text && i < sizeof(k_opens) / sizeof(k_opens[0]); i++) {
+      if (strncmp(text, k_opens[i], strlen(k_opens[i])) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 static void add_vision_to_claude_messages(json_object *messages_array,
                                           const char *input_text,
                                           const char **vision_images,
@@ -240,6 +282,12 @@ static void add_vision_to_claude_messages(json_object *messages_array,
    }
 
    int msg_count = json_object_array_length(messages_array);
+   /* The turn's user message: an operator's system message after it stays. */
+   while (msg_count > 0 && msg_role(json_object_array_get_idx(messages_array, msg_count - 1)) &&
+          strcmp(msg_role(json_object_array_get_idx(messages_array, msg_count - 1)), "system") ==
+              0) {
+      msg_count--;
+   }
    json_object *last_msg = msg_count > 0 ? json_object_array_get_idx(messages_array, msg_count - 1)
                                          : NULL;
    json_object *role_obj = NULL;
@@ -252,15 +300,68 @@ static void add_vision_to_claude_messages(json_object *messages_array,
    // Check if last message is a user message with plain text content
    json_object *last_content = NULL;
    bool is_text_user_message = false;
+   bool is_question_blocks = false; /* the question after its turn's context */
    if (last_msg && last_role_str && strcmp(last_role_str, "user") == 0) {
       if (json_object_object_get_ex(last_msg, "content", &last_content)) {
          if (json_object_is_type(last_content, json_type_string)) {
             is_text_user_message = true;
+         } else if (json_object_is_type(last_content, json_type_array) &&
+                    !parts_have_type(last_content, "tool_result") &&
+                    parts_have_type(last_content, "text")) {
+            is_question_blocks = true;
          }
       }
    }
 
-   if (is_text_user_message) {
+   if (is_question_blocks) {
+      /* The context before it and any operator's note after it stay where they
+       * are; the question (the last text block that isn't a note) becomes the
+       * turn's text, followed by the images. */
+      json_object *content_array = json_object_new_array();
+      const size_t n = json_object_array_length(last_content);
+      size_t question = n;
+      /* The block that is the question's own text; failing that, the last
+       * that isn't a note (a question an image came with may have none). */
+      for (size_t i = n; input_text && i-- > 0;) {
+         json_object *part = json_object_array_get_idx(last_content, i);
+         json_object *text = NULL;
+         if (part_type(part) && strcmp(part_type(part), "text") == 0 &&
+             json_object_object_get_ex(part, "text", &text) &&
+             strcmp(json_object_get_string(text), input_text) == 0) {
+            question = i;
+            break;
+         }
+      }
+      for (size_t i = n; question == n && i-- > 0;) {
+         json_object *part = json_object_array_get_idx(last_content, i);
+         json_object *text = NULL;
+         if (part_type(part) && strcmp(part_type(part), "text") == 0 &&
+             json_object_object_get_ex(part, "text", &text) &&
+             !is_dawn_block(json_object_get_string(text))) {
+            question = i;
+            break;
+         }
+      }
+      for (size_t i = 0; content_array && i <= n; i++) {
+         if (i == question || (i == n && question == n)) {
+            if (input_text && input_text[0]) { /* an empty text block is refused */
+               json_object_array_add(content_array, text_block(input_text));
+            }
+            for (int k = 0; k < vision_image_count; k++) {
+               if (vision_images[k]) {
+                  json_object_array_add(content_array,
+                                        llm_claude_create_image_block(vision_images[k]));
+               }
+            }
+         } else if (i < n) {
+            json_object_array_add(content_array,
+                                  json_object_get(json_object_array_get_idx(last_content, i)));
+         }
+      }
+      if (content_array) {
+         json_object_object_add(last_msg, "content", content_array);
+      }
+   } else if (is_text_user_message) {
       // Last message is user message with text - add vision content
       json_object *content_array = json_object_new_array();
 
@@ -421,6 +522,216 @@ static json_object *result_note(json_object *block) {
 /* @p msg's content replaced by @p parts (taking them). */
 static void set_parts(json_object *msg, json_object *parts) {
    json_object_object_add(msg, "content", parts);
+}
+
+/* ---- Request context (llm_history_kind.h) ---- */
+
+static json_object *text_block(const char *text) {
+   json_object *block = json_object_new_object();
+   if (block) {
+      json_object_object_add(block, "type", json_object_new_string("text"));
+      json_object_object_add(block, "text", json_object_new_string(text ? text : ""));
+   }
+   return block;
+}
+
+static json_object *note_block(const char *label, const char *text) {
+   const size_t len = strlen(label) + (text ? strlen(text) : 0) + 1;
+   char *note = malloc(len);
+   if (!note) {
+      return NULL;
+   }
+   snprintf(note, len, "%s%s", label, text ? text : "");
+   json_object *block = text_block(note);
+   free(note);
+   return block;
+}
+
+/* @p msg's content as an array of blocks (a string becomes one text block). */
+static json_object *content_blocks(json_object *msg) {
+   json_object *content = NULL;
+   json_object_object_get_ex(msg, "content", &content);
+   if (json_object_is_type(content, json_type_array)) {
+      return content;
+   }
+   json_object *blocks = json_object_new_array();
+   if (!blocks) {
+      return NULL;
+   }
+   const char *text = json_object_get_string(content);
+   if (text && *text) {
+      json_object_array_add(blocks, text_block(text));
+   }
+   json_object_object_add(msg, "content", blocks);
+   return blocks;
+}
+
+/**
+ * A directive or an instruction change, where it sits: after the turn's user
+ * message.  On a model that takes one it is a `role: "system"` message (a run
+ * of them is one message: each must be followed by an assistant turn); on any
+ * other it is a note at the end of that user message.  With no user message
+ * before it (a question that was never saved) the note opens a user message
+ * of its own, which the next user message joins.
+ */
+static void add_operator_message(json_object *messages,
+                                 const char *label,
+                                 const char *text,
+                                 bool mid_system,
+                                 json_object **last_message,
+                                 const char **last_role) {
+   if (!text || !*text) {
+      return;
+   }
+   if (*last_role && strcmp(*last_role, "system") == 0 && *last_message) {
+      json_object *content = NULL;
+      json_object_object_get_ex(*last_message, "content", &content);
+      const char *before = json_object_get_string(content);
+      const size_t len = strlen(before ? before : "") + strlen(text) + 3;
+      char *joined = malloc(len);
+      if (joined) {
+         snprintf(joined, len, "%s\n\n%s", before ? before : "", text);
+         json_object_object_add(*last_message, "content", json_object_new_string(joined));
+         free(joined);
+      }
+      return;
+   }
+   const bool after_user = *last_role && strcmp(*last_role, "user") == 0 && *last_message;
+   if (after_user && mid_system) {
+      json_object *sys = json_object_new_object();
+      if (!sys) {
+         return;
+      }
+      json_object_object_add(sys, "role", json_object_new_string("system"));
+      json_object_object_add(sys, "content", json_object_new_string(text));
+      json_object_array_add(messages, sys);
+      *last_message = sys;
+      *last_role = "system";
+      return;
+   }
+   if (!after_user) {
+      json_object *user = json_object_new_object();
+      if (!user) {
+         return;
+      }
+      json_object_object_add(user, "role", json_object_new_string("user"));
+      json_object_object_add(user, "content", json_object_new_array());
+      json_object_array_add(messages, user);
+      *last_message = user;
+      *last_role = "user";
+   }
+   json_object *blocks = content_blocks(*last_message);
+   json_object *note = blocks ? note_block(label, text) : NULL;
+   if (note) {
+      json_object_array_add(blocks, note);
+   }
+}
+
+/* Append @p from's blocks to @p to's (both user messages). */
+static void join_user_messages(json_object *to, json_object *from) {
+   json_object *into = content_blocks(to);
+   json_object *add = content_blocks(from);
+   const size_t n = add ? json_object_array_length(add) : 0;
+   for (size_t i = 0; into && i < n; i++) {
+      json_object_array_add(into, json_object_get(json_object_array_get_idx(add, i)));
+   }
+}
+
+/**
+ * A system message must follow a user message and be the last message or be
+ * followed by an assistant turn.  One that isn't (a reply that was never
+ * saved, so the next question follows it) becomes a note in the user message
+ * before it instead, and that user message takes in the one after.
+ */
+static void place_system_messages(json_object *messages, const char *label) {
+   for (size_t i = 0; i < json_object_array_length(messages); i++) {
+      json_object *msg = json_object_array_get_idx(messages, i);
+      if (!msg_role(msg) || strcmp(msg_role(msg), "system") != 0) {
+         continue;
+      }
+      json_object *prev = i > 0 ? json_object_array_get_idx(messages, i - 1) : NULL;
+      json_object *next = i + 1 < json_object_array_length(messages)
+                              ? json_object_array_get_idx(messages, i + 1)
+                              : NULL;
+      const bool prev_user = prev && msg_role(prev) && strcmp(msg_role(prev), "user") == 0;
+      const bool next_ok = !next || (msg_role(next) && strcmp(msg_role(next), "assistant") == 0);
+      if (prev_user && next_ok) {
+         continue;
+      }
+      json_object *content = NULL;
+      json_object_object_get_ex(msg, "content", &content);
+      json_object *note = note_block(label, json_object_get_string(content));
+      if (prev_user) {
+         json_object *blocks = content_blocks(prev);
+         if (blocks && note) {
+            json_object_array_add(blocks, note);
+            note = NULL;
+         }
+         json_object_array_del_idx(messages, i, 1);
+         if (next && msg_role(next) && strcmp(msg_role(next), "user") == 0) {
+            join_user_messages(prev, next);
+            json_object_array_del_idx(messages, i, 1);
+         }
+      } else {
+         /* No user message before it: it becomes one. */
+         json_object_object_add(msg, "role", json_object_new_string("user"));
+         json_object *blocks = json_object_new_array();
+         if (blocks && note) {
+            json_object_array_add(blocks, note);
+            note = NULL;
+         }
+         json_object_object_add(msg, "content", blocks);
+         if (next && msg_role(next) && strcmp(msg_role(next), "user") == 0) {
+            join_user_messages(msg, next);
+            json_object_array_del_idx(messages, i + 1, 1);
+         }
+      }
+      json_object_put(note);
+      i = i > 0 ? i - 1 : 0; /* look at what's there now */
+   }
+}
+
+/**
+ * Cache breakpoint on the conversation: the last block of the last user
+ * message, so the next request (the next tool round, or the next turn) reads
+ * everything up to here from the cache.  With the tools' and the system
+ * prompt's, three of the four breakpoints a request may carry.
+ */
+static void mark_conversation_breakpoint(json_object *messages) {
+   for (size_t i = json_object_array_length(messages); i-- > 0;) {
+      json_object *msg = json_object_array_get_idx(messages, i);
+      if (!msg_role(msg) || strcmp(msg_role(msg), "user") != 0) {
+         continue;
+      }
+      json_object *blocks = content_blocks(msg);
+      size_t n = blocks ? json_object_array_length(blocks) : 0;
+      /* The last block that can take one: an empty text block can't. */
+      json_object *text = NULL;
+      while (n > 0 &&
+             json_object_object_get_ex(json_object_array_get_idx(blocks, n - 1), "text", &text) &&
+             !json_object_get_string_len(text)) {
+         n--;
+      }
+      if (n == 0) {
+         return;
+      }
+      json_object *last = json_object_array_get_idx(blocks, n - 1);
+      json_object *copy = json_object_new_object();
+      json_object *cc = json_object_new_object();
+      if (!copy || !cc) {
+         json_object_put(copy);
+         json_object_put(cc);
+         return;
+      }
+      /* A copy: the block may be shared with the history. */
+      json_object_object_foreach(last, key, val) {
+         json_object_object_add(copy, key, json_object_get(val));
+      }
+      json_object_object_add(cc, "type", json_object_new_string("ephemeral"));
+      json_object_object_add(copy, "cache_control", cc);
+      json_object_array_put_idx(blocks, n - 1, copy);
+      return;
+   }
 }
 
 /**
@@ -609,12 +920,23 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
 
    // Add tools if native tool calling is enabled
    if (llm_tools_enabled(NULL)) {
-      bool is_remote = is_current_session_remote();
-      struct json_object *tools = llm_tools_get_claude_format_filtered(is_remote);
+      /* The conversation's own tool set when it has one: the same on every
+       * request (a tool this surface may not use is refused when called). */
+      const char *source = NULL;
+      struct json_object *tools = llm_tools_request_tools(openai_conversation,
+                                                          is_current_session_remote(), true,
+                                                          &source);
       if (tools) {
          json_object_object_add(claude_request, "tools", tools);
-         OLOG_INFO("Claude: Added %d tools to request (%s session)",
-                   llm_tools_get_enabled_count_filtered(is_remote), is_remote ? "remote" : "local");
+         OLOG_INFO("Claude: Added %zu tools to request (%s)", json_object_array_length(tools),
+                   source);
+         /* The loop's last call, for a text answer: the tools stay (the
+          * request reads as every other did), none may be called. */
+         if (iteration >= LLM_TOOLS_MAX_ITERATIONS) {
+            json_object *choice = json_object_new_object();
+            json_object_object_add(choice, "type", json_object_new_string("none"));
+            json_object_object_add(claude_request, "tool_choice", choice);
+         }
 
          /* Attach cache_control to the LAST tool so the entire tools
           * array is cacheable as its own prefix.  Anthropic caches
@@ -649,10 +971,12 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    int conv_len = json_object_array_length(openai_conversation);
    const char *last_role = NULL;
    json_object *last_message = NULL;
+   char note_label[LLM_CONTEXT_TAG_MAX + 24];
+   llm_operator_note_label(llm_history_tag(openai_conversation), note_label, sizeof(note_label));
+   const bool mid_system = llm_model_mid_system(model_name);
 
    /* Tool calls and results are paired once, after every message is built
     * (repair_tool_pairs), not filtered here message by message. */
-   (void)iteration;
 
    for (int i = 0; i < conv_len; i++) {
       json_object *msg = json_object_array_get_idx(openai_conversation, i);
@@ -692,7 +1016,11 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                continue;
             }
 
-            json_object_array_add(filtered_content, json_object_get(block));
+            /* The block as produced, less any key of DAWN's own. */
+            json_object *plain = convert_content_block_to_claude(block);
+            if (plain) {
+               json_object_array_add(filtered_content, plain);
+            }
          }
 
          // Only add if we have content
@@ -911,6 +1239,16 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          continue;
       }
 
+      const message_kind_t kind = llm_history_kind_of(msg);
+      if (strcmp(role, "system") == 0 &&
+          (kind == MESSAGE_KIND_DIRECTIVE || kind == MESSAGE_KIND_INSTRUCTION)) {
+         /* In place, never in the top-level system prompt: that stays as the
+          * conversation first sent it. */
+         add_operator_message(messages_array, note_label, json_object_get_string(content_obj),
+                              mid_system, &last_message, &last_role);
+         continue;
+      }
+
       if (strcmp(role, "system") == 0) {
          // System message goes in separate "system" array with cache control
          json_object *system_block = json_object_new_object();
@@ -1021,6 +1359,13 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                   }
                }
                json_object_object_add(last_message, "content", converted_array);
+            } else if (strcmp(role, "user") == 0 && json_object_get_string_len(content_obj) > 0) {
+               /* A user turn is always blocks: the conversation breakpoint goes on
+                * its last one, and a turn must read the same with it or without
+                * it (the next request moves it on). */
+               json_object *blocks = json_object_new_array();
+               json_object_array_add(blocks, text_block(json_object_get_string(content_obj)));
+               json_object_object_add(last_message, "content", blocks);
             } else {
                json_object_object_add(last_message, "content", json_object_get(content_obj));
             }
@@ -1043,7 +1388,9 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       add_vision_to_claude_messages(messages_array, input_text, vision_images, vision_image_count);
    }
 
+   place_system_messages(messages_array, note_label);
    (void)repair_tool_pairs(messages_array);
+   mark_conversation_breakpoint(messages_array);
    json_object_object_add(claude_request, "messages", messages_array);
 
    return claude_request;

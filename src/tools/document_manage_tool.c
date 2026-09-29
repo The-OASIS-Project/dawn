@@ -35,7 +35,9 @@
 #include <strings.h> /* strcasecmp */
 #include <time.h>
 
+#include "auth/auth_db_withdraw.h"
 #include "core/embedding_engine.h"
+#include "core/session_prefix.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "llm/llm_tools.h" /* LLM_TOOLS_ARGS_LEN — the upstream tool-arg cap DOCMGMT_SAVE_TEXT_MAX mirrors */
@@ -423,6 +425,9 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
     * duplicates).  Scoped tight: a same-named note (different kind, owns a gloss)
     * and global/other-user docs are never touched.  The bound guards against a
     * delete that keeps failing. */
+   /* The replaced document is the user removing it: its passages leave the
+    * conversations they were sent into. */
+   conv_db_withdraw_intent_begin(user_id);
    for (int guard = 0; guard < DOCMGMT_MAX_OVERWRITE_SWEEP; guard++) {
       if (document_db_find_by_label_exact(user_id, title, false, &existing) != SUCCESS ||
           existing.user_id != user_id || strcmp(existing.filetype, "note") == 0)
@@ -430,6 +435,10 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
       if (document_db_delete_indexed(existing.id) != SUCCESS)
          break;
       overwrite = true;
+   }
+   conv_db_withdraw_intent_end();
+   if (overwrite) {
+      session_withdraw_forgotten_async(user_id, false);
    }
 
    doc_index_result_t res;
@@ -819,11 +828,15 @@ static char *do_confirm_delete(int user_id) {
    /* Drop the memory→note bridge gloss BEFORE the note row is deleted (the FK
     * nulls note_doc_id on delete, after which the gloss can't be found by it).
     * Best-effort + harmless for non-note docs (no gloss exists). */
+   conv_db_withdraw_intent_begin(user_id); /* the user removing it, its gloss too */
    (void)memory_note_bridge_delete_gloss(user_id, doc_id);
-
-   if (document_db_delete_indexed(doc_id) != SUCCESS)
+   const int deleted = document_db_delete_indexed(doc_id);
+   conv_db_withdraw_intent_end();
+   if (deleted != SUCCESS)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "The deletion failed — the item may have already been removed.");
+   /* Its passages leave the conversations they were sent into. */
+   session_withdraw_forgotten_async(user_id, false);
 
    char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "Deleted the %s '%s'.", is_note ? "note" : "document", label);

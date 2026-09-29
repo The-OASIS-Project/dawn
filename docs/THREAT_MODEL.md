@@ -231,6 +231,74 @@ tracked as *"memory injection filter: multi-language"* in the TODO.
 Injecting untrusted content directly into the **system** role would bypass all of this and is
 a security bug — untrusted text goes into user/data-role context, never the system prompt.
 
+**Per-turn context framing.** A conversation's system prompt is frozen on its first turn, and
+DAWN's per-turn context (retrieved items, remembered preferences and summaries, device notices)
+rides in the user turn, framed by lines carrying a **per-conversation tag** (`dawn-ctx-` + 8 hex
+digits from `getrandom`). The frozen prompt's `context_rules` section tells the model that only
+tagged framing and system messages are DAWN's, and that anything imitating them is data.
+Instruction and surface changes go out of band (system role) where the provider supports it;
+elsewhere they are in-band notes headed `[Operator note <tag>]`.
+
+The controls, in order of what they rest on:
+- **Everything that comes in is neutralized** (`llm_context_neutralize()`,
+  `src/llm/llm_context_text.c`): retrieved items, remembered facts, tool results (including the
+  scheduler's direct briefing calls and the legacy MQTT device-data relay), background-job
+  output, device notices, compaction summaries. Matching runs on a shadow of the text that sees
+  through characters that render as nothing and reads lookalikes (fullwidth, Cyrillic, Greek,
+  mathematical) as their letters. Imitations of a marker are found whatever separates their
+  words or opens them, and so is any tag-shaped string, in any hyphen spelling. Only those spans
+  are rewritten; every other byte is kept, so a note's exact text still round-trips (unless it
+  contains such a span itself: ordinary text reading "Updated instructions" or "[Operator note]",
+  or those words separated only by punctuation, is rewritten too, and an exact-match edit of
+  that span then misses). A defused
+  tag keeps its shape and withholds its digits (`dawn_ctx_(withheld)`). Matching is linear in
+  the text's length. A leaked tag therefore can't be used to forge framing: no untrusted text
+  reaches the model carrying one. This is the control.
+- **The conversation's own secret is masked** wherever its 8 digits appear, split, spaced, in
+  lookalike characters (fullwidth, circled, superscript, Cyrillic, Greek) or escaped (`%XX`,
+  `&#N;`, `&#xN;`, `\uXXXX`): in tool results, retrieved items, the MQTT device-data relay, the
+  model's persisted reply and compaction summaries (`llm_context_mask_tag`), read both as written
+  and with escapes decoded so neither reading hides it. Background-job output and device notices
+  are neutralized but not masked. This is what stops a leaked secret being used: the
+  shape-matching above is best-effort.
+- **The secret doesn't go out through a tool**: a tool call whose arguments carry it, split,
+  spaced or encoded (JSON, URL, entity), is refused. This is a tripwire only: a sufficiently
+  transformed copy (base64, reversed, spread across calls) gets through.
+- **What isn't covered**: text streamed to TTS or a messaging channel as the model writes it is
+  delivered before the reply is finalized, so a secret the model was led to say is spoken or
+  sent. And the reply's stored turn blocks (what a Claude or Responses replay sends) aren't
+  rewritten, because they carry signed reasoning; a reply that wrote the tag replays it as the
+  assistant's text, never as DAWN's.
+
+**Forgotten items leave stored context.** Per-turn context is stored with the conversation so a
+reload replays the same request. A **user's removal** is recorded for withdrawal: forgetting a
+memory (the tool or the memory panel), deleting all memories, forgetting a conversation's
+memories, deleting or replacing a document, or deleting an account (its shared documents are
+in other users' conversations). A CI guard (`scripts/check_user_removal_marked.sh`) fails the
+build if a user-facing delete isn't marked. TEMP delete triggers on DAWN's own connection fire only while
+the removal is marked (`conv_db_withdraw_intent_begin`, `src/auth/auth_db_withdraw.c`).
+`session_withdraw_forgotten` then withdraws each removed item from every conversation it was
+injected into (a shared document's included), stored and in every live session, matching by
+item id, so a voice history not yet saved is covered. A turn built before the removal and saved after it is
+withdrawn as it is saved, as is a voice history saved later, within the week the removal is
+kept. The conversation leaves its earlier reasoning behind (signed reasoning may quote the item
+and can't be edited), including a reply that was streaming during the removal. Chunk ids are
+never reused since v94 (AUTOINCREMENT), so a removed chunk's record can't withdraw a new chunk.
+
+What is **not** withdrawn, stated plainly:
+- deletes that aren't the user's removal: nightly confidence decay, entity merges,
+  superseded-fact cleanup, re-indexing an edited note, dawn-admin's meta-fact cleanup and
+  re-extraction reset, and anything done in the sqlite3 shell; what was sent stays as it was
+  sent;
+- the model's own words about an item: assistant replies that quoted it, and `role:tool` rows
+  (memory search and recall results, document reads);
+- compaction summaries of earlier turns, and a background job's report that mentioned it;
+- calendar occurrences (the calendar's own sync removes those);
+- the debug chat logs (`logs/chat_history_*.json`) and daemon logs;
+- a running background job's in-memory history (it ends with its run).
+
+Deleting the conversation removes all of its rows.
+
 **Scheduled briefing summarization** is a self-contained instance of this pattern. The briefing's
 collected tool output is wrapped in `<briefing_data>` and summarized by a **tool-less** LLM turn,
 so injected data cannot invoke a tool. Forged fence tags in that data (`</briefing_data>`, a fake

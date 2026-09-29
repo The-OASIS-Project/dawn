@@ -976,36 +976,25 @@ int webui_destroy_sessions_by_auth_token(const char *auth_token_prefix);
  * ============================================================================= */
 
 /**
- * @brief Phase 1e structured prompt builder — matches
- *        `session_prompt_builder_t` signature.  Fills `out` with three
- *        named blocks (base + memory + focus); session_manager owns
- *        the heap allocations on SUCCESS and releases via
- *        composed_prompt_free.
+ * @brief The prompt builder (session_prompt_builder_t): a turn's prompt, in
+ *        parts
  *
- * In Phase 1e BOTH refresh kinds rebuild every block — `kind` is
- * forward-compat for 1f's dedup state.  `user_turn_text` is consumed
- * only by the focus block (NULL-skipped on SESSION_START).
+ * The system prompt a conversation starting now would freeze (in named
+ * sections), the surface's standing directions, what DAWN knows about the
+ * user, the tool set, and the turn's context.  session_prefix.c applies them
+ * to the conversation, append-only.
  *
- * @param user_id        Authenticated user (0 / negative → unauthenticated;
- *                       focus block short-circuits to NULL, base + memory
- *                       still build with the appropriate gates).
- * @param user_turn_text User's raw turn text — NULL on SESSION_START
- *                       refresh, the verbatim message on PER_TURN.  Only
- *                       the focus block consumes it.
- * @param kind           Forward-compat hint; ignored in Phase 1e.
- * @param[out] out       Caller-allocated, zero-initialized;
- *                       session_manager owns the heap allocations on
- *                       SUCCESS and releases via composed_prompt_free.
- *                       On FAILURE, builder still cleans up any
- *                       partial allocation; out's pointers are NULL.
- * @return SUCCESS on a built composed_prompt_t (any combination of
- *         non-NULL blocks; focus_block may be NULL even on SUCCESS).
- *         FAILURE only on hard error (no remote prompt source, OOM in
- *         base block).
+ * @param session        The session the turn runs on (its surface, its
+ *                       conversation, its focus dedup state); may be NULL
+ * @param user_id        The turn's user (0: a guest; nothing of any user's)
+ * @param user_turn_text The turn's words (for retrieval)
+ * @param[out] out       Zero-initialized; the caller frees it
+ *                       (composed_prompt_free).  On FAILURE it is empty.
+ * @return SUCCESS, or FAILURE on allocation failure
  */
-int dawn_build_prompt(int user_id,
+int dawn_build_prompt(session_t *session,
+                      int user_id,
                       const char *user_turn_text,
-                      prompt_refresh_kind_t kind,
                       composed_prompt_t *out);
 
 /* =============================================================================

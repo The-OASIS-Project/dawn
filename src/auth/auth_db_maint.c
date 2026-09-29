@@ -38,8 +38,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
+#include "auth/auth_db_withdraw.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -130,6 +132,19 @@ int auth_db_run_cleanup(void) {
    }
    if (total > 0) {
       OLOG_INFO("auth_db: cleared stored blocks from %d compacted message(s)", total);
+   }
+
+   /* Stored prompts no conversation uses any more (their conversations were
+    * deleted or moved past them). */
+   int blobs = 0;
+   if (conv_db_prompt_blobs_gc(&blobs) == AUTH_DB_SUCCESS && blobs > 0) {
+      OLOG_INFO("auth_db: removed %d unused stored prompt(s)", blobs);
+   }
+
+   /* Deleted items' rows past the time a late-saved turn is checked against. */
+   int withdrawn = 0;
+   if (conv_db_withdrawn_items_purge(&withdrawn) == AUTH_DB_SUCCESS && withdrawn > 0) {
+      OLOG_INFO("auth_db: purged %d old withdrawn-item row(s)", withdrawn);
    }
 
    return AUTH_DB_SUCCESS;

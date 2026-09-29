@@ -84,17 +84,37 @@ static __thread uint64_t tl_token;
 uint64_t session_turn_token(void) {
    return tl_token;
 }
+/* The session's stable citation handles (core/focus/focus_handles.c): nothing
+ * numbered here to save. */
+/* Its turns' records (core/session_prefix.c): none here. */
+void session_prefix_release_locked(session_t *session) {
+   (void)session;
+}
+struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
+                                                            struct json_object *question) {
+   (void)session;
+   (void)question;
+   return NULL;
+}
+void session_prefix_save_taken(session_t *session, struct session_prefix_turn *turn) {
+   (void)session;
+   (void)turn;
+}
+void focus_handles_reset_locked(session_t *session) {
+   (void)session;
+}
+int focus_handles_flush(struct session *session, int64_t conv_id, int user_id) {
+   (void)session;
+   (void)conv_id;
+   (void)user_id;
+   return 0;
+}
+
 void session_set_turn_token(uint64_t token) {
    tl_token = token;
 }
 session_t *session_get_command_context(void) {
    return NULL;
-}
-void session_update_system_prompt_locked(session_t *session, const char *system_prompt) {
-   struct json_object *first = json_object_array_get_idx(session->conversation_history, 0);
-   if (first) {
-      json_object_object_add(first, "content", json_object_new_string(system_prompt));
-   }
 }
 void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    pthread_mutex_lock(&session->llm_config_mutex);

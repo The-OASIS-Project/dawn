@@ -36,6 +36,7 @@
 #include "auth/auth_db.h"
 #include "core/conv_event.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/text_filter.h"
 #include "core/turn_queue.h"
 #include "core/utterance_dedup.h"
@@ -1550,6 +1551,7 @@ static void *audio_worker_thread(void *arg) {
           AUTH_DB_SUCCESS) {
          saved_to_db = true;
          session_stamp_last_message_id(session, "user", user_msg_id);
+         session_prefix_question_saved(session, turn_conv, conn->auth_user_id, user_msg_id);
       } else {
          user_msg_id = 0;
       }
@@ -1584,6 +1586,13 @@ static void *audio_worker_thread(void *arg) {
     * turn is never a job/background turn, so the correct value is always false here. */
    atomic_store(&session->events_observable, false);
 
+   /* Disconnect-safe captures (SERVER_AUTHORITATIVE Phase 2b-ii, correctness H1): a voice
+    * turn survives a mid-turn client disconnect (turn_in_flight held), after which
+    * libwebsockets frees `conn`.  Nothing from here on (the prompt build included, which
+    * can take a while) may deref conn: capture everything now, use only the locals. */
+   const int turn_user_id = conn ? conn->auth_user_id : (int)session->metrics.user_id;
+   const bool use_opus = conn ? atomic_load(&conn->use_opus) : false;
+
    /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
     * audio_worker_thread (spawned via pthread_create — NEVER on the
     * lws service thread).  Uses the post-ASR transcript as the turn
@@ -1593,14 +1602,8 @@ static void *audio_worker_thread(void *arg) {
    /* Send "thinking" state while LLM processes - streaming callback will switch to "speaking" */
    webui_send_state_with_detail(session, "thinking", "Processing request...");
 
-   /* Disconnect-safe captures (SERVER_AUTHORITATIVE Phase 2b-ii, correctness H1): a voice
-    * turn survives a mid-turn client disconnect (turn_in_flight held), after which
-    * libwebsockets frees `conn`.  The post-dispatch persist + audio_end MUST NOT deref
-    * conn — capture everything now, use only the locals in the tail.  turn_conv reads
-    * stream_conversation_id AFTER the lazy bind above. */
+   /* turn_conv reads stream_conversation_id AFTER the lazy bind above. */
    turn_conv = atomic_load(&session->stream_conversation_id);
-   int turn_user_id = conn ? conn->auth_user_id : (int)session->metrics.user_id;
-   bool use_opus = conn ? atomic_load(&conn->use_opus) : false;
 
    /* Clear any stale visual stranded by a prior errored/cancelled turn (master-R5): once
     * the server APPENDS pending_visual, a leftover would attach to THIS turn's row.  The

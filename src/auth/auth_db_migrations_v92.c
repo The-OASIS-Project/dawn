@@ -50,25 +50,6 @@
  * this depth, so a user who said something bracketed is left alone. */
 #define V92_JSON_DEPTH 32
 
-static bool column_exists(sqlite3 *db, const char *table, const char *col) {
-   char sql[128];
-   snprintf(sql, sizeof(sql), "PRAGMA table_info(%s)", table);
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
-      return false;
-   }
-   bool found = false;
-   while (sqlite3_step(st) == SQLITE_ROW) {
-      const unsigned char *name = sqlite3_column_text(st, 1);
-      if (name && strcmp((const char *)name, col) == 0) {
-         found = true;
-         break;
-      }
-   }
-   sqlite3_finalize(st);
-   return found;
-}
-
 static const char *block_type(json_object *block) {
    json_object *t = NULL;
    if (!json_object_is_type(block, json_type_object) ||
@@ -519,7 +500,7 @@ int auth_db_migrations_v92(sqlite3 *db) {
         "ALTER TABLE messages ADD COLUMN llm_blocks TEXT " CONV_LLM_BLOCKS_CHECK_SQL },
    };
    for (size_t i = 0; i < COUNT_OF(columns); i++) {
-      if (column_exists(db, "messages", columns[i].name))
+      if (auth_db_column_exists(db, "messages", columns[i].name))
          continue;
       char *errmsg = NULL;
       if (sqlite3_exec(db, columns[i].sql, NULL, NULL, &errmsg) != SQLITE_OK) {

@@ -31,6 +31,7 @@
 
 #include "llm/llm_claude_parts.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -543,6 +544,215 @@ static struct json_object *convert_claude_tool_messages(struct json_object *hist
    return converted;
 }
 
+/* ── Request context (llm_history_kind.h) ───────────────────────────────── */
+
+/* Whether the request goes to OpenAI's own endpoint, which takes a system
+ * message anywhere in a conversation (the carrier opens with its host,
+ * llm_turn_blocks_carrier).  Other chat-completions servers (OpenRouter,
+ * Gemini's, a local server's strict template) get a tagged note instead. */
+static bool takes_mid_system(const char *carrier) {
+   static const char host[] = "api.openai.com";
+   return carrier && strncmp(carrier, host, sizeof(host) - 1) == 0 &&
+          (carrier[sizeof(host) - 1] == '/' || carrier[sizeof(host) - 1] == '#' ||
+           carrier[sizeof(host) - 1] == '\0');
+}
+
+static const char *part_text_of(json_object *part) {
+   json_object *type = NULL, *text = NULL;
+   if (!json_object_object_get_ex(part, "type", &type) ||
+       strcmp(json_object_get_string(type), "text") != 0 ||
+       !json_object_object_get_ex(part, "text", &text)) {
+      return NULL;
+   }
+   return json_object_get_string(text);
+}
+
+/* Whether a content array holds a Claude tool result. */
+static bool parts_have_tool_result(json_object *parts) {
+   const size_t n = json_object_array_length(parts);
+   for (size_t i = 0; i < n; i++) {
+      json_object *type = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(parts, i), "type", &type) &&
+          strcmp(json_object_get_string(type), "tool_result") == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* A copy of @p msg (values shared) with @p content in place of its own. */
+static json_object *with_content(json_object *msg, json_object *content) {
+   json_object *copy = json_object_new_object();
+   if (!copy) {
+      json_object_put(content);
+      return NULL;
+   }
+   json_object_object_foreach(msg, key, val) {
+      if (strcmp(key, "content") != 0) {
+         json_object_object_add(copy, key, json_object_get(val));
+      }
+   }
+   json_object_object_add(copy, "content", content);
+   return copy;
+}
+
+/* Text joined by blank lines: @p a then @p b. */
+static char *join_text(const char *a, const char *b) {
+   const size_t len = strlen(a) + strlen(b) + 3;
+   char *out = malloc(len);
+   if (out) {
+      snprintf(out, len, "%s%s%s", a, (*a && *b) ? "\n\n" : "", b);
+   }
+   return out;
+}
+
+/* A question with its turn's context in front, as one string when it is all
+ * text (the form every chat-completions server and local template takes, and
+ * the same on every request), else its parts as they are. */
+static json_object *question_for_chat(json_object *msg) {
+   json_object *parts = NULL;
+   json_object_object_get_ex(msg, "content", &parts);
+   const size_t n = json_object_array_length(parts);
+   char *text = strdup("");
+   for (size_t i = 0; text && i < n; i++) {
+      const char *t = part_text_of(json_object_array_get_idx(parts, i));
+      if (!t) {
+         free(text);
+         return json_object_get(msg); /* an image: parts as they are */
+      }
+      char *joined = join_text(text, t);
+      free(text);
+      text = joined;
+   }
+   if (!text) {
+      return NULL;
+   }
+   json_object *copy = with_content(msg, json_object_new_string(text));
+   free(text);
+   return copy;
+}
+
+/* @p msg with an operator's note (headed @p label) after its content. */
+static json_object *with_note(json_object *msg, const char *label, const char *note) {
+   const size_t len = strlen(label) + strlen(note) + 1;
+   char *text_note = malloc(len);
+   if (!text_note) {
+      return NULL;
+   }
+   snprintf(text_note, len, "%s%s", label, note);
+   json_object *content = NULL;
+   json_object_object_get_ex(msg, "content", &content);
+   json_object *out = NULL;
+   if (json_object_is_type(content, json_type_array)) {
+      json_object *parts = json_object_new_array();
+      const size_t n = json_object_array_length(content);
+      for (size_t i = 0; parts && i < n; i++) {
+         json_object_array_add(parts, json_object_get(json_object_array_get_idx(content, i)));
+      }
+      json_object *part = parts ? json_object_new_object() : NULL;
+      if (part) {
+         json_object_object_add(part, "type", json_object_new_string("text"));
+         json_object_object_add(part, "text", json_object_new_string(text_note));
+         json_object_array_add(parts, part);
+         out = with_content(msg, parts);
+      } else {
+         json_object_put(parts);
+      }
+   } else {
+      char *joined = join_text(content ? json_object_get_string(content) : "", text_note);
+      out = joined ? with_content(msg, json_object_new_string(joined)) : NULL;
+      free(joined);
+   }
+   free(text_note);
+   return out;
+}
+
+/* @p history with its request context rendered for chat completions, in place
+ * and in order: a turn's context in front of its question, and a directive or
+ * instruction change as a system message where @p system_notes, else as an
+ * operator's note (headed with the conversation's tag) after the user message
+ * before it (a mid-conversation system message isn't one every server and
+ * local template takes).  Other messages are shared.  New array (caller puts),
+ * or NULL. */
+static json_object *render_context_for_chat(struct json_object *history, bool system_notes) {
+   const size_t n = json_object_array_length(history);
+   bool any = false;
+   for (size_t i = 0; i < n && !any; i++) {
+      json_object *msg = json_object_array_get_idx(history, i);
+      any = llm_history_kind_of(msg) != MESSAGE_KIND_NONE || llm_history_has_context_parts(msg);
+   }
+   if (!any) {
+      return json_object_get(history); /* nothing to render: shared as it is */
+   }
+   char label[LLM_CONTEXT_TAG_MAX + 24];
+   llm_operator_note_label(llm_history_tag(history), label, sizeof(label));
+   json_object *out = json_object_new_array();
+   for (size_t i = 0; out && i < n; i++) {
+      json_object *msg = json_object_array_get_idx(history, i);
+      const message_kind_t kind = llm_history_kind_of(msg);
+      if (kind == MESSAGE_KIND_DIRECTIVE || kind == MESSAGE_KIND_INSTRUCTION) {
+         json_object *content = NULL;
+         json_object_object_get_ex(msg, "content", &content);
+         const char *note = content ? json_object_get_string(content) : NULL;
+         if (!note || !*note) {
+            continue;
+         }
+         if (system_notes) {
+            json_object *sys = json_object_new_object();
+            if (!sys) {
+               json_object_put(out);
+               return NULL;
+            }
+            json_object_object_add(sys, "role", json_object_new_string("system"));
+            json_object_object_add(sys, "content", json_object_new_string(note));
+            json_object_array_add(out, sys);
+            continue;
+         }
+         const size_t last = json_object_array_length(out);
+         json_object *prev = last ? json_object_array_get_idx(out, last - 1) : NULL;
+         json_object *role = NULL;
+         json_object *prev_content = NULL;
+         const bool prev_results = prev &&
+                                   json_object_object_get_ex(prev, "content", &prev_content) &&
+                                   json_object_is_type(prev_content, json_type_array) &&
+                                   parts_have_tool_result(prev_content);
+         /* Never into a message of tool results: those become tool messages, and
+          * any other text in them doesn't go along. */
+         if (prev && !prev_results && json_object_object_get_ex(prev, "role", &role) &&
+             strcmp(json_object_get_string(role), "user") == 0) {
+            json_object *noted = with_note(prev, label, note);
+            if (!noted) {
+               json_object_put(out);
+               return NULL;
+            }
+            json_object_array_put_idx(out, last - 1, noted);
+         } else {
+            json_object *user = json_object_new_object();
+            if (user) {
+               json_object_object_add(user, "role", json_object_new_string("user"));
+               json_object_object_add(user, "content", json_object_new_string(""));
+            }
+            json_object *noted = user ? with_note(user, label, note) : NULL;
+            json_object_put(user);
+            if (!noted) {
+               json_object_put(out);
+               return NULL;
+            }
+            json_object_array_add(out, noted);
+         }
+         continue;
+      }
+      json_object *rendered = llm_history_has_context_parts(msg) ? question_for_chat(msg)
+                                                                 : json_object_get(msg);
+      if (!rendered) {
+         json_object_put(out);
+         return NULL;
+      }
+      json_object_array_add(out, rendered);
+   }
+   return out;
+}
+
 /* ── Public entry point ─────────────────────────────────────────────────── */
 
 /* @p history with every assistant turn that has blocks rendered from them
@@ -570,7 +780,12 @@ static json_object *render_turns_from_blocks(struct json_object *history,
 json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history,
                                              const char *carrier,
                                              const char *model) {
-   json_object *rendered = render_turns_from_blocks(conversation_history, carrier, model);
+   json_object *in_place = render_context_for_chat(conversation_history, takes_mid_system(carrier));
+   if (!in_place) {
+      return NULL;
+   }
+   json_object *rendered = render_turns_from_blocks(in_place, carrier, model);
+   json_object_put(in_place);
    if (!rendered) {
       return NULL;
    }
@@ -669,8 +884,17 @@ json_object *llm_openai_apply_vision_images(json_object *history,
 
    if (last_is_user) {
       /* Private copy of the last user message carrying the new content; replace
-       * the shared element (put_idx releases our clone's shared ref). */
-      json_object *content = build_vision_content(input_text, vision_images, vision_image_sizes,
+       * the shared element (put_idx releases our clone's shared ref).  Its text
+       * stays whole when it holds the question (the turn's context goes in front
+       * of it, operators' notes after it), else the question is its text. */
+      json_object *last_content = NULL;
+      json_object_object_get_ex(last, "content", &last_content);
+      const char *text = input_text;
+      if (json_object_is_type(last_content, json_type_string) && input_text && *input_text &&
+          strstr(json_object_get_string(last_content), input_text)) {
+         text = json_object_get_string(last_content);
+      }
+      json_object *content = build_vision_content(text, vision_images, vision_image_sizes,
                                                   vision_image_count);
       json_object *priv = json_object_new_object();
       if (!content || !priv) {

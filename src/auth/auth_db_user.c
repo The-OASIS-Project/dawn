@@ -28,6 +28,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -460,6 +461,9 @@ int auth_db_delete_user(const char *username) {
    sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
    AUTH_DB_UNLOCK();
 
+   /* The frozen prompts of their conversations hold their identity and
+    * settings: gone with them, not at the next maintenance. */
+   (void)conv_db_prompt_blobs_gc(NULL);
    return AUTH_DB_SUCCESS;
 }
 

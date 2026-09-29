@@ -34,9 +34,11 @@
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/conv_stream.h"
+#include "core/image_rehydrate.h"
 #include "core/job_manager.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "image_store.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
@@ -45,7 +47,6 @@
 #include "memory/memory_extraction.h"
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
 #include "version.h"
-#include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_reasoning.h"
 #include "webui/webui_server.h" /* For WEBUI_MAX_THUMBNAIL_BASE64 */
@@ -530,6 +531,9 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
                free(stored);
             }
             session_stamp_claimed(conn->session, user_row, reply_row);
+            /* Its request context, still with the session when no turn has
+             * run since. */
+            session_prefix_question_saved(conn->session, conv_id, conn->auth_user_id, user_row);
             OLOG_INFO("WebUI: saved an ended turn's first exchange to new conversation %lld",
                       (long long)conv_id);
          }
@@ -674,16 +678,9 @@ void handle_clear_session(ws_connection_t *conn) {
    webui_conn_set_active_conversation(conn, 0);
    conn->active_conversation_private = false;
 
+   /* A new context (its focus dedup state with it): the next turn freezes
+    * the prompt it runs under. */
    session_clear_history(conn->session);
-
-   /* Phase 1f: history clear is a SESSION_START boundary — clear dedup
-    * state so the new conversation admits all candidates fresh. */
-   session_injected_set_clear(conn->session);
-
-   /* Re-add system prompt for the new conversation */
-   char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-   session_add_message(conn->session, "system", prompt ? prompt : get_remote_command_prompt());
-   free(prompt);
 
    json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    json_object_object_add(response, "payload", resp_payload);
@@ -1280,7 +1277,8 @@ static int collect_conv_images_cb(const conversation_message_t *msg, void *ctx) 
     * this buffer holds — no markers are missed for the cascade-delete. */
    char ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
    int count = 0;
-   if (webui_collect_image_ids(msg->content, ids, WEBUI_MAX_VISION_IMAGES_CAP, &count) != SUCCESS) {
+   if (image_marker_collect_ids(msg->content, ids, WEBUI_MAX_VISION_IMAGES_CAP, &count) !=
+       SUCCESS) {
       return 0;
    }
    for (int i = 0; i < count; i++) {

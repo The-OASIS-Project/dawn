@@ -313,27 +313,38 @@ static void play_ringtone(void) {
  */
 static void inject_local_context(const char *message) {
    /* Session context injection is a WebUI/multi-client feature; in a WebUI-less
-    * build there is no session to inject into. */
+    * build there is no session to inject into.  Posted as the phone owner's
+    * (the local device's user now): if the device changes hands before it is
+    * told, the next user's conversation doesn't get it. */
 #ifdef ENABLE_WEBUI
-   session_post_notice(session_get_local(), message);
+   session_t *local = session_get_local();
+   const int owner = session_effective_user_id(local);
+   if (owner > 0) {
+      session_post_notice_for(local, message, owner);
+   }
 #else
    (void)message;
 #endif
 }
 
 /**
- * @brief Fan a call-wide phone event out to every interactive session.
+ * @brief Tell the phone owner's surfaces of a call-wide phone event.
  *
  * inject_local_context() reaches only the local mic session, which is why a
  * WebUI or satellite user's LLM never knew the phone was ringing and refused
- * to answer.  Call-wide transitions — ringing, answered, ended — are facts
- * every surface should see: so any of them can answer, and the ones that
- * didn't learn the call was handled elsewhere (rather than discovering it by
- * a failed answer attempt).
+ * to answer.  Call-wide transitions — ringing, answered, ended — reach every
+ * interactive surface of the phone's owner (the local device's user: the
+ * phone is on it), so any of them can answer, and the ones that didn't learn
+ * the call was handled elsewhere.  A notice becomes part of the conversation
+ * it reaches, so another user's surfaces aren't told (who called is the
+ * owner's business); they keep the incoming-call banner.
  */
 static void broadcast_call_context(const char *message) {
 #ifdef ENABLE_WEBUI
-   session_broadcast_notice(message);
+   const int owner = session_effective_user_id(session_get_local());
+   if (owner > 0) {
+      session_broadcast_notice_for_user(owner, message);
+   }
 #else
    (void)message;
 #endif

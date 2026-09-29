@@ -36,6 +36,7 @@
 #include "llm/llm_capabilities.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_key_tag.h"
 #include "llm/llm_local_provider.h"
@@ -303,13 +304,16 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
    }
 
    if (llm_tools_enabled(NULL)) {
-      bool is_remote = is_current_session_remote();
-      struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote);
+      /* The conversation's own tool set when it has one (llm_history_kind.h). */
+      const char *source = NULL;
+      struct json_object *tools = llm_tools_request_tools(conversation_history,
+                                                          is_current_session_remote(), false,
+                                                          &source);
       if (tools) {
          json_object_object_add(root, "tools", tools);
          json_object_object_add(root, "tool_choice", json_object_new_string("auto"));
-         OLOG_INFO("OpenAI: Added %d tools to request (%s session)",
-                   llm_tools_get_enabled_count_filtered(is_remote), is_remote ? "remote" : "local");
+         OLOG_INFO("OpenAI: Added %zu tools to request (%s)", json_object_array_length(tools),
+                   source);
       }
    }
 
@@ -626,12 +630,16 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
                              json_object_new_int(g_config.llm.max_tokens));
    }
 
-   if (llm_tools_enabled(NULL) && iteration < LLM_TOOLS_MAX_ITERATIONS) {
-      bool is_remote = is_current_session_remote();
-      struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote);
+   /* The loop's last call (iteration at the cap), for a text answer: the tools
+    * stay (the request reads as every other did), none may be called. */
+   if (llm_tools_enabled(NULL)) {
+      struct json_object *tools = llm_tools_request_tools(conversation_history,
+                                                          is_current_session_remote(), false, NULL);
       if (tools) {
          json_object_object_add(root, "tools", tools);
-         json_object_object_add(root, "tool_choice", json_object_new_string("auto"));
+         json_object_object_add(root, "tool_choice",
+                                json_object_new_string(
+                                    iteration >= LLM_TOOLS_MAX_ITERATIONS ? "none" : "auto"));
       }
    }
 

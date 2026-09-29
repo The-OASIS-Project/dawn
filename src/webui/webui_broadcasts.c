@@ -53,6 +53,7 @@
 #include "core/conv_event.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
+#include "core/image_rehydrate.h" /* image_marker_collect_ids (reply-body image retention) */
 #include "core/job_manager.h"
 #include "core/job_reinvoke.h"
 #include "core/missed_notifications_db.h"
@@ -64,7 +65,6 @@
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
-#include "webui/webui_image_rehydrate.h" /* webui_collect_image_ids (reply-body image retention) */
 #include "webui/webui_internal.h"
 #include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
@@ -851,8 +851,8 @@ int webui_persist_final_answer(session_t *session,
        * would otherwise LRU-evict later (invisible to a reload-now fidelity test). */
       char reply_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
       int reply_id_count = 0;
-      if (webui_collect_image_ids(persist_body, reply_ids, WEBUI_MAX_VISION_IMAGES_CAP,
-                                  &reply_id_count) == SUCCESS) {
+      if (image_marker_collect_ids(persist_body, reply_ids, WEBUI_MAX_VISION_IMAGES_CAP,
+                                   &reply_id_count) == SUCCESS) {
          for (int i = 0; i < reply_id_count; i++) {
             image_store_update_retention(reply_ids[i], (int)user_id, IMAGE_RETAIN_PERMANENT);
          }

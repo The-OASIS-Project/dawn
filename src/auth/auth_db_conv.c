@@ -34,6 +34,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -992,7 +993,8 @@ int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_owner
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* Extraction-time only (not per turn), so an ad-hoc prepare is fine. */
+   /* Extraction-time only (not per turn), so an ad-hoc prepare is fine.
+    * kind-rows: rows named by id; any row names its own conversation. */
    const char *sql = "SELECT m.conversation_id, c.is_private, c.job_status IS NOT NULL, COUNT(*) "
                      "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
                      "WHERE c.user_id = ?1 AND m.id IN (SELECT value FROM json_each(?2)) "
@@ -1275,6 +1277,8 @@ int conv_db_delete(int64_t conv_id, int user_id) {
 
    if (changes > 0) {
       OLOG_INFO("Deleted conversation %lld for user %d", (long long)conv_id, user_id);
+      /* Its frozen prompt holds the user's identity and settings. */
+      (void)conv_db_prompt_blobs_gc(NULL);
       return AUTH_DB_SUCCESS;
    }
 
@@ -1304,6 +1308,7 @@ int conv_db_delete_admin(int64_t conv_id) {
 
    if (changes > 0) {
       OLOG_INFO("Admin deleted conversation %lld", (long long)conv_id);
+      (void)conv_db_prompt_blobs_gc(NULL); /* its frozen prompt with it */
       return AUTH_DB_SUCCESS;
    }
 
@@ -2008,12 +2013,12 @@ int conv_db_get_messages_by_range(int64_t conv_id,
                             "FROM messages m "
                             "INNER JOIN conversations c ON m.conversation_id = c.id "
                             "WHERE m.conversation_id = ? AND c.user_id = ? "
-                            "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC"
+                            "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC"
                           : "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
                             "FROM messages m "
                             "INNER JOIN conversations c ON m.conversation_id = c.id "
                             "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
-                            "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC";
+                            "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC";
 
    char sql[512];
    snprintf(sql, sizeof(sql), "%s%s", base, max_rows > 0 ? " LIMIT ?" : "");
@@ -2083,7 +2088,8 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
       return AUTH_DB_FORBIDDEN;
    }
 
-   const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?";
+   const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ? "
+                     "AND kind IS NULL";
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {

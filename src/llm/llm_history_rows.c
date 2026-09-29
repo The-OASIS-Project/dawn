@@ -28,6 +28,7 @@
 
 #include "auth/auth_db_messages.h"
 #include "llm/llm_claude_parts.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
@@ -177,11 +178,8 @@ static char *parts_as_text(struct json_object *parts) {
    return out;
 }
 
-int llm_history_rows_append(struct json_object *msg, struct json_object *out) {
-   const char *role = str_of(msg, "role");
-   if (!role || !out) {
-      return 0;
-   }
+/* The rows of a message without request context of its own. */
+static int append_message(struct json_object *msg, const char *role, struct json_object *out) {
    if (is(role, "assistant")) {
       return append_assistant(msg, out);
    }
@@ -211,4 +209,83 @@ int llm_history_rows_append(struct json_object *msg, struct json_object *out) {
    }
    json_object_array_add(out, row);
    return 1;
+}
+
+/* Mark the rows from @p from on with @p kind. */
+static void mark_rows(struct json_object *out, size_t from, message_kind_t kind) {
+   const size_t n = json_object_array_length(out);
+   for (size_t i = from; i < n; i++) {
+      llm_history_set_kind(json_object_array_get_idx(out, i), kind);
+   }
+}
+
+/* A question with its turn's context in front: the question's own rows from
+ * its other parts, then a row per context part (the order a live turn saves
+ * them in: the question before the context composed for it). */
+static int append_with_context(struct json_object *msg,
+                               const char *role,
+                               message_kind_t kind,
+                               struct json_object *out) {
+   struct json_object *content = NULL;
+   json_object_object_get_ex(msg, "content", &content);
+   struct json_object *own = json_object_new_array();
+   if (!own) {
+      return 0;
+   }
+   const size_t n = json_object_array_length(content);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i);
+      if (llm_history_kind_of(part) == MESSAGE_KIND_NONE) {
+         json_object_array_add(own, json_object_get(part));
+      }
+   }
+   int added = 0;
+   if (json_object_array_length(own) > 0) {
+      struct json_object *question = json_object_new_object();
+      if (question) {
+         json_object_object_foreach(msg, key, val) {
+            if (strcmp(key, "content") != 0 && strcmp(key, MESSAGE_KIND_KEY) != 0) {
+               json_object_object_add(question, key, json_object_get(val));
+            }
+         }
+         json_object_object_add(question, "content", json_object_get(own));
+         const size_t from = json_object_array_length(out);
+         added += append_message(question, role, out);
+         mark_rows(out, from, kind);
+         json_object_put(question);
+      }
+   }
+   json_object_put(own);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i);
+      const message_kind_t part_kind = llm_history_kind_of(part);
+      if (part_kind == MESSAGE_KIND_NONE) {
+         continue;
+      }
+      struct json_object *row = new_row(role, str_of(part, "text"));
+      if (row) {
+         llm_history_set_kind(row, part_kind);
+         json_object_array_add(out, row);
+         added++;
+      }
+   }
+   return added;
+}
+
+int llm_history_rows_append(struct json_object *msg, struct json_object *out) {
+   const char *role = str_of(msg, "role");
+   if (!role || !out) {
+      return 0;
+   }
+   const message_kind_t kind = llm_history_kind_of(msg);
+   if (kind == MESSAGE_KIND_PREFIX) {
+      return 0; /* the frozen prefix is the conversation's, never a row */
+   }
+   if (llm_history_has_context_parts(msg)) {
+      return append_with_context(msg, role, kind, out);
+   }
+   const size_t from = json_object_array_length(out);
+   const int added = append_message(msg, role, out);
+   mark_rows(out, from, kind);
+   return added;
 }

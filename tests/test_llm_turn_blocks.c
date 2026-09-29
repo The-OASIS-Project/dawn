@@ -831,6 +831,33 @@ static void test_claude_reasoning_stays_with_its_carrier(void) {
    json_object_put(content);
 }
 
+/* A boundary drops a turn's reasoning wherever it is: its stored blocks, and
+ * the thinking a live tool loop left in an assistant message's content; the
+ * text, tool calls and results stay. */
+static void test_boundary_drops_live_reasoning(void) {
+   struct json_object *h = json_tokener_parse(
+       "[{\"role\":\"user\",\"content\":\"Q\"},"
+       "{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"t\","
+       "\"signature\":\"s\"},{\"type\":\"redacted_thinking\",\"data\":\"d\"},"
+       "{\"type\":\"server_tool_use\",\"id\":\"s1\",\"name\":\"web\",\"input\":{}},"
+       "{\"type\":\"text\",\"text\":\"looking\"},{\"type\":\"tool_use\","
+       "\"id\":\"1\",\"name\":\"x\",\"input\":{}}]},"
+       "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"1\","
+       "\"content\":\"r\"}]},"
+       "{\"role\":\"assistant\",\"content\":\"done\",\"_blocks\":[]}]");
+   TEST_ASSERT_NOT_NULL(h);
+   TEST_ASSERT_EQUAL_INT(2, llm_history_drop_turn_blocks(h));
+   const char *out = json_object_to_json_string(h);
+   TEST_ASSERT_NULL(strstr(out, "thinking"));
+   TEST_ASSERT_NULL(strstr(out, "_blocks"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "tool_use"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "tool_result"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "looking"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "server_tool_use"));      /* not bound to the prefix */
+   TEST_ASSERT_EQUAL_INT(0, llm_history_drop_turn_blocks(h)); /* nothing left */
+   json_object_put(h);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_capture_keeps_every_block_in_order);
@@ -861,5 +888,6 @@ int main(void) {
    RUN_TEST(test_render_chat);
    RUN_TEST(test_carrier);
    RUN_TEST(test_empty_carrier_never_matches);
+   RUN_TEST(test_boundary_drops_live_reasoning);
    return UNITY_END();
 }

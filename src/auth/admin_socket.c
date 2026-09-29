@@ -49,7 +49,9 @@
 #include "auth/admin_socket_internal.h"
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
 #include "core/path_utils.h"
+#include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "document_original_store.h"
 #include "image_store.h"
@@ -1045,8 +1047,17 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
       }
    }
 
-   /* Delete the user */
+   /* Delete the user: its documents (a shared one is in other users'
+    * conversations) and memories go with it, removed on its behalf and
+    * withdrawn. */
+   auth_user_t removed;
+   const int removed_id = auth_db_get_user(target, &removed) == AUTH_DB_SUCCESS ? removed.id : 0;
+   conv_db_withdraw_intent_begin(removed_id);
    int rc = auth_db_delete_user(target);
+   conv_db_withdraw_intent_end();
+   if (rc == AUTH_DB_SUCCESS && removed_id > 0) {
+      session_withdraw_forgotten_async(removed_id, false);
+   }
 
    if (rc == AUTH_DB_LAST_ADMIN) {
       OLOG_WARNING("DELETE_USER: cannot delete last admin: %s", target);

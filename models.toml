@@ -218,3 +218,18 @@
 # low/medium/high (OpenRouter ignores the setting where it doesn't apply).
 # Local models aren't listed: llama.cpp takes "disabled" + "enabled" (budget),
 # Ollama "disabled" + "enabled" with no levels.
+
+
+# ---------------------------------------------------------------------------
+# Mid-conversation system messages
+# ---------------------------------------------------------------------------
+# The Anthropic models that take a {"role": "system"} message inside `messages`
+# (after a user turn).  DAWN sends a conversation's operator directions and
+# instruction changes that way on these models, so the frozen system prompt
+# stays byte for byte what the conversation started with.  Any other model gets
+# them as an "[Operator note]" in the user turn, which every model takes.
+# Prefixes, matched like the tables above.  Source: platform.claude.com
+# (mid-conversation system messages), Sep 2026; Claude Sonnet 5 doesn't take them.
+
+[mid_system]
+anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"]

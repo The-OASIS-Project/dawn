@@ -201,6 +201,15 @@ int auth_db_init(const char *db_path) {
       return AUTH_DB_FAILURE;
    }
 
+   /* What records a user's removals for withdrawal (after the migrations
+    * that make its table). */
+   if (auth_db_withdraw_install(s_db.db) != AUTH_DB_SUCCESS) {
+      sqlite3_close(s_db.db);
+      s_db.db = NULL;
+      pthread_mutex_unlock(&s_db.mutex);
+      return AUTH_DB_FAILURE;
+   }
+
    /* Prepare statements */
    if (auth_db_prepare_statements() != AUTH_DB_SUCCESS) {
       auth_db_finalize_statements();

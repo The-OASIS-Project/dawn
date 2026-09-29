@@ -16,13 +16,10 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Phase 1e unit tests — composer + build_focus_block.
+ * Unit tests for build_focus_block (the turn's retrieved items) and its
+ * focus dedup state.
  *
  * Coverage scope:
- *   - prompt_compose_to_string + prompt_compose_free (pure functions
- *     extracted from session_manager.c into src/core/prompt_compose.c
- *     specifically so this test can link them without the full session
- *     runtime).
  *   - build_focus_block — drives focus_compose + memory_embeddings
  *     via programmable stubs in test_prompt_builder_stub.c.
  *
@@ -47,11 +44,18 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
-#include "core/prompt_compose.h"
+#include "core/prompt_parts.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "unity.h"
 #include "webui/build_focus_block.h"
+
+/* The session a turn runs on: the prompt builder's argument (build_focus_block
+ * reads its focus dedup state and item handles from it). */
+static session_t *s_dispatch;
+static void set_dispatch(session_t *session) {
+   s_dispatch = session;
+}
 
 /* Stub helpers (defined in test_prompt_builder_stub.c). */
 typedef struct {
@@ -123,7 +127,7 @@ void setUp(void) {
    g_config.memory.focus_injection.dedup.score_uplift_factor = 1.5f;
    /* Make sure no leftover dispatch session leaks across tests; pre-1f
     * tests assume dedup is off. */
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
 }
 
 void tearDown(void) {
@@ -133,112 +137,11 @@ void tearDown(void) {
  * Composer tests — two-segment shape (stable_prefix + volatile_block)
  * ============================================================================ */
 
-static void test_composer_both_segments_flatten(void) {
-   composed_prompt_t cp = {
-      .stable_prefix = strdup("STABLE"),
-      .volatile_block = strdup("\n\nVOLATILE"),
-   };
-   char *out = prompt_compose_to_string(&cp);
-   TEST_ASSERT_NOT_NULL(out);
-   TEST_ASSERT_EQUAL_STRING("STABLE\n\nVOLATILE", out);
-   /* Order check: STABLE precedes VOLATILE. */
-   TEST_ASSERT_TRUE(strstr(out, "STABLE") < strstr(out, "VOLATILE"));
-   free(out);
-   prompt_compose_free(&cp);
-}
-
-static void test_composer_volatile_null_omits(void) {
-   composed_prompt_t cp = {
-      .stable_prefix = strdup("STABLE"),
-      .volatile_block = NULL,
-   };
-   char *out = prompt_compose_to_string(&cp);
-   TEST_ASSERT_NOT_NULL(out);
-   TEST_ASSERT_EQUAL_STRING("STABLE", out);
-   free(out);
-   prompt_compose_free(&cp);
-}
-
-static void test_composer_volatile_empty_omits(void) {
-   composed_prompt_t cp = {
-      .stable_prefix = strdup("STABLE"),
-      .volatile_block = strdup(""),
-   };
-   char *out = prompt_compose_to_string(&cp);
-   TEST_ASSERT_NOT_NULL(out);
-   TEST_ASSERT_EQUAL_STRING("STABLE", out);
-   free(out);
-   prompt_compose_free(&cp);
-}
-
-static void test_composer_stable_only_byte_identical(void) {
-   composed_prompt_t cp = {
-      .stable_prefix = strdup("PERSONA + FOOTER"),
-      .volatile_block = NULL,
-   };
-   char *out = prompt_compose_to_string(&cp);
-   TEST_ASSERT_NOT_NULL(out);
-   TEST_ASSERT_EQUAL_STRING("PERSONA + FOOTER", out);
-   free(out);
-   prompt_compose_free(&cp);
-}
-
-static void test_composer_both_null_returns_null(void) {
-   TEST_ASSERT_NULL(prompt_compose_to_string(NULL));
-   composed_prompt_t cp = { 0 };
-   TEST_ASSERT_NULL(prompt_compose_to_string(&cp));
-   /* Empty strings are treated as absent. */
-   cp.stable_prefix = strdup("");
-   cp.volatile_block = strdup("");
-   TEST_ASSERT_NULL(prompt_compose_to_string(&cp));
-   prompt_compose_free(&cp);
-}
-
-static void test_composer_stable_only_volatile_set(void) {
-   /* volatile-only is legal — caller may push only volatile, e.g.
-    * when stable was set on a prior turn and only the volatile
-    * segment is being refreshed.  Flatten just returns the volatile
-    * payload. */
-   composed_prompt_t cp = {
-      .stable_prefix = NULL,
-      .volatile_block = strdup("V-ONLY"),
-   };
-   char *out = prompt_compose_to_string(&cp);
-   TEST_ASSERT_NOT_NULL(out);
-   TEST_ASSERT_EQUAL_STRING("V-ONLY", out);
-   free(out);
-   prompt_compose_free(&cp);
-}
-
-static void test_composer_free_idempotent(void) {
-   composed_prompt_t cp = {
-      .stable_prefix = strdup("X"),
-      .volatile_block = strdup("Y"),
-   };
-   prompt_compose_free(&cp);
-   TEST_ASSERT_NULL(cp.stable_prefix);
-   TEST_ASSERT_NULL(cp.volatile_block);
-   /* Second call must be a no-op, not a double-free. */
-   prompt_compose_free(&cp);
-   prompt_compose_free(NULL); /* NULL safety */
-}
 
 /* ============================================================================
  * Drift-detection hash
  * ============================================================================ */
 
-static void test_fnv1a_drift_detection(void) {
-   /* Same string → same hash (stability invariant: cache-hit turn). */
-   const uint32_t h1 = prompt_compose_fnv1a("STABLE PREFIX V1");
-   const uint32_t h2 = prompt_compose_fnv1a("STABLE PREFIX V1");
-   TEST_ASSERT_EQUAL_UINT32(h1, h2);
-   /* Different strings → different hashes (drift signal). */
-   const uint32_t h3 = prompt_compose_fnv1a("STABLE PREFIX V2");
-   TEST_ASSERT_NOT_EQUAL(h1, h3);
-   /* NULL → FNV-1a basis value (not zero). */
-   const uint32_t hnull = prompt_compose_fnv1a(NULL);
-   TEST_ASSERT_EQUAL_UINT32(0x811c9dc5u, hnull);
-}
 
 /* ============================================================================
  * build_focus_block — feature gate (8-10)
@@ -253,7 +156,7 @@ static void test_focus_disabled_short_circuits(void) {
                                                         "fact:1" };
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "anything", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "anything", &block));
    TEST_ASSERT_NULL(block);
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, pb_focus_state()->call_count,
                                  "disabled feature must NOT invoke focus_compose");
@@ -268,7 +171,7 @@ static void test_focus_unauthenticated_short_circuits(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "any", "fact:1" };
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(0, 0, 0, "x", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 0, 0, 0, "x", &block));
    TEST_ASSERT_NULL(block);
    TEST_ASSERT_EQUAL_INT(0, pb_focus_state()->call_count);
    TEST_ASSERT_EQUAL_INT(0, pb_embed_state()->embed_call_count);
@@ -279,12 +182,12 @@ static void test_focus_empty_turn_text_short_circuits(void) {
    pb_embed_state()->dims = 4;
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "", &block));
    TEST_ASSERT_NULL(block);
    TEST_ASSERT_EQUAL_INT(0, pb_focus_state()->call_count);
 
    block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, NULL, &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, NULL, &block));
    TEST_ASSERT_NULL(block);
    TEST_ASSERT_EQUAL_INT(0, pb_focus_state()->call_count);
 }
@@ -304,7 +207,8 @@ static void test_focus_renders_candidate_lines(void) {
                                                         "calendar_occ:7" };
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(99, 0, 0, "what's coming up?", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 99, 0, 0, "what's coming up?", &block));
    TEST_ASSERT_NOT_NULL(block);
    TEST_ASSERT_NOT_NULL(strstr(block, "[memory_fact] Pepper birthday March 14"));
    TEST_ASSERT_NOT_NULL(strstr(block, "[calendar_event] [2026-05-09 14:00] standup"));
@@ -319,7 +223,7 @@ static void test_focus_passes_user_id_and_text(void) {
    pb_embed_state()->dims = 4;
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(123, 0, 0, "hello world", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 123, 0, 0, "hello world", &block));
    TEST_ASSERT_EQUAL_INT(123, pb_focus_state()->last_user_id);
    TEST_ASSERT_EQUAL_STRING("hello world", pb_focus_state()->last_query_text);
    free(block);
@@ -331,7 +235,8 @@ static void test_focus_zero_candidates_returns_null_block(void) {
    pb_focus_state()->seeded_count = 0;
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "irrelevant query", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 1, 0, 0, "irrelevant query", &block));
    TEST_ASSERT_NULL_MESSAGE(block, "zero candidates → NULL block (composer omits section)");
    /* focus_compose was still called — gate is at the top of build_focus_block,
     * empty result is the SUCCESS path. */
@@ -345,7 +250,7 @@ static void test_focus_embedding_unavailable_passes_null(void) {
                                                         "calendar_occ:1" };
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "hi", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "hi", &block));
    /* focus_compose still consulted — calendar adapter has
     * requires_embedding=false in 1d production; vector-only adapters
     * skip themselves when query_embedding=NULL. */
@@ -365,7 +270,7 @@ static void test_focus_embedding_failure_passes_null(void) {
                                                         "calendar_occ:1" };
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "hi", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "hi", &block));
    TEST_ASSERT_EQUAL_INT(1, pb_embed_state()->embed_call_count);
    TEST_ASSERT_EQUAL_INT(1, pb_focus_state()->call_count);
    TEST_ASSERT_FALSE_MESSAGE(pb_focus_state()->last_had_query_embedding,
@@ -384,7 +289,7 @@ static void test_focus_compose_failure_returns_null_block(void) {
    pb_focus_state()->fail = true;
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(FAILURE, build_focus_block(1, 0, 0, "x", &block));
+   TEST_ASSERT_EQUAL_INT(FAILURE, build_focus_block(s_dispatch, 1, 0, 0, "x", &block));
    TEST_ASSERT_NULL_MESSAGE(block, "focus_compose FAILURE must yield NULL block (composer omits)");
 }
 
@@ -395,7 +300,7 @@ static void test_focus_filter_rejection_logged_no_section_when_zero_survivors(vo
    pb_focus_state()->rejection_count = 3; /* filter blocked 3 candidates */
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "x", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "x", &block));
    TEST_ASSERT_NULL_MESSAGE(block, "all rejected → 0 survivors → NULL block (1g chip later)");
 }
 
@@ -416,7 +321,8 @@ static void test_cross_turn_no_content_leak(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "Pepper birthday",
                                                         "fact:1" };
    char *block1 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "tell me about Pepper", &block1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 1, 0, 0, "tell me about Pepper", &block1));
    TEST_ASSERT_NOT_NULL(block1);
    TEST_ASSERT_NOT_NULL(strstr(block1, "Pepper"));
    free(block1);
@@ -425,7 +331,8 @@ static void test_cross_turn_no_content_leak(void) {
     * content reused. */
    pb_focus_state()->seeded_count = 0;
    char *block2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "what time is it?", &block2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 1, 0, 0, "what time is it?", &block2));
    TEST_ASSERT_NULL_MESSAGE(block2, "turn-2 with zero results must NOT inherit turn-1 content");
 }
 
@@ -436,7 +343,7 @@ static void test_failed_then_successful_refresh_no_carry(void) {
    /* Turn 1: focus_compose fails. */
    pb_focus_state()->fail = true;
    char *block1 = NULL;
-   TEST_ASSERT_EQUAL_INT(FAILURE, build_focus_block(1, 0, 0, "fail-turn", &block1));
+   TEST_ASSERT_EQUAL_INT(FAILURE, build_focus_block(s_dispatch, 1, 0, 0, "fail-turn", &block1));
    TEST_ASSERT_NULL(block1);
 
    /* Turn 2: focus_compose succeeds; block reflects new turn only. */
@@ -444,7 +351,7 @@ static void test_failed_then_successful_refresh_no_carry(void) {
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "fresh content", "fact:9" };
    char *block2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "ok-turn", &block2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "ok-turn", &block2));
    TEST_ASSERT_NOT_NULL(block2);
    TEST_ASSERT_NOT_NULL(strstr(block2, "fresh content"));
    TEST_ASSERT_NULL_MESSAGE(strstr(block2, "fail-turn"),
@@ -459,7 +366,7 @@ static void test_disabled_after_enabled_returns_null(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "alpha", "fact:1" };
 
    char *block1 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "first", &block1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "first", &block1));
    TEST_ASSERT_NOT_NULL(block1);
    free(block1);
 
@@ -470,7 +377,7 @@ static void test_disabled_after_enabled_returns_null(void) {
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
    char *block2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "second", &block2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "second", &block2));
    TEST_ASSERT_NULL(block2);
    TEST_ASSERT_EQUAL_INT(0, pb_focus_state()->call_count);
 }
@@ -492,58 +399,16 @@ static void test_memory_cycle_1000x(void) {
 
    for (int i = 0; i < 1000; i++) {
       char *focus = NULL;
-      TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "query", &focus));
-      /* In the two-segment shape: stable_prefix = "BASE", and the
-       * volatile_block carries memory + focus framed for the LLM.
-       * For the cycle stress test we just want allocation churn —
-       * concatenate the focus body (caller frees) into volatile. */
-      char *volatile_buf = NULL;
-      if (focus != NULL) {
-         const size_t flen = strlen(focus);
-         volatile_buf = malloc(flen + 5);
-         if (volatile_buf != NULL) {
-            memcpy(volatile_buf, "MEM\n", 4);
-            memcpy(volatile_buf + 4, focus, flen);
-            volatile_buf[4 + flen] = '\0';
-         }
-         free(focus);
-      } else {
-         volatile_buf = strdup("MEM");
-      }
-      composed_prompt_t cp = { .stable_prefix = strdup("BASE"), .volatile_block = volatile_buf };
-      char *flat = prompt_compose_to_string(&cp);
-      free(flat);
-      prompt_compose_free(&cp);
+      TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "query", &focus));
+      /* A turn's prompt, built and freed: its sections joined, the focus
+       * body as its context. */
+      composed_prompt_t cp = { .volatile_block = focus };
+      TEST_ASSERT_EQUAL_INT(0, prompt_sections_add(&cp, "persona", "your persona", "BASE"));
+      cp.stable_prefix = prompt_sections_join(&cp);
+      composed_prompt_free(&cp);
    }
 }
 
-static void test_composer_handles_long_volatile_block(void) {
-   /* Stress the malloc(total) sizing path with a large volatile block.
-    * Two-segment composer must memcpy verbatim — no truncation,
-    * no snprintf. */
-   const size_t big_size = 8192;
-   char *big = malloc(big_size + 1);
-   memset(big, 'X', big_size);
-   big[big_size] = '\0';
-   composed_prompt_t cp = {
-      .stable_prefix = strdup("B"),
-      .volatile_block = big,
-   };
-   char *out = prompt_compose_to_string(&cp);
-   TEST_ASSERT_NOT_NULL(out);
-   TEST_ASSERT_NOT_NULL(strstr(out, "B"));
-   const char *xs = strstr(out, "XXXXXXXX");
-   TEST_ASSERT_NOT_NULL(xs);
-   /* Verify the full 8192-byte block is present (memcpy not snprintf). */
-   size_t x_run = 0;
-   while (xs && *xs == 'X') {
-      xs++;
-      x_run++;
-   }
-   TEST_ASSERT_EQUAL_size_t(big_size, x_run);
-   free(out);
-   prompt_compose_free(&cp);
-}
 
 static void test_focus_block_produces_one_line_per_candidate(void) {
    pb_embed_state()->available = true;
@@ -555,7 +420,7 @@ static void test_focus_block_produces_one_line_per_candidate(void) {
    pb_focus_state()->seeded[3] = (pb_seed_candidate_t){ "calendar_event", "d", "4" };
 
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "test", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "test", &block));
    TEST_ASSERT_NOT_NULL(block);
    /* Count newlines — should equal candidate count. */
    int newlines = 0;
@@ -572,7 +437,7 @@ static void test_focus_block_produces_one_line_per_candidate(void) {
  * Phase 1f — per-turn focus-injection dedup
  *
  * These tests drive build_focus_block with a session_t pinned via
- * session_set_dispatch_session().  When the dispatch session is NULL
+ * set_dispatch().  When the dispatch session is NULL
  * (the default for Phase 1e tests above), build_focus_block skips
  * dedup — that's why the pre-1f tests stay correct without changes.
  *
@@ -586,7 +451,7 @@ static bool dedup_run_turn_and_check(int user_id,
                                      const char *turn_text,
                                      const char *expected_substr) {
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(user_id, 0, 0, turn_text, &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, user_id, 0, 0, turn_text, &block));
    const bool found = (block != NULL) && (strstr(block, expected_substr) != NULL);
    free(block);
    return found;
@@ -595,7 +460,7 @@ static bool dedup_run_turn_and_check(int user_id,
 static void test_dedup_baseline_no_dispatch_session(void) {
    /* No dispatch session published → dedup skipped, behavior matches
     * pre-1f.  Same candidate twice both surface. */
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
    pb_focus_state()->seeded_count = 1;
@@ -613,7 +478,7 @@ static void test_dedup_baseline_no_dispatch_session(void) {
 static void test_dedup_consecutive_turn_suppresses(void) {
    session_t s;
    pb_session_init(&s, 42);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
    pb_focus_state()->seeded_count = 1;
@@ -626,10 +491,10 @@ static void test_dedup_consecutive_turn_suppresses(void) {
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "alpha", "fact:1" };
    char *block = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "turn two", &block));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "turn two", &block));
    TEST_ASSERT_NULL_MESSAGE(block, "dedup must suppress repeat at turn 2 with default window=8");
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -639,7 +504,7 @@ static void test_dedup_strict_window_decay(void) {
     * at turn 4 (turns_since=3, > 2). */
    session_t s;
    pb_session_init(&s, 1);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    g_config.memory.focus_injection.dedup.recent_window_turns = 2;
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
@@ -649,7 +514,7 @@ static void test_dedup_strict_window_decay(void) {
 
    /* Turn 1: admit. */
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t1", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t1", &b));
    TEST_ASSERT_NOT_NULL(b);
    TEST_ASSERT_NOT_NULL(strstr(b, "X"));
    free(b);
@@ -658,25 +523,25 @@ static void test_dedup_strict_window_decay(void) {
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "X", "fact:X" };
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t2", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t2", &b));
    TEST_ASSERT_NULL_MESSAGE(b, "turn 2: turns_since=1 not > 2 → suppress");
 
    /* Turn 3: still suppress (turns_since=2, NOT > 2). */
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "X", "fact:X" };
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t3", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t3", &b));
    TEST_ASSERT_NULL_MESSAGE(b, "turn 3: turns_since=2 not > 2 → suppress (strict gt)");
 
    /* Turn 4: admit (turns_since=3, > 2). */
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "X", "fact:X" };
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t4", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t4", &b));
    TEST_ASSERT_NOT_NULL_MESSAGE(b, "turn 4: turns_since=3 > 2 → admit");
    free(b);
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -685,7 +550,7 @@ static void test_dedup_score_uplift_below_threshold_suppresses(void) {
     * 0.7 < 0.75 → suppress. */
    session_t s;
    pb_session_init(&s, 2);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
 
@@ -693,7 +558,7 @@ static void test_dedup_score_uplift_below_threshold_suppresses(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "Y", "fact:Y" };
    pb_focus_set_seed_score(0, 0.5f);
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t1", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t1", &b));
    TEST_ASSERT_NOT_NULL(b);
    free(b);
 
@@ -701,10 +566,10 @@ static void test_dedup_score_uplift_below_threshold_suppresses(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "Y", "fact:Y" };
    pb_focus_set_seed_score(0, 0.7f);
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t2", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t2", &b));
    TEST_ASSERT_NULL_MESSAGE(b, "score 0.7 < 0.5 * 1.5 (=0.75) → suppress");
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -712,7 +577,7 @@ static void test_dedup_score_uplift_meets_threshold_admits(void) {
    /* Turn 1 score 0.5; turn 2 score 0.8 — 0.8 >= 0.75 → admit. */
    session_t s;
    pb_session_init(&s, 3);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
 
@@ -720,19 +585,19 @@ static void test_dedup_score_uplift_meets_threshold_admits(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "Z", "fact:Z" };
    pb_focus_set_seed_score(0, 0.5f);
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t1", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t1", &b));
    free(b);
 
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "Z", "fact:Z" };
    pb_focus_set_seed_score(0, 0.8f);
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t2", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t2", &b));
    TEST_ASSERT_NOT_NULL_MESSAGE(b, "score 0.8 >= 0.5 * 1.5 → admit via uplift");
    TEST_ASSERT_NOT_NULL(strstr(b, "Z"));
    free(b);
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -742,7 +607,7 @@ static void test_dedup_window_zero_disables_time_dedup(void) {
     * disabled" — score-uplift becomes the only suppressor. */
    session_t s;
    pb_session_init(&s, 4);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    g_config.memory.focus_injection.dedup.recent_window_turns = 0;
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
@@ -751,7 +616,7 @@ static void test_dedup_window_zero_disables_time_dedup(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "W", "fact:W" };
    pb_focus_set_seed_score(0, 0.5f);
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t1", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t1", &b));
    free(b);
 
    /* Turn 2: turns_since=1, > 0 → admits via window path even though
@@ -760,53 +625,14 @@ static void test_dedup_window_zero_disables_time_dedup(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "W", "fact:W" };
    pb_focus_set_seed_score(0, 0.5f);
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t2", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t2", &b));
    TEST_ASSERT_NOT_NULL_MESSAGE(b, "window=0: turn 2 admits via turns_since=1 > 0");
    free(b);
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
-static void test_dedup_session_start_clear_resets_state(void) {
-   /* Populate the set, run session_injected_set_clear, then verify the
-    * NEXT PER_TURN admits the same candidate fresh. */
-   session_t s;
-   pb_session_init(&s, 5);
-   session_set_dispatch_session(&s);
-   pb_embed_state()->available = true;
-   pb_embed_state()->dims = 4;
-
-   for (int turn = 0; turn < 5; turn++) {
-      pb_focus_state()->seeded_count = 1;
-      pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "P", "fact:P" };
-      char *b = NULL;
-      TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "loop", &b));
-      free(b);
-   }
-
-   /* SESSION_START refresh in production calls session_injected_set_clear()
-    * before invoking the builder.  Simulate that here. */
-   session_injected_set_clear(&s);
-   /* Builder DOES NOT record on SESSION_START (turn_text NULL → short-
-    * circuit), so count stays 0.  We don't actually invoke the builder
-    * here — but assert the post-clear state is empty as required. */
-   TEST_ASSERT_EQUAL_INT_MESSAGE(0, s.injected_set.count,
-                                 "session_injected_set_clear must reset count to 0");
-   TEST_ASSERT_EQUAL_INT_MESSAGE(0, s.injected_set.turn_counter,
-                                 "session_injected_set_clear must reset turn_counter to 0");
-
-   /* Next PER_TURN with the same candidate must admit fresh. */
-   pb_focus_state()->seeded_count = 1;
-   pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "P", "fact:P" };
-   char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "after-clear", &b));
-   TEST_ASSERT_NOT_NULL_MESSAGE(b, "first PER_TURN after clear must admit fresh");
-   free(b);
-
-   session_set_dispatch_session(NULL);
-   pb_session_destroy(&s);
-}
 
 static void test_dedup_session_start_does_not_record(void) {
    /* The SESSION_START path passes user_turn_text=NULL into build_focus_block,
@@ -814,18 +640,18 @@ static void test_dedup_session_start_does_not_record(void) {
     * The dedup set must remain empty. */
    session_t s;
    pb_session_init(&s, 6);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
 
    /* SESSION_START: NULL turn text. */
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, NULL, &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, NULL, &b));
    TEST_ASSERT_NULL(b);
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, s.injected_set.count,
                                  "SESSION_START must not record any candidate");
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -841,25 +667,25 @@ static void test_dedup_cross_user_isolation(void) {
    pb_embed_state()->dims = 4;
 
    /* user_a, session A */
-   session_set_dispatch_session(&s_a);
+   set_dispatch(&s_a);
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "shared", "fact:s" };
    char *ba = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "qa", &ba));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "qa", &ba));
    TEST_ASSERT_NOT_NULL(ba);
    free(ba);
 
    /* user_b, session B — same candidate, fresh dedup state */
-   session_set_dispatch_session(&s_b);
+   set_dispatch(&s_b);
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "shared", "fact:s" };
    char *bb = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(2, 0, 0, "qb", &bb));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 2, 0, 0, "qb", &bb));
    TEST_ASSERT_NOT_NULL_MESSAGE(bb, "different session → independent injected_set → admit");
    TEST_ASSERT_NOT_NULL(strstr(bb, "shared"));
    free(bb);
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s_a);
    pb_session_destroy(&s_b);
 }
@@ -874,23 +700,23 @@ static void test_dedup_cross_session_same_user_isolation(void) {
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
 
-   session_set_dispatch_session(&s1);
+   set_dispatch(&s1);
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "X", "fact:X" };
    char *b1 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(7, 0, 0, "s1", &b1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 7, 0, 0, "s1", &b1));
    TEST_ASSERT_NOT_NULL(b1);
    free(b1);
 
-   session_set_dispatch_session(&s2);
+   set_dispatch(&s2);
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "X", "fact:X" };
    char *b2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(7, 0, 0, "s2", &b2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 7, 0, 0, "s2", &b2));
    TEST_ASSERT_NOT_NULL_MESSAGE(b2, "same user, different session → independent dedup → admit");
    free(b2);
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s1);
    pb_session_destroy(&s2);
 }
@@ -901,7 +727,7 @@ static void test_dedup_lru_cap_evicts_oldest(void) {
     * to make room for turn 257. */
    session_t s;
    pb_session_init(&s, 7);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
    /* Disable time-window suppression so every candidate admits. */
@@ -914,7 +740,7 @@ static void test_dedup_lru_cap_evicts_oldest(void) {
       snprintf(item_id, sizeof(item_id), "id_%d", i);
       pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", text, item_id };
       char *b = NULL;
-      TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "loop", &b));
+      TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "loop", &b));
       free(b);
    }
 
@@ -934,7 +760,7 @@ static void test_dedup_lru_cap_evicts_oldest(void) {
    TEST_ASSERT_FALSE_MESSAGE(has_id0, "LRU eviction must drop oldest (id_0)");
    TEST_ASSERT_TRUE_MESSAGE(has_id256, "newest entry (id_256) must be present");
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -1003,7 +829,7 @@ static void test_dedup_all_suppressed_warn_once_per_session(void) {
     * the same session; flag stays true (warning does not re-fire). */
    session_t s;
    pb_session_init(&s, 9);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
 
@@ -1036,7 +862,7 @@ static void test_dedup_all_suppressed_warn_once_per_session(void) {
    }
 
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "trigger", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "trigger", &b));
    TEST_ASSERT_NULL_MESSAGE(b, "all 4 candidates suppressed → block NULL");
    TEST_ASSERT_TRUE_MESSAGE(s.injected_set.all_suppressed_logged_once,
                             "all-suppressed gate must flip to true on first such turn");
@@ -1055,12 +881,12 @@ static void test_dedup_all_suppressed_warn_once_per_session(void) {
       pb_focus_set_seed_score(i, 0.1f);
    }
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "trigger2", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "trigger2", &b));
    TEST_ASSERT_NULL(b);
    TEST_ASSERT_TRUE_MESSAGE(s.injected_set.all_suppressed_logged_once == flag_before,
                             "all-suppressed gate must NOT re-fire (stays true)");
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -1098,8 +924,11 @@ static void *concurrent_per_turn_worker(void *arg) {
 
 static void *concurrent_session_start_worker(void *arg) {
    concurrent_args_t *a = (concurrent_args_t *)arg;
+   /* A new context, as session_new_context_locked resets it: under the lock. */
    for (int i = 0; i < a->iterations; i++) {
-      session_injected_set_clear(a->session);
+      pthread_mutex_lock(&a->session->history_mutex);
+      memset(&a->session->injected_set, 0, sizeof(a->session->injected_set));
+      pthread_mutex_unlock(&a->session->history_mutex);
    }
    return NULL;
 }
@@ -1163,7 +992,7 @@ static void test_dedup_uplift_uses_final_score_not_semantic(void) {
     * 1g-i. */
    session_t s;
    pb_session_init(&s, 42);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
 
@@ -1173,7 +1002,7 @@ static void test_dedup_uplift_uses_final_score_not_semantic(void) {
    pb_focus_set_seed_score(0, 0.5f);
    pb_focus_set_seed_final_score(0, 0.9f);
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t1", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t1", &b));
    TEST_ASSERT_NOT_NULL(b);
    free(b);
 
@@ -1184,12 +1013,12 @@ static void test_dedup_uplift_uses_final_score_not_semantic(void) {
    pb_focus_set_seed_score(0, 0.5f);
    pb_focus_set_seed_final_score(0, 1.4f);
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 0, 0, "t2", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 0, 0, "t2", &b));
    TEST_ASSERT_NOT_NULL_MESSAGE(
        b, "1g-i: dedup uplift compares final_score (0.9 → 1.4 admits), not semantic_score");
    free(b);
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -1202,7 +1031,7 @@ static void test_dedup_compacts_both_arrays_lockstep(void) {
     * should equal what we seeded for the FIRST surviving candidate. */
    session_t s;
    pb_session_init(&s, 43);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
 
@@ -1217,7 +1046,7 @@ static void test_dedup_compacts_both_arrays_lockstep(void) {
    pb_focus_set_seed_score(2, 0.80f);
    pb_focus_set_seed_score(3, 0.75f);
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 100, "turn 1", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 7, 100, "turn 1", &b));
    free(b);
 
    /* Turn 2: re-seed same 4 — A and D retain their slots; B and C
@@ -1239,7 +1068,7 @@ static void test_dedup_compacts_both_arrays_lockstep(void) {
 
    pb_broadcast_reset();
    b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 101, "turn 2", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 7, 101, "turn 2", &b));
    TEST_ASSERT_NOT_NULL(b);
    /* Block must contain E and F; not A or B. */
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, "E"), "fresh candidate E must surface");
@@ -1259,7 +1088,7 @@ static void test_dedup_compacts_both_arrays_lockstep(void) {
        1e-5f, 0.95f, bc->last_first_final_score,
        "first survivor's breakdown.final_score must be the one originally at slot 0 (E)");
 
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pb_session_destroy(&s);
 }
 
@@ -1271,7 +1100,8 @@ static void test_broadcast_fires_with_conv_id_set(void) {
    pb_focus_state()->seeded_count = 0; /* zero candidates */
 
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, /*conv_id*/ 7, /*turn_id*/ 99, "x", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 1, /*conv_id*/ 7, /*turn_id*/ 99, "x", &b));
    TEST_ASSERT_NULL_MESSAGE(b, "empty result yields NULL block (composer omits section)");
 
    pb_broadcast_mock_t *bc = pb_broadcast_state();
@@ -1284,16 +1114,16 @@ static void test_broadcast_fires_with_conv_id_set(void) {
 }
 
 static void test_broadcast_skipped_when_conv_id_zero(void) {
-   /* SESSION_START / standalone build_system_prompt_string callers pass
-    * conv_id=0 so build_focus_block must NOT broadcast — otherwise the
-    * settings-change refresh_all_prompts path produces an event storm. */
+   /* A caller with no conversation passes conv_id=0: nothing is broadcast
+    * (there is nowhere to show the items). */
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
    pb_focus_state()->seeded_count = 1;
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "alpha", "fact:1" };
 
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, /*conv_id*/ 0, /*turn_id*/ 0, "x", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 1, /*conv_id*/ 0, /*turn_id*/ 0, "x", &b));
    TEST_ASSERT_NOT_NULL(b);
    free(b);
 
@@ -1312,7 +1142,8 @@ static void test_broadcast_skipped_when_disabled(void) {
    pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_fact", "alpha", "fact:1" };
 
    char *b = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, /*conv_id*/ 7, /*turn_id*/ 99, "x", &b));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         build_focus_block(s_dispatch, 1, /*conv_id*/ 7, /*turn_id*/ 99, "x", &b));
    TEST_ASSERT_NULL(b);
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, pb_broadcast_state()->call_count,
                                  "disabled feature must NOT broadcast (top-of-fn short circuit)");
@@ -1322,16 +1153,8 @@ int main(void) {
    UNITY_BEGIN();
 
    /* Composer two-segment shape */
-   RUN_TEST(test_composer_both_segments_flatten);
-   RUN_TEST(test_composer_volatile_null_omits);
-   RUN_TEST(test_composer_volatile_empty_omits);
-   RUN_TEST(test_composer_stable_only_byte_identical);
-   RUN_TEST(test_composer_both_null_returns_null);
-   RUN_TEST(test_composer_stable_only_volatile_set);
-   RUN_TEST(test_composer_free_idempotent);
 
    /* Drift hash */
-   RUN_TEST(test_fnv1a_drift_detection);
 
    /* Feature gate (8-10) */
    RUN_TEST(test_focus_disabled_short_circuits);
@@ -1356,7 +1179,6 @@ int main(void) {
 
    /* Memory + integration (21-23) */
    RUN_TEST(test_memory_cycle_1000x);
-   RUN_TEST(test_composer_handles_long_volatile_block);
    RUN_TEST(test_focus_block_produces_one_line_per_candidate);
 
    /* Phase 1f — dedup (24-37) */
@@ -1366,7 +1188,6 @@ int main(void) {
    RUN_TEST(test_dedup_score_uplift_below_threshold_suppresses);
    RUN_TEST(test_dedup_score_uplift_meets_threshold_admits);
    RUN_TEST(test_dedup_window_zero_disables_time_dedup);
-   RUN_TEST(test_dedup_session_start_clear_resets_state);
    RUN_TEST(test_dedup_session_start_does_not_record);
    RUN_TEST(test_dedup_cross_user_isolation);
    RUN_TEST(test_dedup_cross_session_same_user_isolation);

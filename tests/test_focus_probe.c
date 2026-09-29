@@ -64,6 +64,13 @@
 #include "unity.h"
 #include "webui/build_focus_block.h"
 
+/* The session a turn runs on: the prompt builder's argument (build_focus_block
+ * reads its focus dedup state and item handles from it). */
+static session_t *s_dispatch;
+static void set_dispatch(session_t *session) {
+   s_dispatch = session;
+}
+
 /* =============================================================================
  * Fake adapter — emits a programmable synthetic pool.  Replaces real
  * memory / document / calendar adapters for deterministic probe-style
@@ -270,12 +277,12 @@ void setUp(void) {
 
    /* Dedup tests publish a session here; ranker tests leave it NULL so
     * build_focus_block (when used) skips dedup entirely. */
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
 }
 
 void tearDown(void) {
    focus_unregister_all();
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
 }
 
 static fake_seed_t *seed_add(const char *source_id,
@@ -395,19 +402,19 @@ static void test_dedup_suppress_within_window(void) {
    memset(&s, 0, sizeof(s));
    s.session_id = 42;
    pthread_mutex_init(&s.history_mutex, NULL);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
 
    /* First turn — admits cleanly. */
    char *block1 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(/*user_id*/ 1, /*conv_id*/ 7, /*turn_id*/ 100,
-                                                    "first turn", &block1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, /*user_id*/ 1, /*conv_id*/ 7,
+                                                    /*turn_id*/ 100, "first turn", &block1));
    TEST_ASSERT_NOT_NULL(block1);
    TEST_ASSERT_NOT_NULL(strstr(block1, "stable text"));
    free(block1);
 
    /* Second turn — same fact, same score, within window → suppressed. */
    char *block2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 101, "second turn", &block2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 7, 101, "second turn", &block2));
    TEST_ASSERT_NULL_MESSAGE(block2,
                             "dedup must suppress the only candidate within the recent window");
 
@@ -431,11 +438,11 @@ static void test_dedup_uplift_admits(void) {
    memset(&s, 0, sizeof(s));
    s.session_id = 43;
    pthread_mutex_init(&s.history_mutex, NULL);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
 
    /* First turn — admits with low score (0.4 → final 0.4). */
    char *block1 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 200, "turn one", &block1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 7, 200, "turn one", &block1));
    TEST_ASSERT_NOT_NULL(block1);
    TEST_ASSERT_NOT_NULL(strstr(block1, "uplifting text"));
    free(block1);
@@ -446,7 +453,7 @@ static void test_dedup_uplift_admits(void) {
    s_fake.seeds[0].semantic_score = 0.7f;
 
    char *block2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 201, "turn two", &block2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 7, 201, "turn two", &block2));
    TEST_ASSERT_NOT_NULL_MESSAGE(block2, "uplift score >= prior * 1.5 must re-admit");
    TEST_ASSERT_NOT_NULL(strstr(block2, "uplifting text"));
    free(block2);

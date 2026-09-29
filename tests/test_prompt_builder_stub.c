@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_handles.h"
 #include "core/focus/focus_source.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
@@ -300,10 +301,33 @@ pb_broadcast_mock_t *pb_broadcast_state(void) {
    return &s_broadcast;
 }
 
+/* The session's stable citation handles (core/focus/focus_handles.c needs the
+ * database): each call numbers its items 1, 2, 3, the old per-turn numbering. */
+/* No conversation here: no tag secret to mask. */
+char *session_prefix_mask_secret(struct session *session, char *text) {
+   (void)session;
+   return text;
+}
+
+int focus_handles_assign(struct session *session,
+                         int64_t conv_id,
+                         int user_id,
+                         conv_focus_handle_t *items,
+                         int count) {
+   (void)session;
+   (void)conv_id;
+   (void)user_id;
+   for (int i = 0; i < count; i++) {
+      items[i].handle = i + 1;
+      items[i].is_new = true;
+   }
+   return 0;
+}
+
 /* session_turn_conversation stub — build_focus_block calls this just before
  * the broadcast to re-read the dispatching turn's conversation (first-turn race
  * fix).  Tests do not publish a dispatch session, so
- * session_get_dispatch_session() returns NULL and this stub never fires — but
+ * no session is passed (NULL) and this stub never fires — but
  * the symbol must resolve at link time. */
 int64_t session_turn_conversation(struct session *session) {
    (void)session;

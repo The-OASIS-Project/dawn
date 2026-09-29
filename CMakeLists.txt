@@ -602,6 +602,9 @@ set(DAWN_SOURCES
     src/llm/llm_streaming.c
     src/llm/llm_command_parser.c
     src/llm/llm_tools.c
+    src/llm/llm_tools_filter.c
+    src/llm/llm_tools_results.c
+    src/llm/llm_tools_dup.c
     src/llm/llm_tool_loop.c
     src/llm/llm_context.c
     src/llm/llm_cache_monitor.c
@@ -612,6 +615,8 @@ set(DAWN_SOURCES
     src/llm/llm_claude_binding.c
     src/llm/llm_claude_blocks.c
     src/llm/llm_turn_blocks.c
+    src/llm/llm_history_kind.c
+    src/llm/llm_context_text.c
     src/llm/llm_turn_blocks_stored.c
     src/llm/llm_key_tag.c
     src/llm/llm_history_rows.c
@@ -728,7 +733,6 @@ if(ENABLE_WEBUI)
         src/webui/webui_settings.c
         src/webui/webui_tools.c
         src/webui/webui_images.c
-        src/webui/webui_image_rehydrate.c
         src/webui/webui_documents.c
         src/webui/webui_doc_library.c
         src/webui/webui_satellite.c
@@ -781,8 +785,11 @@ if(ENABLE_WEBUI)
         src/tools/research_run_loop.c
         src/core/research_worker.c
         src/core/text_input_dispatch.c
-        src/core/prompt_compose.c
+        src/core/prompt_sections.c
+        src/core/prefix_in_force.c
         src/core/session_dedup.c
+        src/core/session_prefix.c
+        src/core/focus/focus_handles.c
         src/core/worker_pool.c
         src/core/text_filter.c
         src/core/rate_limiter.c
@@ -909,7 +916,11 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v75.c
     src/auth/auth_db_migrations_v92.c
     src/auth/auth_db_migrations_v93.c
+    src/auth/auth_db_migrations_v94.c
     src/auth/auth_db_messages.c
+    src/auth/auth_db_conv_prefix.c
+    src/auth/auth_db_focus_handles.c
+    src/auth/auth_db_withdraw.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
@@ -927,6 +938,7 @@ list(APPEND DAWN_SOURCES
     src/blob_store_util.c
     src/document_original_store.c
     src/image_store.c
+    src/core/image_rehydrate.c
     src/memory/memory_db.c
     src/memory/memory_citation.c
     src/memory/memory_citation_parse.c
@@ -968,6 +980,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_maintenance.c
     src/memory/memory_recovery.c
     src/memory/memory_history_loader.c
+    src/core/prefix_message.c
     src/memory/memory_summarize_missing.c
     src/memory/memory_embeddings.c
     src/memory/memory_embeddings_entity.c
@@ -1074,6 +1087,25 @@ add_custom_target(llm_blocks_confined_check
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Checking stored-turn-blocks invariant: replay path only")
 add_dependencies(dawn llm_blocks_confined_check)
+
+# Request-context CI invariant: rows of messages with a kind (turn context,
+# memory, directives, ...) are read only to rebuild an LLM request, never shown,
+# searched, counted or extracted.  See scripts/check_message_kind_confined.sh.
+add_custom_target(message_kind_confined_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_message_kind_confined.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking request-context rows invariant: replay path only")
+add_dependencies(dawn message_kind_confined_check)
+
+# User-removal CI invariant: a delete a user makes (forgetting a memory,
+# deleting a document or an account) is marked as their removal so it is
+# withdrawn from the conversations it was sent into; a maintenance delete says
+# why it isn't one.  See scripts/check_user_removal_marked.sh.
+add_custom_target(user_removal_marked_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_user_removal_marked.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking user removals are marked for withdrawal")
+add_dependencies(dawn user_removal_marked_check)
 
 # Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
 # in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or

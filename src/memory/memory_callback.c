@@ -35,9 +35,11 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
 #include "config/dawn_config.h"
 #include "core/iso8601.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/strbuf.h"
 #include "core/text_filter.h" /* SURFACED_ID_FMT — one marker for both memory renderers */
 #include "core/time_query_parser.h"
@@ -1071,7 +1073,7 @@ static char *memory_action_remember_single(int user_id,
    if (remember_record_source(fact_id, user_id, true) == SESSION_FACT_SOURCE_DROPPED) {
       /* Too many facts wait for this turn's conversation: stored, it could never
        * be tied to it, and forgetting that conversation would keep it. */
-      memory_db_fact_delete(fact_id, user_id);
+      memory_db_fact_delete(fact_id, user_id); /* not-a-removal: just created, never sent */
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Too many facts saved in this reply to keep track of; save this one in the "
                     "next reply.");
@@ -1307,6 +1309,11 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    char nf_ids[400] = "";
    size_t ok_pos = 0, nf_pos = 0;
 
+   /* A forgotten fact is the user removing it (a merge isn't: the kept fact
+    * says it). */
+   if (!merge) {
+      conv_db_withdraw_intent_begin(user_id);
+   }
    for (int i = 0; i < id_count; i++) {
       memory_fact_t fact;
       bool removed = false;
@@ -1328,6 +1335,12 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
       if (*lp < cap - 24)
          *lp += (size_t)snprintf(list + *lp, cap - *lp, "%s%lld", *lp ? ", " : "",
                                  (long long)ids[i]);
+   }
+   conv_db_withdraw_intent_end();
+   /* What was forgotten leaves the conversations it was sent into (a merged
+    * fact stays, in the one it merged into). */
+   if (forgotten > 0 && !merge) {
+      session_withdraw_forgotten_async(user_id, false);
    }
 
    /* Single valid ID that succeeded → detailed response (back-compat). */

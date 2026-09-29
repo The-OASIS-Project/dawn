@@ -33,6 +33,8 @@
 extern "C" {
 #endif
 
+struct session;
+
 /**
  * @brief Build the per-turn focus-injection block.
  *
@@ -68,6 +70,8 @@ extern "C" {
  *     text content is NEVER logged (privacy).
  *   - LOG_WARNING per source with non-zero filter rejections.
  *
+ * @param session        The session the turn runs on: its focus dedup state and
+ *                       the conversation's item handles ([M7]); NULL for none
  * @param user_id        Authenticated user (must be > 0)
  * @param conv_id        Active conversation id (used to scope the
  *                       context_injection broadcast).  0 disables the
@@ -82,7 +86,8 @@ extern "C" {
  *                       SUCCESS-with-no-candidates.  Caller frees.
  * @return SUCCESS or FAILURE.  See contract above.
  */
-int build_focus_block(int user_id,
+int build_focus_block(struct session *session,
+                      int user_id,
                       int64_t conv_id,
                       int64_t turn_id,
                       const char *user_turn_text,

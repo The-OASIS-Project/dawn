@@ -84,6 +84,7 @@ int64_t job_dispatch_tool_persist_cb(void *userdata, const session_tool_row_t *r
                                        .tool_call_id = row->tool_call_id,
                                        .reasoning = row->reasoning,
                                        .llm_blocks = row->llm_blocks,
+                                       .kind = row->kind,
                                        .is_error = row->is_error };
    int64_t id = 0;
    if (conv_db_add_row(ctx->conv_id, ctx->user_id, &db_row, &id) != AUTH_DB_SUCCESS) {

@@ -41,7 +41,9 @@
 #include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
+#include "core/image_rehydrate.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/text_input_dispatch.h"
 #include "core/turn_queue.h"
 #include "core/worker_pool.h"
@@ -51,7 +53,6 @@
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
-#include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
 
@@ -110,6 +111,10 @@ static void write_prior_exchange(session_t *session,
       free(stored);
    }
    session_stamp_claimed(session, user_row, reply_row);
+   /* Its request context goes with its own question. */
+   if (user_row > 0) {
+      session_prefix_question_saved(session, conv_id, user_id, user_row);
+   }
 }
 
 /* A new chat's first message is dispatched before its conversation exists, so
@@ -136,6 +141,7 @@ static void persist_pending_user_row(session_t *session, int user_id) {
    if (user_id > 0 &&
        conv_db_add_message_ex(conv_id, user_id, "user", pending, &msg_id) == AUTH_DB_SUCCESS) {
       session_stamp_last_message_id(session, "user", msg_id);
+      session_prefix_question_saved(session, conv_id, user_id, msg_id);
    } else {
       OLOG_WARNING("WebUI: could not save the first message of conversation %lld",
                    (long long)conv_id);
@@ -179,6 +185,7 @@ static int64_t webui_tool_persist_cb(void *userdata, const session_tool_row_t *r
                                        .tool_call_id = row->tool_call_id,
                                        .reasoning = row->reasoning,
                                        .llm_blocks = row->llm_blocks,
+                                       .kind = row->kind,
                                        .is_error = row->is_error };
    int64_t id = 0;
    if (conv_db_add_row(conv_id, ctx->auth_user_id, &db_row, &id) != AUTH_DB_SUCCESS) {
@@ -313,6 +320,7 @@ static void finish_turn(session_t *session) {
          if (unsaved.user && conv_db_add_message_ex(unsaved.conv, user_id, "user", unsaved.user,
                                                     &msg_id) == AUTH_DB_SUCCESS) {
             session_stamp_last_message_id(session, "user", msg_id);
+            session_prefix_question_saved(session, unsaved.conv, user_id, msg_id);
          }
          if (unsaved.reply) {
             text_worker_persist_final(session, unsaved.conv, user_id, unsaved.reply);
@@ -485,6 +493,7 @@ static void *text_worker_thread(void *arg) {
       .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
       .persist_content_override = work->persist_content, /* text + [IMAGE:<id>] for image turns */
+      .build_history_message = image_rehydrate_message,  /* ...as a reload rebuilds it */
       .await_conversation = turn_conv <= 0,
       .sentence_cb = fanout_tts ? webui_sentence_audio_fanout_callback : NULL,
       .sentence_userdata = fanout_tts ? session : NULL,
@@ -521,8 +530,8 @@ static void *text_worker_thread(void *arg) {
    if (work->persist_content && conn) {
       char persisted_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
       int persisted_id_count = 0;
-      if (webui_collect_image_ids(work->persist_content, persisted_ids, WEBUI_MAX_VISION_IMAGES_CAP,
-                                  &persisted_id_count) == SUCCESS) {
+      if (image_marker_collect_ids(work->persist_content, persisted_ids,
+                                   WEBUI_MAX_VISION_IMAGES_CAP, &persisted_id_count) == SUCCESS) {
          for (int i = 0; i < persisted_id_count; i++) {
             image_store_update_retention(persisted_ids[i], conn->auth_user_id,
                                          IMAGE_RETAIN_PERMANENT);

@@ -32,7 +32,9 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
@@ -139,11 +141,14 @@ static void *conv_memory_worker(void *arg) {
             add_counts(payload, &c);
          }
       } else {
+         conv_db_withdraw_intent_begin(job->user_id); /* the user removing it */
          int rc = memory_forget_conversation(job->user_id, job->conv_id, &c);
+         conv_db_withdraw_intent_end();
          json_object_object_add(payload, "success", json_object_new_boolean(rc == SUCCESS));
          if (rc == SUCCESS) {
-            /* No prompt refresh: every turn rebuilds its system prompt from
-             * memory before calling the LLM, so what's gone is not sent again. */
+            /* What's gone leaves the conversations it was sent into; the next
+             * turn's memory is built without it. */
+            (void)session_withdraw_forgotten(job->user_id, true);
             add_counts(payload, &c);
          } else {
             json_object_object_add(payload, "error",

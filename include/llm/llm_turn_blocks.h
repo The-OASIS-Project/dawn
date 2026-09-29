@@ -284,13 +284,35 @@ struct json_object *llm_history_wire_copy(struct json_object *history);
  * @brief A deep copy of @p history without DAWN's own keys
  *
  * For anything that isn't a replay to the same vendor: memory extraction, a
- * summarizer, a log on disk.  None of those may see reasoning a vendor issued
- * for itself (it would be extracted as facts, sent to another model, or
- * written out): DAWN's own keys go, and so do the thinking and redacted
- * thinking parts a Claude turn's content array holds.  Everything else keeps
- * its shape.  Caller owns it; NULL on failure.
+ * summarizer.  None of those may see reasoning a vendor issued for itself (it
+ * would be extracted as facts or sent to another model): DAWN's own keys go,
+ * and so do the thinking and redacted thinking parts a Claude turn's content
+ * array holds.  Request context (llm_history_kind.h) goes too: what DAWN
+ * injected isn't something the conversation said.  Everything else keeps its
+ * shape.  Caller owns it; NULL on failure.
  */
 struct json_object *llm_history_strip_internal(struct json_object *history);
+
+/**
+ * @brief Drop every message's reasoning, in place: a declared boundary
+ *
+ * Each turn then replays as its text and tool calls, without the reasoning
+ * its model gave it, which was bound to a request that no longer reads the
+ * same (a new system prompt or tool set, withdrawn context): its stored
+ * blocks, and any reasoning a live turn left in an assistant message's
+ * content (a vendor's thinking block, kept by the tool loop).
+ *
+ * @return How many messages had reasoning
+ */
+int llm_history_drop_turn_blocks(struct json_object *history);
+
+/**
+ * @brief A deep copy of @p history for a log on disk
+ *
+ * As llm_history_strip_internal, except that request context stays, with its
+ * kind marks, so the log shows each request as it was sent.
+ */
+struct json_object *llm_history_log_copy(struct json_object *history);
 
 /* ---- The stored shape (llm_turn_blocks_stored.c) ---- */
 

@@ -379,65 +379,6 @@ static tui_theme_t tui_theme = TUI_THEME_GREEN;  // Default: Apple ][ green
 command_processing_mode_t command_processing_mode = CMD_MODE_DIRECT_ONLY;
 
 
-// =============================================================================
-// Direct-only mode system prompt (persona + system instructions)
-// =============================================================================
-// Used when command_processing_mode is CMD_MODE_DIRECT_ONLY.
-// Combines custom persona (or default AI_PERSONA) with dynamic system instructions.
-#define DIRECT_PROMPT_BUFFER_SIZE 16384
-static char direct_mode_prompt[DIRECT_PROMPT_BUFFER_SIZE];
-static int direct_mode_prompt_version = -1;
-static pthread_mutex_t direct_mode_prompt_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/**
- * @brief Gets the system prompt for direct-only command processing mode
- *
- * Returns a combined prompt with:
- * - Persona (from config or AI_PERSONA default)
- * - System instructions (dynamically built based on enabled features)
- *
- * This ensures consistent LLM behavior (response length, formatting rules)
- * even when using a custom persona. Only includes instructions for
- * features that are actually enabled (search, vision, etc.). The cached
- * prompt is rebuilt whenever system instructions are invalidated (e.g.,
- * when HUD availability changes), tracked via the version counter.
- *
- * Now callable from refresh threads (MQTT callbacks via
- * session_manager_refresh_all_prompts), so the buffer is mutex-protected.
- */
-static const char *get_direct_mode_prompt(void) {
-   int current_version = get_system_instructions_version();
-
-   pthread_mutex_lock(&direct_mode_prompt_mutex);
-   if (direct_mode_prompt_version != current_version) {
-      const char *persona = (g_config.persona.description[0] != '\0') ? g_config.persona.description
-                                                                      : AI_PERSONA;
-      /* Local microphone pipeline - always a local-session prompt */
-      snprintf(direct_mode_prompt, DIRECT_PROMPT_BUFFER_SIZE, "%s\n\n%s", persona,
-               get_system_instructions(false));
-      direct_mode_prompt_version = current_version;
-   }
-   pthread_mutex_unlock(&direct_mode_prompt_mutex);
-   return direct_mode_prompt;
-}
-
-/**
- * @brief Local-session prompt builder registered with the session manager.
- *
- * Selects between get_direct_mode_prompt() and get_local_command_prompt()
- * based on command_processing_mode so that session_manager_refresh_all_prompts()
- * reinstalls a prompt consistent with the configured processing mode. This
- * avoids overwriting a direct-only session's minimal prompt with the LLM
- * command prompt on HUD state changes.
- */
-static const char *dawn_local_prompt_builder(void) {
-   if (command_processing_mode == CMD_MODE_LLM_ONLY ||
-       command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-      return get_local_command_prompt();
-   }
-   return get_direct_mode_prompt();
-}
-
 // Barge-in control: when true, speech detection is disabled during TTS playback
 static int g_bargein_disabled = 1;       // Start disabled until after boot calibration
 static int g_bargein_user_disabled = 0;  // Set by --no-bargein CLI option
@@ -561,7 +502,7 @@ static void apply_local_owner_change(session_t *local) {
       int64_t saved = 0;
       /* Couldn't be saved: drop it rather than hand it to the next owner. */
       if (session_save_voice_conversation(local, &saved) != 0 && session_has_messages(local)) {
-         session_init_system_prompt(local, get_local_command_prompt());
+         session_clear_history(local);
       }
       OLOG_INFO("Local device now belongs to user %d%s", after,
                 saved > 0 ? " (previous user's conversation saved)" : "");
@@ -1149,16 +1090,8 @@ void reset_conversation(void) {
 
    /* Note: Conversation history is persisted to DB via WebUI, no file export needed */
 
-   /* Reset local session with appropriate system prompt */
-   const char *system_prompt;
-   if (command_processing_mode == CMD_MODE_LLM_ONLY ||
-       command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-      system_prompt = get_local_command_prompt();
-   } else {
-      /* Direct-only mode: use persona + system instructions for consistent behavior */
-      system_prompt = get_direct_mode_prompt();
-   }
-   session_init_system_prompt(local_session, system_prompt);
+   /* A new context: its first turn freezes the prompt it runs under. */
+   session_clear_history(local_session);
 
 
    /* Reset metrics */
@@ -2142,10 +2075,9 @@ int main(int argc, char *argv[]) {
 
    // Force early initialization of system instructions before any threads start.
    // This ensures thread-safe access since the buffers are built once and cached.
-   // Warm both local and remote variants so either session type can read without
-   // triggering a lazy rebuild on a worker thread.
-   (void)get_system_instructions(false);
-   (void)get_system_instructions(true);
+   // Warm them so a session can read them without triggering a lazy rebuild on a
+   // worker thread.
+   (void)get_system_instructions();
 
    // Initialize session manager (creates local session)
    if (session_manager_init() != 0) {
@@ -2153,11 +2085,7 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
-   // Register prompt builders BEFORE mosquitto_loop_start so MQTT-triggered
-   // refreshes (HUD status / discovery) never observe NULL callbacks. Keeping
-   // dawn_build_prompt's declaration local here avoids pulling the WebUI
-   // internal header into dawn.c.
-   session_manager_set_local_prompt_builder(dawn_local_prompt_builder);
+   // Register the prompt builder before any turn can run.
 #ifdef ENABLE_WEBUI
    /* Phase 1d/1e: register all six focus-source adapters into the framework
     * BEFORE wiring the structured prompt builder.  Adapters register
@@ -2195,20 +2123,9 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
-   // Set the appropriate system message content based on processing mode
-   const char *system_prompt;
-   if (command_processing_mode == CMD_MODE_LLM_ONLY ||
-       command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-      // LLM modes get the enhanced prompt with command information
-      system_prompt = get_local_command_prompt();
-      OLOG_INFO("Using enhanced system prompt for LLM command processing");
-   } else {
-      // Direct-only mode: use persona + system instructions for consistent behavior
-      system_prompt = get_direct_mode_prompt();
-      OLOG_INFO("Using standard system prompt for direct command processing");
-   }
-
-   session_init_system_prompt(local_session, system_prompt);
+   // The local session starts a new context: its first turn freezes the
+   // prompt it runs under (session_prefix.c).
+   session_clear_history(local_session);
 
 
    // Initialize audio backend (runtime selection between ALSA and PulseAudio)

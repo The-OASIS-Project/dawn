@@ -38,35 +38,15 @@ dawn_config_t g_config;
 /* ---- session-layer stubs, recording what the remap did ---- */
 
 static session_t *s;
-static int s_save_result;      /* what session_save_voice_conversation returns */
-static int s_saved_as_user;    /* the session's user when the save ran (-1: never) */
-static char s_init_prompt[64]; /* session_init_system_prompt's prompt ("" = never) */
-static char s_user_prompt[64]; /* session_update_system_prompt's prompt */
-static int s_context_appends;
+static int s_save_result;   /* what session_save_voice_conversation returns */
+static int s_saved_as_user; /* the session's user when the save ran (-1: never) */
+static int s_cleared;       /* session_clear_history calls */
 static atomic_int s_refs;
 
 void session_set_metrics_user(session_t *session, int user_id) {
    pthread_mutex_lock(&session->metrics_mutex);
    session->metrics.user_id = user_id;
    pthread_mutex_unlock(&session->metrics_mutex);
-}
-void session_injected_set_clear(session_t *session) {
-   (void)session;
-}
-char *session_manager_build_system_prompt_string(int user_id) {
-   char *p = malloc(32);
-   snprintf(p, 32, "personal:%d", user_id);
-   return p;
-}
-void session_update_system_prompt(session_t *session, const char *prompt) {
-   (void)session;
-   snprintf(s_user_prompt, sizeof(s_user_prompt), "%s", prompt);
-}
-void session_append_satellite_context(session_t *session, const char *room, const char *ha_area) {
-   (void)session;
-   (void)room;
-   (void)ha_area;
-   s_context_appends++;
 }
 int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
    pthread_mutex_lock(&session->metrics_mutex);
@@ -75,9 +55,9 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
    *conv_id_out = s_save_result == 0 ? 77 : 0;
    return s_save_result;
 }
-void session_init_system_prompt(session_t *session, const char *prompt) {
+void session_clear_history(session_t *session) {
    (void)session;
-   snprintf(s_init_prompt, sizeof(s_init_prompt), "%s", prompt);
+   s_cleared++;
 }
 void session_retain(session_t *session) {
    (void)session;
@@ -87,10 +67,6 @@ void session_release(session_t *session) {
    (void)session;
    atomic_fetch_sub(&s_refs, 1);
 }
-char *get_remote_command_prompt_dup(void) {
-   return strdup("REMOTE");
-}
-
 /* ---- helpers ---- */
 
 static int user_of(session_t *session) {
@@ -128,9 +104,7 @@ void setUp(void) {
    s->session_id = 42;
    s_save_result = 0;
    s_saved_as_user = -1;
-   s_init_prompt[0] = '\0';
-   s_user_prompt[0] = '\0';
-   s_context_appends = 0;
+   s_cleared = 0;
    atomic_store(&s_refs, 0);
 }
 
@@ -156,13 +130,11 @@ void test_unmapped_is_a_guest_not_the_default_voice_user(void) {
 
 void test_remap_saves_previous_users_conversation_first(void) {
    session_set_metrics_user(s, 5);
-   satellite_queue_remap(s, 7, "kitchen", "Kitchen");
+   satellite_queue_remap(s, 7);
    TEST_ASSERT_TRUE(wait_for_remap());
    TEST_ASSERT_EQUAL_INT(5, s_saved_as_user); /* saved as the previous user */
    TEST_ASSERT_EQUAL_INT(7, user_of(s));
-   TEST_ASSERT_EQUAL_STRING("", s_init_prompt); /* the save started the new context */
-   TEST_ASSERT_EQUAL_STRING("personal:7", s_user_prompt);
-   TEST_ASSERT_EQUAL_INT(1, s_context_appends);
+   TEST_ASSERT_EQUAL_INT(0, s_cleared); /* the save started the new context */
 }
 
 void test_remap_waits_for_the_query_in_progress(void) {
@@ -170,7 +142,7 @@ void test_remap_waits_for_the_query_in_progress(void) {
    static int running;
    TEST_ASSERT_EQUAL_INT(TURN_QUEUE_OK,
                          turn_queue_enqueue(42, TURN_SOURCE_USER, &running, hold_spawn, hold_free));
-   satellite_queue_remap(s, 7, "kitchen", "");
+   satellite_queue_remap(s, 7);
    struct timespec ts = { 0, 50000000 };
    nanosleep(&ts, NULL);
    /* The running query still belongs to the user it began as. */
@@ -182,24 +154,23 @@ void test_remap_waits_for_the_query_in_progress(void) {
    TEST_ASSERT_EQUAL_INT(7, user_of(s));
 }
 
-void test_unmap_with_nothing_to_save_drops_the_personal_prompt(void) {
-   /* Nothing to save (or the save failed): a new context starts with the
-    * satellite prompt, so the next speaker doesn't get the previous user's. */
+void test_unmap_with_nothing_to_save_starts_a_new_context(void) {
+   /* Nothing to save (or the save failed): a new context starts, so the next
+    * speaker gets neither the previous user's history nor their prompt. */
    session_set_metrics_user(s, 5);
    s_save_result = 1;
-   satellite_queue_remap(s, 0, "hall", "");
+   satellite_queue_remap(s, 0);
    TEST_ASSERT_TRUE(wait_for_remap());
-   TEST_ASSERT_EQUAL_STRING("REMOTE", s_init_prompt);
+   TEST_ASSERT_EQUAL_INT(1, s_cleared);
    TEST_ASSERT_EQUAL_INT(0, user_of(s));
-   TEST_ASSERT_EQUAL_STRING("", s_user_prompt); /* no personalized prompt for nobody */
 }
 
 void test_apply_mapping_without_owner_change(void) {
    session_set_metrics_user(s, 1);
-   satellite_apply_mapping(s, 1, "den", NULL);
+   satellite_apply_mapping(s, 1);
    TEST_ASSERT_EQUAL_INT(1, user_of(s));
-   TEST_ASSERT_EQUAL_STRING("personal:1", s_user_prompt);
    TEST_ASSERT_EQUAL_INT(-1, s_saved_as_user); /* same owner: nothing saved */
+   TEST_ASSERT_EQUAL_INT(0, s_cleared);        /* nor a new context */
 }
 
 int main(void) {
@@ -207,7 +178,7 @@ int main(void) {
    RUN_TEST(test_unmapped_is_a_guest_not_the_default_voice_user);
    RUN_TEST(test_remap_saves_previous_users_conversation_first);
    RUN_TEST(test_remap_waits_for_the_query_in_progress);
-   RUN_TEST(test_unmap_with_nothing_to_save_drops_the_personal_prompt);
+   RUN_TEST(test_unmap_with_nothing_to_save_starts_a_new_context);
    RUN_TEST(test_apply_mapping_without_owner_change);
    return UNITY_END();
 }

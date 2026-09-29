@@ -3190,22 +3190,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                       * user's upload doesn't invalidate every user's cache. */
                      "CREATE TABLE IF NOT EXISTS doc_chunk_generation ("
                      "  owner INTEGER PRIMARY KEY,"
-                     "  gen INTEGER NOT NULL DEFAULT 0);"
-                     "CREATE TRIGGER IF NOT EXISTS trg_doc_chunks_gen_ins AFTER INSERT ON "
-                     "document_chunks BEGIN INSERT INTO doc_chunk_generation (owner, gen) "
-                     "SELECT COALESCE(CASE WHEN is_global THEN 0 ELSE user_id END, 0), 1 "
-                     "FROM documents WHERE id = NEW.document_id "
-                     "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"
-                     "CREATE TRIGGER IF NOT EXISTS trg_doc_chunks_gen_del AFTER DELETE ON "
-                     "document_chunks BEGIN INSERT INTO doc_chunk_generation (owner, gen) "
-                     "SELECT COALESCE(CASE WHEN is_global THEN 0 ELSE user_id END, 0), 1 "
-                     "FROM documents WHERE id = OLD.document_id "
-                     "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"
-                     "CREATE TRIGGER IF NOT EXISTS trg_doc_chunks_gen_emb AFTER UPDATE OF "
-                     "embedding ON document_chunks BEGIN INSERT INTO doc_chunk_generation "
-                     "(owner, gen) SELECT COALESCE(CASE WHEN is_global THEN 0 ELSE user_id "
-                     "END, 0), 1 FROM documents WHERE id = NEW.document_id "
-                     "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"
+                     "  gen INTEGER NOT NULL DEFAULT 0);" DOC_CHUNK_GENERATION_TRIGGERS_SQL
                      "CREATE TRIGGER IF NOT EXISTS trg_documents_gen_vis AFTER UPDATE OF "
                      "user_id, is_global ON documents BEGIN "
                      "INSERT INTO doc_chunk_generation (owner, gen) VALUES "
@@ -3346,6 +3331,18 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
+   /* v94: messages.kind, the frozen request prefix (prompt_blobs + conversation
+    * columns) and stable memory citation handles.  Idempotent (probe-guarded
+    * ALTERs, IF NOT EXISTS indexes); no data changes. */
+   bool v94_ok = (current_version >= 94);
+   if (current_version < 94) {
+      if (auth_db_migrations_v94(s_db.db) == AUTH_DB_SUCCESS) {
+         v94_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v94 migration (message kinds, frozen prefix) failed");
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3370,7 +3367,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
                               v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
-                              v90_ok && v91_ok && v92_ok && v93_ok;
+                              v90_ok && v91_ok && v92_ok && v93_ok && v94_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {
@@ -3397,4 +3394,24 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
    }
 
    return AUTH_DB_SUCCESS;
+}
+
+/* Whether @p table has column @p col (auth_db_internal.h). */
+bool auth_db_column_exists(sqlite3 *db, const char *table, const char *col) {
+   char sql[128];
+   snprintf(sql, sizeof(sql), "PRAGMA table_info(%s)", table);
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+      return false;
+   }
+   bool found = false;
+   while (sqlite3_step(st) == SQLITE_ROW) {
+      const unsigned char *name = sqlite3_column_text(st, 1);
+      if (name && strcmp((const char *)name, col) == 0) {
+         found = true;
+         break;
+      }
+   }
+   sqlite3_finalize(st);
+   return found;
 }

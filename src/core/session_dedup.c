@@ -20,14 +20,11 @@
  * Injection.  Pure helpers operating on session_t::injected_set; extracted
  * from session_manager.c specifically so test_prompt_builder.c can link
  * the dedup APIs without dragging the full session-manager runtime
- * (auth_db, conv_db, satellite_db, json-c) into the test link — same
- * pattern as src/core/prompt_compose.c.
+ * (auth_db, conv_db, satellite_db, json-c) into the test link.
  *
  * Threading: the `_locked` suffix on three of the four public functions
  * makes the contract loud — caller owns history_mutex.  `_clear` is
- * self-locking and must NOT be called while history_mutex is held.  The
- * thread-local dispatch-session getter/setter is lock-free TLS: each
- * worker thread owns its own pointer.
+ * self-locking and must NOT be called while history_mutex is held.
  */
 
 #include <limits.h>
@@ -43,23 +40,6 @@
 #include "utils/string_utils.h"
 
 #ifdef ENABLE_MULTI_CLIENT
-
-/* =============================================================================
- * Thread-local dispatch session — read by build_focus_block to find the
- * session whose dedup set to update.  Set by session_dispatch_user_turn
- * before invoking the prompt builder and cleared after.  NULL on every
- * non-PER_TURN path so build_focus_block can detect "no session
- * available" and skip dedup safely.
- * ============================================================================= */
-static __thread session_t *t_dispatch_session = NULL;
-
-void session_set_dispatch_session(session_t *session) {
-   t_dispatch_session = session;
-}
-
-session_t *session_get_dispatch_session(void) {
-   return t_dispatch_session;
-}
 
 /* =============================================================================
  * Dedup-set primitives.  All operate on the fixed-size injected_set_t
@@ -170,16 +150,6 @@ int session_injected_set_record_locked(session_t *session,
    e->last_injected_turn = current_turn;
    e->last_score = score;
    return SUCCESS;
-}
-
-void session_injected_set_clear(session_t *session) {
-   if (session == NULL)
-      return;
-   pthread_mutex_lock(&session->history_mutex);
-   /* memset zeros entries[], count, turn_counter, both log-once gates,
-    * and any padding — single statement, no missed field risk. */
-   memset(&session->injected_set, 0, sizeof(session->injected_set));
-   pthread_mutex_unlock(&session->history_mutex);
 }
 
 void session_citation_stash_clear(session_t *session) {

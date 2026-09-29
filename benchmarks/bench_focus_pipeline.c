@@ -127,6 +127,7 @@
 
 #include "config/dawn_config.h"
 #include "core/focus/focus_candidate_helpers.h"
+#include "core/focus/focus_handles.h"
 #include "core/focus/focus_source.h"
 #include "core/focus/focus_source_internal.h"
 #include "core/session_manager.h"
@@ -134,6 +135,13 @@
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 #include "webui/build_focus_block.h"
+
+/* The session a turn runs on: the prompt builder's argument (build_focus_block
+ * reads its focus dedup state and item handles from it). */
+static session_t *s_dispatch;
+static void set_dispatch(session_t *session) {
+   s_dispatch = session;
+}
 
 /* =============================================================================
  * Synthetic embeddings — deterministic FNV-1a → xorshift float vector
@@ -492,9 +500,32 @@ static void captured_release(void) {
    memset(&s_captured, 0, sizeof(s_captured));
 }
 
+/* The session's stable citation handles (core/focus/focus_handles.c needs the
+ * database): each call numbers its items 1, 2, 3, the old per-turn numbering. */
+/* No conversation here: no tag secret to mask. */
+char *session_prefix_mask_secret(struct session *session, char *text) {
+   (void)session;
+   return text;
+}
+
+int focus_handles_assign(struct session *session,
+                         int64_t conv_id,
+                         int user_id,
+                         conv_focus_handle_t *items,
+                         int count) {
+   (void)session;
+   (void)conv_id;
+   (void)user_id;
+   for (int i = 0; i < count; i++) {
+      items[i].handle = i + 1;
+      items[i].is_new = true;
+   }
+   return 0;
+}
+
 /* Latent stub: build_focus_block.c calls session_turn_conversation() to
  * refresh the broadcast conv_id from a live dispatch pointer.  In the bench,
- * session_get_dispatch_session() returns NULL (no dispatch published), so this
+ * no session is passed (NULL), so this
  * stub never actually fires — but the symbol must resolve at link time.
  * Signature mirrors the declaration in include/core/session_manager.h.  Same
  * shape as tests/test_prompt_builder_stub.c. */
@@ -1168,12 +1199,12 @@ int main(int argc, char *argv[]) {
    memset(&s, 0, sizeof(s));
    s.session_id = 1;
    pthread_mutex_init(&s.history_mutex, NULL);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
 
    /* conv_id > 0 (validated above) so build_focus_block fires the
     * broadcast we capture. */
    char *block = NULL;
-   const int rc = build_focus_block(user_id, conv_id, turn_id, query, &block);
+   const int rc = build_focus_block(s_dispatch, user_id, conv_id, turn_id, query, &block);
 
    /* H4: extract dedup_suppressed from the captured log file.  Must run
     * BEFORE emit_json_result because the JSON shape carries the value. */
@@ -1187,7 +1218,7 @@ int main(int argc, char *argv[]) {
    }
 
    free(block);
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pthread_mutex_destroy(&s.history_mutex);
    focus_unregister_all();
    captured_release();

@@ -16,10 +16,9 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Per-turn focus-block builder.  See header for the full contract.
- * Prepends a synthetic `[system_time]` candidate when a real dispatch
- * session is published; replaces the retired prompt_compose_build_now_block
- * surface from before the prompt-cache split.
+ * Per-turn focus-block builder: the retrieved items of a turn's context,
+ * each held one numbered for the conversation.  See header for the full
+ * contract.
  */
 
 #include "webui/build_focus_block.h"
@@ -33,11 +32,14 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_handles.h"
 #include "core/focus/focus_source.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/strbuf.h"
 #include "core/text_filter.h"
 #include "dawn_error.h"
+#include "llm/llm_context_text.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 #include "utils/string_utils.h"
@@ -245,7 +247,8 @@ static void apply_dedup_locked(session_t *session,
    result->candidate_count = kept;
 }
 
-int build_focus_block(int user_id,
+int build_focus_block(session_t *session,
+                      int user_id,
                       int64_t conv_id,
                       int64_t turn_id,
                       const char *user_turn_text,
@@ -323,13 +326,8 @@ int build_focus_block(int user_id,
    const int candidates_before_dedup = result.candidate_count;
    int dedup_suppressed = 0;
 
-   /* Phase 1f: dedup runs only when a session is published into the
-    * dispatch TLS slot — i.e., we're on the PER_TURN path.  SESSION_START
-    * (refresh_all_prompts) and standalone build_system_prompt_string
-    * callers leave the slot NULL; build_focus_block already short-
-    * circuits on NULL/empty turn text in those paths anyway, but the
-    * NULL guard here is defense-in-depth for any future caller. */
-   session_t *dedup_session = session_get_dispatch_session();
+   /* Dedup runs for a turn of a session (a caller with none passes NULL). */
+   session_t *dedup_session = session;
    bool warn_all_suppressed = false;
    if (dedup_session != NULL && result.candidate_count > 0) {
       pthread_mutex_lock(&dedup_session->history_mutex);
@@ -369,50 +367,11 @@ int build_focus_block(int user_id,
       /* Render survivors.  Format: one line per candidate, opening with
        * the source_id in brackets so the LLM can attribute relevance.
        * Text content is reproduced verbatim from the candidate (already
-       * truncated to FOCUS_TEXT_MAX_BYTES inside the framework).
-       *
-       * `[system_time]` synthetic entry sits at the top of the block on
-       * every PER_TURN refresh — moved here from the retired now_block
-       * when the prompt-cache split landed.  Cheap (single strftime);
-       * shape tracks the legacy now_block contract: human-readable +
-       * ISO 8601 + freshness nudge so the LLM trusts it over a `time`
-       * tool call.  Gated on `dedup_session != NULL` (only real per-
-       * turn dispatch should see fresh time; SESSION_START and
-       * standalone callers leave the slot NULL) and `!empty_result`
-       * (preserves the legacy "all suppressed → NULL block"
-       * invariant — quiet turns fall back to the time tool same as
-       * pre-split). */
+       * truncated to FOCUS_TEXT_MAX_BYTES inside the framework).  The
+       * turn's [system_time] line is the prompt builder's: it goes out on
+       * every turn, retrievals or not. */
       strbuf_t sb;
       strbuf_init_with_max(&sb, FOCUS_BLOCK_INIT_BYTES, FOCUS_BLOCK_MAX_BYTES);
-      if (dedup_session != NULL) {
-         time_t now_t = time(NULL);
-         struct tm tm_storage;
-         struct tm *tm_info = localtime_r(&now_t, &tm_storage);
-         if (tm_info != NULL) {
-            char human[64];
-            char iso_local[32];
-            char iso_offset[8];
-            if (strftime(human, sizeof(human), "%A, %Y-%m-%d %H:%M %Z", tm_info) > 0 &&
-                strftime(iso_local, sizeof(iso_local), "%Y-%m-%dT%H:%M:%S", tm_info) > 0 &&
-                strftime(iso_offset, sizeof(iso_offset), "%z", tm_info) > 0) {
-               char iso_offset_colon[8];
-               if (iso_offset[0] != '\0' && (iso_offset[0] == '+' || iso_offset[0] == '-') &&
-                   iso_offset[1] != '\0' && iso_offset[2] != '\0' && iso_offset[3] != '\0' &&
-                   iso_offset[4] != '\0') {
-                  snprintf(iso_offset_colon, sizeof(iso_offset_colon), "%c%c%c:%c%c", iso_offset[0],
-                           iso_offset[1], iso_offset[2], iso_offset[3], iso_offset[4]);
-               } else {
-                  snprintf(iso_offset_colon, sizeof(iso_offset_colon), "Z");
-               }
-               strbuf_appendf(&sb,
-                              "[system_time] Current time: %s (ISO: %s%s).  This timestamp is "
-                              "fresh as of this turn; use it for relative-time computations and "
-                              "tool args like `fire_at`.  The `time` tool is only needed for "
-                              "sub-second precision.\n",
-                              human, iso_local, iso_offset_colon);
-            }
-         }
-      }
       /* Memory citation signal (Phase 1): when enabled, number each surfaced
        * memory as [M# source] and stash ordinal->item_id so the response
        * finalizer can resolve a <cited>M#</cited> back to its item.  When
@@ -422,37 +381,84 @@ int build_focus_block(int user_id,
       memset(&local_stash, 0, sizeof(local_stash));
       int m_ordinal = 0;
 
+      /* Each item's handle: stable for the conversation's life when a session
+       * holds it ([M7] is the same item on every turn and reload, and the
+       * conversation's record of what it was sent: a forgotten item's copy is
+       * withdrawn by it), else this block's own numbering (citation only). */
+      int handles[MAX_CITATION_STASH] = { 0 };
+      if (dedup_session != NULL) {
+         conv_focus_handle_t want[MAX_CITATION_STASH];
+         int want_idx[MAX_CITATION_STASH];
+         int n_want = 0;
+         for (int i = 0; i < result.candidate_count && n_want < MAX_CITATION_STASH; i++) {
+            const focus_candidate_t *c = &result.candidates[i];
+            if (c->text != NULL && c->text[0] != '\0' && c->item_id != NULL &&
+                c->source_id != NULL) {
+               want[n_want] = (conv_focus_handle_t){ .source = c->source_id,
+                                                     .item_id = c->item_id };
+               want_idx[n_want++] = i;
+            }
+         }
+         const int64_t live_conv = session_turn_conversation(dedup_session);
+         (void)focus_handles_assign(dedup_session, live_conv > 0 ? live_conv : conv_id, user_id,
+                                    want, n_want);
+         for (int k = 0; k < n_want; k++) {
+            if (want_idx[k] < MAX_CITATION_STASH) {
+               handles[want_idx[k]] = want[k].handle;
+            }
+         }
+      }
+
       for (int i = 0; i < result.candidate_count; i++) {
          const focus_candidate_t *c = &result.candidates[i];
          if (c->text == NULL || c->text[0] == '\0')
             continue;
 
-         /* Number a candidate [M#] ONLY when it is citeable (has an item_id) AND
-          * the stash still has room — so every rendered [M#] maps 1:1 to a stash
-          * slot.  Non-citeable / overflow candidates render the plain [source]
-          * form so the model never sees an [M#] it can't be resolved back to
-          * (which would mis-score a real citation as a hallucination). */
-         const bool numbered = citation_on && c->item_id != NULL && m_ordinal < MAX_CITATION_STASH;
+         /* Number a candidate [M#] ONLY when it is citeable (has an item_id), has
+          * a handle when a session holds it, AND the stash still has room — so
+          * every rendered [M#] maps 1:1 to a stash slot.  Non-citeable / overflow
+          * candidates render the plain [source] form so the model never sees an
+          * [M#] it can't be resolved back to (which would mis-score a real
+          * citation as a hallucination). */
+         const bool held = dedup_session != NULL;
+         const int handle = held ? (i < MAX_CITATION_STASH ? handles[i] : 0) : m_ordinal + 1;
+         const bool numbered = (held || citation_on) && c->item_id != NULL && handle > 0 &&
+                               (!citation_on || m_ordinal < MAX_CITATION_STASH);
+         /* A held item with no number couldn't be withdrawn if it were
+          * forgotten: left out (only past the handle cap). */
+         if (held && c->item_id != NULL && !numbered) {
+            continue;
+         }
 
+         /* An item's text can come from anywhere (a calendar invite, a document,
+          * a fact learned from a web page): DAWN's markers in it are defused,
+          * and it is one line (its line is what a withdrawal replaces). */
+         char *text = session_prefix_mask_secret(session, llm_context_neutralize_line(c->text));
+         if (!text) {
+            OLOG_ERROR("focus: out of memory preparing candidate %d; left out", i);
+            continue;
+         }
+         const char *item = text;
          int rc_append;
          if (numbered) {
-            const int next_ordinal = m_ordinal + 1;
-            rc_append = strbuf_appendf(&sb, "[M%d %s] %s\n", next_ordinal, c->source_id, c->text);
-            if (rc_append >= 0) {
-               /* Commit the ordinal only after the text is in the block. */
-               m_ordinal = next_ordinal;
-               safe_strscpy(local_stash.entries[m_ordinal - 1].item_id, c->item_id);
+            rc_append = strbuf_appendf(&sb, "[M%d %s] %s\n", handle, c->source_id, item);
+            if (rc_append >= 0 && citation_on) {
+               /* Commit the entry only after the text is in the block. */
+               citation_stash_entry_t *e = &local_stash.entries[m_ordinal++];
+               e->handle = handle;
+               safe_strscpy(e->item_id, c->item_id);
                /* Capture the ranker composite this item was injected at (parallel
                 * score_breakdowns[i]); FOCUS_SCORE_NA if the breakdown is absent so
                 * the audit can tell "no score recorded" from a real 0. */
-               local_stash.entries[m_ordinal - 1].final_score =
-                   (result.score_breakdowns != NULL) ? result.score_breakdowns[i].final_score
-                                                     : FOCUS_SCORE_NA;
+               e->final_score = (result.score_breakdowns != NULL)
+                                    ? result.score_breakdowns[i].final_score
+                                    : FOCUS_SCORE_NA;
                local_stash.count = m_ordinal;
             }
          } else {
-            rc_append = strbuf_appendf(&sb, "[%s] %s\n", c->source_id, c->text);
+            rc_append = strbuf_appendf(&sb, "[%s] %s\n", c->source_id, item);
          }
+         free(text);
 
          if (rc_append < 0) {
             /* strbuf max-cap hit — stop appending; surface the partial block so
@@ -464,9 +470,9 @@ int build_focus_block(int user_id,
       }
 
       /* Salience reminder (citation Phase 2, step 1): restate the citation
-       * instruction in the volatile block, directly under the numbered items —
-       * close to the [M#]s and last before the user turn, instead of buried in
-       * the cached prefix under louder footers (which held compliance at ~13%).
+       * instruction in the turn's context, directly under the numbered items —
+       * close to the [M#]s and last before the user's words, instead of buried
+       * in the system prompt under louder footers (which held compliance at ~13%).
        * Gated on m_ordinal > 0 so it never dangles without items.  Naming the
        * valid range [M1]..[M#] also fences off hallucinated ordinals.  The
        * <cited> grammar here MUST stay byte-identical to k_citation_footer and
@@ -474,13 +480,22 @@ int build_focus_block(int user_id,
        * the tag still resolves and strips.  A max-cap append failure is
        * harmless — the reminder is simply absent that turn. */
       if (citation_on && m_ordinal > 0) {
+         char listed[MAX_CITATION_STASH * 16]; /* "[M123456789], " each */
+         size_t off = 0;
+         listed[0] = '\0';
+         for (int k = 0; k < m_ordinal && off < sizeof(listed); k++) {
+            off += (size_t)snprintf(listed + off, sizeof(listed) - off, "%s[M%d]",
+                                    k == 0 ? "" : (k == m_ordinal - 1 ? " and " : ", "),
+                                    local_stash.entries[k].handle);
+         }
          (void)strbuf_appendf(
              &sb,
-             "[memory citations] The memory items above are numbered [M1] through [M%d].  If any "
-             "of them informed your reply, end your ENTIRE reply with a citation tag listing the "
-             "ones you used, e.g. " CITED_TAG_EXAMPLE " (comma-separated, valid numbers only, no "
-             "spaces).  Cite only what you drew on; omit the tag if you used none.\n",
-             m_ordinal);
+             "[memory citations] The memory items above are %s.  If any of them (or one shown "
+             "earlier in this conversation) informed your reply, end your ENTIRE reply with a "
+             "citation tag listing the ones you used, e.g. " CITED_TAG_EXAMPLE
+             " (comma-separated, valid numbers only, no spaces).  Cite only what you drew on; "
+             "omit the tag if you used none.\n",
+             listed);
       }
 
       /* Publish the per-turn citation map onto the dispatch session.  PER_TURN
@@ -520,8 +535,8 @@ int build_focus_block(int user_id,
     * > 0 too, but the type gate is what keeps the event scoped to
     * browser tabs that actually consume it.  history_mutex was
     * released back at line ~346; broadcast iterates a separate
-    * registry mutex.  conv_id == 0 disables — the SESSION_START
-    * refresh_all_prompts path passes 0 (no user-visible turn).
+    * registry mutex.  conv_id == 0 disables (no conversation to show the
+    * items in).
     *
     * First-turn race fix: dawn_build_prompt() captures conv_id near
     * the top of prompt assembly, but on a fresh-chat first turn the
@@ -533,12 +548,11 @@ int build_focus_block(int user_id,
     * broadcast site, the embed + focus_compose + dedup work has
     * elapsed ~100ms+, more than enough for the main thread to have
     * finished the parallel new_conversation request.  Re-read from
-    * the dispatch session here and prefer the live value; fall back
-    * to the captured conv_id when the live read is still 0 (e.g.
-    * SESSION_START refresh paths that legitimately have no active
-    * conversation, or tests with no dispatch session published). */
+    * the session here and prefer the live value; fall back to the
+    * captured conv_id when the live read is still 0 (a turn with no
+    * conversation yet, or no session). */
    int64_t broadcast_conv_id = conv_id;
-   session_t *dispatch = session_get_dispatch_session();
+   session_t *dispatch = session;
    if (dispatch != NULL) {
       int64_t live_conv = session_turn_conversation(dispatch);
       if (live_conv > 0)

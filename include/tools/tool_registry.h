@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Forward declaration for TOML table (avoid including toml.h everywhere) */
@@ -796,6 +797,14 @@ void tool_registry_invalidate_cache(void);
  * @return true if cache is valid, false if invalidated
  */
 bool tool_registry_is_cache_valid(void);
+
+/**
+ * @brief A number that rises whenever a tool is registered, the registry is
+ *        (re)initialized, a parameter's values or a tool's config change, or
+ *        the cache is invalidated: anything that can change a tool's schema
+ *        or the set of tools.  For callers caching what they derive from it.
+ */
+uint64_t tool_registry_generation(void);
 
 /* =============================================================================
  * Direct Command Variation Statistics

@@ -45,9 +45,9 @@
 
 #include "core/focus/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
 #include "core/focus/focus_source.h"            /* focus_compose_result_t */
-#include "memory/memory_db_aliases.h"           /* memory_db_proposal_count_pending */
+#include "core/image_rehydrate.h"
+#include "memory/memory_db_aliases.h" /* memory_db_proposal_count_pending */
 #include "webui/build_focus_block.h"
-#include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 
 #ifdef ENABLE_WEBUI_AUDIO
@@ -1125,11 +1125,8 @@ static int callback_websocket(struct lws *wsi,
 
                   /* Set user_id for metrics and memory extraction */
                   session_set_metrics_user(conn->session, conn->auth_user_id);
-                  /* Build personalized prompt with user settings + memory context */
-                  char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-                  session_init_system_prompt(conn->session,
-                                             prompt ? prompt : get_remote_command_prompt());
-                  free(prompt);
+                  /* A new context: its first turn freezes the prompt it runs under. */
+                  session_clear_history(conn->session);
                   conn->session->client_data = conn;
                   webui_conn_publish_view(conn); /* the session shows what this connection does */
                   conn->session_was_reconnected = false; /* brand-new session, not a reconnect */
@@ -3354,11 +3351,10 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
       }
    }
 
-   /* If no conversation was restored, initialize with the user's system prompt */
+   /* No conversation restored: a new context (its first turn freezes the
+    * prompt it runs under). */
    if (!restored) {
-      char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-      session_init_system_prompt(conn->session, prompt ? prompt : get_remote_command_prompt());
-      free(prompt);
+      session_clear_history(conn->session);
    }
 
    return true;

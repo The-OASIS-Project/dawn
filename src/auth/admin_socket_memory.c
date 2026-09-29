@@ -133,6 +133,7 @@ int handle_memory_cleanup_meta_facts(int client_fd, const char *payload, uint16_
    const int n_patterns = (int)(sizeof(k_default_patterns) / sizeof(k_default_patterns[0]));
 
    int matched = 0;
+   /* not-a-removal: an operator's cleanup of extraction noise, not the user forgetting */
    int rc = memory_db_facts_delete_by_patterns(user.id, k_default_patterns, n_patterns, dry_run,
                                                &matched);
    if (rc != MEMORY_DB_SUCCESS) {
@@ -445,6 +446,7 @@ int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload
 
    /* Reset transaction. */
    memory_db_admin_reset_counts_t counts = { 0 };
+   /* not-a-removal: derived memory rebuilt by re-extraction, not the user forgetting */
    if (memory_db_admin_reset_derived(user.id, keep_summaries, &counts) != SUCCESS) {
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
                                 "Reset transaction failed; backup preserved");

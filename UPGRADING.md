@@ -12,6 +12,65 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-29 — Conversations keep the prompt they started with
+
+**What changed.**
+- **A conversation's system prompt is fixed when it starts.** Before, DAWN
+  rebuilt it on every turn, so any change (the time, your memory, a device
+  coming online) re-sent the whole conversation to the model as new. Now a
+  change reaches the conversation where it happened, and nothing already sent
+  is rewritten:
+  - Editing your persona or settings mid-conversation adds a note to the
+    conversation that the instructions changed, with the new text. The model
+    follows the newest.
+  - The surface you're talking through (voice, a messaging channel, a
+    satellite's room) and which tools are unavailable right now are added as
+    standing directions when they change.
+  - The current time, the memory items retrieved for a question, and new
+    device events (a phone ringing) go in front of the question they belong to.
+  - What DAWN knows about you (your preferences and recent conversations) goes
+    in front of a question when it changed since the conversation last had it.
+
+  Cloud providers can then reuse their prompt cache across the whole
+  conversation, which costs less and answers faster. On Claude Opus 5.5 and
+  Fable 5.1 accounts created on or after 2026-08-31, it also stops the
+  "system prompt re-rendered" error on the turn after a tool call.
+- **A conversation offers the same tools on every turn.** A tool that isn't
+  available where you are right now (a device offline, a tool disabled for
+  this kind of session) stays listed; the model is told it's unavailable, and
+  DAWN refuses it if called. A newly connected tool (an MCP server) takes
+  effect with the conversation's next turn, as a fresh start for the model's
+  earlier reasoning (text and tool calls are kept).
+- **Memory citations keep their number.** A memory item shown as `[M7]` is
+  `[M7]` for the whole conversation, across reloads.
+- **Image turns send the image on every request of the turn**, the same way a
+  reloaded conversation does.
+
+**Upgrading.** Nothing to do: the database migrates itself (schema v94). The
+first message you send in each existing conversation fixes its prompt; the
+model's earlier reasoning in that conversation isn't replayed from then on (its
+text and tool calls are). The daemon log says `prefix boundary (adopted)` once
+per such conversation.
+
+**Worth knowing.**
+- The memory and context sent with each question are stored with the
+  conversation, like the question. They never appear in the WebUI, search,
+  exports or memory extraction. Forgetting a memory item, deleting memories
+  in the memory panel, or deleting a document also removes it from the
+  context stored in your conversations,
+  including ones open right now; the model's earlier reasoning in those
+  conversations isn't replayed after that, since it may have repeated the item.
+  What the assistant itself said about it (its replies, tool results it read)
+  stays in the conversation; delete the conversation to remove those too.
+- Phone notices (an incoming or missed call, an arriving text) now go only to
+  the conversations of the user who owns the phone (the local device's voice
+  user), not to every connected user. With no user assigned to the local
+  device, no conversation gets them; the incoming-call banner still shows.
+- The debug chat logs (`logs/chat_history_*.json`) now include that memory and
+  context, as they were sent.
+
+---
+
 ## 2026-09-29 — Reloaded conversations replay as the model produced them; old voice conversations cleaned up
 
 **What changed.**

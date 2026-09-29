@@ -326,6 +326,53 @@ struct json_object *llm_tools_get_claude_format(void);
  */
 struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session);
 
+/**
+ * @brief The names of a conversation's tool set, as a JSON array (caller frees)
+ *
+ * Every registered tool (research's own excepted), whether or not it is
+ * enabled, available, or allowed on the current surface right now: a
+ * conversation advertises the same tools on every request, so toggling a tool
+ * in settings is no boundary.  One it may not use is refused when called
+ * (llm_tools_execute), and the turn's standing directions say which
+ * (llm_tools_build_disabled_hint).  NULL when the registry isn't up.
+ */
+char *llm_tools_freeze_names(void);
+
+/**
+ * @brief Tool schemas for exactly @p names (a JSON array), in that order
+ *
+ * Claude's shape when @p claude, else OpenAI's function shape.  A name no
+ * longer registered is left out.  NULL when none are.
+ */
+struct json_object *llm_tools_format_named(struct json_object *names, bool claude);
+
+/**
+ * @brief The tools a request carries
+ *
+ * None on a turn whose tools are suppressed (a no-tools synthesis turn); a
+ * research run's allowlist during one; otherwise the conversation's frozen
+ * set (@p history's prefix, llm_history_frozen_tools), or with none frozen the
+ * tools this surface may use now.
+ *
+ * @param source_out Receives what the set is, for logging (may be NULL)
+ * @return JSON array (caller puts), or NULL for no tools
+ */
+struct json_object *llm_tools_request_tools(struct json_object *history,
+                                            bool is_remote,
+                                            bool claude,
+                                            const char **source_out);
+
+/**
+ * @brief Each registered tool's schema hash, as a JSON object of name to
+ *        SHA-256 hex (caller frees)
+ *
+ * A conversation's tools are frozen by name and rendered on every request, so
+ * a change to a tool's description or parameters changes the bytes it is
+ * sent: this is how that shows (prefix_in_force_check_tool_schemas).  NULL
+ * when the registry isn't up.
+ */
+char *llm_tools_schema_hashes(void);
+
 /* =============================================================================
  * Tool Configuration API (for WebUI)
  * ============================================================================= */

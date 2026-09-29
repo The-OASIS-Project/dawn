@@ -62,6 +62,28 @@ session_t *g_stub_command_context = NULL;
 int g_stub_defer_result = 1; /* FAILURE */
 int64_t g_stub_defer_conv = 0;
 
+/* No live conversations here: nothing to withdraw a forgotten memory from. */
+int session_withdraw_forgotten(int user_id, bool memory_bodies) {
+   (void)user_id;
+   (void)memory_bodies;
+   return 0;
+}
+bool session_prefix_tag(session_t *session, char *out, size_t size) {
+   (void)session;
+   if (out && size) {
+      out[0] = '\0';
+   }
+   return false;
+}
+char *session_prefix_mask_secret(session_t *session, char *text) {
+   (void)session;
+   return text;
+}
+void session_withdraw_forgotten_async(int user_id, bool memory_bodies) {
+   (void)user_id;
+   (void)memory_bodies;
+}
+
 session_t *session_get_command_context(void) {
    return g_stub_command_context;
 }
@@ -427,8 +449,6 @@ struct mosquitto *worker_pool_get_mosq(void) {
 }
 bool component_status_is_hud_online(void) {
    return false;
-}
-void session_manager_refresh_all_prompts(void) {
 }
 
 /* Tool device-type lookup — registry has empty table in bench */

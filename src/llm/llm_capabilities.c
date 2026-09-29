@@ -177,8 +177,26 @@ static void free_rows(caps_row_t **arr) {
    *arr = NULL;
 }
 
+/* Anthropic model-id prefixes that take a mid-conversation system message
+ * (models.toml [mid_system]), NULL-terminated; loaded once, read-only after. */
+static char **s_mid_system;
+
+static void free_thinking_rows(void) {
+   free_rows(&s_anthropic_rows);
+   free_rows(&s_openai_rows);
+   free_rows(&s_gemini_rows);
+}
+
+static void free_mid_system(void) {
+   for (int i = 0; s_mid_system && s_mid_system[i]; i++) {
+      free(s_mid_system[i]);
+   }
+   free(s_mid_system);
+   s_mid_system = NULL;
+}
+
 void llm_capabilities_load_registry(struct toml_table_t *root) {
-   llm_capabilities_free_registry();
+   free_thinking_rows();
    toml_table_t *thinking = root ? toml_table_in(root, "thinking") : NULL;
    if (!thinking) {
       return;
@@ -188,10 +206,41 @@ void llm_capabilities_load_registry(struct toml_table_t *root) {
    s_gemini_rows = load_rows(thinking, "gemini");
 }
 
+void llm_capabilities_load_mid_system(struct toml_table_t *root) {
+   free_mid_system();
+   toml_table_t *table = root ? toml_table_in(root, "mid_system") : NULL;
+   toml_array_t *list = table ? toml_array_in(table, "anthropic") : NULL;
+   const int n = list ? toml_array_nelem(list) : 0;
+   if (n <= 0) {
+      return;
+   }
+   s_mid_system = calloc((size_t)n + 1, sizeof(*s_mid_system));
+   if (!s_mid_system) {
+      return;
+   }
+   int kept = 0;
+   for (int i = 0; i < n; i++) {
+      toml_datum_t d = toml_string_at(list, i);
+      if (d.ok && d.u.s && d.u.s[0]) {
+         s_mid_system[kept++] = d.u.s; /* owned now */
+      } else if (d.ok) {
+         free(d.u.s);
+      }
+   }
+}
+
+bool llm_model_mid_system(const char *model) {
+   for (int i = 0; model && s_mid_system && s_mid_system[i]; i++) {
+      if (strncmp(model, s_mid_system[i], strlen(s_mid_system[i])) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 void llm_capabilities_free_registry(void) {
-   free_rows(&s_anthropic_rows);
-   free_rows(&s_openai_rows);
-   free_rows(&s_gemini_rows);
+   free_thinking_rows();
+   free_mid_system();
 }
 
 static const caps_row_t *lookup(const caps_row_t *arr, const char *model) {

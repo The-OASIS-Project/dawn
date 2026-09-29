@@ -45,6 +45,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_capabilities.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_key_tag.h"
 #include "llm/llm_model_version.h"
@@ -356,16 +357,21 @@ static struct json_object *build_responses_request(struct json_object *history,
    /* max_output_tokens */
    json_object_object_add(root, "max_output_tokens", json_object_new_int(g_config.llm.max_tokens));
 
-   /* Tools */
-   if (llm_tools_enabled(NULL) && iteration < LLM_TOOLS_MAX_ITERATIONS) {
-      bool is_remote = is_current_session_remote_local();
-      struct json_object *cc_tools = llm_tools_get_openai_format_filtered(is_remote);
+   /* Tools.  The loop's last call (iteration at the cap), for a text answer:
+    * the tools stay (the request reads as every other did), none may be
+    * called. */
+   if (llm_tools_enabled(NULL)) {
+      struct json_object *cc_tools = llm_tools_request_tools(history,
+                                                             is_current_session_remote_local(),
+                                                             false, NULL);
       if (cc_tools) {
          struct json_object *flat = flatten_tools_for_responses(cc_tools);
          json_object_put(cc_tools);
          if (flat && json_object_array_length(flat) > 0) {
             json_object_object_add(root, "tools", flat);
-            json_object_object_add(root, "tool_choice", json_object_new_string("auto"));
+            json_object_object_add(root, "tool_choice",
+                                   json_object_new_string(
+                                       iteration >= LLM_TOOLS_MAX_ITERATIONS ? "none" : "auto"));
             json_object_object_add(root, "parallel_tool_calls", json_object_new_boolean(1));
          } else if (flat) {
             json_object_put(flat);

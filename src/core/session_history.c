@@ -28,12 +28,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "core/focus/focus_handles.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "dawn_error.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -68,6 +70,10 @@ static struct json_object *live_history_locked(session_t *session) {
 static bool turn_is_caller_locked(const session_t *session) {
    const uint64_t token = session_turn_token();
    return session->turn_active && token != 0 && token == session->turn_owner_token;
+}
+
+bool session_turn_reads_elsewhere_locked(const session_t *session) {
+   return session && session->turn_active && !turn_is_caller_locked(session);
 }
 
 /* Caller holds history_mutex.  Move the waiting facts @p token saved (0 = those
@@ -116,6 +122,20 @@ static void release_msg_locked(session_t *session, struct json_object *msg) {
       OLOG_WARNING("Session %u: leaked a message reference (no room to park it)",
                    session->session_id);
    }
+}
+
+void session_release_ref_locked(session_t *session, struct json_object *obj) {
+   release_msg_locked(session, obj);
+}
+
+void session_release_ref(session_t *session, struct json_object *obj) {
+   if (!session || !obj) {
+      json_object_put(obj);
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   release_msg_locked(session, obj);
+   pthread_mutex_unlock(&session->history_mutex);
 }
 
 /* Caller holds history_mutex.  Forget an ended turn's unsaved exchange: it
@@ -178,8 +198,10 @@ static void append_message_locked(session_t *session,
    if (!turn) {
       return;
    }
-   session->turn_appends++;
-   if (session->turn_active && strcmp(role, "user") == 0) {
+   if (!llm_history_is_context(message)) {
+      session->turn_appends++; /* the turn's own messages (see history_is_fresh) */
+   }
+   if (session->turn_active && strcmp(role, "user") == 0 && !llm_history_is_context(message)) {
       if (session->turn_user_msg) {
          json_object_put(session->turn_user_msg);
       }
@@ -261,6 +283,23 @@ static bool add_message_impl(session_t *session,
    return true;
 }
 
+/* Caller holds history_mutex.  Take back @p hist[from, len) except the
+ * instruction and standing-direction changes the turn announced: they are the
+ * conversation's, not the turn's (what is in force says they were sent), so
+ * they stay where they are.  Returns how many messages went. */
+static int take_back_locked(struct json_object *hist, int from, int len) {
+   int removed = 0;
+   for (int i = len - 1; i >= from; i--) {
+      const message_kind_t kind = llm_history_kind_of(json_object_array_get_idx(hist, i));
+      if (kind == MESSAGE_KIND_INSTRUCTION || kind == MESSAGE_KIND_DIRECTIVE) {
+         continue;
+      }
+      json_object_array_del_idx(hist, (size_t)i, 1);
+      removed++;
+   }
+   return removed;
+}
+
 int session_rollback_turn(session_t *session) {
    if (!session) {
       return 0;
@@ -285,9 +324,27 @@ int session_rollback_turn(session_t *session) {
       }
    }
    int removed = 0;
+   struct session_prefix_turn *taken = NULL;
    if (from >= 0) {
-      removed = len - from;
-      json_object_array_del_idx(hist, from, removed);
+      /* An envelope's context is a message of its own just before it (never
+       * saved as one: no id; another turn's saved context has one): it goes
+       * with it. */
+      struct json_object *before = from > 0 ? json_object_array_get_idx(hist, from - 1) : NULL;
+      if (llm_history_kind_of(session->turn_user_msg) == MESSAGE_KIND_ENVELOPE && before &&
+          !json_object_object_get_ex(before, "id", NULL) &&
+          llm_history_kind_of(before) == MESSAGE_KIND_NONE && llm_history_is_context(before)) {
+         from--;
+      }
+      taken = session_prefix_take_back_locked(session, session->turn_user_msg);
+      removed = take_back_locked(hist, from, len);
+      /* The device events it was told went with its question: the next turn
+       * tells them. */
+      for (int i = 0; i < session->notice_count; i++) {
+         if (session->notices[i].sent && session->notices[i].told_by != 0 &&
+             session->notices[i].told_by == session->turn_owner_token) {
+            session->notices[i].sent = false;
+         }
+      }
    } else if (session->turn_user_msg) {
       OLOG_WARNING("Session %u: the turn's question is no longer in its history; nothing "
                    "taken back",
@@ -295,7 +352,22 @@ int session_rollback_turn(session_t *session) {
    }
    session->turn_appends = 0;
    pthread_mutex_unlock(&session->history_mutex);
+   session_prefix_save_taken(session, taken);
    return removed;
+}
+
+int64_t session_turn_question_id(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   struct json_object *id = NULL;
+   const int64_t row = (session->turn_user_msg &&
+                        json_object_object_get_ex(session->turn_user_msg, "id", &id))
+                           ? json_object_get_int64(id)
+                           : 0;
+   pthread_mutex_unlock(&session->history_mutex);
+   return row;
 }
 
 bool session_stop_turn(session_t *session, const char *note) {
@@ -323,10 +395,8 @@ bool session_stop_turn(session_t *session, const char *note) {
       pthread_mutex_unlock(&session->history_mutex);
       return false; /* no question to keep (compacted away): the caller rolls back */
    }
-   if (len - at - 1 > 0) {
-      json_object_array_del_idx(hist, at + 1, len - at - 1);
-   }
-   session->turn_appends = 1; /* the question */
+   const int kept = len - at - 1 - take_back_locked(hist, at + 1, len);
+   session->turn_appends = 1 + kept; /* the question, and the changes it announced */
    pthread_mutex_unlock(&session->history_mutex);
    return session_add_turn_message(session, "assistant", note);
 }
@@ -367,21 +437,10 @@ bool session_add_turn_assistant(session_t *session,
 }
 
 
-static pthread_once_t s_notices_header_once = PTHREAD_ONCE_INIT;
-static char s_notices_header[80];
-
-static void init_notices_header(void) {
-   uint32_t tag = 0;
-   if (getrandom(&tag, sizeof(tag), 0) != (ssize_t)sizeof(tag)) {
-      tag = (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16);
-   }
-   snprintf(s_notices_header, sizeof(s_notices_header),
-            "--- Recent device events [%08x] (oldest first) ---", tag);
-}
-
 const char *session_notices_header(void) {
-   pthread_once(&s_notices_header_once, init_notices_header);
-   return s_notices_header;
+   /* Plain: the events sit inside the turn's context, which the conversation's
+    * tag marks as DAWN's (session_prefix.c). */
+   return "Recent device events (oldest first):";
 }
 
 void session_post_notice_for(session_t *session, const char *text, int user_id) {
@@ -407,17 +466,21 @@ void session_post_notice_for(session_t *session, const char *text, int user_id) 
               (size_t)(SESSION_NOTICES_MAX - 1 - drop) * sizeof(session->notices[0]));
       session->notice_count--;
    }
-   session_notice_t *n = &session->notices[session->notice_count++];
-   safe_strncpy(n->text, text, sizeof(n->text));
-   utf8_trim_incomplete(n->text); /* a cut can split a character */
-   /* One event, one line: its text can't start lines that read as more events. */
-   for (char *c = n->text; *c; c++) {
-      if (*c == '\n' || *c == '\r' || *c == '\t') {
-         *c = ' ';
-      }
+   /* An event's details (a caller's name) can be anyone's text: one line (it
+    * can't start lines that read as more events), DAWN's markers defused. */
+   char *defused = llm_context_neutralize_line(text);
+   if (!defused) {
+      pthread_mutex_unlock(&session->history_mutex);
+      OLOG_ERROR("Session %u: out of memory posting a device event; dropped", session->session_id);
+      return;
    }
+   session_notice_t *n = &session->notices[session->notice_count++];
+   safe_strncpy(n->text, defused, sizeof(n->text));
+   free(defused);
+   utf8_trim_incomplete(n->text); /* a cut can split a character */
    n->at = time(NULL);
    n->user_id = user_id > 0 ? user_id : 0;
+   n->sent = false;
    pthread_mutex_unlock(&session->history_mutex);
 }
 
@@ -425,7 +488,8 @@ void session_post_notice(session_t *session, const char *text) {
    session_post_notice_for(session, text, 0);
 }
 
-char *session_render_notices_locked(session_t *session, int viewer_user_id) {
+/* Caller holds history_mutex.  Drop events older than SESSION_NOTICE_TTL_SEC. */
+static void notices_expire_locked(session_t *session) {
    const time_t now = time(NULL);
    int keep = 0;
    for (int i = 0; i < session->notice_count; i++) {
@@ -437,6 +501,12 @@ char *session_render_notices_locked(session_t *session, int viewer_user_id) {
       }
    }
    session->notice_count = keep;
+}
+
+char *session_render_notices_locked(session_t *session, int viewer_user_id) {
+   const time_t now = time(NULL);
+   notices_expire_locked(session);
+   const int keep = session->notice_count;
 
    /* Only the household's events and this surface's user's.  Another user's are
     * kept, not dropped: the viewer was read before the lock, so a surface that
@@ -475,6 +545,48 @@ char *session_render_notices_locked(session_t *session, int viewer_user_id) {
       }
    }
    return out;
+}
+
+char *session_take_new_notices_locked(session_t *session, int viewer_user_id) {
+   notices_expire_locked(session);
+   const char *header = session_notices_header();
+   size_t cap = strlen(header) + 1;
+   int shown = 0;
+   for (int i = 0; i < session->notice_count; i++) {
+      const int owner = session->notices[i].user_id;
+      if (!session->notices[i].sent && (owner == 0 || owner == viewer_user_id)) {
+         cap += strlen(session->notices[i].text) + 16; /* "\n- (HH:MM) " */
+         shown++;
+      }
+   }
+   char *out = shown ? malloc(cap) : NULL;
+   if (!out) {
+      return NULL;
+   }
+   size_t len = (size_t)snprintf(out, cap, "%s", header);
+   for (int i = 0; i < session->notice_count && len < cap; i++) {
+      session_notice_t *n = &session->notices[i];
+      if (n->sent || (n->user_id != 0 && n->user_id != viewer_user_id)) {
+         continue;
+      }
+      char when[8] = "--:--";
+      struct tm tm_storage;
+      if (localtime_r(&n->at, &tm_storage) != NULL) {
+         strftime(when, sizeof(when), "%H:%M", &tm_storage);
+      }
+      len += (size_t)snprintf(out + len, cap - len, "\n- (%s) %s", when, n->text);
+      n->sent = true;
+      n->told_by = session->turn_active ? session->turn_owner_token : 0;
+   }
+   return out;
+}
+
+/* Caller holds history_mutex.  The session now holds another history: it
+ * hasn't been told of any device event yet. */
+static void notices_untold_locked(session_t *session) {
+   for (int i = 0; i < session->notice_count; i++) {
+      session->notices[i].sent = false;
+   }
 }
 
 /* Caller holds history_mutex.  Set @p msg's text (and its blocks' text) when
@@ -559,6 +671,9 @@ void session_stamp_last_message_id(session_t *session, const char *role, int64_t
       if (!json_object_object_get_ex(entry, "role", &role_obj))
          continue;
       if (strcmp(json_object_get_string(role_obj), role) != 0)
+         continue;
+      /* A message's row, never a piece of request context's */
+      if (llm_history_is_context(entry))
          continue;
       /* Skip entries that already have an ID stamped */
       if (json_object_object_get_ex(entry, "id", NULL))
@@ -696,6 +811,47 @@ void session_add_message_with_images(session_t *session,
                                       false);
 }
 
+bool session_add_turn_message_object(session_t *session, struct json_object *message) {
+   const char *role = NULL;
+   struct json_object *role_obj = NULL;
+   if (session && message && json_object_object_get_ex(message, "role", &role_obj)) {
+      role = json_object_get_string(role_obj);
+   }
+   if (!role) {
+      json_object_put(message);
+      return false;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   if (session->turn_active && !turn_is_caller_locked(session)) {
+      pthread_mutex_unlock(&session->history_mutex);
+      OLOG_ERROR("Session %u: dropped a %s message from a turn that is no longer running",
+                 session->session_id, role);
+      json_object_put(message);
+      return false;
+   }
+   struct json_object *mirror = NULL;
+   struct json_object *target = turn_append_target_locked(session, role, &mirror);
+   if (!target) {
+      pthread_mutex_unlock(&session->history_mutex);
+      json_object_put(message);
+      return false;
+   }
+   append_message_locked(session, target, mirror, message, role, true);
+   pthread_mutex_unlock(&session->history_mutex);
+   return true;
+}
+
+void session_stamp_message_id(session_t *session, struct json_object *message, int64_t row_id) {
+   if (!session || !message || row_id <= 0) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   if (!json_object_object_get_ex(message, "id", NULL)) {
+      json_object_object_add(message, "id", json_object_new_int64(row_id));
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
 bool session_add_turn_message_with_images(session_t *session,
                                           const char *role,
                                           const char *text,
@@ -779,6 +935,12 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
     * items, nor its unsaved exchange or waiting facts. */
    session->visual_modules_loaded[0] = '\0';
    memset(&session->injected_set, 0, sizeof(session->injected_set));
+   notices_untold_locked(session);
+   /* Its items' handles were the old context's (a saved conversation's come
+    * back from the database when it is loaded). */
+   focus_handles_reset_locked(session);
+   /* Its turns' records went with it (a running turn's own stays). */
+   session_prefix_release_locked(session);
    if (!session->turn_active) {
       session->turn_appends = 0;
    }
@@ -810,6 +972,9 @@ void session_replace_history(session_t *session, struct json_object *history, in
     * the focus items injected into it. */
    session->visual_modules_loaded[0] = '\0';
    memset(&session->injected_set, 0, sizeof(session->injected_set));
+   notices_untold_locked(session);
+   focus_handles_reset_locked(session);
+   session_prefix_release_locked(session);
    atomic_store(&session->history_conversation_id, conv_id > 0 ? conv_id : 0);
    pthread_mutex_unlock(&session->history_mutex);
 }
@@ -829,9 +994,9 @@ void session_set_history_loader(session_history_loader_fn loader) {
    atomic_store(&s_history_loader, loader);
 }
 
-/* True when @p hist holds nothing but system messages and @p own_appends
- * messages the running turn added itself: no conversation's turns yet, so any
- * conversation may adopt it without mixing. */
+/* True when @p hist holds nothing but system messages, request context and
+ * @p own_appends messages the running turn added itself: no conversation's
+ * turns yet, so any conversation may adopt it without mixing. */
 static bool history_is_fresh(struct json_object *hist, int own_appends) {
    if (!hist) {
       return true;
@@ -841,8 +1006,9 @@ static bool history_is_fresh(struct json_object *hist, int own_appends) {
    for (int i = 0; i < len; i++) {
       struct json_object *entry = json_object_array_get_idx(hist, i);
       struct json_object *role = NULL;
-      if (entry && json_object_object_get_ex(entry, "role", &role) &&
-          strcmp(json_object_get_string(role), "system") == 0) {
+      if (entry && ((json_object_object_get_ex(entry, "role", &role) &&
+                     strcmp(json_object_get_string(role), "system") == 0) ||
+                    llm_history_is_context(entry))) {
          continue;
       }
       if (++others > own_appends) {
@@ -1195,6 +1361,7 @@ void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may
    set_conversation_impl(session, conv_id, may_load, facts, &count, &owner);
    /* What the turn saved before it knew its conversation. */
    session_record_fact_sources(facts, count, conv_id, owner);
+   (void)focus_handles_flush(session, conv_id, 0);
 }
 
 void session_history_append(struct json_object *history, struct json_object *msg) {
@@ -1216,7 +1383,8 @@ void session_history_append(struct json_object *history, struct json_object *msg
       }
    }
    json_object_array_add(history, msg);
-   if (session && session->turn_active && history == session->turn_history) {
+   if (session && session->turn_active && history == session->turn_history &&
+       !llm_history_is_context(msg)) {
       session->turn_appends++; /* the turn's own messages (see history_is_fresh) */
    }
    if (session) {
@@ -1522,6 +1690,7 @@ bool session_bind_created_conversation(session_t *session,
    }
    pthread_mutex_unlock(&session->history_mutex);
    session_record_fact_sources(facts, fact_count, conv_id, 0);
+   (void)focus_handles_flush(session, conv_id, 0);
    return hand_out;
 }
 
@@ -1678,6 +1847,7 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          session->conversation_history = json_object_get(own);
          session->visual_modules_loaded[0] = '\0';
          memset(&session->injected_set, 0, sizeof(session->injected_set));
+         /* No re-telling of device events: the copy was told them. */
          atomic_store(&session->history_conversation_id, viewed_conv);
          OLOG_INFO("Session %u: adopted conversation %lld's history as the session history",
                    session->session_id, (long long)viewed_conv);
@@ -1699,6 +1869,7 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          session->conversation_history = json_object_get(own);
          session->visual_modules_loaded[0] = '\0';
          memset(&session->injected_set, 0, sizeof(session->injected_set));
+         /* No re-telling of device events: the copy was told them. */
       } else if (reply && !history_holds_reply(live, reply, session->turn_reply_mirror)) {
          struct json_object *copy = NULL;
          if (json_object_deep_copy(reply, &copy, NULL) == 0 && copy) {
@@ -1751,12 +1922,6 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
    }
    session->turn_active = false;
    session->turn_owner_token = 0;
-   /* A prompt refresh another thread made while the turn held the live history. */
-   if (session->deferred_system_prompt) {
-      session_update_system_prompt_locked(session, session->deferred_system_prompt);
-      free(session->deferred_system_prompt);
-      session->deferred_system_prompt = NULL;
-   }
    session->turn_history_conv = 0;
    session->turn_pin_conv = 0;
    session->turn_appends = 0;

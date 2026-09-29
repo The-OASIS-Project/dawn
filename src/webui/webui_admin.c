@@ -30,6 +30,8 @@
 
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
+#include "core/session_prefix.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
 
@@ -209,7 +211,16 @@ void handle_delete_user(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
+   /* The account's documents (a shared one is in other users' conversations)
+    * and memories go with it: removed on its behalf, and withdrawn. */
+   auth_user_t target;
+   const int target_id = auth_db_get_user(username, &target) == AUTH_DB_SUCCESS ? target.id : 0;
+   conv_db_withdraw_intent_begin(target_id);
    int result = auth_db_delete_user(username);
+   conv_db_withdraw_intent_end();
+   if (result == AUTH_DB_SUCCESS && target_id > 0) {
+      session_withdraw_forgotten_async(target_id, false);
+   }
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));

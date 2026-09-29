@@ -43,16 +43,36 @@ extern "C" {
 #ifdef ENABLE_MULTI_CLIENT
 
 /**
- * @brief The line heading the device events in a turn's volatile block
+ * @brief Let go of a reference to a history message (or an array of them)
  *
- * Carries a random tag chosen once per process, so text inside the block (an
- * event's own text, a document chunk) can't pose as it: a refresh finds the
- * events where the renderer put them.
+ * A running turn reads its messages without the lock and json-c reference
+ * counts aren't atomic: from any thread but the turn's own, the release is
+ * parked for the turn to make when it ends.  Caller holds history_mutex.
+ */
+void session_release_ref_locked(struct session *session, struct json_object *obj);
+
+/** session_release_ref_locked() taking history_mutex itself. */
+void session_release_ref(struct session *session, struct json_object *obj);
+
+/**
+ * @brief Whether a turn is reading the session's history on another thread
+ *        (it reads without the lock): a change to what it reads waits for
+ *        the session's next turn.  Caller holds history_mutex.
+ */
+bool session_turn_reads_elsewhere_locked(const struct session *session);
+
+/**
+ * @brief The line heading the device events in a turn's context
+ *
+ * Plain text: the events sit inside the TURN CONTEXT block the conversation's
+ * tag marks as DAWN's (session_prefix.c), and each event is one line with
+ * DAWN's markers defused.
  */
 const char *session_notices_header(void);
 
 /**
- * @brief Render the session's device events for a turn's volatile block.
+ * @brief Render every unexpired device event the surface's user may see,
+ *        told or not (what a history told none would be told).
  *
  * Drops events older than SESSION_NOTICE_TTL_SEC, then renders, oldest first
  * with how long ago each happened, the household's and those that are
@@ -63,6 +83,34 @@ const char *session_notices_header(void);
  *         allocation failure.
  */
 char *session_render_notices_locked(session_t *session, int viewer_user_id);
+
+/**
+ * @brief The device events the session's history hasn't been told of yet
+ *
+ * For a turn's context: unexpired events, the household's and
+ * @p viewer_user_id's, oldest first with the time each happened (a turn
+ * context is kept as it was sent, so "3 min ago" would go stale).  Marks them
+ * told: each reaches a history once.  Caller holds history_mutex.
+ *
+ * @return Allocated text, or NULL when there are none (or out of memory).
+ */
+char *session_take_new_notices_locked(session_t *session, int viewer_user_id);
+
+/**
+ * @brief Add a message the caller built (it has a "role") as the running
+ *        turn's own, like session_add_turn_message()
+ *
+ * Takes @p message (released on failure).  For a question whose saved form a
+ * reload rebuilds (an image turn): built by the same function, the turn sends
+ * exactly what a reload would.
+ *
+ * @return false when the message was dropped
+ */
+bool session_add_turn_message_object(session_t *session, struct json_object *message);
+
+/** Stamp @p message (in the session's history) with its row's id, unless it
+ *  has one. */
+void session_stamp_message_id(session_t *session, struct json_object *message, int64_t row_id);
 
 /** history_conversation_id value: the history holds more than one conversation's turns */
 #define SESSION_HISTORY_CONV_MIXED ((int64_t)-1)
@@ -437,9 +485,14 @@ void session_put_history(session_t *session, struct json_object *history);
  * appended through session_add_turn_message) and everything after it — its
  * tool calls and results — from its history.  Nothing when that message is no
  * longer there (compacted away).  For the turn's own code.  Returns how many
- * were removed.
+ * were removed.  The instruction and standing-direction changes it announced
+ * stay: they are the conversation's (what is in force says they were sent).
  */
 int session_rollback_turn(session_t *session);
+
+/** The row id of the running turn's question (its user message or envelope),
+ *  or 0 when it has none saved.  For the turn's own code. */
+int64_t session_turn_question_id(session_t *session);
 
 /**
  * @brief End a turn the user stopped, keeping their question

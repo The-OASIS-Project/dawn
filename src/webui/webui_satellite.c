@@ -679,9 +679,9 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
             /* Queued behind any running query, which finishes as the user it
              * began as; it saves that user's conversation, then applies this
              * mapping (below, otherwise). */
-            satellite_queue_remap(session, mapping.user_id, identity.location, mapping.ha_area);
+            satellite_queue_remap(session, mapping.user_id);
          } else {
-            satellite_apply_mapping(session, mapping.user_id, identity.location, mapping.ha_area);
+            satellite_apply_mapping(session, mapping.user_id);
          }
          if (mapping.user_id > 0) {
             OLOG_INFO("Satellite: Applied user mapping user_id=%d for %s (%s)", mapping.user_id,
@@ -712,9 +712,6 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
          new_mapping.last_seen = new_mapping.created_at;
 
          satellite_db_upsert(&new_mapping);
-
-         /* No user mapping yet — use default room context */
-         session_append_satellite_context(session, identity.location, NULL);
 
          OLOG_INFO("Satellite: Auto-registered new satellite %s (%s)", identity.name, uuid);
       }

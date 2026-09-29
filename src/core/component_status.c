@@ -35,7 +35,6 @@
 #include <unistd.h>
 
 #include "core/ocp_helpers.h"
-#include "core/session_manager.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -128,10 +127,9 @@ static void check_hud_timeout(void) {
          pthread_mutex_unlock(&s_status_mutex);
          llm_tools_refresh();
          llm_tools_invalidate_cache();
+         /* Each conversation's next turn tells the model what is unavailable
+          * now (its standing directions). */
          invalidate_system_instructions();
-         /* Update every active session so the LLM sees the new availability
-          * on its next turn without losing conversation context. */
-         session_manager_refresh_all_prompts();
          return;
       }
    }
@@ -353,10 +351,9 @@ void component_status_handle_message(const char *topic, const char *payload, int
    if (is_online != was_online) {
       llm_tools_refresh();
       llm_tools_invalidate_cache();
+      /* Each conversation's next turn tells the model what is unavailable
+       * now (its standing directions). */
       invalidate_system_instructions();
-      /* Update every active session so the LLM sees the new availability
-       * on its next turn without losing conversation context. */
-      session_manager_refresh_all_prompts();
    }
 }
 

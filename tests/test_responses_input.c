@@ -227,27 +227,40 @@ void test_mid_history_broadcast_emitted_inline(void) {
 
 /* ---- vision images stay on the question item, not the volatile item -------- */
 
+/* A turn's images live in its question's history message: the question is
+ * sent as it is, images included, the volatile item before it. */
 void test_vision_stays_on_question(void) {
    struct json_object *h = json_object_new_array();
    json_object_array_add(h, msg("system", "STABLE"));
    json_object_array_add(h, msg("system", "VOLATILE"));
-   json_object_array_add(h, msg("user", "Q1"));
+   json_object_array_add(h,
+                         json_tokener_parse("{\"role\":\"user\",\"content\":["
+                                            "{\"type\":\"text\",\"text\":\"Q2\"},"
+                                            "{\"type\":\"image_url\",\"image_url\":"
+                                            "{\"url\":\"data:image/jpeg;base64,BASE64IMG\"}}]}"));
 
-   const char *imgs[] = { "BASE64IMG" };
-   const size_t sizes[] = { 9 };
-   struct json_object *in = llm_responses_build_input(h, "Q2", imgs, sizes, 1, "VOLATILE", 2, true,
+   struct json_object *in = llm_responses_build_input(h, "Q2", NULL, NULL, 0, "VOLATILE", 2, true,
                                                       HOST, "m");
 
    int lu = last_user_index(in); /* the question Q2 */
    TEST_ASSERT_EQUAL_STRING("Q2", item_text(in, lu));
-   TEST_ASSERT_TRUE(item_has_image(in, lu));      /* image on the question */
+   TEST_ASSERT_TRUE(item_has_image(in, lu));      /* its own image kept */
    TEST_ASSERT_FALSE(item_has_image(in, lu - 1)); /* not on the volatile item */
    TEST_ASSERT_EQUAL_STRING("VOLATILE", item_text(in, lu - 1));
+   json_object_put(in);
+
+   /* Images a caller still passes join the question. */
+   const char *imgs[] = { "MORE" };
+   const size_t sizes[] = { 4 };
+   in = llm_responses_build_input(h, "Q2", imgs, sizes, 1, "VOLATILE", 2, true, HOST, "m");
+   lu = last_user_index(in);
+   struct json_object *content = NULL;
+   json_object_object_get_ex(json_object_array_get_idx(in, lu), "content", &content);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(content));
 
    json_object_put(in);
    json_object_put(h);
 }
-
 
 /* ---- assistant turns and Claude parts ------------------------------------- */
 
@@ -504,8 +517,32 @@ static void test_reused_ids_and_questions(void) {
    json_object_put(history);
 }
 
+/* The question keeps its context in front when input_text replaces its text,
+ * and a direction after it neither hides it nor duplicates it. */
+static void test_question_keeps_its_context(void) {
+   struct json_object *history = json_tokener_parse(
+       "[{\"role\":\"system\",\"content\":\"P\"},"
+       "{\"role\":\"user\",\"content\":["
+       "{\"type\":\"text\",\"text\":\"CTX\",\"_kind\":\"turn_context\"},"
+       "{\"type\":\"text\",\"text\":\"Hi\"}]},"
+       "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"}]");
+   struct json_object *input = llm_responses_build_input(history, "Hi", NULL, NULL, 0, NULL, 1,
+                                                         false, HOST, "gpt-5.6");
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(input));
+   TEST_ASSERT_EQUAL_STRING("user", item_role(input, 0));
+   TEST_ASSERT_EQUAL_STRING("CTX", item_text(input, 0));
+   struct json_object *parts = json_object_object_get(json_object_array_get_idx(input, 0),
+                                                      "content");
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(parts));
+   TEST_ASSERT_EQUAL_STRING("system", item_role(input, 1));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(input), "_kind"));
+   json_object_put(input);
+   json_object_put(history);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_question_keeps_its_context);
    RUN_TEST(test_extract_stable_and_volatile);
    RUN_TEST(test_single_system_has_no_volatile);
    RUN_TEST(test_volatile_before_question_in_history);

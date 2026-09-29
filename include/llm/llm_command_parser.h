@@ -24,34 +24,47 @@
 #ifndef LLM_COMMAND_PARSER_H
 #define LLM_COMMAND_PARSER_H
 
-/* Header text for the TOOL DEFAULTS line emitted by get_localization_context()
- * and consumed by webui_auth_helpers.c::strip_tool_defaults() when User Context
- * supersedes it.  Producer and consumer share this single source of truth so a
- * future edit to the wording doesn't silently break the strip-on-authenticated
- * path. */
+/* Header text for the TOOL DEFAULTS line emitted by get_localization_context():
+ * the configured location / units / timezone, for a caller with no user
+ * settings of its own. */
 #define TOOL_DEFAULTS_HEADER_TEXT \
    "TOOL DEFAULTS (for tool calls only, do not mention in conversation):"
 
-// Function to build local command prompt from commands_config_nuevo.json
-// For local microphone interface - includes all commands (HUD, helmet, general)
-const char *get_local_command_prompt(void);
+/**
+ * @brief The command prompt every surface starts from: persona, system
+ *        instructions, localization
+ *
+ * Surface-neutral: what differs by surface (voice output, ASR hints, a room,
+ * a channel) reaches the model as standing directions, so a conversation
+ * keeps one system prompt wherever it continues.  Points into a shared buffer
+ * a rebuild rewrites (invalidate_system_instructions()).
+ */
+const char *get_command_prompt(void);
+
+/** The command prompt's pieces, each a private copy. */
+typedef struct {
+   char *persona;       /**< who the assistant is */
+   char *rules;         /**< system instructions (get_system_instructions) */
+   char *tool_defaults; /**< the TOOL DEFAULTS line, "" when nothing is configured */
+} command_prompt_parts_t;
 
 /**
- * @brief A private copy of the local command prompt (caller frees)
+ * @brief The pieces get_command_prompt() joins, for a builder that sends them
+ *        as sections of their own
  *
- * For a caller that uses the prompt later, not right away: the shared buffer
- * get_local_command_prompt() returns is rewritten when the prompt is rebuilt.
- * NULL on allocation failure.
+ * @return 0, or 1 on allocation failure (@p out then empty)
  */
-char *get_local_command_prompt_dup(void);
+int get_command_prompt_parts(command_prompt_parts_t *out);
 
-// Function to build remote command prompt (excludes local-only topics: hud, helmet)
-// For network satellite clients (DAP/DAP2) - includes general commands like date, time
-const char *get_remote_command_prompt(void);
+/** Free a command_prompt_parts_t's copies and zero it.  NULL-safe. */
+void command_prompt_parts_free(command_prompt_parts_t *parts);
 
-/** A private copy of the remote command prompt (caller frees; NULL on OOM); see
- * get_local_command_prompt_dup(). */
-char *get_remote_command_prompt_dup(void);
+/**
+ * @brief A private copy of get_command_prompt() (caller frees; NULL on OOM)
+ *
+ * For a caller that uses the prompt later, not right away.
+ */
+char *get_command_prompt_dup(void);
 
 /**
  * @brief Builds dynamic system instructions based on enabled features
@@ -62,22 +75,10 @@ char *get_remote_command_prompt_dup(void);
  * - Search: Requires SearXNG endpoint configured
  * - Weather/Calculator/URL: Always available
  *
- * The disabled-tool hint appended to the instructions is session-aware so
- * local and remote prompts correctly describe their available capabilities.
- *
- * @param is_remote true for a remote-session prompt, false for local
  * @return Pointer to static buffer containing assembled instructions
  */
-const char *get_system_instructions(bool is_remote);
+const char *get_system_instructions(void);
 
-/**
- * @brief Get the current system-instructions version counter
- *
- * Monotonically increases each time invalidate_system_instructions() is called.
- * Consumers that build derived prompts (e.g., direct-mode prompt) can compare
- * against this to decide whether to rebuild.
- */
-int get_system_instructions_version(void);
 
 /**
  * @brief Checks if vision is enabled for the current LLM type

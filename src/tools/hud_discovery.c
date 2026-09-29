@@ -32,7 +32,6 @@
 #include <time.h>
 
 #include "core/ocp_helpers.h"
-#include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
@@ -178,12 +177,9 @@ static void hud_capability_changed_unlocked(void) {
    llm_tools_refresh();
    /* Schema cache is regenerated with the new enum values on next tool call */
    llm_tools_invalidate_cache();
-   /* Rebuild system-prompt hint so it reflects the new availability */
+   /* Each conversation's next turn tells the model what is unavailable now
+    * (its standing directions). */
    invalidate_system_instructions();
-   /* Propagate the refreshed prompt to every active session.
-    * Takes session_manager_rwlock (read) then per-session locks + DB I/O;
-    * must run OUTSIDE s_discovery_mutex. */
-   session_manager_refresh_all_prompts();
 }
 
 /**
@@ -212,9 +208,8 @@ static void process_elements_discovery(struct json_object *root) {
 
    pthread_mutex_unlock(&s_discovery_mutex);
 
-   /* Post-update refresh runs OUTSIDE s_discovery_mutex — it acquires
-    * session_manager_rwlock + per-session history_mutex and may do DB I/O
-    * via the registered user-prompt builder. */
+   /* Post-update refresh runs OUTSIDE s_discovery_mutex: llm_tools_refresh()
+    * re-locks it through the armor tools' availability callbacks. */
    if (capability_changed) {
       hud_capability_changed_unlocked();
    }

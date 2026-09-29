@@ -25,6 +25,7 @@
 
 #include <curl/curl.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -32,6 +33,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "auth/auth_db.h"
 #include "config/config_parser.h"
@@ -44,6 +46,8 @@
 #include "llm/llm_capabilities.h"
 #include "llm/llm_compaction_range.h"
 #include "llm/llm_context_merge.h"
+#include "llm/llm_context_text.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_models_toml.h"
@@ -267,6 +271,7 @@ static void load_model_registry(void) {
    s_gemini_models = load_provider_table(llm_models_toml_root_for(&m, "gemini"), "gemini");
    llm_pricing_load_registry(llm_models_toml_root_for(&m, "cache_pricing"));
    llm_capabilities_load_registry(llm_models_toml_root_for(&m, "thinking"));
+   llm_capabilities_load_mid_system(llm_models_toml_root_for(&m, "mid_system"));
    OLOG_INFO("llm_context: loaded the model registry (%s)",
              m.disk ? m.path : "built-in models.toml");
    llm_models_toml_close(&m);
@@ -1075,7 +1080,7 @@ int llm_context_save_conversation(uint32_t session_id,
 
    /* Strip provider-private fields (encrypted reasoning blobs etc.) before
     * writing to disk — they're session-bound and must not be persisted. */
-   struct json_object *sanitized = llm_history_strip_internal(history);
+   struct json_object *sanitized = llm_history_log_copy(history);
    if (!sanitized) {
       OLOG_ERROR("llm_context: Failed to strip provider state — skipping save to avoid "
                  "persisting session-bound fields");
@@ -1086,8 +1091,14 @@ int llm_context_save_conversation(uint32_t session_id,
    const char *json_str = json_object_to_json_string_ext(
        sanitized, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
 
-   FILE *fp = fopen(filename, "w");
+   /* Owner-only: the log holds the conversation, its memory and what its
+    * background jobs reported. */
+   const int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+   FILE *fp = fd >= 0 ? fdopen(fd, "w") : NULL;
    if (!fp) {
+      if (fd >= 0) {
+         close(fd);
+      }
       OLOG_ERROR("llm_context: Failed to open %s for writing", filename);
       json_object_put(sanitized);
       return FAILURE;
@@ -1639,6 +1650,12 @@ int llm_context_compact(uint32_t session_id,
          summary = compact_deterministic(to_summarize, LLM_CONTEXT_SUMMARY_TARGET_L3);
       } else {
          summary = compact_with_llm(to_summarize, level, type, provider, model);
+      }
+      if (summary) {
+         /* Written from history that holds untrusted text: what imitates DAWN's
+          * framing or carries a tag doesn't pass into the summary it replays. */
+         summary = llm_context_mask_tag(llm_context_neutralize_owned(summary),
+                                        llm_history_tag(history)); /* its own conversation's */
       }
 
       if (!summary) {

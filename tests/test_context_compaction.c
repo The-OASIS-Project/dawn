@@ -268,6 +268,27 @@ static struct json_object *claude_results(const char *id, int n) {
    return m;
 }
 
+/* A directive or loop note between a turn's question and reply belongs to that
+ * turn: the cut never falls after it. */
+static void test_compaction_range_keeps_context_with_its_turn(void) {
+   struct json_object *h = json_object_new_array();
+   json_object_array_add(h, make_msg("system", "s"));
+   json_object_array_add(h, make_msg("user", "q1"));
+   json_object_array_add(h, make_msg("assistant", "a1"));
+   json_object_array_add(h, make_msg("user", "q2")); /* 3 */
+   struct json_object *directive = make_msg("system", "d");
+   json_object_object_add(directive, "_kind", json_object_new_string("directive"));
+   json_object_array_add(h, directive);
+   struct json_object *note = make_msg("user", "n");
+   json_object_object_add(note, "_kind", json_object_new_string("loop_note"));
+   json_object_array_add(h, note);
+   json_object_array_add(h, make_msg("assistant", "a2"));
+
+   /* Keeping 1 would start at a2, after q2's directive and note: back to q2. */
+   TEST_ASSERT_EQUAL_INT(3, llm_compaction_keep_start(h, 1, 1));
+   json_object_put(h);
+}
+
 /* A turn with parallel Claude results: the kept part starts at its question,
  * and the summarized rows end right before that question's row, past the
  * turn's unstamped calls and results (rows 101-107). */
@@ -372,6 +393,7 @@ int main(void) {
    RUN_TEST(test_estimate_counts_claude_tool_result);
    RUN_TEST(test_level_ordering);
    RUN_TEST(test_compaction_range_claude_tool_turn);
+   RUN_TEST(test_compaction_range_keeps_context_with_its_turn);
    RUN_TEST(test_drop_leading_results);
    return UNITY_END();
 }

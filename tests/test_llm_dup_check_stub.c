@@ -113,6 +113,20 @@ const void *tool_registry_find(const char *name) {
    (void)name;
    return NULL;
 }
+bool session_prefix_tag(void *session, char *out, size_t size) {
+   (void)session;
+   if (out && size) {
+      out[0] = '\0';
+   }
+   return false;
+}
+char *session_prefix_mask_secret(void *session, char *text) {
+   (void)session;
+   return text;
+}
+unsigned long long tool_registry_generation(void) {
+   return 0;
+}
 const void *tool_registry_lookup(const char *name) {
    (void)name;
    return NULL;

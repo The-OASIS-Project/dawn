@@ -65,7 +65,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 93
+#define AUTH_DB_SCHEMA_VERSION 94
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -122,6 +122,13 @@
    "AND llm_blocks IS NOT NULL AND llm_blocks_len IS NOT NULL "                    \
    "AND llm_blocks_len = length(CAST(llm_blocks AS BLOB)) "                        \
    "AND llm_blocks_len <= " STRINGIFY(CONV_LLM_BLOCKS_MAX) "))"
+
+/* messages.kind (v94): which role each kind of request-context row takes.
+ * Kept in step with include/core/message_kind.h. */
+#define CONV_MESSAGE_KIND_CHECK_SQL                                              \
+   "CHECK(kind IS NULL OR (kind IN ('turn_context','memory','envelope') AND "    \
+   "role = 'user') OR (kind = 'loop_note' AND role IN ('user','assistant')) OR " \
+   "(kind IN ('directive','instruction') AND role = 'system'))"
 
 /* Deep-research tables (v75), as ONE shared DDL string so the base SCHEMA_SQL
  * (auth_db_schema.c, fresh installs) and the v75 migration
@@ -746,9 +753,89 @@ int auth_db_migrations_v92(sqlite3 *db);
  */
 int auth_db_migrations_v93(sqlite3 *db);
 
+/**
+ * @brief v94 migration: messages.kind, the frozen request prefix
+ *        (conversations.prefix_hash/tools_hash/reasoning_floor_msg_id +
+ *        prompt_blobs) and conversation_focus_handles.  Idempotent.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v94(sqlite3 *db);
+
+/** Whether @p table has column @p col (a migration's probe before an ALTER;
+ *  auth_db_migrations.c). */
+bool auth_db_column_exists(sqlite3 *db, const char *table, const char *col);
+
+/* document_chunks' triggers, defined once for the migration that made them
+ * and the one that rebuilds the table (a rebuild drops a table's triggers). */
+
+/** Chunk-visibility generation per owner, bumped on every chunk change. */
+#define DOC_CHUNK_GENERATION_TRIGGERS_SQL                                  \
+   "CREATE TRIGGER IF NOT EXISTS trg_doc_chunks_gen_ins AFTER INSERT ON "  \
+   "document_chunks BEGIN INSERT INTO doc_chunk_generation (owner, gen) "  \
+   "SELECT COALESCE(CASE WHEN is_global THEN 0 ELSE user_id END, 0), 1 "   \
+   "FROM documents WHERE id = NEW.document_id "                            \
+   "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"                  \
+   "CREATE TRIGGER IF NOT EXISTS trg_doc_chunks_gen_del AFTER DELETE ON "  \
+   "document_chunks BEGIN INSERT INTO doc_chunk_generation (owner, gen) "  \
+   "SELECT COALESCE(CASE WHEN is_global THEN 0 ELSE user_id END, 0), 1 "   \
+   "FROM documents WHERE id = OLD.document_id "                            \
+   "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"                  \
+   "CREATE TRIGGER IF NOT EXISTS trg_doc_chunks_gen_emb AFTER UPDATE OF "  \
+   "embedding ON document_chunks BEGIN INSERT INTO doc_chunk_generation "  \
+   "(owner, gen) SELECT COALESCE(CASE WHEN is_global THEN 0 ELSE user_id " \
+   "END, 0), 1 FROM documents WHERE id = NEW.document_id "                 \
+   "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"
+
+/**
+ * @brief Install, on DAWN's own connection, what records a user's removals
+ *        for withdrawal (auth_db_withdraw.c): the dawn_withdraw_intent() SQL
+ *        function and TEMP delete triggers that write withdrawn_items only
+ *        while a removal is marked (conv_db_withdraw_intent_begin).  Another
+ *        connection (the sqlite3 shell) has neither, and records nothing.
+ *        Called at init, after migrations.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_withdraw_install(sqlite3 *db);
+
 /** Prepare / finalize the message-row statements (auth_db_messages.c). */
 int auth_db_messages_prepare(void);
+
+/**
+ * @brief Insert one message row; the caller holds the lock (and any
+ *        transaction).  conv_db_add_row() without the conversation's metadata
+ *        bump or list signal.
+ */
+int msg_insert_locked(int64_t conv_id,
+                      int user_id,
+                      const conv_message_row_t *row,
+                      time_t now,
+                      int64_t *id_out);
 void auth_db_messages_finalize(void);
+
+/** Whether conversation @p conv_id is @p user_id's: AUTH_DB_SUCCESS,
+ *  AUTH_DB_NOT_FOUND or AUTH_DB_FAILURE.  Caller holds the lock
+ *  (auth_db_focus_handles.c). */
+int conv_db_owned_locked(int64_t conv_id, int user_id);
+
+/**
+ * @brief Withdraw, from conversation @p conv_id's context rows saved at or
+ *        after row @p from_id, the items removed since @p built_at (a
+ *        minute's grace; 0: within the week), and its USER MEMORY blocks when
+ *        the user's memory was withdrawn after @p built_seq (the withdrawal
+ *        sequence when the turn was built, conv_db_withdraw_seq).  A change,
+ *        or a withdrawal after @p built_seq that changed this conversation
+ *        (the history the turn's reasoning is bound to), leaves the
+ *        conversation's reasoning behind (its floor, pending).  Caller holds
+ *        the lock and the transaction (auth_db_withdraw.c).
+ * @param changed_out Whether the floor went pending (the turn mustn't settle it)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_withdraw_saved_locked(int64_t conv_id,
+                                  int user_id,
+                                  int64_t from_id,
+                                  int64_t built_at,
+                                  int64_t built_seq,
+                                  bool *changed_out);
 
 /**
  * @brief v68 migration: generic blobs table + documents.original_blob_id.

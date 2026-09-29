@@ -97,10 +97,39 @@ int memory_history_load_rows(int64_t conv_id,
 struct json_object *memory_history_load_from_db(int64_t conv_id, int user_id, size_t *text_len_out);
 
 /**
- * @brief memory_history_load_from_db() for a context the LLM continues
+ * @brief A conversation's request, rebuilt for the model that continues it
  *
- * The same history, with each assistant turn's stored blocks, so the turns
- * replay as the model produced them.
+ * The one builder every load that continues a conversation goes through
+ * (a WebUI restore, a resumed job, a reinvoke, a messaging channel), so each
+ * rebuilds the bytes its turns were sent:
+ *  - the rows after @p watermark, with the compaction summary's marker after
+ *    any system message the conversation was saved with;
+ *  - an image turn's question with its images again (owner-checked,
+ *    image_rehydrate_message), request context as the text it was sent, tool
+ *    fields and each assistant turn's stored blocks as they were; legacy
+ *    display markers at the start of a reply left out;
+ *  - each turn's context folded back into its question
+ *    (llm_history_fold_context), and the conversation's frozen prefix first
+ *    when one is stored.
+ *
+ * Reads image files: never call it holding a lock.
+ *
+ * @param compaction_summary The conversation's summary, or NULL
+ * @param text_len_out Receives the loaded rows' text length (may be NULL)
+ * @param rows_out     Receives the number of rows loaded (may be NULL)
+ * @return owned array, or NULL on a read or allocation failure
+ */
+struct json_object *memory_history_request_context(int64_t conv_id,
+                                                   int user_id,
+                                                   int64_t watermark,
+                                                   const char *compaction_summary,
+                                                   size_t *text_len_out,
+                                                   int *rows_out);
+
+/**
+ * @brief memory_history_request_context() for a conversation, by id
+ *
+ * NULL when it is missing or not @p user_id's.
  */
 struct json_object *memory_history_load_for_llm(int64_t conv_id, int user_id, size_t *text_len_out);
 

@@ -69,6 +69,11 @@ function(dawn_add_unit_test NAME)
    if(T_LIBS)
       target_link_libraries(${NAME} PRIVATE ${T_LIBS})
    endif()
+   # The auth-DB chain hashes stored prompts (hash_util.c, OpenSSL SHA-256), so
+   # every test built from it links libcrypto without listing it.
+   if("${SRC_ROOT}/src/core/hash_util.c" IN_LIST T_SOURCES)
+      target_link_libraries(${NAME} PRIVATE OpenSSL::Crypto)
+   endif()
    if(T_INCLUDES)
       target_include_directories(${NAME} PRIVATE ${T_INCLUDES})
    endif()
@@ -115,7 +120,13 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v75.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v92.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v93.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v94.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
+    ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
+    ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
+    ${SRC_ROOT}/src/auth/auth_db_withdraw.c
+    ${SRC_ROOT}/src/llm/llm_context_text.c
+    ${SRC_ROOT}/src/core/hash_util.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -483,8 +494,37 @@ dawn_add_unit_test(test_session_history
    SOURCES test_session_history.c
            ${SRC_ROOT}/src/core/session_history.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# DAWN's added text: the tag, the operator-note label, defused markers.
+dawn_add_unit_test(test_llm_context_text
+   SOURCES test_llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+   LIBS    unity
+   LABEL   ci)
+
+# The append-only request: the first turn freezes the system prompt, changes
+# are appended after the question, the turn's context goes in front of it.
+dawn_add_unit_test(test_session_prefix
+   SOURCES test_session_prefix.c
+           ${SRC_ROOT}/src/core/session_prefix.c
+           ${SRC_ROOT}/src/core/prefix_message.c
+           ${SRC_ROOT}/src/core/prefix_in_force.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+           ${AUTH_DB_SOURCES}
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_satellite_remap
@@ -521,6 +561,8 @@ dawn_add_unit_test(test_memory_embeddings
 dawn_add_unit_test(test_context_compaction
    SOURCES test_context_compaction.c test_context_compaction_impl.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -746,6 +788,25 @@ dawn_add_unit_test(test_claude_format
    SOURCES test_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
+           ${SRC_ROOT}/src/tools/toml.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
+   LABEL   ci)
+
+# Request layout for prompt caching: frozen system prompt, context in front of
+# its question, directions in place, the conversation breakpoint, and each
+# request's messages a prefix of the next one's.
+dawn_add_unit_test(test_prompt_cache_layout
+   SOURCES test_prompt_cache_layout.c
+           ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
@@ -767,6 +828,12 @@ dawn_add_unit_test(test_openrouter_cache
 dawn_add_unit_test(test_llm_dup_check
    SOURCES test_llm_dup_check.c test_llm_dup_check_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/hash_util.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
@@ -861,16 +928,14 @@ dawn_add_unit_test(test_memory_focus_adapters
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
-# Phase 1e: composer (prompt_compose) + build_focus_block.  The composer
-# was extracted from session_manager.c into prompt_compose.c specifically
-# so this test can link it without the full session-manager runtime
-# (auth_db / conv_db / satellite_db / json-c).  build_focus_block links
-# against programmable focus_compose / memory_embeddings stubs.
+# build_focus_block and its focus dedup state, without the full session-
+# manager runtime: focus_compose / memory_embeddings are programmable stubs.
 dawn_add_unit_test(test_prompt_builder
    SOURCES test_prompt_builder.c test_prompt_builder_stub.c
-           ${SRC_ROOT}/src/core/prompt_compose.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/strbuf.c
    # session_dedup primitives + build_focus_block's dispatch-session lookup
    # are gated #ifdef ENABLE_MULTI_CLIENT in the daemon (the root CMakeLists
@@ -900,6 +965,7 @@ dawn_add_unit_test(test_focus_probe
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    # See test_prompt_builder above — same ENABLE_MULTI_CLIENT requirement.
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread m
@@ -972,6 +1038,8 @@ dawn_add_unit_test(test_llm_turn_blocks
    SOURCES test_llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/core/strbuf.c
@@ -984,6 +1052,21 @@ dawn_add_unit_test(test_llm_history_rows
    SOURCES test_llm_history_rows.c
            ${SRC_ROOT}/src/llm/llm_history_rows.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Request context on a history: fold on load, the rows it saves as, and the
+# copies that must never carry it (extraction, summaries) or its marks (wire).
+dawn_add_unit_test(test_llm_history_kind
+   SOURCES test_llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
@@ -995,6 +1078,8 @@ dawn_add_unit_test(test_openai_history
            ${SRC_ROOT}/src/llm/llm_openai_history.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1037,7 +1122,8 @@ dawn_add_unit_test(test_llm_response_finalize
    SOURCES test_llm_response_finalize.c
            ${SRC_ROOT}/src/core/llm_response_finalize.c
            ${SRC_ROOT}/src/core/text_filter.c
-   LIBS    unity
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+   LIBS    dawn_common unity
    LABEL   ci)
 
 dawn_add_unit_test(test_llm_model_version
@@ -1051,6 +1137,8 @@ dawn_add_unit_test(test_responses_input
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1240,6 +1328,8 @@ dawn_add_unit_test(test_crypto_store
            ${SRC_ROOT}/src/core/crypto_store.c
            ${SRC_ROOT}/src/llm/llm_key_tag.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    LIBS    dawn_common unity sodium pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1283,6 +1373,24 @@ dawn_add_unit_test(test_conv_db_llm_blocks
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# messages.kind (request-context rows only the replay read returns), the frozen
+# prefix and tool set, the reasoning floor, and stable citation handles.
+dawn_add_unit_test(test_conv_db_kind_prefix
+   SOURCES test_conv_db_kind_prefix.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# A session's stable memory citation handles (real auth_db): numbered before
+# the conversation exists, saved with it, the same after a reload.
+dawn_add_unit_test(test_focus_handles
+   SOURCES test_focus_handles.c
+           ${SRC_ROOT}/src/core/focus/focus_handles.c
+           ${AUTH_DB_SOURCES}
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_conv_db_jobs
    SOURCES test_conv_db_jobs.c
            ${AUTH_DB_SOURCES}
@@ -1313,8 +1421,17 @@ dawn_add_unit_test(test_research_allowlist
 dawn_add_unit_test(test_history_reload_watermark
    SOURCES test_history_reload_watermark.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/core/prefix_message.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -1328,7 +1445,16 @@ dawn_add_unit_test(test_history_reload_watermark
 dawn_add_unit_test(test_history_strip_markers
    SOURCES test_history_strip_markers.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/core/prefix_message.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -1552,6 +1678,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
@@ -1568,6 +1696,9 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_streaming.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
@@ -1642,6 +1773,8 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
@@ -1658,6 +1791,9 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_streaming.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
@@ -1720,6 +1856,7 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    # See test_prompt_builder — same ENABLE_MULTI_CLIENT requirement.
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common pthread m stemmer

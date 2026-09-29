@@ -237,39 +237,8 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message", json_object_new_string("Settings saved"));
 
-      /* Refresh active session's system prompt immediately (preserves conversation) */
-      if (conn->session) {
-         /* Phase 1f: SESSION_START builder boundary — clear dedup state. */
-         session_injected_set_clear(conn->session);
-         char *new_prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-         if (new_prompt) {
-            session_update_system_prompt(conn->session, new_prompt);
-            OLOG_INFO("WebUI: Refreshed system prompt for user %s", conn->username);
-
-            /* Queue updated prompt to client so debug view refreshes.
-             * Must go through queue — the settings response below is already
-             * a direct write in this callback, so a second write would corrupt
-             * WebSocket framing. */
-            json_object *prompt_msg = json_object_new_object();
-            json_object_object_add(prompt_msg, "type",
-                                   json_object_new_string("system_prompt_response"));
-            json_object *prompt_payload = json_object_new_object();
-            json_object_object_add(prompt_payload, "success", json_object_new_boolean(1));
-            json_object_object_add(prompt_payload, "prompt", json_object_new_string(new_prompt));
-            json_object_object_add(prompt_payload, "length",
-                                   json_object_new_int((int)strlen(new_prompt)));
-            json_object_object_add(prompt_msg, "payload", prompt_payload);
-            const char *json_str = json_object_to_json_string(prompt_msg);
-            ws_response_t resp_q = { 0 };
-            resp_q.session = conn->session;
-            resp_q.type = WS_RESP_JSON;
-            resp_q.generic_json.json = strdup(json_str);
-            queue_response(&resp_q);
-            json_object_put(prompt_msg);
-
-            free(new_prompt);
-         }
-      }
+      /* A running conversation gets the changed parts of its prompt with its
+       * next turn, appended (session_prefix.c). */
 
       /* Log event */
       auth_db_log_event("SETTINGS_UPDATED", conn->username, conn->client_ip, "Personal settings");

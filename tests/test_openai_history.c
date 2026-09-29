@@ -195,8 +195,104 @@ static void test_partial_turn_keeps_its_reasoning(void) {
    json_object_put(history);
 }
 
+/* A turn's context in front of its question as one string, a direction as an
+ * operator's note after it; no marks on the wire; a vision request keeps both. */
+static void test_request_context_for_chat(void) {
+   json_object *history = json_tokener_parse(
+       "[{\"role\":\"system\",\"content\":\"P\"},"
+       "{\"role\":\"user\",\"content\":["
+       "{\"type\":\"text\",\"text\":\"MEM\",\"_kind\":\"memory\"},"
+       "{\"type\":\"text\",\"text\":\"CTX\",\"_kind\":\"turn_context\"},"
+       "{\"type\":\"text\",\"text\":\"Hi\"}]},"
+       "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"}]");
+   json_object *prepared = llm_openai_prepare_chat_history(history, "api.example.com#00000000",
+                                                           "m");
+   TEST_ASSERT_EQUAL_STRING("[{\"role\":\"system\",\"content\":\"P\"},{\"role\":\"user\","
+                            "\"content\":\"MEM\\n\\nCTX\\n\\nHi\\n\\n[Operator note] D\"}]",
+                            json_object_to_json_string_ext(prepared, JSON_C_TO_STRING_PLAIN));
+   const char *image = "iVBORw0KGgo=";
+   const char *images[] = { image };
+   const size_t sizes[] = { strlen(image) };
+   json_object *vision = llm_openai_apply_vision_images(prepared, "Hi", images, sizes, 1);
+   json_object *parts = json_object_object_get(json_object_array_get_idx(vision, 1), "content");
+   TEST_ASSERT_EQUAL_STRING(
+       "MEM\n\nCTX\n\nHi\n\n[Operator note] D",
+       json_object_get_string(json_object_object_get(json_object_array_get_idx(parts, 0), "text")));
+   json_object_put(vision);
+   json_object_put(prepared);
+   json_object_put(history);
+}
+
+/* A direction after a Claude message of tool results is a note of its own
+ * (text in a results message doesn't survive becoming tool messages). */
+static void test_note_after_claude_results(void) {
+   json_object *history = json_tokener_parse(
+       "[{\"role\":\"user\",\"content\":\"Weather?\"},"
+       "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\","
+       "\"name\":\"weather\",\"input\":{}}]},"
+       "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\","
+       "\"content\":\"72F\"}]},"
+       "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"instruction\"}]");
+   json_object *prepared = llm_openai_prepare_chat_history(history, "api.example.com#00000000",
+                                                           "m");
+   const char *wire = json_object_to_json_string_ext(prepared, JSON_C_TO_STRING_PLAIN);
+   TEST_ASSERT_NOT_NULL(strstr(wire, "\"role\":\"tool\""));
+   TEST_ASSERT_NOT_NULL(strstr(wire, "{\"role\":\"user\",\"content\":\"[Operator note] D\"}"));
+   json_object_put(prepared);
+   json_object_put(history);
+}
+
+/* A history whose prefix records the tag, then Q, a directive, A. */
+static json_object *history_with_directive(void) {
+   json_object *history = json_object_new_array();
+   json_object *prefix = msg("system", "P");
+   json_object_object_add(prefix, "_kind", json_object_new_string("prefix"));
+   json_object_object_add(prefix, "_in_force", json_tokener_parse("{\"tag\":\"dawn-feed\"}"));
+   json_object_array_add(history, prefix);
+   json_object_array_add(history, msg("user", "Q"));
+   json_object *directive = msg("system", "Room=Kitchen.");
+   json_object_object_add(directive, "_kind", json_object_new_string("directive"));
+   json_object_array_add(history, directive);
+   json_object_array_add(history, msg("assistant", "A"));
+   return history;
+}
+
+/* OpenAI's own endpoint takes a directive as a system message where it sits. */
+static void test_openai_gets_directions_as_system_messages(void) {
+   json_object *history = history_with_directive();
+   json_object *prepared = llm_openai_prepare_chat_history(history,
+                                                           "api.openai.com/abcdef#00000000",
+                                                           "gpt-5.6");
+   TEST_ASSERT_NOT_NULL(prepared);
+   TEST_ASSERT_EQUAL_INT(4, (int)json_object_array_length(prepared));
+   json_object *d = json_object_array_get_idx(prepared, 2);
+   TEST_ASSERT_EQUAL_STRING("system", json_object_get_string(json_object_object_get(d, "role")));
+   TEST_ASSERT_EQUAL_STRING("Room=Kitchen.",
+                            json_object_get_string(json_object_object_get(d, "content")));
+   json_object_put(prepared);
+   json_object_put(history);
+}
+
+/* Any other server gets it as a note carrying the conversation's tag. */
+static void test_other_servers_get_a_tagged_note(void) {
+   json_object *history = history_with_directive();
+   json_object *prepared = llm_openai_prepare_chat_history(history, "openrouter.ai/x#00000000",
+                                                           "some/model");
+   TEST_ASSERT_NOT_NULL(prepared);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(prepared));
+   const char *q = json_object_get_string(
+       json_object_object_get(json_object_array_get_idx(prepared, 1), "content"));
+   TEST_ASSERT_NOT_NULL(strstr(q, "[Operator note dawn-feed] Room=Kitchen."));
+   json_object_put(prepared);
+   json_object_put(history);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_openai_gets_directions_as_system_messages);
+   RUN_TEST(test_other_servers_get_a_tagged_note);
+   RUN_TEST(test_note_after_claude_results);
+   RUN_TEST(test_request_context_for_chat);
    RUN_TEST(test_internal_keys_never_go_on_the_wire);
    RUN_TEST(test_claude_tool_turn_leaves_its_thinking_out);
    RUN_TEST(test_signed_call_goes_back_to_its_endpoint_only);

@@ -44,10 +44,12 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/image_rehydrate.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "dawn.h"
 #include "image_store.h"
 #include "llm/llm_claude_format.h"
@@ -61,7 +63,6 @@
 #include "webui/webui_attention.h"
 #include "webui/webui_contacts.h"
 #include "webui/webui_doc_library.h"
-#include "webui/webui_image_rehydrate.h"
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "webui/webui_code_projects.h"
 #endif
@@ -237,8 +238,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                 * text).  Freed after the call — the worker strdup's what it needs. */
                char *persist_content = NULL;
                if (image_id_count > 0) {
-                  persist_content = webui_build_image_marker_content(text, image_ids,
-                                                                     image_id_count);
+                  persist_content = image_marker_build_content(text, image_ids, image_id_count);
                   if (!persist_content) {
                      /* OOM building markers — persist plain text rather than fail the
                       * turn.  Log loudly: the images won't re-render on reload (no
@@ -270,12 +270,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (!conn_require_auth(conn)) {
          return;
       }
-      /* Request current system prompt for debugging.  Uses the FULL
-       * variant so the inspector renders both segments of the two-
-       * message shape (stable prefix + volatile block joined by
-       * "\n\n").  session_get_system_prompt would show only the
-       * cached stable prefix — useful elsewhere but misleading for
-       * "what does the LLM actually see this turn?". */
+      /* The system prompt for debugging: the conversation's frozen prompt
+       * and each instruction change and standing direction since. */
       struct json_object *response = json_object_new_object();
       json_object_object_add(response, "type", json_object_new_string("system_prompt_response"));
       struct json_object *resp_payload = json_object_new_object();
@@ -298,8 +294,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
           * of the system-prompt text — so surface them here, serialized exactly as
           * the LLM receives them (descriptions post-truncation), to let the
           * inspector validate what the model actually sees. */
+         /* The conversation's frozen set when it has one, as every request of
+          * it is sent; else what this surface would get. */
          bool is_remote = (conn->session->type != SESSION_TYPE_LOCAL);
-         struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote);
+         struct json_object *frozen = session_prefix_tool_names(conn->session);
+         struct json_object *tools = frozen ? llm_tools_format_named(frozen, false)
+                                            : llm_tools_get_openai_format_filtered(is_remote);
+         json_object_put(frozen);
          if (tools) {
             const char *tools_json = json_object_to_json_string_ext(tools, JSON_C_TO_STRING_PRETTY);
             json_object_object_add(resp_payload, "tools", json_object_new_string(tools_json));
@@ -873,12 +874,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      if (conn->session) {
                         /* Set user_id for metrics and memory extraction */
                         session_set_metrics_user(conn->session, conn->auth_user_id);
-                        /* Build personalized prompt with user settings + memory context */
-                        char *prompt = session_manager_build_system_prompt_string(
-                            conn->auth_user_id);
-                        session_init_system_prompt(conn->session,
-                                                   prompt ? prompt : get_remote_command_prompt());
-                        free(prompt);
+                        /* A new context: its first turn freezes the prompt. */
+                        session_clear_history(conn->session);
                         conn->session->client_data = conn;
                         webui_conn_publish_view(
                             conn); /* the session shows what this connection does */

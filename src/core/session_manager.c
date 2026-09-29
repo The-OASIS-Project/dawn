@@ -33,10 +33,12 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
-#include "core/prompt_compose.h"
+#include "core/focus/focus_handles.h"
+#include "core/session_prefix.h"
 #include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -282,6 +284,12 @@ static void session_free(session_t *session) {
       json_object_put(session->turn_reply_mirror);
       session->turn_reply_mirror = NULL;
    }
+   focus_handles_free(session->focus_handles);
+   session->focus_handles = NULL;
+   session_prefix_turn_free(session->prefix_turn);
+   session->prefix_turn = NULL;
+   json_object_put(session->withdraw_pending);
+   session->withdraw_pending = NULL;
    free(session->turn_pending_user);
    session->turn_pending_user = NULL;
    free(session->turn_pending_reply);
@@ -311,8 +319,6 @@ static void session_free(session_t *session) {
          *held[i] = NULL;
       }
    }
-   free(session->deferred_system_prompt);
-   session->deferred_system_prompt = NULL;
    if (session->conversation_history) {
       json_object_put(session->conversation_history);
       session->conversation_history = NULL;
@@ -542,83 +548,6 @@ session_t *session_create(session_type_t type, int client_fd) {
    return session;
 }
 
-void session_append_room_context(session_t *session, const char *room) {
-   if (!session || !room || room[0] == '\0') {
-      return;
-   }
-
-   char *base = session_get_system_prompt(session);
-   if (!base) {
-      return;
-   }
-
-   /* Guard against double-append (e.g., reconnection without prompt reset) */
-   if (strstr(base, "\nRoom=")) {
-      free(base);
-      return;
-   }
-
-   size_t len = strlen(base) + strlen(room) + 16;
-   char *with_room = malloc(len);
-   if (with_room) {
-      snprintf(with_room, len, "%s\nRoom=%s.", base, room);
-      session_update_system_prompt(session, with_room);
-      free(with_room);
-   }
-   free(base);
-}
-
-void session_append_satellite_context(session_t *session, const char *room, const char *ha_area) {
-   if (!session) {
-      return;
-   }
-
-   char *base = session_get_system_prompt(session);
-   if (!base) {
-      return;
-   }
-
-   /* Guard against double-append */
-   if (strstr(base, "\nRoom=")) {
-      free(base);
-      return;
-   }
-
-   /* Build context in stack buffer: Room + optional HA area */
-   char ctx[192];
-   ctx[0] = '\0';
-   int len = 0;
-
-   if (room && room[0]) {
-      len = snprintf(ctx, sizeof(ctx), "\nRoom=%s.", room);
-   }
-
-   if (ha_area && ha_area[0] && len < (int)sizeof(ctx) - 1) {
-      /* Sanitize ha_area: allowlist alphanumeric, spaces, hyphens, underscores */
-      char safe_area[64];
-      safe_strscpy(safe_area, ha_area);
-      for (char *p = safe_area; *p; p++) {
-         if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
-               *p == ' ' || *p == '-' || *p == '_'))
-            *p = '_';
-      }
-      snprintf(ctx + len, sizeof(ctx) - len, "\nHomeAssistant_Area=[%s].", safe_area);
-   }
-
-   if (ctx[0] == '\0') {
-      free(base);
-      return;
-   }
-
-   size_t total = strlen(base) + strlen(ctx) + 1;
-   char *with_ctx = malloc(total);
-   if (with_ctx) {
-      snprintf(with_ctx, total, "%s%s", base, ctx);
-      session_update_system_prompt(session, with_ctx);
-      free(with_ctx);
-   }
-   free(base);
-}
 
 session_t *session_create_dap2(int client_fd,
                                dap2_tier_t tier,
@@ -749,10 +678,9 @@ session_t *session_create_dap2(int client_fd,
 
    pthread_rwlock_unlock(&session_manager_rwlock);
 
-   /* Initialize with remote command prompt (excludes HUD/helmet commands).
-    * Room/HA context is appended later by handle_satellite_register() after
-    * the DB mapping lookup determines the HA area. */
-   session_init_system_prompt(session, get_remote_command_prompt());
+   /* A new context: its first turn freezes the prompt it runs under, and the
+    * satellite's room reaches it as a standing direction. */
+   session_clear_history(session);
 
    OLOG_INFO("Created DAP2 session %u (tier=%d, uuid=%s, name=%s, location=%s)",
              session->session_id, tier, identity->uuid, identity->name, identity->location);
@@ -840,8 +768,8 @@ session_t *session_get_or_create_dap(int client_fd, const char *client_ip) {
 
    pthread_rwlock_unlock(&session_manager_rwlock);
 
-   // Initialize with remote command prompt (excludes HUD/helmet commands)
-   session_init_system_prompt(session, get_remote_command_prompt());
+   // A new context: its first turn freezes the prompt it runs under.
+   session_clear_history(session);
 
    OLOG_INFO("Created DAP1 session %u (ip=%s)", session->session_id, client_ip);
 
@@ -1343,7 +1271,7 @@ static int broadcast_notice(int user_id, const char *content) {
    }
 
    /* Snapshot session IDs under the read lock, then apply after releasing it —
-    * same discipline as session_manager_refresh_all_prompts(): never hold a
+    * the usual discipline: never hold a
     * per-session lock while the module lock is held. */
    uint32_t snapshot_ids[MAX_SESSIONS];
    int count = 0;
@@ -1378,6 +1306,35 @@ static int broadcast_notice(int user_id, const char *content) {
    }
 
    return delivered;
+}
+
+void session_manager_for_each_user_session(int user_id,
+                                           void (*fn)(session_t *session, void *ctx),
+                                           void *ctx) {
+   if (!initialized || !fn || user_id < 0) {
+      return;
+   }
+   /* Snapshot ids under the read lock, then visit each retained session with
+    * it released (never a per-session lock under the module lock). */
+   uint32_t snapshot_ids[MAX_SESSIONS];
+   int count = 0;
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (sessions[i]) {
+         snapshot_ids[count++] = sessions[i]->session_id;
+      }
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+   for (int i = 0; i < count; i++) {
+      session_t *s = session_get(snapshot_ids[i]); /* Retains */
+      if (!s) {
+         continue;
+      }
+      if (user_id == 0 || session_effective_user_id(s) == user_id) {
+         fn(s, ctx);
+      }
+      session_release(s);
+   }
 }
 
 int session_broadcast_notice(const char *content) {
@@ -1429,426 +1386,6 @@ void session_init_system_prompt(session_t *session, const char *system_prompt) {
 
    OLOG_INFO("Session %u: Initialized with system prompt (%zu chars)", session->session_id,
              strlen(system_prompt));
-}
-
-void session_update_system_prompt(session_t *session, const char *system_prompt) {
-   if (!session || !system_prompt) {
-      return;
-   }
-
-   pthread_mutex_lock(&session->history_mutex);
-   if (session_turn_defers_writes_locked(session)) {
-      /* Another thread, while a turn serializes the live history: the turn
-       * applies it when it ends (the latest refresh wins). */
-      char *copy = strdup(system_prompt);
-      if (copy) {
-         free(session->deferred_system_prompt);
-         session->deferred_system_prompt = copy;
-      }
-      pthread_mutex_unlock(&session->history_mutex);
-      return;
-   }
-   session_update_system_prompt_locked(session, system_prompt);
-   pthread_mutex_unlock(&session->history_mutex);
-}
-
-void session_update_system_prompt_locked(session_t *session, const char *system_prompt) {
-   if (!session->conversation_history) {
-      return;
-   }
-
-   /* Find existing system message */
-   int len = json_object_array_length(session->conversation_history);
-   struct json_object *system_msg = NULL;
-
-   for (int i = 0; i < len; i++) {
-      struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
-      struct json_object *role_obj;
-      if (json_object_object_get_ex(msg, "role", &role_obj)) {
-         const char *role = json_object_get_string(role_obj);
-         if (role && strcmp(role, "system") == 0) {
-            system_msg = msg;
-            break;
-         }
-      }
-   }
-
-   if (system_msg) {
-      /* Update existing system message's content */
-      json_object_object_del(system_msg, "content");
-      json_object_object_add(system_msg, "content", json_object_new_string(system_prompt));
-      OLOG_INFO("Session %u: Updated system prompt (%zu chars)", session->session_id,
-                strlen(system_prompt));
-   } else {
-      /* No system message found - insert at index 0.
-       *
-       * IMPORTANT: json-c 0.15 doesn't expose json_object_array_insert_idx,
-       * and json_object_array_put_idx REPLACES whatever's at the given
-       * position rather than inserting before it.  Using put_idx(0, new)
-       * on a non-empty array would silently clobber the first existing
-       * message — corrupted "Hi friend" → vanished if a user message
-       * happened to land at index 0 first.  This bit messaging-backed
-       * sessions specifically because they start with an empty history,
-       * have a user message appended on first inbound, and then this
-       * function fires for per-turn focus injection BEFORE any prior
-       * system prompt exists.  WebUI/voice sessions never tripped it
-       * because they always have a system message at index 0 from
-       * earlier turns.
-       *
-       * Two cases:
-       *   - Empty history → put_idx(0, ...) safely grows the array.
-       *   - Non-empty history (no system message anywhere) → rebuild
-       *     a new array with system at index 0 followed by the
-       *     existing messages, then swap. */
-      struct json_object *new_msg = json_object_new_object();
-      if (new_msg) {
-         json_object_object_add(new_msg, "role", json_object_new_string("system"));
-         json_object_object_add(new_msg, "content", json_object_new_string(system_prompt));
-
-         if (len == 0) {
-            json_object_array_put_idx(session->conversation_history, 0, new_msg);
-         } else {
-            struct json_object *rebuilt = json_object_new_array();
-            if (!rebuilt) {
-               json_object_put(new_msg);
-               OLOG_ERROR("Session %u: failed to allocate rebuilt history", session->session_id);
-               return;
-            }
-            json_object_array_add(rebuilt, new_msg);
-            for (int i = 0; i < len; i++) {
-               struct json_object *old = json_object_array_get_idx(session->conversation_history,
-                                                                   i);
-               /* Bump refcount so the message survives the array put()
-                * below; json_object_array_add doesn't increment, so the
-                * old reference is what carries through. */
-               json_object_get(old);
-               json_object_array_add(rebuilt, old);
-            }
-            json_object_put(session->conversation_history);
-            session->conversation_history = rebuilt;
-         }
-         OLOG_INFO("Session %u: Inserted system prompt at start (%zu chars)", session->session_id,
-                   strlen(system_prompt));
-      }
-   }
-}
-
-/* Helper: scan the conversation history under @p session->history_mutex
- * (CALLER holds it) and rebuild the array so the leading system
- * messages match @p stable + @p volatile.  Existing non-system
- * messages keep their relative order, just sit at indexes 2+ (or 1+
- * if only stable is present).  Either input may be NULL/empty to
- * omit that segment.
- *
- * Returns SUCCESS / FAILURE; on FAILURE the existing history is left
- * intact (no partial mutation). */
-static int rebuild_history_with_two_system_messages_locked(struct json_object **slot,
-                                                           const char *stable_prefix,
-                                                           const char *volatile_block) {
-   if (slot == NULL || *slot == NULL)
-      return FAILURE;
-
-   const bool have_stable = stable_prefix != NULL && stable_prefix[0] != '\0';
-   const bool have_volatile = volatile_block != NULL && volatile_block[0] != '\0';
-   if (!have_stable && !have_volatile)
-      return FAILURE;
-
-   struct json_object *rebuilt = json_object_new_array();
-   if (rebuilt == NULL)
-      return FAILURE;
-
-   if (have_stable) {
-      struct json_object *msg = json_object_new_object();
-      if (msg == NULL) {
-         json_object_put(rebuilt);
-         return FAILURE;
-      }
-      json_object_object_add(msg, "role", json_object_new_string("system"));
-      json_object_object_add(msg, "content", json_object_new_string(stable_prefix));
-      json_object_array_add(rebuilt, msg);
-   }
-   if (have_volatile) {
-      struct json_object *msg = json_object_new_object();
-      if (msg == NULL) {
-         json_object_put(rebuilt);
-         return FAILURE;
-      }
-      json_object_object_add(msg, "role", json_object_new_string("system"));
-      json_object_object_add(msg, "content", json_object_new_string(volatile_block));
-      json_object_array_add(rebuilt, msg);
-   }
-
-   /* Preserve every non-system message in original order. */
-   const int len = json_object_array_length(*slot);
-   for (int i = 0; i < len; i++) {
-      struct json_object *old = json_object_array_get_idx(*slot, i);
-      struct json_object *role_obj = NULL;
-      const char *role = NULL;
-      if (json_object_object_get_ex(old, "role", &role_obj))
-         role = json_object_get_string(role_obj);
-      if (role != NULL && strcmp(role, "system") == 0)
-         continue;
-      /* Refcount bump: json_object_array_add takes ownership but old
-       * is still referenced by the old array until we put it. */
-      json_object_get(old);
-      json_object_array_add(rebuilt, old);
-   }
-
-   json_object_put(*slot);
-   *slot = rebuilt;
-   return SUCCESS;
-}
-
-/* Caller holds history_mutex.  The @p index'th message of @p hist when it is a
- * system message: its content; NULL otherwise. */
-static const char *system_content_at(struct json_object *hist, int index) {
-   if (!hist || (int)json_object_array_length(hist) <= index) {
-      return NULL;
-   }
-   struct json_object *msg = json_object_array_get_idx(hist, index);
-   struct json_object *role = NULL;
-   struct json_object *content = NULL;
-   if (json_object_object_get_ex(msg, "role", &role) &&
-       strcmp(json_object_get_string(role), "system") == 0 &&
-       json_object_object_get_ex(msg, "content", &content)) {
-      return json_object_get_string(content);
-   }
-   return NULL;
-}
-
-/* The device events rendered into a volatile block start at their header. */
-static const char *find_notices(const char *vol) {
-   return vol ? strstr(vol, session_notices_header()) : NULL;
-}
-
-/* Caller holds history_mutex.  Rebuild the running turn's history (or the live
- * one) so it leads with @p stable_prefix and the volatile block: @p
- * volatile_block plus the session's recent device events.  NULL for either
- * keeps what that history has (the volatile block without the device events it
- * was last rendered with).  @p viewer_user_id: whose device events to show
- * (session_effective_user_id(), read before taking history_mutex). */
-static void apply_system_messages_locked(session_t *session,
-                                         const char *stable_prefix,
-                                         const char *volatile_block,
-                                         int viewer_user_id) {
-   if (session->conversation_history == NULL) {
-      session->conversation_history = json_object_new_array();
-      if (session->conversation_history == NULL) {
-         return;
-      }
-   }
-
-   /* The system messages belong to the running turn's context: rebuild the
-    * turn's own history when the user has since opened another conversation,
-    * else the live one (moving the turn's pin with it when they are the same). */
-   const bool pinned_elsewhere = session->turn_history != NULL &&
-                                 session->turn_history != session->conversation_history;
-   const bool pinned_live = session->turn_history != NULL && !pinned_elsewhere;
-   struct json_object **slot = pinned_elsewhere ? &session->turn_history
-                                                : &session->conversation_history;
-
-   char *kept_stable = NULL;
-   if (stable_prefix == NULL) {
-      const char *first = system_content_at(*slot, 0);
-      kept_stable = first ? strdup(first) : NULL;
-      stable_prefix = kept_stable;
-   }
-   char *kept_volatile = NULL;
-   if (volatile_block == NULL) {
-      /* This history's own volatile block (a two-message shape), without the
-       * events rendered into it last time. */
-      const char *second = system_content_at(*slot, 1);
-      if (second) {
-         const char *cut = find_notices(second);
-         size_t len = cut ? (size_t)(cut - second) : strlen(second);
-         while (len > 0 && second[len - 1] == '\n') {
-            len--;
-         }
-         kept_volatile = strndup(second, len);
-      }
-      volatile_block = kept_volatile ? kept_volatile : "";
-   }
-
-   char *notices = session_render_notices_locked(session, viewer_user_id);
-   char *combined = NULL;
-   if (notices && notices[0] != '\0') {
-      const size_t n = strlen(volatile_block) + strlen(notices) + 3;
-      combined = malloc(n);
-      if (combined) {
-         snprintf(combined, n, "%s%s%s", volatile_block, volatile_block[0] ? "\n\n" : "", notices);
-      }
-   }
-   const char *vol = combined ? combined : volatile_block;
-
-   if (rebuild_history_with_two_system_messages_locked(slot, stable_prefix, vol) != SUCCESS) {
-      /* Nothing to lead with, or out of memory: the history is left as it was. */
-      if ((stable_prefix && stable_prefix[0]) || vol[0]) {
-         OLOG_ERROR("Session %u: failed to rebuild history with two-system-messages shape",
-                    session->session_id);
-      }
-   } else if (pinned_live) {
-      json_object_put(session->turn_history);
-      session->turn_history = json_object_get(session->conversation_history);
-   }
-   free(combined);
-   free(notices);
-   free(kept_volatile);
-   free(kept_stable);
-}
-
-void session_update_system_messages(session_t *session,
-                                    const char *stable_prefix,
-                                    const char *volatile_block) {
-   if (session == NULL)
-      return;
-   const bool have_stable = stable_prefix != NULL && stable_prefix[0] != '\0';
-   const bool have_volatile = volatile_block != NULL && volatile_block[0] != '\0';
-   if (!have_stable && !have_volatile)
-      return; /* nothing to push — leave system messages as-is */
-
-   const int viewer = session_effective_user_id(session);
-   pthread_mutex_lock(&session->history_mutex);
-   apply_system_messages_locked(session, have_stable ? stable_prefix : "",
-                                have_volatile ? volatile_block : "", viewer);
-
-   /* Drift detection.  Hash the stable prefix and compare to the
-    * session's last-known value.  First call post-init (prior hash 0)
-    * always "drifts"; the drift_logged gate suppresses that boot-time
-    * log so the operator only sees genuine cache-busting events
-    * (settings edits, code regressions that leak volatile into stable).
-    * Cheap — FNV-1a over ~3.7 KB takes microseconds. */
-   const uint32_t new_hash = have_stable ? prompt_compose_fnv1a(stable_prefix) : 0u;
-   const uint32_t prev_hash = session->stable_prefix_hash;
-   if (prev_hash != 0u && prev_hash != new_hash && !session->stable_prefix_drift_logged) {
-      OLOG_INFO("Session %u: stable prefix drifted (was %08x, now %08x) — Anthropic cache "
-                "invalidated for one turn",
-                session->session_id, prev_hash, new_hash);
-      session->stable_prefix_drift_logged = true;
-   }
-   session->stable_prefix_hash = new_hash;
-
-   pthread_mutex_unlock(&session->history_mutex);
-
-   OLOG_INFO("Session %u: Updated system messages (stable=%zu, volatile=%zu chars)",
-             session->session_id, have_stable ? strlen(stable_prefix) : 0,
-             have_volatile ? strlen(volatile_block) : 0);
-}
-
-/* For a turn that keeps its last prompt (no prompt builder, no user, or the
- * builder failed): re-render the device events into the volatile block of the
- * history the turn runs on, keeping the rest of its system messages. */
-static void session_refresh_notices(session_t *session) {
-   const int viewer = session_effective_user_id(session);
-   pthread_mutex_lock(&session->history_mutex);
-   struct json_object *hist = session->turn_history ? session->turn_history
-                                                    : session->conversation_history;
-   /* Skip when there's nothing to add and nothing rendered last time to take out. */
-   if (session->notice_count > 0 || find_notices(system_content_at(hist, 1)) != NULL) {
-      apply_system_messages_locked(session, NULL, NULL, viewer);
-   }
-   pthread_mutex_unlock(&session->history_mutex);
-}
-
-void session_append_to_volatile_segment(session_t *session, const char *text) {
-   if (session == NULL || text == NULL || text[0] == '\0')
-      return;
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   /* The running turn's history (the pin), which may be its own copy of
-    * another conversation; the live history otherwise. */
-   struct json_object *hist = session->turn_history ? session->turn_history
-                                                    : session->conversation_history;
-   if (hist == NULL) {
-      pthread_mutex_unlock(&session->history_mutex);
-      return;
-   }
-
-   /* Walk backward to find the LAST role:"system" message.  In the
-    * two-segment shape that's the volatile block; in legacy single-
-    * message sessions it's the lone system message.  Either way the
-    * cacheable stable prefix at messages[0] is untouched whenever the
-    * two-message shape applies. */
-   const int len = json_object_array_length(hist);
-   struct json_object *target = NULL;
-   for (int i = len - 1; i >= 0; i--) {
-      struct json_object *msg = json_object_array_get_idx(hist, i);
-      struct json_object *role_obj = NULL;
-      if (!json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-      const char *role = json_object_get_string(role_obj);
-      if (role != NULL && strcmp(role, "system") == 0) {
-         target = msg;
-         break;
-      }
-   }
-   if (target == NULL) {
-      pthread_mutex_unlock(&session->history_mutex);
-      return;
-   }
-
-   struct json_object *content_obj = NULL;
-   if (!json_object_object_get_ex(target, "content", &content_obj)) {
-      pthread_mutex_unlock(&session->history_mutex);
-      return;
-   }
-   const char *current = json_object_get_string(content_obj);
-   if (current == NULL)
-      current = "";
-
-   const size_t cur_len = strlen(current);
-   const size_t hint_len = strlen(text);
-   char *augmented = malloc(cur_len + hint_len + 3);
-   if (augmented == NULL) {
-      pthread_mutex_unlock(&session->history_mutex);
-      return;
-   }
-   memcpy(augmented, current, cur_len);
-   augmented[cur_len] = '\n';
-   augmented[cur_len + 1] = '\n';
-   memcpy(augmented + cur_len + 2, text, hint_len);
-   augmented[cur_len + 2 + hint_len] = '\0';
-
-   json_object_object_del(target, "content");
-   json_object_object_add(target, "content", json_object_new_string(augmented));
-   free(augmented);
-
-   pthread_mutex_unlock(&session->history_mutex);
-}
-
-char *session_get_system_prompt(session_t *session) {
-   if (!session) {
-      return NULL;
-   }
-
-   char *result = NULL;
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   if (session->conversation_history) {
-      int len = json_object_array_length(session->conversation_history);
-      for (int i = 0; i < len; i++) {
-         struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
-         struct json_object *role_obj;
-         if (json_object_object_get_ex(msg, "role", &role_obj)) {
-            const char *role = json_object_get_string(role_obj);
-            if (role && strcmp(role, "system") == 0) {
-               struct json_object *content_obj;
-               if (json_object_object_get_ex(msg, "content", &content_obj)) {
-                  const char *content = json_object_get_string(content_obj);
-                  if (content) {
-                     result = strdup(content);
-                  }
-               }
-               break;
-            }
-         }
-      }
-   }
-
-   pthread_mutex_unlock(&session->history_mutex);
-
-   return result;
 }
 
 char *session_get_full_system_prompt(session_t *session) {
@@ -1984,74 +1521,18 @@ char *session_get_last_message_content(session_t *session, const char *role) {
  * (main) is visible to refresh callers on MQTT / worker threads
  * without stale-NULL reads on weakly ordered architectures. */
 static _Atomic(session_prompt_builder_t) s_prompt_builder = NULL;
-static _Atomic(session_local_prompt_builder_t) s_local_prompt_builder = NULL;
 
 void session_manager_set_prompt_builder(session_prompt_builder_t fn) {
    atomic_store_explicit(&s_prompt_builder, fn, memory_order_release);
 }
 
-void session_manager_set_local_prompt_builder(session_local_prompt_builder_t fn) {
-   atomic_store_explicit(&s_local_prompt_builder, fn, memory_order_release);
-}
-
-/* =============================================================================
- * Phase 1e: composed_prompt_t lifecycle + composer
- *
- * Implementation extracted to src/core/prompt_compose.c so the composer
- * can be unit-tested without dragging the full session-manager runtime
- * (auth_db, conv_db, satellite_db, ...) into the test link.  The
- * session_manager-namespaced functions below are thin wrappers that
- * forward to the extracted helpers — public API is unchanged.
- * ============================================================================= */
-
-void composed_prompt_free(composed_prompt_t *p) {
-   prompt_compose_free(p);
-}
-
-char *session_manager_compose_prompt_string(const composed_prompt_t *blocks) {
-   return prompt_compose_to_string(blocks);
-}
-
-/* Run the registered builder with kind=SESSION_START and flatten.
- * Convenience wrapper for capability-change refresh callers that need
- * a `char *` to hand to session_update_system_prompt — preserves the
- * legacy `build_user_prompt(int)` ownership semantics so the 9
- * existing call sites need a one-line rename rather than a full
- * composed_prompt_t lifecycle dance. */
-char *session_manager_build_system_prompt_string(int user_id) {
-   session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
-   if (builder == NULL)
-      return NULL;
-
-   composed_prompt_t cp = { 0 };
-   if (builder(user_id, /*user_turn_text*/ NULL, PROMPT_REFRESH_SESSION_START, &cp) != SUCCESS) {
-      composed_prompt_free(&cp);
-      return NULL;
-   }
-   /* Capability-change refresh path wants a single flattened string —
-    * its callers go through the legacy `session_update_system_prompt`
-    * single-message API.  The cache-eligible per-turn path uses
-    * `session_update_system_messages` instead so messages[0] stays
-    * stable across turns. */
-   char *flat = session_manager_compose_prompt_string(&cp);
-   composed_prompt_free(&cp);
-   return flat;
-}
-
-/* =============================================================================
- * Phase 1e: per-turn refresh dispatch
- * ============================================================================= */
-
 int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
-   /* Phase 1f defense: erase any stale dispatch-session pointer before
-    * doing anything else.  Today's only writers (the four explicit
-    * clear-on-return paths in this function) cover all return points,
-    * but a future signal handler / pthread_cancel / setjmp unwind path
-    * could leave the slot non-NULL for the next dispatch on this
-    * thread.  This belt-and-suspenders clear makes the setter
-    * idempotent against stale state — security audit MEDIUM. */
-   session_set_dispatch_session(NULL);
+   return session_dispatch_user_turn_ex(session, user_turn_text, NULL);
+}
 
+int session_dispatch_user_turn_ex(session_t *session,
+                                  const char *user_turn_text,
+                                  const char *turn_note) {
    if (session == NULL || user_turn_text == NULL)
       return SUCCESS;
 
@@ -2069,174 +1550,39 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
 
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
    if (builder == NULL) {
-      session_refresh_notices(session); /* the prompt stays; its device events don't */
+      /* No builder (a build without one): the base prompt is what a new
+       * context freezes; a frozen one keeps its own. */
+      composed_prompt_t base = { .stable_prefix = get_command_prompt_dup() };
+      session_prefix_apply_turn(session, base.stable_prefix ? &base : NULL, turn_note);
+      composed_prompt_free(&base);
       return SUCCESS;
    }
 
    /* Re-read user_id under metrics_mutex so satellite rebinds that
-    * occurred since last turn are picked up.  Session manager design
-    * pattern (matches refresh_all_prompts at line 1700-1702). */
+    * occurred since last turn are picked up.  A guest (0: an unmapped
+    * satellite, a local mic with no voice user) gets the base prompt, its
+    * surface's standing directions and the time; the builder adds nothing of
+    * any user's (settings, memory, retrieval are gated on a user). */
    const int user_id = session_effective_user_id(session);
-   if (user_id <= 0) {
-      session_refresh_notices(session); /* unauthenticated: base prompt + device events */
+
+   composed_prompt_t cp = { 0 };
+   if (builder(session, user_id, user_turn_text, &cp) != SUCCESS) {
+      /* The history keeps the prompt it has; the turn still gets its device
+       * events and note.  Dispatch is never blocked by a builder failure. */
+      OLOG_WARNING("session_dispatch_user_turn: builder failed (user_id=%d); the turn runs on "
+                   "the prompt its history has",
+                   user_id);
+      composed_prompt_free(&cp);
+      session_prefix_apply_turn(session, NULL, turn_note);
       return SUCCESS;
    }
 
-   /* Phase 1f: publish the dispatch session into TLS so build_focus_block
-    * can find the dedup set without needing session plumbed through the
-    * builder typedef.  Cleared on every return path below; the worker
-    * thread's TLS slot returns to NULL before the next dispatch.  Order
-    * matters: set BEFORE the builder call, clear AFTER all uses (system-
-    * prompt swap completes in the success path). */
-   session_set_dispatch_session(session);
-
-   composed_prompt_t cp = { 0 };
-   const int rc = builder(user_id, user_turn_text, PROMPT_REFRESH_PER_TURN, &cp);
-   if (rc != SUCCESS) {
-      /* Builder failure — focus_block guaranteed NULL by builder
-       * contract.  Skip the system-prompt swap entirely; LLM dispatch
-       * proceeds with last-good system prompt.  The previous turn's
-       * focus_block content NEVER leaks into this turn because the
-       * last-good prompt is whatever was set at session start (no
-       * stale focus from a prior PER_TURN call). */
-      OLOG_WARNING("session_dispatch_user_turn: builder failed (user_id=%d, kind=PER_TURN) — "
-                   "skipping system-prompt swap, LLM dispatch proceeds with last-good prompt",
-                   user_id);
-      composed_prompt_free(&cp);
-      session_set_dispatch_session(NULL);
-      session_refresh_notices(session);
-      return SUCCESS; /* LLM dispatch never blocked by focus errors. */
-   }
-
-   /* Push the two-segment shape: messages[0]=stable, messages[1]=volatile.
-    * Anthropic attaches cache_control to messages[0] in llm_claude_format;
-    * the volatile message[1] is never cached.  OpenAI Responses
-    * concatenates the two via extract_system_instructions; chat-completions
-    * tolerates two consecutive system messages.
-    *
-    * DAP2 Room/HomeAssistant_Area suffix has already been baked INTO
-    * cp.stable_prefix by dawn_build_prompt (via append_satellite_
-    * context_to_stable, gated on the dispatch session's type).  No
-    * post-rebuild append here — doing so would mutate the cached
-    * prefix after the drift hash was computed, hiding mid-session
-    * ha_area changes from the drift-log signal (architecture review
-    * 2026-05-28).  Session-START / refresh-all-prompts paths still
-    * use session_append_satellite_context directly; only the per-turn
-    * dispatch path now relies on the in-builder append. */
-   session_update_system_messages(session, cp.stable_prefix, cp.volatile_block);
+   /* The conversation's frozen prompt, what changed appended after the
+    * question, and the turn's context in front of it (session_prefix.h). */
+   session_prefix_apply_turn(session, &cp, turn_note);
    composed_prompt_free(&cp);
-
-   session_set_dispatch_session(NULL);
    return SUCCESS;
 }
-
-void session_manager_refresh_all_prompts(void) {
-   if (!initialized) {
-      return;
-   }
-
-   /* Snapshot only session IDs under the read lock. We intentionally do NOT
-    * snapshot user_id here — on a satellite rebind the session object can be
-    * reassigned to a different user between snapshot and apply, and using a
-    * stale user_id would cause user A's persona + memory context to be
-    * written into user B's session. Instead, user_id is re-read under
-    * metrics_mutex during apply (after session_get() retains the session). */
-   uint32_t snapshot_ids[MAX_SESSIONS];
-   int count = 0;
-
-   pthread_rwlock_rdlock(&session_manager_rwlock);
-   for (int i = 0; i < MAX_SESSIONS; i++) {
-      session_t *s = sessions[i];
-      if (!s) {
-         continue;
-      }
-      snapshot_ids[count++] = s->session_id;
-   }
-   pthread_rwlock_unlock(&session_manager_rwlock);
-
-   session_local_prompt_builder_t local_builder = atomic_load_explicit(&s_local_prompt_builder,
-                                                                       memory_order_acquire);
-   /* Phase 1e: structured builder.  Loaded inside the loop on demand
-    * via session_manager_build_system_prompt_string() so each session's
-    * SESSION_START rebuild picks up the per-user persona/memory blocks
-    * and the (currently-empty for SESSION_START) focus block. */
-
-   int refreshed = 0;
-   for (int i = 0; i < count; i++) {
-      session_t *s = session_get(snapshot_ids[i]); /* Retains */
-      if (!s) {
-         continue;
-      }
-
-      /* Re-read user_id and type under the session's own locks so rebinds
-       * that have occurred since the snapshot are picked up. */
-      session_type_t type = s->type;
-      pthread_mutex_lock(&s->metrics_mutex);
-      int user_id = s->metrics.user_id;
-      pthread_mutex_unlock(&s->metrics_mutex);
-
-      const char *static_prompt = NULL;
-      char *owned_prompt = NULL;
-
-      if (type == SESSION_TYPE_LOCAL) {
-         /* Local mic session — delegate to dawn.c so the prompt matches the
-          * active command_processing_mode (direct-only vs LLM).  Local-mic
-          * focus injection is a follow-up phase; SESSION_TYPE_LOCAL stays
-          * on the legacy single-string peer. */
-         static_prompt = local_builder ? local_builder() : get_local_command_prompt();
-      } else if (user_id > 0) {
-         /* Authenticated WebUI / satellite — rebuild with per-user persona
-          * via the structured builder (PER_TURN focus block is empty for
-          * a capability-change refresh — this is a SESSION_START path).
-          *
-          * Phase 1f: clear the session's focus-injection dedup state
-          * BEFORE invoking the builder so the next PER_TURN admits all
-          * candidates fresh.  The builder itself stays kind-agnostic —
-          * the clear is the session_manager's responsibility, not the
-          * builder's.  Self-locking; safe under read-lock. */
-         session_injected_set_clear(s);
-         owned_prompt = session_manager_build_system_prompt_string(user_id);
-         if (owned_prompt == NULL) {
-            /* Builder unregistered or failed — fall back to base remote
-             * prompt so the session keeps a usable system message. */
-            static_prompt = get_remote_command_prompt();
-         }
-      } else {
-         /* Unauthenticated remote or WebUI not registered — base remote prompt */
-         static_prompt = get_remote_command_prompt();
-      }
-
-      const char *use_prompt = owned_prompt ? owned_prompt : static_prompt;
-      if (use_prompt) {
-         session_update_system_prompt(s, use_prompt);
-
-         /* DAP2 satellites originally have room + HA area appended after
-          * registration via session_append_satellite_context(). Refresh
-          * replaces the whole prompt, so we must re-apply that suffix or
-          * Home Assistant commands lose their area scoping. The append
-          * helper is a no-op if the suffix is already present. */
-         if (type == SESSION_TYPE_DAP2 && s->identity.uuid[0] != '\0') {
-            satellite_mapping_t mapping;
-            if (satellite_db_get(s->identity.uuid, &mapping) == 0) {
-               session_append_satellite_context(s, s->identity.location, mapping.ha_area);
-            } else {
-               /* No mapping row — still re-append room from identity if set */
-               session_append_satellite_context(s, s->identity.location, NULL);
-            }
-         }
-
-         refreshed++;
-      }
-
-      free(owned_prompt);
-      session_release(s);
-   }
-
-   if (refreshed > 0) {
-      OLOG_INFO("Refreshed system prompt on %d active session(s)", refreshed);
-   }
-}
-
 
 // =============================================================================
 // Per-Session LLM Configuration

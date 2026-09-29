@@ -90,7 +90,9 @@ void evict_session_slot(const char *provider, const char *provider_address) {
  * lock failure or an empty conversation.  Used by the staleness check
  * in process_inbound to detect external writers (WebUI conversation
  * panel, voice session, MCP) appending to the same conv between
- * messaging-channel turns. */
+ * messaging-channel turns.  Request-context rows count too: one another
+ * surface wrote (a directive, a changed instruction) is part of what a reload
+ * replays, so this session must pick it up. */
 static int64_t messaging_conv_get_max_msg_id(int64_t conv_id) {
    if (conv_id <= 0) {
       return 0;
@@ -98,6 +100,7 @@ static int64_t messaging_conv_get_max_msg_id(int64_t conv_id) {
    AUTH_DB_LOCK_OR_RETURN(0);
    sqlite3_stmt *stmt = NULL;
    int64_t max_id = 0;
+   /* kind-rows: see above. */
    const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(stmt, 1, conv_id);

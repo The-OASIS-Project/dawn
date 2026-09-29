@@ -47,6 +47,7 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "llm/llm_cache_monitor.h"
+#include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
@@ -810,7 +811,11 @@ static void *briefing_thread_func(void *arg) {
          char value_buf[SCHED_TOOL_VALUE_MAX];
          snprintf(value_buf, sizeof(value_buf), "%s", steps[i].tool_value);
          int should_respond = 0;
-         char *step_result = step_meta->callback(steps[i].tool_action, value_buf, &should_respond);
+         /* Called directly, not through llm_tools_execute: its result is
+          * neutralized here the same way (text from anywhere, headed for an
+          * LLM and a conversation). */
+         char *step_result = llm_context_neutralize_owned(
+             step_meta->callback(steps[i].tool_action, value_buf, &should_respond));
          if (!step_result) {
             OLOG_WARNING("scheduler: briefing %lld step %d (%s) returned NULL",
                          (long long)event->id, i + 1, steps[i].tool_name);
@@ -893,7 +898,8 @@ static void *briefing_thread_func(void *arg) {
       char value_buf[SCHED_TOOL_VALUE_MAX];
       snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
       int should_respond = 0;
-      tool_result = meta->callback(event->tool_action, value_buf, &should_respond);
+      tool_result = llm_context_neutralize_owned(
+          meta->callback(event->tool_action, value_buf, &should_respond));
 
       if (!tool_result) {
          OLOG_ERROR("scheduler: briefing %lld tool returned NULL", (long long)event->id);

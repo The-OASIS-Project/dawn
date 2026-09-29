@@ -16,10 +16,11 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * WebUI image-marker rehydration (see webui_image_rehydrate.h).
+ * Image-marker rehydration for replay: a stored [IMAGE:<id>] marker becomes
+ * the image content a request sends (see image_rehydrate.h).
  */
 
-#include "webui/webui_image_rehydrate.h"
+#include "core/image_rehydrate.h"
 
 #include <json-c/json.h>
 #include <stdio.h>
@@ -89,9 +90,7 @@ static bool append_image_url_part(struct json_object *arr, const char *data_uri)
    return true;
 }
 
-char *webui_build_image_marker_content(const char *text,
-                                       const char ids[][IMAGE_ID_LEN],
-                                       int count) {
+char *image_marker_build_content(const char *text, const char ids[][IMAGE_ID_LEN], int count) {
    if (!text) {
       return NULL;
    }
@@ -103,7 +102,7 @@ char *webui_build_image_marker_content(const char *text,
    }
    for (int i = 0; i < count; i++) {
       /* image_store_validate_id is the single authoritative id validator — mirrors
-       * the parse side (webui_collect_image_ids), so a bad id can't forge a marker. */
+       * the parse side (image_marker_collect_ids), so a bad id can't forge a marker. */
       if (!ids || !image_store_validate_id(ids[i])) {
          OLOG_WARNING("WebUI: skipping invalid image id while building persist markers");
          continue;
@@ -118,10 +117,10 @@ char *webui_build_image_marker_content(const char *text,
    return out;
 }
 
-int webui_collect_image_ids(const char *content,
-                            char ids_out[][IMAGE_ID_LEN],
-                            int max,
-                            int *count_out) {
+int image_marker_collect_ids(const char *content,
+                             char ids_out[][IMAGE_ID_LEN],
+                             int max,
+                             int *count_out) {
    if (count_out) {
       *count_out = 0;
    }
@@ -173,7 +172,7 @@ static struct json_object *text_message(const char *role, const char *content) {
    return m;
 }
 
-struct json_object *webui_rehydrate_message(int user_id, const char *role, const char *content) {
+struct json_object *image_rehydrate_message(int user_id, const char *role, const char *content) {
    if (!role || !content) {
       return NULL;
    }
@@ -215,8 +214,8 @@ struct json_object *webui_rehydrate_message(int user_id, const char *role, const
       /* Legacy inline data URI → use directly as an image_url. */
       if (body_len > DATA_URI_SCHEME_LEN &&
           strncmp(body, DATA_URI_SCHEME, DATA_URI_SCHEME_LEN) == 0) {
-         if (json_object_array_length(image_parts) >= WEBUI_MAX_REHYDRATE_IMAGES ||
-             total_bytes + body_len > WEBUI_MAX_REHYDRATE_BYTES) {
+         if (json_object_array_length(image_parts) >= IMAGE_REHYDRATE_MAX_IMAGES ||
+             total_bytes + body_len > IMAGE_REHYDRATE_MAX_BYTES) {
             strbuf_append(&prose, " [earlier image omitted]");
             continue;
          }
@@ -256,8 +255,8 @@ struct json_object *webui_rehydrate_message(int user_id, const char *role, const
       }
 
       /* Defensive ceilings (crash backstop — see header): total bytes and part count. */
-      if (json_object_array_length(image_parts) >= WEBUI_MAX_REHYDRATE_IMAGES ||
-          total_bytes + meta.size > WEBUI_MAX_REHYDRATE_BYTES) {
+      if (json_object_array_length(image_parts) >= IMAGE_REHYDRATE_MAX_IMAGES ||
+          total_bytes + meta.size > IMAGE_REHYDRATE_MAX_BYTES) {
          strbuf_append(&prose, " [earlier image omitted]");
          continue;
       }

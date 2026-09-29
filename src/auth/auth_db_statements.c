@@ -313,7 +313,7 @@ int auth_db_prepare_statements(void) {
                            "c.continued_from, c.compaction_summary, c.is_private, c.origin "
                            "FROM conversations c "
                            "INNER JOIN messages m ON m.conversation_id = c.id "
-                           "WHERE c.user_id = ? AND m.content LIKE ? "
+                           "WHERE c.user_id = ? AND m.content LIKE ? AND m.kind IS NULL "
                            "ORDER BY c.updated_at DESC LIMIT ? OFFSET ?",
                            -1, &s_db.stmt_conv_search_content, NULL);
    if (rc != SQLITE_OK) {
@@ -385,7 +385,7 @@ int auth_db_prepare_statements(void) {
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
        "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
-       "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.id ASC",
+       "WHERE m.conversation_id = ? AND c.user_id = ? AND m.kind IS NULL ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get failed: %s", sqlite3_errmsg(s_db.db));
@@ -400,7 +400,8 @@ int auth_db_prepare_statements(void) {
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
        "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
-       "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? ORDER BY m.id ASC",
+       "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? AND m.kind IS NULL "
+       "ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get_after, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get_after failed: %s", sqlite3_errmsg(s_db.db));
@@ -411,7 +412,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, "
                            "reasoning, created_at, "
-                           "is_error FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+                           "is_error FROM messages WHERE conversation_id = ? AND kind IS NULL "
+                           "ORDER BY id ASC",
                            -1, &s_db.stmt_msg_get_admin, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get_admin failed: %s", sqlite3_errmsg(s_db.db));
@@ -758,7 +760,8 @@ int auth_db_prepare_statements(void) {
         * different blob, and the anchor avoids pinning a blob on stray prose.
         * This "blob:<id>]" marker is mirrored by the JS producer (dawn.js) and
         * parser (documents.js); kept in sync by scripts/check_blob_marker_sync.sh
-        * — a drift here silently reclaims still-attached files (data loss). */
+        * — a drift here silently reclaims still-attached files (data loss).
+        * kind-rows: every row counts, so a file is kept while anything names it. */
        "SELECT b.id, b.filename FROM blobs b "
        "WHERE b.kind = 0 AND b.retention_policy != 1 AND b.created_at < ? "
        "AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.original_blob_id = b.id) "

@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "llm/llm_claude_parts.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
@@ -69,6 +70,10 @@ int llm_responses_count_leading_system_run(struct json_object *history) {
       if (!json_object_object_get_ex(msg, "role", &role_obj))
          break;
       if (strcmp(json_object_get_string(role_obj), "system") != 0)
+         break;
+      /* A directive or instruction change is the conversation's, not the prompt's. */
+      const message_kind_t kind = llm_history_kind_of(msg);
+      if (kind == MESSAGE_KIND_DIRECTIVE || kind == MESSAGE_KIND_INSTRUCTION)
          break;
       run++;
    }
@@ -301,6 +306,10 @@ struct json_object *llm_responses_build_input(struct json_object *history,
    if (!input)
       return NULL;
 
+   /* The newest user item while it is still the conversation's last word (an
+    * operator's direction after it doesn't change that). */
+   struct json_object *question_item = NULL;
+
    int len = json_object_array_length(history);
    for (int i = 0; i < len; i++) {
       struct json_object *msg = json_object_array_get_idx(history, i);
@@ -332,6 +341,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          json_object_array_add(bc_arr, bc_part);
          json_object_object_add(bc_item, "content", bc_arr);
          json_object_array_add(input, bc_item);
+         if (llm_history_kind_of(msg) == MESSAGE_KIND_NONE) {
+            question_item = NULL; /* an older build's system message ends the question */
+         }
          continue;
       }
 
@@ -349,6 +361,7 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          json_object_object_add(item, "output",
                                 json_object_new_string(json_object_get_string(content_obj)));
          json_object_array_add(input, item);
+         question_item = NULL;
          continue;
       }
 
@@ -358,6 +371,7 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          struct json_object *blocks = llm_turn_message_blocks(msg);
          llm_turn_blocks_render_responses(blocks, input, carrier, model);
          json_object_put(blocks);
+         question_item = NULL;
          continue;
       }
 
@@ -424,10 +438,12 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          if (json_object_array_length(content_array) > 0) {
             json_object_object_add(item, "content", content_array);
             json_object_array_add(input, item);
+            question_item = item;
          } else {
             /* Only tool results: they were emitted as their own items. */
             json_object_put(content_array);
             json_object_put(item);
+            question_item = NULL;
          }
       }
    }
@@ -441,47 +457,19 @@ struct json_object *llm_responses_build_input(struct json_object *history,
     * this with the identical last-is-user check (llm_openai_history.c:638); mirror it so
     * the Responses request carries the question exactly once. When the last item already
     * IS the user turn, attach any vision to it instead of emitting a duplicate. */
-   int tail_n = json_object_array_length(input);
-   struct json_object *tail_item = (tail_n > 0) ? json_object_array_get_idx(input, tail_n - 1)
-                                                : NULL;
-   bool tail_is_user = false;
-   if (tail_item != NULL) {
-      struct json_object *tr;
-      if (json_object_object_get_ex(tail_item, "role", &tr) && json_object_get_string(tr) &&
-          strcmp(json_object_get_string(tr), "user") == 0)
-         tail_is_user = true;
-   }
+   struct json_object *tail_item = question_item;
+   const bool tail_is_user = tail_item != NULL;
 
-   if (tail_is_user && input_text && *input_text) {
-      /* Question already present as the last history item — REPLACE its content with
-       * input_text (+ vision) rather than appending a duplicate. input_text is
-       * authoritative for the current question, so this mirrors the CC builder
-       * (llm_openai_history.c: last_is_user → rebuild the last user message's content).
-       * PRECONDITION (holds on every live call path): the trailing user item IS the
-       * current question — the add-path leaves history ending in an assistant turn, and
-       * the no-add path's trailing user is the same text passed here. If a caller ever
-       * violated it (trailing user is an older, different unanswered turn), that turn's
-       * text would be overwritten rather than preserved — same as the CC builder.
-       * tail_item is a fresh object this function built in the history loop, so
-       * replacing its "content" key (json_object_object_add frees the old value) is safe. */
-      struct json_object *content_array = json_object_new_array();
-      struct json_object *part = json_object_new_object();
-      json_object_object_add(part, "type", json_object_new_string("input_text"));
-      json_object_object_add(part, "text", json_object_new_string(input_text));
-      json_object_array_add(content_array, part);
-      llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
-                                        vision_image_count);
-      json_object_object_add(tail_item, "content", content_array);
-   } else if (tail_is_user) {
-      /* No new input_text (e.g. a tool-loop iteration) — keep the existing question,
-       * just attach vision to it if any images were supplied. */
-      if (vision_image_count > 0) {
-         struct json_object *content_obj;
-         if (json_object_object_get_ex(tail_item, "content", &content_obj) &&
-             json_object_get_type(content_obj) == json_type_array) {
-            llm_responses_append_vision_parts(content_obj, vision_images, vision_image_sizes,
-                                              vision_image_count);
-         }
+   if (tail_is_user) {
+      /* The question is already the last history item, as sent: its context,
+       * its text and its own images (a turn's images live in its question's
+       * history message).  Kept exactly as built above; images a caller still
+       * passes are added to it. */
+      struct json_object *content_obj;
+      if (vision_image_count > 0 && json_object_object_get_ex(tail_item, "content", &content_obj) &&
+          json_object_get_type(content_obj) == json_type_array) {
+         llm_responses_append_vision_parts(content_obj, vision_images, vision_image_sizes,
+                                           vision_image_count);
       }
    } else if (input_text && *input_text) {
       struct json_object *item = json_object_new_object();
@@ -508,8 +496,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
     * [instructions][tools][history] caches cross-turn (see the cache-layout note at
     * the top of this file). Anchoring on "last user item" is robust to whether the
     * question arrived via history or input_text, and keeps the volatile pinned before
-    * the (fixed) question across tool-loop iterations. Not persisted — the session
-    * already rebuilds/replaces the two system messages each turn. */
+    * the (fixed) question across tool-loop iterations. Only a history without a frozen
+    * prefix has one (a session whose system messages are its prompt: a research run);
+    * a frozen conversation's turn context is part of its question. */
    if (volatile_block && *volatile_block) {
       int n = json_object_array_length(input);
       int last_user = -1;

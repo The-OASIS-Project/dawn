@@ -1370,17 +1370,6 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    /* Track tools enable/disable changes for prompt rebuild */
    bool old_tools_enabled = g_config.llm.tools.enabled;
 
-   /* Track voice-directive changes.  These feed the cached LOCAL-mic prompt
-    * (initialize_command_prompt), which only rebuilds on
-    * invalidate_system_instructions(); satellites/WebUI rebuild per turn and
-    * pick up edits automatically, but the local static prompt would otherwise
-    * stay stale until the next capability change or restart.  voice_directive_webui
-    * is NOT tracked here — it only rides the per-turn WebUI volatile block. */
-   char old_voice_directive[CONFIG_DESCRIPTION_MAX];
-   char old_disambiguation_hint[CONFIG_DESCRIPTION_MAX];
-   safe_strscpy(old_voice_directive, g_config.tts.voice_directive);
-   safe_strscpy(old_disambiguation_hint, g_config.asr.disambiguation_hint);
-
    /* Track local endpoint changes for provider cache invalidation */
    char old_local_endpoint[128];
    safe_strscpy(old_local_endpoint, g_config.llm.local.endpoint);
@@ -1393,14 +1382,6 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    dawn_config_t *mutable_config = (dawn_config_t *)config_get();
    apply_config_from_json(mutable_config, payload);
    bool tools_mode_changed = (old_tools_enabled != g_config.llm.tools.enabled);
-   /* Name reflects intent: gates the LOCAL static-prompt rebuild.  Both fields
-    * baked into that prompt are tracked (tts.voice_directive AND the [asr]
-    * disambiguation_hint); a new field baked into the local prompt must be added
-    * here too or its edit won't apply without a restart.  voice_directive_webui
-    * is intentionally excluded — it only rides the per-turn WebUI volatile block. */
-   bool local_prompt_directives_changed =
-       (strcmp(old_voice_directive, g_config.tts.voice_directive) != 0 ||
-        strcmp(old_disambiguation_hint, g_config.asr.disambiguation_hint) != 0);
    int result = config_write_toml(mutable_config, config_path);
    pthread_rwlock_unlock(&s_config_rwlock);
 
@@ -1521,33 +1502,12 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
       }
 #endif
 
-      /* If tool calling was toggled on/off, rebuild system prompt for current session */
+      /* Tool calling toggled on/off: the prompt's rules change (a running
+       * conversation gets them with its next turn, appended). */
       if (tools_mode_changed) {
          invalidate_system_instructions();
          OLOG_INFO("Tool calling %s, rebuilding prompt",
                    g_config.llm.tools.enabled ? "enabled" : "disabled");
-
-         /* Update current session's system prompt so change takes effect immediately */
-         if (conn->session) {
-            /* Phase 1f: SESSION_START builder boundary — clear dedup state. */
-            session_injected_set_clear(conn->session);
-            char *new_prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-            if (new_prompt) {
-               session_update_system_prompt(conn->session, new_prompt);
-               OLOG_INFO("WebUI: Updated session prompt for tools mode change");
-               free(new_prompt);
-            }
-         }
-      }
-
-      /* Voice-directive edits: rebuild the cached local-mic prompt so the change
-       * applies without a restart.  invalidate_system_instructions() drops the
-       * cached command_prompt; refresh_all_prompts re-installs every session's
-       * system prompt (including the local mic) from the rebuilt source. */
-      if (local_prompt_directives_changed) {
-         invalidate_system_instructions();
-         session_manager_refresh_all_prompts();
-         OLOG_INFO("WebUI: Voice directive changed, rebuilt prompts");
       }
 
       /* Nudge other admin browsers (a second tab, Aurora) to re-pull config so

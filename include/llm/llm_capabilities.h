@@ -88,7 +88,25 @@ typedef struct {
  */
 void llm_capabilities_load_registry(struct toml_table_t *root);
 
-/** Free what llm_capabilities_load_registry() loaded. */
+/**
+ * @brief Load models.toml [mid_system]: the Anthropic models that take a
+ *        `role: "system"` message inside `messages`
+ *
+ * Called once at startup, after llm_capabilities_load_registry().  Read-only
+ * afterwards.
+ */
+void llm_capabilities_load_mid_system(struct toml_table_t *root);
+
+/**
+ * @brief Whether Anthropic @p model takes a mid-conversation system message
+ *
+ * Its id starts with a models.toml [mid_system] prefix.  A model not listed
+ * gets an operator's note as text in the user turn instead, which every model
+ * takes.
+ */
+bool llm_model_mid_system(const char *model);
+
+/** Free what llm_capabilities_load_registry() and _load_mid_system() loaded. */
 void llm_capabilities_free_registry(void);
 
 /**

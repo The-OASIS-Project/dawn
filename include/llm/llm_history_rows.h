@@ -46,6 +46,12 @@ struct json_object;
  *  - anything else is one row of its role and text (a content array's text
  *    parts joined, an image as "[image]").
  *
+ * Request context (llm_history_kind.h) is saved as rows of its kind, marked
+ * with MESSAGE_KIND_KEY: a context message's rows carry its kind, and each
+ * kind part of a question is a row of its own after the question's rows (the
+ * order a live turn saves them in).
+ * The frozen prefix is never a row.
+ *
  * @return Rows appended (0 for a message with no role)
  */
 int llm_history_rows_append(struct json_object *msg, struct json_object *out);

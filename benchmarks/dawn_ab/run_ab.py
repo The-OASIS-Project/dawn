@@ -232,7 +232,8 @@ def fact_embedding_coverage(db, user_id):
 
 def conversation_rows(db, conv_id):
     cur = db.execute("SELECT id, role, content, tool_calls, tool_call_id, reasoning, is_error, "
-                     "created_at FROM messages WHERE conversation_id = ? ORDER BY id", (conv_id,))
+                     "created_at FROM messages WHERE conversation_id = ? AND kind IS NULL ORDER BY id",
+                     (conv_id,))
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 

@@ -176,16 +176,3 @@ const dawn_config_t *config_get(void) {
 const secrets_config_t *config_get_secrets(void) {
    return &g_secrets;
 }
-
-/* ============================================================================
- * session_manager.c — session_manager_refresh_all_prompts
- *
- * Only defined when ENABLE_MULTI_CLIENT is on. In local-only builds (e.g., the
- * `ci` preset with WEBUI=OFF), session_manager.h provides an inline stub, and
- * defining a non-inline version here would collide.
- * ============================================================================ */
-
-#ifdef ENABLE_MULTI_CLIENT
-void session_manager_refresh_all_prompts(void) {
-}
-#endif

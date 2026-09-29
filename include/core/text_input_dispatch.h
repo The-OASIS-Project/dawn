@@ -36,6 +36,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "core/message_kind.h"
 #include "core/session_manager.h"
 
 #ifdef __cplusplus
@@ -90,6 +91,21 @@ typedef struct {
     * AND the marker format out of core: this module just persists the string it's
     * handed.  NULL for text-only turns and all non-WebUI callers. */
    const char *persist_content_override;
+
+   /* Optional: builds the question's history message from its persisted form
+    * (the WebUI's image rehydration: `persist_content_override`'s markers
+    * become the image parts).  With it, an image turn sends exactly what a
+    * reload of the conversation sends: the model's reasoning over that
+    * question stays valid, and the cache holds, across a reload.  NULL: the
+    * images go in as the dispatch received them. */
+   struct json_object *(*build_history_message)(int user_id, const char *role, const char *content);
+
+   /* The question's kind: MESSAGE_KIND_NONE (0) for what someone said;
+    * MESSAGE_KIND_ENVELOPE for input DAWN wrote for a turn it started itself (a
+    * background job's result handed back).  An envelope is saved like any
+    * question (a reload replays what the model was sent) but as request
+    * context: no transcript, search or memory extraction sees it. */
+   message_kind_t question_kind;
 
    /* TTS sentence streaming.  Pass NULL to skip TTS (text-only mode).
     * When non-NULL, the LLM call uses sentence buffering and invokes

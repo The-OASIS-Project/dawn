@@ -216,6 +216,25 @@ static const char *SCHEMA_SQL =
      * re-dispatch the ordinary worker against a research conversation.  The
      * idx_conv_jobs_user partial index lives in the v75 migration, not here. */
     "   job_kind TEXT DEFAULT NULL,"
+    /* Frozen request prefix (v94): the conversation's system prompt and tool set
+     * as first sent, in prompt_blobs, so every later request and every reload
+     * replays them byte for byte (a changed prefix invalidates the model's
+     * earlier reasoning).  in_force_hash: which of its sections and standing
+     * directions are in force now (changes are appended, never rewritten).
+     * reasoning_floor_msg_id: reasoning stored on rows at or below it is never
+     * replayed (set at a declared boundary; only rises).  reasoning_floor_pending:
+     * the withdrawal (its place in the withdrawal sequence) that changed the
+     * stored context; until a turn built after it is saved (the floor then
+     * rises to that turn's question), no row's reasoning is replayed, a reply
+     * streamed during it included.  reasoning_floor_seq: the last withdrawal that
+     * changed it, kept after the floor settles, so a turn built before it (in
+     * another session) saves behind the floor too. */
+    "   prefix_hash TEXT DEFAULT NULL,"
+    "   tools_hash TEXT DEFAULT NULL,"
+    "   in_force_hash TEXT DEFAULT NULL,"
+    "   reasoning_floor_msg_id INTEGER NOT NULL DEFAULT 0,"
+    "   reasoning_floor_pending INTEGER NOT NULL DEFAULT 0,"
+    "   reasoning_floor_seq INTEGER NOT NULL DEFAULT 0,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (parent_id) REFERENCES conversations(id) ON DELETE SET NULL"
@@ -245,9 +264,43 @@ static const char *SCHEMA_SQL =
      * context (v92). Last column so the v92 ALTER yields the same table. */
     "   llm_blocks_len INTEGER,"
     "   llm_blocks TEXT " CONV_LLM_BLOCKS_CHECK_SQL ","
+    /* kind (v94): NULL = a message someone sees; otherwise request context the
+     * model reads and no client or search does (turn context, memory,
+     * directives, operator instructions, loop notes, envelopes). */
+    "   kind TEXT DEFAULT NULL " CONV_MESSAGE_KIND_CHECK_SQL ","
+    /* context_of (v94): a turn's context row names the question it goes in
+     * front of, so it attaches there whatever rows land between them. */
+    "   context_of INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"
+
+    /* Content-addressed request prefixes (v94): a conversation's frozen system
+     * prompt and tool set, by SHA-256; shared by every conversation that sent the
+     * same bytes. */
+    "CREATE TABLE IF NOT EXISTS prompt_blobs ("
+    "   hash TEXT PRIMARY KEY,"
+    "   bytes TEXT NOT NULL,"
+    "   created_at INTEGER NOT NULL"
+    ");"
+
+    /* Stable memory citation handles (v94): [M<handle>] is assigned the first time
+     * an item is injected into a conversation and never reused there. */
+    "CREATE TABLE IF NOT EXISTS conversation_focus_handles ("
+    "   conversation_id INTEGER NOT NULL,"
+    "   handle INTEGER NOT NULL,"
+    "   source TEXT NOT NULL,"
+    "   item_id TEXT NOT NULL,"
+    /* The item was forgotten or deleted: its copies in the conversation's
+     * stored context were withdrawn (conv_db_withdraw). */
+    "   withdrawn INTEGER NOT NULL DEFAULT 0,"
+    "   PRIMARY KEY (conversation_id, handle),"
+    "   UNIQUE (conversation_id, source, item_id),"
+    "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+    ");"
+    /* A removed item's handles, in whatever conversations hold it
+     * (auth_db_withdraw.c). */
+    "CREATE INDEX IF NOT EXISTS idx_focus_handles_item ON conversation_focus_handles(item_id);"
 
     /* conversation_events (v72): durable step-granular log for the background-jobs
      * observe/replay contract (status | tool_call | tool_result | terminal_chunk |
@@ -750,8 +803,11 @@ static const char *SCHEMA_SQL =
     /* document_chunks.created_at added in v35 — used by temporal-query scoring to
      * boost chunks whose origin date is near the user's referenced point in time
      * (e.g., "what did we discuss in summer 2021"). 0 = unknown (no boost). */
+    /* AUTOINCREMENT (v94): a chunk's id is never reused, so a deleted chunk's
+     * id (in a conversation's stored context, or its withdrawn_items row) can't
+     * name a new one (a re-indexed document's, an edited note's). */
     "CREATE TABLE IF NOT EXISTS document_chunks ("
-    "  id INTEGER PRIMARY KEY,"
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  document_id INTEGER NOT NULL,"
     "  chunk_index INTEGER NOT NULL,"
     "  text TEXT NOT NULL,"
@@ -763,6 +819,7 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON document_chunks(document_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash);"
+
     /* idx_documents_original_blob is created by the v68 migration (auth_db_migrations_v68.c),
      * NOT here: this base SCHEMA_SQL runs before migrations, so on an existing pre-v68 DB the
      * documents.original_blob_id column doesn't exist yet and indexing it would fail.  The v68

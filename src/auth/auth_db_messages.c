@@ -29,6 +29,7 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "core/message_kind.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -42,27 +43,40 @@ int auth_db_messages_prepare(void) {
       const char *sql;
       sqlite3_stmt **stmt;
    } stmts[] = {
+      /* A context row's question (?12) must be a row of the same conversation
+       * a turn's context goes in front of: a user message, ordinary or an
+       * envelope. */
       { "msg_add",
         "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
-        "reasoning, llm_blocks_len, llm_blocks, created_at, is_error) "
-        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
-        "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ? AND user_id = ?)",
+        "reasoning, llm_blocks_len, llm_blocks, created_at, is_error, kind, context_of) "
+        "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 "
+        "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?13) "
+        "AND (?12 IS NULL OR EXISTS (SELECT 1 FROM messages q WHERE q.id = ?12 "
+        "AND q.conversation_id = ?1 AND q.role = 'user' "
+        "AND (q.kind IS NULL OR q.kind = 'envelope')))",
         &s_db.stmt_msg_add },
-      /* A row's blocks load only past the budget cutoff (?4); the column is read
-       * nowhere else.  llm_blocks_len sits before the blocks, so testing it
-       * never reads them. */
+      /* A row's blocks load only past the budget cutoff (?4) and the
+       * conversation's reasoning floor (a declared boundary left the reasoning at
+       * or below it behind), and none while a withdrawal's floor is pending
+       * (auth_db_withdraw.h); the column is read nowhere else.  llm_blocks_len
+       * sits before the blocks, so testing it never reads them. */
       { "msg_get_llm",
         "SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-        "CASE WHEN m.id > ?4 AND m.llm_blocks_len IS NOT NULL THEN m.llm_blocks END, "
-        "m.created_at, m.is_error FROM messages m "
+        "CASE WHEN m.id > MAX(?4, c.reasoning_floor_msg_id) AND c.reasoning_floor_pending = 0 "
+        "AND m.llm_blocks_len IS NOT NULL "
+        "THEN m.llm_blocks END, "
+        "m.created_at, m.is_error, m.kind, m.context_of FROM messages m "
         "INNER JOIN conversations c ON m.conversation_id = c.id "
         "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 ORDER BY m.id ASC",
         &s_db.stmt_msg_get_llm },
+      /* kind-rows: sizes the replay read's own rows. */
       { "msg_llm_sizes",
         "SELECT m.id, m.llm_blocks_len FROM messages m "
         "INNER JOIN conversations c ON m.conversation_id = c.id "
         "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 "
-        "AND m.llm_blocks_len IS NOT NULL ORDER BY m.id DESC",
+        "AND m.id > c.reasoning_floor_msg_id AND c.reasoning_floor_pending = 0 "
+        "AND m.llm_blocks_len IS NOT NULL "
+        "ORDER BY m.id DESC",
         &s_db.stmt_msg_llm_sizes },
       /* The v67 watermark, with a monotonic guard so a stale async compaction
        * can't rewind one a later pass already advanced. */
@@ -70,11 +84,13 @@ int auth_db_messages_prepare(void) {
         "UPDATE conversations SET compaction_summary = ?, context_watermark_msg_id = ? "
         "WHERE id = ? AND user_id = ? AND ? >= context_watermark_msg_id",
         &s_db.stmt_conv_set_watermark },
+      /* kind-rows: clears blocks, whatever the row. */
       { "msg_gc_blocks",
         "UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id IN ("
         "SELECT id FROM messages WHERE conversation_id = ? AND id <= ? "
         "AND llm_blocks_len IS NOT NULL LIMIT " STRINGIFY(GC_BATCH_ROWS) ")",
         &s_db.stmt_msg_gc_blocks },
+      /* kind-rows: clears blocks, whatever the row. */
       { "msg_sweep_blocks",
         "UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id IN ("
         "SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id "
@@ -131,11 +147,21 @@ static int missing_or_forbidden_locked(int64_t conv_id) {
    return result;
 }
 
-int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row, int64_t *id_out) {
-   if (id_out)
-      *id_out = 0;
-
-   if (conv_id <= 0 || !row || !row->role || !row->content || !valid_role(row->role)) {
+/* A row the insert accepts: a known role, a kind that fits it, a question only
+ * on a kinded row.  Its blocks come back through @p blocks_out (NULL when the
+ * row can't hold them: the text still saves). */
+static int row_check(int64_t conv_id, const conv_message_row_t *row, const char **blocks_out) {
+   *blocks_out = NULL;
+   if (conv_id <= 0 || !row || !row->role || !row->content || !valid_role(row->role) ||
+       row->context_of < 0) {
+      return AUTH_DB_INVALID;
+   }
+   const message_kind_t kind = message_kind_parse(row->kind);
+   if ((row->kind && *row->kind && kind == MESSAGE_KIND_NONE) ||
+       !message_kind_role_ok(kind, row->role) ||
+       (row->context_of > 0 && kind == MESSAGE_KIND_NONE)) {
+      OLOG_WARNING("conv_db_add_row: kind '%s' on a %s row refused", row->kind ? row->kind : "",
+                   row->role);
       return AUTH_DB_INVALID;
    }
 
@@ -152,10 +178,23 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
                    (long long)conv_id);
       blocks = NULL;
    }
+   *blocks_out = blocks;
+   return AUTH_DB_SUCCESS;
+}
 
-   AUTH_DB_LOCK_OR_FAIL();
+int msg_insert_locked(int64_t conv_id,
+                      int user_id,
+                      const conv_message_row_t *row,
+                      time_t now,
+                      int64_t *id_out) {
+   *id_out = 0;
+   const char *blocks = NULL;
+   const int checked = row_check(conv_id, row, &blocks);
+   if (checked != AUTH_DB_SUCCESS) {
+      return checked;
+   }
+   const message_kind_t kind = message_kind_parse(row->kind);
 
-   const time_t now = time(NULL);
    sqlite3_stmt *st = s_db.stmt_msg_add;
    sqlite3_reset(st);
    sqlite3_bind_int64(st, 1, conv_id);
@@ -165,6 +204,7 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
    bind_text_or_null(st, 5, row->tool_call_id);
    bind_text_or_null(st, 6, row->reasoning);
    if (blocks) {
+      const size_t blocks_len = strlen(blocks);
       sqlite3_bind_int64(st, 7, (int64_t)blocks_len);
       sqlite3_bind_text(st, 8, blocks, (int)blocks_len, SQLITE_STATIC);
    } else {
@@ -173,8 +213,13 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
    }
    sqlite3_bind_int64(st, 9, (int64_t)now);
    sqlite3_bind_int(st, 10, row->is_error ? 1 : 0);
-   sqlite3_bind_int64(st, 11, conv_id);
-   sqlite3_bind_int(st, 12, user_id);
+   bind_text_or_null(st, 11, message_kind_name(kind));
+   if (row->context_of > 0) {
+      sqlite3_bind_int64(st, 12, row->context_of);
+   } else {
+      sqlite3_bind_null(st, 12);
+   }
+   sqlite3_bind_int(st, 13, user_id);
 
    int rc = sqlite3_step(st);
    sqlite3_reset(st);
@@ -182,23 +227,53 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_add_row: insert failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
-
    if (sqlite3_changes(s_db.db) == 0) {
-      const int result = missing_or_forbidden_locked(conv_id);
+      int result = missing_or_forbidden_locked(conv_id);
+      if (result == AUTH_DB_FORBIDDEN && row->context_of > 0) {
+         /* The conversation may be the user's: the question isn't one of its. */
+         result = AUTH_DB_INVALID;
+         OLOG_WARNING("conv_db_add_row: row %lld is no question of conv %lld",
+                      (long long)row->context_of, (long long)conv_id);
+      }
+      return result;
+   }
+   *id_out = sqlite3_last_insert_rowid(s_db.db);
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row, int64_t *id_out) {
+   if (id_out)
+      *id_out = 0;
+   const char *blocks = NULL;
+   const int checked = row_check(conv_id, row, &blocks);
+   if (checked != AUTH_DB_SUCCESS) {
+      return checked;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   const time_t now = time(NULL);
+   int64_t id = 0;
+   const int result = msg_insert_locked(conv_id, user_id, row, now, &id);
+   if (result != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return result;
    }
-
    if (id_out)
-      *id_out = sqlite3_last_insert_rowid(s_db.db);
+      *id_out = id;
+
+   /* Request context is nobody's message: no count, no reordering, no signal. */
+   if (message_kind_parse(row->kind) != MESSAGE_KIND_NONE) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_SUCCESS;
+   }
 
    sqlite3_reset(s_db.stmt_conv_update_meta);
    sqlite3_bind_int64(s_db.stmt_conv_update_meta, 1, (int64_t)now);
    sqlite3_bind_int64(s_db.stmt_conv_update_meta, 2, conv_id);
-   rc = sqlite3_step(s_db.stmt_conv_update_meta);
+   const int rc = sqlite3_step(s_db.stmt_conv_update_meta);
    sqlite3_reset(s_db.stmt_conv_update_meta);
 
    AUTH_DB_UNLOCK();
@@ -206,7 +281,7 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
    /* The row is saved: a caller that retried on this would write it twice. */
    if (rc != SQLITE_DONE) {
       OLOG_WARNING("conv_db_add_row: conv %lld metadata not updated (row %lld saved)",
-                   (long long)conv_id, id_out ? (long long)*id_out : 0LL);
+                   (long long)conv_id, (long long)id);
    }
 
    /* The updated_at bump re-orders this user's sidebar — tell any connected
@@ -324,6 +399,8 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
       row.llm_blocks_len = row.llm_blocks ? (size_t)sqlite3_column_bytes(st, 5) : 0;
       row.created_at = (time_t)sqlite3_column_int64(st, 6);
       row.is_error = sqlite3_column_int(st, 7);
+      row.kind = (const char *)sqlite3_column_text(st, 8);
+      row.context_of = sqlite3_column_int64(st, 9);
       if (callback(&row, ctx) != 0)
          break;
    }

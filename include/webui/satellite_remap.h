@@ -40,29 +40,24 @@ extern "C" {
 bool satellite_owner_changes(session_t *session, int new_user);
 
 /**
- * @brief Apply a mapping to the session now
+ * @brief Apply a mapping to the session now: its user
  *
- * Its user, the prompt it starts with (personalized for a mapped user), and its
- * room context.  For a mapping that doesn't change whose speech the history is.
+ * The user's prompt and the satellite's room reach the model with the next
+ * turn (its prompt is built for the session's user; the room is a standing
+ * direction).  For a mapping that doesn't change whose speech the history is.
  */
-void satellite_apply_mapping(session_t *session,
-                             int user_id,
-                             const char *location,
-                             const char *ha_area);
+void satellite_apply_mapping(session_t *session, int user_id);
 
 /**
  * @brief Move the session to another user, behind any query in progress
  *
  * Queued on the session's turn queue: the running query finishes as the user it
  * began as.  Then the previous user's conversation is saved (a new context
- * starts), or, with nothing to save, a new context starts with the satellite
- * prompt; then the mapping is applied.  Off the WebSocket service thread.  If
- * it can't be queued, the history is discarded instead of carried over.
+ * starts), or, with nothing to save, a new context starts; then the mapping is
+ * applied.  Off the WebSocket service thread.  If it can't be queued, the
+ * history is discarded instead of carried over.
  */
-void satellite_queue_remap(session_t *session,
-                           int user_id,
-                           const char *location,
-                           const char *ha_area);
+void satellite_queue_remap(session_t *session, int user_id);
 
 #ifdef __cplusplus
 }

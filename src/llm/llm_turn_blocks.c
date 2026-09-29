@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_history_kind.h"
 #include "llm/llm_key_tag.h"
 
 
@@ -581,26 +582,74 @@ size_t llm_turn_message_reasoning_chars(struct json_object *message) {
    return chars;
 }
 
-static bool has_internal_key(struct json_object *msg) {
-   json_object_object_foreach(msg, key, val) {
+/* A key DAWN keeps for itself.  @p keep_kind spares the kind mark (a log on
+ * disk shows which messages were request context). */
+static bool internal_key(const char *key, bool keep_kind) {
+   return key[0] == '_' && !(keep_kind && strcmp(key, MESSAGE_KIND_KEY) == 0);
+}
+
+static bool has_internal_key(struct json_object *obj, bool keep_kind) {
+   json_object_object_foreach(obj, key, val) {
       (void)val;
-      if (key[0] == '_') {
+      if (internal_key(key, keep_kind)) {
          return true;
       }
    }
    return false;
 }
 
-/* A copy of @p msg without DAWN's own keys.  @p deep copies the values too, so
- * the result shares nothing with the history (and the internal values are
- * never copied at all).  NULL on allocation failure. */
-static struct json_object *copy_message(struct json_object *msg, bool deep) {
-   if (!json_object_is_type(msg, json_type_object) || (!deep && !has_internal_key(msg))) {
+/* Whether any of a content array's parts has a key of DAWN's own (a turn's
+ * context parts carry their kind). */
+static bool parts_have_internal_key(struct json_object *msg, bool keep_kind) {
+   struct json_object *content = NULL;
+   if (!json_object_object_get_ex(msg, "content", &content) ||
+       !json_object_is_type(content, json_type_array)) {
+      return false;
+   }
+   const size_t n = json_object_array_length(content);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i);
+      if (json_object_is_type(part, json_type_object) && has_internal_key(part, keep_kind)) {
+         return true;
+      }
+   }
+   return false;
+}
+
+static struct json_object *copy_object(struct json_object *obj, bool deep, bool keep_kind);
+
+/* A content array whose parts are copied without DAWN's own keys. */
+static struct json_object *copy_parts(struct json_object *content, bool deep, bool keep_kind) {
+   const size_t n = json_object_array_length(content);
+   struct json_object *out = json_object_new_array_ext((int)n);
+   if (!out) {
+      return NULL;
+   }
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i);
+      struct json_object *copy = part ? copy_object(part, deep, keep_kind) : NULL;
+      if ((part && !copy) || json_object_array_add(out, copy) != 0) {
+         json_object_put(copy);
+         json_object_put(out);
+         return NULL;
+      }
+   }
+   return out;
+}
+
+/* A copy of @p obj (a message, or one of its content parts) without DAWN's own
+ * keys.  @p deep copies the values too, so the result shares nothing with the
+ * history (and the internal values are never copied at all).  NULL on
+ * allocation failure. */
+static struct json_object *copy_object(struct json_object *obj, bool deep, bool keep_kind) {
+   const bool strip = json_object_is_type(obj, json_type_object) &&
+                      (has_internal_key(obj, keep_kind) || parts_have_internal_key(obj, keep_kind));
+   if (!strip) {
       if (!deep) {
-         return json_object_get(msg);
+         return json_object_get(obj);
       }
       struct json_object *copy = NULL;
-      if (json_object_deep_copy(msg, &copy, NULL) != 0) {
+      if (json_object_deep_copy(obj, &copy, NULL) != 0) {
          json_object_put(copy);
          return NULL;
       }
@@ -610,26 +659,31 @@ static struct json_object *copy_message(struct json_object *msg, bool deep) {
    if (!copy) {
       return NULL;
    }
-   json_object_object_foreach(msg, key, val) {
-      if (key[0] == '_') {
+   json_object_object_foreach(obj, key, val) {
+      if (internal_key(key, keep_kind)) {
          continue;
       }
-      struct json_object *value = json_object_get(val);
-      if (deep && val) {
-         json_object_put(value);
-         value = NULL;
+      struct json_object *value = NULL;
+      if (strcmp(key, "content") == 0 && json_object_is_type(val, json_type_array)) {
+         value = copy_parts(val, deep, keep_kind);
+      } else if (deep && val) {
          if (json_object_deep_copy(val, &value, NULL) != 0) {
             json_object_put(value);
-            json_object_put(copy);
-            return NULL;
+            value = NULL;
          }
+      } else {
+         value = json_object_get(val);
+      }
+      if (val && !value) {
+         json_object_put(copy);
+         return NULL;
       }
       json_object_object_add(copy, key, value);
    }
    return copy;
 }
 
-static struct json_object *copy_history(struct json_object *history, bool deep) {
+static struct json_object *copy_history(struct json_object *history, bool deep, bool keep_kind) {
    if (!history || !json_object_is_type(history, json_type_array)) {
       return NULL;
    }
@@ -640,7 +694,7 @@ static struct json_object *copy_history(struct json_object *history, bool deep) 
    }
    for (size_t i = 0; i < len; i++) {
       struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *copy = msg ? copy_message(msg, deep) : NULL;
+      struct json_object *copy = msg ? copy_object(msg, deep, keep_kind) : NULL;
       if ((msg && !copy) || json_object_array_add(out, copy) != 0) {
          json_object_put(copy);
          json_object_put(out);
@@ -651,12 +705,26 @@ static struct json_object *copy_history(struct json_object *history, bool deep) 
 }
 
 struct json_object *llm_history_wire_copy(struct json_object *history) {
-   return copy_history(history, false);
+   return copy_history(history, false, false);
 }
 
-/* Keep only the parts another reader may see: text, tool calls and results,
- * images.  Thinking, redacted thinking and any vendor's opaque content (a
- * server tool's encrypted result, say) go. */
+/* Whether @p part is one another reader may not see: anything but text, tool
+ * calls and results, and images.  Thinking, redacted thinking and any vendor's
+ * opaque content (a server tool's encrypted result, say) go. */
+static bool is_vendor_part(struct json_object *part) {
+   const char *type = str_of(part, "type");
+   return type && !is(type, "text") && !is(type, "tool_use") && !is(type, "tool_result") &&
+          !is(type, "image") && !is(type, "image_url");
+}
+
+/* Signed reasoning a live Claude turn keeps in its content. A boundary drops
+ * only these; other vendor parts (server-tool calls and results) aren't bound
+ * to the prefix and stay. */
+static bool is_signed_reasoning_part(struct json_object *part) {
+   const char *type = str_of(part, "type");
+   return type && (is(type, "thinking") || is(type, "redacted_thinking"));
+}
+
 static void drop_reasoning_parts(struct json_object *history) {
    const size_t n = json_object_array_length(history);
    for (size_t i = 0; i < n; i++) {
@@ -666,9 +734,7 @@ static void drop_reasoning_parts(struct json_object *history) {
          continue;
       }
       for (size_t j = json_object_array_length(content); j-- > 0;) {
-         const char *type = str_of(json_object_array_get_idx(content, j), "type");
-         if (!is(type, "text") && !is(type, "tool_use") && !is(type, "tool_result") &&
-             !is(type, "image") && !is(type, "image_url")) {
+         if (is_vendor_part(json_object_array_get_idx(content, j))) {
             json_object_array_del_idx(content, j, 1);
          }
       }
@@ -676,7 +742,50 @@ static void drop_reasoning_parts(struct json_object *history) {
 }
 
 struct json_object *llm_history_strip_internal(struct json_object *history) {
-   struct json_object *copy = copy_history(history, true);
+   /* The kind marks are kept long enough to find the request context, which
+    * goes, and then removed. */
+   struct json_object *marked = copy_history(history, true, true);
+   if (!marked) {
+      return NULL;
+   }
+   llm_history_drop_context(marked); /* a deep copy: the history is untouched */
+   drop_reasoning_parts(marked);
+   struct json_object *copy = copy_history(marked, false, false);
+   json_object_put(marked);
+   return copy;
+}
+
+int llm_history_drop_turn_blocks(struct json_object *history) {
+   int dropped = 0;
+   const size_t n = json_object_is_type(history, json_type_array)
+                        ? json_object_array_length(history)
+                        : 0;
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      bool had = false;
+      if (json_object_object_get_ex(msg, LLM_TURN_BLOCKS_KEY, NULL)) {
+         json_object_object_del(msg, LLM_TURN_BLOCKS_KEY);
+         had = true;
+      }
+      /* Reasoning a live turn left in its content, as the vendor sent it. */
+      struct json_object *content = NULL;
+      if (is(str_of(msg, "role"), "assistant") &&
+          json_object_object_get_ex(msg, "content", &content) &&
+          json_object_is_type(content, json_type_array)) {
+         for (size_t j = json_object_array_length(content); j-- > 0;) {
+            if (is_signed_reasoning_part(json_object_array_get_idx(content, j))) {
+               json_object_array_del_idx(content, j, 1);
+               had = true;
+            }
+         }
+      }
+      dropped += had;
+   }
+   return dropped;
+}
+
+struct json_object *llm_history_log_copy(struct json_object *history) {
+   struct json_object *copy = copy_history(history, true, true);
    if (copy) {
       drop_reasoning_parts(copy); /* a deep copy: the history is untouched */
    }

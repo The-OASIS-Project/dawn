@@ -40,6 +40,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_history_rows.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_key_tag.h"
@@ -144,7 +145,7 @@ static const char *str_field(struct json_object *obj, const char *key) {
  * llm_tools.c) is DELIBERATELY excluded here: it carries neither tool_calls
  * nor tool_call_id, so the walk below skips its row regardless of provider.  This is intentional,
  * not a gap: conv_db reload expects images as `[IMAGE:id]` markers pointing
- * at the image store (see webui_image_rehydrate.c), not raw embedded base64
+ * at the image store (see image_rehydrate.c), not raw embedded base64
  * in a message row — writing the base64 JSON verbatim here would produce a
  * row the reload path can't parse back into a real image.  Wiring captures
  * through the image store's marker system is a real follow-up, not a
@@ -304,6 +305,15 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                               CONV_EVENT_TOOL_CALL, tc_payload);
                }
             }
+         }
+      } else if (llm_history_kind_of(m) == MESSAGE_KIND_LOOP_NOTE) {
+         /* A note the loop gave the model: saved where it sat, so a reload
+          * replays the request the model answered. */
+         if (cb) {
+            const session_tool_row_t row = { .role = role,
+                                             .content = content ? content : "",
+                                             .kind = message_kind_name(MESSAGE_KIND_LOOP_NOTE) };
+            (void)cb(ud, &row);
          }
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
          const char *tcid = json_object_get_string(tcid_obj);
@@ -553,6 +563,19 @@ static void append_claude_tool_history(struct json_object *history,
    llm_tools_add_results_claude(history, results);
 }
 
+/* Append a note to the model (a user message of the loop's own), marked as
+ * request context. */
+static void append_loop_note(struct json_object *history, const char *text) {
+   json_object *note = json_object_new_object();
+   if (!note) {
+      return;
+   }
+   json_object_object_add(note, "role", json_object_new_string("user"));
+   json_object_object_add(note, "content", json_object_new_string(text));
+   llm_history_set_kind(note, MESSAGE_KIND_LOOP_NOTE);
+   session_history_append(history, note);
+}
+
 /**
  * @brief Add closing assistant message to complete tool call history
  *
@@ -579,6 +602,7 @@ static void append_closing_message(struct json_object *history,
    } else {
       json_object_object_add(closing_msg, "content", json_object_new_string(text));
    }
+   llm_history_set_kind(closing_msg, MESSAGE_KIND_LOOP_NOTE);
 
    session_history_append(history, closing_msg);
    OLOG_INFO("Tool loop: Added closing assistant message to complete history");
@@ -893,14 +917,12 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
           * (no "[System:]" prefix) so a reasoning model doesn't mistake this
           * daemon control message for an injected directive and flag it; tool-
           * agnostic wording since this fires for any repeated tool, not search. */
-         json_object *hint_msg = json_object_new_object();
-         json_object_object_add(hint_msg, "role", json_object_new_string("user"));
-         json_object_object_add(
-             hint_msg, "content",
-             json_object_new_string(
-                 "You already called that tool with identical arguments and have its result. "
-                 "Answer using the information you already have — do not call it again."));
-         session_history_append(params->conversation_history, hint_msg);
+         const int note_at = json_object_array_length(params->conversation_history);
+         append_loop_note(
+             params->conversation_history,
+             "You already called that tool with identical arguments and have its result. "
+             "Answer using the information you already have — do not call it again.");
+         persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
 
          llm_tool_response_free(&result);
 
@@ -985,9 +1007,11 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       /* Step 8b: All-silent check — tools handled their own output */
       if (followup.all_silent) {
          OLOG_INFO("Tool loop: All tools silent (should_respond=false), skipping follow-up");
+         const int note_at = json_object_array_length(params->conversation_history);
          append_closing_message(params->conversation_history,
                                 "[Tool execution completed without follow-up response]",
                                 params->history_format);
+         persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
          free_tool_result_resources(results);
          free(results);
          llm_tool_response_free(&result);
@@ -999,15 +1023,14 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          OLOG_WARNING("Tool loop: Max iterations (%d) reached, forcing text response",
                       LLM_TOOLS_MAX_ITERATIONS);
 
-         /* Inject a system hint telling the LLM to respond with what it has */
-         json_object *hint_msg = json_object_new_object();
-         json_object_object_add(hint_msg, "role", json_object_new_string("user"));
-         json_object_object_add(
-             hint_msg, "content",
-             json_object_new_string(
-                 "[System: Maximum tool iterations reached. Respond to the user now with "
-                 "the information you have gathered so far. Do not call any more tools.]"));
-         session_history_append(params->conversation_history, hint_msg);
+         /* Tell the model to answer with what it has. */
+         const int note_at = json_object_array_length(params->conversation_history);
+         /* Plain wording, as the duplicate-call note: a "[System:]" prefix reads
+          * to a reasoning model as an injected directive. */
+         append_loop_note(params->conversation_history,
+                          "That is as many tool calls as this turn allows. Answer the user now "
+                          "with the information you have gathered — do not call any more tools.");
+         persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
 
          free_tool_result_resources(results);
          free(results);

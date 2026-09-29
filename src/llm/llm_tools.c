@@ -42,9 +42,11 @@
 #include "config/dawn_config.h"
 #include "core/command_executor.h"
 #include "core/component_status.h"
+#include "core/hash_util.h"
 #include "core/ocp_helpers.h"
 #include "core/research_allowlist.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "dawn_error.h"
@@ -52,7 +54,10 @@
 #include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
+#include "llm/llm_context_text.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tools_internal.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "tools/hud_discovery.h"
@@ -125,22 +130,18 @@ static char *base64_encode(const unsigned char *buffer, size_t length) {
  * Static Tool Definitions
  * ============================================================================= */
 
-static tool_definition_t s_tools[LLM_TOOLS_MAX_TOOLS];
-static int s_tool_count = 0;
+tool_definition_t llm_tools_table[LLM_TOOLS_MAX_TOOLS];
+int llm_tools_count = 0;
 static int s_enabled_count = 0; /* Cached enabled count, updated by llm_tools_refresh() */
-static bool s_initialized = false;
+bool llm_tools_ready = false;
 
 /* Thread safety for tool state modifications */
-static pthread_mutex_t s_tools_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t llm_tools_mutex = PTHREAD_MUTEX_INITIALIZER;
+_Atomic uint64_t llm_tools_generation;
 
 /* Cached token estimates (-1 = needs recalculation) */
 static int s_token_estimate_local = -1;
 static int s_token_estimate_remote = -1;
-
-/* Thread-local suppression counter for temporarily disabling tools.
- * Used by subsystems like the search summarizer that need to make
- * LLM calls without tools being added to the request. */
-static __thread int tl_suppress_count = 0;
 
 /* Thread-local pointer to current resolved config.
  * Set by llm_tools_set_current_config() before LLM calls so that
@@ -250,9 +251,9 @@ static bool is_tool_parallel_safe(const char *tool_name) {
  * @return true if parallel-safe, false if sequential (or unknown tool)
  */
 static bool get_tool_parallel_safe(const char *tool_name) {
-   for (int i = 0; i < s_tool_count; i++) {
-      if (strcmp(s_tools[i].name, tool_name) == 0) {
-         return s_tools[i].parallel_safe;
+   for (int i = 0; i < llm_tools_count; i++) {
+      if (strcmp(llm_tools_table[i].name, tool_name) == 0) {
+         return llm_tools_table[i].parallel_safe;
       }
    }
    /* Unknown tool - assume sequential for safety */
@@ -547,8 +548,8 @@ static bool execute_viewing_sync(const char *action,
  * @brief Check if a tool with given name already exists
  */
 static bool tool_exists(const char *name) {
-   for (int i = 0; i < s_tool_count; i++) {
-      if (strcmp(s_tools[i].name, name) == 0) {
+   for (int i = 0; i < llm_tools_count; i++) {
+      if (strcmp(llm_tools_table[i].name, name) == 0) {
          return true;
       }
    }
@@ -574,12 +575,12 @@ static void generate_tool_from_treg(const tool_metadata_t *meta, void *user_data
       return;
    }
 
-   if (s_tool_count >= LLM_TOOLS_MAX_TOOLS) {
+   if (llm_tools_count >= LLM_TOOLS_MAX_TOOLS) {
       OLOG_ERROR("Maximum tool count (%d) reached, skipping '%s'", LLM_TOOLS_MAX_TOOLS, meta->name);
       return;
    }
 
-   tool_definition_t *t = &s_tools[s_tool_count++];
+   tool_definition_t *t = &llm_tools_table[llm_tools_count++];
    memset(t, 0, sizeof(*t));
 
    safe_strncpy(t->name, meta->name, LLM_TOOLS_NAME_LEN);
@@ -639,19 +640,20 @@ static void generate_tool_from_treg(const tool_metadata_t *meta, void *user_data
  * ============================================================================= */
 
 void llm_tools_init(void) {
-   if (s_initialized) {
+   if (llm_tools_ready) {
       return;
    }
 
-   s_tool_count = 0;
+   llm_tools_count = 0;
 
    /* Generate tools from ALL registry entries (including dangerous tools that
     * default to disabled). This ensures they appear in the WebUI tools config
     * so users can opt in. The enabled_local/remote flags control LLM access. */
    tool_registry_foreach(generate_tool_from_treg, NULL);
+   atomic_fetch_add(&llm_tools_generation, 1);
 
-   s_initialized = true;
-   OLOG_INFO("Initialized %d LLM tools from tool_registry", s_tool_count);
+   llm_tools_ready = true;
+   OLOG_INFO("Initialized %d LLM tools from tool_registry", llm_tools_count);
 
    /* Refresh availability based on current config */
    llm_tools_refresh();
@@ -659,10 +661,10 @@ void llm_tools_init(void) {
    /* Log which tools are enabled */
    char enabled_list[512] = "";
    int offset = 0;
-   for (int i = 0; i < s_tool_count && offset < 500; i++) {
-      if (s_tools[i].enabled) {
+   for (int i = 0; i < llm_tools_count && offset < 500; i++) {
+      if (llm_tools_table[i].enabled) {
          offset += snprintf(enabled_list + offset, 512 - offset, "%s%s", offset > 0 ? ", " : "",
-                            s_tools[i].name);
+                            llm_tools_table[i].name);
       }
    }
    OLOG_INFO("Enabled tools: %s", enabled_list);
@@ -673,15 +675,15 @@ void llm_tools_init(void) {
  * ============================================================================= */
 
 void llm_tools_refresh(void) {
-   if (!s_initialized) {
+   if (!llm_tools_ready) {
       return;
    }
 
    /* Check if HUD/helmet hardware is available via status keepalive */
    bool hud_available = component_status_is_hud_online();
 
-   for (int i = 0; i < s_tool_count; i++) {
-      tool_definition_t *t = &s_tools[i];
+   for (int i = 0; i < llm_tools_count; i++) {
+      tool_definition_t *t = &llm_tools_table[i];
 
       /* Default: capability enabled (local/remote defaults set during init from JSON) */
       t->enabled = true;
@@ -735,8 +737,8 @@ void llm_tools_refresh(void) {
 
    /* Update cached enabled count (total capability-enabled) */
    s_enabled_count = 0;
-   for (int i = 0; i < s_tool_count; i++) {
-      if (s_tools[i].enabled) {
+   for (int i = 0; i < llm_tools_count; i++) {
+      if (llm_tools_table[i].enabled) {
          s_enabled_count++;
       }
    }
@@ -746,8 +748,10 @@ void llm_tools_refresh(void) {
 }
 
 void llm_tools_cleanup(void) {
-   s_tool_count = 0;
-   s_initialized = false;
+   llm_tools_filter_release();
+   llm_tools_count = 0;
+   llm_tools_ready = false;
+   atomic_fetch_add(&llm_tools_generation, 1);
 }
 
 /* =============================================================================
@@ -884,7 +888,7 @@ static struct json_object *build_parameters_schema_from_cached(const tool_defini
  *
  * Uses tool_registry for dynamic enum updates when available.
  */
-static struct json_object *build_parameters_schema(const tool_definition_t *tool) {
+struct json_object *llm_tools_parameters_schema(const tool_definition_t *tool) {
    /* Check if this tool exists in tool_registry (supports dynamic params) */
    if (tool_registry_find(tool->name) != NULL) {
       return build_parameters_schema_from_treg(tool->name, tool->param_count);
@@ -909,7 +913,7 @@ static struct json_object *build_parameters_schema(const tool_definition_t *tool
  * UTF-8 (static literals by construction; MCP descriptions are
  * codepoint-safe-capped at ingest in mcp_schema_wrap_description).
  */
-static const char *tool_effective_description(const tool_definition_t *t) {
+const char *llm_tools_effective_description(const tool_definition_t *t) {
    const tool_metadata_t *meta = tool_registry_lookup(t->name);
    return (meta && meta->description) ? meta->description : t->description;
 }
@@ -919,14 +923,14 @@ static const char *tool_effective_description(const tool_definition_t *t) {
  * ============================================================================= */
 
 struct json_object *llm_tools_get_openai_format(void) {
-   if (!s_initialized || llm_tools_get_enabled_count() == 0) {
+   if (!llm_tools_ready || llm_tools_get_enabled_count() == 0) {
       return NULL;
    }
 
    struct json_object *tools_array = json_object_new_array();
 
-   for (int i = 0; i < s_tool_count; i++) {
-      const tool_definition_t *t = &s_tools[i];
+   for (int i = 0; i < llm_tools_count; i++) {
+      const tool_definition_t *t = &llm_tools_table[i];
       if (!t->enabled) {
          continue;
       }
@@ -948,8 +952,8 @@ struct json_object *llm_tools_get_openai_format(void) {
       struct json_object *function = json_object_new_object();
       json_object_object_add(function, "name", json_object_new_string(t->name));
       json_object_object_add(function, "description",
-                             json_object_new_string(tool_effective_description(t)));
-      json_object_object_add(function, "parameters", build_parameters_schema(t));
+                             json_object_new_string(llm_tools_effective_description(t)));
+      json_object_object_add(function, "parameters", llm_tools_parameters_schema(t));
 
       json_object_object_add(tool_obj, "function", function);
       json_object_array_add(tools_array, tool_obj);
@@ -963,14 +967,14 @@ struct json_object *llm_tools_get_openai_format(void) {
  * ============================================================================= */
 
 struct json_object *llm_tools_get_claude_format(void) {
-   if (!s_initialized || llm_tools_get_enabled_count() == 0) {
+   if (!llm_tools_ready || llm_tools_get_enabled_count() == 0) {
       return NULL;
    }
 
    struct json_object *tools_array = json_object_new_array();
 
-   for (int i = 0; i < s_tool_count; i++) {
-      const tool_definition_t *t = &s_tools[i];
+   for (int i = 0; i < llm_tools_count; i++) {
+      const tool_definition_t *t = &llm_tools_table[i];
       if (!t->enabled) {
          continue;
       }
@@ -986,8 +990,8 @@ struct json_object *llm_tools_get_claude_format(void) {
       struct json_object *tool_obj = json_object_new_object();
       json_object_object_add(tool_obj, "name", json_object_new_string(t->name));
       json_object_object_add(tool_obj, "description",
-                             json_object_new_string(tool_effective_description(t)));
-      json_object_object_add(tool_obj, "input_schema", build_parameters_schema(t));
+                             json_object_new_string(llm_tools_effective_description(t)));
+      json_object_object_add(tool_obj, "input_schema", llm_tools_parameters_schema(t));
 
       json_object_array_add(tools_array, tool_obj);
    }
@@ -999,145 +1003,18 @@ struct json_object *llm_tools_get_claude_format(void) {
  * Schema Generation - Filtered by Session Type
  * ============================================================================= */
 
-/* The deep-research fetch loop runs on a read-only tool allowlist: while a
- * research session is active, ONLY these tools are reachable — no email, HA,
- * phone, shutdown, or any other side-effecting verb (DEEP_RESEARCH_DESIGN §7/§11
- * plan HIGH-1).  research_plan/research_record are ALSO research-only: hidden
- * from every non-research session.  The name list is single-sourced in
- * core/research_allowlist.h so the native gate here and the command_execute
- * defense-in-depth close (HIGH-1) cannot drift. */
-
-/**
- * @brief Check if a tool is enabled for a given session type
- */
-static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remote) {
-   if (!t->enabled) {
-      return false; /* Capability not available */
-   }
-
-   /* Research read-only allowlist (enforced identically at schema advertisement
-    * AND execution — both the *_format_filtered() schema builders and
-    * llm_tools_execute() route through this one function, so the two points
-    * cannot drift).  When the command-context session is a research run, ONLY the
-    * allowlisted tools are visible/executable; when it is NOT, the two
-    * research-only tools are hidden.  t->enabled is still honored (a globally-
-    * disabled web tool stays off even for research).
-    *
-    * NOTE: this gates only the NATIVE tool path.  The legacy <command>-tag path
-    * (command_execute) does NOT consult this, so it is NOT closed here — the
-    * research fetch loop must run native-tools-only, and command_execute needs a
-    * research-aware refusal as defense-in-depth (DEEP_RESEARCH_DESIGN §11 HIGH-1).
-    * Both are the research_worker's session-setup responsibility (Step 6), with a
-    * regression test that a research-context command_execute is refused. */
-   session_t *ctx = session_get_command_context();
-   /* No-tools turn (e.g. the deep-research synthesis turn): deny EVERY tool so the
-    * turn is pure text.  Checked before the allowlist so it also suppresses the read
-    * tools. */
-   if (ctx != NULL && session_tools_suppressed(ctx)) {
-      return false;
-   }
-   bool research_mode = (ctx != NULL && atomic_load(&ctx->research_run_id) > 0);
-   if (research_mode) {
-      return research_tool_is_allowlisted(t->name);
-   }
-   if (research_tool_is_research_only(t->name)) {
-      return false; /* research_plan/research_record never appear outside a research session */
-   }
-
-   /* Headless background-job workers must not fan out into more jobs — hide the
-    * job-spawn tool from a SESSION_TYPE_JOB context's schema so the model never
-    * sees it.  (handle_spawn also hard-refuses a job-context caller as a backstop
-    * for any non-schema path, e.g. a legacy <command> tag.) */
-   if (strcmp(t->name, "job") == 0) {
-      if (ctx != NULL && ctx->type == SESSION_TYPE_JOB) {
-         return false;
-      }
-   }
-   return is_remote ? t->enabled_remote : t->enabled_local;
-}
-
-struct json_object *llm_tools_get_openai_format_filtered(bool is_remote_session) {
-   if (!s_initialized || s_tool_count == 0) {
-      return NULL;
-   }
-
-   /* Single pass: build array and count simultaneously */
-   struct json_object *tools_array = json_object_new_array();
-   int added = 0;
-
-   for (int i = 0; i < s_tool_count; i++) {
-      const tool_definition_t *t = &s_tools[i];
-      if (!is_tool_enabled_for_session(t, is_remote_session)) {
-         continue;
-      }
-
-      struct json_object *tool_obj = json_object_new_object();
-      json_object_object_add(tool_obj, "type", json_object_new_string("function"));
-
-      struct json_object *function = json_object_new_object();
-      json_object_object_add(function, "name", json_object_new_string(t->name));
-      json_object_object_add(function, "description",
-                             json_object_new_string(tool_effective_description(t)));
-      json_object_object_add(function, "parameters", build_parameters_schema(t));
-
-      json_object_object_add(tool_obj, "function", function);
-      json_object_array_add(tools_array, tool_obj);
-      added++;
-   }
-
-   if (added == 0) {
-      json_object_put(tools_array);
-      return NULL;
-   }
-
-   return tools_array;
-}
-
-struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session) {
-   if (!s_initialized || s_tool_count == 0) {
-      return NULL;
-   }
-
-   /* Single pass: build array and count simultaneously */
-   struct json_object *tools_array = json_object_new_array();
-   int added = 0;
-
-   for (int i = 0; i < s_tool_count; i++) {
-      const tool_definition_t *t = &s_tools[i];
-      if (!is_tool_enabled_for_session(t, is_remote_session)) {
-         continue;
-      }
-
-      struct json_object *tool_obj = json_object_new_object();
-      json_object_object_add(tool_obj, "name", json_object_new_string(t->name));
-      json_object_object_add(tool_obj, "description",
-                             json_object_new_string(tool_effective_description(t)));
-      json_object_object_add(tool_obj, "input_schema", build_parameters_schema(t));
-
-      json_object_array_add(tools_array, tool_obj);
-      added++;
-   }
-
-   if (added == 0) {
-      json_object_put(tools_array);
-      return NULL;
-   }
-
-   return tools_array;
-}
-
 /* =============================================================================
  * Tool Configuration API
  * ============================================================================= */
 
 int llm_tools_get_all(tool_info_t *out, int max_tools) {
-   if (!out || max_tools <= 0 || !s_initialized) {
+   if (!out || max_tools <= 0 || !llm_tools_ready) {
       return 0;
    }
 
    int count = 0;
-   for (int i = 0; i < s_tool_count && count < max_tools; i++) {
-      const tool_definition_t *t = &s_tools[i];
+   for (int i = 0; i < llm_tools_count && count < max_tools; i++) {
+      const tool_definition_t *t = &llm_tools_table[i];
       tool_info_t *info = &out[count++];
 
       safe_strncpy(info->name, t->name, LLM_TOOLS_NAME_LEN);
@@ -1153,58 +1030,60 @@ int llm_tools_get_all(tool_info_t *out, int max_tools) {
 }
 
 int llm_tools_set_enabled(const char *tool_name, bool enabled_local, bool enabled_remote) {
-   if (!tool_name || !s_initialized) {
+   if (!tool_name || !llm_tools_ready) {
       return 1; /* FAILURE - invalid args or not initialized */
    }
 
-   pthread_mutex_lock(&s_tools_mutex);
-   for (int i = 0; i < s_tool_count; i++) {
-      if (strcmp(s_tools[i].name, tool_name) == 0) {
-         s_tools[i].enabled_local = enabled_local;
-         s_tools[i].enabled_remote = enabled_remote;
+   pthread_mutex_lock(&llm_tools_mutex);
+   for (int i = 0; i < llm_tools_count; i++) {
+      if (strcmp(llm_tools_table[i].name, tool_name) == 0) {
+         llm_tools_table[i].enabled_local = enabled_local;
+         llm_tools_table[i].enabled_remote = enabled_remote;
 
          /* Invalidate token estimate cache */
          s_token_estimate_local = -1;
          s_token_estimate_remote = -1;
 
-         pthread_mutex_unlock(&s_tools_mutex);
+         pthread_mutex_unlock(&llm_tools_mutex);
          OLOG_INFO("Tool '%s' enable state updated: local=%d, remote=%d", tool_name, enabled_local,
                    enabled_remote);
          return 0; /* SUCCESS */
       }
    }
-   pthread_mutex_unlock(&s_tools_mutex);
+   pthread_mutex_unlock(&llm_tools_mutex);
 
    OLOG_WARNING("Tool '%s' not found", tool_name);
    return 1; /* FAILURE - tool not found */
 }
 
 bool llm_tools_is_device_enabled(const char *device_name, bool is_remote) {
-   if (!device_name || !s_initialized) {
+   if (!device_name || !llm_tools_ready) {
       return false;
    }
 
-   pthread_mutex_lock(&s_tools_mutex);
+   pthread_mutex_lock(&llm_tools_mutex);
 
    /* Search tools by name - tools use device_string for device name mapping */
-   for (int i = 0; i < s_tool_count; i++) {
+   for (int i = 0; i < llm_tools_count; i++) {
       /* Check both the tool name and the device_string (underlying device) */
-      if (strcmp(s_tools[i].name, device_name) == 0 ||
-          (s_tools[i].device_name && strcmp(s_tools[i].device_name, device_name) == 0)) {
+      if (strcmp(llm_tools_table[i].name, device_name) == 0 ||
+          (llm_tools_table[i].device_name &&
+           strcmp(llm_tools_table[i].device_name, device_name) == 0)) {
          /* Check if the tool is enabled at all */
-         if (!s_tools[i].enabled) {
-            pthread_mutex_unlock(&s_tools_mutex);
+         if (!llm_tools_table[i].enabled) {
+            pthread_mutex_unlock(&llm_tools_mutex);
             return false;
          }
 
          /* Check session-specific enable state */
-         bool enabled = is_remote ? s_tools[i].enabled_remote : s_tools[i].enabled_local;
-         pthread_mutex_unlock(&s_tools_mutex);
+         bool enabled = is_remote ? llm_tools_table[i].enabled_remote
+                                  : llm_tools_table[i].enabled_local;
+         pthread_mutex_unlock(&llm_tools_mutex);
          return enabled;
       }
    }
 
-   pthread_mutex_unlock(&s_tools_mutex);
+   pthread_mutex_unlock(&llm_tools_mutex);
 
    /* Device not found in tools array. Only devices with tool blocks in
     * commands_config_nuevo.json become tools and should appear in prompts.
@@ -1216,8 +1095,8 @@ bool llm_tools_is_device_enabled(const char *device_name, bool is_remote) {
 /* Mark set[i]=true for each registered tool named in names[0..count). */
 static void build_tool_set(bool *set, const char names[][LLM_TOOL_NAME_MAX], int count) {
    for (int j = 0; j < count; j++) {
-      for (int i = 0; i < s_tool_count; i++) {
-         if (strcmp(s_tools[i].name, names[j]) == 0) {
+      for (int i = 0; i < llm_tools_count; i++) {
+         if (strcmp(llm_tools_table[i].name, names[j]) == 0) {
             set[i] = true;
             break;
          }
@@ -1250,7 +1129,7 @@ static bool resolve_tool_enabled(bool dangerous,
 }
 
 void llm_tools_apply_config(const llm_tools_config_t *cfg) {
-   if (!s_initialized) {
+   if (!llm_tools_ready) {
       OLOG_WARNING("llm_tools_apply_config called before initialization - config ignored");
       return;
    }
@@ -1258,7 +1137,7 @@ void llm_tools_apply_config(const llm_tools_config_t *cfg) {
       return;
 
    /* Build membership sets for each of the four lists (O(n*m), tiny m). Reads
-    * s_tool_count / s_tools[].name OUTSIDE s_tools_mutex: safe because this runs
+    * llm_tools_count / llm_tools_table[].name OUTSIDE llm_tools_mutex: safe because this runs
     * once at startup (single caller in llm_interface.c, before worker/session
     * threads exist) and name/count are init-time-immutable. A future runtime
     * re-apply from a request thread would need to take the lock here. */
@@ -1271,21 +1150,22 @@ void llm_tools_apply_config(const llm_tools_config_t *cfg) {
    build_tool_set(dis_local, cfg->local_disabled, cfg->local_disabled_count);
    build_tool_set(dis_remote, cfg->remote_disabled, cfg->remote_disabled_count);
 
-   pthread_mutex_lock(&s_tools_mutex);
-   for (int i = 0; i < s_tool_count; i++) {
-      s_tools[i].enabled_local = resolve_tool_enabled(s_tools[i].dangerous, en_local[i],
-                                                      dis_local[i], cfg->local_enabled_configured,
-                                                      cfg->local_disabled_configured);
-      s_tools[i].enabled_remote = resolve_tool_enabled(s_tools[i].dangerous, en_remote[i],
-                                                       dis_remote[i],
-                                                       cfg->remote_enabled_configured,
-                                                       cfg->remote_disabled_configured);
+   pthread_mutex_lock(&llm_tools_mutex);
+   for (int i = 0; i < llm_tools_count; i++) {
+      llm_tools_table[i].enabled_local = resolve_tool_enabled(llm_tools_table[i].dangerous,
+                                                              en_local[i], dis_local[i],
+                                                              cfg->local_enabled_configured,
+                                                              cfg->local_disabled_configured);
+      llm_tools_table[i].enabled_remote = resolve_tool_enabled(llm_tools_table[i].dangerous,
+                                                               en_remote[i], dis_remote[i],
+                                                               cfg->remote_enabled_configured,
+                                                               cfg->remote_disabled_configured);
    }
 
    /* Invalidate token estimate cache */
    s_token_estimate_local = -1;
    s_token_estimate_remote = -1;
-   pthread_mutex_unlock(&s_tools_mutex);
+   pthread_mutex_unlock(&llm_tools_mutex);
 
    OLOG_INFO("Applied tool config: local=%d tools, remote=%d tools",
              llm_tools_get_enabled_count_filtered(false),
@@ -1293,13 +1173,13 @@ void llm_tools_apply_config(const llm_tools_config_t *cfg) {
 }
 
 int llm_tools_get_enabled_count_filtered(bool is_remote_session) {
-   if (!s_initialized) {
+   if (!llm_tools_ready) {
       return 0;
    }
 
    int count = 0;
-   for (int i = 0; i < s_tool_count; i++) {
-      if (is_tool_enabled_for_session(&s_tools[i], is_remote_session)) {
+   for (int i = 0; i < llm_tools_count; i++) {
+      if (llm_tools_enabled_for_session(&llm_tools_table[i], is_remote_session)) {
          count++;
       }
    }
@@ -1307,7 +1187,7 @@ int llm_tools_get_enabled_count_filtered(bool is_remote_session) {
 }
 
 int llm_tools_estimate_tokens(bool is_remote_session) {
-   /* The per-session job-tool mask (is_tool_enabled_for_session) makes the built
+   /* The per-session job-tool mask (llm_tools_enabled_for_session) makes the built
     * schema session-dependent, but this estimate cache is process-global.  If this
     * ever runs in a SESSION_TYPE_JOB context, compute fresh and do NOT read or
     * write the shared cache — otherwise a job worker's one-tool-lighter schema
@@ -1340,10 +1220,10 @@ int llm_tools_estimate_tokens(bool is_remote_session) {
 }
 
 void llm_tools_invalidate_cache(void) {
-   pthread_mutex_lock(&s_tools_mutex);
+   pthread_mutex_lock(&llm_tools_mutex);
    s_token_estimate_local = -1;
    s_token_estimate_remote = -1;
-   pthread_mutex_unlock(&s_tools_mutex);
+   pthread_mutex_unlock(&llm_tools_mutex);
    OLOG_INFO("LLM tools schema cache invalidated");
 }
 
@@ -1667,6 +1547,83 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
    return result->success ? 0 : 1;
 }
 
+/* Whether a string in @p obj (its keys too) carries @p hex. */
+static bool json_carries_secret(struct json_object *obj, const char *hex, int depth) {
+   if (!obj) {
+      return false;
+   }
+   if (depth > 16) {
+      return true; /* deeper than any real call's arguments: refused */
+   }
+   switch (json_object_get_type(obj)) {
+      case json_type_string:
+         return llm_context_carries_secret(json_object_get_string(obj), hex);
+      case json_type_array:
+         for (size_t i = 0; i < json_object_array_length(obj); i++) {
+            if (json_carries_secret(json_object_array_get_idx(obj, i), hex, depth + 1)) {
+               return true;
+            }
+         }
+         return false;
+      case json_type_object: {
+         json_object_object_foreach(obj, key, val) {
+            if (llm_context_carries_secret(key, hex) || json_carries_secret(val, hex, depth + 1)) {
+               return true;
+            }
+         }
+         return false;
+      }
+      default:
+         return false;
+   }
+}
+
+/* Whether @p call's arguments carry the conversation's tag secret: in the
+ * text as sent, or in any decoded string of it. */
+static bool call_carries_tag(const tool_call_t *call) {
+   session_t *ctx = session_get_command_context();
+   char tag[LLM_CONTEXT_TAG_MAX];
+   char hex[9];
+   if (!ctx || !call->arguments || !session_prefix_tag(ctx, tag, sizeof(tag)) ||
+       !llm_context_tag_secret(tag, hex)) {
+      return false;
+   }
+   if (llm_context_carries_secret(call->arguments, hex)) {
+      return true;
+   }
+   struct json_object *args = json_tokener_parse(call->arguments);
+   const bool carried = json_carries_secret(args, hex, 0);
+   json_object_put(args);
+   return carried;
+}
+
+/* @p result neutralized (llm_context_neutralize) in place, and the
+ * conversation's tag secret masked in it; a result that can't be is replaced
+ * by an error rather than passed on as it came. */
+static void neutralize_result(const char *tool, tool_result_t *result) {
+   session_t *ctx = session_get_command_context();
+   if (result->result_extended) {
+      result->result_extended = session_prefix_mask_secret(ctx, llm_context_neutralize_owned(
+                                                                    result->result_extended));
+      if (!result->result_extended) {
+         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error: out of memory reading the result");
+         result->success = false;
+         OLOG_ERROR("Tool '%s': out of memory neutralizing its result", tool);
+         return;
+      }
+   }
+   char *safe = session_prefix_mask_secret(ctx, llm_context_neutralize(result->result));
+   if (safe) {
+      safe_strncpy(result->result, safe, LLM_TOOLS_RESULT_LEN);
+      utf8_trim_incomplete(result->result);
+      free(safe);
+   } else {
+      snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error: out of memory reading the result");
+      result->success = false;
+      OLOG_ERROR("Tool '%s': out of memory neutralizing its result", tool);
+   }
+}
+
 int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    if (!call || !result) {
       return 1;
@@ -1685,6 +1642,22 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
       return 1;
    }
 
+   /* The conversation's tag is what marks DAWN's own framing: a call that
+    * carries its secret out (a URL, a search, a message; split, spaced or
+    * encoded) is refused, so text the model was led to read can't learn it
+    * through a tool.  A tripwire: what comes in is defused regardless. */
+   if (call_carries_tag(call)) {
+      snprintf(result->result, LLM_TOOLS_RESULT_LEN,
+               "Refused: the call's arguments carry DAWN's conversation tag, which never leaves "
+               "the conversation. Make the call without it.");
+      result->success = false;
+      result->is_error = true;
+      OLOG_WARNING("Refused tool '%s': its arguments carry the conversation tag", call->name);
+      notify_tool_execution(call->name, "(withheld: carried the conversation tag)", result->result,
+                            false);
+      return 1;
+   }
+
    /* Session-level availability guard. The schema sent to the LLM already
     * excludes unavailable tools, but LLMs sometimes hallucinate a call from
     * conversation history — e.g., when a previous turn successfully used a
@@ -1700,14 +1673,14 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    if (ctx) {
       bool is_remote = (ctx->type != SESSION_TYPE_LOCAL);
       bool enabled = true;
-      pthread_mutex_lock(&s_tools_mutex);
-      for (int i = 0; i < s_tool_count; i++) {
-         if (strcmp(s_tools[i].name, call->name) == 0) {
-            enabled = is_tool_enabled_for_session(&s_tools[i], is_remote);
+      pthread_mutex_lock(&llm_tools_mutex);
+      for (int i = 0; i < llm_tools_count; i++) {
+         if (strcmp(llm_tools_table[i].name, call->name) == 0) {
+            enabled = llm_tools_enabled_for_session(&llm_tools_table[i], is_remote);
             break;
          }
       }
-      pthread_mutex_unlock(&s_tools_mutex);
+      pthread_mutex_unlock(&llm_tools_mutex);
 
       if (!enabled) {
          snprintf(result->result, LLM_TOOLS_RESULT_LEN,
@@ -1729,6 +1702,9 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    }
 
    int rc = llm_tools_execute_from_treg(call, treg_meta, result);
+   /* A result is text from anywhere (a page, a message, a document, an MCP
+    * server): what imitates DAWN's framing or carries a tag is defused. */
+   neutralize_result(call->name, result);
    /* Backstop: every from_treg path sets `success` explicitly, so folding `!success` in here
     * retroactively covers ALL of them (structural failures — bad args, invalid JSON, encode
     * overflow, command-exec failure) with one line. The direct-callback site sets `is_error`
@@ -1941,385 +1917,8 @@ char *llm_tools_get_direct_response(const tool_result_list_t *results) {
 }
 
 /* =============================================================================
- * Tool Result Formatting for Conversation History
+ * Current config and thinking (Thread-Local)
  * ============================================================================= */
-
-/**
- * @brief Build a standalone user message holding exactly one captured-vision image
- *
- * OpenAI-shape: {"role":"user","content":[{"type":"image_url","image_url":{"url":...}}]}
- * No accompanying text. Persists a tool-captured image (e.g. the `viewing`
- * camera tool) into conversation history so follow-up turns can still see
- * it, instead of the image only being visible for the single turn it was
- * captured in. is_capture_image_message() recognizes this exact
- * single-part shape for retention pruning.
- */
-static struct json_object *build_openai_capture_image_message(const char *base64_data) {
-   const char *media_type = llm_claude_detect_image_mime_type(base64_data);
-   const char *prefix_fmt = "data:%s;base64,";
-   size_t data_uri_len = strlen(prefix_fmt) + strlen(media_type) + strlen(base64_data) + 1;
-   char *data_uri = malloc(data_uri_len);
-   if (!data_uri) {
-      OLOG_ERROR("Failed to allocate data URI for captured image (%zu bytes) — skipping persist",
-                 data_uri_len);
-      return NULL;
-   }
-   snprintf(data_uri, data_uri_len, "data:%s;base64,%s", media_type, base64_data);
-
-   struct json_object *image_url_obj = json_object_new_object();
-   json_object_object_add(image_url_obj, "url", json_object_new_string(data_uri));
-   free(data_uri);
-
-   struct json_object *image_obj = json_object_new_object();
-   json_object_object_add(image_obj, "type", json_object_new_string("image_url"));
-   json_object_object_add(image_obj, "image_url", image_url_obj);
-
-   struct json_object *content_array = json_object_new_array();
-   json_object_array_add(content_array, image_obj);
-
-   struct json_object *msg = json_object_new_object();
-   json_object_object_add(msg, "role", json_object_new_string("user"));
-   json_object_object_add(msg, "content", content_array);
-   return msg;
-}
-
-/**
- * @brief Build a standalone user message holding exactly one captured-vision image (Claude shape)
- *
- * Mirrors build_openai_capture_image_message() but wraps the image with
- * llm_claude_create_image_block(), matching what convert_to_claude_format()
- * already produces ephemerally for a caller-supplied vision image.
- */
-static struct json_object *build_claude_capture_image_message(const char *base64_data) {
-   struct json_object *content_array = json_object_new_array();
-   json_object_array_add(content_array, llm_claude_create_image_block(base64_data));
-
-   struct json_object *msg = json_object_new_object();
-   json_object_object_add(msg, "role", json_object_new_string("user"));
-   json_object_object_add(msg, "content", content_array);
-   return msg;
-}
-
-/**
- * @brief True if msg is a lone captured-vision-image message
- *
- * Recognizes the exact shape built above: a "user" message whose content is
- * a single-element array containing only an image part ("image_url" for
- * OpenAI shape, "image" for Claude shape). This is distinct from a
- * WebUI-uploaded image (session_add_message_with_images() always pairs an
- * image with a text part, so its content array has length >= 2), so
- * retention pruning only ever touches ambient tool captures, never images
- * the user deliberately attached to a message.
- */
-static bool is_capture_image_message(struct json_object *msg) {
-   struct json_object *role_obj = NULL;
-   struct json_object *content_obj = NULL;
-
-   if (!msg || !json_object_object_get_ex(msg, "role", &role_obj) ||
-       strcmp(json_object_get_string(role_obj), "user") != 0) {
-      return false;
-   }
-   if (!json_object_object_get_ex(msg, "content", &content_obj) ||
-       !json_object_is_type(content_obj, json_type_array) ||
-       json_object_array_length(content_obj) != 1) {
-      return false;
-   }
-
-   struct json_object *part = json_object_array_get_idx(content_obj, 0);
-   struct json_object *type_obj = NULL;
-   if (!part || !json_object_object_get_ex(part, "type", &type_obj)) {
-      return false;
-   }
-
-   const char *type = json_object_get_string(type_obj);
-   return type && (strcmp(type, "image_url") == 0 || strcmp(type, "image") == 0);
-}
-
-/**
- * @brief Keep only the most recent N tool-captured images in history
- *
- * Scans newest-to-oldest; the first retention_count capture-image messages
- * found are left intact, anything older is collapsed to a short text
- * placeholder. retention_count <= 0 means unlimited (no-op) — bounding is
- * then left entirely to normal context compaction.
- */
-static void evict_old_capture_images(struct json_object *history, int retention_count) {
-   if (!history || retention_count <= 0) {
-      return;
-   }
-
-   int live = 0;
-   for (int i = json_object_array_length(history) - 1; i >= 0; i--) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      if (!is_capture_image_message(msg)) {
-         continue;
-      }
-      live++;
-      if (live > retention_count) {
-         json_object_object_add(msg, "content",
-                                json_object_new_string(
-                                    "[earlier camera capture - image no longer retained]"));
-      }
-   }
-}
-
-/**
- * @brief Persist the first tool result carrying a captured image, if any
- *
- * Appends an image-only message via the given builder and prunes older
- * captures per [vision] capture_history_count. Matches the prior ephemeral
- * behavior of surfacing at most one captured image per tool iteration.
- */
-static void persist_capture_image_if_present(struct json_object *history,
-                                             const tool_result_list_t *results,
-                                             struct json_object *(*build_message)(const char *)) {
-   for (int i = 0; i < results->count; i++) {
-      const tool_result_t *r = &results->results[i];
-      if (r->vision_image && r->vision_image_size > 0) {
-         struct json_object *msg = build_message(r->vision_image);
-         if (msg) {
-            session_history_append(history, msg);
-            evict_old_capture_images(history, g_config.vision.capture_history_count);
-         }
-         return;
-      }
-   }
-}
-
-int llm_tools_add_results_openai(struct json_object *history, const tool_result_list_t *results) {
-   if (!history || !results) {
-      return 1;
-   }
-
-   /*
-    * OpenAI format: Add a "tool" role message for each result
-    * {
-    *   "role": "tool",
-    *   "tool_call_id": "call_xxx",
-    *   "content": "result text"
-    * }
-    */
-   for (int i = 0; i < results->count; i++) {
-      const tool_result_t *r = &results->results[i];
-
-      struct json_object *msg = json_object_new_object();
-      json_object_object_add(msg, "role", json_object_new_string("tool"));
-      json_object_object_add(msg, "tool_call_id", json_object_new_string(r->tool_call_id));
-      json_object_object_add(msg, "content", json_object_new_string(tool_result_content(r)));
-
-      session_history_append(history, msg);
-   }
-
-   /* A tool that returned a captured image (e.g. `viewing`) only shows the
-    * model that image for the turn it was captured in unless we persist it
-    * here — see docs/arch/subsystems/llm.md vision notes. */
-   persist_capture_image_if_present(history, results, build_openai_capture_image_message);
-
-   return 0;
-}
-
-int llm_tools_add_results_claude(struct json_object *history, const tool_result_list_t *results) {
-   if (!history || !results) {
-      return 1;
-   }
-
-   /*
-    * Claude format: Add a single "user" message with tool_result content blocks
-    * {
-    *   "role": "user",
-    *   "content": [
-    *     {
-    *       "type": "tool_result",
-    *       "tool_use_id": "toolu_xxx",
-    *       "content": "result text"
-    *     }
-    *   ]
-    * }
-    */
-   struct json_object *content_array = json_object_new_array();
-
-   for (int i = 0; i < results->count; i++) {
-      const tool_result_t *r = &results->results[i];
-
-      struct json_object *block = json_object_new_object();
-      json_object_object_add(block, "type", json_object_new_string("tool_result"));
-      json_object_object_add(block, "tool_use_id", json_object_new_string(r->tool_call_id));
-      json_object_object_add(block, "content", json_object_new_string(tool_result_content(r)));
-
-      json_object_array_add(content_array, block);
-   }
-
-   struct json_object *msg = json_object_new_object();
-   json_object_object_add(msg, "role", json_object_new_string("user"));
-   json_object_object_add(msg, "content", content_array);
-
-   session_history_append(history, msg);
-
-   persist_capture_image_if_present(history, results, build_claude_capture_image_message);
-
-   return 0;
-}
-
-/* =============================================================================
- * Response Parsing
- * ============================================================================= */
-
-int llm_tools_parse_openai_response(struct json_object *response, tool_call_list_t *out) {
-   if (!response || !out) {
-      return FAILURE;
-   }
-
-   out->count = 0;
-
-   /*
-    * OpenAI response structure:
-    * {
-    *   "choices": [{
-    *     "message": {
-    *       "tool_calls": [{
-    *         "id": "call_xxx",
-    *         "function": {
-    *           "name": "weather",
-    *           "arguments": "{...}"
-    *         }
-    *       }]
-    *     },
-    *     "finish_reason": "tool_calls"
-    *   }]
-    * }
-    */
-   struct json_object *choices;
-   if (!json_object_object_get_ex(response, "choices", &choices)) {
-      return 1; /* No tool calls */
-   }
-
-   if (json_object_array_length(choices) == 0) {
-      return 1;
-   }
-
-   struct json_object *first_choice = json_object_array_get_idx(choices, 0);
-   struct json_object *message;
-   if (!json_object_object_get_ex(first_choice, "message", &message)) {
-      return 1;
-   }
-
-   struct json_object *tool_calls;
-   if (!json_object_object_get_ex(message, "tool_calls", &tool_calls)) {
-      return 1; /* No tool calls */
-   }
-
-   int len = json_object_array_length(tool_calls);
-   for (int i = 0; i < len && out->count < LLM_TOOLS_MAX_PARALLEL_CALLS; i++) {
-      struct json_object *tc = json_object_array_get_idx(tool_calls, i);
-      struct json_object *id_obj, *function_obj;
-
-      if (!json_object_object_get_ex(tc, "id", &id_obj) ||
-          !json_object_object_get_ex(tc, "function", &function_obj)) {
-         continue;
-      }
-
-      struct json_object *name_obj, *args_obj;
-      if (!json_object_object_get_ex(function_obj, "name", &name_obj) ||
-          !json_object_object_get_ex(function_obj, "arguments", &args_obj)) {
-         continue;
-      }
-
-      tool_call_t *call = &out->calls[out->count++];
-      safe_strncpy(call->id, json_object_get_string(id_obj), LLM_TOOLS_ID_LEN);
-      safe_strncpy(call->name, json_object_get_string(name_obj), LLM_TOOLS_NAME_LEN);
-
-      const char *args_str = json_object_get_string(args_obj);
-      call->args_truncated = (args_str && strlen(args_str) >= LLM_TOOLS_ARGS_LEN);
-      if (call->args_truncated) {
-         OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
-                      strlen(args_str), LLM_TOOLS_ARGS_LEN - 1);
-      }
-      safe_strncpy(call->arguments, args_str ? args_str : "", LLM_TOOLS_ARGS_LEN);
-   }
-
-   return out->count > 0 ? 0 : 1;
-}
-
-int llm_tools_parse_claude_response(struct json_object *response, tool_call_list_t *out) {
-   if (!response || !out) {
-      return FAILURE;
-   }
-
-   out->count = 0;
-
-   /*
-    * Claude response structure:
-    * {
-    *   "content": [
-    *     {
-    *       "type": "tool_use",
-    *       "id": "toolu_xxx",
-    *       "name": "weather",
-    *       "input": { ... }
-    *     }
-    *   ],
-    *   "stop_reason": "tool_use"
-    * }
-    */
-   struct json_object *content;
-   if (!json_object_object_get_ex(response, "content", &content)) {
-      return 1;
-   }
-
-   int len = json_object_array_length(content);
-   for (int i = 0; i < len && out->count < LLM_TOOLS_MAX_PARALLEL_CALLS; i++) {
-      struct json_object *block = json_object_array_get_idx(content, i);
-      struct json_object *type_obj;
-
-      if (!json_object_object_get_ex(block, "type", &type_obj)) {
-         continue;
-      }
-
-      if (strcmp(json_object_get_string(type_obj), "tool_use") != 0) {
-         continue;
-      }
-
-      struct json_object *id_obj, *name_obj, *input_obj;
-      if (!json_object_object_get_ex(block, "id", &id_obj) ||
-          !json_object_object_get_ex(block, "name", &name_obj) ||
-          !json_object_object_get_ex(block, "input", &input_obj)) {
-         continue;
-      }
-
-      tool_call_t *call = &out->calls[out->count++];
-      safe_strncpy(call->id, json_object_get_string(id_obj), LLM_TOOLS_ID_LEN);
-      safe_strncpy(call->name, json_object_get_string(name_obj), LLM_TOOLS_NAME_LEN);
-
-      /* Claude sends input as object, we need it as string */
-      const char *input_str = json_object_to_json_string(input_obj);
-      call->args_truncated = (input_str && strlen(input_str) >= LLM_TOOLS_ARGS_LEN);
-      if (call->args_truncated) {
-         OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
-                      strlen(input_str), LLM_TOOLS_ARGS_LEN - 1);
-      }
-      safe_strncpy(call->arguments, input_str, LLM_TOOLS_ARGS_LEN);
-   }
-
-   return out->count > 0 ? 0 : 1;
-}
-
-/* =============================================================================
- * Tool Suppression (Thread-Local)
- * ============================================================================= */
-
-void llm_tools_suppress_push(void) {
-   tl_suppress_count++;
-}
-
-void llm_tools_suppress_pop(void) {
-   if (tl_suppress_count > 0) {
-      tl_suppress_count--;
-   }
-}
-
-bool llm_tools_suppressed(void) {
-   return tl_suppress_count > 0;
-}
 
 void llm_tools_set_current_config(const llm_resolved_config_t *config) {
    tl_current_config = config;
@@ -2396,7 +1995,7 @@ bool llm_check_thinking_trigger(const char *text) {
 
 bool llm_tools_enabled(const llm_resolved_config_t *config) {
    /* Check thread-local suppression first */
-   if (tl_suppress_count > 0) {
+   if (llm_tools_suppressed()) {
       return false;
    }
 
@@ -2414,7 +2013,7 @@ bool llm_tools_enabled(const llm_resolved_config_t *config) {
    }
 
    /* Check that tools system is initialized with enabled tools */
-   if (!s_initialized || llm_tools_get_enabled_count() == 0) {
+   if (!llm_tools_ready || llm_tools_get_enabled_count() == 0) {
       return false;
    }
 
@@ -2442,128 +2041,12 @@ bool llm_tools_enabled(const llm_resolved_config_t *config) {
 }
 
 int llm_tools_get_enabled_count(void) {
-   if (!s_initialized) {
+   if (!llm_tools_ready) {
       return 0;
    }
    return s_enabled_count;
 }
 
-/* Append "name" (with ", " separator after the first entry) to a bucket,
- * clamping on truncation so repeated calls can't underflow remaining space.
- * Returns true if the name was fully written, false on truncation or error. */
-static bool hint_bucket_append(char *bucket, size_t bucket_size, int *offset, const char *name) {
-   if (!bucket || !offset || !name || bucket_size == 0) {
-      return false;
-   }
-   int off = *offset;
-   if (off < 0 || (size_t)off >= bucket_size - 1) {
-      return false; /* Bucket full */
-   }
-
-   if (off > 0) {
-      int w = snprintf(bucket + off, bucket_size - off, ", ");
-      if (w < 0 || (size_t)w >= bucket_size - off) {
-         *offset = (int)bucket_size - 1; /* Clamp */
-         return false;
-      }
-      off += w;
-   }
-
-   int w = snprintf(bucket + off, bucket_size - off, "%s", name);
-   if (w < 0) {
-      return false;
-   }
-   if ((size_t)w >= bucket_size - off) {
-      /* Truncated — clamp so further appends see no remaining space */
-      *offset = (int)bucket_size - 1;
-      return false;
-   }
-   off += w;
-   *offset = off;
-   return true;
-}
-
-int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_size) {
-   if (!s_initialized || !buffer || buffer_size == 0) {
-      return 0;
-   }
-
-   /* Bucket tools into two lists for the target session:
-    *   unavailable[]      - capability not available (hardware/config not met)
-    *   session_disabled[] - capability works, but admin-disabled for this session
-    */
-   char unavailable[512] = "";
-   char session_disabled[512] = "";
-   int unavail_off = 0;
-   int disabled_off = 0;
-   int unavail_count = 0;
-   int disabled_count = 0;
-
-   /* Hold s_tools_mutex across the scan so enable-flag writers
-    * (llm_tools_set_enabled, llm_tools_refresh) don't mutate mid-read. */
-   pthread_mutex_lock(&s_tools_mutex);
-   for (int i = 0; i < s_tool_count; i++) {
-      const tool_definition_t *t = &s_tools[i];
-      bool session_flag = is_remote ? t->enabled_remote : t->enabled_local;
-
-      /* Fully usable in this session - omit from hint */
-      if (t->enabled && session_flag) {
-         continue;
-      }
-
-      if (!t->enabled) {
-         /* Capability not available (e.g., HUD hardware offline, API key missing) */
-         if (hint_bucket_append(unavailable, sizeof(unavailable), &unavail_off, t->name)) {
-            unavail_count++;
-         }
-      } else {
-         /* Capability works but disabled for this session type */
-         if (hint_bucket_append(session_disabled, sizeof(session_disabled), &disabled_off,
-                                t->name)) {
-            disabled_count++;
-         }
-      }
-   }
-   pthread_mutex_unlock(&s_tools_mutex);
-
-   if (unavail_count == 0 && disabled_count == 0) {
-      buffer[0] = '\0';
-      return 0;
-   }
-
-   int len = 0;
-   const char *session_label = is_remote ? "remote" : "local";
-
-   if (unavail_count > 0) {
-      int w = snprintf(buffer + len, buffer_size - len,
-                       "\nNote: The following tools are installed but not currently "
-                       "available (hardware offline or not configured): %s. If the user "
-                       "asks about these capabilities, let them know the feature exists "
-                       "but is not reachable right now.\n",
-                       unavailable);
-      if (w > 0 && (size_t)w < buffer_size - len) {
-         len += w;
-      } else if (w > 0) {
-         len = (int)buffer_size - 1; /* Clamp on truncation */
-      }
-   }
-
-   if (disabled_count > 0 && (size_t)len < buffer_size - 1) {
-      int w = snprintf(buffer + len, buffer_size - len,
-                       "\nNote: The following tools are disabled by the administrator "
-                       "for this %s session: %s. If the user asks about these "
-                       "capabilities, let them know the feature exists but is not "
-                       "enabled in this context.\n",
-                       session_label, session_disabled);
-      if (w > 0 && (size_t)w < buffer_size - len) {
-         len += w;
-      } else if (w > 0) {
-         len = (int)buffer_size - 1;
-      }
-   }
-
-   return len;
-}
 
 #define VISION_STRIP_TEXT_BUF_MAX 8192
 
@@ -2695,244 +2178,6 @@ void llm_tool_response_free(llm_tool_response_t *response) {
          response->response_id = NULL;
       }
    }
-}
-
-/* =============================================================================
- * Duplicate Tool Call Detection
- * ============================================================================= */
-
-/* Maximum messages to check for duplicate tool calls (performance optimization) */
-#define DUPLICATE_CHECK_LOOKBACK 10
-
-/**
- * @brief Check OpenAI-format history for duplicate tool call
- */
-static bool is_duplicate_in_openai_history(struct json_object *history,
-                                           const char *tool_name,
-                                           const char *tool_args,
-                                           int min_idx) {
-   int len = json_object_array_length(history);
-
-   for (int i = len - 1; i >= min_idx; i--) {
-      json_object *msg = json_object_array_get_idx(history, i);
-      if (!msg)
-         continue;
-
-      json_object *role_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-
-      const char *role = json_object_get_string(role_obj);
-      if (!role || strcmp(role, "assistant") != 0)
-         continue;
-
-      json_object *tool_calls;
-      if (!json_object_object_get_ex(msg, "tool_calls", &tool_calls))
-         continue;
-      if (!json_object_is_type(tool_calls, json_type_array))
-         continue;
-
-      int tc_len = json_object_array_length(tool_calls);
-      for (int j = 0; j < tc_len; j++) {
-         json_object *tc = json_object_array_get_idx(tool_calls, j);
-         if (!tc)
-            continue;
-
-         json_object *func;
-         if (!json_object_object_get_ex(tc, "function", &func))
-            continue;
-
-         json_object *name_obj;
-         if (!json_object_object_get_ex(func, "name", &name_obj))
-            continue;
-
-         const char *prev_name = json_object_get_string(name_obj);
-         if (!prev_name || strcmp(prev_name, tool_name) != 0)
-            continue;
-
-         json_object *args_obj;
-         if (json_object_object_get_ex(func, "arguments", &args_obj)) {
-            const char *prev_args = json_object_get_string(args_obj);
-            bool args_match = false;
-            if ((!prev_args || prev_args[0] == '\0') && (!tool_args || tool_args[0] == '\0')) {
-               args_match = true;
-            } else if (prev_args && tool_args && strcmp(prev_args, tool_args) == 0) {
-               args_match = true;
-            }
-
-            if (args_match) {
-               return true;
-            }
-         }
-      }
-   }
-   return false;
-}
-
-/**
- * @brief Check Claude-format history for duplicate tool call
- */
-static bool is_duplicate_in_claude_history(struct json_object *history,
-                                           const char *tool_name,
-                                           const char *tool_args,
-                                           int min_idx) {
-   int len = json_object_array_length(history);
-
-   for (int i = len - 1; i >= min_idx; i--) {
-      json_object *msg = json_object_array_get_idx(history, i);
-      if (!msg)
-         continue;
-
-      json_object *role_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-
-      const char *role = json_object_get_string(role_obj);
-      if (!role || strcmp(role, "assistant") != 0)
-         continue;
-
-      json_object *content_obj;
-      if (!json_object_object_get_ex(msg, "content", &content_obj))
-         continue;
-      if (!json_object_is_type(content_obj, json_type_array))
-         continue;
-
-      int arr_len = json_object_array_length(content_obj);
-      for (int j = 0; j < arr_len; j++) {
-         json_object *block = json_object_array_get_idx(content_obj, j);
-         if (!block)
-            continue;
-
-         json_object *type_obj;
-         if (!json_object_object_get_ex(block, "type", &type_obj))
-            continue;
-
-         const char *type_str = json_object_get_string(type_obj);
-         if (!type_str || strcmp(type_str, "tool_use") != 0)
-            continue;
-
-         json_object *name_obj;
-         if (!json_object_object_get_ex(block, "name", &name_obj))
-            continue;
-
-         const char *prev_name = json_object_get_string(name_obj);
-         if (!prev_name || strcmp(prev_name, tool_name) != 0)
-            continue;
-
-         /* Claude stores input as object, compare JSON string representation */
-         json_object *input_obj;
-         if (json_object_object_get_ex(block, "input", &input_obj)) {
-            const char *prev_args = json_object_to_json_string(input_obj);
-            bool args_match = false;
-            if ((!prev_args || prev_args[0] == '\0') && (!tool_args || tool_args[0] == '\0')) {
-               args_match = true;
-            } else if (prev_args && tool_args && strcmp(prev_args, tool_args) == 0) {
-               args_match = true;
-            }
-
-            if (args_match) {
-               return true;
-            }
-         }
-      }
-   }
-   return false;
-}
-
-/* Index of the last real user message — the start of the current turn.  A repeat
- * of a tool call from an EARLIER turn is legitimate (the user asked again, or the
- * underlying data changed between turns); only a repeat within THIS turn is the
- * runaway loop the duplicate check guards against.  Claude tool-result messages
- * are role "user" too (content array with a tool_result block) — they are not a
- * turn boundary, so they're skipped.  Returns 0 when no real user message found. */
-static int last_real_user_msg_index(struct json_object *history, llm_history_format_t format) {
-   int len = json_object_array_length(history);
-   for (int i = len - 1; i >= 0; i--) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *role_obj;
-      if (!msg || !json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-      if (strcmp(json_object_get_string(role_obj), "user") != 0)
-         continue;
-      if (format == LLM_HISTORY_CLAUDE) {
-         struct json_object *content;
-         if (json_object_object_get_ex(msg, "content", &content) &&
-             json_object_is_type(content, json_type_array)) {
-            bool is_tool_result = false;
-            int n = json_object_array_length(content);
-            for (int j = 0; j < n; j++) {
-               struct json_object *blk = json_object_array_get_idx(content, j);
-               struct json_object *type_obj;
-               if (blk && json_object_object_get_ex(blk, "type", &type_obj) &&
-                   strcmp(json_object_get_string(type_obj), "tool_result") == 0) {
-                  is_tool_result = true;
-                  break;
-               }
-            }
-            if (is_tool_result)
-               continue; /* Claude tool result, not a turn boundary */
-         }
-      }
-      return i;
-   }
-   return 0;
-}
-
-bool llm_tools_is_duplicate_call(struct json_object *history,
-                                 const char *tool_name,
-                                 const char *tool_args,
-                                 llm_history_format_t format) {
-   if (!history || !tool_name)
-      return false;
-
-   /* Non-deterministic actions are exempt: an identical-args repeat is a feature
-    * (e.g. calculator "random" — "pick another number"), not an infinite loop.
-    * The registry owns both the args key that carries the action (usually
-    * "action", but e.g. switch_llm uses "target") and which action values a tool
-    * declares repeatable. */
-   if (tool_args && tool_args[0] != '\0') {
-      const char *action_key = tool_registry_get_action_param_name(tool_name);
-      if (action_key) {
-         struct json_object *parsed = json_tokener_parse(tool_args);
-         if (parsed) {
-            struct json_object *action_obj;
-            if (json_object_object_get_ex(parsed, action_key, &action_obj)) {
-               const char *action = json_object_get_string(action_obj);
-               if (action && tool_registry_action_is_repeatable(tool_name, action)) {
-                  json_object_put(parsed);
-                  return false;
-               }
-            }
-            json_object_put(parsed);
-         }
-      }
-   }
-
-   int len = json_object_array_length(history);
-   int min_idx = len - DUPLICATE_CHECK_LOOKBACK;
-   if (min_idx < 0) {
-      min_idx = 0;
-   }
-   /* Confine the scan to the current turn so a user-requested repeat (or a
-    * re-read of data that changed since the last turn) isn't blocked as a dup —
-    * only same-turn loops are caught. */
-   int turn_start = last_real_user_msg_index(history, format);
-   if (turn_start > min_idx) {
-      min_idx = turn_start;
-   }
-
-   bool is_dup;
-   if (format == LLM_HISTORY_CLAUDE) {
-      is_dup = is_duplicate_in_claude_history(history, tool_name, tool_args, min_idx);
-   } else {
-      is_dup = is_duplicate_in_openai_history(history, tool_name, tool_args, min_idx);
-   }
-
-   if (is_dup) {
-      OLOG_INFO("Duplicate tool call detected: %s with args %s", tool_name,
-                tool_args ? tool_args : "(none)");
-   }
-   return is_dup;
 }
 
 /* =============================================================================

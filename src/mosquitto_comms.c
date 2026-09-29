@@ -37,9 +37,11 @@
 #include "core/component_status.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "dawn.h"
 #include "input_queue.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
@@ -229,9 +231,14 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
     * (drop-oldest). Revisit tool-scoping / extraction-tagging for relays if the
     * MQTT LOCAL PATH sees heavy use. */
    (void)mosq; /* command chaining + TTS now handled by the main pipeline */
+   /* A callback's result can be text from anywhere (a search): what imitates
+    * DAWN's framing or carries a tag is defused before it becomes input. */
+   char *safe = session_prefix_mask_secret(session_get_local(),
+                                           llm_context_neutralize(pending_command_result));
    snprintf(gpt_response, sizeof(gpt_response),
             "[DEVICE DATA] Speak this information naturally to the user: %s",
-            pending_command_result);
+            safe ? safe : "(the device's data couldn't be read)");
+   free(safe);
    input_queue_push(INPUT_SOURCE_MQTT, gpt_response);
 
    free(pending_command_result);
