@@ -65,7 +65,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 94
+#define AUTH_DB_SCHEMA_VERSION 95
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -760,6 +760,13 @@ int auth_db_migrations_v93(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v94(sqlite3 *db);
+
+/**
+ * @brief v95 migration: memory_facts.superseded_at (when a fact was merged),
+ *        stamped now on facts already superseded.  Idempotent.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v95(sqlite3 *db);
 
 /** Whether @p table has column @p col (a migration's probe before an ALTER;
  *  auth_db_migrations.c). */

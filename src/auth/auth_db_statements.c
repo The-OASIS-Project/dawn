@@ -1099,7 +1099,9 @@ int auth_db_prepare_statements(void) {
     * pointing superseded_by at a foreign row, AND a foreign old_fact_id
     * would let a caller corrupt another user's fact chain. */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_facts SET superseded_by = ? WHERE id = ? AND user_id = ? "
+                           "UPDATE memory_facts SET superseded_by = ?, "
+                           "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                           "WHERE id = ? AND user_id = ? "
                            "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {
@@ -1140,8 +1142,11 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(
        s_db.db,
+       /* A retention window after the merge (superseded_at), never after
+        * creation: an old fact merged today stays recoverable for the window.
+        * Without a merge time it is kept. */
        "DELETE FROM memory_facts WHERE user_id = ? AND superseded_by IS NOT NULL "
-       "AND created_at < ?",
+       "AND superseded_at IS NOT NULL AND superseded_at < ?",
        -1, &s_db.stmt_memory_fact_prune_superseded, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_prune_superseded failed: %s",

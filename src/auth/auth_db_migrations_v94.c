@@ -27,9 +27,10 @@
  * - conversations.prefix_hash / tools_hash name the conversation's frozen system
  *   prompt and tool set in prompt_blobs, in_force_hash which of its sections
  *   and standing directions are in force now; reasoning_floor_msg_id marks where a
- *   declared boundary left earlier reasoning behind, and reasoning_floor_pending
- *   (a time) that a withdrawal left every row's reasoning behind until a turn
- *   built after it is saved.
+ *   declared boundary left earlier reasoning behind, reasoning_floor_pending (a
+ *   place in the withdrawal sequence) that a withdrawal left every row's
+ *   reasoning behind until a turn built after it is saved, and
+ *   reasoning_floor_seq the last withdrawal that changed the conversation.
  * - conversation_focus_handles gives each injected memory item a citation handle
  *   that stays the same for the conversation's life.
  *

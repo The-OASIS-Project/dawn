@@ -121,6 +121,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v92.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v93.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v94.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v95.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -1243,6 +1244,22 @@ dawn_add_unit_test(test_memory_note_guard
 dawn_add_unit_test(test_memory_note_bridge
    SOURCES test_memory_note_bridge.c
            ${SRC_ROOT}/src/memory/memory_note_bridge.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Merged facts are pruned a window after the merge, not after creation (v95).
+dawn_add_unit_test(test_memory_fact_prune
+   SOURCES test_memory_fact_prune.c
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c

@@ -48,6 +48,7 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  last_accessed INTEGER,"
                          "  access_count INTEGER DEFAULT 0,"
                          "  superseded_by INTEGER,"
+                         "  superseded_at INTEGER,"
                          "  normalized_hash INTEGER DEFAULT 0,"
                          "  embedding BLOB DEFAULT NULL,"
                          "  embedding_norm REAL DEFAULT NULL"
@@ -156,7 +157,9 @@ static void setup_db(void) {
     * the UPDATE and an EXISTS subquery enforces same-user ownership of
     * new_fact_id (cross-user pointer prevention). */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_facts SET superseded_by = ? WHERE id = ? AND user_id = ? "
+                           "UPDATE memory_facts SET superseded_by = ?, "
+                           "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                           "WHERE id = ? AND user_id = ? "
                            "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {

@@ -489,6 +489,9 @@ static const char *SCHEMA_SQL =
      * cites, so a citation cooldown sharing that column would never fire.  The
      * reinforce UPDATE gates on (last_cited IS NULL OR now - last_cited > 3600). */
     "   last_cited             INTEGER DEFAULT NULL,"
+    /* v95: superseded_at — when the fact was merged into superseded_by; the
+     * superseded prune counts its retention window from here. */
+    "   superseded_at          INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"

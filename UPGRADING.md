@@ -12,6 +12,24 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-29 — Merging duplicate memories is recoverable again
+
+**What changed.**
+- **Merges are real merges.** When the assistant merged duplicate memories
+  (`forget` with a fact to keep), the fact to keep never reached DAWN, so every
+  such "merge" permanently deleted the duplicates. Duplicates are now hidden
+  behind the kept fact and recoverable, as intended.
+- **A merged fact is kept for `prune_superseded_days` (default 30) from the
+  merge.** Before, the window counted from when the fact was first learned, so
+  any fact older than that was deleted at the next prune, right after merging.
+
+**Upgrading.** Nothing to do: the database migrates itself (schema v95), and
+facts merged before the upgrade get a fresh window from the upgrade. Duplicates
+deleted by earlier "merges" are not brought back; the facts they were merged
+into still hold what they said.
+
+---
+
 ## 2026-09-29 — Conversations keep the prompt they started with
 
 **What changed.**
