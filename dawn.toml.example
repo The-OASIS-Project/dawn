@@ -591,7 +591,7 @@
 # expire_grace_days = 7           # Keep an expiring fact visible N days past its reference date
 # prune_expired_days = 30         # Recoverable buffer before hard-delete (0 = delete on expiry)
 # conversation_idle_timeout_min = 15  # Auto-save voice conversations after N minutes idle
-                                  # (0 = disabled, minimum 10 if enabled)
+                                  # (0 = disabled, minimum 5 if enabled)
 # default_voice_user_id = 1       # User the local microphone speaks for while the Local Device
                                   # isn't assigned on the admin satellite page (assigned, its mic
                                   # and speaker are that user's).  Satellites not assigned to a

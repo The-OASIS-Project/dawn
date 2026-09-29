@@ -789,37 +789,12 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_BOOL(section, "expire_enabled", config->memory.expire_enabled);
       JSON_TO_CONFIG_INT(section, "expire_grace_days", config->memory.expire_grace_days);
       JSON_TO_CONFIG_INT(section, "prune_expired_days", config->memory.prune_expired_days);
-      /* Clamp expiry windows (mirror config_parser) */
-      if (config->memory.expire_grace_days < 0) {
-         config->memory.expire_grace_days = 0;
-      } else if (config->memory.expire_grace_days > 365) {
-         config->memory.expire_grace_days = 365;
-      }
-      if (config->memory.prune_expired_days < 0) {
-         config->memory.prune_expired_days = 0;
-      } else if (config->memory.prune_expired_days > 365) {
-         config->memory.prune_expired_days = 365;
-      }
       JSON_TO_CONFIG_INT(section, "conversation_idle_timeout_min",
                          config->memory.conversation_idle_timeout_min);
-      /* Clamp conversation idle timeout (0 = disabled, else 10-60 min) */
-      if (config->memory.conversation_idle_timeout_min < 0) {
-         config->memory.conversation_idle_timeout_min = 0;
-      } else if (config->memory.conversation_idle_timeout_min > 0 &&
-                 config->memory.conversation_idle_timeout_min < 10) {
-         config->memory.conversation_idle_timeout_min = 10;
-      } else if (config->memory.conversation_idle_timeout_min > 60) {
-         config->memory.conversation_idle_timeout_min = 60;
-      }
       JSON_TO_CONFIG_INT(section, "default_voice_user_id", config->memory.default_voice_user_id);
-      /* Default voice user ID must be positive */
-      if (config->memory.default_voice_user_id < 1) {
-         config->memory.default_voice_user_id = 1;
-      }
       const int prev_fact_cache_mb = config->memory.fact_cache_mb;
       JSON_TO_CONFIG_INT(section, "fact_cache_mb", config->memory.fact_cache_mb);
-      CONFIG_CLAMP(config->memory.fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN,
-                   MEMORY_FACT_CACHE_MB_MAX);
+      config_clamp_memory(&config->memory); /* the same bounds as the file path */
       if (config->memory.fact_cache_mb != prev_fact_cache_mb) {
          memory_embeddings_invalidate_cache(); /* the next search reloads at the new size */
       }

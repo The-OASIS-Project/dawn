@@ -288,6 +288,27 @@ static void test_memory_fact_cache_mb_is_clamped(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_FACT_CACHE_MB_MIN, g_read.memory.fact_cache_mb);
 }
 
+/* The voice idle timeout: 0 is off, 5 is allowed, 1-4 rises to 5, and the
+ * settings POST shares these bounds (config_clamp_memory). */
+static void test_memory_idle_timeout_bounds(void) {
+   g_written.memory.conversation_idle_timeout_min = 5;
+   round_trip();
+   TEST_ASSERT_EQUAL_INT(5, g_read.memory.conversation_idle_timeout_min);
+
+   memory_config_t m = g_written.memory;
+   m.conversation_idle_timeout_min = 0;
+   config_clamp_memory(&m);
+   TEST_ASSERT_EQUAL_INT(0, m.conversation_idle_timeout_min);
+   m.conversation_idle_timeout_min = 3;
+   config_clamp_memory(&m);
+   TEST_ASSERT_EQUAL_INT(5, m.conversation_idle_timeout_min);
+   m.conversation_idle_timeout_min = 90;
+   m.context_budget_tokens = 99999;
+   config_clamp_memory(&m);
+   TEST_ASSERT_EQUAL_INT(60, m.conversation_idle_timeout_min);
+   TEST_ASSERT_EQUAL_INT(2000, m.context_budget_tokens);
+}
+
 /* --- section coverage ------------------------------------------------------
  * The generic half: every section config_write_toml is responsible for must
  * appear in its output.  A new section wired into the parser but not the writer
@@ -504,6 +525,7 @@ int main(void) {
    RUN_TEST(test_focus_document_min_relevance_roundtrip);
    RUN_TEST(test_memory_fact_cache_mb_roundtrip);
    RUN_TEST(test_memory_fact_cache_mb_is_clamped);
+   RUN_TEST(test_memory_idle_timeout_bounds);
    RUN_TEST(test_use_openrouter_migrates_to_provider);
    RUN_TEST(test_use_openrouter_not_written);
    RUN_TEST(test_all_writer_owned_sections_present);

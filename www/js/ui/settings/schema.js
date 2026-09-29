@@ -982,7 +982,7 @@
                min: 0,
                max: 60,
                step: 5,
-               hint: 'Minutes of idle time before auto-saving voice conversations (0 = disabled, 10+ to enable)',
+               hint: 'Minutes of idle time before auto-saving voice conversations (0 = disabled, 5+ to enable)',
                ariaLabel: 'Voice conversation idle timeout in minutes',
                displayValue: (val) => (val === 0 ? 'Disabled' : `${val} minutes`),
                advanced: true,

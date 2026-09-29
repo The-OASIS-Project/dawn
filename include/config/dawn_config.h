@@ -1339,6 +1339,16 @@ void config_set_secrets_defaults(secrets_config_t *secrets);
 void config_clamp_jobs(jobs_config_t *config);
 
 /**
+ * @brief Clamp [memory] settings to their valid ranges.
+ *
+ * Shared by the TOML parse path and the WebUI settings POST handler so the two
+ * entry points cannot drift.
+ *
+ * @param config Memory config to clamp in place (NULL-safe).
+ */
+void config_clamp_memory(memory_config_t *config);
+
+/**
  * @brief Clamp [vad] enum settings to their valid values.
  *
  * Shared by the TOML parse path and the WebUI settings POST handler so the two

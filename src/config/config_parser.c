@@ -1255,70 +1255,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    PARSE_INT(table, "conversation_idle_timeout_min", config->conversation_idle_timeout_min);
    PARSE_INT(table, "default_voice_user_id", config->default_voice_user_id);
    PARSE_INT(table, "fact_cache_mb", config->fact_cache_mb);
-   CONFIG_CLAMP(config->fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN, MEMORY_FACT_CACHE_MB_MAX);
-
-   /* Clamp context_budget_tokens to valid range */
-   if (config->context_budget_tokens < 100) {
-      config->context_budget_tokens = 100;
-   } else if (config->context_budget_tokens > 2000) {
-      config->context_budget_tokens = 2000;
-   }
-
-   /* Clamp source_budget_chars.  0 in config means "use compile-time default";
-    * otherwise clamp to the same MEMORY_SOURCE_BUDGET_MAX (32 KiB) the runtime
-    * applies in memory_action_search/_recent.  Lower bound of 0 (disabled —
-    * no source excerpts at all) is allowed so deployments can opt out of
-    * verbatim-source token cost entirely. */
-   if (config->source_budget_chars < 0) {
-      config->source_budget_chars = 0;
-   } else if (config->source_budget_chars > 32768) {
-      config->source_budget_chars = 32768;
-   }
-
-   /* Clamp pruning days to sensible values */
-   if (config->prune_superseded_days < 1) {
-      config->prune_superseded_days = 1;
-   } else if (config->prune_superseded_days > 365) {
-      config->prune_superseded_days = 365;
-   }
-   if (config->prune_stale_days < 7) {
-      config->prune_stale_days = 7;
-   } else if (config->prune_stale_days > 730) {
-      config->prune_stale_days = 730;
-   }
-   if (config->prune_stale_min_confidence < 0.0f) {
-      config->prune_stale_min_confidence = 0.0f;
-   } else if (config->prune_stale_min_confidence > 1.0f) {
-      config->prune_stale_min_confidence = 1.0f;
-   }
-
-   /* Clamp expiry windows.  Grace 0-365 days (0 = expire on the reference date).
-    * prune_expired 0-365 days (0 = hard-expire on the reference date, no buffer). */
-   if (config->expire_grace_days < 0) {
-      config->expire_grace_days = 0;
-   } else if (config->expire_grace_days > 365) {
-      config->expire_grace_days = 365;
-   }
-   if (config->prune_expired_days < 0) {
-      config->prune_expired_days = 0;
-   } else if (config->prune_expired_days > 365) {
-      config->prune_expired_days = 365;
-   }
-
-   /* Clamp conversation idle timeout (0 = disabled, otherwise 10-60 min) */
-   if (config->conversation_idle_timeout_min < 0) {
-      config->conversation_idle_timeout_min = 0;
-   } else if (config->conversation_idle_timeout_min > 0 &&
-              config->conversation_idle_timeout_min < 10) {
-      config->conversation_idle_timeout_min = 10;
-   } else if (config->conversation_idle_timeout_min > 60) {
-      config->conversation_idle_timeout_min = 60;
-   }
-
-   /* Default voice user ID must be positive */
-   if (config->default_voice_user_id < 1) {
-      config->default_voice_user_id = 1;
-   }
+   config_clamp_memory(config);
 
    /* Parse [memory.decay] sub-table */
    toml_table_t *decay = toml_table_in(table, "decay");
@@ -1777,6 +1714,76 @@ void config_clamp_vad(vad_config_t *config) {
        strcmp(config->adaptive_endpoint, "on") != 0) {
       OLOG_WARNING("Invalid [vad] adaptive_endpoint '%s'; using 'off'", config->adaptive_endpoint);
       safe_strscpy(config->adaptive_endpoint, "off");
+   }
+}
+
+void config_clamp_memory(memory_config_t *config) {
+   if (!config) {
+      return;
+   }
+   CONFIG_CLAMP(config->fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN, MEMORY_FACT_CACHE_MB_MAX);
+
+   /* Clamp context_budget_tokens to valid range */
+   if (config->context_budget_tokens < 100) {
+      config->context_budget_tokens = 100;
+   } else if (config->context_budget_tokens > 2000) {
+      config->context_budget_tokens = 2000;
+   }
+
+   /* Clamp source_budget_chars.  0 in config means "use compile-time default";
+    * otherwise clamp to the same MEMORY_SOURCE_BUDGET_MAX (32 KiB) the runtime
+    * applies in memory_action_search/_recent.  Lower bound of 0 (disabled —
+    * no source excerpts at all) is allowed so deployments can opt out of
+    * verbatim-source token cost entirely. */
+   if (config->source_budget_chars < 0) {
+      config->source_budget_chars = 0;
+   } else if (config->source_budget_chars > 32768) {
+      config->source_budget_chars = 32768;
+   }
+
+   /* Clamp pruning days to sensible values */
+   if (config->prune_superseded_days < 1) {
+      config->prune_superseded_days = 1;
+   } else if (config->prune_superseded_days > 365) {
+      config->prune_superseded_days = 365;
+   }
+   if (config->prune_stale_days < 7) {
+      config->prune_stale_days = 7;
+   } else if (config->prune_stale_days > 730) {
+      config->prune_stale_days = 730;
+   }
+   if (config->prune_stale_min_confidence < 0.0f) {
+      config->prune_stale_min_confidence = 0.0f;
+   } else if (config->prune_stale_min_confidence > 1.0f) {
+      config->prune_stale_min_confidence = 1.0f;
+   }
+
+   /* Clamp expiry windows.  Grace 0-365 days (0 = expire on the reference date).
+    * prune_expired 0-365 days (0 = hard-expire on the reference date, no buffer). */
+   if (config->expire_grace_days < 0) {
+      config->expire_grace_days = 0;
+   } else if (config->expire_grace_days > 365) {
+      config->expire_grace_days = 365;
+   }
+   if (config->prune_expired_days < 0) {
+      config->prune_expired_days = 0;
+   } else if (config->prune_expired_days > 365) {
+      config->prune_expired_days = 365;
+   }
+
+   /* Clamp conversation idle timeout (0 = disabled, otherwise 5-60 min) */
+   if (config->conversation_idle_timeout_min < 0) {
+      config->conversation_idle_timeout_min = 0;
+   } else if (config->conversation_idle_timeout_min > 0 &&
+              config->conversation_idle_timeout_min < 5) {
+      config->conversation_idle_timeout_min = 5;
+   } else if (config->conversation_idle_timeout_min > 60) {
+      config->conversation_idle_timeout_min = 60;
+   }
+
+   /* Default voice user ID must be positive */
+   if (config->default_voice_user_id < 1) {
+      config->default_voice_user_id = 1;
    }
 }
 
