@@ -186,11 +186,10 @@ static int resolve_item_to_path(const char *item,
 }
 
 /**
- * @brief Decode the terminal ::items:: slot into a JSON string array
+ * @brief Decode the ::items:: field into a JSON string array
  *
- * Uses the tail extractor (the array is the terminal custom slot, per the
- * ARRAY contract). Returns a json_type_array the caller must json_object_put(),
- * or NULL if absent / not an array.
+ * Returns a json_type_array the caller must json_object_put(), or NULL if
+ * absent / not an array.
  */
 static struct json_object *decode_items(const char *value) {
    if (!value || !value[0]) {
@@ -201,7 +200,7 @@ static struct json_object *decode_items(const char *value) {
    if (!json) {
       return NULL;
    }
-   bool got = tool_param_extract_custom_tail(value, "items", json, cap);
+   bool got = tool_param_extract_custom(value, "items", json, cap);
    struct json_object *arr = got ? json_tokener_parse(json) : NULL;
    free(json);
    if (arr && json_object_is_type(arr, json_type_array)) {
@@ -346,7 +345,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
    OLOG_INFO("WebUI music tool: action='%s' query='%s'", action, query ? query : "(none)");
 
    /* The bridge passes the packed value string; the real search query is the
-    * base segment, and list params arrive in the terminal ::items:: slot. */
+    * base segment, and list params arrive in the ::items:: field. */
    char base_query[WEBUI_MUSIC_PATH_MAX] = { 0 };
    tool_param_extract_base(query ? query : "", base_query, sizeof(base_query));
 

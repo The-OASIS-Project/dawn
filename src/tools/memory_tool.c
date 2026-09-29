@@ -259,6 +259,42 @@ static const treg_param_t memory_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "replaced_by",
    },
+   /* The contact fields: save_contact reads all four, find_contact and
+    * list_contacts read field_type. */
+   {
+       .name = "field_type",
+       .description = "For 'save_contact' / 'find_contact' / 'list_contacts': the kind of "
+                      "contact info, e.g. 'email', 'phone' or 'address'.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "field_type",
+   },
+   {
+       .name = "value",
+       .description = "For 'save_contact': the address, number or other contact info itself.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "value",
+   },
+   {
+       .name = "label",
+       .description = "For 'save_contact': an optional label, e.g. 'work' or 'personal'.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "label",
+   },
+   {
+       .name = "entity_id",
+       .description = "For 'save_contact': the person's entity ID, when a previous call asked you "
+                      "to choose between similar people.",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "entity_id",
+   },
 };
 
 /* ========== Tool Metadata ========== */
@@ -324,7 +360,7 @@ static const tool_metadata_t memory_metadata = {
                   "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
-   .param_count = 12,
+   .param_count = 16,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,

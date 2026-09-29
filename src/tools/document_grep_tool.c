@@ -216,7 +216,7 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
    *should_respond = 1;
 
    if (!value || value[0] == '\0')
-      return strdup("Error: no grep query provided.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no grep query provided.");
 
    /* Custom params (read before stripping the primary value). */
    int context = DOC_GREP_CONTEXT_DEFAULT;
@@ -238,18 +238,15 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
          offset = 0;
    }
 
-   /* The query is everything before the first "::" custom-param separator. */
+   /* The query is the base value (decoded: it may itself contain "::"). */
    char needle[DOC_CHUNK_TEXT_MAX];
-   const char *sep = strstr(value, "::");
-   size_t qlen = sep ? (size_t)(sep - value) : strlen(value);
+   tool_param_extract_base(value, needle, sizeof(needle));
    /* Fail closed rather than silently truncating to a prefix (which would match
     * the wrong, shorter term). A real search term is never this long anyway. */
-   if (qlen >= sizeof(needle))
+   if (strlen(needle) >= sizeof(needle) - 1)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: search term too long.");
-   memcpy(needle, value, qlen);
-   needle[qlen] = '\0';
    if (needle[0] == '\0')
-      return strdup("Error: empty grep query.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: empty grep query.");
 
    int user_id = tool_get_current_user_id();
    if (user_id <= 0)

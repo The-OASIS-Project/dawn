@@ -545,9 +545,8 @@ static char *commit_edit(int user_id,
 }
 
 /* edit: find/replace in a note.  `change` is a JSON object given as a string:
- * {"find": "...", "replace": "..."}.  Carried as the terminal tail param so its
- * content (incl. "::", newlines) survives the ::field::value flattening intact —
- * the JSON escaping is what makes find/replace safe regardless of content. */
+ * {"find": "...", "replace": "..."}; the JSON escaping is what makes
+ * find/replace safe regardless of content. */
 static char *do_edit(int user_id, const char *label, int64_t id, const char *change_json) {
    if (!change_json || !change_json[0])
       return strdup("To edit, provide 'change' as {\"find\": \"...\", \"replace\": \"...\"}.");
@@ -938,26 +937,26 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
       return do_rename(user_id, label, id, new_name);
    }
 
-   /* edit: the JSON 'change' object is the terminal (tail) param. */
+   /* edit: the JSON 'change' object. */
    if (strcmp(act, "edit") == 0) {
       char *change = malloc(DOCMGMT_SAVE_TEXT_MAX);
       if (!change)
          return strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
       change[0] = '\0';
-      tool_param_extract_custom_tail(value, "change", change, DOCMGMT_SAVE_TEXT_MAX);
+      tool_param_extract_custom(value, "change", change, DOCMGMT_SAVE_TEXT_MAX);
       char *result = do_edit(user_id, label, id, change);
       free(change);
       return result;
    }
 
-   /* save_note / save_text / append: text is the terminal (tail) param.  Buffer
-    * sized to DOCMGMT_SAVE_TEXT_MAX (the tool-arg ceiling), NOT the per-chunk
-    * size, so a multi-chunk save_text document isn't clipped at 4 KB. */
+   /* save_note / save_text / append: the text, in a buffer of
+    * DOCMGMT_SAVE_TEXT_MAX (the tool-arg ceiling), NOT the per-chunk size, so a
+    * multi-chunk save_text document isn't clipped at 4 KB. */
    char *text = malloc(DOCMGMT_SAVE_TEXT_MAX);
    if (!text)
       return strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
    text[0] = '\0';
-   tool_param_extract_custom_tail(value, "text", text, DOCMGMT_SAVE_TEXT_MAX);
+   tool_param_extract_custom(value, "text", text, DOCMGMT_SAVE_TEXT_MAX);
 
    char *result;
    if (strcmp(act, "save_note") == 0)

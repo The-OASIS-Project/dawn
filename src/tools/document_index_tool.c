@@ -415,18 +415,9 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
       return strdup(result_buf);
    }
 
-   /* Extract URL (strip custom params if present) */
+   /* The URL is the base value, before any custom params. */
    char url[2048];
-   const char *sep = strstr(value, "::");
-   if (sep) {
-      size_t url_len = (size_t)(sep - value);
-      if (url_len >= sizeof(url))
-         url_len = sizeof(url) - 1;
-      memcpy(url, value, url_len);
-      url[url_len] = '\0';
-   } else {
-      snprintf(url, sizeof(url), "%s", value);
-   }
+   tool_param_extract_base(value, url, sizeof(url));
 
    /* Trim whitespace */
    char *url_start = url;

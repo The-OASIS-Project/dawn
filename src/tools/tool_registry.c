@@ -468,21 +468,6 @@ int tool_registry_register(const tool_metadata_t *metadata) {
       return 1;
    }
 
-   /* Enforce the ARRAY terminal-slot contract (see tool_registry.h): an ARRAY
-    * param must be the last declared param so its ::field::<json> occupies the
-    * terminal slot in the packed value. Any ARRAY not in the last position (which
-    * also catches a second ARRAY param) would let it — or a trailing scalar — be
-    * truncated by the decode. Fail registration loudly rather than corrupt at runtime. */
-   for (int i = 0; metadata->params && i < metadata->param_count; i++) {
-      if (metadata->params[i].type == TOOL_PARAM_TYPE_ARRAY && i != metadata->param_count - 1) {
-         OLOG_ERROR("tool_registry: Tool '%s' ARRAY param '%s' must be the last declared "
-                    "param (terminal-slot contract)",
-                    metadata->name, metadata->params[i].name ? metadata->params[i].name : "?");
-         pthread_mutex_unlock(&s_registry_mutex);
-         return 1;
-      }
-   }
-
    /* Register the tool */
    int idx = s_tool_count;
    tool_entry_t *entry = &s_tools[idx];

@@ -84,18 +84,13 @@ typedef enum {
 } tool_param_type_t;
 
 /*
- * ARRAY param delivery contract:
+ * ARRAY param delivery:
  *   The LLM emits a native JSON array; the schema advertises
  *   {"type":"array","items":{"type":"string"}}. At encode time
  *   (llm_tools.c) json-c serializes the array to its compact JSON string,
- *   which rides the existing TOOL_MAPS_TO_CUSTOM "::field::value" packing.
- *   Because that packing is "::"-delimited and a serialized array (or an
- *   element) can itself contain "::", an ARRAY custom param MUST be the
- *   LAST-declared param in the tool's params[] so its value occupies the
- *   terminal slot, and the callback MUST decode it with
- *   tool_param_extract_custom_tail() (reads to end-of-string), not the
- *   plain tool_param_extract_custom(). A tool may declare at most one
- *   ARRAY param for this reason.
+ *   which rides the TOOL_MAPS_TO_CUSTOM "::field::value" packing like any
+ *   other value (escaped, so its "::" can't break it); the callback reads it
+ *   with tool_param_extract_custom().
  */
 
 /**
@@ -839,8 +834,20 @@ int tool_registry_count_tool_variations(const char *name);
  * TOOL_MAPS_TO_CUSTOM parameters are encoded by llm_tools.c as:
  *   "base_value::field_name::field_value[::field_name::field_value...]"
  *
- * These inline helpers decode the encoding. Co-located here so the
- * encode/decode contract lives in one place.
+ * A value can hold any text, "::" included: the encoder escapes each colon a
+ * separator could be mistaken for (one next to another colon, or at either end
+ * of the value) as TOOL_VALUE_ESC 'c', and a TOOL_VALUE_ESC byte itself as
+ * TOOL_VALUE_ESC 'u', so every "::" in the packed string is a separator.  The
+ * helpers below decode as they copy.  A string packed by anything that doesn't
+ * escape (a direct command, MQTT) decodes unchanged.
+ *
+ * Only a tool that declares CUSTOM params gets an escaped value; a callback of
+ * one reads it through these helpers (or tool_value_decode_copy), never raw.
+ * Direct commands, MQTT and scheduled steps pack without escaping: their text
+ * is written with its separators in it, so a "::" inside a value there still
+ * ends it (and could set a field).  No authorization check may trust a packed
+ * field unless the call is known to come from the LLM tool loop.
+ * Co-located here so the encode/decode contract lives in one place.
  * ============================================================================= */
 
 #include <stdio.h>
@@ -849,12 +856,76 @@ int tool_registry_count_tool_variations(const char *name);
 #include "core/scheduled_context.h"
 #include "core/session_manager.h"
 
+/** The escape byte of a packed tool value (ASCII unit separator). */
+#define TOOL_VALUE_ESC '\x1F'
+
+/**
+ * @brief Escape @p in (@p len bytes) as a packed tool value into @p out.
+ * @return The escaped length (excluding the NUL); when it is >= @p out_len the
+ *         output was cut short (still NUL-terminated when @p out_len > 0).
+ */
+static inline size_t tool_value_escape(const char *in, size_t len, char *out, size_t out_len) {
+   size_t n = 0; /* the escaped length */
+   size_t w = 0; /* bytes written: what fits, never half an escape */
+   bool fits = out_len > 0;
+   for (size_t i = 0; i < len; i++) {
+      const char c = in[i];
+      const bool colon_at_risk = c == ':' &&
+                                 (i == 0 || i + 1 == len || in[i - 1] == ':' || in[i + 1] == ':');
+      char pair = 0;
+      if (colon_at_risk) {
+         pair = 'c';
+      } else if (c == TOOL_VALUE_ESC) {
+         pair = 'u';
+      }
+      const size_t need = pair ? 2 : 1;
+      if (fits && w + need < out_len) {
+         if (pair) {
+            out[w++] = TOOL_VALUE_ESC;
+            out[w++] = pair;
+         } else {
+            out[w++] = c;
+         }
+      } else {
+         fits = false;
+      }
+      n += need;
+   }
+   if (out_len > 0) {
+      out[w] = '\0';
+   }
+   return n;
+}
+
+/**
+ * @brief Copy @p len bytes of a packed value from @p src into @p out, decoded.
+ *        Always NUL-terminates (when @p out_len > 0); truncates to fit.
+ */
+static inline void tool_value_decode_copy(const char *src, size_t len, char *out, size_t out_len) {
+   if (!out || out_len == 0) {
+      return;
+   }
+   size_t n = 0;
+   for (size_t i = 0; i < len && n + 1 < out_len; i++) {
+      char c = src[i];
+      if (c == TOOL_VALUE_ESC && i + 1 < len && (src[i + 1] == 'c' || src[i + 1] == 'u')) {
+         c = src[i + 1] == 'c' ? ':' : TOOL_VALUE_ESC;
+         i++;
+      }
+      out[n++] = c;
+   }
+   out[n] = '\0';
+}
+
 /**
  * @brief Extract a custom parameter value from an encoded value string
  *
+ * Walks the name/value pairs after the base, so a value can't be mistaken for
+ * a field name.
+ *
  * @param value Full value string (may contain custom params)
  * @param field_name Name of field to extract
- * @param out_value Buffer for extracted value
+ * @param out_value Buffer for the decoded value
  * @param out_len Size of out_value buffer
  * @return true if found, false otherwise
  */
@@ -865,85 +936,39 @@ static inline bool tool_param_extract_custom(const char *value,
    if (!value || !field_name || !out_value || out_len == 0)
       return false;
 
-   char pattern[64];
-   snprintf(pattern, sizeof(pattern), "::%s::", field_name);
-
-   const char *pos = strstr(value, pattern);
-   if (!pos)
-      return false;
-
-   const char *val_start = pos + strlen(pattern);
-   const char *val_end = strstr(val_start, "::");
-   size_t val_len = val_end ? (size_t)(val_end - val_start) : strlen(val_start);
-
-   if (val_len >= out_len)
-      val_len = out_len - 1;
-
-   memcpy(out_value, val_start, val_len);
-   out_value[val_len] = '\0';
-   return true;
-}
-
-/**
- * @brief Extract a terminal custom parameter, reading to end-of-string
- *
- * Like tool_param_extract_custom() but, once it finds "::field_name::", it
- * copies everything to the end of the string rather than stopping at the next
- * "::". This is required for TOOL_PARAM_TYPE_ARRAY values: the serialized JSON
- * array (or an element) may contain a literal "::", which the plain extractor
- * would truncate. Valid ONLY for the LAST-declared param (the terminal slot) —
- * see the ARRAY contract note near tool_param_type_t.
- *
- * @param value Full value string (may contain custom params)
- * @param field_name Name of the terminal field to extract
- * @param out_value Buffer for extracted value
- * @param out_len Size of out_value buffer
- * @return true if found, false otherwise
- */
-static inline bool tool_param_extract_custom_tail(const char *value,
-                                                  const char *field_name,
-                                                  char *out_value,
-                                                  size_t out_len) {
-   if (!value || !field_name || !out_value || out_len == 0)
-      return false;
-
-   char pattern[64];
-   snprintf(pattern, sizeof(pattern), "::%s::", field_name);
-
-   const char *pos = strstr(value, pattern);
-   if (!pos)
-      return false;
-
-   const char *val_start = pos + strlen(pattern);
-   size_t val_len = strlen(val_start);
-
-   if (val_len >= out_len)
-      val_len = out_len - 1;
-
-   memcpy(out_value, val_start, val_len);
-   out_value[val_len] = '\0';
-   return true;
+   const size_t name_len = strlen(field_name);
+   const char *sep = strstr(value, "::"); /* the end of the base */
+   while (sep) {
+      const char *name = sep + 2;
+      const char *name_end = strstr(name, "::");
+      if (!name_end)
+         return false;
+      const char *val = name_end + 2;
+      const char *val_end = strstr(val, "::");
+      if ((size_t)(name_end - name) == name_len && strncmp(name, field_name, name_len) == 0) {
+         tool_value_decode_copy(val, val_end ? (size_t)(val_end - val) : strlen(val), out_value,
+                                out_len);
+         return true;
+      }
+      sep = val_end;
+   }
+   return false;
 }
 
 /**
  * @brief Extract the base value (before any custom params) from an encoded string
  *
  * @param value Full value string
- * @param out_base Buffer for base value
+ * @param out_base Buffer for the decoded base value
  * @param out_len Size of out_base buffer
  */
 static inline void tool_param_extract_base(const char *value, char *out_base, size_t out_len) {
-   if (!value || !out_base)
+   if (!value || !out_base || out_len == 0)
       return;
 
    const char *delim = strstr(value, "::");
-   size_t base_len = delim ? (size_t)(delim - value) : strlen(value);
-
-   if (base_len >= out_len)
-      base_len = out_len - 1;
-
-   memcpy(out_base, value, base_len);
-   out_base[base_len] = '\0';
+   tool_value_decode_copy(value, delim ? (size_t)(delim - value) : strlen(value), out_base,
+                          out_len);
 }
 
 /**

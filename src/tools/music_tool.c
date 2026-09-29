@@ -211,8 +211,6 @@ static const treg_param_t music_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "year_max",
    },
-   /* ARRAY param MUST be declared last (terminal-slot contract — see
-    * tool_registry.h). Only one ARRAY param per tool. */
    {
        .name = "items",
        .description =
@@ -564,7 +562,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       if (value && value[0]) {
          size_t cap = strlen(value) + 1;
          char *items_json = malloc(cap);
-         if (items_json && tool_param_extract_custom_tail(value, "items", items_json, cap)) {
+         if (items_json && tool_param_extract_custom(value, "items", items_json, cap)) {
             stop_current_playback();
             s_paused_position = 0;
             s_paused_sample_rate = 0;
@@ -901,7 +899,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       if (value && value[0]) {
          size_t cap = strlen(value) + 1;
          char *items_json = malloc(cap);
-         if (items_json && tool_param_extract_custom_tail(value, "items", items_json, cap)) {
+         if (items_json && tool_param_extract_custom(value, "items", items_json, cap)) {
             struct json_object *arr = json_tokener_parse(items_json);
             free(items_json);
             /* Only treat this as a batch when items[] is NON-empty; an empty

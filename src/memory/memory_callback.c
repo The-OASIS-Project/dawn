@@ -515,35 +515,6 @@ static void append_tool_citation_hint(strbuf_t *sb) {
                   " (comma-separated, no spaces).\n");
 }
 
-/* Every TOOL_MAPS_TO_CUSTOM field the `memory` tool declares (memory_tool.c),
- * flattened into the callback value as "::field::value" (tool_registry.h).
- * `remember` stores its input verbatim as fact_text, so ANY of these that the
- * flattening appends must be trimmed first — a stray param tail poisons the
- * fact_text, its embedding, and its dedup hash (observed: a remember call that
- * carried spurious search/recent params). Keep in sync with memory_tool.c. */
-static const char *const kMemoryParamMarkers[] = {
-   "::time_range::",  "::limit::",           "::sort::",        "::before::",
-   "::target_name::", "::category::",        "::as_of::",       "::include_historical::",
-   "::with_source::", "::confirm_private::", "::replaced_by::",
-};
-
-/* Length of `value` up to the EARLIEST known custom-param marker (or the whole
- * length if none). Matches on the known "::field::" names rather than a bare
- * "::", so a fact that legitimately contains "::" (e.g. "the ratio is 3::1") is
- * never truncated. */
-static size_t memory_value_base_len(const char *value) {
-   size_t base = strlen(value);
-   for (size_t i = 0; i < sizeof(kMemoryParamMarkers) / sizeof(kMemoryParamMarkers[0]); i++) {
-      const char *m = strstr(value, kMemoryParamMarkers[i]);
-      if (m != NULL) {
-         size_t len = (size_t)(m - value);
-         if (len < base)
-            base = len;
-      }
-   }
-   return base;
-}
-
 /* category (v34): when non-NULL/non-empty, pre-filters fact-ID set by exact category
  *   match before hybrid scoring.  Bypasses time_range path (categories layer above
  *   recency for now — combinable in a follow-up if useful).
@@ -2222,40 +2193,25 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       if (gate != NULL) {
          return gate; /* private conversation, not yet confirmed */
       }
-      /* Strip the packed custom-param suffix before the text is stored.
-       * TOOL_MAPS_TO_CUSTOM params ride INSIDE `value` as "base::field::val"
-       * (tool_registry.h), and remember stores its input verbatim as fact_text.
-       * ANY declared param the flattening appends (not just confirm_private —
-       * a remember call has been seen carrying spurious search/recent params)
-       * would otherwise persist "…the 14th::confirm_private::true" /
-       * "…::time_range::…" as the fact, poisoning its embedding, its dedup hash
-       * and every later recall.
-       *
-       * Trimmed at the earliest KNOWN "::field::" marker rather than via
-       * tool_param_extract_base(), which cuts at the FIRST "::" — fine for the
-       * ID lists `forget` passes, but a fact is free-form user text and may
-       * legitimately contain "::" ("the ratio is 3::1"), which base-extraction
-       * would silently truncate. */
-      size_t base_len = memory_value_base_len(value);
-      if (base_len < strlen(value)) {
-         /* A param tail was appended — trim it before storing.  Warn: a normal
-          * remember carries no flattened params, so a trim means the model
-          * over-populated the call (the observed poisoning path) or, very rarely,
-          * a fact legitimately contained a "::field::" token — either way worth a
-          * breadcrumb. */
-         OLOG_WARNING("memory remember: stripped %zu-byte custom-param tail before storing fact",
-                      strlen(value) - base_len);
-         char *trimmed = strndup(value, base_len);
-         if (trimmed == NULL) {
-            /* Fail SAFE: never fall back to the untrimmed value — that would
-             * persist the param tail this strip exists to remove. */
-            return strdup(TOOL_RESULT_ERROR_MARK "Memory remember failed: out of memory.");
-         }
-         char *res = memory_action_remember(user_id, trimmed);
-         free(trimmed);
-         return res;
+      /* The fact is the base value: TOOL_MAPS_TO_CUSTOM params ride inside
+       * `value` as "base::field::val" (tool_registry.h), and remember stores
+       * its input verbatim as fact_text, so a param the model sent with it
+       * (a remember call has been seen carrying search/recent params) must
+       * not persist as part of the fact.  The base is decoded, so a fact
+       * that itself contains "::" ("the ratio is 3::1") stays whole. */
+      const char *packed = value ? value : "";
+      char *fact = malloc(strlen(packed) + 1);
+      if (fact == NULL) {
+         return strdup(TOOL_RESULT_ERROR_MARK "Memory remember failed: out of memory.");
       }
-      return memory_action_remember(user_id, value);
+      tool_param_extract_base(packed, fact, strlen(packed) + 1);
+      if (strstr(packed, "::") != NULL) {
+         /* A normal remember carries no params: worth a breadcrumb. */
+         OLOG_WARNING("memory remember: params sent with the fact were not stored with it");
+      }
+      char *res = memory_action_remember(user_id, fact);
+      free(fact);
+      return res;
    } else if (strcmp(actionName, "forget") == 0) {
       /* IDs are the base value; optional replaced_by switches delete -> supersede (merge).
        * Base-extract so the ID parser doesn't choke on the ::replaced_by:: suffix. */

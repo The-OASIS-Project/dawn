@@ -576,6 +576,33 @@ static void append_loop_note(struct json_object *history, const char *text) {
    session_history_append(history, note);
 }
 
+/* The turn's last word: @p note appended (and saved) after the tool results,
+ * then one call with tools disabled.  Returns the answer (caller frees), or
+ * NULL when the call fails or brings no text. */
+static char *final_answer_without_tools(llm_tool_loop_params_t *params,
+                                        const char *note,
+                                        int iteration) {
+   const int note_at = json_object_array_length(params->conversation_history);
+   append_loop_note(params->conversation_history, note);
+   persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
+
+   OLOG_INFO("Tool loop: Making final call without tools to present gathered results");
+   llm_tool_response_t result;
+   memset(&result, 0, sizeof(result));
+   const int rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0,
+                                      params->base_url, params->api_key, params->model,
+                                      params->chunk_callback, params->callback_userdata,
+                                      LLM_TOOLS_MAX_ITERATIONS, &result);
+   char *text = NULL;
+   if (rc == 0 && result.text) {
+      text = strdup(result.text);
+      tool_loop_stash_final(params->session_id, &result,
+                            reasoning_provider_label(params->llm_type, params->cloud_provider));
+   }
+   llm_tool_response_free(&result);
+   return text;
+}
+
 /**
  * @brief Add closing assistant message to complete tool call history
  *
@@ -853,14 +880,32 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
 
       /* Step 4: If no tool calls, return text response.
        *
-       * A clean provider call (rc == 0) with no tool_calls and NULL text is a
-       * benign "end_turn with empty content" outcome — the LLM signalled the
-       * preceding tool result was sufficient and no further response is
-       * warranted.  Return an empty malloc'd string rather than NULL so
-       * callers (session_manager.c) do not classify it as an LLM call
-       * failure.  malloc(1) so the caller owns a heap pointer it can free()
-       * identically to the populated path. */
+       * A clean provider call (rc == 0) with no tool_calls and NULL text ends
+       * the turn without a word.  After tools ran in a turn someone is waiting
+       * on, the model is asked once for the outcome (tools off).  Otherwise, or
+       * when that brings nothing, an empty malloc'd string is returned rather
+       * than NULL so callers (session_manager.c) do not classify it as an LLM
+       * call failure.  malloc(1) so the caller owns a heap pointer it can
+       * free() identically to the populated path. */
       if (!result.has_tool_calls) {
+         if (result.text == NULL && iteration > 0 && !params->is_background &&
+             !llm_interrupt_ctx_triggered(&ictx)) {
+            /* Tools ran this turn and the model ended without a word: the user
+             * would see nothing, even when a tool failed.  Ask once for the
+             * outcome, tools off.  (A background turn has no one waiting; its
+             * empty ending is judged by its job.) */
+            OLOG_INFO("Tool loop: empty content at iteration %d after tool calls; asking for "
+                      "the outcome",
+                      iteration);
+            llm_tool_response_free(&result);
+            char *answer = final_answer_without_tools(
+                params, "Tell the user how this went: what you did, and anything that failed.",
+                iteration);
+            if (answer) {
+               return answer;
+            }
+            memset(&result, 0, sizeof(result)); /* freed above: nothing left to free */
+         }
          if (result.text == NULL) {
             OLOG_INFO("Tool loop: provider returned empty content at iteration %d "
                       "(clean end_turn, no response needed)",
@@ -1023,39 +1068,16 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          OLOG_WARNING("Tool loop: Max iterations (%d) reached, forcing text response",
                       LLM_TOOLS_MAX_ITERATIONS);
 
-         /* Tell the model to answer with what it has. */
-         const int note_at = json_object_array_length(params->conversation_history);
-         /* Plain wording, as the duplicate-call note: a "[System:]" prefix reads
-          * to a reasoning model as an injected directive. */
-         append_loop_note(params->conversation_history,
-                          "That is as many tool calls as this turn allows. Answer the user now "
-                          "with the information you have gathered — do not call any more tools.");
-         persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
-
          free_tool_result_resources(results);
          free(results);
          llm_tool_response_free(&result);
-
-         /* Make one final call with tools disabled */
-         OLOG_INFO("Tool loop: Making final call without tools to present gathered results");
-         memset(&result, 0, sizeof(result));
-         int final_rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0,
-                                            params->base_url, params->api_key, params->model,
-                                            params->chunk_callback, params->callback_userdata,
-                                            LLM_TOOLS_MAX_ITERATIONS, &result);
-
-         char *final_text = NULL;
-         if (final_rc == 0 && result.text) {
-            final_text = strdup(result.text);
-            /* Parity with the other final-answer paths (this one lacked even the
-             * finish-reason stash): record both so a max-iter forced answer still
-             * reports its stop reason and renders its E3 panel on reload. */
-            tool_loop_stash_final(params->session_id, &result,
-                                  reasoning_provider_label(params->llm_type,
-                                                           params->cloud_provider));
-         }
-         llm_tool_response_free(&result);
-         return final_text;
+         /* Plain wording, as the duplicate-call note: a "[System:]" prefix reads
+          * to a reasoning model as an injected directive. */
+         return final_answer_without_tools(
+             params,
+             "That is as many tool calls as this turn allows. Answer the user now with the "
+             "information you have gathered — do not call any more tools.",
+             iteration);
       }
 
       /* Step 10: Vision images from a tool result (e.g. the `viewing` camera tool) are

@@ -160,18 +160,9 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
          count = DOC_READ_MAX_COUNT;
    }
 
-   /* Strip custom params from value to get the document name */
-   char *sep = strstr(value, "::");
+   /* The document name is the base value, before any custom params. */
    char doc_name[DOC_FILENAME_MAX];
-   if (sep) {
-      size_t len = (size_t)(sep - value);
-      if (len >= sizeof(doc_name))
-         len = sizeof(doc_name) - 1;
-      memcpy(doc_name, value, len);
-      doc_name[len] = '\0';
-   } else {
-      snprintf(doc_name, sizeof(doc_name), "%s", value);
-   }
+   tool_param_extract_base(value, doc_name, sizeof(doc_name));
 
    /* Trim trailing whitespace from document name */
    size_t name_len = strlen(doc_name);
