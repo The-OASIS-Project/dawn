@@ -460,6 +460,7 @@ int auth_db_delete_user(const char *username) {
 
    sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
    AUTH_DB_UNLOCK();
+   auth_sessions_changed(); /* their logins went with them */
 
    /* The frozen prompts of their conversations hold their identity and
     * settings: gone with them, not at the next maintenance. */
@@ -467,7 +468,7 @@ int auth_db_delete_user(const char *username) {
    return AUTH_DB_SUCCESS;
 }
 
-int auth_db_update_password(const char *username, const char *new_hash) {
+int auth_db_update_password(const char *username, const char *new_hash, const char *keep_token) {
    if (!username || !new_hash) {
       return AUTH_DB_INVALID;
    }
@@ -520,8 +521,10 @@ int auth_db_update_password(const char *username, const char *new_hash) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Invalidate all sessions for this user */
-   const char *sql_del = "DELETE FROM sessions WHERE user_id = ?";
+   /* End the account's logins: all of them, or all but the one that made the
+    * change (the user changing their own password stays signed in there). */
+   const char *sql_del = keep_token ? "DELETE FROM sessions WHERE user_id = ? AND token != ?"
+                                    : "DELETE FROM sessions WHERE user_id = ?";
    sqlite3_stmt *stmt_del = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql_del, -1, &stmt_del, NULL);
    if (rc != SQLITE_OK) {
@@ -530,11 +533,21 @@ int auth_db_update_password(const char *username, const char *new_hash) {
       return AUTH_DB_FAILURE;
    }
    sqlite3_bind_int(stmt_del, 1, user_id);
-   sqlite3_step(stmt_del);
+   if (keep_token) {
+      sqlite3_bind_text(stmt_del, 2, keep_token, -1, SQLITE_STATIC);
+   }
+   rc = sqlite3_step(stmt_del);
    sqlite3_finalize(stmt_del);
+   if (rc != SQLITE_DONE) {
+      /* The password must not change while the old logins survive it. */
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
 
    sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
    AUTH_DB_UNLOCK();
+   auth_sessions_changed(); /* the change ended the account's logins */
 
    return AUTH_DB_SUCCESS;
 }

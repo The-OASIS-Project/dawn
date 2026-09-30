@@ -41,6 +41,9 @@
 #include "utils/string_utils.h"
 #include "version.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_login_cookie.h"
+#include "webui/webui_origin.h"
+#include "webui/webui_protocol.h"
 #include "webui/webui_server.h"
 
 #ifdef ENABLE_AUTH
@@ -378,37 +381,81 @@ static int send_304_not_modified(struct lws *wsi, const char *etag) {
 
 #ifdef ENABLE_AUTH
 
+/* A Cookie header this long is refused rather than read in part (browsers
+ * send every cookie of the host; a shared dev host can collect many). */
+#define COOKIE_HEADER_MAX 8192
+
 /**
- * @brief Extract session token from Cookie header
- * @param wsi WebSocket/HTTP connection
- * @param token_out Buffer to store token (must be AUTH_TOKEN_LEN bytes)
- * @return true if token found, false otherwise
+ * @brief The value of login cookie @p name on the request (AUTH_TOKEN_LEN
+ *        bytes out).
+ * @return true if present and a plausible token.
+ */
+static bool extract_named_cookie(struct lws *wsi, const char *name, char *token_out) {
+   const int total = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_COOKIE);
+   if (total <= 0 || total >= COOKIE_HEADER_MAX) {
+      return false;
+   }
+   char *header = malloc((size_t)total + 1);
+   if (!header) {
+      return false;
+   }
+   bool found = false;
+   if (lws_hdr_copy(wsi, header, total + 1, WSI_TOKEN_HTTP_COOKIE) > 0) {
+      found = webui_cookie_value(header, name, token_out, AUTH_TOKEN_LEN);
+   }
+   free(header);
+   return found;
+}
+
+/**
+ * @brief The login cookie's name for the app the request is from: its
+ *        `app` query argument (Aurora's "?app=aurora"), else the WebUI.
+ *
+ * Every argument is read whole (lws_get_urlarg_by_name stops at one longer
+ * than its buffer, so a long argument before app= would hide it and fall
+ * back to the WebUI's login).  An app= that can't be read, or isn't a valid
+ * app name, is no login, never the WebUI's.
+ *
+ * @return false for an invalid or unreadable app: the request has no login.
+ */
+static bool request_login_cookie_name(struct lws *wsi, char *name_out, size_t name_size) {
+   for (int i = 0;; i++) {
+      const int len = lws_hdr_fragment_length(wsi, WSI_TOKEN_HTTP_URI_ARGS, i);
+      if (len <= 0) {
+         return webui_login_cookie_name(NULL, name_out, name_size); /* no app= */
+      }
+      if (len < 4) {
+         continue; /* too short to be app=... */
+      }
+      char *arg = malloc((size_t)len + 1);
+      if (!arg) {
+         return false;
+      }
+      bool is_app = false;
+      bool ok = false;
+      if (lws_hdr_copy_fragment(wsi, arg, len + 1, WSI_TOKEN_HTTP_URI_ARGS, i) >= 0) {
+         is_app = strncmp(arg, "app=", 4) == 0;
+         ok = is_app && webui_login_cookie_name(arg + 4, name_out, name_size);
+      } else {
+         is_app = true; /* unreadable: can't tell, so no login */
+      }
+      free(arg);
+      if (is_app) {
+         return ok;
+      }
+   }
+}
+
+/**
+ * @brief The login token on the request: from the cookie of the app it is
+ *        from (see request_login_cookie_name).
+ * @param token_out Buffer of AUTH_TOKEN_LEN bytes
+ * @return true if found
  */
 static bool extract_session_cookie(struct lws *wsi, char *token_out) {
-   char cookie_buf[512];
-   int len = lws_hdr_copy(wsi, cookie_buf, sizeof(cookie_buf), WSI_TOKEN_HTTP_COOKIE);
-   if (len <= 0) {
-      return false;
-   }
-
-   /* Parse cookie header for dawn_session=<token> */
-   const char *prefix = AUTH_COOKIE_NAME "=";
-   char *start = strstr(cookie_buf, prefix);
-   if (!start) {
-      return false;
-   }
-
-   start += strlen(prefix);
-   char *end = strchr(start, ';');
-   size_t token_len = end ? (size_t)(end - start) : strlen(start);
-
-   if (token_len >= AUTH_TOKEN_LEN || token_len == 0) {
-      return false;
-   }
-
-   memcpy(token_out, start, token_len);
-   token_out[token_len] = '\0';
-   return true;
+   char name[WEBUI_LOGIN_COOKIE_NAME_MAX];
+   return request_login_cookie_name(wsi, name, sizeof(name)) &&
+          extract_named_cookie(wsi, name, token_out);
 }
 
 /**
@@ -490,7 +537,7 @@ static bool is_service_token_authenticated(struct lws *wsi) {
  * @param wsi HTTP connection
  * @param status HTTP status code
  * @param json_body JSON string to send
- * @param cookie Cookie value to set (NULL for no cookie, empty string to clear)
+ * @param cookie Cookie to set as "name=value" (NULL for none)
  * @param cookie_max_age Max-Age for cookie (0 = session cookie, >0 = persistent)
  * @return 0 on success, LWS_CLOSE_CONNECTION on failure
  */
@@ -513,22 +560,18 @@ static int send_auth_response(struct lws *wsi,
    if (lws_add_http_header_content_length(wsi, body_len, &p, end))
       return LWS_CLOSE_CONNECTION;
 
-   /* Add Set-Cookie header if provided */
+   /* Add Set-Cookie header if provided: "name=value" (a login's own cookie). */
    if (cookie) {
       char cookie_header[256];
-      if (cookie[0] == '\0') {
-         /* Clear cookie */
+      if (cookie_max_age > 0) {
+         /* Persistent cookie with explicit expiry ("Remember me" enabled) */
          snprintf(cookie_header, sizeof(cookie_header),
-                  "%s=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0", AUTH_COOKIE_NAME);
-      } else if (cookie_max_age > 0) {
-         /* Set persistent cookie with explicit expiry ("Remember me" enabled) */
-         snprintf(cookie_header, sizeof(cookie_header),
-                  "%s=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d", AUTH_COOKIE_NAME,
-                  cookie, cookie_max_age);
+                  "%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d", cookie,
+                  cookie_max_age);
       } else {
-         /* Set session cookie (expires when browser closes) */
+         /* Session cookie (expires when browser closes) */
          snprintf(cookie_header, sizeof(cookie_header),
-                  "%s=%s; Path=/; HttpOnly; Secure; SameSite=Strict", AUTH_COOKIE_NAME, cookie);
+                  "%s; Path=/; HttpOnly; Secure; SameSite=Strict", cookie);
       }
       if (lws_add_http_header_by_name(wsi, (unsigned char *)"Set-Cookie:",
                                       (unsigned char *)cookie_header, (int)strlen(cookie_header),
@@ -605,6 +648,40 @@ static int send_nocache_json_response(struct lws *wsi, int status, const char *j
       return LWS_CLOSE_CONNECTION;
 
    return 0;
+}
+
+/**
+ * @brief The logout reply: {"success":true}, the app's login cookie
+ *        @p cookie_name cleared (the attributes it was set with, Max-Age=0),
+ *        and not cached.
+ */
+static int send_logout_response(struct lws *wsi, const char *cookie_name) {
+   static const char body[] = "{\"success\":true}";
+   unsigned char buffer[LWS_PRE + 1024];
+   unsigned char *start = &buffer[LWS_PRE];
+   unsigned char *p = start;
+   unsigned char *end = &buffer[sizeof(buffer) - 1];
+   char cookie[128];
+   snprintf(cookie, sizeof(cookie), "%s=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
+            cookie_name);
+   static const char no_store[] = "no-store";
+
+   if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end) ||
+       lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
+                                    (unsigned char *)"application/json", 16, &p, end) ||
+       lws_add_http_header_content_length(wsi, sizeof(body) - 1, &p, end) ||
+       lws_add_http_header_by_name(wsi, (unsigned char *)"Set-Cookie:", (unsigned char *)cookie,
+                                   (int)strlen(cookie), &p, end) ||
+       lws_add_http_header_by_name(wsi, (unsigned char *)"Cache-Control:",
+                                   (unsigned char *)no_store, (int)sizeof(no_store) - 1, &p, end) ||
+       webui_add_security_headers(wsi, &p, end) || lws_finalize_http_header(wsi, &p, end)) {
+      return LWS_CLOSE_CONNECTION;
+   }
+   if (lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS) < 0 ||
+       lws_write(wsi, (unsigned char *)body, sizeof(body) - 1, LWS_WRITE_HTTP_FINAL) < 0) {
+      return LWS_CLOSE_CONNECTION;
+   }
+   return LWS_CLOSE_CONNECTION;
 }
 
 /**
@@ -748,6 +825,21 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       remember_me = json_object_get_boolean(remember_obj);
    }
 
+   /* The app logging in ("app":"aurora"; none is the WebUI): its own cookie,
+    * so apps open in one browser keep separate logins. */
+   struct json_object *app_obj;
+   char cookie_name[WEBUI_LOGIN_COOKIE_NAME_MAX];
+   const bool has_app = json_object_object_get_ex(req, "app", &app_obj);
+   const char *app = has_app && json_object_is_type(app_obj, json_type_string)
+                         ? json_object_get_string(app_obj)
+                         : NULL;
+   if ((has_app && !app) || !webui_login_cookie_name(app, cookie_name, sizeof(cookie_name))) {
+      json_object_put(req);
+      snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Invalid app\"}");
+      send_auth_response(wsi, HTTP_STATUS_BAD_REQUEST, response, NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+
    /* Get user from database */
    auth_user_t user;
    if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
@@ -832,6 +924,24 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       return LWS_CLOSE_CONNECTION;
    }
 
+   /* The login this app still had in this browser (another user's, or this
+    * user's own earlier one) ends now that the new one exists (another app's
+    * is its own, and stays); a failed login above left it alone.  Only one
+    * that still exists: a cookie whose login already ended (a logout, a
+    * password change) has nothing to replace.  auth_db's hook closes its
+    * connections and sessions. */
+   char replaced[AUTH_TOKEN_LEN] = { 0 };
+   if (extract_named_cookie(wsi, cookie_name, replaced)) {
+      auth_session_t previous = { 0 };
+      if (sodium_memcmp(replaced, session_token, AUTH_TOKEN_LEN - 1) != 0 &&
+          auth_db_get_session(replaced, &previous) == AUTH_DB_SUCCESS &&
+          auth_db_delete_session(replaced) == AUTH_DB_SUCCESS) {
+         OLOG_INFO("WebUI: login replaced this browser's previous login");
+      }
+      auth_secure_zero(replaced, sizeof(replaced));
+      auth_secure_zero(&previous, sizeof(previous));
+   }
+
    /* Reset failed attempts and update last login */
    auth_db_reset_failed_attempts(username);
    rate_limiter_reset(&s_login_rate, normalized_ip); /* Clear in-memory rate limit on success */
@@ -847,7 +957,10 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
    int cookie_max_age = remember_me ? AUTH_REMEMBER_ME_TIMEOUT_SEC : 0;
    snprintf(response, sizeof(response), "{\"success\":true,\"username\":\"%s\",\"is_admin\":%s}",
             username, user.is_admin ? "true" : "false");
-   send_auth_response(wsi, HTTP_STATUS_OK, response, session_token, cookie_max_age);
+   char set_cookie[WEBUI_LOGIN_COOKIE_NAME_MAX + AUTH_TOKEN_LEN + 1];
+   snprintf(set_cookie, sizeof(set_cookie), "%s=%s", cookie_name, session_token);
+   send_auth_response(wsi, HTTP_STATUS_OK, response, set_cookie, cookie_max_age);
+   auth_secure_zero(set_cookie, sizeof(set_cookie));
 
    /* Clear session token from stack after use */
    auth_secure_zero(session_token, sizeof(session_token));
@@ -892,8 +1005,31 @@ static bool origin_in_allowlist(const char *origin) {
    return false;
 }
 
-bool webui_is_same_origin_request(struct lws *wsi) {
+/* A browser origin ("scheme://authority", nothing after) is ours (the
+ * request's Host, over http or https) or on the allowlist.  Exact matches
+ * only. */
+static bool browser_origin_allowed(struct lws *wsi, int host_total, const char *origin) {
    char host[256] = { 0 };
+   if (host_total <= 0 || lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST) <= 0) {
+      OLOG_WARNING("CSRF: browser origin '%s' but no readable Host; rejecting", origin);
+      return false;
+   }
+   char expected_https[280], expected_http[280];
+   snprintf(expected_https, sizeof(expected_https), "https://%s", host);
+   snprintf(expected_http, sizeof(expected_http), "http://%s", host);
+   if (strcmp(origin, expected_https) == 0 || strcmp(origin, expected_http) == 0) {
+      return true;
+   }
+   /* Not our own origin — allow only if explicitly whitelisted (a
+    * separately-hosted front-end / HUD / dev server). */
+   if (origin_in_allowlist(origin)) {
+      return true;
+   }
+   OLOG_WARNING("CSRF: origin mismatch - expected host %s, got %s", host, origin);
+   return false;
+}
+
+bool webui_is_same_origin_request(struct lws *wsi) {
    char origin[256] = { 0 };
    char referer[512] = { 0 };
 
@@ -923,28 +1059,12 @@ bool webui_is_same_origin_request(struct lws *wsi) {
          }
          return true; /* bare-host non-browser client (satellite/CLI) */
       }
-      /* Browser origin: must match our Host. No readable Host ⇒ can't validate
-       * ⇒ reject. */
-      if (host_total <= 0 || lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST) <= 0) {
-         OLOG_WARNING("CSRF: browser Origin '%s' but no readable Host; rejecting", origin);
-         return false;
-      }
-      char expected_https[280], expected_http[280];
-      snprintf(expected_https, sizeof(expected_https), "https://%s", host);
-      snprintf(expected_http, sizeof(expected_http), "http://%s", host);
-      if (strcmp(origin, expected_https) == 0 || strcmp(origin, expected_http) == 0) {
-         return true;
-      }
-      /* Not our own origin — allow only if explicitly whitelisted (a
-       * separately-hosted front-end / HUD / dev server). */
-      if (origin_in_allowlist(origin)) {
-         return true;
-      }
-      OLOG_WARNING("CSRF: Origin mismatch - expected host %s, got %s", host, origin);
-      return false;
+      return browser_origin_allowed(wsi, host_total, origin);
    }
 
-   /* No Origin - check Referer as fallback (same browser-shaped treatment). */
+   /* No Origin - check Referer as fallback: its origin, judged exactly as an
+    * Origin is (never a prefix match: https://ours.example.evil.com/ isn't
+    * ours). */
    if (referer_total > 0) {
       if (lws_hdr_copy(wsi, referer, sizeof(referer), WSI_TOKEN_HTTP_REFERER) <= 0) {
          OLOG_WARNING("CSRF: Referer present but unreadable (too long); rejecting");
@@ -953,19 +1073,12 @@ bool webui_is_same_origin_request(struct lws *wsi) {
       if (strncmp(referer, "http://", 7) != 0 && strncmp(referer, "https://", 8) != 0) {
          return true; /* non-browser */
       }
-      if (host_total <= 0 || lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST) <= 0) {
-         OLOG_WARNING("CSRF: browser Referer but no readable Host; rejecting");
+      char ref_origin[256];
+      if (!webui_referer_origin(referer, ref_origin, sizeof(ref_origin))) {
+         OLOG_WARNING("CSRF: malformed browser Referer; rejecting");
          return false;
       }
-      char expected_https[280], expected_http[280];
-      snprintf(expected_https, sizeof(expected_https), "https://%s/", host);
-      snprintf(expected_http, sizeof(expected_http), "http://%s/", host);
-      if (strncmp(referer, expected_https, strlen(expected_https)) == 0 ||
-          strncmp(referer, expected_http, strlen(expected_http)) == 0) {
-         return true;
-      }
-      OLOG_WARNING("CSRF: Referer mismatch - expected host %s, got %s", host, referer);
-      return false;
+      return browser_origin_allowed(wsi, host_total, ref_origin);
    }
 
    /* No Origin or Referer - non-browser client (curl, satellite). Allow. */
@@ -974,6 +1087,13 @@ bool webui_is_same_origin_request(struct lws *wsi) {
 
 /**
  * @brief Handle POST /api/auth/logout
+ *
+ * Ends the login on the request's cookie: the database row, then (auth_db's
+ * hook, the login sweep on this thread next) its browser connections, told
+ * with force_logout and closed with WEBUI_CLOSE_LOGGED_OUT, and its sessions,
+ * connected or not.  Nothing here waits, so the reply comes at once; it
+ * clears the cookie and isn't cached.
+ *
  * @param wsi HTTP connection
  * @return LWS_CLOSE_CONNECTION to close connection after response
  */
@@ -985,25 +1105,26 @@ static int handle_auth_logout(struct lws *wsi) {
       return LWS_CLOSE_CONNECTION;
    }
 
+   /* The login of the app the request is from (?app=): only that one ends. */
+   char cookie_name[WEBUI_LOGIN_COOKIE_NAME_MAX];
+   if (!request_login_cookie_name(wsi, cookie_name, sizeof(cookie_name))) {
+      lws_return_http_status(wsi, HTTP_STATUS_BAD_REQUEST, NULL);
+      return LWS_CLOSE_CONNECTION;
+   }
    char token[AUTH_TOKEN_LEN];
-   if (extract_session_cookie(wsi, token)) {
+   if (extract_named_cookie(wsi, cookie_name, token)) {
       auth_session_t session;
       if (auth_db_get_session(token, &session) == AUTH_DB_SUCCESS) {
          char client_ip[64] = "unknown";
          lws_get_peer_simple(wsi, client_ip, sizeof(client_ip));
          auth_db_log_event("logout", session.username, client_ip, "WebUI logout");
          auth_db_delete_session(token);
-         /* Release session_manager slots immediately instead of waiting for the
-          * 30-minute idle timeout — logout is an explicit signal the user is done. */
-         webui_destroy_sessions_by_auth_token(token);
          OLOG_INFO("WebUI: User logged out: %s", session.username);
       }
+      auth_secure_zero(token, sizeof(token));
    }
 
-   /* Use simple HTTP status - no body needed, avoids lws_write issues.
-    * JavaScript redirects regardless of response content. */
-   lws_return_http_status(wsi, HTTP_STATUS_OK, NULL);
-   return LWS_CLOSE_CONNECTION;
+   return send_logout_response(wsi, cookie_name);
 }
 
 /* =============================================================================
@@ -1203,14 +1324,18 @@ static bool parse_link_path(const char *path, int64_t *out_src, int64_t *out_tgt
  */
 static int handle_auth_status(struct lws *wsi) {
    auth_session_t session;
-   char response[256];
+   char response[256 + WEBUI_PROTOCOL_JSON_MAX];
+   /* The protocol version and feature flags, for a client deciding before it
+    * opens a socket (the config frame carries them too). */
+   char protocol[WEBUI_PROTOCOL_JSON_MAX];
+   const char *sep = webui_protocol_json_members(protocol, sizeof(protocol)) > 0 ? "," : "";
 
    if (is_request_authenticated(wsi, &session)) {
       snprintf(response, sizeof(response),
-               "{\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s}", session.username,
-               session.is_admin ? "true" : "false");
+               "{\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s%s%s}", session.username,
+               session.is_admin ? "true" : "false", sep, protocol);
    } else {
-      snprintf(response, sizeof(response), "{\"authenticated\":false}");
+      snprintf(response, sizeof(response), "{\"authenticated\":false%s%s}", sep, protocol);
    }
 
    send_auth_response(wsi, HTTP_STATUS_OK, response, NULL, 0);

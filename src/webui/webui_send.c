@@ -52,6 +52,7 @@
 #include "webui/webui_always_on.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_server.h"
+#include "webui/webui_protocol.h"
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -506,11 +507,15 @@ static void build_config_json(char *json, size_t len) {
    bool music_enabled = webui_music_server_is_running();
    int music_port = webui_music_server_get_port();
    bool aurora_enabled = (s_aurora_path[0] != '\0');
+   /* The protocol members, with their comma only when there are any. */
+   char protocol[WEBUI_PROTOCOL_JSON_MAX];
+   const bool has_protocol = webui_protocol_json_members(protocol, sizeof(protocol)) > 0;
    snprintf(json, len,
             "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d,"
-            "\"music_enabled\":%s,\"music_port\":%d,\"aurora_enabled\":%s,\"version\":\"%s\"}}",
+            "\"music_enabled\":%s,\"music_port\":%d,\"aurora_enabled\":%s,\"version\":\"%s\""
+            "%s%s}}",
             g_config.webui.audio_chunk_ms, music_enabled ? "true" : "false", music_port,
-            aurora_enabled ? "true" : "false", VERSION_NUMBER);
+            aurora_enabled ? "true" : "false", VERSION_NUMBER, has_protocol ? "," : "", protocol);
 }
 
 /* Compile-time constant: feature flags sent to all clients on connect */
@@ -544,7 +549,7 @@ void queue_init_messages(ws_connection_t *conn, const char *token) {
 
    /* 2. Config — pre-serialize as JSON string */
    {
-      char json[256];
+      char json[256 + WEBUI_PROTOCOL_JSON_MAX];
       build_config_json(json, sizeof(json));
       ws_response_t resp = { 0 };
       resp.session = session;

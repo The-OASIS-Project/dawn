@@ -78,6 +78,8 @@ static void *maintenance_thread_func(void *arg) {
       if (cleanup_result != AUTH_DB_SUCCESS) {
          OLOG_WARNING("auth_maintenance: cleanup failed");
       }
+      /* Expired logins end everywhere they're still in use. */
+      auth_sessions_changed();
 
       /* Clean up old images past retention period */
       if (image_store_is_ready()) {

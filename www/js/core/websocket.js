@@ -31,6 +31,14 @@
    // The next `session` frame consumes it to force a full transcript re-render
    // (load_conversation) instead of the lightweight re-anchor a normal reconnect uses.
    let reclaiming = false;
+   // Set when this browser's login ended: the server closed us with WS code 4002
+   // ("logged out") or sent force_logout (the proxy-robust signal: a reverse proxy
+   // strips the close code), or this tab is logging out itself. While set, nothing
+   // reconnects — the page is on its way to the login screen. A reload clears it.
+   let loggedOut = false;
+   // This tab asked to log out (DawnUserBadge): its own request, not a login that
+   // ended elsewhere — the badge navigates once the server's reply is in.
+   let selfLogout = false;
 
    // Liveness heartbeat state (see DawnConfig.PING_*). Detects a half-open socket
    // (readyState OPEN but the server has stopped answering). Started by dawn.js on
@@ -74,7 +82,14 @@
    /**
     * Connect to WebSocket server
     */
+   /** Who this client is, for the server's log (the WebUI ships with DAWN). */
+   function clientDescription() {
+      return { name: 'dawn-webui', version: 'bundled', protocol: DawnConfig.PROTOCOL_VERSION };
+   }
+
    function connect() {
+      // The login ended: this page reconnects nothing (it goes to the login screen).
+      if (loggedOut) return;
       // Bail if a socket is already OPEN or mid-handshake (CONNECTING) — a
       // pageshow/online event during initial load could otherwise spawn a
       // duplicate socket and orphan the first (whose stale onopen would reset
@@ -145,6 +160,7 @@
                      // server-persisted flag set via session_keepalive_enable; this
                      // just re-advertises intent on each (re)connect.
                      session_keepalive: isAlwaysOn(),
+                     client: clientDescription(),
                   },
                })
             );
@@ -158,6 +174,7 @@
                      tts_enabled: ttsEnabled,
                      tool_step_origin: true,
                      session_keepalive: isAlwaysOn(),
+                     client: clientDescription(),
                   },
                })
             );
@@ -187,6 +204,17 @@
          // event.code === 4001; the proxy path relies on the `session_superseded`
          // DATA frame that arrives just before this close and already set
          // `superseded` (via markSuperseded). Either one means back off.
+         // Logged out (WS 4002, or the force_logout frame that preceded a close a
+         // proxy stripped): don't reconnect; dawn.js goes to the login screen.
+         if (event.code === 4002 || loggedOut) {
+            console.log('Logged out — not reconnecting');
+            loggedOut = true;
+            if (callbacks.onStatus) {
+               callbacks.onStatus('logged_out', event.reason || null);
+            }
+            return;
+         }
+
          if (event.code === 4001 || superseded) {
             console.log('Session superseded by another connection — not auto-reconnecting');
             superseded = true;
@@ -248,6 +276,7 @@
     * Schedule reconnection with exponential backoff
     */
    function scheduleReconnect() {
+      if (loggedOut) return;
       // Don't steal the session back from a live sibling tab (half-open steal-back).
       if (hasRecentSiblingClaim()) {
          console.log('Sibling tab owns the session — not reconnecting');
@@ -338,6 +367,30 @@
     */
    function markSuperseded() {
       superseded = true;
+   }
+
+   /**
+    * Mark this browser's login ended (a force_logout frame): nothing reconnects
+    * afterwards.
+    */
+   function markLoggedOut() {
+      loggedOut = true;
+   }
+
+   /** Whether this browser's login ended (see markLoggedOut). */
+   function isLoggedOut() {
+      return loggedOut;
+   }
+
+   /** This tab is logging out itself: as markLoggedOut, and remembered as its own. */
+   function markSelfLogout() {
+      selfLogout = true;
+      loggedOut = true;
+   }
+
+   /** Whether this tab asked to log out itself (see markSelfLogout). */
+   function isSelfLogout() {
+      return selfLogout;
    }
 
    /* =========================================================================
@@ -668,6 +721,10 @@
       forceReconnect: forceReconnect,
       isSuperseded: isSuperseded,
       markSuperseded: markSuperseded,
+      markLoggedOut: markLoggedOut,
+      isLoggedOut: isLoggedOut,
+      markSelfLogout: markSelfLogout,
+      isSelfLogout: isSelfLogout,
       consumeReclaiming: consumeReclaiming,
       send: send,
       sendBinary: sendBinary,

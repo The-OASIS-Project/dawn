@@ -36,6 +36,7 @@
 #include "core/focus/focus_handles.h"
 #include "core/session_compaction.h"
 #include "core/session_prefix.h"
+#include "core/session_reaper.h"
 #include "core/tool_result_store.h"
 #include "core/turn_queue.h"
 #include "dawn_error.h"
@@ -149,11 +150,6 @@ static void generate_crypto_random_hex(char *buf, size_t num_bytes) {
  * @return true if strings are equal, false otherwise
  */
 #define RECONNECT_SECRET_LEN 64 /* 32 bytes * 2 hex chars */
-
-/* session_destroy ref-count wait ceiling.  teardown's cancel aborts a live
- * worker within ~1s; a hold past this means a wedged worker, so we leak the
- * session_t (recoverable) rather than free it under a still-running worker (UAF). */
-#define SESSION_DESTROY_REF_WAIT_MAX_SEC 30
 
 static bool constant_time_compare(const char *a, const char *b) {
    if (!a || !b) {
@@ -460,6 +456,12 @@ int session_manager_init(void) {
    local->client_fd = -1;
    local->ref_count = 1;  // Local session always has ref_count >= 1
 
+   /* Destroys finish on the reaper, never on their caller's thread (the
+    * WebUI service thread among them): no reaper, no session manager. */
+   if (session_reaper_start() != 0) {
+      session_free(local);
+      return 1;
+   }
    sessions[0] = local;
    initialized = true;
 
@@ -496,6 +498,10 @@ void session_manager_cleanup(void) {
          pthread_mutex_unlock(&going[i]->ref_mutex);
       }
    }
+
+   /* Sessions destroyed and not yet finished: the WebUI is down, so their
+    * connections have released what they held. */
+   session_reaper_stop();
 
    pthread_rwlock_wrlock(&session_manager_rwlock);
    for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -898,12 +904,76 @@ void session_release(session_t *session) {
 
    pthread_mutex_lock(&session->ref_mutex);
    session->ref_count--;
+   /* A destroyed session's last reference: the reaper finishes it.  Decided
+    * under the lock; the session isn't touched after the unlock (the reaper
+    * may free it at once). */
+   const bool last_of_destroyed = session->ref_count <= 0 && atomic_load(&session->being_destroyed);
 
    /* Every release: a waiter may be waiting for a count other than 0 (shutdown
     * waits for the local session's to reach 1). */
    pthread_cond_broadcast(&session->ref_zero_cond);
 
    pthread_mutex_unlock(&session->ref_mutex);
+   if (last_of_destroyed) {
+      session_reaper_wake();
+   }
+}
+
+/* A usable owner key: at least SESSION_OWNER_KEY_LEN characters. */
+static bool owner_key_given(const char *key) {
+   return key && strlen(key) >= SESSION_OWNER_KEY_LEN;
+}
+
+bool session_set_owner(session_t *session, const char *key) {
+   if (!session || !owner_key_given(key)) {
+      return false;
+   }
+   pthread_rwlock_wrlock(&session_manager_rwlock);
+   bool owns;
+   if (session->owner_key[0] == '\0') {
+      memcpy(session->owner_key, key, SESSION_OWNER_KEY_LEN);
+      session->owner_key[SESSION_OWNER_KEY_LEN] = '\0';
+      owns = true;
+   } else {
+      owns = memcmp(session->owner_key, key, SESSION_OWNER_KEY_LEN) == 0;
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+   return owns;
+}
+
+bool session_owner_matches(session_t *session, const char *key) {
+   if (!session) {
+      return false;
+   }
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+   const bool matches = owner_key_given(key)
+                            ? session->owner_key[0] != '\0' &&
+                                  memcmp(session->owner_key, key, SESSION_OWNER_KEY_LEN) == 0
+                            : session->owner_key[0] == '\0';
+   pthread_rwlock_unlock(&session_manager_rwlock);
+   return matches;
+}
+
+bool session_owner_is(session_t *session, const char *key) {
+   return owner_key_given(key) && session_owner_matches(session, key);
+}
+
+int session_manager_list_owned(session_owned_t *out, int max) {
+   if (!initialized || !out || max <= 0) {
+      return 0;
+   }
+   int n = 0;
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+   for (int i = 0; i < MAX_SESSIONS && n < max; i++) {
+      session_t *s = sessions[i];
+      if (s != NULL && s->owner_key[0] != '\0') {
+         out[n].session_id = s->session_id;
+         memcpy(out[n].owner_key, s->owner_key, sizeof(out[n].owner_key));
+         n++;
+      }
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+   return n;
 }
 
 session_t *session_get_local(void) {
@@ -963,55 +1033,27 @@ void session_destroy(uint32_t session_id) {
 
    pthread_rwlock_unlock(&session_manager_rwlock);
 
-   /* Phase 1.25: Close the turn queue for this session BEFORE the ref-count wait.
-    * Marks the session closing (no new turns can enqueue, the in-flight turn's
-    * turn_done won't chain a successor) and drops every already-QUEUED turn —
-    * each queued turn holds a session retain, so dropping them here lets the
-    * ref-count wait below actually reach zero instead of timing out. */
+   /* Close the session's turn queue: no new turns enqueue, the in-flight
+    * turn's turn_done won't chain a successor, and every already-QUEUED turn is
+    * dropped — each holds a session retain, so the reaper's wait for the last
+    * reference can finish. */
    turn_queue_purge_session(session_id);
 
-   /* Phase 1.5: Detach WebUI connections before waiting for ref_count.
-    * This NULLs out conn->session pointers and calls session_release()
-    * for each detached connection, allowing the ref_count wait below
-    * to complete without timing out. */
+   /* Detach its WebUI connections: their reconnect tokens go, each attached
+    * connection's reference is released, and a music socket bound to it is
+    * asked to close (on the music thread, which releases that reference). */
 #ifdef ENABLE_WEBUI
    webui_detach_session(session);
 #endif
 
-   /* Phase 1.75: the compaction worker, cancelled (its own flag: its transfer
-    * aborts) and joined, and what it holds freed.  Before Phase 2: the worker
-    * holds a ref. */
-   session_compaction_teardown(session);
+   /* The rest waits for the session's workers and its last reference, which
+    * a caller here may be the one to release (the WebUI service thread for a
+    * connection it has yet to close): the reaper finishes it. */
+   session_reaper_enqueue(session);
+}
 
-   // Phase 2: Wait for ref_count to reach 0 (bounded retry; leak rather than
-   // free-under-a-worker).  teardown set cancel_requested, so a live LLM/CURL
-   // worker aborts within ~1s and releases its ref — 30s is generous.  A hold
-   // PAST that means a genuinely wedged worker: leaking a few-KB session_t is
-   // recoverable, but freeing it while a worker still dereferences it is a UAF.
-   // On the leak path we deliberately return WITHOUT Phase 3 (metrics +
-   // extraction) or session_free, logging ERROR so the leak is visible.
-   pthread_mutex_lock(&session->ref_mutex);
-   int waited_sec = 0;
-   while (session->ref_count > 0) {
-      struct timespec timeout;
-      clock_gettime(CLOCK_REALTIME, &timeout);
-      timeout.tv_sec += 3;
-
-      int rc = pthread_cond_timedwait(&session->ref_zero_cond, &session->ref_mutex, &timeout);
-      if (rc == ETIMEDOUT) {
-         waited_sec += 3;
-         OLOG_WARNING("Session %u: ref_count wait %ds (ref_count=%d)", session_id, waited_sec,
-                      session->ref_count);
-         if (waited_sec >= SESSION_DESTROY_REF_WAIT_MAX_SEC) {
-            OLOG_ERROR("Session %u: ref_count stuck at %d after %ds — leaking session instead of "
-                       "freeing (UAF guard)",
-                       session_id, session->ref_count, waited_sec);
-            pthread_mutex_unlock(&session->ref_mutex);
-            return; /* deliberate leak: skip metrics/extraction/session_free */
-         }
-      }
-   }
-   pthread_mutex_unlock(&session->ref_mutex);
+void session_manager_finalize(session_t *session) {
+   const uint32_t session_id = session->session_id;
 
    // Phase 3: Final metrics persist (updates ended_at timestamp)
    // Per-query metrics are already saved; this ensures ended_at is final.
@@ -1054,7 +1096,7 @@ void session_destroy(uint32_t session_id) {
    if ((session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2 ||
         session->type == SESSION_TYPE_MESSAGING) &&
        session->metrics.user_id > 0 && session->metrics.queries_total > 0 &&
-       g_config.memory.enabled) {
+       g_config.memory.enabled && auth_db_is_ready()) {
       /* Copy the history and what it holds in one critical section, then work
        * outside the lock (extraction does DB lookups). */
       int64_t conv_id = 0;

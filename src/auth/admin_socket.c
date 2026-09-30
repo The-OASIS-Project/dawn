@@ -1126,7 +1126,7 @@ static int handle_change_password(int client_fd, const char *payload, uint16_t p
    auth_secure_zero(new_password, sizeof(new_password));
 
    /* Update password (also invalidates all sessions) */
-   int rc = auth_db_update_password(target, new_hash);
+   int rc = auth_db_update_password(target, new_hash, NULL); /* all its logins end */
 
    if (rc == AUTH_DB_NOT_FOUND) {
       OLOG_WARNING("CHANGE_PASSWORD: user not found: %s", target);

@@ -73,6 +73,7 @@
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
 #include "webui/webui_ota.h"
+#include "webui/webui_protocol.h"
 #include "webui/webui_reasoning.h"
 #include "webui/webui_server.h"
 
@@ -779,42 +780,56 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          }
       }
    } else if (strcmp(type, "reconnect") == 0) {
-      /* Session reconnection with stored token */
+      webui_protocol_note_client(payload, &conn->client_noted);
+      /* Session reconnection with stored token.  A login ended since this
+       * connection opened reconnects nothing (and the connection closes). */
+      if (payload && conn->authenticated && !webui_conn_login_valid(conn)) {
+         return;
+      }
       if (payload) {
          struct json_object *token_obj;
          if (json_object_object_get_ex(payload, "token", &token_obj)) {
             const char *token = json_object_get_string(token_obj);
             if (token && strlen(token) > 0) {
                session_t *existing = lookup_session_by_token(token);
-               if (existing && !webui_session_owned_by(existing, conn->auth_user_id)) {
-                  /* Another user's session: never attach to it. */
-                  OLOG_WARNING("WebUI: reconnect token belongs to another user's session; "
+               if (existing && (!webui_session_owned_by(existing, conn->auth_user_id) ||
+                                !webui_conn_may_resume(conn, existing))) {
+                  /* Another user's or another login's session: never attach to it. */
+                  OLOG_WARNING("WebUI: reconnect token's session isn't this login's; "
                                "not attaching");
                   session_release(existing); /* the lookup's reference */
                   existing = NULL;
                }
-               if (existing) {
-                  /* Found existing session - switch to it */
-                  if (conn->session && conn->session != existing) {
-                     /* Destroy the abandoned session (just auto-created on
-                      * connect). session_destroy() -> webui_detach_session()
-                      * already releases the connection's single ref_count for
-                      * us (it finds this conn still attached and calls
-                      * session_release). Do NOT release it here too, or the
-                      * ref_count double-decrements (1 -> 0 -> -1), defeating the
-                      * destroy wait and freeing the session early — a
-                      * use-after-free that crashes the reconnect path. */
+               if (existing && existing == conn->session) {
+                  /* Already this connection's session: its own reference stays,
+                   * the lookup's goes. */
+                  session_release(existing);
+               } else if (existing) {
+                  /* Switching to it: first the abandoned session (just
+                   * auto-created on connect).  session_destroy() ->
+                   * webui_detach_session() releases the connection's reference to
+                   * it (it finds this conn still attached); releasing it here too
+                   * would double-decrement and free it early. */
+                  if (conn->session) {
                      uint32_t abandoned_id = conn->session->session_id;
                      conn->session->client_data = NULL;
                      session_destroy(abandoned_id);
                      unregister_tokens_for_session(abandoned_id);
                      OLOG_INFO("WebUI: Destroyed abandoned session %u", abandoned_id);
                   }
+                  if (!webui_conn_attach_session(conn, existing)) {
+                     /* Destroyed meanwhile: a fresh session instead (below). */
+                     OLOG_WARNING("WebUI: session %u is ending; not attaching",
+                                  existing->session_id);
+                     session_release(existing);
+                     existing = NULL;
+                  }
+               }
+               if (existing) {
                   /* Evict any other connection still owning this session BEFORE
                    * taking ownership, so the superseded tab backs off (WS 4001)
                    * rather than fighting to re-steal it. */
                   webui_evict_session_owner(existing, conn);
-                  conn->session = existing;
                   conn->session_was_reconnected = true;
                   existing->client_data = conn;
                   webui_conn_publish_view(conn); /* the session shows what this connection does */
@@ -865,6 +880,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   if (!conn->session) {
                      conn->session = session_create(SESSION_TYPE_WEBUI, -1);
                      if (conn->session) {
+                        webui_conn_own_session(conn, conn->session);
                         /* Set user_id for metrics and memory extraction */
                         session_set_metrics_user(conn->session, conn->auth_user_id);
                         /* A new context: its first turn freezes the prompt. */
@@ -913,6 +929,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          }
       }
    } else if (strcmp(type, "init") == 0) {
+      webui_protocol_note_client(payload, &conn->client_noted);
       /* Init message arrived on an already-authenticated connection (cookie auth
        * auto-created the session before this message was processed). Sync capabilities. */
       if (payload) {

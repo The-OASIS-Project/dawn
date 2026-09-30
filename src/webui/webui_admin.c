@@ -345,9 +345,13 @@ void handle_change_password(ws_connection_t *conn, struct json_object *payload) 
    }
 
    /* Update password (this also invalidates all sessions) */
-   int result = auth_db_update_password(username, hash);
+   /* Your own password: every other login of yours ends, this one stays (you
+    * proved you're you).  Someone else's: all of theirs end. */
+   int result = auth_db_update_password(username, hash,
+                                        is_self_change ? conn->auth_session_token : NULL);
 
    if (result == AUTH_DB_SUCCESS) {
+      /* The account's other logins ended: auth_db's hook signs them out. */
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message", json_object_new_string("Password changed"));
 

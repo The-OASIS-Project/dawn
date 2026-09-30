@@ -1745,12 +1745,11 @@ static int queue_music_direct(session_music_state_t *state, const uint8_t *data,
    state->write_ring_tail = (state->write_ring_tail + 1) % WEBUI_MUSIC_WRITE_RING;
    state->write_ring_count++;
 
-   /* Request writeable callback */
-   lws_callback_on_writable(state->music_wsi);
-
-   /* Wake up the music server's event loop to process the writeable request */
-   webui_music_server_wake();
-
+   struct lws *music_wsi = state->music_wsi;
    pthread_mutex_unlock(&state->write_mutex);
+
+   /* The music thread arms the writeable callback itself (lws calls belong on
+    * the service thread; this runs on the stream thread). */
+   webui_music_server_request_write(music_wsi);
    return 0;
 }

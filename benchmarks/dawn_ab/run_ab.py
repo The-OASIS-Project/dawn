@@ -98,7 +98,7 @@ class DawnClient:
         r = s.post(self.base + "/api/auth/login",
                    json={"csrf_token": csrf, "username": user, "password": password}, timeout=15)
         body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        self.token = s.cookies.get("dawn_session")
+        self.token = s.cookies.get("__Host-dawn_session")
         if r.status_code != 200 or not self.token:
             raise RuntimeError(f"login failed (HTTP {r.status_code}): {body.get('error', '')}")
 
@@ -106,7 +106,7 @@ class DawnClient:
         ws_url = re.sub(r"^http", "ws", self.base) + "/ws"
         sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False} if self.insecure else {}
         self.ws = websocket.create_connection(
-            ws_url, subprotocols=[WS_SUBPROTOCOL], header=[f"Cookie: dawn_session={self.token}"],
+            ws_url, subprotocols=[WS_SUBPROTOCOL], header=[f"Cookie: __Host-dawn_session={self.token}"],
             sslopt=sslopt, suppress_origin=True, timeout=5)
         # First frame creates the session server-side; TTS off so no binary audio arrives.
         self.send("init", {"tts_enabled": False})

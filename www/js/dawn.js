@@ -89,15 +89,10 @@
                updateState(msg.payload.state, msg.payload.detail, msg.payload.tools);
                break;
             case 'force_logout':
-               // Session was revoked - force immediate logout
-               console.warn('Force logout received:', msg.payload.reason);
-               DawnToast.show(msg.payload.reason || 'Session revoked', 'error');
-               DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
-               sessionStorage.removeItem('dawn_active_conversation');
-               DawnWS.disconnect();
-               setTimeout(() => {
-                  window.location.href = '/login.html';
-               }, 1500);
+               // This browser's login ended (logout, revoke, password change,
+               // expiry). The server closes the socket next (WS 4002).
+               console.warn('Force logout received:', msg.payload && msg.payload.reason);
+               endLogin((msg.payload && msg.payload.reason) || 'Signed out');
                break;
             case 'transcript':
                // Check for special LLM state update (sent with role '__llm_state__')
@@ -1500,6 +1495,35 @@
    // =============================================================================
    // UI Updates
    // =============================================================================
+   // =============================================================================
+   // Login ended
+   // =============================================================================
+   let loginEnded = false;
+
+   /**
+    * This browser's login ended: forget the session, stop reconnecting, and go to
+    * the login page. A logout this tab asked for (DawnWS.markSelfLogout) is
+    * left to DawnUserBadge, which navigates once the server's reply (it clears
+    * the cookie) is in; one from elsewhere (another tab's logout, a revoke, a
+    * password change, expiry) says so briefly first.
+    */
+   function endLogin(reason) {
+      if (loginEnded) return;
+      loginEnded = true;
+      const selfInitiated = DawnWS.isSelfLogout();
+      DawnWS.markLoggedOut();
+      DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
+      sessionStorage.removeItem('dawn_active_conversation');
+      DawnWS.disconnect();
+      if (selfInitiated) {
+         return;
+      }
+      DawnToast.show(reason || 'Signed out', 'error');
+      setTimeout(() => {
+         window.location.href = '/login.html';
+      }, 1500);
+   }
+
    function updateConnectionStatus(status, reason) {
       // A new (re)connect: allow the next 'session' message to restore the active
       // conversation once (the duplicate-restore guard in the session handler).
@@ -1547,6 +1571,10 @@
          DawnElements.connectionStatus.className = 'connecting';
          DawnElements.connectionStatus.textContent = 'Unstable…';
          DawnElements.connectionStatus.title = reason || 'Connection unstable — checking…';
+      } else if (status === 'logged_out') {
+         DawnElements.connectionStatus.className = 'disconnected';
+         DawnElements.connectionStatus.textContent = 'Signed out';
+         endLogin(reason);
       } else {
          if (status === 'superseded') {
             // Another tab/device took over this session. Reuse the 'disconnected'

@@ -18,7 +18,29 @@ WebUI browser clients, and DAP2 satellite devices. All connections use the
   `tests/tools/tail_conversation.py`.
 - **Authentication**: HTTP cookie set during login (see `webui_http.c`). Obtain it
   with `GET /api/auth/csrf` then `POST /api/auth/login`; the WebUI is TLS-only when
-  `[webui] ssl_cert_path` is set, so use `wss://`.
+  `[webui] ssl_cert_path` is set, so use `wss://`. A session belongs to the login
+  that created it: a `reconnect` token only reattaches from that same login.
+- **One login per app** (feature `app_logins`): a front-end other than the WebUI names
+  itself on login (`"app": "aurora"` in the JSON body; `[a-z0-9_]`, 1-16 characters)
+  and gets its own cookie, `__Host-dawn_session_<app>` (the WebUI's is
+  `__Host-dawn_session`; the `__Host-` prefix means the browser only accepts it from
+  this host, over HTTPS, with `Path=/` and no `Domain`). Every
+  other request says which app it is from with **`?app=<app>` on its URL**: the
+  WebSocket and music-socket upgrade URLs, fetches, image and document links. No `app`
+  means the WebUI; an invalid or unreadable one means no login, never the WebUI's.
+  URLs DAWN sends (image and document links in frames) carry no `app`: a front-end
+  adds its own `app=` to each one (merged with `&` when there is a query already).
+  So the WebUI and another front-end
+  open in the same browser keep separate logins: logging out of or into one never
+  touches the other.
+- **Logging out**: `POST /api/auth/logout` (with `?app=<app>` for another front-end;
+  same-origin: `Origin`, or a `Referer` whose `scheme://host[:port]` is exactly this
+  server's or on `[webui] allowed_origins`) **with the socket open**. It ends that app's
+  login only. The reply is immediate: `200 {"success":true}`, that app's cookie cleared
+  (`Max-Age=0`), `Cache-Control: no-store`. Every connection on that
+  login gets `force_logout` and is closed with **`4002`**, its music socket is closed
+  by the server, and its sessions are destroyed, connected or not. A login over an
+  existing one of the same app in the same browser ends the old one the same way.
 
 ## Binary Message Types
 
@@ -35,6 +57,38 @@ Audio format: 16-bit PCM at 16kHz mono (raw), Opus-encoded for WebSocket transpo
 Music format: Opus-encoded at 48kHz stereo.
 
 ---
+
+## Protocol version and feature flags
+
+DAWN advertises what its protocol does, so a client can adapt to the server it meets
+instead of guessing from the version string. Both carriers say the same thing: the
+`config` frame (sent on every connect and reconnect) and `GET /api/auth/status`
+(logged in or not, for decisions made before a socket opens):
+
+- `protocol` (integer): the protocol version. Bumped **only** when something is removed
+  or changes incompatibly, after a deprecation window. A client that doesn't speak the
+  server's version says so ("this DAWN is newer/older than this client") rather than
+  half-working.
+- `features` (array of strings): behaviours a client must know about to use them.
+  Names are stable snake_case; a flag isn't removed while the protocol version stands.
+  **A missing `features` array means a DAWN from before flags existed:** assume only
+  the legacy behaviour.
+
+When to add what:
+
+- A new optional field: nothing. Clients detect it by its presence.
+- A new or changed behaviour, or a new request a client must opt into: a feature flag.
+- A removal, or a field whose meaning changed incompatibly: a protocol bump, after a
+  deprecation window.
+
+| Flag | Since | Meaning |
+|------|-------|---------|
+| `app_logins` | 2026-09-30 | One login per app: `"app"` on login, `?app=` on every other request, a cookie per app (see Connection Lifecycle). Without it, all front-ends in a browser share one login. |
+| `logout_closes_sockets` | 2026-09-30 | `POST /api/auth/logout` with the socket open is safe: the login's connections get `force_logout` and close with `4002`, the server closes the music socket, and the reply comes at once with the cookie cleared (see Connection Lifecycle, Logging out). Without it, close the socket before logging out. |
+
+A client says who it is in its `init` / `reconnect` payload:
+`"client": {"name": "aurora", "version": "1.4.0", "protocol": 1}`. DAWN logs it once per
+connection (and warns on a protocol it doesn't speak); nothing is enforced on it.
 
 ## Connection Lifecycle
 
@@ -110,6 +164,8 @@ Reconnect to an existing session using a stored token.
   `tool_step` fan (see `tool_step` under Server → Client). Default off preserves the origin-excluded
   behavior for clients that render tool steps inline from the stream. **The same fields are
   accepted on the initial connect handshake**, not only on `reconnect`.
+- `client` (optional): who the client is, `{name, version, protocol}` (see Protocol
+  version and feature flags). Logged; accepted on `init` too.
 - `session_keepalive` (optional, default false): a per-browser **"always on"** hint that this
   client has session-keepalive enabled. **Hint only** — it is NOT the authorization to extend the
   session (an attacker holding a token could otherwise set it). The authoritative state is the
@@ -846,6 +902,14 @@ Response: `delete_all_memories_response`
 Music messages are accessible to both authenticated WebUI users and registered
 satellites.
 
+The audio itself goes over the separate music socket (`music_port`), which
+authenticates with `{"type":"auth","token":<session token>}`. A browser's music
+socket must also carry the login cookie of the login that owns that session (its
+upgrade URL names the app, `?app=<app>`, as every request does) (a
+browser sends it: the cookie is same-site whatever the port); otherwise it gets
+`auth_failed`. When the session is destroyed (logout, expiry) the server closes the
+music socket.
+
 #### `music_subscribe`
 Subscribe to music streaming for this connection.
 ```json
@@ -1336,7 +1400,9 @@ WebUI configuration (sent after session).
       "audio_chunk_ms": 200,
       "music_enabled": true,
       "music_port": 3001,
-      "version": "2.0.0"
+      "version": "2.0.0",
+      "protocol": 1,
+      "features": ["logout_closes_sockets"]
    }
 }
 ```
@@ -1346,6 +1412,8 @@ WebUI configuration (sent after session).
   Advertised so clients don't have to assume `main_port + 1`.
 - `version`: The DAWN daemon version (`VERSION_NUMBER`, compile-time). Advertised so
   clients can detect the daemon version for compatibility/telemetry.
+- `protocol`, `features`: the protocol version and feature flags (see
+  [Protocol version and feature flags](#protocol-version-and-feature-flags)).
 
 #### `state`
 State machine update.
@@ -1398,15 +1466,24 @@ Error or informational notification.
 - `recoverable`: Legacy field, currently always `true`. Prefer `severity`.
 
 #### `force_logout`
-Server-initiated logout (session revoked).
+This connection's login ended: a logout (from this or another tab), a login over it
+in the same browser, a revoke (WebUI or `dawn-admin`), a password change, a deleted
+user, or the login expiring. Sent **immediately before** the server closes the socket
+with WS close code **`4002` "logged out"** (skipped only if a large frame is still
+being sent: then the close code alone says it). Frames the client sends in between
+are ignored.
 ```json
 {
    "type": "force_logout",
    "payload": {
-      "reason": "Session revoked"
+      "reason": "Signed out"
    }
 }
 ```
+- Both signals, as with `session_superseded`: a reverse proxy strips the close code.
+- Client contract: on this frame **or** `close.code === 4002`, drop the session token
+  and per-user state, do **not** reconnect, and go to the login screen. The login is
+  gone: a new connection is unauthenticated until the user logs in again.
 
 ---
 
@@ -1952,7 +2029,8 @@ Registration confirmation for satellite.
 }
 ```
 - `reconnect_secret`: Client must save and provide on reconnection
-- `session_token`: Used for music WebSocket authentication
+- `session_token`: Used for music WebSocket authentication (a satellite's music
+  socket needs no cookie: its session is bound by the device registration)
 
 #### `satellite_pong`
 Response to `satellite_ping`.

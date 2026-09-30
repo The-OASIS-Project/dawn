@@ -35,7 +35,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "auth/auth_crypto.h"
+#include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
@@ -57,8 +60,27 @@ typedef struct {
    struct lws *wsi;
    bool authenticated;
    char session_token[WEBUI_SESSION_TOKEN_LEN];
-   session_t *session; /* Link to main session */
+   session_t *session; /* Link to main session: set and cleared on the music
+                        * thread, under s_registry_mutex (read there by
+                        * webui_music_server_close_session) */
+   /* The login cookie on the upgrade request, when it resolved in the DB: a
+    * browser's music socket must belong to the login that owns its session. */
+   bool has_login;
+   char login_key[SESSION_OWNER_KEY_LEN + 1];
+   /* The session was destroyed: close on the next writeable callback. */
+   atomic_bool close_requested;
+   /* A frame was queued (or a close requested): arm a writeable callback at
+    * the next wake.  Set by any thread, taken by the music thread. */
+   atomic_bool wants_write;
 } music_ws_connection_t;
+
+/* Authenticated music connections, so another thread can ask one to close
+ * (a destroyed session's socket) and the music thread can arm writeable
+ * callbacks for queued frames.  Lock order: s_conn_registry_mutex →
+ * s_registry_mutex → s_music_teardown_mutex (webui_music.c). */
+#define MUSIC_MAX_CONNECTIONS 32
+static music_ws_connection_t *s_registry[MUSIC_MAX_CONNECTIONS];
+static pthread_mutex_t s_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* =============================================================================
  * Module State
@@ -69,6 +91,76 @@ static pthread_t s_music_server_thread;
 static atomic_bool s_music_server_running = false;
 static int s_music_port = 0;
 static pthread_mutex_t s_music_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* =============================================================================
+ * Connection Registry
+ * ============================================================================= */
+
+/* Bind @p conn to @p session and list it; false when the registry is full or
+ * the session is being destroyed.  Checked under the lock
+ * webui_music_server_close_session() scans with, after the flag its destroy
+ * sets first: a destroy either finds this connection listed (and closes it)
+ * or is seen here.  Music thread. */
+static bool registry_add(music_ws_connection_t *conn, session_t *session) {
+   bool added = false;
+   pthread_mutex_lock(&s_registry_mutex);
+   if (!atomic_load(&session->being_destroyed)) {
+      for (int i = 0; i < MUSIC_MAX_CONNECTIONS; i++) {
+         if (!s_registry[i]) {
+            s_registry[i] = conn;
+            conn->session = session;
+            atomic_store(&conn->close_requested, false);
+            atomic_store(&conn->wants_write, false);
+            added = true;
+            break;
+         }
+      }
+   }
+   pthread_mutex_unlock(&s_registry_mutex);
+   return added;
+}
+
+/* Unlist @p conn and take its session reference (the caller releases it).
+ * Music thread. */
+static session_t *registry_remove(music_ws_connection_t *conn) {
+   pthread_mutex_lock(&s_registry_mutex);
+   for (int i = 0; i < MUSIC_MAX_CONNECTIONS; i++) {
+      if (s_registry[i] == conn) {
+         s_registry[i] = NULL;
+         break;
+      }
+   }
+   session_t *session = conn->session;
+   conn->session = NULL;
+   pthread_mutex_unlock(&s_registry_mutex);
+   return session;
+}
+
+/* After lws_cancel_service: arm a writeable callback on each listed
+ * connection that asked (a queued frame, or a requested close).  lws calls
+ * must be made on the service thread, so other threads only mark and wake. */
+static void registry_arm_writeable(void) {
+   pthread_mutex_lock(&s_registry_mutex);
+   for (int i = 0; i < MUSIC_MAX_CONNECTIONS; i++) {
+      if (s_registry[i] && atomic_exchange(&s_registry[i]->wants_write, false)) {
+         lws_callback_on_writable(s_registry[i]->wsi);
+      }
+   }
+   pthread_mutex_unlock(&s_registry_mutex);
+}
+
+/* May a music socket with this login bind to @p session?  A satellite's
+ * session carries its device registration (it has no login cookie); a
+ * browser's must be owned by the login on this socket's upgrade request. */
+static bool login_may_bind(const music_ws_connection_t *conn, session_t *session) {
+   if (session->type == SESSION_TYPE_DAP2) {
+      return true;
+   }
+   if (session->type != SESSION_TYPE_WEBUI || !conn->has_login) {
+      return false;
+   }
+   return session_owner_is(session, conn->login_key);
+}
 
 /* =============================================================================
  * WebSocket Callback
@@ -82,11 +174,25 @@ static int callback_music_websocket(struct lws *wsi,
    music_ws_connection_t *conn = (music_ws_connection_t *)user;
 
    switch (reason) {
-      case LWS_CALLBACK_ESTABLISHED:
+      case LWS_CALLBACK_ESTABLISHED: {
          OLOG_INFO("Music server: New connection");
          memset(conn, 0, sizeof(*conn));
          conn->wsi = wsi;
          conn->authenticated = false;
+         /* The login on the upgrade request (a browser sends its cookie: same
+          * site, whatever the port). */
+         auth_session_t login;
+         if (is_request_authenticated(wsi, &login)) {
+            conn->has_login = true;
+            memcpy(conn->login_key, login.token, SESSION_OWNER_KEY_LEN);
+            conn->login_key[SESSION_OWNER_KEY_LEN] = '\0';
+            auth_secure_zero(login.token, sizeof(login.token));
+         }
+         break;
+      }
+
+      case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
+         registry_arm_writeable();
          break;
 
       case LWS_CALLBACK_RECEIVE:
@@ -98,8 +204,13 @@ static int callback_music_websocket(struct lws *wsi,
                return LWS_CLOSE_CONNECTION;
             }
 
-            /* Parse auth message */
-            struct json_object *msg = json_tokener_parse((const char *)in);
+            /* Parse auth message (the frame isn't NUL-terminated: by length) */
+            struct json_tokener *tok = json_tokener_new();
+            struct json_object *msg = tok ? json_tokener_parse_ex(tok, (const char *)in, (int)len)
+                                          : NULL;
+            if (tok) {
+               json_tokener_free(tok);
+            }
             if (!msg) {
                OLOG_WARNING("Music server: Invalid JSON in auth message");
                return LWS_CLOSE_CONNECTION;
@@ -124,9 +235,19 @@ static int callback_music_websocket(struct lws *wsi,
                    * before lookup so {"type":"auth","token":null} can't reach it
                    * (CWE-476), matching the post-auth string guards below. */
                   session_t *session = token ? lookup_session_by_token(token) : NULL;
+                  if (session && !login_may_bind(conn, session)) {
+                     OLOG_WARNING("Music server: session %u isn't this login's; refusing",
+                                  session->session_id);
+                     session_release(session);
+                     session = NULL;
+                  }
+                  if (session && !registry_add(conn, session)) {
+                     OLOG_WARNING("Music server: too many music connections; refusing");
+                     session_release(session);
+                     session = NULL;
+                  }
                   if (session) {
                      conn->authenticated = true;
-                     conn->session = session;
                      safe_strscpy(conn->session_token, token);
 
                      /* Register this wsi with the session's music state */
@@ -200,11 +321,17 @@ static int callback_music_websocket(struct lws *wsi,
          break;
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
-         /* Streaming thread requests writeable via lws_callback_on_writable().
-          * The actual write is handled by webui_music_write_pending(). A fatal/short
-          * write would leave a truncated frame on the wire and desync the client's
-          * WS parser, so close the socket and let the client reconnect cleanly. */
+         /* Armed by registry_arm_writeable() after the stream thread's wake, and
+          * re-armed by webui_music_write_pending() while frames remain; a
+          * destroyed session's socket closes here.  The actual write is handled by
+          * webui_music_write_pending(). A fatal/short write would leave a truncated frame on the
+          * wire and desync the client's WS parser, so close the socket and let the client reconnect
+          * cleanly. */
          if (conn->authenticated && conn->session) {
+            if (atomic_load(&conn->close_requested)) {
+               lws_close_reason(wsi, LWS_CLOSE_STATUS_NORMAL, (unsigned char *)"session ended", 13);
+               return LWS_CLOSE_CONNECTION;
+            }
             if (webui_music_write_pending(conn->session, wsi) == WEBUI_MUSIC_WRITE_CLOSE) {
                return LWS_CLOSE_CONNECTION;
             }
@@ -213,12 +340,15 @@ static int callback_music_websocket(struct lws *wsi,
 
       case LWS_CALLBACK_CLOSED:
          OLOG_INFO("Music server: Connection closed");
-         if (conn->authenticated && conn->session) {
-            /* Clear the stream wsi from the session */
-            webui_music_set_stream_wsi(conn->session, NULL);
-            /* Release the session reference acquired during auth */
-            session_release(conn->session);
-            conn->session = NULL;
+         if (conn->authenticated) {
+            /* The one release of the reference taken at auth (never another
+             * thread's: this thread may be inside a callback using it). */
+            session_t *session = registry_remove(conn);
+            if (session) {
+               webui_music_set_stream_wsi(session, NULL);
+               session_release(session);
+            }
+            conn->authenticated = false;
          }
          break;
 
@@ -368,6 +498,46 @@ bool webui_music_server_is_running(void) {
 
 int webui_music_server_get_port(void) {
    return s_music_port;
+}
+
+void webui_music_server_close_session(session_t *session) {
+   if (!session) {
+      return;
+   }
+   int marked = 0;
+   pthread_mutex_lock(&s_registry_mutex);
+   for (int i = 0; i < MUSIC_MAX_CONNECTIONS; i++) {
+      if (s_registry[i] && s_registry[i]->session == session) {
+         atomic_store(&s_registry[i]->close_requested, true);
+         atomic_store(&s_registry[i]->wants_write, true);
+         marked++;
+      }
+   }
+   pthread_mutex_unlock(&s_registry_mutex);
+   if (marked > 0) {
+      OLOG_INFO("Music server: closing %d connection(s) of session %u", marked,
+                session->session_id);
+      webui_music_server_wake();
+   }
+}
+
+void webui_music_server_request_write(struct lws *wsi) {
+   if (!wsi) {
+      return;
+   }
+   bool found = false;
+   pthread_mutex_lock(&s_registry_mutex);
+   for (int i = 0; i < MUSIC_MAX_CONNECTIONS; i++) {
+      if (s_registry[i] && s_registry[i]->wsi == wsi) {
+         atomic_store(&s_registry[i]->wants_write, true);
+         found = true;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_registry_mutex);
+   if (found) {
+      webui_music_server_wake();
+   }
 }
 
 void webui_music_server_wake(void) {

@@ -168,6 +168,8 @@ Layer 1 (Core Infrastructure)
 ├── src/core/command_executor.c/h  - Unified command executor (deps: tool_registry)
 ├── src/core/session_manager.c/h   - Session lifecycle (deps: logging, config); with session_history.c and
 │                                    session_prefix.c it forms one session unit that reaches Layer 2 (see Layer 2)
+├── src/core/session_reaper.c/h    - Finishes destroyed sessions: session_destroy() only ends one (never waits), the
+│                                    reaper joins its compaction worker, waits for its last reference, then frees it
 ├── src/core/worker_pool.c/h       - Concurrent tool execution (deps: logging)
 ├── src/core/wake_word.c/h         - Wake-word matching (shared daemon + satellites)
 ├── src/core/time_query_parser.c/h - Stateless temporal-expression recognizer (deps: libc, math)
@@ -326,6 +328,8 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  DB storage      — auth.db's checkpoints (own connection,│
 │                    off the global mutex) + free pages  │
 │                    returned to the disk in chunks      │
+│  Session reaper  — finishes destroyed sessions once    │
+│                    their last reference is released    │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -428,6 +432,11 @@ Per-module locks (scoped to a single subsystem):
   session_prefix::s_withdraw_mutex (src/core/session_prefix.c) — the withdraw worker's queue (LEAF: never held across a withdrawal)
   auth_db_storage::s_wake_mutex (src/auth/auth_db_storage.c) — wakes the storage thread (LEAF: taken by the WAL hook inside a
                                                                      commit, the auth_db mutex held; the thread never holds it while taking the auth_db mutex)
+  session_reaper::s_mutex (src/core/session_reaper.c)          — the reaper's list of destroyed sessions (LEAF: never held while
+                                                                     finishing one; a release to zero wakes it after dropping ref_mutex)
+  webui_music_server::s_registry_mutex (src/webui/webui_music_server.c) — authenticated music sockets (taken after
+                                                                     s_conn_registry_mutex, before s_music_teardown_mutex; other threads only mark a
+                                                                     socket to close and wake the music thread, which alone releases its session reference)
   tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
                                                                      history_mutex; held only to find, pin, insert and release a slot, never across a render)
   tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that

@@ -1457,6 +1457,35 @@ dawn_add_unit_test(test_auth_db_storage
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# The session reaper: a destroyed session is finished on its last reference.
+dawn_add_unit_test(test_session_reaper
+   SOURCES test_session_reaper.c
+           ${SRC_ROOT}/src/core/session_reaper.c
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# A Referer's origin for the same-origin (CSRF) check.
+dawn_add_unit_test(test_webui_origin
+   SOURCES test_webui_origin.c
+           ${SRC_ROOT}/src/webui/webui_origin.c
+   LIBS    unity
+   LABEL   ci)
+
+# One login cookie per app (the WebUI and Aurora keep separate logins).
+dawn_add_unit_test(test_webui_login_cookie
+   SOURCES test_webui_login_cookie.c
+           ${SRC_ROOT}/src/webui/webui_login_cookie.c
+   LIBS    unity
+   LABEL   ci)
+
+# The WebUI protocol's version and feature flags.
+dawn_add_unit_test(test_webui_protocol
+   SOURCES test_webui_protocol.c
+           ${SRC_ROOT}/src/webui/webui_protocol.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Stored tool results: who may read one, binding, cascades (real auth_db).
 dawn_add_unit_test(test_tool_result_store
    SOURCES test_tool_result_store.c

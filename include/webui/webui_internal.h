@@ -90,7 +90,6 @@ extern "C" {
 
 #define WS_SEND_BUFFER_SIZE 16384
 #define HTTP_MAX_POST_BODY 4096
-#define AUTH_COOKIE_NAME "dawn_session"
 #define AUTH_COOKIE_MAX_AGE (24 * 60 * 60) /* 24 hours */
 #define MAX_TOKEN_MAPPINGS 16
 #define MODEL_CACHE_TTL 60 /* Cache refresh interval in seconds */
@@ -128,6 +127,9 @@ typedef struct {
                           * in its own tool_step fan. Default off = #3 origin-excluded
                           * behavior (stock www). Set by LWS at handshake, read by worker. */
    bool is_satellite;    /* True if this is a DAP2 satellite connection */
+   bool logged_out;      /* Its login ended (webui_conn_end_login): closing, and
+                          * nothing it sends is handled */
+   bool client_noted;    /* Its `client` self-description was logged */
 
    /* Text message fragmentation support (for large JSON payloads) */
    char *text_buffer;      /* Accumulation buffer for fragmented text messages */
@@ -532,6 +534,12 @@ void queue_init_messages(ws_connection_t *conn, const char *token);
  * in onclose and backs off (does NOT auto-reconnect) instead of re-stealing the
  * session, which would ping-pong two tabs.  Kept in sync with www/js client. */
 #define WEBUI_CLOSE_SUPERSEDED 4001
+
+/* Private-range WS close code sent to a connection whose login ended (logout,
+ * a revoke, a password change, expiry).  It follows a force_logout frame; the
+ * client goes to the login page and does not reconnect.  Kept in sync with
+ * www/js client. */
+#define WEBUI_CLOSE_LOGGED_OUT 4002
 
 /**
  * @brief Evict the connection currently owning @p existing so a newer reconnect
@@ -948,28 +956,56 @@ void webui_phone_handle_action(ws_connection_t *conn, const char *action);
  */
 void webui_phone_send_status(ws_connection_t *conn);
 
-/**
- * @brief Force logout connections by auth session token prefix
- *
- * Finds all WebSocket connections with matching auth_session_token prefix
- * and sends them a force_logout message. Used when a session is revoked.
- *
- * @param auth_token_prefix First AUTH_TOKEN_PREFIX_LEN chars of auth token
- * @return Number of connections notified
- */
-int webui_force_logout_by_auth_token(const char *auth_token_prefix);
+/* =============================================================================
+ * Ending logins (webui_login_sweep.c)
+ * ============================================================================= */
+
+/** @brief @p conn's owner key: its login cookie's public prefix, or "" (none). */
+void webui_conn_owner_key(const ws_connection_t *conn, char out[SESSION_OWNER_KEY_LEN + 1]);
+
+/** @brief A session just created for @p conn belongs to its login (if any). */
+void webui_conn_own_session(ws_connection_t *conn, session_t *session);
 
 /**
- * @brief Destroy session_manager sessions for connections with matching auth token.
- *
- * Used by the logout handler to release session slots immediately instead of
- * waiting for the 30-minute idle timeout. Detaches matching connections from
- * their sessions and destroys the sessions.
- *
- * @param auth_token_prefix First AUTH_TOKEN_PREFIX_LEN chars of auth token
- * @return Number of sessions destroyed
+ * @brief May @p conn resume @p session (a reconnect token)?  Only a WebUI
+ *        session, and only the one its own login created (an unowned one only
+ *        for a connection that never logged in).
  */
-int webui_destroy_sessions_by_auth_token(const char *auth_token_prefix);
+bool webui_conn_may_resume(ws_connection_t *conn, session_t *session);
+
+/**
+ * @brief Attach @p conn to @p session unless the session is being destroyed.
+ *        The caller's reference becomes the connection's.
+ * @return false if it is being destroyed (the caller releases its reference).
+ */
+bool webui_conn_attach_session(ws_connection_t *conn, session_t *session);
+
+/**
+ * @brief End @p conn's login: force_logout, identity cleared, closed with
+ *        WEBUI_CLOSE_LOGGED_OUT, and its session destroyed if that login
+ *        owns it.  Service thread only.
+ * @return true if it destroyed that session.
+ */
+bool webui_conn_end_login(ws_connection_t *conn, const char *reason);
+
+/**
+ * @brief Re-check @p conn's login in the database before giving it a session.
+ *        A login that no longer exists is ended (webui_conn_end_login); a
+ *        failed lookup sends an error.  Service thread only.
+ * @return true if the login is valid.
+ */
+bool webui_conn_login_valid(ws_connection_t *conn);
+
+/**
+ * @brief Ask for a login sweep on the service thread: close the browser
+ *        connections of logins the database no longer has, and destroy their
+ *        sessions, connected or not.  Any thread; requests coalesce.  auth_db
+ *        asks for one whenever it deletes a login (auth_sessions_changed).
+ */
+void webui_login_sweep_request(void);
+
+/** @brief The service thread's wake: a requested sweep runs. */
+void webui_login_sweep_run_pending(void);
 
 /* =============================================================================
  * Prompt Construction Helpers

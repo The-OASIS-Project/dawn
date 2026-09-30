@@ -77,6 +77,7 @@
 #include "core/ota_rollout.h"
 #include "core/path_utils.h"
 #include "core/session_manager.h"
+#include "core/session_reaper.h"
 #include "core/text_filter.h"
 #include "core/utterance_dedup.h"
 #include "core/wake_word.h"
@@ -4220,6 +4221,17 @@ server_shutdown:
    blob_store_shutdown();
    OLOG_INFO("Shutdown: auth_crypto_shutdown");
    auth_crypto_shutdown();
+#endif
+#ifdef ENABLE_WEBUI
+   /* Sessions destroyed and not yet finished: while the database and memory
+    * subsystems are up, so their final metrics and memory extraction still
+    * reach them.  Then nothing more is finished until session_manager_cleanup
+    * (after the WebUI, whose connections may still hold some): a finish
+    * racing the teardown below could find them half-closed. */
+   if (!session_reaper_drain(SESSION_REAPER_SHUTDOWN_DRAIN_MS)) {
+      OLOG_WARNING("Shutdown: %d destroyed session(s) still referenced", session_reaper_pending());
+   }
+   session_reaper_hold();
 #endif
    OLOG_INFO("Shutdown: memory_embeddings_cleanup");
    memory_embeddings_cleanup();

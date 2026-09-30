@@ -732,6 +732,10 @@ if(ENABLE_WEBUI)
         src/webui/webui_config.c
         src/webui/webui_reasoning.c
         src/webui/webui_session.c
+        src/webui/webui_login_sweep.c
+        src/webui/webui_origin.c
+        src/webui/webui_protocol.c
+        src/webui/webui_login_cookie.c
         src/webui/webui_settings.c
         src/webui/webui_tools.c
         src/webui/webui_images.c
@@ -773,6 +777,7 @@ endif()
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
+        src/core/session_reaper.c
         src/core/session_voice_save.c
         src/core/session_history.c
         src/core/turn_queue.c

@@ -89,6 +89,10 @@ extern "C" {
 #define MAX_SESSIONS 8
 #define SESSION_TIMEOUT_SEC 1800  // 30 minute idle timeout
 #define LOCAL_SESSION_ID 0        // Reserved for local microphone
+/* An owner key's length: the credential that owns a session, as the caller
+ * names it (the WebUI: its login cookie's public prefix).  Core compares it,
+ * never interprets it. */
+#define SESSION_OWNER_KEY_LEN 16
 
 /**
  * LOCK ACQUISITION ORDER (to prevent deadlocks):
@@ -778,6 +782,16 @@ typedef struct session {
    pthread_mutex_t ref_mutex;
    pthread_cond_t ref_zero_cond;  // Signaled when ref_count reaches 0
 
+   /* The credential that owns this session (session_set_owner): set when it
+    * is created, under session_manager_rwlock, never changed; "" = none (a
+    * satellite, or a connection that never logged in). */
+   char owner_key[SESSION_OWNER_KEY_LEN + 1];
+
+   /* After session_destroy(): the reaper's list (session_reaper.c) and the
+    * time it gives up waiting for the last reference.  Owned by the reaper. */
+   struct session *reap_next;
+   time_t reap_deadline;
+
    // Per-session LLM configuration (allows different LLM for each client)
    session_llm_config_t llm_config;
    pthread_mutex_t llm_config_mutex;  // Protects llm_config (lock level 4)
@@ -1325,15 +1339,53 @@ session_t *session_get_local(void);
 #ifdef ENABLE_MULTI_CLIENT
 
 /**
- * @brief Mark session as disconnected and destroy when ref_count=0
+ * @brief Destroy a session: end it now, free it once nothing holds it.
  *
  * @param session_id Session ID to destroy
  *
- * @note Two-phase destruction:
- *       1. Mark disconnected + remove from active list (prevents new refs)
- *       2. Wait for ref_count=0 via ref_zero_cond, then free
+ * Never blocks, so any thread may call it (the WebUI service thread
+ * included).  Before it returns the session is out of the active list (no
+ * lookup finds it, no reconnect or music socket can reach it), its turn is
+ * cancelled, its queued turns dropped, and its connections detached (a music
+ * socket is asked to close, on its own thread).  The reaper
+ * (session_reaper.c) then joins its compaction worker, waits for the last
+ * reference, saves its final metrics, starts memory extraction and frees it;
+ * a reference still held after SESSION_DESTROY_REF_WAIT_MAX_SEC is leaked
+ * rather than freed under its holder.
  */
 void session_destroy(uint32_t session_id);
+
+/**
+ * @brief Record the credential that owns @p session: when it is created, never
+ *        later (a session is never adopted by another login).
+ * @return true if @p key owns it (set now, or already its owner).
+ * @locks session_manager_rwlock (write)
+ */
+bool session_set_owner(session_t *session, const char *key);
+
+/**
+ * @brief Whether a connection with credential @p key may resume @p session:
+ *        an owned session only for its own key; an unowned one only for a
+ *        connection without one (NULL or "": it never logged in).
+ * @locks session_manager_rwlock (read)
+ */
+bool session_owner_matches(session_t *session, const char *key);
+
+/** @brief Whether @p key (non-empty) is @p session's owner. */
+bool session_owner_is(session_t *session, const char *key);
+
+/** A live session's id and owner key (session_manager_list_owned). */
+typedef struct {
+   uint32_t session_id;
+   char owner_key[SESSION_OWNER_KEY_LEN + 1];
+} session_owned_t;
+
+/**
+ * @brief The live sessions that have an owner, up to @p max.
+ * @return How many were written to @p out.
+ * @locks session_manager_rwlock (read)
+ */
+int session_manager_list_owned(session_owned_t *out, int max);
 
 /**
  * @brief Cleanup expired sessions (called periodically)

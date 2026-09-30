@@ -180,13 +180,31 @@ static void test_verify_wrong_password(void) {
 static void test_update_password(void) {
    auth_db_create_user("frank", "old_hash", false);
 
-   int rc = auth_db_update_password("frank", "new_hash");
+   int rc = auth_db_update_password("frank", "new_hash", NULL);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
 
    auth_user_t user;
    memset(&user, 0, sizeof(user));
    auth_db_get_user("frank", &user);
    TEST_ASSERT_EQUAL_STRING("new_hash", user.password_hash);
+}
+
+/* A password change ends the account's logins: all of them, or all but the
+ * one it was made from. */
+static void test_update_password_ends_logins(void) {
+   int user_id = create_and_get_id("pw_logins", "old_hash", false);
+   auth_db_create_session(user_id, "pwtok_keep_0123456789", NULL, NULL, false);
+   auth_db_create_session(user_id, "pwtok_other_0123456789", NULL, NULL, false);
+   auth_session_t session;
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_update_password("pw_logins", "new_hash", "pwtok_keep_0123456789"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_session("pwtok_keep_0123456789", &session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         auth_db_get_session("pwtok_other_0123456789", &session));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_update_password("pw_logins", "newer_hash", NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, auth_db_get_session("pwtok_keep_0123456789", &session));
 }
 
 static void test_validate_username(void) {
@@ -248,6 +266,35 @@ static void test_expired_session(void) {
    memset(&session, 0, sizeof(session));
    int rc = auth_db_get_session("token_exp_1234567890", &session);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, rc);
+}
+
+/* A login's public prefix: found while unexpired, not after expiry or
+ * deletion, and a short prefix is refused (never "any login"). */
+static void test_session_prefix_exists(void) {
+   int user_id = create_and_get_id("sess_prefix", "hash", false);
+   auth_db_create_session(user_id, "prefixA_0123456789abcdef", NULL, NULL, false);
+   auth_db_create_session(user_id, "prefixB_0123456789abcdef", NULL, NULL, false);
+
+   bool exists = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_session_prefix_exists("prefixA_01234567", &exists));
+   TEST_ASSERT_TRUE(exists);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_session_prefix_exists("prefixC_01234567", &exists));
+   TEST_ASSERT_FALSE(exists);
+
+   force_session_expiry("prefixA_0123456789abcdef", time(NULL) - 60);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_session_prefix_exists("prefixA_01234567", &exists));
+   TEST_ASSERT_FALSE(exists);
+
+   auth_db_delete_session("prefixB_0123456789abcdef");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_session_prefix_exists("prefixB_01234567", &exists));
+   TEST_ASSERT_FALSE(exists);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, auth_db_session_prefix_exists("short", &exists));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, auth_db_session_prefix_exists("", &exists));
 }
 
 static void test_delete_user_sessions(void) {
@@ -1289,6 +1336,8 @@ int main(void) {
    RUN_TEST(test_delete_session);
    RUN_TEST(test_expired_session);
    RUN_TEST(test_delete_user_sessions);
+   RUN_TEST(test_session_prefix_exists);
+   RUN_TEST(test_update_password_ends_logins);
 
    /* Conversations */
    RUN_TEST(test_create_conversation);

@@ -49,9 +49,11 @@
 #include "memory/memory_db_aliases.h" /* memory_db_proposal_count_pending */
 #include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_protocol.h"
 
 #ifdef ENABLE_WEBUI_AUDIO
 #include "webui/webui_audio.h"
+#include "webui/webui_music_server.h"
 #endif
 
 #include "config/config_env.h"
@@ -938,6 +940,10 @@ static int callback_websocket(struct lws *wsi,
       }
 
       case LWS_CALLBACK_RECEIVE: {
+         /* Its login ended: it is closing, and nothing it sends is handled. */
+         if (conn->logged_out) {
+            break;
+         }
          /* Message received from client.
           * Atomic load: maintenance thread may have NULLed conn->session
           * via webui_detach_session() on session expiry. */
@@ -946,6 +952,13 @@ static int callback_websocket(struct lws *wsi,
              * or the conversation session expired while the WS connection stayed alive.
              * If already authenticated, auto-create a new session so the user
              * doesn't have to log in again. */
+            if (conn->is_satellite) {
+               /* A satellite's session ended (expired or destroyed): it isn't
+                * recreated here as a browser's would be; closing makes the
+                * satellite register again. */
+               OLOG_INFO("WebUI: satellite's session ended; closing so it re-registers");
+               return LWS_CLOSE_CONNECTION;
+            }
             if (conn->authenticated) {
                OLOG_INFO("WebUI: Session expired for authenticated connection, auto-creating");
                if (!webui_conn_create_session(conn)) {
@@ -982,6 +995,7 @@ static int callback_websocket(struct lws *wsi,
                json_object_object_get_ex(root, "payload", &payload);
 
                OLOG_INFO("WebUI: Init message received, type=%s", type ? type : "(null)");
+               webui_protocol_note_client(payload, &conn->client_noted);
 
                bool is_reconnect = false;
                session_t *existing_session = NULL;
@@ -994,11 +1008,14 @@ static int callback_websocket(struct lws *wsi,
                      if (token && strlen(token) > 0) {
                         existing_session = lookup_session_by_token(token);
                         if (existing_session &&
-                            !webui_session_owned_by(existing_session, conn->auth_user_id)) {
-                           /* Another user's session (a token that outlived a user
-                            * switch): never attach to it; start a fresh one. */
-                           OLOG_WARNING("WebUI: reconnect token belongs to another user's "
-                                        "session; not attaching");
+                            (!webui_session_owned_by(existing_session, conn->auth_user_id) ||
+                             !webui_conn_may_resume(conn, existing_session) ||
+                             !webui_conn_attach_session(conn, existing_session))) {
+                           /* Another user's or another login's session (a token that
+                            * outlived a user switch or a logout), or one being
+                            * destroyed: never attach to it; start a fresh one. */
+                           OLOG_WARNING("WebUI: reconnect token's session isn't this "
+                                        "login's (or is ending); not attaching");
                            session_release(existing_session); /* the lookup's reference */
                            existing_session = NULL;
                         }
@@ -1006,9 +1023,10 @@ static int callback_websocket(struct lws *wsi,
                            is_reconnect = true;
                            /* Evict any other connection that still owns this session
                             * BEFORE taking ownership, so the superseded tab backs off
-                            * (WS 4001) instead of fighting to re-steal it. */
+                            * (WS 4001) instead of fighting to re-steal it.  (This
+                            * connection is attached already; the session's owner,
+                            * client_data, is still the other one.) */
                            webui_evict_session_owner(existing_session, conn);
-                           conn->session = existing_session;
                            conn->session_was_reconnected = true;
                            existing_session->client_data = conn;
                            webui_conn_publish_view(
@@ -1330,6 +1348,11 @@ static int callback_websocket(struct lws *wsi,
       }
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
+         /* A connection whose login ended closes now, its force_logout sent
+          * (lws_close_reason carries WEBUI_CLOSE_LOGGED_OUT). */
+         if (conn && conn->logged_out) {
+            return LWS_CLOSE_CONNECTION;
+         }
          /* Ready to send more data - process next queued response */
          process_one_response();
          break;
@@ -1337,6 +1360,7 @@ static int callback_websocket(struct lws *wsi,
       case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
          /* lws_cancel_service() was called - process response queue */
          process_response_queue();
+         webui_login_sweep_run_pending();
          break;
 
       default:
@@ -3005,6 +3029,12 @@ void webui_detach_session(session_t *session) {
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
 
+#ifdef ENABLE_WEBUI_AUDIO
+   /* Its music socket closes on the music thread, which alone releases the
+    * reference that socket holds. */
+   webui_music_server_close_session(session);
+#endif
+
    if (detached > 0) {
       OLOG_INFO("WebUI: Detached %d connection(s) from expiring session %u", detached,
                 session->session_id);
@@ -3115,90 +3145,6 @@ void webui_send_metrics_update(session_t *session,
 
 
 /* =============================================================================
- * Force Logout (for session revocation)
- *
- * Finds all WebSocket connections with matching auth_session_token prefix
- * and sends them a force_logout message.
- * ============================================================================= */
-
-int webui_force_logout_by_auth_token(const char *auth_token_prefix) {
-   if (!auth_token_prefix || strlen(auth_token_prefix) < AUTH_TOKEN_PREFIX_LEN) {
-      return 0;
-   }
-
-   int count = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (conn && conn->wsi && conn->authenticated) {
-         /* Check if auth token prefix matches */
-         if (strncmp(conn->auth_session_token, auth_token_prefix, AUTH_TOKEN_PREFIX_LEN) == 0) {
-            OLOG_INFO("WebUI: Forcing logout for connection with auth token %.4s...",
-                      auth_token_prefix);
-            send_force_logout_impl(conn->wsi, "Session revoked");
-            /* Mark as unauthenticated to prevent further requests */
-            conn->authenticated = false;
-            count++;
-         }
-      }
-   }
-
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   if (count > 0) {
-      OLOG_INFO("WebUI: Sent force_logout to %d connection(s)", count);
-   }
-
-   return count;
-}
-
-int webui_destroy_sessions_by_auth_token(const char *auth_token_prefix) {
-   if (!auth_token_prefix || strlen(auth_token_prefix) < AUTH_TOKEN_PREFIX_LEN)
-      return 0;
-
-   /* Collect matching session IDs under the conn mutex, then destroy after
-    * releasing (session_destroy blocks on ref_count and itself calls
-    * webui_detach_session → s_conn_registry_mutex; recursive would deadlock). */
-   uint32_t ids[MAX_ACTIVE_CONNECTIONS];
-   int n = 0;
-
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session)
-         continue;
-      if (strncmp(conn->auth_session_token, auth_token_prefix, AUTH_TOKEN_PREFIX_LEN) != 0)
-         continue;
-      /* Skip satellites — their session lifecycle is managed by the satellite
-       * protocol, not the auth cookie. */
-      if (conn->is_satellite)
-         continue;
-      uint32_t sid = conn->session->session_id;
-      bool dup = false;
-      for (int j = 0; j < n; j++) {
-         if (ids[j] == sid) {
-            dup = true;
-            break;
-         }
-      }
-      if (!dup && n < MAX_ACTIVE_CONNECTIONS)
-         ids[n++] = sid;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   for (int i = 0; i < n; i++) {
-      session_destroy(ids[i]);
-   }
-
-   if (n > 0)
-      OLOG_INFO("WebUI: Destroyed %d session slot(s) for auth token %.4s...", n, auth_token_prefix);
-
-   return n;
-}
-
-
-/* =============================================================================
  * Connection Iterator (for per-user broadcasting)
  * ============================================================================= */
 
@@ -3297,11 +3243,21 @@ void webui_force_disconnect_satellite(const char *uuid) {
  * @return true if session was created, false on failure (error sent to client)
  */
 static bool webui_conn_create_session(ws_connection_t *conn) {
+   /* A satellite's session comes only from its registration. */
+   if (conn->is_satellite) {
+      return false;
+   }
+   /* Only for a login that still exists: one ended since this connection
+    * opened is ended here too (the connection closes). */
+   if (!webui_conn_login_valid(conn)) {
+      return false;
+   }
    conn->session = session_create(SESSION_TYPE_WEBUI, -1);
    if (!conn->session) {
       send_error_impl(conn->wsi, "SESSION_LIMIT", "Maximum sessions reached");
       return false;
    }
+   webui_conn_own_session(conn, conn->session); /* new: this login's */
 
    session_set_metrics_user(conn->session, conn->auth_user_id);
    conn->session->client_data = conn;

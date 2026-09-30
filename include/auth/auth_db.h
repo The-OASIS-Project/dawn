@@ -352,13 +352,16 @@ int auth_db_count_admins(int *count_out);
 int auth_db_delete_user(const char *username);
 
 /**
- * @brief Update user password (atomically invalidates all sessions)
+ * @brief Update a user's password, ending the account's logins in the same
+ *        transaction (auth_sessions_changed() then signs them out).
  *
  * @param username Username
  * @param new_hash New password hash from auth_hash_password()
+ * @param keep_token The login to keep: the one a user changes their own
+ *        password from.  NULL ends them all (an admin reset, dawn-admin).
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
-int auth_db_update_password(const char *username, const char *new_hash);
+int auth_db_update_password(const char *username, const char *new_hash, const char *keep_token);
 
 /**
  * @brief Unlock a user account
@@ -583,6 +586,27 @@ int auth_db_delete_session(const char *token);
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
 int auth_db_delete_session_by_prefix(const char *prefix);
+
+/**
+ * @brief Whether a login (an unexpired session) has this 16-character token
+ *        prefix.
+ *
+ * @param prefix 16-character token prefix
+ * @param exists_out Set to whether one does
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE (@p exists_out
+ *         untouched: a failed lookup says nothing)
+ */
+int auth_db_session_prefix_exists(const char *prefix, bool *exists_out);
+
+/**
+ * @brief Logins changed in the database: deleted, revoked, a password
+ *        changed, a user deleted, expired sessions removed.
+ *
+ * Callers that change sessions call it afterwards, on any thread.  A no-op
+ * here (weak); the WebUI replaces it to end the connections and sessions of
+ * logins that no longer exist.
+ */
+void auth_sessions_changed(void);
 
 /**
  * @brief Check if a session belongs to a specific user

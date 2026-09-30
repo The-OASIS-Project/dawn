@@ -12,6 +12,42 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-30 — Logging out signs out every tab, at once
+
+**What changed.**
+- **Logout is immediate and complete.** Logging out used to take up to 30 seconds,
+  and could leave the session behind until DAWN was restarted; enough logouts in a
+  row ended in "Maximum sessions reached". Now the reply comes at once, every tab on
+  that login is signed out and closed, and its sessions are freed.
+- **An ended login signs its tabs out everywhere,** whatever ended it: a logout in
+  another tab, logging in as someone else in the same browser, revoking the login
+  (WebUI or `dawn-admin`), changing the account's password, deleting the user, or
+  the login expiring. Before, those tabs kept working until they were reloaded.
+- **Changing your own password signs you out everywhere else.** Your other tabs,
+  Aurora and other devices go to the login screen; the tab you changed it in stays
+  signed in. An admin resetting someone's password (WebUI or `dawn-admin`) signs that
+  user out everywhere.
+- **Everyone signs in once more after this update.** The login cookie is renamed
+  (`dawn_session` becomes `__Host-dawn_session`), so the old one is no longer read.
+  The `__Host-` prefix tells the browser to accept that cookie only from DAWN itself,
+  over HTTPS, for the whole site: a cookie planted by another site on your domain can
+  no longer stand in for your login.
+- **Aurora and the WebUI have separate logins.** With both open in one browser,
+  logging out of (or into) one no longer affects the other. Aurora has its own login
+  now (`__Host-dawn_session_aurora`).
+- **Scripts that log in directly** (curl, Python) must read and send the new cookie
+  name, `__Host-dawn_session`.
+- **A browser's music stream needs its login cookie.** The WebUI and Aurora send it
+  already; a custom client that opens the music socket without the cookie now gets
+  `auth_failed`. Satellites are unaffected.
+
+**What you need to do.** Sign in again (in the WebUI, and in Aurora if you use
+it). If you run a separate front-end behind a proxy, make sure the proxy passes the
+`Cookie` header to the music port and does not add a `Domain` to DAWN's cookies (the
+browser rejects a `__Host-` cookie that has one).
+
+---
+
 ## 2026-09-30 — The database is rewritten once, then keeps itself compact
 
 **What changed.**
