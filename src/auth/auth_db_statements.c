@@ -2950,6 +2950,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_entity_search);
    if (s_db.stmt_memory_entity_delete)
       sqlite3_finalize(s_db.stmt_memory_entity_delete);
+   if (s_db.stmt_memory_entity_set_photo)
+      sqlite3_finalize(s_db.stmt_memory_entity_set_photo);
+   if (s_db.stmt_memory_entity_get_photo)
+      sqlite3_finalize(s_db.stmt_memory_entity_get_photo);
    if (s_db.stmt_memory_relation_delete_by_entity)
       sqlite3_finalize(s_db.stmt_memory_relation_delete_by_entity);
 
