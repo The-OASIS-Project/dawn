@@ -34,9 +34,11 @@
 #include <stdlib.h> /* free() in static-inline composed_prompt_free fallback */
 #include <time.h>
 
-#include "core/prompt_parts.h"  // For composed_prompt_t
-#include "core/text_filter.h"   // For cmd_tag_filter_state_t
-#include "llm/llm_interface.h"  // For session_llm_config_t
+#include "config/dawn_config.h"  // g_config (the non-multi-client stubs read it)
+#include "core/prompt_parts.h"   // For composed_prompt_t
+#include "core/text_filter.h"    // For cmd_tag_filter_state_t
+#include "dawn_error.h"          // SUCCESS / FAILURE (the non-multi-client stubs return them)
+#include "llm/llm_interface.h"   // For session_llm_config_t
 
 #define SESSION_PROVIDER_MAX 16
 #define SESSION_MAX_PROVIDERS 5 /* local + each cloud provider */
@@ -2377,6 +2379,60 @@ static inline void session_citation_stash_clear(session_t *session) {
 static inline int64_t session_get_last_user_msg_id(session_t *session) {
    (void)session;
    return 0;
+}
+
+/* The one session here is the local device's, and it belongs to the default
+ * voice user; there are no other sessions to reconnect to, no metrics to sum,
+ * and no conversation store to save a voice conversation into. */
+static inline int session_default_voice_user_id(void) {
+   return g_config.memory.default_voice_user_id > 0 ? g_config.memory.default_voice_user_id : 1;
+}
+
+static inline int session_effective_user_id(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   if (session->metrics.user_id > 0) {
+      return session->metrics.user_id;
+   }
+   return session->type == SESSION_TYPE_LOCAL ? session_default_voice_user_id() : 0;
+}
+
+static inline session_t *session_get_for_reconnect(uint32_t session_id) {
+   (void)session_id;
+   return NULL;
+}
+
+static inline void session_metrics_totals(session_t *session,
+                                          uint64_t *tokens_in_out,
+                                          uint32_t *queries_out) {
+   (void)session;
+   if (tokens_in_out) {
+      *tokens_in_out = 0;
+   }
+   if (queries_out) {
+      *queries_out = 0;
+   }
+}
+
+static inline void session_clear_history(session_t *session) {
+   if (!session || !session->conversation_history) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   const size_t len = json_object_array_length(session->conversation_history);
+   if (len > 0) {
+      json_object_array_del_idx(session->conversation_history, 0, len);
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
+static inline int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
+   (void)session;
+   if (conv_id_out) {
+      *conv_id_out = 0;
+   }
+   return FAILURE; /* no conversation store in a local-only build */
 }
 
 #endif /* !ENABLE_MULTI_CLIENT */

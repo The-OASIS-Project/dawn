@@ -572,6 +572,7 @@ dawn_add_unit_test(test_satellite_remap
    SOURCES test_satellite_remap.c
            ${SRC_ROOT}/src/webui/satellite_remap.c
            ${SRC_ROOT}/src/core/turn_queue.c
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1053,6 +1054,7 @@ dawn_add_unit_test(test_silent_observe
 dawn_add_unit_test(test_llm_cache_monitor
    SOURCES test_llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
@@ -1145,6 +1147,7 @@ dawn_add_unit_test(test_llm_claude_binding
 dawn_add_unit_test(test_llm_claude_betas
    SOURCES test_llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1830,6 +1833,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
 
@@ -1925,6 +1929,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)

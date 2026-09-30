@@ -403,6 +403,7 @@ static void claude_sse_event_handler(const char *event_type,
 /* Maximum tool call iterations to prevent infinite loops */
 #define MAX_TOOL_ITERATIONS 8
 
+#ifdef ENABLE_WEBUI
 /**
  * @brief Extract error message from Claude API error response
  *
@@ -447,6 +448,7 @@ static const char *parse_claude_error_message(const char *response_body, long ht
    json_object_put(root);
    return error_msg;
 }
+#endif /* ENABLE_WEBUI */
 
 static int claude_single_shot_once(struct json_object *conversation_history,
                                    const char *input_text,
@@ -642,6 +644,8 @@ static int claude_single_shot_once(struct json_object *conversation_history,
                                                             http_code);
          webui_send_error(session, "LLM_ERROR", error_msg);
       }
+#else
+      (void)retrying; /* the call above still drops a rejected beta for the retry */
 #endif
       curl_easy_cleanup(curl_handle);
       curl_slist_free_all(headers);

@@ -164,6 +164,7 @@ static struct json_object *extraction_message_cap_content(struct json_object *ms
    return clean;
 }
 
+#ifdef ENABLE_AUTH /* the row-ownership check below */
 static int cmp_int64(const void *a, const void *b) {
    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
    return (x > y) - (x < y);
@@ -192,6 +193,7 @@ static int distinct_row_id_count(struct json_object *ids) {
    free(v);
    return distinct;
 }
+#endif /* ENABLE_AUTH */
 
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,

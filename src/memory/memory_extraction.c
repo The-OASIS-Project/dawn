@@ -1744,10 +1744,12 @@ static void *extraction_thread(void *arg) {
    llm_cache_monitor_pop_kind(kind_prev); /* primary and fallback both tagged */
    json_object_put(extraction_history);
 
+#ifdef ENABLE_WEBUI
    /* Recovery-triggered extractions process old, idle conversations the user
     * has long since moved on from.  Surfacing a noisy "extraction failed"
     * toast for those is just clutter — log only, don't notify. */
    bool is_recovery_run = (strncmp(ctx->session_id, "recovery_", 9) == 0);
+#endif
 
    /* Compute source range for provenance: (last_extracted_msg_id + 1, MAX(messages.id)).
     * Queried here — after LLM returns — to avoid a race with concurrent inserts. */
