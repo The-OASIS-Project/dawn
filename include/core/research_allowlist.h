@@ -42,8 +42,9 @@ extern "C" {
 /**
  * @brief Is @p name a tool a deep-research fetch loop is allowed to run?
  *
- * The full read-only set: web `search` + `url_fetch` (reads) plus the four
- * ledger/control research tools (`research_plan` / `research_record` /
+ * The full read-only set: web `search` + `url_fetch` (reads), `result_read`
+ * (more of one of this run's own large results), plus the four ledger/control
+ * research tools (`research_plan` / `research_record` /
  * `research_conclude` / `research_mark_unanswerable`).  Nothing side-effecting or
  * outward-facing appears here.
  */
@@ -52,8 +53,9 @@ static inline bool research_tool_is_allowlisted(const char *name) {
       return false;
    }
    return strcmp(name, "search") == 0 || strcmp(name, "url_fetch") == 0 ||
-          strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0 ||
-          strcmp(name, "research_conclude") == 0 || strcmp(name, "research_mark_unanswerable") == 0;
+          strcmp(name, "result_read") == 0 || strcmp(name, "research_plan") == 0 ||
+          strcmp(name, "research_record") == 0 || strcmp(name, "research_conclude") == 0 ||
+          strcmp(name, "research_mark_unanswerable") == 0;
 }
 
 /**

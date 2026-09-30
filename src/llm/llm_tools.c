@@ -260,6 +260,15 @@ static bool get_tool_parallel_safe(const char *tool_name) {
    return false;
 }
 
+/* Set while this thread runs the tools the LLM called (llm_tools_execute_all
+ * and its workers): a plan's steps run inside, so they carry it only when the
+ * model started the plan (llm_tools_executing()). */
+static __thread bool tl_executing;
+
+bool llm_tools_executing(void) {
+   return tl_executing;
+}
+
 /**
  * @brief Thread wrapper for parallel tool execution
  *
@@ -277,8 +286,10 @@ static void *tool_exec_thread(void *arg) {
    /* Propagate session context to this thread */
    session_set_command_context(task->session);
    session_set_turn_token(task->turn_token);
+   tl_executing = true; /* the LLM's call, on its worker */
 
    task->return_code = llm_tools_execute(task->call, task->result);
+   tl_executing = false;
 
    /* Clear context before thread exit */
    session_set_turn_token(0);
@@ -1766,7 +1777,7 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    return rc;
 }
 
-int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *results) {
+static int execute_all_impl(const tool_call_list_t *calls, tool_result_list_t *results) {
    if (!calls || !results) {
       return 1;
    }
@@ -1900,6 +1911,15 @@ int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *res
              total_calls, elapsed_ms, parallel_count, sequential_count);
 
    return failures > 0 ? 1 : 0;
+}
+
+int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *results) {
+   /* The LLM's own calls (a plan it starts runs its steps in here too). */
+   const bool outer = tl_executing;
+   tl_executing = true;
+   const int rc = execute_all_impl(calls, results);
+   tl_executing = outer;
+   return rc;
 }
 
 bool llm_tools_should_skip_followup(const tool_result_list_t *results) {

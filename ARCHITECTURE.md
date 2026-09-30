@@ -191,7 +191,9 @@ Layer 2 (Services)
 │   ├── llm_tools_results.c        - Tool results into history (per provider) + tool calls parsed from responses
 │   ├── llm_tools_dup.c            - Duplicate tool-call detection within a turn
 │   ├── llm_history_rows.c         - A history message → the rows it saves as (deps: turn blocks)
-│   └── llm_key_tag.c              - API-key tag / request carrier for vendor reasoning (deps: crypto_store)
+│   ├── llm_key_tag.c              - API-key tag / request carrier for vendor reasoning (deps: crypto_store)
+│   ├── llm_tool_view.c            - A bounded view of a tool result too big to send whole (pure)
+│   └── llm_tool_view_path.c       - JSON paths as views write them and readers take them back (pure)
 ├── src/core/embedding_engine.c    - Shared embedding infrastructure (deps: Layer 0-1)
 ├── src/core/crypto_store.c        - Shared libsodium encryption (deps: Layer 0)
 ├── src/core/scheduler.c           - Scheduler engine + background thread (deps: Layer 0-1)
@@ -205,6 +207,9 @@ Layer 2 (Services)
 ├── src/core/prefix_in_force.c     - What a conversation has in force (section/directive/tool-schema hashes) and the deltas to append (deps: llm)
 ├── src/core/prefix_message.c      - The one maker of a conversation's frozen prefix message (deps: llm)
 ├── src/core/image_rehydrate.c     - Rebuilds image content from stored markers for replay (deps: image_store)
+├── src/core/tool_result_store.c   - Tool results kept whole behind a view: who may read one (its conversation, or
+│                                    before one exists the turn that stored it), binding, a parsed-tree cache
+│                                    (deps: Layer 0-1, auth, llm_tool_view)
 ├── src/core/ota*.c                - OTA release store, signed manifests, fleet rollout (deps: Layer 0-1, crypto_store; rollout pushes via a registered fn pointer to avoid a Layer-4 dep)
 ├── src/tts/                       - Text-to-speech (deps: Layer 0-1)
 ├── src/asr/                       - Daemon-side ASR interface, Vosk, chunking (deps: Layer 0-1)
@@ -214,7 +219,8 @@ Layer 2 (Services)
 └── src/auth/                      - User auth, settings, per-user prefs, conversation rows
                                      (auth_db_messages.c: the one message insert + the LLM replay read;
                                       auth_db_conv_prefix.c: a conversation's frozen prefix + turn records;
-                                      auth_db_withdraw.c: withdrawing a user's removals from stored context) (deps: Layer 0-1;
+                                      auth_db_withdraw.c: withdrawing a user's removals from stored context;
+                                      auth_db_tool_results.c: stored tool results, their caps and eviction) (deps: Layer 0-1;
                                       auth_db_withdraw.c also uses the pure llm/llm_context_text.c line helpers)
 
 Layer 3 (Tools)
@@ -236,6 +242,8 @@ Layer 3 (Tools)
 ├── src/tools/research_run.c           - Deep-research deterministic controller (ledger→stop decision; deps: Layer 0-2, research_db, document store)
 ├── src/tools/research_run_loop.c      - Deep-research live round loop + synthesis (session/dispatch-coupled; deps: Layer 0-2)
 ├── src/tools/research_tools.c         - In-loop research tools (plan/record/conclude; deps: Layer 0-2)
+├── src/tools/result_read_tool.c       - More of a stored tool result by its handle (deps: Layer 0-2, tool_result_store;
+│                                        its pure reads in result_read_ops.c)
 └── src/tools/*.c                      - All other tools (deps: Layer 0-2)
 
 Layer 4 (Application)
@@ -414,6 +422,10 @@ Per-module locks (scoped to a single subsystem):
   turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
   llm_tools::llm_tools_mutex (src/llm/llm_tools*.c)         — the LLM tool table + cached schema hashes; taken BEFORE the tool registry's own mutex (schemas are built from registry lookups), never after it
   session_prefix::s_withdraw_mutex (src/core/session_prefix.c) — the withdraw worker's queue (LEAF: never held across a withdrawal)
+  tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
+                                                                     history_mutex; held only to find, pin, insert and release a slot, never across a render)
+  tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that
+                                                                     read's render; takes no other lock, never taken under history_mutex or the auth_db lock)
   job_manager::s_pool_mutex (src/core/job_manager.c)       — background-job session pool (REGISTRY tier, like session_manager_rwlock: released before any ref-cond wait, session_free, or conv_db_*/scheduler_* callout)
   job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
   memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)

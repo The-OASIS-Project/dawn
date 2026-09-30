@@ -37,6 +37,7 @@
 #include "core/session_history.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/tool_result_store.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_history_rows.h"
@@ -350,6 +351,11 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
       } else {
          saved = kept;
       }
+   }
+   /* The results its turns stored, readable in it from now on.  Last: a
+    * failure before it deletes the conversation, and would take them with it. */
+   if (saved == AUTH_DB_SUCCESS) {
+      saved = tool_result_store_bind_locked(session, conv_id, 0, true);
    }
    if (saved != AUTH_DB_SUCCESS) {
       OLOG_ERROR("Session %u: voice conversation %lld not saved (%d); tried again later",

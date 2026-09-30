@@ -123,9 +123,11 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v94.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v95.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v96.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v97.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
+    ${SRC_ROOT}/src/auth/auth_db_tool_results.c
     ${SRC_ROOT}/src/auth/auth_db_withdraw.c
     ${SRC_ROOT}/src/llm/llm_context_text.c
     ${SRC_ROOT}/src/core/hash_util.c
@@ -227,7 +229,18 @@ dawn_add_unit_test(test_mcp_client
 dawn_add_unit_test(test_llm_tool_view
    SOURCES test_llm_tool_view.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
+           ${SRC_ROOT}/src/llm/llm_tool_view_path.c
    LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# What result_read does with a stored result (pure).
+dawn_add_unit_test(test_result_read_ops
+   SOURCES test_result_read_ops.c
+           ${SRC_ROOT}/src/tools/result_read_ops.c
+           ${SRC_ROOT}/src/llm/llm_tool_view.c
+           ${SRC_ROOT}/src/llm/llm_tool_view_path.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # An MCP tools/call result as the model reads it (pure, no network).
@@ -1430,6 +1443,18 @@ dawn_add_unit_test(test_conv_db_kind_prefix
 dawn_add_unit_test(test_focus_handles
    SOURCES test_focus_handles.c
            ${SRC_ROOT}/src/core/focus/focus_handles.c
+           ${AUTH_DB_SOURCES}
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Stored tool results: who may read one, binding, cascades (real auth_db).
+dawn_add_unit_test(test_tool_result_store
+   SOURCES test_tool_result_store.c
+           ${SRC_ROOT}/src/core/tool_result_store.c
+           ${SRC_ROOT}/src/llm/llm_tool_view.c
+           ${SRC_ROOT}/src/llm/llm_tool_view_path.c
+           ${SRC_ROOT}/src/blob_store_util.c
            ${AUTH_DB_SOURCES}
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}

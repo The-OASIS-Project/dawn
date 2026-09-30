@@ -804,6 +804,15 @@ typedef struct session {
    // (core/focus/focus_handles.h); NULL until first used.  Shares history_mutex.
    struct focus_handles *focus_handles;
 
+   // The tool results this history's turns stored (core/tool_result_store.h),
+   // which it may read before they are bound to a conversation; NULL until
+   // first used.  Shares history_mutex.
+   struct tool_result_minted *tool_results_minted;
+   // Which live history that is: bumped when it is discarded, so a result
+   // stored across that (no turn running) isn't taken for the next one's.
+   // Shares history_mutex.
+   uint64_t tool_results_live_gen;
+
    // What turns' prompts added to their conversations, until each is saved
    // with its question, oldest first (core/session_prefix.h).  Shares
    // history_mutex.

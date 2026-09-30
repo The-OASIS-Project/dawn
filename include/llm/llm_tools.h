@@ -471,6 +471,13 @@ const char *llm_tools_current_raw_args(void);
  * ============================================================================= */
 
 /**
+ * @brief Whether this thread is running a tool the LLM called (through
+ *        llm_tools_execute): a tool that serves only the model's own turn
+ *        (result_read) refuses other callers, such as MQTT.
+ */
+bool llm_tools_executing(void);
+
+/**
  * @brief Execute a single tool call
  *
  * Maps the tool call to the appropriate deviceCallback and executes it.

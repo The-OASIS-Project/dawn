@@ -328,6 +328,9 @@ static const char *SCHEMA_SQL =
      * migrated DBs can never diverge.  See docs/DEEP_RESEARCH_DESIGN.md §3. */
     AUTH_DB_RESEARCH_SCHEMA_SQL
 
+        /* Tool results kept whole behind a view (v97); shared with the migration. */
+        AUTH_DB_TOOL_RESULTS_SCHEMA_SQL
+
     /* Session metrics table (added in schema v8) */
     "CREATE TABLE IF NOT EXISTS session_metrics ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"

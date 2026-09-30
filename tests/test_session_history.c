@@ -114,6 +114,30 @@ int focus_handles_flush(struct session *session, int64_t conv_id, int user_id) {
    (void)user_id;
    return 0;
 }
+/* Its stored tool results (core/tool_result_store.c): none here. */
+void tool_result_store_reset_locked(struct session *session) {
+   (void)session;
+}
+void tool_result_store_drop_trees(struct session *session) {
+   (void)session;
+}
+int tool_result_store_bind_locked(struct session *session,
+                                  int64_t conv_id,
+                                  uint64_t turn_token,
+                                  bool with_ended) {
+   (void)session;
+   (void)conv_id;
+   (void)turn_token;
+   (void)with_ended;
+   return 0;
+}
+void tool_result_store_turn_ended_locked(struct session *session,
+                                         uint64_t turn_token,
+                                         bool to_live) {
+   (void)session;
+   (void)turn_token;
+   (void)to_live;
+}
 
 void session_set_turn_token(uint64_t token) {
    tl_token = token;

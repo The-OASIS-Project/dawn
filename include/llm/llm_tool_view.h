@@ -76,9 +76,10 @@ struct json_object;
 #define LLM_TOOL_VIEW_STRING_MAX 16000
 #define LLM_TOOL_VIEW_DEPTH_MAX 32 /* json-c's own nesting limit for parsed text */
 #define LLM_TOOL_VIEW_KEYS_MAX 1024
-#define LLM_TOOL_VIEW_ELIDE_MIN 4      /* fewer items (or keys) than this are shown, not elided */
-#define LLM_TOOL_VIEW_CUT_MIN 48       /* a string is cut only when this much past its head */
-#define LLM_TOOL_VIEW_KEY_MAX 64       /* a key longer than this is shown cut */
+#define LLM_TOOL_VIEW_ELIDE_MIN 4 /* fewer items (or keys) than this are shown, not elided */
+#define LLM_TOOL_VIEW_CUT_MIN 48  /* a string is cut only when this much past its head */
+#define LLM_TOOL_VIEW_KEY_MAX 64  /* a key longer than this is shown cut */
+#define LLM_TOOL_VIEW_KEY_SHOWN_MAX (LLM_TOOL_VIEW_KEY_MAX + 48) /* a cut key as shown */
 #define LLM_TOOL_VIEW_SHAPE_SAMPLES 32 /* items sampled for an array's shape */
 
 typedef enum {
@@ -117,6 +118,19 @@ char *llm_tool_view(const char *text,
                     llm_tool_view_info_t *info);
 
 /**
+ * @brief llm_tool_view(), handing back the tree it parsed when it made the
+ *        JSON view (*@p tree_out; the caller releases it with
+ *        json_object_put()), else NULL: so a reader of the stored result
+ *        needn't parse it again
+ */
+char *llm_tool_view_ex(const char *text,
+                       size_t len,
+                       size_t budget,
+                       const char *path_prefix,
+                       llm_tool_view_info_t *info,
+                       struct json_object **tree_out);
+
+/**
  * @brief A parsed JSON value @p root in at most @p budget bytes: whole (its
  *        compact JSON) when it renders uncut in the budget, else the JSON
  *        view, else (when even the skeleton won't fit) the text view of its
@@ -130,6 +144,64 @@ char *llm_tool_view_tree(struct json_object *root,
                          size_t budget,
                          const char *path_prefix,
                          llm_tool_view_info_t *info);
+
+/**
+ * @brief Items of a larger array (@p items: a new array whose item i is the
+ *        original's item @p first_index + i) viewed as llm_tool_view_tree
+ *        does, their paths and markers naming the original indices
+ *        (@p path_prefix is the original array's path)
+ */
+char *llm_tool_view_slice(struct json_object *items,
+                          size_t first_index,
+                          size_t budget,
+                          const char *path_prefix,
+                          llm_tool_view_info_t *info);
+
+/**
+ * @brief Lines of a text as the text view shows them, numbered from
+ *        @p first_line (the slice's first line's number in the whole text):
+ *        whole when they fit, else head and tail with what's between counted
+ */
+char *llm_tool_view_lines(const char *text,
+                          size_t len,
+                          size_t budget,
+                          size_t first_line,
+                          llm_tool_view_info_t *info);
+
+/**
+ * @brief @p text parsed as the JSON view parses it: one strict JSON value (a
+ *        JSON text: '{' or '[' first, at most LLM_TOOL_VIEW_JSON_MAX_BYTES)
+ *        whose numbers json-c holds exactly, or NULL
+ *
+ * A reader of a stored result parses it this way, so it never shows a value
+ * json-c changed.  Caller releases with json_object_put().
+ */
+struct json_object *llm_tool_view_parse(const char *text, size_t len);
+
+/**
+ * @brief How a view shows key @p key when it is cut (its head, length and
+ *        hash, in @p out), or NULL when it is shown whole
+ */
+const char *llm_tool_view_key_shown(const char *key, char out[LLM_TOOL_VIEW_KEY_SHOWN_MAX]);
+
+/**
+ * @brief Whether a view shows key @p key as @p shown (whole, or, past
+ *        LLM_TOOL_VIEW_KEY_MAX, cut with its length and hash): how a reader
+ *        resolves a path segment copied from a view
+ */
+bool llm_tool_view_key_shown_as(const char *key, const char *shown);
+
+#define LLM_TOOL_VIEW_SCALAR_MAX 32
+
+/**
+ * @brief A scalar (or null) @p v as JSON text, as its tree holds it: a double
+ *        json-c parsed its source text, a NaN or infinity null; the text is
+ *        @p buf's or the tree's own (valid while @p v is)
+ *
+ * Unlike json_object_to_json_string_ext() it leaves no printbuf on @p v, so
+ * a cached tree doesn't grow as it's read.
+ */
+const char *llm_tool_view_scalar(struct json_object *v, char buf[LLM_TOOL_VIEW_SCALAR_MAX]);
 
 #ifdef __cplusplus
 }

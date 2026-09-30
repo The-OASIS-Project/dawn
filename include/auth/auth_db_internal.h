@@ -65,7 +65,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 96
+#define AUTH_DB_SCHEMA_VERSION 97
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -129,6 +129,67 @@
    "CHECK(kind IS NULL OR (kind IN ('turn_context','memory','envelope') AND "    \
    "role = 'user') OR (kind = 'loop_note' AND role IN ('user','assistant')) OR " \
    "(kind IN ('directive','instruction') AND role = 'system'))"
+
+/* Tool results kept whole while the model is shown a view of them (v97).
+ * Readable only in the conversation that stored them (or, before it exists,
+ * by the turn that stored them): see core/tool_result_store.h.  They go with
+ * their conversation or user (FK cascades); unbound rows (no conversation
+ * yet) are reclaimed after a grace.  body is the last column, so reading any
+ * other never walks its overflow pages.  The indexes are in age order and
+ * carry bytes, so eviction reads them alone.  tool_results_usage holds the
+ * bytes per conversation (scope 0), per user (1) and in all (2, key 0), kept
+ * by triggers (FK cascades fire them too), so a cap check is one lookup.
+ * Shared by the base schema and the v97 migration. */
+#define AUTH_DB_TOOL_RESULTS_SCHEMA_SQL                                                            \
+   "CREATE TABLE IF NOT EXISTS tool_results ("                                                     \
+   "   id TEXT PRIMARY KEY,"                                                                       \
+   "   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"                           \
+   "   conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,"                    \
+   "   session_key TEXT,"                                                                          \
+   "   tool_name TEXT NOT NULL,"                                                                   \
+   "   tool_call_id TEXT,"                                                                         \
+   "   content_kind INTEGER NOT NULL,"                                                             \
+   "   chars INTEGER NOT NULL,"                                                                    \
+   "   bytes INTEGER NOT NULL,"                                                                    \
+   "   created_at INTEGER NOT NULL,"                                                               \
+   "   body BLOB NOT NULL"                                                                         \
+   ");"                                                                                            \
+   "CREATE INDEX IF NOT EXISTS idx_tool_results_conv "                                             \
+   "   ON tool_results(conversation_id, created_at, bytes);"                                       \
+   "CREATE INDEX IF NOT EXISTS idx_tool_results_user ON tool_results(user_id, created_at, bytes);" \
+   "CREATE TABLE IF NOT EXISTS tool_results_usage ("                                               \
+   "   scope INTEGER NOT NULL,"                                                                    \
+   "   key INTEGER NOT NULL,"                                                                      \
+   "   bytes INTEGER NOT NULL,"                                                                    \
+   "   PRIMARY KEY (scope, key)"                                                                   \
+   ") WITHOUT ROWID;"                                                                              \
+   "CREATE TRIGGER IF NOT EXISTS tool_results_usage_add AFTER INSERT ON tool_results BEGIN"        \
+   "   INSERT OR IGNORE INTO tool_results_usage VALUES (1, NEW.user_id, 0), (2, 0, 0);"            \
+   "   UPDATE tool_results_usage SET bytes = bytes + NEW.bytes"                                    \
+   "      WHERE (scope = 1 AND key = NEW.user_id) OR (scope = 2 AND key = 0);"                     \
+   "   INSERT OR IGNORE INTO tool_results_usage"                                                   \
+   "      SELECT 0, NEW.conversation_id, 0 WHERE NEW.conversation_id IS NOT NULL;"                 \
+   "   UPDATE tool_results_usage SET bytes = bytes + NEW.bytes"                                    \
+   "      WHERE scope = 0 AND key = NEW.conversation_id;"                                          \
+   "END;"                                                                                          \
+   "CREATE TRIGGER IF NOT EXISTS tool_results_usage_del AFTER DELETE ON tool_results BEGIN"        \
+   "   UPDATE tool_results_usage SET bytes = bytes - OLD.bytes"                                    \
+   "      WHERE (scope = 1 AND key = OLD.user_id) OR (scope = 2 AND key = 0)"                      \
+   "         OR (scope = 0 AND key = OLD.conversation_id);"                                        \
+   "   DELETE FROM tool_results_usage WHERE bytes <= 0"                                            \
+   "      AND ((scope = 1 AND key = OLD.user_id) OR (scope = 0 AND key = OLD.conversation_id));"   \
+   "END;"                                                                                          \
+   "CREATE TRIGGER IF NOT EXISTS tool_results_usage_bind"                                          \
+   "   AFTER UPDATE OF conversation_id ON tool_results BEGIN"                                      \
+   "   UPDATE tool_results_usage SET bytes = bytes - OLD.bytes"                                    \
+   "      WHERE scope = 0 AND key = OLD.conversation_id;"                                          \
+   "   DELETE FROM tool_results_usage WHERE bytes <= 0 AND scope = 0"                              \
+   "      AND key = OLD.conversation_id;"                                                          \
+   "   INSERT OR IGNORE INTO tool_results_usage"                                                   \
+   "      SELECT 0, NEW.conversation_id, 0 WHERE NEW.conversation_id IS NOT NULL;"                 \
+   "   UPDATE tool_results_usage SET bytes = bytes + NEW.bytes"                                    \
+   "      WHERE scope = 0 AND key = NEW.conversation_id;"                                          \
+   "END;"
 
 /* Deep-research tables (v75), as ONE shared DDL string so the base SCHEMA_SQL
  * (auth_db_schema.c, fresh installs) and the v75 migration
@@ -774,6 +835,13 @@ int auth_db_migrations_v95(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v96(sqlite3 *db);
+
+/**
+ * @brief v97 migration: the tool_results table (a tool result kept whole
+ *        behind the view the model is shown).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v97(sqlite3 *db);
 
 /** Whether @p table has column @p col (a migration's probe before an ALTER;
  *  auth_db_migrations.c). */

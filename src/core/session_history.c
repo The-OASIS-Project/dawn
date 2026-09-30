@@ -35,6 +35,7 @@
 #include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/tool_result_store.h"
 #include "dawn_error.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_tools.h"
@@ -987,6 +988,9 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
    /* And its compaction: a summary of it, and what a voice surface kept of it
     * for its save (never the next owner's). */
    session_compaction_reset_locked(session);
+   /* The results its turns stored: this history's (bound ones stay readable
+    * in their conversation). */
+   tool_result_store_reset_locked(session);
    if (!session->turn_active) {
       session->turn_appends = 0;
    }
@@ -1022,6 +1026,7 @@ void session_replace_history(session_t *session, struct json_object *history, in
    focus_handles_reset_locked(session);
    session_prefix_release_locked(session);
    session_compaction_reset_locked(session);
+   tool_result_store_reset_locked(session);
    atomic_store(&session->history_conversation_id, conv_id > 0 ? conv_id : 0);
    pthread_mutex_unlock(&session->history_mutex);
 }
@@ -1365,6 +1370,13 @@ static void set_conversation_impl(session_t *session,
    const bool became = was_unbound && atomic_load(&session->history_conversation_id) == conv_id;
    /* In this critical section, so a context reset can't drop them first. */
    *count = take_bound_facts_locked(session, became, facts);
+   /* And the results it stored before then (the same ones: its own, and when
+    * the live history became the conversation, what ended turns left there). */
+   if (tool_result_store_bind_locked(session, conv_id, session->turn_owner_token, became) !=
+       AUTH_DB_SUCCESS) {
+      OLOG_WARNING("Session %u: tool results not bound to conv %lld", session->session_id,
+                   (long long)conv_id);
+   }
    if (!moves) {
       pthread_mutex_unlock(&session->history_mutex);
       return;
@@ -1735,6 +1747,13 @@ bool session_bind_created_conversation(session_t *session,
    } else if (became) {
       fact_count = take_facts_locked(session, 0, facts, 0);
    }
+   /* The results stored before it existed, the same way. */
+   if ((adopt || became) &&
+       tool_result_store_bind_locked(session, conv_id, adopt ? session->turn_owner_token : 0,
+                                     became) != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("Session %u: tool results not bound to conv %lld", session->session_id,
+                   (long long)conv_id);
+   }
    pthread_mutex_unlock(&session->history_mutex);
    session_record_fact_sources(facts, fact_count, conv_id, 0);
    (void)focus_handles_flush(session, conv_id, 0);
@@ -1890,6 +1909,7 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          /* The live context is replaced: what its ended turns left behind. */
          drop_fact_sources_locked(session);
          drop_unclaimed_locked(session);
+         tool_result_store_reset_locked(session);
          json_object_put(session->conversation_history);
          session->conversation_history = json_object_get(own);
          session->visual_modules_loaded[0] = '\0';
@@ -1956,6 +1976,7 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
     * one the live history becomes when that is the history it wrote (a new
     * chat's first exchange, a voice session saved later); otherwise there is
     * none to record. */
+   tool_result_store_turn_ended_locked(session, my_token, wrote_unbound_live);
    for (int i = 0; i < session->pending_fact_source_count;) {
       session_fact_source_t *f = &session->pending_fact_sources[i];
       if (f->turn_token != my_token) {
@@ -2042,11 +2063,17 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
 }
 
 void session_turn_end(session_t *session) {
-   (void)turn_end_impl(session, NULL);
+   if (turn_end_impl(session, NULL) == SESSION_TURN_ENDED) {
+      tool_result_store_drop_trees(session); /* a turn's cache is its own */
+   }
 }
 
 int session_turn_finish(session_t *session, session_turn_unsaved_t *out) {
-   return turn_end_impl(session, out);
+   const int rc = turn_end_impl(session, out);
+   if (rc == SESSION_TURN_ENDED) {
+      tool_result_store_drop_trees(session);
+   }
+   return rc;
 }
 
 bool session_turn_on_own_history(session_t *session) {

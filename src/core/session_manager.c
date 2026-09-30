@@ -36,6 +36,7 @@
 #include "core/focus/focus_handles.h"
 #include "core/session_compaction.h"
 #include "core/session_prefix.h"
+#include "core/tool_result_store.h"
 #include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "llm/llm_command_parser.h"
@@ -291,6 +292,7 @@ static void session_free(session_t *session) {
    }
    focus_handles_free(session->focus_handles);
    session->focus_handles = NULL;
+   tool_result_store_free(session);
    session_prefix_turn_free(session->prefix_turn);
    session->prefix_turn = NULL;
    json_object_put(session->withdraw_pending);

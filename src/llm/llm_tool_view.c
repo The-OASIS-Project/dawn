@@ -34,10 +34,9 @@
 #include <string.h>
 #include <strings.h>
 
-#define VIEW_JSON_FLAGS (JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE)
+#include "llm/llm_tool_view_path.h"
 
-/* A path longer than this is shown cut (it only names where an omission is). */
-#define VIEW_PATH_MAX 512
+#define VIEW_JSON_FLAGS (JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE)
 
 /* What the text view keeps for its omission marker, beyond head and tail. */
 #define VIEW_TEXT_MARKER_ROOM 96
@@ -53,7 +52,7 @@
 #define VIEW_SHAPE_MAX 384
 
 /* A marker's text: its path plus a count, a range and an items' shape. */
-#define VIEW_MARKER_MAX (VIEW_PATH_MAX + VIEW_SHAPE_MAX + 128)
+#define VIEW_MARKER_MAX (LLM_TOOL_VIEW_PATH_MAX + VIEW_SHAPE_MAX + 128)
 
 /* What a render cut, one bit per shape dimension (the loosening step grows
  * only a dimension that cut something). */
@@ -204,11 +203,10 @@ static size_t utf8_chars(const char *s, size_t n) {
  * and a hash of it, so two cut keys never show alike.
  * ------------------------------------------------------------------------- */
 
-#define VIEW_KEY_SHOWN_MAX (LLM_TOOL_VIEW_KEY_MAX + 48)
 
 /* @p key (@p kl bytes) as shown: NULL when shown whole, else its cut form in
  * @p out. */
-static const char *key_cut(const char *key, size_t kl, char out[VIEW_KEY_SHOWN_MAX]) {
+static const char *key_cut(const char *key, size_t kl, char out[LLM_TOOL_VIEW_KEY_SHOWN_MAX]) {
    if (kl <= LLM_TOOL_VIEW_KEY_MAX) {
       return NULL;
    }
@@ -218,86 +216,9 @@ static const char *key_cut(const char *key, size_t kl, char out[VIEW_KEY_SHOWN_M
    }
    const size_t head = utf8_cut(key, kl, LLM_TOOL_VIEW_KEY_MAX);
    memcpy(out, key, head);
-   snprintf(out + head, VIEW_KEY_SHOWN_MAX - head, "...(%zu chars, #%08" PRIx32 ")",
+   snprintf(out + head, LLM_TOOL_VIEW_KEY_SHOWN_MAX - head, "...(%zu chars, #%08" PRIx32 ")",
             utf8_chars(key, kl), h);
    return out;
-}
-
-/* ---------------------------------------------------------------------------
- * JSON paths: "$.name" for a name that is an identifier, "$[\"...\"]" for any
- * other key (escaped, as shown), "[i]" for an item.  A segment is added whole
- * or not at all, so a cut path stays valid UTF-8.
- * ------------------------------------------------------------------------- */
-
-typedef struct {
-   char s[VIEW_PATH_MAX + 4];
-   size_t len;
-   bool cut;
-} path_t;
-
-static bool identifier(const char *k, size_t n) {
-   if (n == 0 || !(isalpha((unsigned char)k[0]) || k[0] == '_')) {
-      return false;
-   }
-   for (size_t i = 1; i < n; i++) {
-      if (!(isalnum((unsigned char)k[i]) || k[i] == '_')) {
-         return false;
-      }
-   }
-   return true;
-}
-
-static void path_put(path_t *p, const char *s, size_t n) {
-   if (p->cut) {
-      return;
-   }
-   if (p->len + n > VIEW_PATH_MAX) {
-      memcpy(p->s + p->len, "...", 3);
-      p->len += 3;
-      p->s[p->len] = '\0';
-      p->cut = true;
-      return;
-   }
-   memcpy(p->s + p->len, s, n);
-   p->len += n;
-   p->s[p->len] = '\0';
-}
-
-/* @p p with key @p key appended, as shown (@p shown: its cut form, or NULL);
- * the caller restores len and cut after. */
-static void path_key(path_t *p, const char *key, size_t kl, const char *shown) {
-   char seg[VIEW_KEY_SHOWN_MAX * 2 + 8];
-   if (!shown && identifier(key, kl)) {
-      seg[0] = '.';
-      memcpy(seg + 1, key, kl);
-      path_put(p, seg, kl + 1);
-      return;
-   }
-   const char *k = shown ? shown : key;
-   const size_t n = shown ? strlen(shown) : kl;
-   size_t len = 0;
-   seg[len++] = '[';
-   seg[len++] = '"';
-   for (size_t i = 0; i < n; i++) {
-      const unsigned char c = (unsigned char)k[i];
-      if (c == '"' || c == '\\') {
-         seg[len++] = '\\';
-         seg[len++] = (char)c;
-      } else if (c < 0x20 || c == 0x7F) {
-         seg[len++] = ' '; /* a path is one line */
-      } else {
-         seg[len++] = (char)c;
-      }
-   }
-   seg[len++] = '"';
-   seg[len++] = ']';
-   path_put(p, seg, len);
-}
-
-static void path_index(path_t *p, size_t i) {
-   char seg[32];
-   const int n = snprintf(seg, sizeof(seg), "[%zu]", i);
-   path_put(p, seg, (size_t)n);
 }
 
 /* ---------------------------------------------------------------------------
@@ -474,7 +395,7 @@ static bool depth_marker(wbuf_t *b,
                          const char *what,
                          const shape_t *s,
                          int depth,
-                         const path_t *path) {
+                         const llm_tool_view_path_t *path) {
    if (n == 0 || (depth < s->depth && depth < VIEW_DEPTH_HARD)) {
       return false;
    }
@@ -489,9 +410,16 @@ static bool depth_marker(wbuf_t *b,
    return true;
 }
 
-static void render(wbuf_t *b, struct json_object *v, const shape_t *s, int depth, path_t *path);
+static void render(wbuf_t *b,
+                   struct json_object *v,
+                   const shape_t *s,
+                   int depth,
+                   llm_tool_view_path_t *path);
 
-static void render_string(wbuf_t *b, struct json_object *v, const shape_t *s, path_t *path) {
+static void render_string(wbuf_t *b,
+                          struct json_object *v,
+                          const shape_t *s,
+                          llm_tool_view_path_t *path) {
    const char *str = json_object_get_string(v);
    const size_t len = (size_t)json_object_get_string_len(v);
    ws(b, "\"");
@@ -511,11 +439,14 @@ static void render_string(wbuf_t *b, struct json_object *v, const shape_t *s, pa
    ws(b, "\"");
 }
 
+/* @p v with its items numbered from @p base (a slice of a larger array keeps
+ * its items' own indices). */
 static void render_array(wbuf_t *b,
                          struct json_object *v,
                          const shape_t *s,
                          int depth,
-                         path_t *path) {
+                         llm_tool_view_path_t *path,
+                         size_t base) {
    const size_t n = json_object_array_length(v);
    if (depth_marker(b, v, n, "...[%zu items at %s]", s, depth, path)) {
       return;
@@ -530,7 +461,7 @@ static void render_array(wbuf_t *b,
       char shape[VIEW_SHAPE_MAX];
       items_shape(v, s->items, n - 1, shape, sizeof(shape));
       snprintf(text, sizeof(text), "... %zu more items at %s[%zu:%zu], each %s", n - 1 - s->items,
-               path->s, s->items, n - 1, shape);
+               path->s, base + s->items, base + n - 1, shape);
       if (items_exceed(v, s->items, n - 1, escaped_len(text) + 3)) {
          shown = s->items;
       }
@@ -540,7 +471,7 @@ static void render_array(wbuf_t *b,
       if (i) {
          ws(b, ",");
       }
-      path_index(path, i);
+      llm_tool_view_path_index(path, base + i);
       render(b, json_object_array_get_idx(v, i), s, depth + 1, path);
       path->len = saved;
       path->cut = saved_cut;
@@ -551,7 +482,7 @@ static void render_array(wbuf_t *b,
       w_quoted(b, text);
       b->cuts |= CUT_ITEMS;
       ws(b, ",");
-      path_index(path, n - 1);
+      llm_tool_view_path_index(path, base + n - 1);
       render(b, json_object_array_get_idx(v, n - 1), s, depth + 1, path);
       path->len = saved;
       path->cut = saved_cut;
@@ -591,7 +522,7 @@ static void render_object(wbuf_t *b,
                           struct json_object *v,
                           const shape_t *s,
                           int depth,
-                          path_t *path) {
+                          llm_tool_view_path_t *path) {
    const size_t n = (size_t)json_object_object_length(v);
    if (depth_marker(b, v, n, "...{%zu keys at %s}", s, depth, path)) {
       return;
@@ -620,7 +551,7 @@ static void render_object(wbuf_t *b,
          ws(b, ",");
       }
       const size_t kl = strlen(key);
-      char cut[VIEW_KEY_SHOWN_MAX];
+      char cut[LLM_TOOL_VIEW_KEY_SHOWN_MAX];
       const char *shown = key_cut(key, kl, cut);
       ws(b, "\"");
       w_escaped(b, shown ? shown : key, shown ? strlen(shown) : kl);
@@ -628,7 +559,7 @@ static void render_object(wbuf_t *b,
          b->cuts |= CUT_KEYNAME;
       }
       ws(b, "\":");
-      path_key(path, key, kl, shown);
+      llm_tool_view_path_key(path, key, kl, shown);
       render(b, val, s, depth + 1, path);
       path->len = saved;
       path->cut = saved_cut;
@@ -645,41 +576,56 @@ static void render_object(wbuf_t *b,
    ws(b, "}");
 }
 
-/* A scalar: a number as its tree holds it (a double parsed by json-c keeps
- * its text), a NaN or infinity as null (not JSON). */
-static void render_scalar(wbuf_t *b, struct json_object *v) {
-   char num[32];
+const char *llm_tool_view_scalar(struct json_object *v, char buf[LLM_TOOL_VIEW_SCALAR_MAX]) {
    switch (json_object_get_type(v)) {
-      case json_type_null:
-         ws(b, "null");
-         return;
       case json_type_boolean:
-         ws(b, json_object_get_boolean(v) ? "true" : "false");
-         return;
+         return json_object_get_boolean(v) ? "true" : "false";
       case json_type_int: {
          const int64_t i = json_object_get_int64(v);
          if (i == INT64_MAX) { /* or an unsigned value above it */
-            snprintf(num, sizeof(num), "%" PRIu64, json_object_get_uint64(v));
+            snprintf(buf, LLM_TOOL_VIEW_SCALAR_MAX, "%" PRIu64, json_object_get_uint64(v));
          } else {
-            snprintf(num, sizeof(num), "%" PRId64, i);
+            snprintf(buf, LLM_TOOL_VIEW_SCALAR_MAX, "%" PRId64, i);
          }
-         ws(b, num);
-         return;
+         return buf;
       }
-      case json_type_double:
-         if (!isfinite(json_object_get_double(v))) {
-            ws(b, "null");
-            return;
+      case json_type_double: {
+         const double d = json_object_get_double(v);
+         if (!isfinite(d)) {
+            return "null";
          }
-         ws(b, json_object_to_json_string_ext(v, VIEW_JSON_FLAGS));
-         return;
+         /* A parsed double keeps its source text as its userdata (json-c's
+          * tokener; nothing else in DAWN sets a userdata). */
+         const char *text = json_object_get_userdata(v);
+         if (text) {
+            return text;
+         }
+         snprintf(buf, LLM_TOOL_VIEW_SCALAR_MAX, "%.17g", d);
+         if (!strpbrk(buf, ".eE")) {
+            const size_t n = strlen(buf);
+            if (n + 2 < LLM_TOOL_VIEW_SCALAR_MAX) {
+               memcpy(buf + n, ".0", 3);
+            }
+         }
+         return buf;
+      }
       default:
-         ws(b, "null");
-         return;
+         return "null";
    }
 }
 
-static void render(wbuf_t *b, struct json_object *v, const shape_t *s, int depth, path_t *path) {
+/* A scalar as its tree holds it (llm_tool_view_scalar: no printbuf is left on
+ * the tree, so a cached tree doesn't grow as it's read). */
+static void render_scalar(wbuf_t *b, struct json_object *v) {
+   char num[LLM_TOOL_VIEW_SCALAR_MAX];
+   ws(b, llm_tool_view_scalar(v, num));
+}
+
+static void render(wbuf_t *b,
+                   struct json_object *v,
+                   const shape_t *s,
+                   int depth,
+                   llm_tool_view_path_t *path) {
    if (b->over) {
       return;
    }
@@ -688,7 +634,7 @@ static void render(wbuf_t *b, struct json_object *v, const shape_t *s, int depth
          render_string(b, v, s, path);
          return;
       case json_type_array:
-         render_array(b, v, s, depth, path);
+         render_array(b, v, s, depth, path, 0);
          return;
       case json_type_object:
          render_object(b, v, s, depth, path);
@@ -751,14 +697,23 @@ static bool loosen(shape_t *s, unsigned cut) {
    }
 }
 
-/* Render @p root with @p s into @p b (reset first): whether it fit. */
-static bool render_into(wbuf_t *b, struct json_object *root, const shape_t *s, const char *prefix) {
+/* Render @p root with @p s into @p b (reset first): whether it fit.  A root
+ * array's items are numbered from @p base. */
+static bool render_into(wbuf_t *b,
+                        struct json_object *root,
+                        const shape_t *s,
+                        const char *prefix,
+                        size_t base) {
    b->len = 0;
    b->over = false;
    b->cuts = 0;
-   path_t path = { .len = 0 };
-   path_put(&path, prefix, strlen(prefix));
-   render(b, root, s, 0, &path);
+   llm_tool_view_path_t path;
+   llm_tool_view_path_start(&path, prefix);
+   if (base > 0 && json_object_is_type(root, json_type_array)) {
+      render_array(b, root, s, 0, &path, base);
+   } else {
+      render(b, root, s, 0, &path);
+   }
    if (!b->over) {
       b->buf[b->len] = '\0';
    }
@@ -768,6 +723,7 @@ static bool render_into(wbuf_t *b, struct json_object *root, const shape_t *s, c
 /* The JSON view of @p root in @p budget bytes (its length in *@p len_out), or
  * NULL (out of memory, or no shape fits: *@p fits false). */
 static char *json_view(struct json_object *root,
+                       size_t base,
                        size_t budget,
                        const char *prefix,
                        bool *fits,
@@ -782,7 +738,7 @@ static char *json_view(struct json_object *root,
    /* Tighten until it fits (or no shape does). */
    bool fit = false;
    do {
-      fit = render_into(&b, root, &s, prefix);
+      fit = render_into(&b, root, &s, prefix, base);
    } while (!fit && tighten(&s));
    if (!fit) {
       free(b.buf);
@@ -808,7 +764,7 @@ static char *json_view(struct json_object *root,
          if (!(open & cut) || !(best_cuts & cut)) {
             continue; /* a later step may make it cut something */
          }
-         if (!loosen(&t, cut) || !render_into(&b, root, &t, prefix)) {
+         if (!loosen(&t, cut) || !render_into(&b, root, &t, prefix, base)) {
             open &= ~cut;
             continue;
          }
@@ -881,6 +837,7 @@ static void w_cut_line(wbuf_t *b,
 static char *text_view(const char *text,
                        size_t len,
                        size_t budget,
+                       size_t base,
                        size_t *lines_out,
                        size_t *len_out) {
    const size_t lines = count_lines(text, len);
@@ -900,7 +857,14 @@ static char *text_view(const char *text,
          if (end > 0 && text[end - 1] == '\n') {
             end--;
          }
-         w_cut_line(&b, text, 0, end, 1, usable);
+         if (7 + end + 1 <= usable) {
+            /* It fits: the line whole. */
+            w_line_no(&b, base + 1);
+            w_text(&b, text, end);
+            ws(&b, "\n");
+         } else {
+            w_cut_line(&b, text, 0, end, base + 1, usable);
+         }
       } else {
          /* Head: whole lines while they fit (a first line too long is cut). */
          size_t pos = 0;
@@ -912,13 +876,13 @@ static char *text_view(const char *text,
             const size_t cost = 7 + (end - pos) + 1;
             if (used + cost > head_room) {
                if (head_lines == 0) {
-                  w_cut_line(&b, text, pos, end, 1, head_room);
+                  w_cut_line(&b, text, pos, end, base + 1, head_room);
                   pos = nl ? end + 1 : len;
                   head_lines = 1;
                }
                break;
             }
-            w_line_no(&b, head_lines + 1);
+            w_line_no(&b, base + head_lines + 1);
             w_text(&b, text + pos, end - pos);
             ws(&b, "\n");
             used += cost;
@@ -966,19 +930,19 @@ static char *text_view(const char *text,
          char mark[128];
          if (omitted_lines > 0) {
             snprintf(mark, sizeof(mark), "... %zu lines (%zu chars) omitted: lines %zu-%zu ...\n",
-                     omitted_lines, omitted_chars, head_lines + 1, first_tail_no - 1);
+                     omitted_lines, omitted_chars, base + head_lines + 1, base + first_tail_no - 1);
             ws(&b, mark);
          }
          if (tail_cut) {
             size_t end = len > 0 && text[len - 1] == '\n' ? len - 1 : len;
-            w_cut_line(&b, text, tail_start, end, lines, tail_room);
+            w_cut_line(&b, text, tail_start, end, base + lines, tail_room);
          } else {
             size_t no = first_tail_no;
             size_t p = tail_start;
             while (p < len) {
                const char *nl = memchr(text + p, '\n', len - p);
                const size_t end = nl ? (size_t)(nl - text) : len;
-               w_line_no(&b, no++);
+               w_line_no(&b, base + no++);
                w_text(&b, text + p, end - p);
                ws(&b, "\n");
                p = nl ? end + 1 : len;
@@ -1185,11 +1149,12 @@ static void info_set(llm_tool_view_info_t *info,
 static char *text_view_info(const char *text,
                             size_t len,
                             size_t budget,
+                            size_t first_line,
                             size_t bytes,
                             llm_tool_view_info_t *info) {
    size_t lines = 0;
    size_t view_len = 0;
-   char *view = text_view(text, len, budget, &lines, &view_len);
+   char *view = text_view(text, len, budget, first_line - 1, &lines, &view_len);
    if (view) {
       info_set(info, LLM_TOOL_VIEW_TEXT, true, bytes, lines, view_len);
    }
@@ -1201,6 +1166,18 @@ char *llm_tool_view(const char *text,
                     size_t budget,
                     const char *path_prefix,
                     llm_tool_view_info_t *info) {
+   return llm_tool_view_ex(text, len, budget, path_prefix, info, NULL);
+}
+
+char *llm_tool_view_ex(const char *text,
+                       size_t len,
+                       size_t budget,
+                       const char *path_prefix,
+                       llm_tool_view_info_t *info,
+                       struct json_object **tree_out) {
+   if (tree_out) {
+      *tree_out = NULL;
+   }
    if (!text) {
       return NULL;
    }
@@ -1226,8 +1203,12 @@ char *llm_tool_view(const char *text,
    if (root) {
       bool fits = false;
       size_t view_len = 0;
-      char *view = json_view(root, budget, prefix, &fits, &view_len);
-      json_object_put(root);
+      char *view = json_view(root, 0, budget, prefix, &fits, &view_len);
+      if (view && tree_out) {
+         *tree_out = root; /* the caller's now (a reader's cache) */
+      } else {
+         json_object_put(root);
+      }
       if (view) {
          info_set(info, LLM_TOOL_VIEW_JSON, true, len, count_lines(text, len), view_len);
          return view;
@@ -1236,13 +1217,20 @@ char *llm_tool_view(const char *text,
          return NULL; /* out of memory */
       }
    }
-   return text_view_info(text, len, budget, len, info);
+   return text_view_info(text, len, budget, 1, len, info);
 }
 
-char *llm_tool_view_tree(struct json_object *root,
-                         size_t budget,
-                         const char *path_prefix,
-                         llm_tool_view_info_t *info) {
+/* The view of @p root (a root array's items numbered from @p base). */
+static char *tree_view(struct json_object *root,
+                       size_t base,
+                       size_t budget,
+                       const char *path_prefix,
+                       llm_tool_view_info_t *info) {
+   if (!root) {
+      /* JSON null (json-c's NULL object). */
+      info_set(info, LLM_TOOL_VIEW_JSON, false, 4, 0, 4);
+      return strdup("null");
+   }
    if (budget < LLM_TOOL_VIEW_MIN_BUDGET) {
       budget = LLM_TOOL_VIEW_MIN_BUDGET;
    }
@@ -1253,14 +1241,14 @@ char *llm_tool_view_tree(struct json_object *root,
    if (!b.buf) {
       return NULL;
    }
-   if (render_into(&b, root, &k_whole, prefix) && b.cuts == 0) {
+   if (render_into(&b, root, &k_whole, prefix, base) && b.cuts == 0) {
       info_set(info, LLM_TOOL_VIEW_JSON, false, b.len, 0, b.len);
       return b.buf;
    }
    free(b.buf);
    bool fits = false;
    size_t view_len = 0;
-   char *view = json_view(root, budget, prefix, &fits, &view_len);
+   char *view = json_view(root, base, budget, prefix, &fits, &view_len);
    if (view) {
       info_set(info, LLM_TOOL_VIEW_JSON, true, 0, 0, view_len);
       return view;
@@ -1270,5 +1258,54 @@ char *llm_tool_view_tree(struct json_object *root,
    }
    /* Even the skeleton won't fit: the text view of its JSON. */
    const char *json = json_object_to_json_string_ext(root, VIEW_JSON_FLAGS);
-   return json ? text_view_info(json, strlen(json), budget, 0, info) : NULL;
+   return json ? text_view_info(json, strlen(json), budget, 1, 0, info) : NULL;
+}
+
+char *llm_tool_view_tree(struct json_object *root,
+                         size_t budget,
+                         const char *path_prefix,
+                         llm_tool_view_info_t *info) {
+   return tree_view(root, 0, budget, path_prefix, info);
+}
+
+char *llm_tool_view_slice(struct json_object *items,
+                          size_t first_index,
+                          size_t budget,
+                          const char *path_prefix,
+                          llm_tool_view_info_t *info) {
+   if (!items || !json_object_is_type(items, json_type_array)) {
+      return NULL;
+   }
+   return tree_view(items, first_index, budget, path_prefix, info);
+}
+
+char *llm_tool_view_lines(const char *text,
+                          size_t len,
+                          size_t budget,
+                          size_t first_line,
+                          llm_tool_view_info_t *info) {
+   if (!text) {
+      return NULL;
+   }
+   if (budget < LLM_TOOL_VIEW_MIN_BUDGET) {
+      budget = LLM_TOOL_VIEW_MIN_BUDGET;
+   }
+   return text_view_info(text, len, budget, first_line > 0 ? first_line : 1, len, info);
+}
+
+const char *llm_tool_view_key_shown(const char *key, char out[LLM_TOOL_VIEW_KEY_SHOWN_MAX]) {
+   return key ? key_cut(key, strlen(key), out) : NULL;
+}
+
+bool llm_tool_view_key_shown_as(const char *key, const char *shown) {
+   if (!key || !shown) {
+      return false;
+   }
+   char cut[LLM_TOOL_VIEW_KEY_SHOWN_MAX];
+   const char *as = key_cut(key, strlen(key), cut);
+   return strcmp(as ? as : key, shown) == 0;
+}
+
+struct json_object *llm_tool_view_parse(const char *text, size_t len) {
+   return text ? parse_whole(text, len) : NULL;
 }
