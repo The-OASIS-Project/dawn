@@ -223,6 +223,13 @@ dawn_add_unit_test(test_mcp_client
    LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
+# A view of a tool result too big to send whole (pure).
+dawn_add_unit_test(test_llm_tool_view
+   SOURCES test_llm_tool_view.c
+           ${SRC_ROOT}/src/llm/llm_tool_view.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # An MCP tools/call result as the model reads it (pure, no network).
 dawn_add_unit_test(test_mcp_result
    SOURCES test_mcp_result.c

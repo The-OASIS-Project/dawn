@@ -624,6 +624,7 @@ set(DAWN_SOURCES
     src/llm/llm_reasoning_details.c
     src/llm/llm_compaction_range.c
     src/llm/llm_compaction.c
+    src/llm/llm_tool_view.c
     src/llm/llm_pricing.c
     src/llm/llm_local_provider.c
     src/llm/sse_parser.c
