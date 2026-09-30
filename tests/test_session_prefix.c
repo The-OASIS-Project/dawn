@@ -34,14 +34,131 @@
 #include "auth/auth_db_focus_handles.h"
 #include "auth/auth_db_messages.h"
 #include "auth/auth_db_withdraw.h"
+#include "config/dawn_config.h"
 #include "core/focus/focus_handles.h"
 #include "core/prefix_in_force.h"
+#include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "dawn_error.h"
+#include "llm/llm_compaction.h"
+#include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_turn_blocks.h"
+#include "memory/memory_history_loader.h"
 #include "unity.h"
+
+dawn_config_t g_config;
+
+/* ---- stubs for the compaction's runtime (session_compaction.c) ---- */
+static bool s_over;             /* the history reaches its threshold */
+static const char *s_summary;   /* what the summarizer writes */
+static char s_summarized[4096]; /* what it was given */
+static int s_noted_tokens = -1; /* the tracked count after a compaction */
+int llm_context_estimate_tokens(struct json_object *history) {
+   return llm_compaction_estimate_range(history, 0, (int)json_object_array_length(history));
+}
+bool llm_context_over_threshold(uint32_t session_id,
+                                struct json_object *history,
+                                int extra_tokens,
+                                llm_type_t type,
+                                cloud_provider_t provider,
+                                const char *model,
+                                float threshold) {
+   (void)session_id, (void)history, (void)extra_tokens, (void)type, (void)provider;
+   (void)model, (void)threshold;
+   return s_over;
+}
+void llm_context_note_compacted(uint32_t session_id, int tokens) {
+   (void)session_id;
+   s_noted_tokens = tokens;
+}
+char *llm_context_summarize(struct json_object *to_summarize,
+                            int kept_tokens,
+                            int window_tokens,
+                            const llm_compaction_calibration_t *cal,
+                            const char *tag,
+                            const session_llm_config_t *config,
+                            const atomic_bool *cancel,
+                            llm_compaction_level_t *level_out) {
+   (void)kept_tokens, (void)window_tokens, (void)cal, (void)tag, (void)config, (void)cancel;
+   snprintf(s_summarized, sizeof(s_summarized), "%s",
+            json_object_to_json_string_ext(to_summarize, JSON_C_TO_STRING_PLAIN));
+   *level_out = LLM_COMPACT_NORMAL;
+   return s_summary ? strdup(s_summary) : NULL;
+}
+int llm_resolve_config(const session_llm_config_t *session_config,
+                       llm_resolved_config_t *resolved) {
+   (void)session_config;
+   memset(resolved, 0, sizeof(*resolved));
+   resolved->type = LLM_CLOUD;
+   resolved->cloud_provider = CLOUD_PROVIDER_CLAUDE;
+   resolved->model = "m";
+   return 0;
+}
+void session_get_llm_config(session_t *session, session_llm_config_t *config) {
+   (void)session;
+   memset(config, 0, sizeof(*config));
+}
+void session_set_command_context(session_t *session) {
+   (void)session;
+}
+void session_set_llm_config_override(const session_t *session, const session_llm_config_t *c) {
+   (void)session, (void)c;
+}
+int llm_is_interrupt_requested(void) {
+   return 0;
+}
+void *llm_get_cancel_flag(void) {
+   return NULL;
+}
+int llm_context_get_size(llm_type_t type, cloud_provider_t provider, const char *model) {
+   (void)type, (void)provider, (void)model;
+   return 200000;
+}
+void llm_context_calibration(uint32_t session_id,
+                             llm_type_t type,
+                             cloud_provider_t provider,
+                             const char *model,
+                             llm_compaction_calibration_t *out) {
+   (void)session_id, (void)type, (void)provider, (void)model;
+   memset(out, 0, sizeof(*out));
+}
+float llm_context_hard_threshold(void) {
+   return 0.85f;
+}
+void llm_set_cancel_flag(void *flag) {
+   (void)flag;
+}
+void llm_set_cancel_flag_ex(void *flag, bool honor_global) {
+   (void)flag, (void)honor_global;
+}
+void session_retain(session_t *session) {
+   (void)session;
+}
+void session_release(session_t *session) {
+   (void)session;
+}
+void session_release_ref(session_t *session, struct json_object *obj) {
+   (void)session;
+   json_object_put(obj);
+}
+static int s_compaction_notices;
+void session_compaction_client_notice(session_t *session,
+                                      int64_t conversation_id,
+                                      int tokens_before,
+                                      int tokens_after,
+                                      int messages_summarized,
+                                      const char *summary,
+                                      int level) {
+   (void)session, (void)conversation_id, (void)tokens_before, (void)tokens_after;
+   (void)messages_summarized, (void)summary, (void)level;
+   s_compaction_notices++;
+}
+int text_to_speech(char *text) {
+   (void)text;
+   return 0;
+}
 
 /* ---- stubs for the session runtime ---- */
 static const char *s_notice;
@@ -110,9 +227,15 @@ void setUp(void) {
    s_notice = NULL;
    s_turn_elsewhere = false;
    s_table_item = NULL;
+   s_over = false;
+   s_summary = NULL;
+   s_summarized[0] = '\0';
+   s_noted_tokens = -1;
+   s_compaction_notices = 0;
 }
 
 void tearDown(void) {
+   session_compaction_teardown(s);
    session_prefix_turn_free(s->prefix_turn);
    json_object_put(s->withdraw_pending);
    json_object_put(s->conversation_history);
@@ -745,6 +868,267 @@ static void test_an_unsaved_history_withdraws_by_its_table(void) {
    db_close();
 }
 
+/* ---- compaction at the seam (session_compaction.h) ---- */
+
+/* One turn as a surface runs it: the question saved, the prompt applied, the
+ * answer saved. */
+static void run_turn(int64_t conv, const char *q, const char *a, const char *persona) {
+   add("user", q);
+   save_question(conv, count() - 1);
+   composed_prompt_t cp = sectioned(persona, "R", "U");
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+   add("assistant", a);
+   int64_t id = 0;
+   const conv_message_row_t row = { .role = "assistant", .content = a };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
+   json_object_object_add(at(count() - 1), "id", json_object_new_int64(id));
+}
+
+/* What a provider is sent: the history without DAWN's keys or row ids. */
+static char *wire_of(struct json_object *hist) {
+   struct json_object *copy = llm_history_wire_copy(hist);
+   TEST_ASSERT_NOT_NULL(copy);
+   struct json_object *deep = NULL;
+   TEST_ASSERT_EQUAL_INT(0, json_object_deep_copy(copy, &deep, NULL));
+   json_object_put(copy);
+   for (size_t i = 0; i < json_object_array_length(deep); i++) {
+      json_object_object_del(json_object_array_get_idx(deep, i), "id");
+   }
+   char *out = strdup(json_object_to_json_string_ext(deep, FLAGS));
+   json_object_put(deep);
+   return out;
+}
+
+static int kind_count(message_kind_t kind) {
+   int n = 0;
+   for (int i = 0; i < count(); i++) {
+      n += llm_history_kind_of(at(i)) == kind;
+   }
+   return n;
+}
+
+/* A summary applied at the next turn's seam: the summarized turns go, the
+ * summary leads the first kept question, what was in force only in them is
+ * sent again after the question, the compaction is saved with the turn, and
+ * the conversation reloads as it was sent. */
+static void test_a_compaction_applies_at_the_seam_and_reloads_the_same(void) {
+   const int64_t conv = db_open_conv();
+   run_turn(conv, "Q1", "A1", "P1");
+   run_turn(conv, "Q2", "A2", "P2"); /* the persona changes: an instruction row */
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_INSTRUCTION));
+   run_turn(conv, "Q3", "A3", "P2");
+   run_turn(conv, "Q4", "A4", "P2");
+   run_turn(conv, "Q5", "A5", "P2");
+
+   add("user", "Q6");
+   save_question(conv, count() - 1);
+   s_over = true;
+   s_summary = "They talked about Q1 and Q2.";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   TEST_ASSERT_NOT_NULL(strstr(s_summarized, "Q1"));
+   TEST_ASSERT_NULL(strstr(s_summarized, "TURN CONTEXT")); /* injected context isn't summarized */
+
+   composed_prompt_t cp = sectioned("P2", "R", "U");
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+
+   /* The summarized turns are gone; the summary leads the first kept question. */
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   const char *wire = json_object_to_json_string(s->conversation_history);
+   TEST_ASSERT_NULL(strstr(wire, "\"Q1\""));
+   struct json_object *first = at(1);
+   TEST_ASSERT_TRUE(llm_history_is_question(first));
+   struct json_object *parts = json_object_object_get(first, "content");
+   TEST_ASSERT_EQUAL_INT(MESSAGE_KIND_SUMMARY,
+                         llm_history_kind_of(json_object_array_get_idx(parts, 0)));
+   /* The persona change was in the summarized part: sent again after Q6. */
+   struct json_object *last = at(count() - 1);
+   TEST_ASSERT_EQUAL_INT(MESSAGE_KIND_INSTRUCTION, llm_history_kind_of(last));
+   TEST_ASSERT_NOT_NULL(strstr(content_of(count() - 1), "P2"));
+   TEST_ASSERT_TRUE(s_noted_tokens > 0);
+   TEST_ASSERT_EQUAL_INT(1, s_compaction_notices); /* the client's marker */
+
+   /* Saved with the turn: the summary, its node, the watermark. */
+   conversation_t c = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(conv, s_user, &c));
+   TEST_ASSERT_EQUAL_STRING("They talked about Q1 and Q2.", c.compaction_summary);
+   const int64_t watermark = c.context_watermark_msg_id;
+   TEST_ASSERT_TRUE(watermark > 0);
+   summary_node_t node = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, summary_node_get_latest(conv, &node));
+   TEST_ASSERT_EQUAL_INT64(watermark, node.msg_id_end);
+   summary_node_free(&node);
+
+   /* A reload is what was sent. */
+   struct json_object *reloaded = memory_history_request_context(conv, s_user, watermark,
+                                                                 c.compaction_summary, NULL, NULL);
+   conv_free(&c);
+   TEST_ASSERT_NOT_NULL(reloaded);
+   char *live = wire_of(s->conversation_history);
+   char *again = wire_of(reloaded);
+   TEST_ASSERT_EQUAL_STRING(live, again);
+   free(live);
+   free(again);
+   json_object_put(reloaded);
+   db_close();
+}
+
+/* A summary of a range the history no longer holds as it was is dropped. */
+static void test_a_stale_summary_is_dropped(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   add("user", "Qn");
+   save_question(conv, count() - 1);
+   s_over = true;
+   s_summary = "S";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   /* The first message after the prompt changes under it. */
+   json_object_array_del_idx(s->conversation_history, 1, 1);
+   composed_prompt_t cp = sectioned("P", "R", "U");
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_NULL(
+       strstr(json_object_to_json_string(s->conversation_history), "CONVERSATION SUMMARY"));
+   db_close();
+}
+
+/* A message saved as its own row, as a history stored before prefixes were. */
+static void add_saved(int64_t conv, const char *role, const char *content) {
+   add(role, content);
+   int64_t id = 0;
+   const conv_message_row_t row = { .role = role, .content = content };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
+   json_object_object_add(at(count() - 1), "id", json_object_new_int64(id));
+}
+
+/* A summary made before the seam that freezes the history (a conversation
+ * stored before prefixes, reopened past its window) is applied at that seam:
+ * the frozen array is the same history. */
+static void test_a_summary_follows_its_history_when_frozen(void) {
+   const int64_t conv = db_open_conv();
+   add("system", "P");
+   for (int i = 0; i < 5; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      add_saved(conv, "user", q);
+      add_saved(conv, "assistant", a);
+   }
+   add_saved(conv, "user", "Qn");
+   s_over = true;
+   s_summary = "Earlier questions.";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   TEST_ASSERT_FALSE(session_prefix_is_frozen(s->conversation_history));
+
+   composed_prompt_t cp = sectioned("P", "R", "U");
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+   TEST_ASSERT_TRUE(session_prefix_is_frozen(s->conversation_history));
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_NOT_NULL(
+       strstr(json_object_to_json_string(s->conversation_history), "Earlier questions."));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(s->conversation_history), "\"Q0\""));
+   db_close();
+}
+
+/* A session going away starts no summary; a context replaced drops the one
+ * waiting for it, and what a voice surface kept for its save. */
+static void test_a_closed_or_reset_session_keeps_no_summary(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   add("user", "Qn");
+   save_question(conv, count() - 1);
+   s_over = true;
+   s_summary = "S";
+
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   s->compaction.voice_removed = json_object_new_array();
+   s->compaction.voice_summary = strdup("S");
+   pthread_mutex_lock(&s->history_mutex);
+   session_compaction_reset_locked(s);
+   pthread_mutex_unlock(&s->history_mutex);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_NULL(s->compaction.hist);
+   TEST_ASSERT_NULL(s->compaction.voice_removed);
+   TEST_ASSERT_NULL(s->compaction.voice_summary);
+
+   session_compaction_teardown(s);
+   s_summarized[0] = '\0';
+   session_compaction_prepare(s, 0);
+   session_compaction_trigger(s, s->conversation_history, LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "m");
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_EQUAL_STRING("", s_summarized); /* nothing summarized */
+   db_close();
+}
+
+/* A turn waiting on a summary still running stops waiting when it is itself
+ * stopped, and the summary is let go (the turn that needed it is going). */
+static void test_a_stopped_turn_stops_waiting(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   s_over = true;
+   /* A worker mid-summary, as prepare sees it. */
+   atomic_store(&s->compaction.state, COMPACTION_RUNNING);
+   atomic_store(&s->compaction.thread_active, true);
+   atomic_store(&s->cancel_requested, true);
+   session_compaction_prepare(s, 0); /* returns rather than waiting */
+   TEST_ASSERT_TRUE(atomic_load(&s->compaction.cancel));
+   TEST_ASSERT_EQUAL_INT(COMPACTION_RUNNING, atomic_load(&s->compaction.state));
+   /* No real worker to join. */
+   atomic_store(&s->compaction.thread_active, false);
+   atomic_store(&s->compaction.state, COMPACTION_IDLE);
+   atomic_store(&s->cancel_requested, false);
+   db_close();
+}
+
+/* After a switch, a summary made to fit the model switched from is made again
+ * for the one switched to. */
+static void test_a_switch_summarizes_again(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   add("user", "Qn");
+   save_question(conv, count() - 1);
+   s_over = true;
+   s_summary = "For the old model.";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_STRING("For the old model.", s->compaction.summary);
+
+   session_llm_config_t from = { 0 };
+   session_compaction_note_switch(s, &from);
+   s_summary = "For the new model.";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   TEST_ASSERT_EQUAL_STRING("For the new model.", s->compaction.summary);
+   TEST_ASSERT_FALSE(atomic_load(&s->compaction.switched));
+   db_close();
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_turns_append_and_never_rewrite);
@@ -763,5 +1147,11 @@ int main(void) {
    RUN_TEST(test_an_unsaved_history_withdraws_by_its_table);
    RUN_TEST(test_a_turn_built_after_a_withdrawal_keeps_its_memory);
    RUN_TEST(test_a_live_history_withdraws_too);
+   RUN_TEST(test_a_compaction_applies_at_the_seam_and_reloads_the_same);
+   RUN_TEST(test_a_stale_summary_is_dropped);
+   RUN_TEST(test_a_summary_follows_its_history_when_frozen);
+   RUN_TEST(test_a_closed_or_reset_session_keeps_no_summary);
+   RUN_TEST(test_a_switch_summarizes_again);
+   RUN_TEST(test_a_stopped_turn_stops_waiting);
    return UNITY_END();
 }

@@ -86,6 +86,17 @@ typedef struct {
    "genuinely need to store a large reference artifact, write it in chunks with an "  \
    "append action rather than one large create. Here is your task:\n\n"
 
+/* What a job is told when its context filled mid-task: its turn closed, and the
+ * one that goes on runs on a compacted history (the work so far summarized). */
+#define JOB_CONTINUE_DIRECTIVE                                                       \
+   "Your context filled up partway through this task, so the earlier part of it is " \
+   "now summarized above. Continue from where you left off, without repeating work " \
+   "that is already complete, and produce the final answer."
+
+/* Continuation turns a job may take after its context fills (each compacts the
+ * history first); its runtime reap bounds it too. */
+#define JOB_CONTINUATIONS_MAX 8
+
 static void job_worker_run(job_work_t *work) {
    session_t *s = NULL;
    int rc = job_manager_begin(work->user_id, work->conv_id, job_provider_from_default(), &s);
@@ -219,7 +230,35 @@ static void job_worker_run(job_work_t *work) {
    /* The turn belongs to the job conversation (compaction watermark, context
     * expansion and focus read it from the turn, like every other surface). */
    session_turn_begin(s, work->conv_id, work->user_id);
+   atomic_store(&s->turn_overflowed, false);
    char *response = core_text_input_dispatch(s, dispatch_text, NULL, NULL, NULL, 0, &opts);
+   /* A turn that filled its context closed to go on in another, whose seam
+    * compacts the history (session_compaction.h): DAWN's own question, saved as
+    * an envelope, not as something the user said. */
+   for (int turns = 0; atomic_exchange(&s->turn_overflowed, false) &&
+                       turns < JOB_CONTINUATIONS_MAX && !atomic_load(&s->cancel_requested);
+        turns++) {
+      OLOG_INFO("job_worker: job conv %lld filled its context; continuing (%d)",
+                (long long)work->conv_id, turns + 1);
+      free(response);
+      json_object_put(session_take_reply_blocks(s));
+      session_turn_end(s);
+      session_turn_begin(s, work->conv_id, work->user_id);
+      text_input_dispatch_opts_t more = opts;
+      more.question_kind = MESSAGE_KIND_ENVELOPE;
+      const unsigned compacted_before = atomic_load(&s->compaction.applied);
+      response = core_text_input_dispatch(s, JOB_CONTINUE_DIRECTIVE, NULL, NULL, NULL, 0, &more);
+      if (atomic_load(&s->turn_overflowed) &&
+          atomic_load(&s->compaction.applied) == compacted_before) {
+         /* Its seam found nothing to summarize: another turn would fill the
+          * same context again. */
+         OLOG_WARNING("job_worker: job conv %lld fills its context and can't be compacted; "
+                      "stopping",
+                      (long long)work->conv_id);
+         atomic_store(&s->turn_overflowed, false);
+         break;
+      }
+   }
    /* The reply's own blocks.  The turn stays open until the answer is saved,
     * so the row is written while the turn is this one. */
    struct json_object *reply_blocks = session_take_reply_blocks(s);

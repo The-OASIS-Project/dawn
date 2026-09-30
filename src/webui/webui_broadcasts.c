@@ -58,6 +58,7 @@
 #include "core/job_reinvoke.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
+#include "core/session_compaction.h"
 #include "dawn_error.h"
 #include "image_store.h"
 #include "llm/llm_turn_blocks.h"
@@ -1797,6 +1798,19 @@ void webui_broadcast_config_changed(void) {
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast config_changed to %d admin client(s)", sent);
    }
+}
+
+/* Strong override of the weak session_compaction_client_notice: the session's
+ * browser shows its "context compacted" marker. */
+void session_compaction_client_notice(session_t *session,
+                                      int64_t conv_id,
+                                      int tokens_before,
+                                      int tokens_after,
+                                      int count,
+                                      const char *summary,
+                                      int level) {
+   webui_send_compaction_complete(session, conv_id, tokens_before, tokens_after, count, summary,
+                                  level);
 }
 
 #ifdef DAWN_ENABLE_CODE_PROJECTS

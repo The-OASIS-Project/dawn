@@ -161,6 +161,35 @@ int llm_history_fold_context(struct json_object *history, int from);
  */
 void llm_history_drop_context(struct json_object *history);
 
+/**
+ * @brief The request text of a compaction's summary: the one rendering, live
+ *        and on reload, from values known when the history is compacted
+ *
+ * Framed as the conversation's CONVERSATION SUMMARY block, with @p tag when the
+ * history has one.  No database ids: a conversation-less history has none, and
+ * the same bytes must come back on reload.
+ *
+ * @return Heap text (caller frees), or NULL on allocation failure
+ */
+char *llm_history_summary_text(const char *summary, const char *tag);
+
+/**
+ * @brief Put @p summary in front of the first question at or after @p from,
+ *        as a summary part (MESSAGE_KIND_SUMMARY), in place
+ *
+ * The question keeps its identity (a turn tracks its question by it); its text
+ * becomes parts when it was a string.  With no question after @p from, the
+ * summary is a user message of its own there, after the leading system
+ * messages.  Live compaction and both loaders call this, so a reload renders
+ * the request byte for byte as it was sent.
+ *
+ * @return The index of the message holding it, or -1 on failure (unchanged)
+ */
+int llm_history_attach_summary(struct json_object *history,
+                               int from,
+                               const char *summary,
+                               const char *tag);
+
 #ifdef __cplusplus
 }
 #endif

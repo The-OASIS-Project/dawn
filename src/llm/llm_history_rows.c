@@ -259,8 +259,8 @@ static int append_with_context(struct json_object *msg,
    for (size_t i = 0; i < n; i++) {
       struct json_object *part = json_object_array_get_idx(content, i);
       const message_kind_t part_kind = llm_history_kind_of(part);
-      if (part_kind == MESSAGE_KIND_NONE) {
-         continue;
+      if (part_kind == MESSAGE_KIND_NONE || message_kind_in_memory_only(part_kind)) {
+         continue; /* its own words, above; or the conversation's (a summary) */
       }
       struct json_object *row = new_row(role, str_of(part, "text"));
       if (row) {
@@ -278,8 +278,8 @@ int llm_history_rows_append(struct json_object *msg, struct json_object *out) {
       return 0;
    }
    const message_kind_t kind = llm_history_kind_of(msg);
-   if (kind == MESSAGE_KIND_PREFIX) {
-      return 0; /* the frozen prefix is the conversation's, never a row */
+   if (message_kind_in_memory_only(kind)) {
+      return 0; /* the conversation's (the frozen prefix), never a row */
    }
    if (llm_history_has_context_parts(msg)) {
       return append_with_context(msg, role, kind, out);
@@ -287,5 +287,15 @@ int llm_history_rows_append(struct json_object *msg, struct json_object *out) {
    const size_t from = json_object_array_length(out);
    const int added = append_message(msg, role, out);
    mark_rows(out, from, kind);
+   return added;
+}
+
+int llm_history_rows_append_text(struct json_object *msg, struct json_object *out) {
+   const size_t before = out ? json_object_array_length(out) : 0;
+   const int added = llm_history_rows_append(msg, out);
+   for (int r = 0; r < added; r++) {
+      json_object_object_del(json_object_array_get_idx(out, before + (size_t)r),
+                             LLM_HISTORY_ROW_STORED_KEY);
+   }
    return added;
 }

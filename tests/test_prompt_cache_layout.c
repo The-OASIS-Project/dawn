@@ -54,6 +54,10 @@ const char *llm_get_current_thinking_mode(void) {
 const char *llm_get_current_reasoning_effort(void) {
    return "medium";
 }
+static bool s_one_off; /* the call is a compaction's summary (llm_cache_monitor.c) */
+bool llm_cache_monitor_one_off_call(void) {
+   return s_one_off;
+}
 static bool s_tools_on;
 bool llm_tools_enabled(const llm_resolved_config_t *c) {
    (void)c;
@@ -337,6 +341,19 @@ static void test_breakpoint_on_the_newest_results(void) {
    json_object_put(h);
 }
 
+/* A request sent once and never again (a compaction's summary) has no
+ * conversation breakpoint: its cache write would only cost. */
+static void test_a_one_off_request_has_no_breakpoint(void) {
+   const char *msgs[] = { PREFIX, TURN2 };
+   struct json_object *h = history(msgs, 2);
+   s_one_off = true;
+   struct json_object *req = render(h, MID_SYSTEM_MODEL);
+   s_one_off = false;
+   TEST_ASSERT_NULL(strstr(str(field(req, "messages")), "cache_control"));
+   json_object_put(req);
+   json_object_put(h);
+}
+
 /* A reply that was never saved leaves a direction between two questions: it
  * becomes a note in the first, which takes in the second. */
 static void test_direction_before_a_question_becomes_a_note(void) {
@@ -406,6 +423,7 @@ int main(void) {
    llm_capabilities_load_mid_system(s_models);
    UNITY_BEGIN();
    RUN_TEST(test_context_goes_in_front_of_the_question);
+   RUN_TEST(test_a_one_off_request_has_no_breakpoint);
    RUN_TEST(test_direction_is_a_system_message_where_taken);
    RUN_TEST(test_direction_is_a_note_elsewhere);
    RUN_TEST(test_directions_in_a_row_are_one_message);

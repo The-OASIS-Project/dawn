@@ -211,6 +211,45 @@ static void test_kind_rows_do_not_count_as_messages(void) {
    TEST_ASSERT_EQUAL_INT64(1, message_count(conv));
 }
 
+/* Rows written together: a context row names its question by its place in the
+ * batch; a bad row saves nothing; another user's conversation takes none. */
+static void test_rows_are_saved_together(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const conv_message_row_t rows[] = {
+      { .role = "user", .content = "Q" },
+      { .role = "user", .content = "ctx", .kind = "turn_context", .context_of_row = 1 },
+      { .role = "assistant", .content = "A" },
+   };
+   int64_t ids[3] = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_rows(conv, alice_id, rows, 3, ids));
+   TEST_ASSERT_TRUE(ids[0] > 0 && ids[1] > ids[0] && ids[2] > ids[1]);
+   TEST_ASSERT_EQUAL_INT64(2, message_count(conv));
+   char sql[96];
+   snprintf(sql, sizeof(sql), "SELECT context_of FROM messages WHERE id = %lld", (long long)ids[1]);
+   sqlite3 *db = raw_open(TEST_DB);
+   TEST_ASSERT_EQUAL_INT64(ids[0], raw_int(db, sql));
+   sqlite3_close(db);
+
+   /* A kind the role can't carry: the whole batch is refused. */
+   const conv_message_row_t bad[] = {
+      { .role = "user", .content = "Q2" },
+      { .role = "assistant", .content = "x", .kind = "turn_context" },
+   };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, conv_db_add_rows(conv, alice_id, bad, 2, NULL));
+   /* A question later in the batch than its context. */
+   const conv_message_row_t ahead[] = {
+      { .role = "user", .content = "ctx", .kind = "turn_context", .context_of_row = 2 },
+      { .role = "user", .content = "Q3" },
+   };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, conv_db_add_rows(conv, alice_id, ahead, 2, NULL));
+   /* Someone else's conversation: nothing is written. */
+   int64_t no_ids[1] = { 0 };
+   TEST_ASSERT_NOT_EQUAL(AUTH_DB_SUCCESS, conv_db_add_rows(conv, bob_id, rows, 1, no_ids));
+   TEST_ASSERT_EQUAL_INT64(0, no_ids[0]);
+   TEST_ASSERT_EQUAL_INT64(2, message_count(conv));
+}
+
 static void test_kind_must_match_role(void) {
    int64_t conv = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
@@ -787,6 +826,31 @@ static void test_a_turn_built_before_a_withdrawal_saves_behind_it(void) {
    sqlite3_close(db);
 }
 
+/* v96: a compacted conversation's reasoning floor rises to its newest row
+ * (its summary's shape changed); one never compacted is untouched. */
+static void test_v96_leaves_compacted_reasoning_behind(void) {
+   int64_t compacted = 0, plain = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &compacted));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "p", &plain));
+   const int64_t q = add_row(compacted, "user", "Q", NULL);
+   const int64_t last = add_row(compacted, "assistant", "A", NULL);
+   add_row(plain, "user", "Q", NULL);
+   add_row(plain, "assistant", "A", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_set_compaction_watermark(compacted, alice_id, "earlier", q));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v96(s_db.db));
+   sqlite3 *db = raw_open(TEST_DB);
+   char sql[160];
+   snprintf(sql, sizeof(sql), "SELECT reasoning_floor_msg_id FROM conversations WHERE id = %lld",
+            (long long)compacted);
+   TEST_ASSERT_EQUAL_INT64(last, raw_int(db, sql));
+   snprintf(sql, sizeof(sql), "SELECT reasoning_floor_msg_id FROM conversations WHERE id = %lld",
+            (long long)plain);
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(db, sql));
+   sqlite3_close(db);
+}
+
 /* An unanswered envelope goes with its context; one the attempt saved work
  * after stays, and a row that isn't an envelope is never taken. */
 static void test_an_unanswered_envelope_is_retracted(void) {
@@ -926,6 +990,7 @@ int main(void) {
    RUN_TEST(test_replay_read_returns_kind_rows_in_order);
    RUN_TEST(test_kind_rows_do_not_count_as_messages);
    RUN_TEST(test_kind_must_match_role);
+   RUN_TEST(test_rows_are_saved_together);
    RUN_TEST(test_v94_migrates_a_v93_database);
    RUN_TEST(test_turn_save_stores_prefix_and_anchored_rows);
    RUN_TEST(test_turn_save_is_all_or_nothing);
@@ -940,6 +1005,7 @@ int main(void) {
    RUN_TEST(test_memory_blocks_are_withdrawn);
    RUN_TEST(test_a_purged_withdrawal_still_settles);
    RUN_TEST(test_a_turn_built_before_a_withdrawal_saves_behind_it);
+   RUN_TEST(test_v96_leaves_compacted_reasoning_behind);
    RUN_TEST(test_an_unanswered_envelope_is_retracted);
    RUN_TEST(test_handles_are_stable_per_conversation);
    RUN_TEST(test_handles_check_the_owner_and_input);

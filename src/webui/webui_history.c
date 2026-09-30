@@ -703,7 +703,7 @@ void handle_continue_conversation(ws_connection_t *conn, struct json_object *pay
    }
 
    /* DORMANT as of v67: compaction now records an in-conversation watermark instead
-    * of forking (see llm_context_compact + conv_db_set_compaction_watermark). The
+    * of forking (see session_compaction.c + conv_db_save_turn). The
     * WebUI client no longer sends `continue_conversation` on compaction. This handler
     * is retained only for backward-compat; if it ever fires, the (archiving) split
     * path is still live — log it so we can confirm the client is the only caller

@@ -38,9 +38,11 @@
 
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
+#include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
@@ -1229,6 +1231,9 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       .provider_fn = provider_fn,
       .history_format = history_format,
       .session_id = session_id,
+      /* A side call (a tool's summarizer, extraction) runs inside a turn but
+       * is none of its conversation: it reads and writes no session state. */
+      .has_session = session != NULL && !llm_cache_monitor_in_side_call(),
       .llm_type = type,
       .cloud_provider = provider,
       /* cancel_flag borrows &session->cancel_requested for the loop's lifetime.
@@ -1269,13 +1274,14 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       }
    }
 
-   /* Trigger async compaction for next turn (WebUI sessions) */
-   {
+   /* The turn ended: a history nearing its window is summarized ahead, applied
+    * at the next turn's seam (session_compaction.h). */
+   if (loop_params.has_session) {
       session_t *trigger_session = session_get(loop_params.session_id);
       if (trigger_session) {
-         llm_context_async_trigger(trigger_session, loop_params.conversation_history,
-                                   loop_params.llm_type, loop_params.cloud_provider,
-                                   loop_params.model);
+         session_compaction_trigger(trigger_session, loop_params.conversation_history,
+                                    loop_params.llm_type, loop_params.cloud_provider,
+                                    loop_params.model);
          session_release(trigger_session);
       }
    }
@@ -1636,8 +1642,12 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
     * session-aware llm_rate_limit_wait_ctx; these bare completions are foreground
     * / auxiliary (briefings, memory extraction) with no background-cancel need. */
    if (config->type != LLM_LOCAL) {
-      if (llm_rate_limit_wait())
-         return NULL; /* interrupted */
+      if (llm_rate_limit_wait()) {
+         /* Interrupted: this thread's state goes back as the call found it. */
+         llm_tools_set_current_config(NULL);
+         s_tl_timeout_ms = saved_tl_timeout;
+         return NULL;
+      }
    }
 
    if (config->type == LLM_LOCAL) {
@@ -1671,6 +1681,7 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
          default:
             OLOG_ERROR("No cloud provider configured in session config");
             llm_tools_set_current_config(NULL);
+            s_tl_timeout_ms = saved_tl_timeout;
             return NULL;
       }
    }
@@ -1744,6 +1755,9 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       .provider_fn = provider_fn,
       .history_format = history_format,
       .session_id = session_id,
+      /* A side call (a tool's summarizer, extraction) runs inside a turn but
+       * is none of its conversation: it reads and writes no session state. */
+      .has_session = session != NULL && !llm_cache_monitor_in_side_call(),
       .llm_type = config->type,
       .cloud_provider = config->cloud_provider,
       /* cancel_flag borrows &session->cancel_requested for the loop's lifetime.
@@ -1757,13 +1771,14 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 
    response = llm_tool_iteration_loop(&loop_params);
 
-   /* Trigger async compaction for next turn (WebUI sessions) */
-   {
+   /* The turn ended: a history nearing its window is summarized ahead, applied
+    * at the next turn's seam (session_compaction.h). */
+   if (loop_params.has_session) {
       session_t *trigger_session = session_get(loop_params.session_id);
       if (trigger_session) {
-         llm_context_async_trigger(trigger_session, loop_params.conversation_history,
-                                   loop_params.llm_type, loop_params.cloud_provider,
-                                   loop_params.model);
+         session_compaction_trigger(trigger_session, loop_params.conversation_history,
+                                    loop_params.llm_type, loop_params.cloud_provider,
+                                    loop_params.model);
          session_release(trigger_session);
       }
    }

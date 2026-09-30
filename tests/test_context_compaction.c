@@ -16,17 +16,16 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Unit tests for LCM Phase 1 — compaction escalation helpers.
- * Tests compact_deterministic, calculate_compaction_target, and
- * estimate_tokens_range via DAWN_TESTING wrappers.
+ * Unit tests for the compaction core (llm_compaction.c, linked as is): the
+ * mechanical summary, the target, the range estimate and the escalation, plus
+ * the compaction range (llm_compaction_range.c).
  */
-
-#define DAWN_TESTING
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_compaction.h"
 #include "llm/llm_compaction_range.h"
 #include "llm/llm_context.h"
 #include "unity.h"
@@ -58,7 +57,7 @@ static void test_compact_deterministic_basic(void) {
       json_object_array_add(arr, make_msg(role, "This is a test message for compaction."));
    }
 
-   char *result = llm_context_compact_deterministic(arr, 150);
+   char *result = llm_compaction_deterministic(arr, 150);
    TEST_ASSERT_NOT_NULL_MESSAGE(result, "deterministic returns non-NULL");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(result, "truncated"), "output contains 'truncated' header");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(result, "user:"), "output contains user role");
@@ -80,7 +79,7 @@ static void test_compact_deterministic_budget(void) {
 
    int budget = 150;
    int max_bytes = budget * 4 + 128;
-   char *result = llm_context_compact_deterministic(arr, budget);
+   char *result = llm_compaction_deterministic(arr, budget);
    TEST_ASSERT_NOT_NULL_MESSAGE(result, "deterministic with long content returns non-NULL");
    TEST_ASSERT_TRUE_MESSAGE((int)strlen(result) < max_bytes, "output stays within budget");
 
@@ -93,7 +92,7 @@ static void test_compact_deterministic_empty(void) {
    json_object_array_add(arr, make_msg("user", ""));
    json_object_array_add(arr, make_msg("assistant", ""));
 
-   char *result = llm_context_compact_deterministic(arr, 150);
+   char *result = llm_compaction_deterministic(arr, 150);
    TEST_ASSERT_NOT_NULL_MESSAGE(result, "empty content messages don't crash");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(result, "truncated"), "still has header");
 
@@ -105,7 +104,7 @@ static void test_compact_deterministic_single(void) {
    struct json_object *arr = json_object_new_array();
    json_object_array_add(arr, make_msg("user", "Hello, how are you today?"));
 
-   char *result = llm_context_compact_deterministic(arr, 150);
+   char *result = llm_compaction_deterministic(arr, 150);
    TEST_ASSERT_NOT_NULL_MESSAGE(result, "single message returns non-NULL");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(result, "Hello"), "contains message content");
 
@@ -121,7 +120,7 @@ static void test_compact_deterministic_many_messages(void) {
 
    int budget = 150;
    int max_bytes = budget * 4 + 128;
-   char *result = llm_context_compact_deterministic(arr, budget);
+   char *result = llm_compaction_deterministic(arr, budget);
    TEST_ASSERT_NOT_NULL_MESSAGE(result, "500 messages returns non-NULL");
    TEST_ASSERT_TRUE_MESSAGE((int)strlen(result) < max_bytes,
                             "output stays within budget with many messages");
@@ -135,26 +134,26 @@ static void test_compact_deterministic_many_messages(void) {
  * ============================================================================= */
 
 static void test_calculate_target_normal(void) {
-   int target = llm_context_calculate_compaction_target(8192, 0.80f);
+   int target = llm_compaction_target_tokens(8192, 0.80f);
    TEST_ASSERT_TRUE_MESSAGE(target > 4000, "8192 * 0.60 > 4000");
    TEST_ASSERT_TRUE_MESSAGE(target < 5500, "8192 * 0.60 < 5500");
    TEST_ASSERT_EQUAL_INT_MESSAGE((int)(8192 * 0.60f), target, "exact value matches 8192 * 0.60");
 }
 
 static void test_calculate_target_low_threshold(void) {
-   int target = llm_context_calculate_compaction_target(4096, 0.40f);
+   int target = llm_compaction_target_tokens(4096, 0.40f);
    int floor_val = (int)(4096 * 0.30f);
    TEST_ASSERT_EQUAL_INT_MESSAGE(floor_val, target, "low threshold hits floor at 0.30");
 }
 
 static void test_calculate_target_high_threshold(void) {
-   int target = llm_context_calculate_compaction_target(128000, 0.85f);
+   int target = llm_compaction_target_tokens(128000, 0.85f);
    int expected = (int)(128000 * 0.65f);
    TEST_ASSERT_EQUAL_INT_MESSAGE(expected, target, "128K context * 0.65 = ~83200");
 }
 
 static void test_calculate_target_below_clamp(void) {
-   int target = llm_context_calculate_compaction_target(4096, 0.15f);
+   int target = llm_compaction_target_tokens(4096, 0.15f);
    int floor_val = (int)(4096 * 0.30f);
    TEST_ASSERT_EQUAL_INT_MESSAGE(floor_val, target, "threshold < 0.25 clamped, hits floor at 0.30");
 }
@@ -169,17 +168,17 @@ static void test_estimate_tokens_range(void) {
    json_object_array_add(arr, make_msg("user", "Hello there, how are you doing today?"));
    json_object_array_add(arr, make_msg("assistant", "I am doing well, thank you for asking!"));
 
-   int full = llm_context_estimate_tokens_range(arr, 0, 3);
+   int full = llm_compaction_estimate_range(arr, 0, 3);
    TEST_ASSERT_TRUE_MESSAGE(full > 0, "full range estimate is positive");
 
-   int partial = llm_context_estimate_tokens_range(arr, 1, 3);
+   int partial = llm_compaction_estimate_range(arr, 1, 3);
    TEST_ASSERT_TRUE_MESSAGE(partial > 0, "partial range estimate is positive");
    TEST_ASSERT_TRUE_MESSAGE(partial < full, "partial range is less than full");
 
-   int single = llm_context_estimate_tokens_range(arr, 0, 1);
+   int single = llm_compaction_estimate_range(arr, 0, 1);
    TEST_ASSERT_TRUE_MESSAGE(single > 0, "single message estimate is positive");
 
-   int empty = llm_context_estimate_tokens_range(arr, 2, 2);
+   int empty = llm_compaction_estimate_range(arr, 2, 2);
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, empty, "empty range returns 0");
 
    json_object_put(arr);
@@ -210,7 +209,7 @@ static void test_estimate_counts_claude_tool_result(void) {
    json_object_array_add(arr, msg);
 
    /* 4000 chars / 4 = ~1000 tokens; before the fix this returned ~5 (the flat +20). */
-   int est = llm_context_estimate_tokens_range(arr, 0, 1);
+   int est = llm_compaction_estimate_range(arr, 0, 1);
    TEST_ASSERT_TRUE_MESSAGE(est > 900, "Claude tool_result content is counted (~1000 tokens)");
 
    json_object_put(arr);
@@ -286,6 +285,25 @@ static void test_compaction_range_keeps_context_with_its_turn(void) {
 
    /* Keeping 1 would start at a2, after q2's directive and note: back to q2. */
    TEST_ASSERT_EQUAL_INT(3, llm_compaction_keep_start(h, 1, 1));
+   json_object_put(h);
+}
+
+/* A question DAWN asked (a job's continuation, an envelope) starts a turn: the
+ * cut lands on it, not past it into the turn before. */
+static void test_compaction_range_cuts_at_an_envelope_question(void) {
+   struct json_object *h = json_object_new_array();
+   json_object_array_add(h, make_msg("system", "s"));
+   json_object_array_add(h, make_msg("user", "q1"));
+   json_object_array_add(h, claude_call("toolu_1"));
+   json_object_array_add(h, claude_results("toolu_1", 1));
+   struct json_object *go_on = make_msg("user", "Continue the task.");
+   json_object_object_add(go_on, "_kind", json_object_new_string("envelope"));
+   json_object_array_add(h, go_on); /* 4 */
+   json_object_array_add(h, claude_call("toolu_2"));
+   json_object_array_add(h, claude_results("toolu_2", 1));
+
+   /* Keeping 2 would start inside the continuation's exchange: back to it. */
+   TEST_ASSERT_EQUAL_INT(4, llm_compaction_keep_start(h, 1, 2));
    json_object_put(h);
 }
 
@@ -378,6 +396,112 @@ static void test_drop_leading_results(void) {
    json_object_put(h);
 }
 
+/* The escalation: an L1 summary that fits is used; a failing summarizer falls
+ * through to the mechanical L3; the text is neutralized either way. */
+typedef struct {
+   const char *reply[2]; /* per level; NULL = the call fails */
+   int calls;
+} fake_summarizer_t;
+
+static char *fake_summarize(struct json_object *in, llm_compaction_level_t level, void *ctx) {
+   (void)in;
+   fake_summarizer_t *f = ctx;
+   f->calls++;
+   return f->reply[level] ? strdup(f->reply[level]) : NULL;
+}
+
+static struct json_object *two_messages(void) {
+   struct json_object *h = json_object_new_array();
+   for (int i = 0; i < 2; i++) {
+      struct json_object *m = json_object_new_object();
+      json_object_object_add(m, "role", json_object_new_string(i ? "assistant" : "user"));
+      json_object_object_add(m, "content",
+                             json_object_new_string("a long enough message about the garage"));
+      json_object_array_add(h, m);
+   }
+   return h;
+}
+
+static void test_summarize_uses_a_fitting_l1(void) {
+   struct json_object *h = two_messages();
+   fake_summarizer_t f = { .reply = { "short summary", "bullets" } };
+   llm_compaction_level_t level = LLM_COMPACT_MAX_LEVEL;
+   char *s = llm_compaction_summarize(h, 0, 10000, NULL, fake_summarize, &f, NULL, &level);
+   TEST_ASSERT_EQUAL_STRING("short summary", s);
+   TEST_ASSERT_EQUAL_INT(LLM_COMPACT_NORMAL, level);
+   TEST_ASSERT_EQUAL_INT(1, f.calls);
+   free(s);
+   json_object_put(h);
+}
+
+static void test_summarize_falls_through_to_l3(void) {
+   struct json_object *h = two_messages();
+   fake_summarizer_t f = { .reply = { NULL, NULL } };
+   llm_compaction_level_t level = LLM_COMPACT_NORMAL;
+   char *s = llm_compaction_summarize(h, 0, 10000, NULL, fake_summarize, &f, NULL, &level);
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_INT(LLM_COMPACT_DETERMINISTIC, level);
+   TEST_ASSERT_EQUAL_INT(2, f.calls);
+   TEST_ASSERT_NOT_NULL(strstr(s, "garage"));
+   free(s);
+   json_object_put(h);
+}
+
+static void test_summarize_stops_when_cancelled(void) {
+   struct json_object *h = two_messages();
+   fake_summarizer_t f = { .reply = { NULL, NULL } };
+   atomic_bool cancel = true;
+   llm_compaction_level_t level = LLM_COMPACT_NORMAL;
+   TEST_ASSERT_NULL(llm_compaction_summarize(h, 0, 10000, NULL, fake_summarize, &f, &cancel,
+                                             &level)); /* no mechanical fallback */
+   TEST_ASSERT_EQUAL_INT(1, f.calls);
+   json_object_put(h);
+}
+
+/* A model's density comes from how two requests grew: the fixed part cancels.
+ * (The numbers are a real session's: two tool results added 76,109 tokens that
+ * the estimate put at ~51,400.) */
+static void test_the_density_is_learned_from_growth(void) {
+   float f = llm_compaction_factor_update(1.0f, 0, 170545 - 94436, 51400);
+   TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.48f, f); /* the first sample, whole */
+   /* Growth too small to tell anything: no change. */
+   TEST_ASSERT_EQUAL_FLOAT(f, llm_compaction_factor_update(f, 1, 900, 500));
+   /* A later sample moves it part of the way; an absurd one is clamped. */
+   const float g = llm_compaction_factor_update(f, 1, 2000, 2000);
+   TEST_ASSERT_TRUE(g < f && g > 1.0f);
+   TEST_ASSERT_TRUE(llm_compaction_factor_update(1.0f, 0, 100000, 1000) <=
+                    LLM_COMPACTION_FACTOR_MAX);
+}
+
+/* A request's size is the fixed part (tools, system prompt: never in the
+ * estimate) plus the history at the model's density; the inverse gives the
+ * room a token budget leaves the history. */
+static void test_a_request_is_fixed_part_plus_density(void) {
+   const llm_compaction_calibration_t cal = {
+      .known = true,
+      .last_prompt = 170545,
+      .last_estimate = 94000,
+      .last_factor = 1.5f,
+      .factor = 1.5f,
+   };
+   /* fixed = 170545 - 1.5 * 94000 = 29545 */
+   TEST_ASSERT_INT_WITHIN(2, 29545 + 60000, llm_compaction_calibrated_tokens(&cal, 40000));
+   TEST_ASSERT_INT_WITHIN(2, 40000, llm_compaction_estimate_budget(&cal, 29545 + 60000));
+   TEST_ASSERT_EQUAL_INT(0, llm_compaction_estimate_budget(&cal, 1000)); /* no room */
+
+   /* Another model reads the same text at its own density: the fixed part too. */
+   llm_compaction_calibration_t other = cal;
+   other.factor = 3.0f;
+   TEST_ASSERT_INT_WITHIN(2, 2 * 29545 + 3 * 40000,
+                          llm_compaction_calibrated_tokens(&other, 40000));
+
+   /* Nothing measured: the estimate as it is. */
+   const llm_compaction_calibration_t none = { 0 };
+   TEST_ASSERT_EQUAL_INT(40000, llm_compaction_calibrated_tokens(&none, 40000));
+   TEST_ASSERT_EQUAL_INT(40000, llm_compaction_estimate_budget(&none, 40000));
+   TEST_ASSERT_EQUAL_INT(40000, llm_compaction_calibrated_tokens(NULL, 40000));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_compact_deterministic_basic);
@@ -394,6 +518,12 @@ int main(void) {
    RUN_TEST(test_level_ordering);
    RUN_TEST(test_compaction_range_claude_tool_turn);
    RUN_TEST(test_compaction_range_keeps_context_with_its_turn);
+   RUN_TEST(test_compaction_range_cuts_at_an_envelope_question);
+   RUN_TEST(test_the_density_is_learned_from_growth);
+   RUN_TEST(test_a_request_is_fixed_part_plus_density);
    RUN_TEST(test_drop_leading_results);
+   RUN_TEST(test_summarize_uses_a_fitting_l1);
+   RUN_TEST(test_summarize_falls_through_to_l3);
+   RUN_TEST(test_summarize_stops_when_cancelled);
    return UNITY_END();
 }

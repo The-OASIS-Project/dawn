@@ -32,6 +32,7 @@
 
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_capabilities.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
@@ -1390,7 +1391,11 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
 
    place_system_messages(messages_array, note_label);
    (void)repair_tool_pairs(messages_array);
-   mark_conversation_breakpoint(messages_array);
+   /* A one-off request (a compaction's summary) is never read back: its cache
+    * write would only cost. */
+   if (!llm_cache_monitor_one_off_call()) {
+      mark_conversation_breakpoint(messages_array);
+   }
    json_object_object_add(claude_request, "messages", messages_array);
 
    return claude_request;

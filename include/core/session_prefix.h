@@ -270,6 +270,12 @@ static inline void session_prefix_voice_save_locked(struct session *session) {
 
 #endif /* ENABLE_MULTI_CLIENT */
 
+/**
+ * @brief Caller holds history_mutex.  Whether a turn record still holds
+ *        @p msg (its question, context, or a message it hasn't saved yet)
+ */
+bool session_prefix_owns_locked(struct session *session, struct json_object *msg);
+
 #ifdef __cplusplus
 }
 #endif

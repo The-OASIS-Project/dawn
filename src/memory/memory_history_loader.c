@@ -452,28 +452,13 @@ struct json_object *memory_history_request_context(int64_t conv_id,
    const int n = (int)json_object_array_length(staged);
    size_t text_len = 0;
    int i = 0;
-   /* A system message the conversation was saved with leads; the compaction
-    * summary follows it. */
+   /* A system message the conversation was saved with leads. */
    if (n > 0 && plain_system(json_object_array_get_idx(staged, 0))) {
       struct json_object *m = request_message(user_id, json_object_array_get_idx(staged, 0));
       if (m) {
          json_object_array_add(hist, m);
       }
       i = 1;
-   }
-   if (watermark > 0 && compaction_summary && compaction_summary[0]) {
-      /* The reconstructed [COMPACTED ...] marker keeps a context_expand handle
-       * to the compacted originals.  Assistant role, as the live compaction
-       * marker is (llm_context.c). */
-      char note[CONV_SUMMARY_MAX];
-      conv_db_format_compaction_context(conv_id, compaction_summary, note, sizeof(note));
-      struct json_object *m = json_object_new_object();
-      if (m) {
-         json_object_object_add(m, "role", json_object_new_string("assistant"));
-         json_object_object_add(m, "content", json_object_new_string(note));
-         json_object_array_add(hist, m);
-         text_len += strlen(note);
-      }
    }
    for (; i < n; i++) {
       struct json_object *row = json_object_array_get_idx(staged, i);
@@ -496,6 +481,17 @@ struct json_object *memory_history_request_context(int64_t conv_id,
    if (prefix) {
       (void)prefix_message_install(hist, prefix);
    }
+   /* The compaction's summary, in front of the first kept question, rendered
+    * as the live compaction sent it (llm_history_attach_summary). */
+   if (watermark > 0 && compaction_summary && compaction_summary[0]) {
+      if (llm_history_attach_summary(hist, 0, compaction_summary, llm_history_tag(hist)) >= 0) {
+         text_len += strlen(compaction_summary);
+      } else {
+         OLOG_WARNING("memory_history_loader: conv %lld: compaction summary left out (out of "
+                      "memory)",
+                      (long long)conv_id);
+      }
+   }
    if (text_len_out) {
       *text_len_out = text_len;
    }
@@ -517,23 +513,12 @@ static struct json_object *load_history(int64_t conv_id, int user_id, size_t *te
     * messaging forever-conversation path, stays context-bounded.  watermark == 0
     * (never compacted) keeps the original full-history behavior. */
    int64_t watermark = 0;
+   char *summary = NULL;
    conversation_t conv = { 0 };
    if (conv_db_get(conv_id, user_id, &conv) == AUTH_DB_SUCCESS) {
       watermark = conv.context_watermark_msg_id;
       if (watermark > 0 && conv.compaction_summary && conv.compaction_summary[0]) {
-         struct json_object *summary_msg = json_object_new_object();
-         if (summary_msg) {
-            char note[CONV_SUMMARY_MAX];
-            /* Same reconstructed [COMPACTED ...] marker as a request rebuild
-             * (memory_history_request_context), so what reads this history sees
-             * where the compacted part was.  Assistant role, as the live
-             * compaction marker is. */
-            conv_db_format_compaction_context(conv_id, conv.compaction_summary, note, sizeof(note));
-            json_object_object_add(summary_msg, "role", json_object_new_string("assistant"));
-            json_object_object_add(summary_msg, "content", json_object_new_string(note));
-            json_object_array_add(ctx.array, summary_msg);
-            ctx.total_text_len += strlen(note);
-         }
+         summary = strdup(conv.compaction_summary);
       }
    }
    conv_free(&conv);
@@ -543,10 +528,29 @@ static struct json_object *load_history(int64_t conv_id, int user_id, size_t *te
                                            append_message_to_history, &ctx, ctx.array,
                                            &dropped_chars);
    if (rc != AUTH_DB_SUCCESS) {
+      free(summary);
       json_object_put(ctx.array);
       return NULL;
    }
    ctx.total_text_len -= dropped_chars <= ctx.total_text_len ? dropped_chars : ctx.total_text_len;
+   /* The compaction's summary, as a request rebuild renders it: framed with
+    * the conversation's tag (its frozen prompt holds it; this history is
+    * given that prompt later, when it runs). */
+   if (summary) {
+      char tag[32] = "";
+      struct json_object *prefix_only = json_object_new_array();
+      struct json_object *prefix = prefix_only ? prefix_message_stored(conv_id, user_id) : NULL;
+      if (prefix) {
+         json_object_array_add(prefix_only, prefix);
+         const char *t = llm_history_tag(prefix_only);
+         snprintf(tag, sizeof(tag), "%s", t ? t : "");
+      }
+      json_object_put(prefix_only);
+      if (llm_history_attach_summary(ctx.array, 0, summary, tag[0] ? tag : NULL) >= 0) {
+         ctx.total_text_len += strlen(summary);
+      }
+   }
+   free(summary);
    if (text_len_out) {
       *text_len_out = ctx.total_text_len;
    }

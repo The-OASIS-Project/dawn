@@ -91,6 +91,10 @@ uint64_t session_turn_token(void) {
 void session_prefix_release_locked(session_t *session) {
    (void)session;
 }
+/* Its compaction (core/session_compaction.c): none here. */
+void session_compaction_reset_locked(session_t *session) {
+   (void)session;
+}
 struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
                                                             struct json_object *question) {
    (void)session;

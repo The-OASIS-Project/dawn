@@ -184,7 +184,8 @@ Layer 2 (Services)
 │   ├── llm_claude.c               - Anthropic Claude (deps: llm_interface)
 │   ├── llm_tools.c                - Tool execution (deps: tool_registry)
 │   ├── llm_turn_blocks*.c         - Provider-neutral turn blocks + their stored shape (deps: Layer 0)
-│   ├── llm_history_kind.c         - Kind-marked history messages; folds stored context rows back in front of their questions (deps: Layer 0)
+│   ├── llm_history_kind.c         - Kind-marked history messages; folds stored context rows back in front of their questions; the compaction summary part (deps: Layer 0)
+│   ├── llm_compaction.c           - The compaction core: sizes, the mechanical summary, the escalation (pure; the summarizer behind a function pointer)
 │   ├── llm_context_text.c         - Tagged framing, neutralizing untrusted text, withdrawing forgotten lines (pure, deps: Layer 0)
 │   ├── llm_tools_filter.c         - Which tools a request advertises (frozen set, research allowlist, surface) (deps: tool table)
 │   ├── llm_tools_results.c        - Tool results into history (per provider) + tool calls parsed from responses
@@ -197,8 +198,10 @@ Layer 2 (Services)
 ├── src/core/session_manager_llm.c - LLM-call orchestration extracted from session_manager (deps: Layer 0-1, llm)
 ├── src/core/session_voice_save.c  - Saves a voice session's conversation as rows (deps: Layer 0-1, llm, memory)
 ├── src/core/session_prefix.c      - Append-only conversation request: freezes the prefix, appends changes + turn context, saves each turn's record, withdraws forgotten items live (deps: Layer 0-1, llm, auth)
-│                                    session_manager.c (the dispatch) and session_history.c (history lifecycle) call into it and it back into them:
-│                                    read the three as one Layer-2 session unit
+│                                    session_manager.c (the dispatch), session_history.c (history lifecycle) and session_compaction.c call into it
+│                                    and it back into them: read the four as one Layer-2 session unit
+├── src/core/session_compaction.c  - Compaction: a range summarized ahead on a worker, applied at a turn seam, saved with the turn
+│                                    (deps: Layer 0-1, llm, auth, tts; its client marker is a weak hook the WebUI replaces)
 ├── src/core/prefix_in_force.c     - What a conversation has in force (section/directive/tool-schema hashes) and the deltas to append (deps: llm)
 ├── src/core/prefix_message.c      - The one maker of a conversation's frozen prefix message (deps: llm)
 ├── src/core/image_rehydrate.c     - Rebuilds image content from stored markers for replay (deps: image_store)
@@ -309,6 +312,8 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    turn via the turn queue or detached) │
 │  Job notify      — transient detached delivery of job  │
 │                    completions (chime/banner/voice)     │
+│  Compaction      — one per session, joinable: a long   │
+│                    history summarized ahead of its turn │
 └────────────────────────────────────────────────────────┘
 ```
 

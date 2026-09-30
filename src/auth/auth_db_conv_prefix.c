@@ -302,6 +302,81 @@ static int floor_settled_locked(int64_t conv_id, const conv_turn_save_t *save) {
    return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
+/* A compaction the turn applied: the summary and the watermark reloads start
+ * after (never moved back), then a summary node after the conversation's
+ * latest (or the latest of the one it continues).  A watermark already past
+ * this one (a later compaction saved first) leaves both as they are.  Caller
+ * holds the lock and the transaction. */
+static int compaction_locked(int64_t conv_id, int user_id, const conv_turn_save_t *save) {
+   sqlite3_stmt *st = s_db.stmt_conv_set_watermark;
+   sqlite3_reset(st);
+   sqlite3_bind_text(st, 1, save->compaction_summary, -1, SQLITE_STATIC);
+   sqlite3_bind_int64(st, 2, save->compaction_last_id);
+   sqlite3_bind_int64(st, 3, conv_id);
+   sqlite3_bind_int(st, 4, user_id);
+   sqlite3_bind_int64(st, 5, save->compaction_last_id);
+   int rc = sqlite3_step(st);
+   const int moved = sqlite3_changes(s_db.db);
+   sqlite3_reset(st);
+   sqlite3_clear_bindings(st);
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("conv_prefix: compaction watermark failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   if (moved == 0) {
+      OLOG_WARNING("conv_prefix: conv %lld's watermark is past %lld already; compaction not "
+                   "recorded",
+                   (long long)conv_id, (long long)save->compaction_last_id);
+      return AUTH_DB_SUCCESS;
+   }
+
+   int64_t prior = 0;
+   int depth = 0;
+   st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id, depth FROM summary_nodes WHERE conversation_id IN (?1, "
+                          "(SELECT continued_from FROM conversations WHERE id = ?1)) "
+                          "ORDER BY conversation_id = ?1 DESC, id DESC LIMIT 1",
+                          -1, &st, NULL) != SQLITE_OK) {
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   if (sqlite3_step(st) == SQLITE_ROW) {
+      prior = sqlite3_column_int64(st, 0);
+      depth = sqlite3_column_int(st, 1) + 1;
+   }
+   sqlite3_finalize(st);
+   st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "INSERT INTO summary_nodes (conversation_id, prior_node_id, depth, "
+                          "msg_id_start, msg_id_end, level, summary_text, token_count, "
+                          "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          -1, &st, NULL) != SQLITE_OK) {
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   if (prior > 0) {
+      sqlite3_bind_int64(st, 2, prior);
+   } else {
+      sqlite3_bind_null(st, 2);
+   }
+   sqlite3_bind_int(st, 3, depth);
+   sqlite3_bind_int64(
+       st, 4, save->compaction_first_id > 0 ? save->compaction_first_id : save->compaction_last_id);
+   sqlite3_bind_int64(st, 5, save->compaction_last_id);
+   sqlite3_bind_int(st, 6, save->compaction_level);
+   sqlite3_bind_text(st, 7, save->compaction_summary, -1, SQLITE_STATIC);
+   sqlite3_bind_int(st, 8, (int)((strlen(save->compaction_summary) + 20) / 4));
+   sqlite3_bind_int64(st, 9, (int64_t)time(NULL));
+   rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("conv_prefix: summary node failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   return AUTH_DB_SUCCESS;
+}
+
 int conv_db_save_turn(int64_t conv_id,
                       int user_id,
                       const conv_turn_save_t *save,
@@ -355,6 +430,11 @@ int conv_db_save_turn(int64_t conv_id,
    if (result == AUTH_DB_SUCCESS && save->floor_at_rows) {
       result = floor_at_rows_locked(conv_id, first_id);
    }
+   const bool compacted = save->compaction_summary && save->compaction_summary[0] &&
+                          save->compaction_last_id > 0;
+   if (result == AUTH_DB_SUCCESS && compacted) {
+      result = compaction_locked(conv_id, user_id, save);
+   }
    if (result == AUTH_DB_SUCCESS && !withdrawn) {
       result = floor_settled_locked(conv_id, save);
    }
@@ -368,6 +448,10 @@ int conv_db_save_turn(int64_t conv_id,
       }
    }
    AUTH_DB_UNLOCK();
+   /* What the watermark passed has no reader left: its blocks go, in batches. */
+   if (result == AUTH_DB_SUCCESS && compacted) {
+      conv_db_clear_compacted_blocks(conv_id, save->compaction_last_id);
+   }
    if (result != AUTH_DB_SUCCESS && ids_out) {
       for (size_t i = 0; i < save->n_rows; i++) {
          ids_out[i] = 0;

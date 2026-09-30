@@ -73,6 +73,8 @@ typedef struct {
    const char *llm_blocks;   /**< assistant: stored turn blocks (llm_turn_blocks_to_stored) */
    const char *kind;         /**< request-context kind (message_kind.h); NULL = ordinary */
    int64_t context_of;       /**< a kinded row: the question it belongs to; 0 = none */
+   int context_of_row;       /**< conv_db_add_rows only: that question as a row of the
+                                  same batch (1-based); 0 = context_of */
    bool is_error;            /**< tool: 1 = confirmed failure */
 } conv_message_row_t;
 
@@ -92,6 +94,22 @@ typedef struct {
  *         or AUTH_DB_FAILURE.
  */
 int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row, int64_t *id_out);
+
+/**
+ * @brief Insert @p n rows in one transaction: all of them, or none
+ *
+ * Each row as conv_db_add_row(), except that a row's `context_of_row` may name
+ * an earlier row of the same batch as its question.  One commit, one list
+ * signal.
+ *
+ * @param ids_out Receives each row's id (n entries); may be NULL.
+ * @return As conv_db_add_row(); on failure nothing is saved.
+ */
+int conv_db_add_rows(int64_t conv_id,
+                     int user_id,
+                     const conv_message_row_t *rows,
+                     int n,
+                     int64_t *ids_out);
 
 /**
  * @brief A message row as the replay read returns it. A separate type from

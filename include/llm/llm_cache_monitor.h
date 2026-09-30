@@ -128,6 +128,13 @@ void llm_cache_monitor_pop_kind(int previous);
 bool llm_cache_monitor_in_side_call(void);
 
 /**
+ * @brief Whether the calling thread's call is sent once and never again (a
+ *        compaction's summary): a cache write for it would only cost (a write
+ *        is billed above an uncached read, and nothing reads it back)
+ */
+bool llm_cache_monitor_one_off_call(void);
+
+/**
  * @brief The tool-loop iteration the calling thread's next call belongs to
  *
  * 0 for a turn's first call; -1 outside a tool loop.

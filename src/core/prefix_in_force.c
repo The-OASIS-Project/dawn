@@ -28,6 +28,7 @@
  * A section's hash is of its text as built (the tag placeholder unfilled).
  */
 
+#define _GNU_SOURCE /* memmem */
 #include "core/prefix_in_force.h"
 
 #include <json-c/json.h>
@@ -158,10 +159,28 @@ const char *prefix_in_force_ensure_tag(struct json_object *hist) {
    return str_of(rec, "tag");
 }
 
+/* The piece of an instruction message @p msg that updates the section titled
+ * @p title: its start (at "Updated instructions: <title>.") and length, or
+ * false when it has none. */
+static bool instruction_piece(const char *msg, const char *title, const char **start, size_t *len) {
+   char head[256];
+   snprintf(head, sizeof(head), "Updated instructions: %s.", title ? title : "");
+   const char *at = msg ? strstr(msg, head) : NULL;
+   if (!at) {
+      return false;
+   }
+   const char *next = strstr(at + strlen(head), "\n\nUpdated instructions: ");
+   *start = at;
+   *len = next ? (size_t)(next - at) : strlen(at);
+   return true;
+}
+
 /* The hash in force for section @p sec: the record's; for a history with no
- * section record, the section's own when its text (tag filled in) is in the
- * frozen prefix. */
-static const char *in_force_hash(struct json_object *sections,
+ * section record (never made, or reset by a compaction), what the history
+ * shows: its newest instruction message that updates the section, else the
+ * frozen prefix, holding the section's text (tag filled in). */
+static const char *in_force_hash(struct json_object *hist,
+                                 struct json_object *sections,
                                  const char *frozen,
                                  const prompt_section_t *sec,
                                  const char *tag,
@@ -171,7 +190,24 @@ static const char *in_force_hash(struct json_object *sections,
       return json_object_object_get_ex(sections, sec->name, &e) ? str_of(e, "h") : NULL;
    }
    char *text = llm_context_with_tag(sec->text, tag);
-   const bool there = frozen && text && strstr(frozen, text);
+   if (!text) {
+      return NULL;
+   }
+   const int len = hist ? (int)json_object_array_length(hist) : 0;
+   for (int i = len - 1; i > 0; i--) {
+      struct json_object *msg = json_object_array_get_idx(hist, i);
+      const char *start = NULL;
+      size_t n = 0;
+      if (llm_history_kind_of(msg) != MESSAGE_KIND_INSTRUCTION ||
+          !instruction_piece(str_of(msg, "content"), sec->title, &start, &n)) {
+         continue;
+      }
+      /* Its newest update: in force if it holds this text (a removal holds none). */
+      const bool there = memmem(start, n, text, strlen(text)) != NULL;
+      free(text);
+      return there ? own_hash : "";
+   }
+   const bool there = frozen && strstr(frozen, text);
    free(text);
    return there ? own_hash : NULL;
 }
@@ -213,7 +249,7 @@ char *prefix_in_force_instructions(struct json_object *hist, const composed_prom
       const prompt_section_t *sec = &cp->sections[i];
       char h[DAWN_SHA256_HEX_LEN];
       hash_text(sec->text, h);
-      const char *had = in_force_hash(sections, frozen, sec, tag, h);
+      const char *had = in_force_hash(hist, sections, frozen, sec, tag, h);
       json_object_object_add(next, sec->name, section_entry(h, sec->title));
       if (had && strcmp(had, h) == 0) {
          continue;
@@ -370,4 +406,17 @@ char *prefix_in_force_json(struct json_object *hist) {
    }
    const char *json = json_object_to_json_string_ext(rec, JSON_C_TO_STRING_PLAIN);
    return json ? strdup(json) : NULL;
+}
+
+void prefix_in_force_reset_to_history(struct json_object *hist) {
+   struct json_object *prefix = prefix_of(hist);
+   struct json_object *rec = NULL;
+   if (!prefix || !json_object_object_get_ex(prefix, LLM_HISTORY_IN_FORCE_KEY, &rec) ||
+       !json_object_is_type(rec, json_type_object)) {
+      return;
+   }
+   /* The tag and the tool schemas stay: the frozen prefix still declares them. */
+   json_object_object_del(rec, "sections");
+   json_object_object_del(rec, "previous");
+   json_object_object_del(rec, "directives");
 }

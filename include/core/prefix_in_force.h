@@ -110,6 +110,17 @@ void prefix_in_force_check_tool_schemas(struct json_object *hist, const char *sc
 /** The record on @p hist's prefix message as JSON (caller frees), or NULL. */
 char *prefix_in_force_json(struct json_object *hist);
 
+/**
+ * @brief Forget what the record says is in force (the sections and the
+ *        directions): the next turn works it out from what @p hist shows, its
+ *        frozen prefix and the instruction and directive messages it holds
+ *
+ * A compaction summarizes part of a history, and with it the instruction and
+ * directive messages that changed what is in force; after one, whatever the
+ * kept part doesn't show is appended again.  The tag and the tool schemas stay.
+ */
+void prefix_in_force_reset_to_history(struct json_object *hist);
+
 #ifdef __cplusplus
 }
 #endif

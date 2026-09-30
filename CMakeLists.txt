@@ -623,7 +623,7 @@ set(DAWN_SOURCES
     src/llm/llm_claude_parts.c
     src/llm/llm_reasoning_details.c
     src/llm/llm_compaction_range.c
-    src/llm/llm_context_merge.c
+    src/llm/llm_compaction.c
     src/llm/llm_pricing.c
     src/llm/llm_local_provider.c
     src/llm/sse_parser.c
@@ -789,6 +789,7 @@ if(ENABLE_WEBUI)
         src/core/prefix_in_force.c
         src/core/session_dedup.c
         src/core/session_prefix.c
+        src/core/session_compaction.c
         src/core/focus/focus_handles.c
         src/core/worker_pool.c
         src/core/text_filter.c
@@ -918,6 +919,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v93.c
     src/auth/auth_db_migrations_v94.c
     src/auth/auth_db_migrations_v95.c
+    src/auth/auth_db_migrations_v96.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c

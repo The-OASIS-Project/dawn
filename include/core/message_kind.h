@@ -49,6 +49,8 @@ typedef enum {
    MESSAGE_KIND_DIRECTIVE,    /**< the surface's standing directions (system) */
    MESSAGE_KIND_INSTRUCTION,  /**< a change to the frozen instructions (system) */
    MESSAGE_KIND_PREFIX,       /**< the frozen system prompt; in memory only, never a row */
+   MESSAGE_KIND_SUMMARY,      /**< a compaction's summary: a part of the first kept question;
+                                   in memory only (the conversation holds it), never a row */
 } message_kind_t;
 
 /** The kind's stored name (NULL for MESSAGE_KIND_NONE). */
@@ -68,6 +70,8 @@ static inline const char *message_kind_name(message_kind_t kind) {
          return "instruction";
       case MESSAGE_KIND_PREFIX:
          return "prefix";
+      case MESSAGE_KIND_SUMMARY:
+         return "summary";
       case MESSAGE_KIND_NONE:
       default:
          return NULL;
@@ -79,12 +83,17 @@ static inline message_kind_t message_kind_parse(const char *name) {
    if (!name || !*name) {
       return MESSAGE_KIND_NONE;
    }
-   for (int k = MESSAGE_KIND_TURN_CONTEXT; k <= MESSAGE_KIND_PREFIX; k++) {
+   for (int k = MESSAGE_KIND_TURN_CONTEXT; k <= MESSAGE_KIND_SUMMARY; k++) {
       if (strcmp(name, message_kind_name((message_kind_t)k)) == 0) {
          return (message_kind_t)k;
       }
    }
    return MESSAGE_KIND_NONE;
+}
+
+/** Whether @p kind is held by the conversation, never saved as a row. */
+static inline bool message_kind_in_memory_only(message_kind_t kind) {
+   return kind == MESSAGE_KIND_PREFIX || kind == MESSAGE_KIND_SUMMARY;
 }
 
 /** Whether a row of @p kind may have @p role (mirrors the schema's CHECK). */
@@ -105,8 +114,9 @@ static inline bool message_kind_role_ok(message_kind_t kind, const char *role) {
       case MESSAGE_KIND_INSTRUCTION:
          return strcmp(role, "system") == 0;
       case MESSAGE_KIND_PREFIX:
+      case MESSAGE_KIND_SUMMARY:
       default:
-         return false; /* the prefix is never stored as a row */
+         return false; /* in memory only: the conversation holds these, never a row */
    }
 }
 

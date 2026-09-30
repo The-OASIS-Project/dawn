@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 #include "core/focus/focus_handles.h"
+#include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "dawn_error.h"
@@ -983,6 +984,9 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
    focus_handles_reset_locked(session);
    /* Its turns' records went with it (a running turn's own stays). */
    session_prefix_release_locked(session);
+   /* And its compaction: a summary of it, and what a voice surface kept of it
+    * for its save (never the next owner's). */
+   session_compaction_reset_locked(session);
    if (!session->turn_active) {
       session->turn_appends = 0;
    }
@@ -1017,6 +1021,7 @@ void session_replace_history(session_t *session, struct json_object *history, in
    notices_untold_locked(session);
    focus_handles_reset_locked(session);
    session_prefix_release_locked(session);
+   session_compaction_reset_locked(session);
    atomic_store(&session->history_conversation_id, conv_id > 0 ? conv_id : 0);
    pthread_mutex_unlock(&session->history_mutex);
 }

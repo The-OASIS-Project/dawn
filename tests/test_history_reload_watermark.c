@@ -26,6 +26,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_turn_blocks.h"
 #include "memory/memory_history_loader.h"
 #include "unity.h"
@@ -66,6 +67,21 @@ static const char *role_at(struct json_object *h, int i) {
               : NULL;
 }
 
+/* @p q opens with the compaction's summary part, then its own words. */
+static void assert_summary_leads(struct json_object *q, const char *summary, const char *own) {
+   struct json_object *parts = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(q, "content", &parts));
+   TEST_ASSERT_TRUE(json_object_is_type(parts, json_type_array));
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(parts));
+   struct json_object *first = json_object_array_get_idx(parts, 0);
+   TEST_ASSERT_EQUAL_INT(MESSAGE_KIND_SUMMARY, llm_history_kind_of(first));
+   struct json_object *t = NULL;
+   json_object_object_get_ex(first, "text", &t);
+   TEST_ASSERT_NOT_NULL(strstr(json_object_get_string(t), "--- CONVERSATION SUMMARY"));
+   TEST_ASSERT_NOT_NULL(strstr(json_object_get_string(t), summary));
+   TEST_ASSERT_EQUAL_STRING(own, llm_history_question_text(q));
+}
+
 /* An older build recorded the point at the first of three parallel results. */
 static void test_point_inside_a_tool_exchange(void) {
    int64_t conv = 0;
@@ -88,12 +104,12 @@ static void test_point_inside_a_tool_exchange(void) {
 
    struct json_object *h = memory_history_load_from_db(conv, s_user_id, NULL);
    TEST_ASSERT_NOT_NULL(h);
-   /* The summary, then the answer and the next question: results 2 and 3,
-    * whose call is in the summary, are gone. */
-   TEST_ASSERT_EQUAL_INT(3, json_object_array_length(h));
+   /* The answer, then the next question with the summary in front of it:
+    * results 2 and 3, whose call is in the summary, are gone. */
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(h));
    TEST_ASSERT_EQUAL_STRING("assistant", role_at(h, 0));
-   TEST_ASSERT_EQUAL_STRING("assistant", role_at(h, 1));
-   TEST_ASSERT_EQUAL_STRING("user", role_at(h, 2));
+   TEST_ASSERT_EQUAL_STRING("user", role_at(h, 1));
+   assert_summary_leads(json_object_array_get_idx(h, 1), "They added numbers.", "thanks");
    json_object_put(h);
 }
 
@@ -109,8 +125,9 @@ static void test_point_at_a_turn(void) {
                          conv_db_set_compaction_watermark(conv, s_user_id, "One.", answer));
    struct json_object *h = memory_history_load_from_db(conv, s_user_id, NULL);
    TEST_ASSERT_NOT_NULL(h);
-   TEST_ASSERT_EQUAL_INT(3, json_object_array_length(h)); /* summary, two, second */
-   TEST_ASSERT_EQUAL_STRING("user", role_at(h, 1));
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(h)); /* two (summary first), second */
+   TEST_ASSERT_EQUAL_STRING("user", role_at(h, 0));
+   assert_summary_leads(json_object_array_get_idx(h, 0), "One.", "two");
    json_object_put(h);
 }
 

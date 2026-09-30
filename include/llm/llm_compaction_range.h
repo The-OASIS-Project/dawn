@@ -34,6 +34,16 @@ extern "C" {
 struct json_object;
 
 /**
+ * @brief Whether @p msg is part of a tool exchange, in the OpenAI or Claude
+ *        shape: a role "tool" result, an assistant with tool_calls or tool_use
+ *        parts, or a user message with tool_result parts
+ */
+bool llm_compaction_is_tool_exchange(struct json_object *msg);
+
+/** @brief @p msg's database row id ("id"), or 0. */
+int64_t llm_compaction_row_id(struct json_object *msg);
+
+/**
  * @brief Where the kept part of a compacted history starts
  *
  * About @p keep_messages from the end, moved back so it starts a turn: past

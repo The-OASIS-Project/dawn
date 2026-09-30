@@ -12,6 +12,31 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-29 — Long conversations are compacted between turns
+
+**What changed.**
+- **Compaction happens between turns only.** When a conversation grows long,
+  DAWN summarizes its oldest part in the background and puts the summary in
+  place when your next message starts, never in the middle of a reply that is
+  using tools. The summary now appears as a "CONVERSATION SUMMARY" block in
+  front of the first kept message, the same whether the conversation is live
+  or reopened.
+- **Instructions survive a compaction.** A persona or setting change made in
+  the part that was summarized is sent again, so the model keeps following it.
+- **A reply that fills the conversation mid-task** now answers with what it
+  has (or says it ran out of room) instead of compacting mid-reply; send another
+  message to carry on. A background job continues on its own.
+- **Switching models** fits the conversation to the new model with your next
+  message.
+- `context_expand` with no arguments shows the messages the latest summary
+  replaced.
+
+**Upgrading.** Nothing to do: the database migrates itself (schema v96).
+Conversations that were already compacted lose the model's earlier reasoning
+once (their text and tool calls stay).
+
+---
+
 ## 2026-09-29 — Merging duplicate memories is recoverable again
 
 **What changed.**

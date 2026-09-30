@@ -97,7 +97,10 @@ typedef struct {
    void *callback_userdata;                  /**< User context for callback */
    llm_single_shot_fn provider_fn;           /**< Current provider single-shot function */
    llm_history_format_t history_format;      /**< Current history format (OpenAI or Claude) */
-   uint32_t session_id;                      /**< Session ID for compaction */
+   uint32_t session_id;                      /**< The session the call is for */
+   bool has_session;                         /**< session_id names one (0 is the local mic's);
+                                                  false: a call on no session's behalf, which
+                                                  reads and writes no session's state */
    llm_type_t llm_type;                      /**< Current LLM type */
    cloud_provider_t cloud_provider;          /**< Current cloud provider */
    _Atomic bool *cancel_flag;                /**< Per-session cancel_requested (NULL if none);

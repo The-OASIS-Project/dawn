@@ -552,3 +552,16 @@ int memory_db_entity_alias_link(int user_id,
    }
    return MEMORY_DB_NOT_FOUND;
 }
+
+/* The turn-end compaction trigger (session_compaction.c): nothing to summarize here. */
+void session_compaction_trigger(struct session *session,
+                                struct json_object *hist,
+                                llm_type_t type,
+                                cloud_provider_t provider,
+                                const char *model) {
+   (void)session;
+   (void)hist;
+   (void)type;
+   (void)provider;
+   (void)model;
+}

@@ -34,6 +34,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/focus/focus_handles.h"
+#include "core/session_compaction.h"
 #include "core/session_prefix.h"
 #include "core/turn_queue.h"
 #include "dawn_error.h"
@@ -271,6 +272,10 @@ static void session_free(session_t *session) {
       return;
    }
 
+   /* Its compaction first: a worker still summarizing (shutdown frees without
+    * session_destroy) is cancelled and joined, and what it held freed. */
+   session_compaction_teardown(session);
+
    // Free conversation history (and any turn state a torn-down turn left behind)
    if (session->turn_history) {
       json_object_put(session->turn_history);
@@ -335,17 +340,6 @@ static void session_free(session_t *session) {
    // Free any unconsumed final-answer reasoning stash (SERVER_AUTHORITATIVE §6c-G1)
    session_final_answer_clear(session);
 
-   // Free async compaction resources
-   if (session->async_compact.snapshot_last) {
-      json_object_put(session->async_compact.snapshot_last);
-      session->async_compact.snapshot_last = NULL;
-   }
-   if (session->async_compact.pending_history) {
-      json_object_put(session->async_compact.pending_history);
-      session->async_compact.pending_history = NULL;
-   }
-   free(session->async_compact.result_summary);
-   session->async_compact.result_summary = NULL;
 
    // Clear client_data pointer (don't free - WebSocket sessions use libwebsockets-managed memory)
    session->client_data = NULL;
@@ -476,32 +470,45 @@ void session_manager_cleanup(void) {
       return;
    }
 
+   /* Shutdown: abort any in-flight operations AND gate emission (both flags). */
+   session_t *going[MAX_SESSIONS] = { 0 };
    pthread_rwlock_wrlock(&session_manager_rwlock);
-
    for (int i = 0; i < MAX_SESSIONS; i++) {
-      if (sessions[i] != NULL) {
-         // Shutdown: abort any in-flight operations AND gate emission (both flags).
-         session_teardown_flags(sessions[i]);
+      going[i] = sessions[i];
+      if (going[i] != NULL) {
+         session_teardown_flags(going[i]);
+      }
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
 
-         // For LOCAL session, wait for ref_count to reach 1 (workers may be using it)
-         // For WebSocket/DAP sessions, force cleanup (ref_count is for reconnection support)
-         if (sessions[i]->type == SESSION_TYPE_LOCAL) {
-            pthread_mutex_lock(&sessions[i]->ref_mutex);
-            while (sessions[i]->ref_count > 1) {
-               pthread_cond_wait(&sessions[i]->ref_zero_cond, &sessions[i]->ref_mutex);
-            }
-            pthread_mutex_unlock(&sessions[i]->ref_mutex);
+   /* For the LOCAL session, wait for ref_count to reach 1 (workers may be using
+    * it, and may look sessions up meanwhile: no manager lock is held while
+    * waiting).  WebSocket/DAP sessions are freed regardless (ref_count is for
+    * reconnection support); session_free joins what still runs on them. */
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (going[i] != NULL && going[i]->type == SESSION_TYPE_LOCAL) {
+         pthread_mutex_lock(&going[i]->ref_mutex);
+         while (going[i]->ref_count > 1) {
+            pthread_cond_wait(&going[i]->ref_zero_cond, &going[i]->ref_mutex);
          }
-
-         OLOG_INFO("Destroying session %u (type=%s)", sessions[i]->session_id,
-                   session_type_name(sessions[i]->type));
-         session_free(sessions[i]);
-         sessions[i] = NULL;
+         pthread_mutex_unlock(&going[i]->ref_mutex);
       }
    }
 
+   pthread_rwlock_wrlock(&session_manager_rwlock);
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      sessions[i] = NULL;
+   }
    initialized = false;
    pthread_rwlock_unlock(&session_manager_rwlock);
+
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (going[i] != NULL) {
+         OLOG_INFO("Destroying session %u (type=%s)", going[i]->session_id,
+                   session_type_name(going[i]->type));
+         session_free(going[i]);
+      }
+   }
 
    OLOG_INFO("Session manager cleanup complete");
 }
@@ -890,10 +897,9 @@ void session_release(session_t *session) {
    pthread_mutex_lock(&session->ref_mutex);
    session->ref_count--;
 
-   if (session->ref_count <= 0) {
-      // Signal anyone waiting for ref_count to reach 0
-      pthread_cond_broadcast(&session->ref_zero_cond);
-   }
+   /* Every release: a waiter may be waiting for a count other than 0 (shutdown
+    * waits for the local session's to reach 1). */
+   pthread_cond_broadcast(&session->ref_zero_cond);
 
    pthread_mutex_unlock(&session->ref_mutex);
 }
@@ -970,18 +976,10 @@ void session_destroy(uint32_t session_id) {
    webui_detach_session(session);
 #endif
 
-   /* Phase 1.75: Join async compaction thread if running.
-    * The bg thread's CURL cancel flag is &session->cancel_requested, which
-    * Phase 1's session_teardown_flags() just set, so any in-flight transfer
-    * aborts and the join returns promptly. Must happen before Phase 2 to
-    * release the thread's ref. */
-   /* Joined whenever a thread was started: one that aborted is idle but still
-    * joinable, and would otherwise leak its stack. */
-   if (atomic_exchange(&session->async_compact.thread_active, false)) {
-      OLOG_INFO("Session %u: joining async compaction thread", session_id);
-      pthread_join(session->async_compact.thread_id, NULL);
-      OLOG_INFO("Session %u: async compaction thread joined", session_id);
-   }
+   /* Phase 1.75: the compaction worker, cancelled (its own flag: its transfer
+    * aborts) and joined, and what it holds freed.  Before Phase 2: the worker
+    * holds a ref. */
+   session_compaction_teardown(session);
 
    // Phase 2: Wait for ref_count to reach 0 (bounded retry; leak rather than
    // free-under-a-worker).  teardown set cancel_requested, so a live LLM/CURL
@@ -1553,6 +1551,7 @@ int session_dispatch_user_turn_ex(session_t *session,
       /* No builder (a build without one): the base prompt is what a new
        * context freezes; a frozen one keeps its own. */
       composed_prompt_t base = { .stable_prefix = get_command_prompt_dup() };
+      session_compaction_prepare(session, 0);
       session_prefix_apply_turn(session, base.stable_prefix ? &base : NULL, turn_note);
       composed_prompt_free(&base);
       return SUCCESS;
@@ -1573,9 +1572,18 @@ int session_dispatch_user_turn_ex(session_t *session,
                    "the prompt its history has",
                    user_id);
       composed_prompt_free(&cp);
+      session_compaction_prepare(session, turn_note ? (int)(strlen(turn_note) / 4) : 0);
       session_prefix_apply_turn(session, NULL, turn_note);
       return SUCCESS;
    }
+
+   /* A history this turn would take past its window is compacted at this
+    * seam, sized with what the turn adds (session_compaction.h). */
+   const size_t adds = (cp.volatile_block ? strlen(cp.volatile_block) : 0) +
+                       (cp.memory_body ? strlen(cp.memory_body) : 0) +
+                       (cp.directives ? strlen(cp.directives) : 0) +
+                       (turn_note ? strlen(turn_note) : 0);
+   session_compaction_prepare(session, (int)(adds / 4));
 
    /* The conversation's frozen prompt, what changed appended after the
     * question, and the turn's context in front of it (session_prefix.h). */

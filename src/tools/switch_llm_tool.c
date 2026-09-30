@@ -28,6 +28,7 @@
 #include <strings.h>
 
 #include "auth/auth_db.h"
+#include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_context.h"
@@ -131,42 +132,6 @@ static const llm_target_entry_t *find_target(const char *name) {
    return NULL;
 }
 
-/**
- * @brief Compact conversation history before switching to a provider with smaller context
- *
- * Uses the current (larger-context) provider to summarize before switching.
- */
-static void compact_before_switch(session_t *session,
-                                  const session_llm_config_t *current,
-                                  const llm_target_entry_t *entry) {
-   /* The calling turn's own history. */
-   struct json_object *history = session_get_turn_history(session);
-   if (!history) {
-      return;
-   }
-
-   /* Determine target provider: for "cloud" with no explicit provider, keep current */
-   cloud_provider_t target_provider = entry->provider;
-   if (entry->type == LLM_CLOUD && target_provider == CLOUD_PROVIDER_NONE) {
-      target_provider = current->cloud_provider;
-   }
-
-   if (llm_context_needs_compaction_for_switch(session->session_id, history, entry->type,
-                                               target_provider, NULL)) {
-      llm_compaction_result_t compact_result = { 0 };
-      int rc = llm_context_compact_for_switch(session->session_id, history, current->type,
-                                              current->cloud_provider, current->model, entry->type,
-                                              target_provider, NULL, &compact_result);
-      if (rc == 0 && compact_result.performed) {
-         OLOG_INFO("Pre-switch compaction: %d messages summarized, %d -> %d tokens",
-                   compact_result.messages_summarized, compact_result.tokens_before,
-                   compact_result.tokens_after);
-      }
-      llm_compaction_result_free(&compact_result);
-   }
-   session_put_history(session, history);
-}
-
 static char *switch_llm_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
 
@@ -245,10 +210,11 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
                 !is_private;
    }
 
-   /* Compact the turn's own history if switching to a provider with a smaller
-    * context window. */
-   if (in_turn) {
-      compact_before_switch(session, &config, entry);
+   /* The switch takes effect with the next message: its seam fits the history
+    * to the new model's window, summarizing with this one if it must (never
+    * inside this tool call: mid tool round, the turn's request stands as it is). */
+   if (in_turn && lasting) {
+      session_compaction_note_switch(session, &config);
    }
 
    OLOG_INFO("Setting AI to %s via switch_llm tool%s.", entry->label,

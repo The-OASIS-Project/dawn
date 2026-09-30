@@ -83,13 +83,21 @@ typedef struct {
    int64_t question_id; /**< The question the rows were sent with, or 0 */
    int64_t built_at;    /**< When the turn's prompt was built (unix time), or 0 */
    int64_t built_seq;   /**< Where withdrawals stood then (conv_db_withdraw_seq) */
+   /** A compaction the turn applied: its summary (NULL: none), the rows it
+    *  summarized (first and last id; the last is the conversation's new
+    *  watermark), and its level */
+   const char *compaction_summary;
+   int64_t compaction_first_id;
+   int64_t compaction_last_id;
+   int compaction_level;
 } conv_turn_save_t;
 
 /**
  * Save a turn's request context in one transaction: its rows, the prefix and
  * tool set it ran under (stored when they differ from those bound), what is in
- * force after it, and a declared boundary's reasoning floor.  All of it, or
- * none.  What the user forgot after the turn was built (@p save->built_at,
+ * force after it, a declared boundary's reasoning floor, and a compaction it
+ * applied (a summary node; the summary and the watermark reloads start after).
+ * All of it, or none.  What the user forgot after the turn was built (@p save->built_at,
  * @p save->built_seq) is withdrawn from the rows as they are saved
  * (auth_db_withdraw.h), and a floor a withdrawal left pending settles at
  * @p save->question_id when the turn was built after it.

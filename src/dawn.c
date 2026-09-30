@@ -1336,8 +1336,20 @@ void *llm_worker_thread(void *arg) {
    llm_cache_monitor_set_local_mic(true); /* this thread's calls are the local mic's turn */
    session_set_turn_token(s_local_turn_token);
 
-   // Get local session's LLM config (for per-session LLM settings)
    session_t *local_session = session_get_local();
+   /* Parity with WebUI/satellite: the turn's memory and focus context, and a
+    * compaction when the history reaches its window, before the call.  Here,
+    * not on the audio loop: a summary can take a while, and a barge-in must be
+    * heard while it runs. */
+   if (request_text) {
+      session_dispatch_user_turn(local_session, request_text);
+   }
+   /* A barge-in while it ran (a summary can take a while): the turn is not
+    * sent, and the main loop handles the interrupt as it would one mid-call
+    * (the streaming call below would clear the flag first). */
+   const bool interrupted = llm_is_interrupt_requested();
+
+   // Get local session's LLM config (for per-session LLM settings)
    session_llm_config_t session_config;
    session_get_llm_config(local_session, &session_config);
 
@@ -1353,7 +1365,7 @@ void *llm_worker_thread(void *arg) {
    // The turn's own history, referenced for the call (other threads' writes to
    // it wait for the turn to end).
    // Vision is handled by native tool calling - viewing tool captures image internally
-   struct json_object *history = session_get_turn_history(local_session);
+   struct json_object *history = interrupted ? NULL : session_get_turn_history(local_session);
    char *response = history ? llm_chat_completion_streaming_tts_with_config(
                                   history, request_text, NULL, NULL, 0, dawn_tts_sentence_callback,
                                   NULL, &resolved_config)
@@ -4049,14 +4061,11 @@ mqtt_disabled:
                      session_set_turn_llm_config(local_session, &trigger_config);
                   }
 
-                  /* Parity with WebUI/satellite: rebuild the local session's system
-                   * prompt with this turn's memory + focus context before dispatch (a
-                   * no-op when no structured builder is registered: static prompt). */
-                  /* The turn is carried by the worker thread (its token) and ended
-                   * here once the worker is joined. */
-                  session_dispatch_user_turn(local_session, command_text);
-                  /* The worker writes from here on; this thread takes the token
-                   * back only to end the turn. */
+                  /* The turn is carried by the worker thread (its token): it
+                   * dispatches it (the turn's context, and a compaction when the
+                   * history reaches its window, off this loop) and runs it, and
+                   * it is ended here once the worker is joined.  This thread
+                   * takes the token back only to end the turn. */
                   session_set_turn_token(0);
 
                   // Spawn LLM thread to process request (non-blocking)

@@ -25,6 +25,7 @@
 #include "auth/auth_db_messages.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -294,6 +295,79 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
    return AUTH_DB_SUCCESS;
 }
 
+int conv_db_add_rows(int64_t conv_id,
+                     int user_id,
+                     const conv_message_row_t *rows,
+                     int n,
+                     int64_t *ids_out) {
+   if (n <= 0) {
+      return AUTH_DB_SUCCESS;
+   }
+   if (!rows) {
+      return AUTH_DB_INVALID;
+   }
+   int64_t *ids = ids_out ? ids_out : calloc((size_t)n, sizeof(*ids));
+   if (!ids) {
+      return AUTH_DB_FAILURE;
+   }
+   memset(ids, 0, (size_t)n * sizeof(*ids));
+   for (int i = 0; i < n; i++) {
+      const char *blocks = NULL;
+      const int checked = row_check(conv_id, &rows[i], &blocks);
+      if (checked != AUTH_DB_SUCCESS || rows[i].context_of_row < 0 || rows[i].context_of_row > i) {
+         if (!ids_out) {
+            free(ids);
+         }
+         return checked != AUTH_DB_SUCCESS ? checked : AUTH_DB_INVALID;
+      }
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      if (!ids_out) {
+         free(ids);
+      }
+      return AUTH_DB_FAILURE;
+   }
+   const time_t now = time(NULL);
+   int result = AUTH_DB_SUCCESS;
+   bool ordinary = false;
+   for (int i = 0; i < n && result == AUTH_DB_SUCCESS; i++) {
+      conv_message_row_t row = rows[i];
+      if (row.context_of_row > 0) {
+         row.context_of = ids[row.context_of_row - 1];
+      }
+      result = msg_insert_locked(conv_id, user_id, &row, now, &ids[i]);
+      if (result == AUTH_DB_SUCCESS && message_kind_parse(row.kind) == MESSAGE_KIND_NONE) {
+         ordinary = true;
+         sqlite3_reset(s_db.stmt_conv_update_meta);
+         sqlite3_bind_int64(s_db.stmt_conv_update_meta, 1, (int64_t)now);
+         sqlite3_bind_int64(s_db.stmt_conv_update_meta, 2, conv_id);
+         if (sqlite3_step(s_db.stmt_conv_update_meta) != SQLITE_DONE) {
+            result = AUTH_DB_FAILURE;
+         }
+         sqlite3_reset(s_db.stmt_conv_update_meta);
+      }
+   }
+   if (result == AUTH_DB_SUCCESS &&
+       sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+      result = AUTH_DB_FAILURE;
+   }
+   if (result != AUTH_DB_SUCCESS) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      memset(ids, 0, (size_t)n * sizeof(*ids));
+   }
+   AUTH_DB_UNLOCK();
+   if (!ids_out) {
+      free(ids);
+   }
+   if (result == AUTH_DB_SUCCESS && ordinary) {
+      conversation_list_changed_notify(user_id, conv_id, CONV_LIST_CHANGE_BUMPED);
+   }
+   return result;
+}
+
 int conv_db_add_message_with_tools_ex(int64_t conv_id,
                                       int user_id,
                                       const char *role,
@@ -414,7 +488,7 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
 /* Clear stored blocks at or below @p watermark in @p conv_id, a batch per lock
  * hold.  They are already out of every reload's reach (reads take id >
  * watermark); this frees what they hold. */
-static void clear_compacted_blocks(int64_t conv_id, int64_t watermark) {
+void conv_db_clear_compacted_blocks(int64_t conv_id, int64_t watermark) {
    for (;;) {
       AUTH_DB_LOCK_OR_RETURN_VOID();
       sqlite3_stmt *gc = s_db.stmt_msg_gc_blocks;
@@ -471,7 +545,7 @@ int conv_db_set_compaction_watermark(int64_t conv_id,
     * watermark just passed have no reader left: clear them now, in batches
     * (conv_db_sweep_compacted_blocks catches any this misses). */
    if (changes > 0) {
-      clear_compacted_blocks(conv_id, watermark_msg_id);
+      conv_db_clear_compacted_blocks(conv_id, watermark_msg_id);
    }
    return AUTH_DB_SUCCESS;
 }

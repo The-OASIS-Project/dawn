@@ -50,6 +50,10 @@
 /* ---- Stubs for the config / tool-registry deps the converter references.
  *      (log_message comes from dawn_common.) ---- */
 dawn_config_t g_config;
+/* Every call here is a conversation's (llm_cache_monitor.c). */
+bool llm_cache_monitor_one_off_call(void) {
+   return false;
+}
 const char *llm_get_default_claude_model(void) {
    return "claude-sonnet-4-6";
 }

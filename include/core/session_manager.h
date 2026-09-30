@@ -190,17 +190,15 @@ typedef struct {
 } messaging_identity_t;
 
 /**
- * @brief Async compaction state machine (per-session, embedded in session_t)
- *
- * State transitions: IDLE -> RUNNING (trigger) -> READY (bg complete) -> IDLE (merge)
- * Single-writer discipline: bg thread writes result fields while RUNNING,
- * main thread reads them when READY. _Atomic state governs transitions.
+ * @brief A session's compaction (session_compaction.h): IDLE, summarizing a
+ *        range of its history (RUNNING), or a summary waiting for the next turn
+ *        to apply it (READY)
  */
 typedef enum {
-   ASYNC_COMPACT_IDLE = 0,
-   ASYNC_COMPACT_RUNNING = 1,
-   ASYNC_COMPACT_READY = 2,
-} async_compact_state_t;
+   COMPACTION_IDLE = 0,
+   COMPACTION_RUNNING = 1,
+   COMPACTION_READY = 2,
+} compaction_state_t;
 
 /* =============================================================================
  * Phase 1f: per-turn focus-injection dedup state
@@ -350,33 +348,40 @@ typedef struct {
    uint64_t told_by; /* the turn that put it there (turn_owner_token), 0 = none running */
 } session_notice_t;
 
+/* A compaction's state.  The range, its refs and the summary are read and
+ * written under history_mutex; the state is atomic.  What the summarizer reads
+ * is its runner's alone (the worker's, or a turn's summarizing synchronously),
+ * never held here, so nothing here is freed from under it. */
 typedef struct {
-   _Atomic int state;
-   pthread_t thread_id;
+   _Atomic int state;           // compaction_state_t
+   pthread_t thread_id;         // a started worker, until joined
    _Atomic bool thread_active;  // started and not yet joined: exactly one joiner takes it
+   atomic_bool cancel;          // its own (never the turn's): set to drop it
+   bool closed;                 // the session is going: none starts again
 
-   struct json_object *pending_history;
-   int result_tokens_before;
-   int result_tokens_after;
-   int result_messages_summarized;
-   int result_level;
-   char *result_summary;
+   struct json_object *hist;   // the history the range is of (ref)
+   struct json_object *first;  // its first summarized message (ref)
+   struct json_object *last;   // its last (ref)
+   int count;                  // messages summarized
+   char tag[32];               // the conversation's tag, masked in the summary
 
-   /* The last message of the history the summary was computed from (owned ref).
-    * The merge finds it in the history the next turn runs on: every turn rebuilds
-    * its history array, but keeps the message objects themselves. */
-   struct json_object *snapshot_last;
+   // A switch to another model, made in a turn: the next turn's seam judges the
+   // history against the new model's window, and summarizes (if it must) with
+   // the one switched from, which the history fits.
+   atomic_bool switched;  // (switched_from under history_mutex)
+   session_llm_config_t switched_from;
 
-   llm_type_t trigger_llm_type;
-   cloud_provider_t trigger_cloud_provider;
-   session_llm_config_t trigger_config;  // the triggering turn's settings (the
-                                         // compaction thread outlives the turn)
-   char trigger_model[64];
-   uint32_t trigger_session_id;
-   int64_t trigger_conv_id;
+   char *summary;             // READY: the summary to apply
+   int level;                 // its level (llm_compaction_level_t)
+   time_t last_at;            // when one last finished (cooldown)
+   _Atomic unsigned applied;  // compactions applied (a caller sees whether one was)
 
-   time_t last_compacted_at;
-} async_compaction_t;
+   // A voice surface's history is saved whole: the messages a compaction took
+   // out, and its summary, wait for the voice save (session_voice_save.c).
+   struct json_object *voice_removed;
+   char *voice_summary;
+   int voice_level;
+} session_compaction_t;
 
 /**
  * @brief One row a tool turn saves (the persist hook's argument)
@@ -471,6 +476,9 @@ typedef struct session {
    // across raw stores.  (atomic for cross-thread visibility on ARM64.)
    atomic_bool disconnected;      // Emission gate: client is not attached
    atomic_bool cancel_requested;  // Abort this turn's generation (Stop / teardown)
+   atomic_bool turn_overflowed;   // A background turn filled its context mid-turn: it
+                                  // closed to go on in a continuation turn, compacted
+                                  // at that turn's seam (job_worker.c)
    // Set once at the very start of session_destroy() and never cleared.  The turn
    // queue's dequeue wrappers check it before starting a queued turn: a turn that
    // was spawned into the tiny pop-to-run window just as teardown began must NOT
@@ -762,8 +770,8 @@ typedef struct session {
    // Format: ",diagram,chart," (delimiter-bounded for exact substring matching)
    char visual_modules_loaded[512];
 
-   // Async context compaction (LCM Phase 2 — background compaction between turns)
-   async_compaction_t async_compact;
+   // Compaction: summarized ahead, applied at a turn seam (session_compaction.h)
+   session_compaction_t compaction;
 
    // Reference counting for safe access (two-phase destruction pattern)
    int ref_count;
@@ -880,6 +888,7 @@ static inline void session_teardown_flags(session_t *s) {
    if (s != NULL) {
       atomic_store(&s->cancel_requested, true);
       atomic_store(&s->disconnected, true);
+      atomic_store(&s->compaction.cancel, true); /* its summarizer's transfer, too */
    }
 }
 
@@ -923,6 +932,13 @@ static inline void session_begin_turn_flags(session_t *s) {
  */
 static inline bool session_is_background(const session_t *s) {
    return s != NULL && s->type == SESSION_TYPE_JOB;
+}
+
+/** A voice surface: its history is saved whole when it goes idle, not turn by
+ *  turn (session_voice_save.c). */
+static inline bool session_saved_whole(const session_t *s) {
+   return s != NULL && (s->type == SESSION_TYPE_LOCAL || s->type == SESSION_TYPE_DAP ||
+                        s->type == SESSION_TYPE_DAP2);
 }
 
 /**

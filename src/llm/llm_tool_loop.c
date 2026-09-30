@@ -34,11 +34,13 @@
 #include <string.h>
 #include <time.h>
 
+#include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
+#include "llm/llm_compaction.h"
 #include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_history_rows.h"
@@ -130,6 +132,30 @@ static const char *str_field(struct json_object *obj, const char *key) {
    return json_object_object_get_ex(obj, key, &v) ? json_object_get_string(v) : NULL;
 }
 
+/* A request of this call's session is being sent: its size estimate, to
+ * calibrate its model's density when its usage comes back (llm_compaction.h). */
+static void note_request(const llm_tool_loop_params_t *params, const char *input, int images) {
+   if (!params->has_session) {
+      return;
+   }
+   const size_t input_len = input ? strlen(input) : 0;
+   const int estimate = llm_context_estimate_tokens(params->conversation_history) +
+                        (int)(input_len / 4) + images * (LLM_COMPACTION_IMAGE_ESTIMATE_CHARS / 4);
+   llm_context_note_request(params->session_id, estimate, params->llm_type, params->cloud_provider,
+                            params->model);
+}
+
+/* The session this call is for (a ref, or NULL): none for a call on no
+ * session's behalf.  @p even_detached finds one whose client has gone (its
+ * turn still runs and saves). */
+static session_t *call_session(const llm_tool_loop_params_t *params, bool even_detached) {
+   if (!params->has_session) {
+      return NULL;
+   }
+   return even_detached ? session_get_for_reconnect(params->session_id)
+                        : session_get(params->session_id);
+}
+
 /* Persist the tool messages just appended to history in [before_len, end) via the
  * session's tool-persist hook (if set), in OpenAI-canonical form.  Runs on the
  * worker thread with NO lock held, so conv_db (auth_db lock) is safe to call here.
@@ -163,7 +189,7 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
     * NULL here, silently dropping the tool_calls + role:tool rows so a reload
     * shows the answer but no tool use.  The session is not torn down mid-turn
     * (turn_in_flight guards the idle sweep; the worker holds a ref). */
-   session_t *s = session_get_for_reconnect(params->session_id);
+   session_t *s = call_session(params, true);
    if (!s) {
       return;
    }
@@ -403,7 +429,7 @@ static json_object *blocks_as_run(const llm_tool_response_t *response, bool call
  * from two helpers into one so a final-answer return does a single session_get_for_reconnect
  * rather than two.  TAKES ownership of the built reasoning JSON into the session (the
  * consuming persist frees it). */
-static void tool_loop_stash_final(uint32_t session_id,
+static void tool_loop_stash_final(const llm_tool_loop_params_t *params,
                                   const llm_tool_response_t *result,
                                   const char *provider_label) {
    const char *reason = result != NULL ? result->finish_reason : NULL;
@@ -414,7 +440,7 @@ static void tool_loop_stash_final(uint32_t session_id,
    if (!have_reason && json == NULL && blocks == NULL) {
       return; /* nothing to write — skip the lookup entirely */
    }
-   session_t *s = session_get_for_reconnect(session_id);
+   session_t *s = call_session(params, true);
    if (s == NULL) {
       free(json);
       json_object_put(blocks);
@@ -439,7 +465,7 @@ static void tool_loop_stash_final(uint32_t session_id,
  * close the current streaming bubble — the next iteration's text then opens a fresh
  * bubble below the tool entries.  No-op for satellite / local-mic turns (hook NULL). */
 static void fire_tool_iteration_boundary(llm_tool_loop_params_t *params) {
-   session_t *s = session_get(params->session_id);
+   session_t *s = call_session(params, false);
    if (!s) {
       return;
    }
@@ -589,6 +615,7 @@ static char *final_answer_without_tools(llm_tool_loop_params_t *params,
    OLOG_INFO("Tool loop: Making final call without tools to present gathered results");
    llm_tool_response_t result;
    memset(&result, 0, sizeof(result));
+   note_request(params, "", 0);
    const int rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0,
                                       params->base_url, params->api_key, params->model,
                                       params->chunk_callback, params->callback_userdata,
@@ -596,7 +623,7 @@ static char *final_answer_without_tools(llm_tool_loop_params_t *params,
    char *text = NULL;
    if (rc == 0 && result.text) {
       text = strdup(result.text);
-      tool_loop_stash_final(params->session_id, &result,
+      tool_loop_stash_final(params, &result,
                             reasoning_provider_label(params->llm_type, params->cloud_provider));
    }
    llm_tool_response_free(&result);
@@ -738,29 +765,23 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
 
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
       llm_cache_monitor_set_iteration(iteration); /* tags this iteration's provider call */
-      /* Step 0: Merge any completed async compaction (invisible to user).
-       * for_reconnect so a turn surviving a client disconnect still merges its
-       * compaction across iterations (session_get would skip a disconnected
-       * session and let context grow unbounded on a long survivor). */
-      session_t *loop_session = session_get_for_reconnect(params->session_id);
-      if (loop_session) {
-         llm_context_async_merge(loop_session, params->conversation_history);
-
-         /* Step 0b: cumulative-session input-token ceiling (opt-in; 0 = unlimited).
-          * Input tokens are recorded per provider response (session_record_query), so
-          * at the top of this iteration the session total reflects spend through the
-          * previous iteration.  Stopping HERE bounds overshoot to a single
-          * iteration's tokens rather than a whole multi-tool turn's (the deep-
-          * research per-round guard).  This check is only ever reached BETWEEN
-          * iterations (a completed iteration with no tool calls already returned its
-          * text at step 4), so there is no partial answer to hand back — return an
-          * empty string (never NULL barring OOM) so the caller doesn't misread a
-          * budget stop as a provider failure. */
-         if (params->cumulative_input_token_ceiling > 0) {
+      /* Step 0: cumulative-session input-token ceiling (opt-in; 0 = unlimited).
+       * Input tokens are recorded per provider response (session_record_query), so
+       * at the top of this iteration the session total reflects spend through the
+       * previous iteration.  Stopping HERE bounds overshoot to a single
+       * iteration's tokens rather than a whole multi-tool turn's (the deep-
+       * research per-round guard).  This check is only ever reached BETWEEN
+       * iterations (a completed iteration with no tool calls already returned its
+       * text at step 4), so there is no partial answer to hand back — return an
+       * empty string (never NULL barring OOM) so the caller doesn't misread a
+       * budget stop as a provider failure. */
+      if (params->cumulative_input_token_ceiling > 0) {
+         session_t *loop_session = call_session(params, true);
+         if (loop_session) {
             uint64_t tok = 0;
             session_metrics_totals(loop_session, &tok, NULL);
+            session_release(loop_session);
             if (tok >= (uint64_t)params->cumulative_input_token_ceiling) {
-               session_release(loop_session);
                OLOG_INFO("Tool loop: session input tokens %llu reached ceiling %lld at "
                          "iteration %d — stopping turn",
                          (unsigned long long)tok, (long long)params->cumulative_input_token_ceiling,
@@ -772,32 +793,57 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
                return empty;
             }
          }
-         session_release(loop_session);
       }
 
-      /* Step 1: Auto-compact if needed (hard threshold — blocking safety net).
-       * This runs EVERY iteration, not just once at the top of the entry point.
-       * Without this, context can overflow during multi-step tool iterations. */
-      llm_context_auto_compact_with_config(params->conversation_history, params->session_id,
-                                           params->llm_type, params->cloud_provider, params->model);
-
-      /* Step 1b: Hard pre-flight window guard.  Summary-based compaction keeps the
-       * most recent messages verbatim, so if a single recent tool result is itself
-       * larger than the model window it can't be shrunk — the request would still
-       * overflow and the provider rejects it with HTTP 400.  Surface that loudly
-       * (it was previously silent) instead of shipping a doomed request; trimming
-       * such oversized results at the source is the follow-up fix.
-       *
-       * This re-estimates the history *after* the compaction pass above (a distinct
-       * value from that pass's pre-compaction decision estimate); the extra walk is
-       * sub-millisecond and negligible against the per-iteration network round-trip. */
+      /* Step 1: the request this iteration sends must fit.  A history is
+       * compacted only at a turn seam (session_compaction.h), never mid tool round
+       * (its reasoning is bound to the request as it stands): past the hard
+       * threshold after tools ran, the turn closes here.  A background turn goes
+       * on in a continuation turn, compacted at its seam; a foreground one answers
+       * with what it has, or, when even that wouldn't fit, says so. */
       {
-         int est_tokens = llm_context_estimate_tokens(params->conversation_history);
-         int window = llm_context_get_size(params->llm_type, params->cloud_provider, params->model);
+         /* The request's real size: the estimate, calibrated by what this
+          * session's requests measured (llm_compaction.h). */
+         const int history_estimate = llm_context_estimate_tokens(params->conversation_history);
+         const int est_tokens = params->has_session
+                                    ? llm_context_request_tokens(params->session_id,
+                                                                 history_estimate, params->llm_type,
+                                                                 params->cloud_provider,
+                                                                 params->model)
+                                    : history_estimate;
+         const int window = llm_context_get_size(params->llm_type, params->cloud_provider,
+                                                 params->model);
+         const float hard = llm_context_hard_threshold();
+         if (window > 0 && iteration > 0 && est_tokens >= (int)((float)window * hard)) {
+            OLOG_WARNING("Tool loop: ~%d tokens reach the hard threshold of the %d window at "
+                         "iteration %d; closing the turn",
+                         est_tokens, window, iteration);
+            if (params->is_background) {
+               session_t *loop_session = call_session(params, true);
+               if (loop_session) {
+                  atomic_store(&loop_session->turn_overflowed, true);
+                  session_release(loop_session);
+               }
+               char *empty = malloc(1);
+               if (empty != NULL) {
+                  empty[0] = '\0';
+               }
+               return empty;
+            }
+            if (est_tokens < window) {
+               return final_answer_without_tools(
+                   params,
+                   "This reply has used as much of the conversation's room as it can. Answer "
+                   "the user now with what you have, and say what is left to do: the next "
+                   "message can continue it.",
+                   iteration);
+            }
+            return strdup("I've run out of room in this conversation partway through this. Send "
+                          "another message and I'll pick it up from a summary of what we have.");
+         }
          if (window > 0 && est_tokens >= window) {
-            OLOG_ERROR("Tool loop: estimated request ~%d tokens still exceeds model window %d "
-                       "after compaction (iteration %d) — provider will likely reject with 400; "
-                       "an oversized recent tool result cannot be summarized away",
+            OLOG_ERROR("Tool loop: estimated request ~%d tokens exceeds the model window %d "
+                       "(iteration %d): a single message is larger than the window",
                        est_tokens, window, iteration);
          }
       }
@@ -814,6 +860,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       llm_tool_response_t result;
       memset(&result, 0, sizeof(result));
 
+      note_request(params, params->input_text, params->vision_image_count);
       int rc = params->provider_fn(params->conversation_history, params->input_text,
                                    params->vision_images, params->vision_image_sizes,
                                    params->vision_image_count, params->base_url, params->api_key,
@@ -856,6 +903,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          }
          llm_tool_response_free(&result);
          memset(&result, 0, sizeof(result));
+         note_request(params, params->input_text, params->vision_image_count);
          rc = params->provider_fn(params->conversation_history, params->input_text,
                                   params->vision_images, params->vision_image_sizes,
                                   params->vision_image_count, params->base_url, params->api_key,
@@ -919,7 +967,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
             empty[0] = '\0';
             return empty;
          }
-         tool_loop_stash_final(params->session_id, &result,
+         tool_loop_stash_final(params, &result,
                                reasoning_provider_label(params->llm_type, params->cloud_provider));
          final_response = result.text;
          result.text = NULL; /* Transfer ownership to caller */
@@ -974,6 +1022,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          /* Make one more call with tools disabled (iteration = MAX forces no tools) */
          OLOG_INFO("Tool loop: Making final call without tools to force text response");
          memset(&result, 0, sizeof(result));
+         note_request(params, "", 0);
          rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0, params->base_url,
                                   params->api_key, params->model, params->chunk_callback,
                                   params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
@@ -983,7 +1032,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
             return NULL;
          }
 
-         tool_loop_stash_final(params->session_id, &result,
+         tool_loop_stash_final(params, &result,
                                reasoning_provider_label(params->llm_type, params->cloud_provider));
          final_response = result.text;
          result.text = NULL;

@@ -56,6 +56,15 @@ struct json_object;
  */
 int llm_history_rows_append(struct json_object *msg, struct json_object *out);
 
+/**
+ * @brief As llm_history_rows_append, without any stored blocks: the rows a
+ *        message is saved as once its reasoning no longer replays (a
+ *        compaction's summarized part)
+ *
+ * @return Rows appended
+ */
+int llm_history_rows_append_text(struct json_object *msg, struct json_object *out);
+
 #ifdef __cplusplus
 }
 #endif

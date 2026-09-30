@@ -65,7 +65,7 @@ static int parts_of_type(struct json_object *msg, const char *type, int *total_o
 /* Part of a tool exchange, in the OpenAI or Claude shape: a role "tool"
  * result, an assistant with tool_calls or tool_use parts, or a user message
  * with tool_result parts. */
-static bool is_tool_message(struct json_object *msg) {
+bool llm_compaction_is_tool_exchange(struct json_object *msg) {
    const char *role = role_of(msg);
    int total = 0;
    if (is(role, "tool")) {
@@ -95,10 +95,14 @@ int llm_compaction_keep_start(struct json_object *history, int start_idx, int ke
 
    /* Move back past the tool calls and results the cut would split, and the
     * request context between them (a directive, a loop note: it belongs to the
-    * turn it sits in), then onto the user message that started them. */
-   while (end_idx > start_idx &&
-          (is_tool_message(json_object_array_get_idx(history, end_idx - 1)) ||
-           llm_history_is_context(json_object_array_get_idx(history, end_idx - 1)))) {
+    * turn it sits in), then onto the user message that started them.  A
+    * question DAWN asked (a continuation's) starts a turn too. */
+   while (end_idx > start_idx) {
+      struct json_object *msg = json_object_array_get_idx(history, end_idx - 1);
+      if (!llm_compaction_is_tool_exchange(msg) &&
+          !(llm_history_is_context(msg) && !llm_history_is_question(msg))) {
+         break;
+      }
       end_idx--;
    }
    if (end_idx > start_idx &&
@@ -108,8 +112,7 @@ int llm_compaction_keep_start(struct json_object *history, int start_idx, int ke
    return end_idx;
 }
 
-/* @p msg's database row id, or 0. */
-static int64_t row_id_of(struct json_object *msg) {
+int64_t llm_compaction_row_id(struct json_object *msg) {
    struct json_object *id_obj = NULL;
    if (!msg || !json_object_object_get_ex(msg, "id", &id_obj)) {
       return 0;
@@ -127,7 +130,7 @@ void llm_compaction_summary_ids(struct json_object *history,
    int64_t last = 0;
    const int history_len = history ? (int)json_object_array_length(history) : 0;
    for (int i = start_idx; i < end_idx && i < history_len; i++) {
-      const int64_t id = row_id_of(json_object_array_get_idx(history, i));
+      const int64_t id = llm_compaction_row_id(json_object_array_get_idx(history, i));
       if (id > 0) {
          if (first == 0) {
             first = id;
@@ -189,7 +192,7 @@ struct json_object *llm_compaction_tail_call_ids(struct json_object *history,
    }
    int from = start_idx;
    for (int i = start_idx; i < end_idx; i++) {
-      if (row_id_of(json_object_array_get_idx(history, i)) > 0) {
+      if (llm_compaction_row_id(json_object_array_get_idx(history, i)) > 0) {
          from = i + 1; /* after the last message that has its row id */
       }
    }
@@ -279,7 +282,7 @@ int llm_history_drop_leading_results(struct json_object *history, int from, size
 int64_t llm_compaction_kept_first_id(struct json_object *history, int end_idx) {
    const int history_len = history ? (int)json_object_array_length(history) : 0;
    for (int i = end_idx < 0 ? 0 : end_idx; i < history_len; i++) {
-      const int64_t id = row_id_of(json_object_array_get_idx(history, i));
+      const int64_t id = llm_compaction_row_id(json_object_array_get_idx(history, i));
       if (id > 0) {
          return id;
       }

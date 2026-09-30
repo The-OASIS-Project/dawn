@@ -469,6 +469,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    static const char *const k_end_memory[] = { "end", "user", "memory", NULL };
    static const char *const k_turn[] = { "turn", "context", NULL };
    static const char *const k_memory[] = { "user", "memory", NULL };
+   static const char *const k_end_summary[] = { "end", "conversation", "summary", NULL };
+   static const char *const k_summary[] = { "conversation", "summary", NULL };
    static const char *const k_note[] = { "operator", "note", NULL };
    static const char *const k_updated[] = { "updated", "instructions", NULL };
    const char c = sh->s[i];
@@ -486,6 +488,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
          { k_end_memory, "- - END USER MEMORY (quoted)" },
          { k_turn, "- - TURN CONTEXT (quoted)" },
          { k_memory, "- - USER MEMORY (quoted)" },
+         { k_end_summary, "- - END CONVERSATION SUMMARY (quoted)" },
+         { k_summary, "- - CONVERSATION SUMMARY (quoted)" },
       };
       for (size_t k = 0; k < sizeof(k_frames) / sizeof(k_frames[0]); k++) {
          const size_t e = words_at(sh, w, k_frames[k].words);

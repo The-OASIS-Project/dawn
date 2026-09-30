@@ -122,6 +122,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v93.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v94.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v95.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v96.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -513,6 +514,15 @@ dawn_add_unit_test(test_llm_context_text
 dawn_add_unit_test(test_session_prefix
    SOURCES test_session_prefix.c
            ${SRC_ROOT}/src/core/session_prefix.c
+           ${SRC_ROOT}/src/core/session_compaction.c
+           ${SRC_ROOT}/src/llm/llm_compaction.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
            ${SRC_ROOT}/src/core/prefix_message.c
            ${SRC_ROOT}/src/core/prefix_in_force.c
            ${SRC_ROOT}/src/core/prompt_sections.c
@@ -541,12 +551,6 @@ dawn_add_unit_test(test_turn_queue
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
-dawn_add_unit_test(test_llm_context_merge
-   SOURCES test_llm_context_merge.c
-           ${SRC_ROOT}/src/llm/llm_context_merge.c
-   LIBS    unity ${JSONC_LIBRARIES}
-   LABEL   ci)
-
 dawn_add_unit_test(test_memory_embeddings
    SOURCES test_memory_embeddings.c test_memory_embeddings_stub.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
@@ -560,10 +564,16 @@ dawn_add_unit_test(test_memory_embeddings
    LABEL   ci)
 
 dawn_add_unit_test(test_context_compaction
-   SOURCES test_context_compaction.c test_context_compaction_impl.c
+   SOURCES test_context_compaction.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_compaction.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
+           ${SRC_ROOT}/src/core/strbuf.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1723,9 +1733,9 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_context.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_compaction.c
            ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
-           ${SRC_ROOT}/src/llm/llm_context_merge.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
@@ -1818,9 +1828,9 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_context.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_compaction.c
            ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
-           ${SRC_ROOT}/src/llm/llm_context_merge.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c

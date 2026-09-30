@@ -144,6 +144,10 @@ bool llm_cache_monitor_in_side_call(void) {
           !llm_call_kind_sets_context((llm_call_kind_t)t_kind);
 }
 
+bool llm_cache_monitor_one_off_call(void) {
+   return t_kind == LLM_CALL_COMPACTION;
+}
+
 void llm_cache_monitor_set_iteration(int iteration) {
    t_iteration = iteration;
 }

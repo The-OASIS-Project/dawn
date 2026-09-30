@@ -33,6 +33,7 @@
 #include "config/dawn_config.h"
 #include "core/focus/focus_handles.h"
 #include "core/prefix_in_force.h"
+#include "core/session_compaction.h"
 #include "core/session_history.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
@@ -49,30 +50,110 @@ static const char *row_field(struct json_object *row, const char *key) {
    return json_object_object_get_ex(row, key, &v) ? json_object_get_string(v) : NULL;
 }
 
-/* Write one row (llm_history_rows_append's shape), a context row naming
- * @p question_id; its id, or 0. */
-static int64_t save_row(int64_t conv_id,
-                        int user_id,
-                        struct json_object *row,
-                        int64_t question_id) {
-   struct json_object *calls = NULL;
-   json_object_object_get_ex(row, "tool_calls", &calls);
-   const conv_message_row_t db_row = {
-      .role = row_field(row, "role"),
-      .content = row_field(row, "content"),
-      .tool_calls = calls ? json_object_to_json_string_ext(calls, JSON_C_TO_STRING_PLAIN) : NULL,
-      .tool_call_id = row_field(row, "tool_call_id"),
-      .llm_blocks = row_field(row, LLM_HISTORY_ROW_STORED_KEY),
-      .kind = row_field(row, MESSAGE_KIND_KEY),
-      .context_of = llm_history_kind_of(row) != MESSAGE_KIND_NONE ? question_id : 0,
-   };
-   int64_t id = 0;
-   if (conv_db_add_row(conv_id, user_id, &db_row, &id) != AUTH_DB_SUCCESS) {
-      OLOG_WARNING("voice save: a %s row not saved to conv %lld", db_row.role ? db_row.role : "?",
-                   (long long)conv_id);
-      return 0;
+/* A voice save's rows, written in one transaction: what a compaction took out
+ * first, then the history. */
+typedef struct {
+   conv_message_row_t *rows;
+   int n;
+   int cap;
+   struct json_object *keep; /* the row objects the rows' strings belong to */
+   struct {
+      struct json_object *msg; /* stamped with its row id; NULL = not */
+      int row;                 /* its row: the question's, not its context's */
+   } * stamps;
+   int n_stamps;
+   int cap_stamps;
+} row_batch_t;
+
+static bool batch_grow(row_batch_t *b) {
+   if (b->n < b->cap) {
+      return true;
    }
-   return id;
+   const int cap = b->cap ? b->cap * 2 : 64;
+   conv_message_row_t *rows = realloc(b->rows, (size_t)cap * sizeof(*rows));
+   if (!rows) {
+      return false;
+   }
+   b->rows = rows;
+   b->cap = cap;
+   return true;
+}
+
+static bool batch_stamp(row_batch_t *b, struct json_object *obj, int row) {
+   if (b->n_stamps == b->cap_stamps) {
+      const int cap = b->cap_stamps ? b->cap_stamps * 2 : 32;
+      void *grown = realloc(b->stamps, (size_t)cap * sizeof(*b->stamps));
+      if (!grown) {
+         return false;
+      }
+      b->stamps = grown;
+      b->cap_stamps = cap;
+   }
+   b->stamps[b->n_stamps].msg = obj;
+   b->stamps[b->n_stamps].row = row;
+   b->n_stamps++;
+   return true;
+}
+
+/* Add @p rows (llm_history_rows_append's shape; taken) as one message's rows:
+ * @p msg is stamped with its own row's id (may be NULL), or, with @p each_row,
+ * every row object with its own (the rows are the messages, as a compaction
+ * kept them: memory extraction reads them, and trusts only saved rows). */
+static bool batch_add(row_batch_t *b,
+                      struct json_object *rows,
+                      struct json_object *msg,
+                      bool each_row) {
+   json_object_array_add(b->keep, rows);
+   const int n = (int)json_object_array_length(rows);
+   int question = 0; /* 1-based, in the batch */
+   const int first = b->n;
+   for (int r = 0; r < n; r++) {
+      struct json_object *row = json_object_array_get_idx(rows, r);
+      if (!batch_grow(b)) {
+         return false;
+      }
+      struct json_object *calls = NULL;
+      json_object_object_get_ex(row, "tool_calls", &calls);
+      const message_kind_t kind = llm_history_kind_of(row);
+      /* A question's context rows follow its own row and name it. */
+      b->rows[b->n] = (conv_message_row_t){
+         .role = row_field(row, "role"),
+         .content = row_field(row, "content"),
+         .tool_calls = calls ? json_object_to_json_string_ext(calls, JSON_C_TO_STRING_PLAIN) : NULL,
+         .tool_call_id = row_field(row, "tool_call_id"),
+         .llm_blocks = row_field(row, LLM_HISTORY_ROW_STORED_KEY),
+         .kind = row_field(row, MESSAGE_KIND_KEY),
+         .context_of_row = kind != MESSAGE_KIND_NONE ? question : 0,
+      };
+      b->n++;
+      if (each_row && !batch_stamp(b, row, b->n - 1)) {
+         return false;
+      }
+      if (question == 0 && (kind == MESSAGE_KIND_NONE || kind == MESSAGE_KIND_ENVELOPE)) {
+         question = b->n;
+      }
+   }
+   if (!msg || b->n == first) {
+      return true;
+   }
+   return batch_stamp(b, msg, question > 0 ? question - 1 : first);
+}
+
+static void batch_free(row_batch_t *b) {
+   free(b->rows);
+   free(b->stamps);
+   json_object_put(b->keep);
+   memset(b, 0, sizeof(*b));
+}
+
+/* Whether @p msg is saved as rows: the prompt isn't (the frozen prefix is saved
+ * with the conversation); a system message with a kind (a directive, an
+ * instruction change) is. */
+static bool is_saved_message(struct json_object *msg) {
+   struct json_object *role_obj = NULL;
+   return msg && json_object_object_get_ex(msg, "role", &role_obj) &&
+          !(strcmp(json_object_get_string(role_obj), "system") == 0 &&
+            llm_history_kind_of(msg) == MESSAGE_KIND_NONE);
 }
 
 /* Seconds before an idle voice save that couldn't run (a turn in progress, a
@@ -153,6 +234,7 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
    if (user_id <= 0) {
       session_fact_source_t dropped[SESSION_PENDING_FACT_SOURCES_MAX];
       (void)session_take_fact_sources_locked(session, dropped);
+      /* What a compaction took out goes with it, unsaved. */
       session_new_context_locked(session, next_prompt);
       session->last_interaction_complete = 0;
       pthread_mutex_unlock(&session->history_mutex);
@@ -195,64 +277,97 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
       return 1;
    }
 
-   /* Save each message as the rows it becomes (llm_history_rows_append): the
-    * text and tool columns every reader expects, and an assistant turn's
-    * stored blocks, so a reloaded voice conversation replays as it ran. */
-   struct json_object *rows = json_object_new_array();
-   for (int i = 0; rows && i < msg_count; i++) {
+   /* Each message as the rows it becomes (llm_history_rows_append): the text
+    * and tool columns every reader expects, and an assistant turn's stored
+    * blocks, so a reloaded voice conversation replays as it ran.  What a
+    * compaction took out comes first (its rows, kept at the compaction): they
+    * are summarized, the kept ones follow the watermark (session_compaction.h).
+    * One transaction: a conversation saved whole or not at all. */
+   session_compaction_t *cmp = &session->compaction;
+   const int n_removed = cmp->voice_removed ? (int)json_object_array_length(cmp->voice_removed) : 0;
+   row_batch_t batch = { .keep = json_object_new_array() };
+   bool built = batch.keep != NULL;
+   for (int i = 0; built && i < n_removed; i++) {
+      built = batch_add(&batch, json_object_get(json_object_array_get_idx(cmp->voice_removed, i)),
+                        NULL, true);
+   }
+   const int removed_rows = batch.n;
+   for (int i = 0; built && i < msg_count; i++) {
       struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
-      struct json_object *role_obj = NULL;
-      /* The prompt isn't a row (the frozen prefix is saved with the
-       * conversation, below); a system message with a kind (a directive, an
-       * instruction change) is. */
-      if (!msg || !json_object_object_get_ex(msg, "role", &role_obj) ||
-          (strcmp(json_object_get_string(role_obj), "system") == 0 &&
-           llm_history_kind_of(msg) == MESSAGE_KIND_NONE)) {
+      if (!is_saved_message(msg)) {
          continue;
       }
-      const int from = (int)json_object_array_length(rows);
-      const int added = llm_history_rows_append(msg, rows);
-      /* The message takes its own row's id: the question's, not its context's. */
-      int64_t msg_id = 0;
-      int64_t first_id = 0;
-      for (int r = from; r < from + added; r++) {
-         struct json_object *row = json_object_array_get_idx(rows, r);
-         /* A question's context rows follow its own row and name it. */
-         const int64_t row_id = save_row(conv_id, user_id, row, msg_id);
-         if (first_id == 0) {
-            first_id = row_id;
-         }
-         const message_kind_t kind = llm_history_kind_of(row);
-         if (msg_id == 0 && (kind == MESSAGE_KIND_NONE || kind == MESSAGE_KIND_ENVELOPE)) {
-            msg_id = row_id;
-         }
-      }
-      if (msg_id == 0) {
-         msg_id = first_id;
-      }
-      if (msg_id > 0) {
-         json_object_object_add(msg, "id", json_object_new_int64(msg_id));
+      struct json_object *rows = json_object_new_array();
+      built = rows && llm_history_rows_append(msg, rows) >= 0 &&
+              batch_add(&batch, rows, msg, false);
+      if (!rows) {
+         built = false;
       }
    }
-   json_object_put(rows);
+   int64_t *ids = built && batch.n > 0 ? calloc((size_t)batch.n, sizeof(*ids)) : NULL;
+   int saved = !built || (batch.n > 0 && !ids)
+                   ? AUTH_DB_FAILURE
+                   : conv_db_add_rows(conv_id, user_id, batch.rows, batch.n, ids);
+   int64_t removed_first = removed_rows > 0 && ids ? ids[0] : 0;
+   int64_t watermark = 0;
+   for (int i = 0; saved == AUTH_DB_SUCCESS && i < removed_rows; i++) {
+      if (ids[i] > watermark) {
+         watermark = ids[i];
+      }
+   }
    /* The conversation's frozen prompt and tool set, as its turns were sent,
-    * and what is in force (the rows above include what each turn added). */
+    * what is in force (the rows above include what each turn added), and the
+    * compaction: without them a reload would replay what was summarized, so
+    * they too are saved or the conversation isn't. */
    struct json_object *first = json_object_array_get_idx(session->conversation_history, 0);
-   if (session_prefix_is_frozen(session->conversation_history)) {
+   const bool compacted = cmp->voice_summary && watermark > 0;
+   if (saved == AUTH_DB_SUCCESS &&
+       (session_prefix_is_frozen(session->conversation_history) || compacted)) {
+      const bool frozen = session_prefix_is_frozen(session->conversation_history);
       struct json_object *tools = NULL;
-      json_object_object_get_ex(first, LLM_HISTORY_TOOLS_KEY, &tools);
-      char *in_force = prefix_in_force_json(session->conversation_history);
+      if (frozen) {
+         json_object_object_get_ex(first, LLM_HISTORY_TOOLS_KEY, &tools);
+      }
+      char *in_force = frozen ? prefix_in_force_json(session->conversation_history) : NULL;
       const conv_turn_save_t save = {
-         .prefix = row_field(first, "content"),
+         .prefix = frozen ? row_field(first, "content") : NULL,
          .tools = tools ? json_object_to_json_string_ext(tools, JSON_C_TO_STRING_PLAIN) : NULL,
          .in_force = in_force,
+         .compaction_summary = compacted ? cmp->voice_summary : NULL,
+         .compaction_first_id = removed_first,
+         .compaction_last_id = compacted ? watermark : 0,
+         .compaction_level = cmp->voice_level,
       };
-      if (conv_db_save_turn(conv_id, user_id, &save, NULL) != AUTH_DB_SUCCESS) {
-         OLOG_WARNING("voice save: conv %lld's prompt not saved (its next turn freezes one)",
-                      (long long)conv_id);
-      }
+      const int kept = conv_db_save_turn(conv_id, user_id, &save, NULL);
       free(in_force);
+      if (kept == AUTH_DB_INVALID) {
+         /* It can never be stored (a prompt past the size a conversation keeps):
+          * the conversation is kept without it, whole, rather than never saved.
+          * Its rows then replay as they are, and the next seam compacts them. */
+         OLOG_ERROR("Session %u: conv %lld's prompt or compaction can't be stored; saved "
+                    "without them",
+                    session->session_id, (long long)conv_id);
+      } else {
+         saved = kept;
+      }
    }
+   if (saved != AUTH_DB_SUCCESS) {
+      OLOG_ERROR("Session %u: voice conversation %lld not saved (%d); tried again later",
+                 session->session_id, (long long)conv_id, saved);
+      (void)conv_db_delete(conv_id, user_id);
+      batch_free(&batch);
+      free(ids);
+      pthread_mutex_unlock(&session->history_mutex);
+      voice_save_later(session, false);
+      free(next_prompt);
+      return 1;
+   }
+   for (int i = 0; i < batch.n_stamps; i++) {
+      json_object_object_add(batch.stamps[i].msg, "id",
+                             json_object_new_int64(ids[batch.stamps[i].row]));
+   }
+   batch_free(&batch);
+   free(ids);
    /* The handles its turn contexts number items with ([M3]), so a reopened
     * conversation keeps them and gives new items new ones. */
    (void)focus_handles_save_locked(session, conv_id, user_id);
@@ -274,10 +389,24 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
     * memory-extraction LLM (which may be Claude/Gemini/local).  Extraction
     * starts after the lock is released: building its fallback reads the LLM
     * settings under llm_config_mutex, never held together with this one. */
-   struct json_object *history_copy = g_config.memory.enabled ? llm_history_strip_internal(
-                                                                    session->conversation_history)
-                                                              : NULL;
-
+   /* What a compaction took out is part of what the conversation taught. */
+   struct json_object *history_copy = NULL;
+   if (g_config.memory.enabled) {
+      struct json_object *whole = json_object_new_array();
+      for (int i = 0; whole && i < n_removed; i++) {
+         struct json_object *rows = json_object_array_get_idx(cmp->voice_removed, i);
+         const size_t n = json_object_array_length(rows);
+         for (size_t r = 0; r < n; r++) {
+            json_object_array_add(whole, json_object_get(json_object_array_get_idx(rows, r)));
+         }
+      }
+      for (int i = 0; whole && i < msg_count; i++) {
+         json_object_array_add(
+             whole, json_object_get(json_object_array_get_idx(session->conversation_history, i)));
+      }
+      history_copy = whole ? llm_history_strip_internal(whole) : NULL;
+      json_object_put(whole);
+   }
    /* Start the next context in the same critical section, so no turn can begin
     * on the history just saved (its exchange would be saved twice, or lost),
     * taking the facts the voice turns saved to memory: they were learned in

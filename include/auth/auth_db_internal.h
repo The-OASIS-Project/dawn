@@ -65,7 +65,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 95
+#define AUTH_DB_SCHEMA_VERSION 96
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -768,6 +768,13 @@ int auth_db_migrations_v94(sqlite3 *db);
  */
 int auth_db_migrations_v95(sqlite3 *db);
 
+/**
+ * @brief v96 migration: compacted conversations' reasoning floor to their
+ *        newest row (the summary's shape changed).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v96(sqlite3 *db);
+
 /** Whether @p table has column @p col (a migration's probe before an ALTER;
  *  auth_db_migrations.c). */
 bool auth_db_column_exists(sqlite3 *db, const char *table, const char *col);
@@ -823,6 +830,11 @@ void auth_db_messages_finalize(void);
  *  AUTH_DB_NOT_FOUND or AUTH_DB_FAILURE.  Caller holds the lock
  *  (auth_db_focus_handles.c). */
 int conv_db_owned_locked(int64_t conv_id, int user_id);
+
+/** Clear the stored blocks of conversation @p conv_id's rows at or below
+ *  @p watermark (out of every reload's reach), in batches, each under the lock
+ *  (auth_db_messages.c; the sweep retries what this misses). */
+void conv_db_clear_compacted_blocks(int64_t conv_id, int64_t watermark);
 
 /**
  * @brief Withdraw, from conversation @p conv_id's context rows saved at or

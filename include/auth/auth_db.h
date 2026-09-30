@@ -2173,25 +2173,6 @@ int conv_db_set_compaction_watermark(int64_t conv_id,
                                      int64_t watermark_msg_id);
 
 /**
- * @brief Format the reload context line for a (watermarked) conversation.
- *
- * Writes a `[COMPACTED conv=N msgs=X-Y node=Z depth=D] Previous conversation
- * context (summarized): <summary>` marker into @out when a summary node exists
- * (so a reloaded LLM keeps a context_expand handle to the compacted originals),
- * else a plain summary line. @out is always NUL-terminated. Empty @summary
- * yields an empty string.
- *
- * @param conv_id Conversation id (for summary-node lookup + the marker).
- * @param summary The conversation's compaction_summary text (may be NULL).
- * @param out Output buffer.
- * @param out_len Size of @out.
- */
-void conv_db_format_compaction_context(int64_t conv_id,
-                                       const char *summary,
-                                       char *out,
-                                       size_t out_len);
-
-/**
  * @brief Lock LLM settings for a conversation
  *
  * Updates LLM settings only if message_count is 0 (first message lock).
@@ -2493,14 +2474,6 @@ typedef struct {
    time_t created_at;
 } summary_node_t;
 
-/**
- * @brief Create a summary node after compaction
- *
- * @param node Node data (id field is ignored, set on output)
- * @param node_id_out Output: inserted node ID
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
- */
-int summary_node_create(const summary_node_t *node, int64_t *node_id_out);
 
 /**
  * @brief Get a summary node by ID
@@ -2514,9 +2487,8 @@ int summary_node_get(int64_t node_id, summary_node_t *node_out);
 /**
  * @brief Get the most recent summary node for a conversation
  *
- * Queries summary_nodes for the given conversation ID only.
- * The caller (llm_context_compact) handles continuation chain
- * traversal via continued_from if no node is found.
+ * Queries summary_nodes for the given conversation ID only (the
+ * conversation it continues isn't searched).
  *
  * @param conv_id Conversation ID to query
  * @param node_out Output: latest node (summary_text is heap-allocated, caller frees)
