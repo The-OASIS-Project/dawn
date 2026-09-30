@@ -105,8 +105,11 @@ int mcp_bridge_reconnect(int *connected_out);
  *
  * @param args_json  Arguments object as JSON (may be NULL → {}).
  * @param timeout_ms Per-call timeout (0 = client default).
- * @param result_out On SUCCESS, malloc'd result JSON (caller frees); may be NULL.
- * @return SUCCESS or FAILURE.
+ * @param result_out Set to the tool's result as a model reads it (mcp_result.h:
+ *                   JSON only when the tool sent JSON), malloc'd. Also set on
+ *                   FAILURE when the tool itself reported the failure (isError):
+ *                   its text. Always free it. May be NULL.
+ * @return SUCCESS, or FAILURE (including a tool's own isError).
  */
 int mcp_bridge_call_tool(const char *server_alias,
                          const char *tool_name,

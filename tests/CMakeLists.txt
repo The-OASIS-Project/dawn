@@ -217,9 +217,17 @@ dawn_add_unit_test(test_mcp_transport
 dawn_add_unit_test(test_mcp_client
    SOURCES test_mcp_client.c
            ${SRC_ROOT}/src/tools/mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_result.c
            ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
            ${SRC_ROOT}/src/llm/sse_parser.c
    LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
+# An MCP tools/call result as the model reads it (pure, no network).
+dawn_add_unit_test(test_mcp_result
+   SOURCES test_mcp_result.c
+           ${SRC_ROOT}/src/tools/mcp_result.c
+   LIBS    unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # MCP JSON Schema -> treg_param_t translator (pure functions, no network).
@@ -265,6 +273,7 @@ dawn_add_unit_test(test_mcp_bridge
            ${SRC_ROOT}/src/tools/mcp_bridge_tool.c
            ${SRC_ROOT}/src/tools/mcp_bridge_schema.c
            ${SRC_ROOT}/src/tools/mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_result.c
            ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/auth/auth_db_mcp.c

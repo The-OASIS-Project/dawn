@@ -479,6 +479,26 @@ void test_a_failed_write_keeps_the_rows(void) {
    TEST_ASSERT_EQUAL_INT(4, s_written_count); /* nothing written twice */
 }
 
+/* A request sent once and never read back (a compaction's summary, a memory
+ * extraction) carries no conversation breakpoint; a conversation's own calls,
+ * and a summarizer or briefing, keep theirs. */
+static void test_one_off_calls(void) {
+   TEST_ASSERT_FALSE(llm_cache_monitor_one_off_call());
+   static const llm_call_kind_t k_one_off[] = { LLM_CALL_COMPACTION, LLM_CALL_EXTRACTION };
+   static const llm_call_kind_t k_kept[] = { LLM_CALL_TURN, LLM_CALL_TOOL_ITER, LLM_CALL_JOB,
+                                             LLM_CALL_BRIEFING, LLM_CALL_SUMMARIZER };
+   for (size_t i = 0; i < sizeof(k_one_off) / sizeof(k_one_off[0]); i++) {
+      const int prev = llm_cache_monitor_push_kind(k_one_off[i]);
+      TEST_ASSERT_TRUE(llm_cache_monitor_one_off_call());
+      llm_cache_monitor_pop_kind(prev);
+   }
+   for (size_t i = 0; i < sizeof(k_kept) / sizeof(k_kept[0]); i++) {
+      const int prev = llm_cache_monitor_push_kind(k_kept[i]);
+      TEST_ASSERT_FALSE(llm_cache_monitor_one_off_call());
+      llm_cache_monitor_pop_kind(prev);
+   }
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_prefix_hash_covers_tools_and_stable_system_only);
@@ -497,5 +517,6 @@ int main(void) {
    RUN_TEST(test_a_full_queue_keeps_the_newest);
    RUN_TEST(test_a_failed_write_keeps_the_rows);
    RUN_TEST(test_diagnostics_chain_follows_the_conversation);
+   RUN_TEST(test_one_off_calls);
    return UNITY_END();
 }

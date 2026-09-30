@@ -274,7 +274,10 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
    if (should_respond != NULL) {
       *should_respond = 1;
    }
-   if (rc == SUCCESS && result != NULL) {
+   /* The tool's own failure (isError) is still its text: the model reads why,
+    * marked as an error. */
+   const bool tool_error = rc == MCP_ERR_TOOL && result != NULL;
+   if ((rc == SUCCESS || tool_error) && result != NULL) {
 #ifdef DAWN_ENABLE_CODE_PROJECTS
       /* Strip cbm's graph-name prefix and absolute source_root paths out of the
        * result so no slug or filesystem layout reaches the LLM (symmetric with
@@ -287,6 +290,15 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
          }
       }
 #endif
+      if (tool_error) {
+         const size_t len = strlen(TOOL_RESULT_ERROR_MARK) + strlen(result) + 1;
+         char *marked = malloc(len);
+         if (marked != NULL) {
+            snprintf(marked, len, "%s%s", TOOL_RESULT_ERROR_MARK, result);
+         }
+         free(result);
+         return marked ? marked : strdup(TOOL_RESULT_ERROR_MARK "MCP tool reported an error.");
+      }
       return result;
    }
    free(result);

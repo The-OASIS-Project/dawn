@@ -138,9 +138,14 @@ static void mock_respond(mock_t *s, struct json_object *req) {
       pthread_mutex_lock(&s->mtx);
       s->toolscall_count++;
       pthread_mutex_unlock(&s->mtx);
+      /* A real tools/call result: content parts, and isError for a tool that
+       * fails on purpose. */
+      const bool fails = strstr(called, "fail") != NULL;
       snprintf(resp, sizeof(resp),
-               "{\"jsonrpc\":\"2.0\",\"id\":%lld,\"result\":{\"called\":\"%s\"}}", (long long)id,
-               called);
+               "{\"jsonrpc\":\"2.0\",\"id\":%lld,\"result\":{\"content\":[{\"type\":\"text\","
+               "\"text\":\"%s %s\"}],\"isError\":%s}}",
+               (long long)id, fails ? "failed on purpose:" : "called", called,
+               fails ? "true" : "false");
       mock_write(s, resp);
    }
 }
@@ -371,7 +376,29 @@ static void test_dispatch_forwards_toolscall(void) {
    TEST_ASSERT_NOT_NULL(result);
    TEST_ASSERT_EQUAL_INT(1, should_respond);
    TEST_ASSERT_TRUE(mock_toolscall_count(&g_srv) >= 1);
-   TEST_ASSERT_NOT_NULL(strstr(result, "search_graph")); /* server echoed the name */
+   /* The model reads the tool's text, not the JSON-RPC envelope around it. */
+   TEST_ASSERT_EQUAL_STRING("called search_graph", result);
+   free(result);
+   session_set_command_context(NULL);
+   free(s);
+}
+
+/* A tool's own failure (isError) reaches the model as its text, marked an error. */
+static void test_dispatch_marks_a_tool_error(void) {
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_mcp_grant(g_admin_uid, "cbm"));
+   mcp_param_set_t params = empty_params();
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         mcp_bridge_register_tool(g_client, "cbm", "fail_tool", "cbm_fail_tool",
+                                                  "desc", &params, false));
+   const tool_metadata_t *meta = tool_registry_find("cbm_fail_tool");
+   TEST_ASSERT_NOT_NULL(meta);
+   session_t *s = push_session(g_admin_uid);
+   int should_respond = 0;
+   char *result = meta->callback(NULL, "{}", &should_respond);
+   TEST_ASSERT_NOT_NULL(result);
+   TEST_ASSERT_EQUAL_INT(0,
+                         strncmp(result, TOOL_RESULT_ERROR_MARK, strlen(TOOL_RESULT_ERROR_MARK)));
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(result, "failed on purpose: fail_tool"), result);
    free(result);
    session_set_command_context(NULL);
    free(s);
@@ -460,6 +487,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_register_into_registry);
    RUN_TEST(test_dispatch_forwards_toolscall);
+   RUN_TEST(test_dispatch_marks_a_tool_error);
    RUN_TEST(test_dispatch_denies_without_grant);
    RUN_TEST(test_dispatch_denies_without_session);
    RUN_TEST(test_dangerous_tool_marked);

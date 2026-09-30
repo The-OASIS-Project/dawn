@@ -41,6 +41,7 @@
 #define MCP_ERR_PROTOCOL 6     /**< Handshake / protocol-version failure. */
 #define MCP_ERR_RPC 7          /**< Server returned a JSON-RPC error object. */
 #define MCP_ERR_DISABLED 8     /**< Client disabled after repeated failures. */
+#define MCP_ERR_TOOL 9 /**< The tool reported a failure (isError); the result is its text. */
 
 /** Lifecycle states (see the FSM diagram in mcp_bridge.h). */
 typedef enum {
@@ -126,8 +127,12 @@ void mcp_client_reset(mcp_client_t *c);
  * @param timeout_ms    Per-call timeout (0 = client default).
  * @param progress_cb   Optional progress callback (NULL to disable).
  * @param progress_user Context for @p progress_cb.
- * @param result_out    On SUCCESS, set to a malloc'd JSON string of the
- *                       "result" value (caller frees). NULL-initialized first.
+ * @param result_out    On SUCCESS, set to a malloc'd string (caller frees):
+ *                       for tools/call, the result as a model reads it
+ *                       (mcp_result.h); for any other method, the JSON of the
+ *                       "result" value.  On MCP_ERR_TOOL (a tools/call the tool
+ *                       itself reports as failed), set to its text.
+ *                       NULL-initialized first.
  * @return SUCCESS or an MCP_ERR_* code.
  */
 int mcp_client_call(mcp_client_t *c,

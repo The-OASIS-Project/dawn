@@ -114,24 +114,12 @@ static char *replace_all(const char *s, const char *needle, const char *repl) {
 /* Parse cbm's list_projects output, intersect with DAWN's rows, and build a fresh
  * per-project map. @rows/@nrows are DAWN's projects (already snapshotted). */
 static void build_map_from_cbm(const char *cbm_result, const code_project_t *rows, int nrows) {
-   /* cbm wraps tool output as MCP content: {"content":[{"text":"<json>"}]} */
-   struct json_object *outer = json_tokener_parse(cbm_result);
-   if (outer == NULL) {
+   /* The tool's payload (the MCP client unwraps the tools/call result:
+    * mcp_result.h): cbm's own JSON. */
+   struct json_object *inner = json_tokener_parse(cbm_result);
+   if (inner == NULL) {
+      OLOG_WARNING("code_project namemap: cbm's project list isn't JSON; map not updated");
       return;
-   }
-   struct json_object *content = NULL;
-   struct json_object *inner = NULL;
-   const char *inner_str = NULL;
-   if (json_object_object_get_ex(outer, "content", &content) &&
-       json_object_is_type(content, json_type_array) && json_object_array_length(content) > 0) {
-      struct json_object *c0 = json_object_array_get_idx(content, 0);
-      struct json_object *text = NULL;
-      if (c0 != NULL && json_object_object_get_ex(c0, "text", &text)) {
-         inner_str = json_object_get_string(text);
-      }
-   }
-   if (inner_str != NULL) {
-      inner = json_tokener_parse(inner_str);
    }
 
    cp_map_entry_t tmp[CODE_PROJECTS_MAX];
@@ -176,10 +164,7 @@ static void build_map_from_cbm(const char *cbm_result, const code_project_t *row
    pthread_mutex_unlock(&s_mtx);
    OLOG_INFO("code_project namemap: captured %d project mapping(s)", tn);
 
-   if (inner != NULL) {
-      json_object_put(inner);
-   }
-   json_object_put(outer);
+   json_object_put(inner);
 }
 
 void code_project_namemap_capture(void) {

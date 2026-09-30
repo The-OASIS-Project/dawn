@@ -323,6 +323,202 @@ static void shadow_free(shadow_t *sh) {
    memset(sh, 0, sizeof(*sh));
 }
 
+/* HTML named character references a reader decodes to ASCII punctuation (the
+ * characters DAWN's framing is made of, or what the shadow folds them to) or
+ * a space.  A legacy one is also read in capitals and without its ';', as
+ * browsers do. */
+static const struct {
+   const char *name; /* between '&' and ';' */
+   char c;
+   bool legacy;
+} k_named_refs[] = {
+   { "lt", '<', true },      { "gt", '>', true },        { "amp", '&', true },
+   { "quot", '"', true },    { "nbsp", ' ', true },      { "lsqb", '[', false },
+   { "lbrack", '[', false }, { "rsqb", ']', false },     { "rbrack", ']', false },
+   { "lpar", '(', false },   { "rpar", ')', false },     { "lcub", '{', false },
+   { "lbrace", '{', false }, { "rcub", '}', false },     { "rbrace", '}', false },
+   { "vert", '|', false },   { "verbar", '|', false },   { "colon", ':', false },
+   { "sol", '/', false },    { "period", '.', false },   { "comma", ',', false },
+   { "lowbar", '_', false }, { "ast", '*', false },      { "midast", '*', false },
+   { "equals", '=', false }, { "num", '#', false },      { "tilde", '~', false },
+   { "hyphen", '-', false }, { "dash", '-', false },     { "minus", '-', false },
+   { "ndash", '-', false },  { "mdash", '-', false },    { "horbar", '-', false },
+   { "boxh", '-', false },   { "laquo", '[', false },    { "lsaquo", '[', false },
+   { "lang", '[', false },   { "raquo", ']', false },    { "rsaquo", ']', false },
+   { "rang", ']', false },   { "excl", '!', false },     { "apos", '\'', false },
+   { "Tab", '\t', false },   { "NewLine", '\n', false },
+};
+
+/* What HTML reads "&#128;" through "&#159;" as: Windows-1252, not the C1
+ * controls those numbers name (0: undefined there). */
+static const unsigned short k_cp1252[32] = {
+   0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+   0x2039, 0x0152, 0,      0x017D, 0,      0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+   0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
+};
+
+/* A code point as UTF-8 into @p out (the shadow's room for it is the escape's
+ * length, never less: see shadow_escape); its length. */
+static size_t utf8_put(unsigned cp, char *out) {
+   if (cp < 0x80) {
+      out[0] = (char)cp;
+      return 1;
+   }
+   if (cp < 0x800) {
+      out[0] = (char)(0xC0 | (cp >> 6));
+      out[1] = (char)(0x80 | (cp & 0x3F));
+      return 2;
+   }
+   if (cp < 0x10000) {
+      out[0] = (char)(0xE0 | (cp >> 12));
+      out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+      out[2] = (char)(0x80 | (cp & 0x3F));
+      return 3;
+   }
+   out[0] = (char)(0xF0 | (cp >> 18));
+   out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+   out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+   out[3] = (char)(0x80 | (cp & 0x3F));
+   return 4;
+}
+
+/* @p n hex digits at @p p: their value, or -1 when any isn't one. */
+static long hex_n(const unsigned char *p, int n) {
+   long v = 0;
+   for (int i = 0; i < n; i++) {
+      if (!isxdigit(p[i])) {
+         return -1;
+      }
+      v = v * 16 + (isdigit(p[i]) ? p[i] - '0' : (tolower(p[i]) - 'a' + 10));
+   }
+   return v;
+}
+
+/* A numeric character reference at @p p ("&#N;", "&#xN;", the ';' optional
+ * as HTML reads it; leading zeros any number): its length and code point, or
+ * 0. */
+static size_t numeric_ref(const unsigned char *p, unsigned *cp) {
+   const bool hex = p[2] == 'x' || p[2] == 'X';
+   size_t i = hex ? 3 : 2;
+   while (p[i] == '0' && (hex ? isxdigit(p[i + 1]) : isdigit(p[i + 1]))) {
+      i++;
+   }
+   unsigned long v = 0;
+   size_t digits = 0;
+   for (; hex ? isxdigit(p[i]) : isdigit(p[i]); i++, digits++) {
+      if (digits == 7) {
+         return 0; /* past any code point */
+      }
+      v = v * (hex ? 16 : 10) + (isdigit(p[i]) ? p[i] - '0' : (tolower(p[i]) - 'a' + 10));
+   }
+   if (digits == 0 || v > 0x10FFFF) {
+      return 0;
+   }
+   if (p[i] == ';') {
+      i++;
+   }
+   if (v >= 0x80 && v <= 0x9F) {
+      v = k_cp1252[v - 0x80];
+      if (v == 0) {
+         return 0;
+      }
+   }
+   *cp = (unsigned)v;
+   return i;
+}
+
+/* A JSON, C or HTML character escape at @p p ("\\u005b", "\\U0000005b", a
+ * surrogate pair, "\\n", "\\/", "&#91;", "&#x5b", "&lsqb;"): its length, with
+ * what it reads as in the shadow written to @p out (@p out_len bytes: 0 for an
+ * invisible character; the UTF-8 of a letter the shadow folds, so an escaped
+ * lookalike reads as one); 0 when there is no such escape.  A reader, and a
+ * JSON parser, decodes these, so an imitation spelled with them is one.  Every
+ * escape is at least as long as what it writes, so the shadow never outgrows
+ * the text.  "%XX" is not one: URL encoding is everywhere in text and nobody
+ * reads it as the character. */
+static size_t shadow_escape(const unsigned char *p, char out[4], size_t *out_len) {
+   unsigned cp = 0;
+   size_t n = 0;
+   *out_len = 0;
+   if (p[0] == '\\') {
+      static const char k_short[] = "\\/\"nrtfb";
+      static const char k_means[] = "\\/\"\n\r\t\f";
+      const char *hit = p[1] ? strchr(k_short, p[1]) : NULL;
+      if (hit) {
+         const size_t k = (size_t)(hit - k_short);
+         if (k < sizeof(k_means) - 1) {
+            out[0] = k_means[k];
+            *out_len = 1;
+         }
+         return 2; /* "\\b" (backspace) reads as nothing */
+      }
+      if (p[1] == 'U' && hex_n(p + 2, 8) >= 0) {
+         cp = (unsigned)hex_n(p + 2, 8);
+         n = 10;
+      } else if ((p[1] == 'u' || p[1] == 'U') && hex_n(p + 2, 4) >= 0) {
+         cp = (unsigned)hex_n(p + 2, 4);
+         n = 6;
+         if (cp >= 0xD800 && cp <= 0xDBFF && p[6] == '\\' && (p[7] == 'u' || p[7] == 'U')) {
+            const long lo = hex_n(p + 8, 4);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+               cp = 0x10000 + ((cp - 0xD800) << 10) + (unsigned)(lo - 0xDC00);
+               n = 12;
+            }
+         }
+      } else {
+         return 0;
+      }
+   } else if (p[0] == '&' && p[1] == '#') {
+      n = numeric_ref(p, &cp);
+      if (n == 0) {
+         return 0;
+      }
+   } else if (p[0] == '&') {
+      for (size_t k = 0; k < sizeof(k_named_refs) / sizeof(k_named_refs[0]); k++) {
+         const char *name = k_named_refs[k].name;
+         const bool legacy = k_named_refs[k].legacy;
+         const size_t len = strlen(name);
+         const bool same = legacy ? strncasecmp((const char *)p + 1, name, len) == 0
+                                  : strncmp((const char *)p + 1, name, len) == 0;
+         if (!same) {
+            continue;
+         }
+         if (p[1 + len] == ';') {
+            out[0] = k_named_refs[k].c;
+            *out_len = 1;
+            return len + 2;
+         }
+         if (legacy) {
+            out[0] = k_named_refs[k].c;
+            *out_len = 1;
+            return len + 1;
+         }
+      }
+      return 0;
+   } else {
+      return 0;
+   }
+   if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+      return 0;
+   }
+   if (cp < 0x80) {
+      if (cp < 0x20 && cp != '\n' && cp != '\r' && cp != '\t' && cp != '\v' && cp != '\f') {
+         return 0;
+      }
+      out[0] = (char)cp;
+      *out_len = 1;
+      return n;
+   }
+   const int r = shadowed(cp);
+   if (r > 0) {
+      out[0] = (char)r;
+      *out_len = 1;
+   } else if (r < 0) {
+      *out_len = utf8_put(cp, out);
+   }
+   return n;
+}
+
 /* @p text's shadow (@p line: line breaks shown as spaces).  False on
  * allocation failure (or a text past 4 GiB). */
 static bool shadow_make(const char *text, bool line, shadow_t *sh) {
@@ -343,6 +539,18 @@ static bool shadow_make(const char *text, bool line, shadow_t *sh) {
    const unsigned char *p = (const unsigned char *)text;
    while (*p) {
       const uint32_t at = (uint32_t)(p - (const unsigned char *)text);
+      char decoded[4];
+      size_t decoded_len = 0;
+      const size_t en = shadow_escape(p, decoded, &decoded_len);
+      if (en > 0) {
+         /* The whole escape is where what it stands for came from. */
+         for (size_t k = 0; k < decoded_len; k++) {
+            sh->s[off] = decoded[k];
+            sh->src[off++] = at;
+         }
+         p += en;
+         continue;
+      }
       unsigned cp = *p;
       size_t n = 1;
       int r = -1;
@@ -512,7 +720,7 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    }
    size_t e = words_at(sh, i, k_updated);
    if (e > 0) {
-      *out = "Updated instructions (quoted)";
+      *out = "Updated (quoted) instructions"; /* split: it can't match again */
       return e;
    }
    e = tag_at(sh, i);

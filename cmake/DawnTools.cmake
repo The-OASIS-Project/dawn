@@ -463,6 +463,7 @@ if(DAWN_ENABLE_MCP_BRIDGE_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/mcp_bridge_tool.c
         src/tools/mcp_client.c
+        src/tools/mcp_result.c
         src/tools/mcp_transport_http_sse.c
         src/tools/mcp_bridge_schema.c
         src/auth/auth_db_mcp.c
