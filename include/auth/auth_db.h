@@ -805,14 +805,13 @@ int auth_db_run_cleanup(void);
 int auth_db_checkpoint(void);
 
 /**
- * @brief Passive WAL checkpoint (non-blocking).
+ * @brief Warn about any statement left mid-read on the connection (it keeps
+ *        the WAL from being checkpointed past its snapshot).
  *
- * Checkpoints as much of the WAL as possible without waiting.
- * Suitable for background maintenance as it won't block other operations.
- *
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ * Routine checkpoints run on the storage thread (auth_db_storage.h), off the
+ * global mutex; the maintenance loop calls this instead.
  */
-int auth_db_checkpoint_passive(void);
+void auth_db_check_leaked_reads(void);
 
 /* ============================================================================
  * Satellite Mappings

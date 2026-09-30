@@ -22,7 +22,7 @@
  *
  * Handles database maintenance operations:
  * - Cleanup of expired data (sessions, attempts, logs, metrics)
- * - WAL checkpointing (full and passive)
+ * - WAL checkpointing (full; routine checkpoints are the storage thread's)
  * - Database statistics
  * - VACUUM for space reclamation
  * - Secure backup with path validation
@@ -41,6 +41,7 @@
 #include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
+#include "auth/auth_db_storage.h"
 #include "auth/auth_db_withdraw.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -48,6 +49,10 @@
 /* Batches of compacted rows' blocks cleared per cleanup run (each batch is a
  * short hold of the lock); the rest wait for the next run. */
 #define BLOCK_SWEEP_BATCHES 32
+
+/* An admin checkpoint meeting the storage thread's retries for up to ~2 s. */
+#define CHECKPOINT_RETRIES 200
+#define CHECKPOINT_RETRY_US 10000
 
 /* Vacuum rate limit: once per 24 hours */
 #define VACUUM_COOLDOWN_SEC (24 * 60 * 60)
@@ -151,34 +156,31 @@ int auth_db_run_cleanup(void) {
 }
 
 int auth_db_checkpoint(void) {
-   pthread_mutex_lock(&s_db.mutex);
-
-   if (!s_db.initialized || !s_db.db) {
+   /* The storage thread may be checkpointing (SQLite answers BUSY at once
+    * for a second checkpoint, without its busy handler): retry briefly,
+    * without holding the mutex between tries. */
+   int rc = SQLITE_BUSY;
+   for (int i = 0; i < CHECKPOINT_RETRIES && rc == SQLITE_BUSY; i++) {
+      if (i > 0) {
+         usleep(CHECKPOINT_RETRY_US);
+      }
+      pthread_mutex_lock(&s_db.mutex);
+      if (!s_db.initialized || !s_db.db) {
+         pthread_mutex_unlock(&s_db.mutex);
+         return AUTH_DB_FAILURE;
+      }
+      rc = sqlite3_wal_checkpoint_v2(s_db.db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
       pthread_mutex_unlock(&s_db.mutex);
-      return AUTH_DB_FAILURE;
    }
-
-   int rc = sqlite3_wal_checkpoint_v2(s_db.db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
-
-   pthread_mutex_unlock(&s_db.mutex);
-
    return (rc == SQLITE_OK) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
-int auth_db_checkpoint_passive(void) {
+void auth_db_check_leaked_reads(void) {
    pthread_mutex_lock(&s_db.mutex);
-
-   if (!s_db.initialized || !s_db.db) {
-      pthread_mutex_unlock(&s_db.mutex);
-      return AUTH_DB_FAILURE;
+   if (s_db.initialized && s_db.db) {
+      auth_db_storage_check_leaked_reads_locked(s_db.db);
    }
-
-   /* PASSIVE: Checkpoint as much as possible without waiting */
-   int rc = sqlite3_wal_checkpoint_v2(s_db.db, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
-
    pthread_mutex_unlock(&s_db.mutex);
-
-   return (rc == SQLITE_OK) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
 /* =============================================================================

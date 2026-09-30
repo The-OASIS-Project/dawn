@@ -12,6 +12,40 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-30 — The database is rewritten once, then keeps itself compact
+
+**What changed.**
+- **A one-time rewrite at the first start.** DAWN converts `auth.db` to
+  incremental auto-vacuum with a single `VACUUM` when it starts. Measured on a
+  Jetson: about 0.8 seconds for 71 MB of data; larger databases take longer, and
+  startup waits for it. The rewrite is all-or-nothing: if it stops part way, the
+  file is as it was.
+- **It needs free disk space for the rewrite:** about the size of your data next
+  to the database (twice that when the database is over 512 MB, half of it in
+  your temp directory). Without the room, DAWN skips the conversion, logs
+  `not converting to incremental auto-vacuum yet`, and tries again at the next
+  start. Everything else works as before meanwhile.
+- **From then on the file shrinks by itself.** Space freed by deleted
+  conversations, users and stored tool results is returned to the disk within
+  about a minute, instead of the file keeping its largest size forever.
+- **Shorter pauses on large writes.** Writing the database's log back into the
+  file now happens on its own thread, not while every other part of DAWN waits.
+  Measured on a Jetson, a 16 MB write now holds the database ~90 ms, from
+  ~130-180 ms.
+
+**What you need to do.** Nothing, as long as the disk has the space above. A
+manual `VACUUM` (the admin compact command) briefly needs twice the database's
+size on disk, as before.
+
+**Note on deleted data.** Deleting a conversation removes it from the database
+file promptly (its space is returned to the disk). Like any deleted file, its old
+contents can remain in freed disk blocks, in the database's log until it is
+overwritten, and in any backup copies (DAWN's pre-upgrade backups in
+`backups/`, and any copies you made yourself). Full-disk encryption is the way
+to protect data at rest on the device.
+
+---
+
 ## 2026-09-29 — Long conversations are compacted between turns
 
 **What changed.**

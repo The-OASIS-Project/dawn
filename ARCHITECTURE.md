@@ -220,7 +220,8 @@ Layer 2 (Services)
                                      (auth_db_messages.c: the one message insert + the LLM replay read;
                                       auth_db_conv_prefix.c: a conversation's frozen prefix + turn records;
                                       auth_db_withdraw.c: withdrawing a user's removals from stored context;
-                                      auth_db_tool_results.c: stored tool results, their caps and eviction) (deps: Layer 0-1;
+                                      auth_db_tool_results.c: stored tool results, their caps and eviction;
+                                      auth_db_storage.c: checkpoints on their own thread and connection, free pages drained) (deps: Layer 0-1;
                                       auth_db_withdraw.c also uses the pure llm/llm_context_text.c line helpers)
 
 Layer 3 (Tools)
@@ -322,6 +323,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    completions (chime/banner/voice)     │
 │  Compaction      — one per session, joinable: a long   │
 │                    history summarized ahead of its turn │
+│  DB storage      — auth.db's checkpoints (own connection,│
+│                    off the global mutex) + free pages  │
+│                    returned to the disk in chunks      │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -422,6 +426,8 @@ Per-module locks (scoped to a single subsystem):
   turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
   llm_tools::llm_tools_mutex (src/llm/llm_tools*.c)         — the LLM tool table + cached schema hashes; taken BEFORE the tool registry's own mutex (schemas are built from registry lookups), never after it
   session_prefix::s_withdraw_mutex (src/core/session_prefix.c) — the withdraw worker's queue (LEAF: never held across a withdrawal)
+  auth_db_storage::s_wake_mutex (src/auth/auth_db_storage.c) — wakes the storage thread (LEAF: taken by the WAL hook inside a
+                                                                     commit, the auth_db mutex held; the thread never holds it while taking the auth_db mutex)
   tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
                                                                      history_mutex; held only to find, pin, insert and release a slot, never across a render)
   tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that

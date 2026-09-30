@@ -930,6 +930,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
     src/auth/auth_db_tool_results.c
+    src/auth/auth_db_storage.c
     src/auth/auth_db_withdraw.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c

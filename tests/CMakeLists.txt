@@ -128,6 +128,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
     ${SRC_ROOT}/src/auth/auth_db_tool_results.c
+    ${SRC_ROOT}/src/auth/auth_db_storage.c
     ${SRC_ROOT}/src/auth/auth_db_withdraw.c
     ${SRC_ROOT}/src/llm/llm_context_text.c
     ${SRC_ROOT}/src/core/hash_util.c
@@ -1443,6 +1444,14 @@ dawn_add_unit_test(test_conv_db_kind_prefix
 dawn_add_unit_test(test_focus_handles
    SOURCES test_focus_handles.c
            ${SRC_ROOT}/src/core/focus/focus_handles.c
+           ${AUTH_DB_SOURCES}
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# auth.db's storage: checkpoints off the global lock, auto-vacuum (real auth_db).
+dawn_add_unit_test(test_auth_db_storage
+   SOURCES test_auth_db_storage.c
            ${AUTH_DB_SOURCES}
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
