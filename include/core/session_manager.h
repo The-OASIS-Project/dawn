@@ -828,6 +828,9 @@ typedef struct session {
    // stored across that (no turn running) isn't taken for the next one's.
    // Shares history_mutex.
    uint64_t tool_results_live_gen;
+   // The characters a result_read answer gets this turn (set by the tool loop's
+   // view stage from its batch budget before the batch runs; 0 = the default).
+   _Atomic size_t tool_results_read_budget;
 
    // What turns' prompts added to their conversations, until each is saved
    // with its question, oldest first (core/session_prefix.h).  Shares

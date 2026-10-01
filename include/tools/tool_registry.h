@@ -371,6 +371,20 @@ typedef struct {
    tool_device_type_t device_type; /**< boolean, analog, getter, etc. */
    tool_capability_t capabilities; /**< Capability flags */
    bool skip_followup;             /**< Skip LLM follow-up response (see guide for details) */
+   /**< Show this tool's result whole up to this many characters (0: no
+    * ask; its share of the tool loop's batch budget decides).  A result
+    * within it is served first in the batch's split, whole while it fits the
+    * batch budget, which it never exceeds; a larger one is split like any
+    * other.  An MCP tool's comes from _meta["anthropic/maxResultSizeChars"]. */
+   size_t max_result_chars;
+   /**< Never store this tool's result (over its share it is still shown as a
+    * view, with no handle): result_read's own answers, so a read can't hand
+    * out a handle to itself. */
+   bool result_no_store;
+   /**< Always shown whole, never viewed: render_visual's markup, which the
+    * WebUI renders from the full text.  Keyed on the tool, never on content,
+    * so untrusted text can't claim the exemption. */
+   bool result_whole;
    /**< When true, a scheduled-briefing step running this tool has its result
     * persisted into the briefing conversation as a synthetic tool-call/result
     * pair (rendered as a tool entry, reloaded into LLM context) alongside the

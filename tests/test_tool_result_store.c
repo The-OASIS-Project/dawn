@@ -43,6 +43,11 @@ uint64_t session_turn_token(void) {
    return s_token;
 }
 
+/* The session's effective user (session_manager.c): its own user here. */
+int session_effective_user_id(session_t *session) {
+   return session ? session->metrics.user_id : 0;
+}
+
 /* The conversation's tag, masked (session_prefix.c): "TAGSECRET" stands in. */
 char *session_prefix_mask_secret(struct session *session, char *text) {
    (void)session;
@@ -64,6 +69,14 @@ static session_t *at(session_t *s, int64_t conv) {
       s->turn_history_conv = conv;
    } else if (s) {
       atomic_store(&s->history_conversation_id, conv);
+   }
+   return s;
+}
+
+/* @p s acts for @p user_id (its effective user, which the store reads). */
+static session_t *as_user(session_t *s, int user_id) {
+   if (s) {
+      s->metrics.user_id = user_id;
    }
    return s;
 }
@@ -119,8 +132,8 @@ void tearDown(void) {
 static void put(session_t *s, int u, int64_t conv, char id[TOOL_RESULTS_ID_LEN]) {
    const char *json = "{\"results\":[1,2,3]}";
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK,
-                         tool_result_store_put(at(s, conv), u, "cbm_search", "call_1", json,
-                                               strlen(json), true, id, NULL));
+                         tool_result_store_put(as_user(at(s, conv), u), "cbm_search", "call_1",
+                                               json, strlen(json), true, id, NULL));
    TEST_ASSERT_EQUAL_INT(TOOL_RESULTS_ID_LEN - 1, strlen(id));
 }
 
@@ -168,10 +181,11 @@ static void test_a_guest_stores_nothing(void) {
    session_t *s = new_session(1);
    char id[TOOL_RESULTS_ID_LEN];
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_NO_USER,
-                         tool_result_store_put(at(s, 0), 0, "t", NULL, "x", 1, false, id, NULL));
-   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_NO_USER,
-                         tool_result_store_put(at(NULL, 0), alice, "t", NULL, "x", 1, false, id,
+                         tool_result_store_put(as_user(at(s, 0), 0), "t", NULL, "x", 1, false, id,
                                                NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_NO_USER,
+                         tool_result_store_put(as_user(at(NULL, 0), alice), "t", NULL, "x", 1,
+                                               false, id, NULL));
    free_session(s);
 }
 
@@ -287,8 +301,9 @@ static void test_a_huge_result_keeps_head_and_tail(void) {
    memcpy(text + len - 4, "TAIL", 4);
    char id[TOOL_RESULTS_ID_LEN];
    bool cut = false;
-   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK, tool_result_store_put(at(s, a), alice, "big", NULL,
-                                                                     text, len, true, id, &cut));
+   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK,
+                         tool_result_store_put(as_user(at(s, a), alice), "big", NULL, text, len,
+                                               true, id, &cut));
    TEST_ASSERT_TRUE(cut);
    tool_result_doc_t doc;
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_open(at(s, a), alice, id, &doc));
@@ -429,8 +444,8 @@ static void test_the_tag_is_masked_at_rest(void) {
    const char *text = "before TAGSECRET after";
    char id[TOOL_RESULTS_ID_LEN];
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK,
-                         tool_result_store_put(at(s, a), alice, "t", NULL, text, strlen(text),
-                                               false, id, NULL));
+                         tool_result_store_put(as_user(at(s, a), alice), "t", NULL, text,
+                                               strlen(text), false, id, NULL));
    tool_result_doc_t doc;
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_open(at(s, a), alice, id, &doc));
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_load_body(&doc));
@@ -445,8 +460,8 @@ static void test_only_the_users_conversation(void) {
    const int64_t bobs = conversation(bob);
    char id[TOOL_RESULTS_ID_LEN];
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_FAILED,
-                         tool_result_store_put(at(s, bobs), alice, "t", NULL, "x", 1, false, id,
-                                               NULL));
+                         tool_result_store_put(as_user(at(s, bobs), alice), "t", NULL, "x", 1,
+                                               false, id, NULL));
    free_session(s);
 }
 
@@ -545,8 +560,9 @@ static void test_the_body_waits_and_the_large_slot(void) {
    json[len++] = ']';
    json[len] = '\0';
    char id[TOOL_RESULTS_ID_LEN];
-   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK, tool_result_store_put(at(s, a), alice, "big", NULL,
-                                                                     json, len, true, id, NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK,
+                         tool_result_store_put(as_user(at(s, a), alice), "big", NULL, json, len,
+                                               true, id, NULL));
    tool_result_doc_t doc;
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_open(at(s, a), alice, id, &doc));
    tool_result_tree_t t1;
@@ -580,15 +596,16 @@ static void test_a_stale_thread_and_a_nul(void) {
    s_token = 5; /* another thread's token: not the running turn's */
    char none[TOOL_RESULTS_ID_LEN];
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_FAILED,
-                         tool_result_store_put(at(s, a), alice, "t", NULL, "x", 1, false, none,
-                                               NULL));
+                         tool_result_store_put(as_user(at(s, a), alice), "t", NULL, "x", 1, false,
+                                               none, NULL));
    tool_result_doc_t doc;
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_REFUSED, tool_result_store_open(s, alice, id, &doc));
    s_token = 9;
    const char text[] = "a\0b";
    char nul[TOOL_RESULTS_ID_LEN];
-   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK, tool_result_store_put(at(s, a), alice, "t", NULL,
-                                                                     text, 3, false, nul, NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK,
+                         tool_result_store_put(as_user(at(s, a), alice), "t", NULL, text, 3, false,
+                                               nul, NULL));
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_open(s, alice, nul, &doc));
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_load_body(&doc));
    TEST_ASSERT_EQUAL_STRING("a b", doc.body);

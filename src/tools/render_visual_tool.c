@@ -387,6 +387,7 @@ static const tool_metadata_t render_visual_metadata = {
    .default_remote = true,
 
    .callback = render_visual_callback,
+   .result_whole = true, /* the WebUI renders the markup from the full text */
 };
 
 /* =============================================================================

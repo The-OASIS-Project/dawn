@@ -166,6 +166,14 @@ void llm_tools_set_execution_callback(tool_execution_callback_fn callback) {
    __atomic_store_n(&s_execution_callback, callback, __ATOMIC_RELEASE);
 }
 
+/* The tool loop finishes its batch's results itself (llm_tools_finish_result,
+ * after its view stage): execute_all asks for the next execute's finish to
+ * wait (tl_defer_request), and that execute alone defers it
+ * (tl_defer_current); a call a tool makes from inside (a plan's steps)
+ * finishes as always. */
+static __thread bool tl_defer_request;
+static __thread bool tl_defer_current;
+
 /**
  * @brief Notify registered callback about tool execution
  */
@@ -173,6 +181,9 @@ static void notify_tool_execution(const char *tool_name,
                                   const char *tool_args,
                                   const char *result,
                                   bool success) {
+   if (result != NULL && tl_defer_current) {
+      return; /* the tool loop's batch: sent when the result is finished */
+   }
    tool_execution_callback_fn cb = __atomic_load_n(&s_execution_callback, __ATOMIC_ACQUIRE);
    if (cb) {
       /* Get current command context (session) for callback */
@@ -288,6 +299,7 @@ static void *tool_exec_thread(void *arg) {
    session_set_turn_token(task->turn_token);
    tl_executing = true; /* the LLM's call, on its worker */
 
+   tl_defer_request = true; /* the loop finishes it (llm_tools_finish_result) */
    task->return_code = llm_tools_execute(task->call, task->result);
    tl_executing = false;
 
@@ -1687,7 +1699,7 @@ static void neutralize_result(const char *tool, tool_result_t *result) {
    }
 }
 
-int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
+static int execute_one(const tool_call_t *call, tool_result_t *result) {
    if (!call || !result) {
       return 1;
    }
@@ -1765,9 +1777,6 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    }
 
    int rc = llm_tools_execute_from_treg(call, treg_meta, result);
-   /* A result is text from anywhere (a page, a message, a document, an MCP
-    * server): what imitates DAWN's framing or carries a tag is defused. */
-   neutralize_result(call->name, result);
    /* Backstop: every from_treg path sets `success` explicitly, so folding `!success` in here
     * retroactively covers ALL of them (structural failures — bad args, invalid JSON, encode
     * overflow, command-exec failure) with one line. The direct-callback site sets `is_error`
@@ -1775,6 +1784,93 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
     */
    result->is_error = result->is_error || !result->success;
    return rc;
+}
+
+int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
+   const bool outer = tl_defer_current;
+   tl_defer_current = tl_defer_request;
+   tl_defer_request = false;
+   const int rc = execute_one(call, result);
+   /* A result is text from anywhere (a page, a message, a document, an MCP
+    * server, the call's own name in an error): what imitates DAWN's framing
+    * or carries a tag is defused, on every path.  A batch's result is
+    * neutralized when finished, after its view stage (a view is made from the
+    * result as it came; what the model sees is neutralized last). */
+   if (result && call && !tl_defer_current) {
+      neutralize_result(call->name, result);
+      result->finished = true;
+   }
+   tl_defer_current = outer;
+   return rc;
+}
+
+/* The loop's own call: finished later (llm_tools_finish_result). */
+static int execute_deferred(const tool_call_t *call, tool_result_t *result) {
+   tl_defer_request = true;
+   return llm_tools_execute(call, result);
+}
+
+void llm_tools_result_set_content(tool_result_t *result, char *text) {
+   if (!result || !text) {
+      free(text);
+      return;
+   }
+   free(result->result_extended);
+   result->result_extended = NULL;
+   const size_t len = strlen(text);
+   if (len < LLM_TOOLS_RESULT_LEN) {
+      memcpy(result->result, text, len + 1);
+      free(text);
+   } else {
+      result->result_extended = text;
+      safe_strncpy(result->result, text, LLM_TOOLS_RESULT_LEN);
+      utf8_trim_incomplete(result->result);
+   }
+}
+
+/* @p header in front of @p result's content; without the memory for it, a
+ * fixed notice instead, so a shortened result never reads as whole. */
+static void prepend_header(tool_result_t *result, const char *header) {
+   const char *body = tool_result_content(result);
+   const size_t hlen = strlen(header);
+   const size_t blen = strlen(body);
+   char *framed = malloc(hlen + blen + 1);
+   if (!framed) {
+      OLOG_ERROR("Tool result: out of memory framing a view; its header is replaced");
+      free(result->result_extended);
+      result->result_extended = NULL;
+      snprintf(result->result, LLM_TOOLS_RESULT_LEN,
+               "[Tool result shortened: the rest was left out.]");
+      return;
+   }
+   memcpy(framed, header, hlen);
+   memcpy(framed + hlen, body, blen + 1);
+   llm_tools_result_set_content(result, framed);
+}
+
+void llm_tools_finish_result(const tool_call_t *call, tool_result_t *result, const char *header) {
+   if (!call || !result || result->finished) {
+      return;
+   }
+   neutralize_result(call->name, result);
+   /* DAWN's own frame goes on after the result is neutralized (the
+    * neutralizer defuses an imitation of it in the result). */
+   if (header && header[0]) {
+      prepend_header(result, header);
+   }
+   result->is_error = result->is_error || !result->success;
+   result->finished = true;
+   /* A call to no tool was never announced, so it isn't completed either. */
+   if (!tool_registry_find(call->name)) {
+      return;
+   }
+   const bool outer = tl_defer_current;
+   tl_defer_current = false;
+   notify_tool_execution(call->name,
+                         call_carries_tag(call) ? "(withheld: carried the conversation tag)"
+                                                : call->arguments,
+                         tool_result_content(result), result->success);
+   tl_defer_current = outer;
 }
 
 static int execute_all_impl(const tool_call_list_t *calls, tool_result_list_t *results) {
@@ -1803,16 +1899,10 @@ static int execute_all_impl(const tool_call_list_t *calls, tool_result_list_t *r
 
    /* Single tool - no threading overhead needed, skip timing */
    if (total_calls == 1) {
-      if (llm_tools_execute(&calls->calls[0], &results->results[0]) != 0) {
+      if (execute_deferred(&calls->calls[0], &results->results[0]) != 0) {
          failures++;
       }
       results->count = 1;
-
-      /* Transition from "tool_call" to "thinking" for the follow-up LLM call */
-      if (status_session) {
-         webui_send_state_with_detail(status_session, "thinking", "Processing results...");
-      }
-
       return failures > 0 ? 1 : 0;
    }
 
@@ -1868,7 +1958,7 @@ static int execute_all_impl(const tool_call_list_t *calls, tool_result_list_t *r
             /* Fallback to sequential if thread creation fails */
             OLOG_WARNING("pthread_create failed for tool '%s' (error=%d), executing sequentially",
                          calls->calls[idx].name, rc);
-            tasks[i].return_code = llm_tools_execute(tasks[i].call, tasks[i].result);
+            tasks[i].return_code = execute_deferred(tasks[i].call, tasks[i].result);
          }
       }
 
@@ -1892,17 +1982,12 @@ static int execute_all_impl(const tool_call_list_t *calls, tool_result_list_t *r
    /* Execute sequential tools one at a time */
    for (int i = 0; i < sequential_count; i++) {
       int idx = sequential_indices[i];
-      if (llm_tools_execute(&calls->calls[idx], &results->results[idx]) != 0) {
+      if (execute_deferred(&calls->calls[idx], &results->results[idx]) != 0) {
          failures++;
       }
    }
 
    results->count = total_calls;
-
-   /* Transition from "tool_call" to "thinking" for the follow-up LLM call */
-   if (status_session) {
-      webui_send_state_with_detail(status_session, "thinking", "Processing results...");
-   }
 
    clock_gettime(CLOCK_MONOTONIC, &end_time);
    long elapsed_ms = (end_time.tv_sec - start_time.tv_sec) * 1000 +
@@ -1913,12 +1998,38 @@ static int execute_all_impl(const tool_call_list_t *calls, tool_result_list_t *r
    return failures > 0 ? 1 : 0;
 }
 
-int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *results) {
+int llm_tools_execute_all(const tool_call_list_t *calls,
+                          tool_result_list_t *results,
+                          llm_tools_batch_finish_fn finish,
+                          void *userdata) {
    /* The LLM's own calls (a plan it starts runs its steps in here too). */
    const bool outer = tl_executing;
    tl_executing = true;
    const int rc = execute_all_impl(calls, results);
    tl_executing = outer;
+   if (!calls || !results) {
+      return rc;
+   }
+   if (finish) {
+      finish(calls, results, userdata);
+   }
+   /* Nothing leaves here unfinished: what the stage missed is finished as it
+    * came, never passed on raw. */
+   for (int i = 0; i < results->count; i++) {
+      if (!results->results[i].finished) {
+         if (finish) {
+            OLOG_ERROR("Tool '%s': its result wasn't finished by the batch; finishing it",
+                       calls->calls[i].name);
+         }
+         llm_tools_finish_result(&calls->calls[i], &results->results[i], NULL);
+      }
+   }
+   /* Transition from "tool_call" to "thinking" for the follow-up LLM call,
+    * after the results were announced. */
+   session_t *status_session = session_get_command_context();
+   if (status_session && results->count > 0) {
+      webui_send_state_with_detail(status_session, "thinking", "Processing results...");
+   }
    return rc;
 }
 

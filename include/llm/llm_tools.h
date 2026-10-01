@@ -185,6 +185,7 @@ typedef struct {
    bool should_respond;      /**< If false, tool handled its own output — suppress follow-up */
    char *vision_image;       /**< Base64 vision image (caller must free) */
    size_t vision_image_size; /**< Size of vision image data */
+   bool finished;            /**< Neutralized and announced (llm_tools_finish_result) */
 } tool_result_t;
 
 /**
@@ -499,11 +500,51 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result);
  *
  * For single tool calls, executes directly without threading overhead.
  *
+ * Every result comes back finished: neutralized, the conversation's tag
+ * masked in it, and the WebUI told the call completed.  @p finish, when
+ * given, runs on the raw batch first and finishes each result itself
+ * (llm_tools_finish_result, after shaping it: the tool loop's view stage);
+ * a result it leaves unfinished is finished here, and logged.
+ *
  * @param calls List of tool calls to execute
  * @param results Output: execution results (indexed to match input calls)
+ * @param finish Shapes and finishes the batch, or NULL (each finished as it came)
+ * @param userdata Passed to @p finish
  * @return 0 if all succeeded, non-zero if any failed
  */
-int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *results);
+typedef void (*llm_tools_batch_finish_fn)(const tool_call_list_t *calls,
+                                          tool_result_list_t *results,
+                                          void *userdata);
+int llm_tools_execute_all(const tool_call_list_t *calls,
+                          tool_result_list_t *results,
+                          llm_tools_batch_finish_fn finish,
+                          void *userdata);
+
+/**
+ * @brief Finish a result of a batch (llm_tools_execute_all's @p finish):
+ *        neutralize it and mask the conversation's tag in it, put @p header
+ *        in front (DAWN's own frame, after neutralizing, so it isn't
+ *        defused), and tell the WebUI the call completed with what the model
+ *        now sees.  Once only; a finished result is left as it is.
+ *
+ * @param header A view's frame, or NULL for none
+ */
+void llm_tools_finish_result(const tool_call_t *call, tool_result_t *result, const char *header);
+
+/**
+ * @brief Put @p text (taken; freed here) in @p result as its content: in
+ *        result[] when it fits, else result_extended with a UTF-8-safe
+ *        preview in result[]
+ */
+void llm_tools_result_set_content(tool_result_t *result, char *text);
+
+/**
+ * @brief Whether the request built from @p history offers tool @p name and
+ *        would run it: in the tools it carries (llm_tools_request_tools) and
+ *        enabled for this session (a frozen set can name a tool that is now
+ *        refused)
+ */
+bool llm_tools_request_offers(struct json_object *history, bool is_remote, const char *name);
 
 /**
  * @brief Check if follow-up LLM call should be skipped

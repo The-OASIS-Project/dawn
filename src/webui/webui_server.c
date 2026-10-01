@@ -77,6 +77,7 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "state_machine.h"
+#include "tools/tool_registry.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
@@ -1768,11 +1769,15 @@ static void webui_tool_execution_callback(void *session_ptr,
    /* Tool execution completed - remove from active list */
    session_remove_active_tool(session, display_name);
 
-   /* If the tool result contains a <dawn-visual> tag, send the full result
-    * as a visible transcript entry (not debug-only). The WebUI visual renderer
-    * extracts and renders the tag as a sandboxed iframe. The result may exceed
-    * the debug_msg buffer size (8KB), so we send the raw result directly. */
-   if (success && result && strstr(result, "<dawn-visual") != NULL) {
+   /* A visual tool's result (render_visual: tool_metadata_t.result_whole)
+    * goes out whole as a visible transcript entry (not debug-only); the WebUI
+    * renders its <dawn-visual> tag as a sandboxed iframe. It may exceed the
+    * debug_msg buffer size (8KB), so the raw result is sent directly. Keyed on
+    * the tool, never the content: a page, email or MCP result that contains
+    * the tag is not a visual. */
+   const tool_metadata_t *tool_meta = tool_registry_find(tool_name);
+   if (success && result && tool_meta && tool_meta->result_whole &&
+       strstr(result, "<dawn-visual") != NULL) {
       webui_send_transcript(session, "visual", result);
 
       /* Stash visual content on the session so it gets appended to the

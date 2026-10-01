@@ -349,7 +349,7 @@ static void test_register_into_registry(void) {
    mcp_param_set_t params = empty_params();
    TEST_ASSERT_EQUAL_INT(SUCCESS, mcp_bridge_register_tool(g_client, "cbm", "search_graph",
                                                            "cbm_search_graph", "Search the graph",
-                                                           &params, false));
+                                                           &params, false, 0));
    const tool_metadata_t *meta = tool_registry_find("cbm_search_graph");
    TEST_ASSERT_NOT_NULL(meta);
    TEST_ASSERT_TRUE((meta->capabilities & TOOL_CAP_NETWORK) != 0);
@@ -365,7 +365,7 @@ static void test_dispatch_forwards_toolscall(void) {
    mcp_param_set_t params = empty_params();
    TEST_ASSERT_EQUAL_INT(SUCCESS,
                          mcp_bridge_register_tool(g_client, "cbm", "search_graph",
-                                                  "cbm_search_graph", "desc", &params, false));
+                                                  "cbm_search_graph", "desc", &params, false, 0));
    const tool_metadata_t *meta = tool_registry_find("cbm_search_graph");
    TEST_ASSERT_NOT_NULL(meta);
 
@@ -389,7 +389,7 @@ static void test_dispatch_marks_a_tool_error(void) {
    mcp_param_set_t params = empty_params();
    TEST_ASSERT_EQUAL_INT(SUCCESS,
                          mcp_bridge_register_tool(g_client, "cbm", "fail_tool", "cbm_fail_tool",
-                                                  "desc", &params, false));
+                                                  "desc", &params, false, 0));
    const tool_metadata_t *meta = tool_registry_find("cbm_fail_tool");
    TEST_ASSERT_NOT_NULL(meta);
    session_t *s = push_session(g_admin_uid);
@@ -410,7 +410,7 @@ static void test_dispatch_denies_without_grant(void) {
    mcp_param_set_t params = empty_params();
    TEST_ASSERT_EQUAL_INT(SUCCESS,
                          mcp_bridge_register_tool(g_client, "cbm", "search_graph",
-                                                  "cbm_search_graph", "desc", &params, false));
+                                                  "cbm_search_graph", "desc", &params, false, 0));
    const tool_metadata_t *meta = tool_registry_find("cbm_search_graph");
    session_t *s = push_session(g_admin_uid);
    TEST_ASSERT_NOT_NULL(s);
@@ -430,7 +430,7 @@ static void test_dispatch_denies_without_session(void) {
    mcp_param_set_t params = empty_params();
    TEST_ASSERT_EQUAL_INT(SUCCESS,
                          mcp_bridge_register_tool(g_client, "cbm", "search_graph",
-                                                  "cbm_search_graph", "desc", &params, false));
+                                                  "cbm_search_graph", "desc", &params, false, 0));
    const tool_metadata_t *meta = tool_registry_find("cbm_search_graph");
    session_set_command_context(NULL); /* no authenticated caller */
    int should_respond = 0;
@@ -444,9 +444,9 @@ static void test_dispatch_denies_without_session(void) {
 /* Dangerous tools register with TOOL_CAP_DANGEROUS. */
 static void test_dangerous_tool_marked(void) {
    mcp_param_set_t params = empty_params();
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         mcp_bridge_register_tool(g_client, "cbm", "index_repository",
-                                                  "cbm_index_repository", "desc", &params, true));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, mcp_bridge_register_tool(g_client, "cbm", "index_repository",
+                                                           "cbm_index_repository", "desc", &params,
+                                                           true, 0));
    const tool_metadata_t *meta = tool_registry_find("cbm_index_repository");
    TEST_ASSERT_NOT_NULL(meta);
    TEST_ASSERT_TRUE((meta->capabilities & TOOL_CAP_DANGEROUS) != 0);
@@ -460,9 +460,9 @@ static void test_dangerous_tool_blocks_non_admin(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_mcp_grant(bob.id, "cbm"));
 
    mcp_param_set_t params = empty_params();
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         mcp_bridge_register_tool(g_client, "cbm", "index_repository",
-                                                  "cbm_index_repository", "desc", &params, true));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, mcp_bridge_register_tool(g_client, "cbm", "index_repository",
+                                                           "cbm_index_repository", "desc", &params,
+                                                           true, 0));
    const tool_metadata_t *meta = tool_registry_find("cbm_index_repository");
 
    /* Make bob the current caller via a minimal session context. */
@@ -482,9 +482,30 @@ static void test_dangerous_tool_blocks_non_admin(void) {
    free(s);
 }
 
+/* A tool's result size hint comes from its tools/list _meta, capped. */
+static void test_result_size_hint(void) {
+   struct json_object *t = json_tokener_parse(
+       "{\"name\":\"x\",\"_meta\":{\"anthropic/maxResultSizeChars\":120000}}");
+   TEST_ASSERT_EQUAL_UINT64(120000, mcp_bridge_result_size_hint(t));
+   json_object_put(t);
+   t = json_tokener_parse("{\"name\":\"x\",\"_meta\":{\"anthropic/maxResultSizeChars\":9000000}}");
+   TEST_ASSERT_EQUAL_UINT64(MCP_BRIDGE_MAX_RESULT_CHARS, mcp_bridge_result_size_hint(t));
+   json_object_put(t);
+   t = json_tokener_parse("{\"name\":\"x\",\"_meta\":{\"anthropic/maxResultSizeChars\":\"big\"}}");
+   TEST_ASSERT_EQUAL_UINT64(0, mcp_bridge_result_size_hint(t));
+   json_object_put(t);
+   t = json_tokener_parse("{\"name\":\"x\",\"_meta\":{\"anthropic/maxResultSizeChars\":-5}}");
+   TEST_ASSERT_EQUAL_UINT64(0, mcp_bridge_result_size_hint(t));
+   json_object_put(t);
+   t = json_tokener_parse("{\"name\":\"x\"}");
+   TEST_ASSERT_EQUAL_UINT64(0, mcp_bridge_result_size_hint(t));
+   json_object_put(t);
+}
+
 int main(void) {
    signal(SIGPIPE, SIG_IGN);
    UNITY_BEGIN();
+   RUN_TEST(test_result_size_hint);
    RUN_TEST(test_register_into_registry);
    RUN_TEST(test_dispatch_forwards_toolscall);
    RUN_TEST(test_dispatch_marks_a_tool_error);

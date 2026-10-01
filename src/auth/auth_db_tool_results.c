@@ -56,6 +56,60 @@ typedef enum {
 
 static const char *const k_scope_name[] = { "conversation", "user", "total" };
 
+/* The statements a put and a read run every time, prepared on first use and
+ * kept (tool_results_db_release_locked finalizes them with the database);
+ * each use ends with stmt_done(), so none is left holding a read or a bound
+ * pointer. */
+typedef enum {
+   STMT_USAGE,
+   STMT_RECLAIM,
+   STMT_INSERT,
+   STMT_GET_META,
+   STMT_GET_BODY,
+   STMT_COUNT,
+} stmt_id_t;
+
+static const char *const k_stmt_sql[STMT_COUNT] = {
+   [STMT_USAGE] = "SELECT bytes FROM tool_results_usage WHERE scope = ?1 AND key = ?2",
+   [STMT_RECLAIM] = "DELETE FROM tool_results WHERE conversation_id IS NULL AND created_at < ?",
+   [STMT_INSERT] =
+       "INSERT INTO tool_results (id, user_id, conversation_id, session_key, tool_name, "
+       "tool_call_id, content_kind, chars, bytes, body, created_at) VALUES (?, ?, ?, "
+       "?, ?, ?, ?, ?, ?, ?, ?)",
+   [STMT_GET_META] = "SELECT user_id, conversation_id, content_kind, chars, bytes, tool_name FROM "
+                     "tool_results WHERE id = ?",
+   [STMT_GET_BODY] = "SELECT user_id, conversation_id, content_kind, chars, bytes, tool_name, body "
+                     "FROM tool_results WHERE id = ?",
+};
+
+static sqlite3_stmt *s_stmts[STMT_COUNT];
+
+/* Statement @p id, prepared if it isn't yet; NULL on failure.  Caller holds
+ * the lock. */
+static sqlite3_stmt *stmt_locked(stmt_id_t id) {
+   if (!s_stmts[id] &&
+       sqlite3_prepare_v2(s_db.db, k_stmt_sql[id], -1, &s_stmts[id], NULL) != SQLITE_OK) {
+      OLOG_ERROR("tool_results: preparing statement %d failed: %s", (int)id,
+                 sqlite3_errmsg(s_db.db));
+      s_stmts[id] = NULL;
+   }
+   return s_stmts[id];
+}
+
+static void stmt_done(sqlite3_stmt *st) {
+   if (st) {
+      sqlite3_reset(st);
+      sqlite3_clear_bindings(st);
+   }
+}
+
+void tool_results_db_release_locked(void) {
+   for (int i = 0; i < STMT_COUNT; i++) {
+      sqlite3_finalize(s_stmts[i]);
+      s_stmts[i] = NULL;
+   }
+}
+
 /* The oldest results of a scope first, from its age-ordered index: a user's
  * unbound results (no conversation holds them yet) go before the rest. */
 static const char *const k_scope_victims[][2] = {
@@ -73,10 +127,8 @@ static const char *const k_scope_victims[][2] = {
 /* The bytes @p scope (keyed by @p key) holds (tool_results_usage). */
 static int usage_locked(scope_t scope, int64_t key, int64_t *bytes) {
    *bytes = 0;
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT bytes FROM tool_results_usage WHERE scope = ?1 AND key = ?2", -1,
-                          &st, NULL) != SQLITE_OK) {
+   sqlite3_stmt *st = stmt_locked(STMT_USAGE);
+   if (!st) {
       return AUTH_DB_FAILURE;
    }
    sqlite3_bind_int(st, 1, (int)scope);
@@ -85,7 +137,7 @@ static int usage_locked(scope_t scope, int64_t key, int64_t *bytes) {
    if (rc == SQLITE_ROW) {
       *bytes = sqlite3_column_int64(st, 0);
    }
-   sqlite3_finalize(st);
+   stmt_done(st);
    return rc == SQLITE_ROW || rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
@@ -176,16 +228,13 @@ static int evict_locked(scope_t scope, int64_t key, int64_t cap, int64_t need, i
 }
 
 static int reclaim_unbound_locked(int64_t before, int *deleted_out) {
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "DELETE FROM tool_results WHERE conversation_id IS NULL AND "
-                          "created_at < ?",
-                          -1, &st, NULL) != SQLITE_OK) {
+   sqlite3_stmt *st = stmt_locked(STMT_RECLAIM);
+   if (!st) {
       return AUTH_DB_FAILURE;
    }
    sqlite3_bind_int64(st, 1, before);
    const int rc = sqlite3_step(st);
-   sqlite3_finalize(st);
+   stmt_done(st);
    if (rc != SQLITE_DONE) {
       return AUTH_DB_FAILURE;
    }
@@ -249,12 +298,8 @@ int tool_results_db_add(const tool_results_new_t *r, int *evicted_out) {
       result = evict_locked(SCOPE_ALL, 0, TOOL_RESULTS_TOTAL_MAX_BYTES, need, evicted_out);
    }
    if (result == AUTH_DB_SUCCESS) {
-      sqlite3_stmt *st = NULL;
-      if (sqlite3_prepare_v2(s_db.db,
-                             "INSERT INTO tool_results (id, user_id, conversation_id, "
-                             "session_key, tool_name, tool_call_id, content_kind, chars, bytes, "
-                             "body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             -1, &st, NULL) != SQLITE_OK) {
+      sqlite3_stmt *st = stmt_locked(STMT_INSERT);
+      if (!st) {
          result = AUTH_DB_FAILURE;
       } else {
          sqlite3_bind_text(st, 1, r->id, -1, SQLITE_STATIC);
@@ -281,7 +326,7 @@ int tool_results_db_add(const tool_results_new_t *r, int *evicted_out) {
          sqlite3_bind_blob64(st, 10, r->body, (sqlite3_uint64)r->bytes, SQLITE_STATIC);
          sqlite3_bind_int64(st, 11, now);
          result = sqlite3_step(st) == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
-         sqlite3_finalize(st);
+         stmt_done(st);
       }
    }
    result = end_transaction_locked(result);
@@ -302,14 +347,9 @@ int tool_results_db_get(const char *id, tool_results_meta_t *meta, char **body, 
    memset(meta, 0, sizeof(*meta));
 
    AUTH_DB_LOCK_OR_FAIL();
-   sqlite3_stmt *st = NULL;
    int result = AUTH_DB_FAILURE;
-   if (sqlite3_prepare_v2(s_db.db,
-                          body ? "SELECT user_id, conversation_id, content_kind, chars, bytes, "
-                                 "tool_name, body FROM tool_results WHERE id = ?"
-                               : "SELECT user_id, conversation_id, content_kind, chars, bytes, "
-                                 "tool_name FROM tool_results WHERE id = ?",
-                          -1, &st, NULL) != SQLITE_OK) {
+   sqlite3_stmt *st = stmt_locked(body ? STMT_GET_BODY : STMT_GET_META);
+   if (!st) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -344,7 +384,7 @@ int tool_results_db_get(const char *id, tool_results_meta_t *meta, char **body, 
    } else if (rc == SQLITE_DONE) {
       result = AUTH_DB_NOT_FOUND;
    }
-   sqlite3_finalize(st);
+   stmt_done(st);
    AUTH_DB_UNLOCK();
    return result;
 }

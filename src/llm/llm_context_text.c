@@ -681,6 +681,7 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    static const char *const k_summary[] = { "conversation", "summary", NULL };
    static const char *const k_note[] = { "operator", "note", NULL };
    static const char *const k_updated[] = { "updated", "instructions", NULL };
+   static const char *const k_shortened[] = { "tool", "result", "shortened", NULL };
    const char c = sh->s[i];
    if (is_rule(c)) {
       const size_t r = sh->rule_to[i];
@@ -709,9 +710,16 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
       return 0;
    }
    if (c == '[' || c == '(' || c == '{' || c == '<' || c == '|') {
-      const size_t e = words_at(sh, seps_at(sh, i + 1, false), k_note);
+      const size_t w = seps_at(sh, i + 1, false);
+      size_t e = words_at(sh, w, k_note);
       if (e > 0) {
          *out = "(quoted Operator note";
+         return e;
+      }
+      /* A tool view's header (llm_tool_views.h): it names a stored result. */
+      e = words_at(sh, w, k_shortened);
+      if (e > 0) {
+         *out = "(quoted Tool result shortened";
       }
       return e;
    }

@@ -879,6 +879,20 @@ dawn_add_unit_test(test_llm_dup_check
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
+# The batch finish contract: results reach the finish step raw and leave
+# finished (neutralized, announced).  Same link as test_llm_dup_check.
+dawn_add_unit_test(test_llm_tools_finish
+   SOURCES test_llm_tools_finish.c test_llm_dup_check_stub.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/hash_util.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_instruction_loader
    SOURCES test_instruction_loader.c
            ${SRC_ROOT}/src/tools/instruction_loader.c
@@ -1482,6 +1496,13 @@ dawn_add_unit_test(test_webui_login_cookie
    LIBS    unity
    LABEL   ci)
 
+# The tool loop's view stage: the batch budget, its split, the header.
+dawn_add_unit_test(test_llm_tool_views
+   SOURCES test_llm_tool_views.c
+           ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
+   LIBS    unity m
+   LABEL   ci)
+
 # The WebUI protocol's version and feature flags.
 dawn_add_unit_test(test_webui_protocol
    SOURCES test_webui_protocol.c
@@ -1821,6 +1842,10 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
+           ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
+           ${SRC_ROOT}/src/llm/llm_tool_view.c
+           ${SRC_ROOT}/src/llm/llm_tool_view_path.c
            ${SRC_ROOT}/src/llm/llm_history_rows.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/sse_parser.c
@@ -1917,6 +1942,10 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
+           ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
+           ${SRC_ROOT}/src/llm/llm_tool_view.c
+           ${SRC_ROOT}/src/llm/llm_tool_view_path.c
            ${SRC_ROOT}/src/llm/llm_history_rows.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/sse_parser.c

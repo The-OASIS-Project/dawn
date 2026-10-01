@@ -241,6 +241,41 @@ struct json_object *llm_tools_request_tools(struct json_object *history,
    return format_filtered(is_remote, claude);
 }
 
+bool llm_tools_request_offers(struct json_object *history, bool is_remote, const char *name) {
+   if (!name || !llm_tools_ready) {
+      return false;
+   }
+   session_t *ctx = session_get_command_context();
+   const bool research = ctx != NULL && atomic_load(&ctx->research_run_id) > 0;
+   if (!research) {
+      /* The conversation's frozen set, when it has one, is what the request
+       * carries: a tool it doesn't name isn't offered. */
+      struct json_object *frozen = llm_history_frozen_tools(history);
+      if (frozen) {
+         bool named = false;
+         const size_t n = json_object_array_length(frozen);
+         for (size_t k = 0; !named && k < n; k++) {
+            const char *f = json_object_get_string(json_object_array_get_idx(frozen, k));
+            named = f && strcmp(f, name) == 0;
+         }
+         if (!named) {
+            return false;
+         }
+      }
+   }
+   /* Carried, and it must also run: the same check execution makes. */
+   bool enabled = false;
+   pthread_mutex_lock(&llm_tools_mutex);
+   for (int i = 0; i < llm_tools_count; i++) {
+      if (strcmp(llm_tools_table[i].name, name) == 0) {
+         enabled = llm_tools_enabled_for_session(&llm_tools_table[i], is_remote);
+         break;
+      }
+   }
+   pthread_mutex_unlock(&llm_tools_mutex);
+   return enabled;
+}
+
 /* The last schema hashes computed, and the generations they are of (under
  * llm_tools_mutex): recomputed only when a tool or a schema could have
  * changed, not every turn. */

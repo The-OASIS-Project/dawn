@@ -32,6 +32,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
+#include "core/tool_result_store.h"
 
 /* g_config and g_secrets are now defined by src/config/config_defaults.c
  * (linked into the bench for memory-pipeline mode). Pre-memory-pipeline the
@@ -564,4 +565,44 @@ void session_compaction_trigger(struct session *session,
    (void)type;
    (void)provider;
    (void)model;
+}
+
+/* The tool loop's view stage (llm_tool_views_apply.c): the bench keeps no
+ * results, so a view carries no handle. */
+int tool_result_store_put(struct session *session,
+                          const char *tool_name,
+                          const char *tool_call_id,
+                          const char *text,
+                          size_t len,
+                          bool is_json,
+                          char id_out[TOOL_RESULTS_ID_LEN],
+                          bool *cut_out) {
+   (void)session;
+   (void)tool_name;
+   (void)tool_call_id;
+   (void)text;
+   (void)len;
+   (void)is_json;
+   if (id_out) {
+      id_out[0] = '\0';
+   }
+   if (cut_out) {
+      *cut_out = false;
+   }
+   return TOOL_RESULT_STORE_NO_USER;
+}
+
+void tool_result_store_tree_seed(struct session *session,
+                                 const char *id,
+                                 struct json_object *tree,
+                                 size_t text_bytes) {
+   (void)session;
+   (void)id;
+   (void)text_bytes;
+   json_object_put(tree);
+}
+
+void tool_result_store_set_read_budget(struct session *session, size_t chars) {
+   (void)session;
+   (void)chars;
 }

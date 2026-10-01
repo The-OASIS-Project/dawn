@@ -311,13 +311,31 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
  * Registration
  * -------------------------------------------------------------------------- */
 
+size_t mcp_bridge_result_size_hint(struct json_object *tool) {
+   struct json_object *meta = NULL;
+   struct json_object *hint = NULL;
+   if (!tool || !json_object_object_get_ex(tool, "_meta", &meta) ||
+       !json_object_is_type(meta, json_type_object) ||
+       !json_object_object_get_ex(meta, "anthropic/maxResultSizeChars", &hint) ||
+       !json_object_is_type(hint, json_type_int)) {
+      return 0;
+   }
+   const int64_t chars = json_object_get_int64(hint);
+   if (chars <= 0) {
+      return 0;
+   }
+   return (uint64_t)chars < MCP_BRIDGE_MAX_RESULT_CHARS ? (size_t)chars
+                                                        : MCP_BRIDGE_MAX_RESULT_CHARS;
+}
+
 int mcp_bridge_register_tool(mcp_client_t *client,
                              const char *server_alias,
                              const char *upstream_tool_name,
                              const char *dawn_tool_name,
                              const char *description,
                              mcp_param_set_t *params,
-                             bool dangerous) {
+                             bool dangerous,
+                             size_t max_result_chars) {
    if (client == NULL || server_alias == NULL || upstream_tool_name == NULL ||
        dawn_tool_name == NULL || params == NULL) {
       return FAILURE;
@@ -359,6 +377,9 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    meta.default_local = true;
    meta.default_remote = true;
    meta.callback = s_trampolines[idx];
+   meta.max_result_chars = max_result_chars < MCP_BRIDGE_MAX_RESULT_CHARS
+                               ? max_result_chars
+                               : MCP_BRIDGE_MAX_RESULT_CHARS;
    /* enabled-first slot serves as the config struct so dangerous-tool
     * validation (needs config + parser) passes; no TOML section. */
    meta.config = slot;
@@ -470,7 +491,8 @@ static void register_server_tools(const char *alias, mcp_client_t *client) {
       snprintf(dawn_name, sizeof(dawn_name), "%s_%s", alias, upstream);
 
       if (mcp_bridge_register_tool(client, alias, upstream, dawn_name, description, &params,
-                                   is_dangerous_tool(upstream)) == SUCCESS) {
+                                   is_dangerous_tool(upstream),
+                                   mcp_bridge_result_size_hint(tool)) == SUCCESS) {
          registered++;
       } else {
          mcp_param_set_free(&params); /* register failed: reclaim (move didn't happen) */

@@ -131,6 +131,7 @@ static const tool_metadata_t result_read_metadata = {
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
    .skip_followup = false,
+   .result_no_store = true, /* its answers are views of a stored result already */
 
    .is_available = NULL,
    .callback = result_read_callback,

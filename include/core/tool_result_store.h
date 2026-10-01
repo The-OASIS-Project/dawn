@@ -89,15 +89,16 @@ typedef struct {
 
 /**
  * @brief Store @p text (@p len bytes) from tool @p tool_name, readable in the
- *        caller's conversation (its turn's; 0: not yet, bound later) by
- *        @p user_id
+ *        caller's conversation (its turn's; 0: not yet, bound later) by the
+ *        session's effective user (session_effective_user_id)
  *
- * Contract: @p user_id is session_effective_user_id(@p session); called from
- * the storing turn (its thread or a tool thread carrying its token), or with
- * no turn running (a research round), without history_mutex held; @p text is
- * the result as the model would see it whole (normalized and scrubbed; the
- * conversation's tag is masked here, a NUL stored as a space).  A thread that
- * isn't the running turn's stores nothing.
+ * Contract: called from the storing turn (its thread or a tool thread
+ * carrying its token), or with no turn running (a research round), without
+ * history_mutex held; @p text is the result as its tool returned it (not
+ * neutralized: whatever a read returns is neutralized when that result is
+ * finished, like any result; the conversation's tag is masked here, a NUL
+ * stored as a space).  A thread that isn't the running turn's stores nothing;
+ * a guest (effective user 0) stores nothing (TOOL_RESULT_STORE_NO_USER).
  *
  * @param is_json Whether the view parsed it as JSON
  * @param id_out Its handle
@@ -106,7 +107,6 @@ typedef struct {
  * @return TOOL_RESULT_STORE_OK, _NO_USER or _FAILED
  */
 int tool_result_store_put(struct session *session,
-                          int user_id,
                           const char *tool_name,
                           const char *tool_call_id,
                           const char *text,
@@ -219,6 +219,14 @@ void tool_result_store_free(struct session *session);
 
 /** @brief The characters a result_read answer gets in @p session's turn. */
 size_t tool_result_store_read_budget(struct session *session);
+
+/**
+ * @brief Set the characters a result_read answer gets from now on in
+ *        @p session (its fair share of the tool loop's batch budget, set
+ *        before the batch runs, so an answer usually fits whole; one over its
+ *        share is viewed, never stored again); 0 restores the default
+ */
+void tool_result_store_set_read_budget(struct session *session, size_t chars);
 
 #ifdef __cplusplus
 }

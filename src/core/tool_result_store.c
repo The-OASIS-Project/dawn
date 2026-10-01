@@ -518,7 +518,6 @@ static bool caller_context_locked(const session_t *session, uint64_t *token, int
 }
 
 int tool_result_store_put(session_t *session,
-                          int user_id,
                           const char *tool_name,
                           const char *tool_call_id,
                           const char *text,
@@ -532,7 +531,9 @@ int tool_result_store_put(session_t *session,
    if (id_out) {
       id_out[0] = '\0';
    }
-   if (!session || user_id <= 0) {
+   /* The user is the session's own, never the caller's say. */
+   const int user_id = session ? session_effective_user_id(session) : 0;
+   if (user_id <= 0) {
       return TOOL_RESULT_STORE_NO_USER;
    }
    if (!tool_name || !text || !id_out) {
@@ -755,6 +756,12 @@ void tool_result_store_free(session_t *session) {
 }
 
 size_t tool_result_store_read_budget(session_t *session) {
-   (void)session;
-   return TOOL_RESULT_READ_BUDGET_CHARS;
+   const size_t chars = session ? atomic_load(&session->tool_results_read_budget) : 0;
+   return chars > 0 ? chars : TOOL_RESULT_READ_BUDGET_CHARS;
+}
+
+void tool_result_store_set_read_budget(session_t *session, size_t chars) {
+   if (session) {
+      atomic_store(&session->tool_results_read_budget, chars);
+   }
 }

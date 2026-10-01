@@ -38,6 +38,7 @@
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/session_manager.h"
+#include "core/tool_result_store.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_compaction.h"
@@ -49,6 +50,8 @@
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_rate_limit.h"
+#include "llm/llm_tool_views.h"
+#include "llm/llm_tool_views_apply.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -1047,7 +1050,27 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          llm_tool_response_free(&result);
          return NULL;
       }
-      llm_tools_execute_all(&result.tool_calls, results);
+      /* The batch's budget, planned before it runs: a result_read answer in
+       * it is built to its fair share.  After it runs, the view stage keeps
+       * what is over its share whole and shows a view, then finishes every
+       * result (neutralized last; the WebUI told what the model sees) before
+       * anything reads them. */
+      llm_tool_views_budget_t view_budget;
+      llm_tool_views_budget_batch(params, &result.tool_calls, result.text, &view_budget);
+      session_t *view_session = call_session(params, true);
+      tool_result_store_set_read_budget(
+          view_session, llm_tool_views_read_chars(view_budget.chars, result.tool_calls.count));
+      const llm_tool_views_batch_t view_batch = {
+         .params = params,
+         .session = view_session,
+         .budget = &view_budget,
+      };
+      llm_tools_execute_all(&result.tool_calls, results, llm_tool_views_finish_batch,
+                            (void *)&view_batch);
+      if (view_session) {
+         tool_result_store_set_read_budget(view_session, 0);
+         session_release(view_session);
+      }
 
       /* Log tool results */
       for (int i = 0; i < results->count; i++) {

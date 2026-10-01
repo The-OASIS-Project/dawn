@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_tool_results.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -2633,6 +2634,7 @@ int auth_db_prepare_statements(void) {
 }
 
 void auth_db_finalize_statements(void) {
+   tool_results_db_release_locked(); /* the store's own, kept on first use */
    auth_db_messages_finalize();
    if (s_db.stmt_create_user)
       sqlite3_finalize(s_db.stmt_create_user);

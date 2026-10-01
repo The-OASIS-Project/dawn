@@ -24,6 +24,7 @@
 #define MCP_BRIDGE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "tools/mcp_bridge_schema.h"
 #include "tools/mcp_client.h"
@@ -70,6 +71,9 @@ void mcp_bridge_shutdown(void);
  *
  * @param dangerous If true, register with TOOL_CAP_DANGEROUS and gate invocation
  *                  on admin (the cbm mutating-tool denylist, sec-M1).
+ * @param max_result_chars The tool's own result size hint (its
+ *                  `_meta["anthropic/maxResultSizeChars"]`, capped at
+ *                  MCP_BRIDGE_MAX_RESULT_CHARS); 0 for none.
  * @return SUCCESS or FAILURE.
  */
 int mcp_bridge_register_tool(mcp_client_t *client,
@@ -78,7 +82,20 @@ int mcp_bridge_register_tool(mcp_client_t *client,
                              const char *dawn_tool_name,
                              const char *description,
                              mcp_param_set_t *params,
-                             bool dangerous);
+                             bool dangerous,
+                             size_t max_result_chars);
+
+struct json_object;
+
+/* The largest result size hint an MCP tool may declare (Claude Code's own cap). */
+#define MCP_BRIDGE_MAX_RESULT_CHARS ((size_t)500000)
+
+/**
+ * @brief A tool's result size hint from its tools/list entry:
+ *        `_meta["anthropic/maxResultSizeChars"]`, capped at
+ *        MCP_BRIDGE_MAX_RESULT_CHARS; 0 when absent or not a positive integer.
+ */
+size_t mcp_bridge_result_size_hint(struct json_object *tool);
 
 /**
  * @brief Write a human-readable summary of connected servers (alias, tool

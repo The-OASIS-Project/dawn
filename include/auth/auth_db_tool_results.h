@@ -119,6 +119,9 @@ int tool_results_db_delete(const char *id);
  */
 int tool_results_db_reclaim_unbound(int64_t before, int *deleted_out);
 
+/** @brief Finalize the statements kept for the store (auth_db, when it closes; its lock held). */
+void tool_results_db_release_locked(void);
+
 #ifdef __cplusplus
 }
 #endif
