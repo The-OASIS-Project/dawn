@@ -40,6 +40,10 @@ static const char *const s_features[] = {
     * with ?app=, and each app's login lives in its own cookie
     * (dawn_session_<app>), so apps open in one browser don't share a login. */
    "app_logins",
+   /* A text turn takes images only by id (image_ids); images[] is ignored.  A
+    * bad, missing or foreign id, or too many, refuses the whole turn with
+    * IMAGE_UNAVAILABLE / IMAGE_LIMIT / IMAGE_ERROR and saves nothing. */
+   "image_turns_by_id",
 };
 
 size_t webui_protocol_json_members(char *out, size_t size) {
