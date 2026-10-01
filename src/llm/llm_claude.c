@@ -85,9 +85,6 @@ static struct curl_slist *build_claude_headers(const char *api_key, const claude
 
 static char *claude_chat_completion_once(struct json_object *conversation_history,
                                          const char *input_text,
-                                         const char **vision_images,
-                                         const size_t *vision_image_sizes,
-                                         int vision_image_count,
                                          const char *base_url,
                                          const char *api_key,
                                          const char *model) {
@@ -103,9 +100,12 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
    // so orphaned tool_use filtering is always needed to clean up any history artifacts.
    char carrier[LLM_CARRIER_MAX];
    llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
-   json_object *request = convert_to_claude_format(conversation_history, input_text, vision_images,
-                                                   vision_image_sizes, vision_image_count, model,
-                                                   carrier, 0);
+   json_object *request = convert_to_claude_format(conversation_history, input_text, model, carrier,
+                                                   0, claude_betas_render_inline(base_url));
+   if (!request) {
+      OLOG_ERROR("Failed to convert conversation to Claude format");
+      return NULL;
+   }
 
    claude_betas_t betas;
    claude_betas_add(request, base_url, &betas);
@@ -186,6 +186,9 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
    if (http_code != 200) {
       if (claude_betas_rejected(http_code, chunk.data, &betas)) {
          /* retried without them by llm_claude_chat_completion */
+         if (betas.inline_rejected) {
+            llm_note_inline_tools_rejected();
+         }
       } else if (http_code == 401) {
          OLOG_ERROR("Claude API: Invalid or missing API key (HTTP 401)");
       } else if (http_code == 403) {
@@ -452,9 +455,6 @@ static const char *parse_claude_error_message(const char *response_body, long ht
 
 static int claude_single_shot_once(struct json_object *conversation_history,
                                    const char *input_text,
-                                   const char **vision_images,
-                                   const size_t *vision_image_sizes,
-                                   int vision_image_count,
                                    const char *base_url,
                                    const char *api_key,
                                    const char *model,
@@ -492,9 +492,8 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    /* Whose stored reasoning this request may send back, and whose this turn's is. */
    char carrier[LLM_CARRIER_MAX];
    llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
-   request = convert_to_claude_format(conversation_history, input_text, vision_images,
-                                      vision_image_sizes, vision_image_count, model, carrier,
-                                      iteration);
+   request = convert_to_claude_format(conversation_history, input_text, model, carrier, iteration,
+                                      claude_betas_render_inline(base_url));
    if (!request) {
       OLOG_ERROR("Failed to convert conversation to Claude format");
       return 1;
@@ -630,6 +629,9 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    if (http_code != 200) {
       const bool retrying = claude_betas_rejected(http_code, streaming_ctx.raw_response.data,
                                                   &betas);
+      if (betas.inline_rejected) {
+         llm_note_inline_tools_rejected(); /* the turn's caller records it */
+      }
       OLOG_ERROR("Claude API: Request failed (HTTP %ld)", http_code);
       if (http_code == 429 || (http_code >= 500 && http_code < 600)) {
          llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
@@ -698,17 +700,13 @@ static int claude_single_shot_once(struct json_object *conversation_history,
  * Anthropic rejects one (see claude_betas_rejected). */
 char *llm_claude_chat_completion(struct json_object *conversation_history,
                                  const char *input_text,
-                                 const char **vision_images,
-                                 const size_t *vision_image_sizes,
-                                 int vision_image_count,
                                  const char *base_url,
                                  const char *api_key,
                                  const char *model) {
    char *response = NULL;
    for (int attempt = 0; attempt < CLAUDE_BETA_ATTEMPTS; attempt++) {
-      response = claude_chat_completion_once(conversation_history, input_text, vision_images,
-                                             vision_image_sizes, vision_image_count, base_url,
-                                             api_key, model);
+      response = claude_chat_completion_once(conversation_history, input_text, base_url, api_key,
+                                             model);
       if (response || !claude_betas_take_retry()) {
          break;
       }
@@ -719,9 +717,6 @@ char *llm_claude_chat_completion(struct json_object *conversation_history,
 
 int llm_claude_streaming_single_shot(struct json_object *conversation_history,
                                      const char *input_text,
-                                     const char **vision_images,
-                                     const size_t *vision_image_sizes,
-                                     int vision_image_count,
                                      const char *base_url,
                                      const char *api_key,
                                      const char *model,
@@ -731,8 +726,7 @@ int llm_claude_streaming_single_shot(struct json_object *conversation_history,
                                      llm_tool_response_t *result) {
    int rc = 1;
    for (int attempt = 0; attempt < CLAUDE_BETA_ATTEMPTS; attempt++) {
-      rc = claude_single_shot_once(conversation_history, input_text, vision_images,
-                                   vision_image_sizes, vision_image_count, base_url, api_key, model,
+      rc = claude_single_shot_once(conversation_history, input_text, base_url, api_key, model,
                                    chunk_callback, callback_userdata, iteration, result);
       if (rc == 0 || !claude_betas_take_retry()) {
          break;

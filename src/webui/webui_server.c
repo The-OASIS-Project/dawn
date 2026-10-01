@@ -3324,10 +3324,8 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
 void handle_text_message(ws_connection_t *conn,
                          const char *text,
                          size_t len,
-                         const char **vision_images,
-                         const size_t *vision_image_sizes,
-                         const char **vision_mimes,
-                         int vision_image_count,
+                         const char image_ids[][IMAGE_ID_LEN],
+                         int image_id_count,
                          const char *persist_content) {
    (void)len; /* Length already validated by caller */
 
@@ -3345,22 +3343,13 @@ void handle_text_message(ws_connection_t *conn,
       }
    }
 
-   if (vision_image_count > 0) {
-      size_t total_bytes = 0;
-      for (int i = 0; i < vision_image_count; i++) {
-         total_bytes += vision_image_sizes[i];
-      }
-      OLOG_INFO("WebUI: Text+Vision input from session %u: %s (%d images, %zu total bytes)",
-                conn->session->session_id, text, vision_image_count, total_bytes);
-   } else {
-      OLOG_INFO("WebUI: Text input from session %u: %s", conn->session->session_id, text);
-   }
+   OLOG_INFO("WebUI: Text input from session %u: %s (%d image(s))", conn->session->session_id, text,
+             image_id_count);
 
    /* Typed input (not ASR): pass input_was_voice=false so the worker stamps the
     * flag right before dispatch and the prompt builder omits the ASR hint. */
-   int ret = webui_process_text_input_with_vision(conn->session, text, vision_images,
-                                                  vision_image_sizes, vision_mimes,
-                                                  vision_image_count, persist_content,
+   int ret = webui_process_text_input_with_images(conn->session, text, image_ids, image_id_count,
+                                                  persist_content,
                                                   /*input_was_voice=*/false);
    if (ret != 0) {
       send_error_impl(conn->wsi, "PROCESSING_ERROR", "Failed to process text input");

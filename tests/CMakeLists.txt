@@ -124,6 +124,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v95.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v96.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v97.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v98.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -337,6 +338,20 @@ dawn_add_unit_test(test_image_store
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# An image question's history message: what a reload rebuilds, or refused
+# (missing / another user's / inline data: / too many), never degraded.
+dawn_add_unit_test(test_image_question
+   SOURCES test_image_question.c
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Document-original store + blob engine dedup/orphan/caps + v68 stmt_blob_*.
 dawn_add_unit_test(test_document_original_store
    SOURCES test_document_original_store.c
@@ -528,6 +543,8 @@ dawn_add_unit_test(test_session_history
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SRC_ROOT}/src/core/hash_util.c
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -547,6 +564,7 @@ dawn_add_unit_test(test_session_prefix
            ${SRC_ROOT}/src/core/session_compaction.c
            ${SRC_ROOT}/src/llm/llm_compaction.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
            ${SRC_ROOT}/src/core/image_rehydrate.c
            ${SRC_ROOT}/src/core/ocp_helpers.c
@@ -564,6 +582,8 @@ dawn_add_unit_test(test_session_prefix
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/core/prefix_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -829,6 +849,8 @@ dawn_add_unit_test(test_messaging_format
 dawn_add_unit_test(test_claude_format
    SOURCES test_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
@@ -836,6 +858,9 @@ dawn_add_unit_test(test_claude_format
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/src/llm/llm_claude_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SRC_ROOT}/src/core/hash_util.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
@@ -846,6 +871,10 @@ dawn_add_unit_test(test_claude_format
 dawn_add_unit_test(test_prompt_cache_layout
    SOURCES test_prompt_cache_layout.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
@@ -853,6 +882,9 @@ dawn_add_unit_test(test_prompt_cache_layout
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/src/llm/llm_claude_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SRC_ROOT}/src/core/hash_util.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
@@ -870,12 +902,15 @@ dawn_add_unit_test(test_openrouter_cache
 dawn_add_unit_test(test_llm_dup_check
    SOURCES test_llm_dup_check.c test_llm_dup_check_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tools_dup.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/hash_util.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
@@ -884,12 +919,53 @@ dawn_add_unit_test(test_llm_dup_check
 dawn_add_unit_test(test_llm_tools_finish
    SOURCES test_llm_tools_finish.c test_llm_dup_check_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tools_dup.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/hash_util.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
+# A conversation's tools are decided by registration, not enable flags; a
+# tool a session may not use is never offered to it, frozen or added later.
+dawn_add_unit_test(test_llm_tools_frozen
+   SOURCES test_llm_tools_frozen.c test_llm_dup_check_stub.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/hash_util.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
+# A tool's images inside its result: counted (image budget, token estimate)
+# and stripped for a model without vision, on every history shape.  Links the
+# real llm_tools.c against the dup-check stub, as test_llm_dup_check does.
+dawn_add_unit_test(test_tool_images_render
+   SOURCES test_tool_images_render.c test_llm_dup_check_stub.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+           ${SRC_ROOT}/src/llm/llm_compaction.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/hash_util.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
@@ -1134,6 +1210,7 @@ dawn_add_unit_test(test_llm_history_kind
 dawn_add_unit_test(test_openai_history
    SOURCES test_openai_history.c
            ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
@@ -1157,12 +1234,23 @@ dawn_add_unit_test(test_llm_claude_binding
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# The HUD tools' schemas stay as registered through a helmet discovery cycle
+# (a conversation freezes them); live elements and modes are described and
+# checked at the call instead.
+dawn_add_unit_test(test_hud_tools
+   SOURCES test_hud_tools.c
+           ${SRC_ROOT}/src/tools/hud_tools.c
+           ${SRC_ROOT}/src/tools/hud_discovery.c
+   LIBS    dawn_common unity mosquitto ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 # Anthropic betas: request fields, header, and which 400s turn one off.
 dawn_add_unit_test(test_llm_claude_betas
    SOURCES test_llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_turn_result.c
    DEFINES ENABLE_MULTI_CLIENT
-   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LIBS    dawn_common unity pthread ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_word_to_number
@@ -1194,6 +1282,7 @@ dawn_add_unit_test(test_llm_model_version
 dawn_add_unit_test(test_responses_input
    SOURCES test_responses_input.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
@@ -1456,6 +1545,38 @@ dawn_add_unit_test(test_conv_db_kind_prefix
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Images a tool returns (real auth_db, real image store): stored unbound and
+# owner-only, bound with their tool row, reclaimed otherwise, reloaded as the
+# live turn built them, saved by a voice save, deleted with their conversation.
+dawn_add_unit_test(test_tool_images
+   SOURCES test_tool_images.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/core/conv_images.c
+           ${SRC_ROOT}/src/core/session_image_hold.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/src/core/session_voice_save.c
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+           ${SRC_ROOT}/src/document_original_store.c
+           ${SRC_ROOT}/src/core/prefix_message.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${AUTH_DB_SOURCES}
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # A session's stable memory citation handles (real auth_db): numbered before
 # the conversation exists, saved with it, the same after a reload.
 dawn_add_unit_test(test_focus_handles
@@ -1564,6 +1685,7 @@ dawn_add_unit_test(test_history_reload_watermark
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -1587,6 +1709,7 @@ dawn_add_unit_test(test_history_strip_markers
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -1806,6 +1929,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
@@ -1815,6 +1939,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_claude_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
@@ -1829,6 +1955,12 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
            ${SRC_ROOT}/src/llm/llm_tools_dup.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
@@ -1906,6 +2038,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
@@ -1915,6 +2048,8 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_claude_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
@@ -1929,6 +2064,12 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
            ${SRC_ROOT}/src/llm/llm_tools_dup.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c

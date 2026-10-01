@@ -29,6 +29,7 @@
 #include <json-c/json.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 #include "config/dawn_config.h"
 
@@ -76,22 +77,24 @@ int llm_context_get_size(void) {
 int llm_get_type(void) {
    return 0;
 }
-/* Pulled in by the new capture-image persistence helpers in llm_tools.c
- * (build_openai_capture_image_message/build_claude_capture_image_message) —
- * not on the dup-check path under test. */
-const char *llm_claude_detect_image_mime_type(const char *base64_data) {
-   (void)base64_data;
-   return "image/jpeg";
+/* A tool's image (llm_tool_images.c) — not on the paths under test: no
+ * image is ever taken, and a result's content is its text. */
+bool llm_tool_images_ingest(char *base64, void *result) {
+   (void)result;
+   free(base64);
+   return false;
 }
-json_object *llm_claude_create_image_block(const char *vision_image) {
-   (void)vision_image;
-   return NULL;
+json_object *llm_tool_images_result_content(const void *result) {
+   (void)result;
+   return NULL; /* the caller then takes the result's text */
 }
 char *ocp_base64_encode(void) {
    return NULL;
 }
+/* The command context a test runs as (none unless it sets one). */
+void *g_stub_command_context = NULL;
 void *session_get_command_context(void) {
-   return NULL;
+   return g_stub_command_context;
 }
 void session_set_command_context(void *session) {
    (void)session;

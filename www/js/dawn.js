@@ -1460,24 +1460,13 @@
          msg.payload.conversation_id = activeConvId;
       }
 
-      // Add vision images if pending (supports multiple)
-      const pendingImages = DawnVision.getPendingImages();
-      if (pendingImages.length > 0) {
-         msg.payload.images = pendingImages.map((img) => ({
-            data: img.data,
-            mime_type: img.mimeType,
-         }));
-         // Persistence keys (from /api/images). NOTE: getPendingImages() above
-         // intentionally returns only {data, mimeType} (no id), so read the ids via
-         // getPendingImageIds() — which maps the SAME pendingImages array in order,
-         // keeping them aligned with images[]. The DAEMON is authoritative for
-         // user-turn persistence: it builds the [IMAGE:<id>] markers and persists the
-         // turn itself, then echoes server_saved=true so the client skips its own save.
-         // image_ids is MANDATORY on an image turn — without valid ids the daemon
-         // persists text-only and the images are lost on reload (hard cut-over).
-         const pendingImageIds = DawnVision.getPendingImageIds
-            ? DawnVision.getPendingImageIds()
-            : [];
+      // Attached images, by the ids /api/images gave them. The daemon reads the
+      // stored files (no image bytes on the socket), builds the [IMAGE:<id>]
+      // markers and persists the turn itself, then echoes server_saved=true so the
+      // client skips its own save. An id the daemon can't use (gone, another
+      // user's) fails the turn with an error frame; nothing is sent without it.
+      const pendingImageIds = DawnVision.getPendingImageIds();
+      if (pendingImageIds.length > 0) {
          msg.payload.image_ids = pendingImageIds;
          // Retained only for local display of the just-sent turn (no longer a save key).
          pendingThumbnailsForSave = pendingImageIds;

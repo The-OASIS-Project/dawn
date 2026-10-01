@@ -1782,14 +1782,6 @@
                hint: 'Maximum images per message (1-10)',
                configPath: 'vision.max_images',
             },
-            capture_history_count: {
-               type: 'number',
-               label: 'Camera Capture Retention',
-               min: 0,
-               max: 50,
-               hint: 'Recent camera captures (viewing tool) kept visible for follow-up questions. 0 = unlimited (bounded only by context compaction, not per-capture).',
-               configPath: 'vision.capture_history_count',
-            },
             storage: {
                type: 'group',
                label: 'Storage',

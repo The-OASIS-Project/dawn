@@ -61,13 +61,10 @@ typedef void (*llm_claude_text_chunk_callback)(const char *chunk, void *userdata
  *
  * Handles Anthropic Claude API calls with automatic format conversion.
  * Conversation history is provided in OpenAI format and converted internally
- * to Claude's format. Supports vision API and prompt caching.
+ * to Claude's format (images included). Supports prompt caching.
  *
  * @param conversation_history JSON array of messages (OpenAI format - will be converted)
  * @param input_text User input text
- * @param vision_images Array of base64 images for vision models (NULL if not used)
- * @param vision_image_sizes Array of image sizes in bytes (NULL if not used)
- * @param vision_image_count Number of images (0 if not used)
  * @param base_url Base URL (should be https://api.anthropic.com)
  * @param api_key Anthropic API key (required)
  * @param model Model name (NULL to use config default)
@@ -75,9 +72,6 @@ typedef void (*llm_claude_text_chunk_callback)(const char *chunk, void *userdata
  */
 char *llm_claude_chat_completion(struct json_object *conversation_history,
                                  const char *input_text,
-                                 const char **vision_images,
-                                 const size_t *vision_image_sizes,
-                                 int vision_image_count,
                                  const char *base_url,
                                  const char *api_key,
                                  const char *model);
@@ -90,9 +84,6 @@ char *llm_claude_chat_completion(struct json_object *conversation_history,
  *
  * @param conversation_history JSON array of messages (OpenAI format - converted internally)
  * @param input_text User input text (empty string for follow-up calls)
- * @param vision_images Array of base64 images (NULL if not used)
- * @param vision_image_sizes Array of image sizes (NULL if not used)
- * @param vision_image_count Number of images (0 if not used)
  * @param base_url API base URL
  * @param api_key Anthropic API key (required)
  * @param model Model name (NULL = use config default)
@@ -104,9 +95,6 @@ char *llm_claude_chat_completion(struct json_object *conversation_history,
  */
 int llm_claude_streaming_single_shot(struct json_object *conversation_history,
                                      const char *input_text,
-                                     const char **vision_images,
-                                     const size_t *vision_image_sizes,
-                                     int vision_image_count,
                                      const char *base_url,
                                      const char *api_key,
                                      const char *model,

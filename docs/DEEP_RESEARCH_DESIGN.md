@@ -570,7 +570,7 @@ builder means **no private memory reaches the fetch loop at all** — the arch H
 [§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)) — never via the automatic per-turn block
 inside the fetch loop.
 
-**Build-time confirmations (before P0, low risk):** verify that (a) `session_llm_call_with_tts_vision_no_add`
+**Build-time confirmations (before P0, low risk):** verify that (a) `session_llm_call_with_tts_no_add`
 does not *itself* re-inject memory (the builder should be the only composer — then skipping it is sufficient),
 and (b) native tool schemas attach from the registry at the LLM call independent of the prompt text, so the
 read-only allowlist ([§7](#7-tools)) is the enforcement point even with the builder skipped.
@@ -1083,7 +1083,7 @@ hard-budget + all-closed stopping.
 - ✅ **`skip_prompt_rebuild` dispatch option** — shipped, verified clean across the pre-merge audits; no other caller
   regressed.
 - ✅ **Two build-time confirmations from the pressure-test** — both confirmed at P0: (a)
-  `session_llm_call_with_tts_vision_no_add` does not re-inject memory; (b) native tool schemas attach from the
+  `session_llm_call_with_tts_no_add` does not re-inject memory; (b) native tool schemas attach from the
   registry independent of prompt text → the read-only allowlist is the real enforcement point.
 - ✅ **Persona-less research session** — addressed: the user-facing take is the completion-commentary turn
   ([§7a](#7a-invocation-routing--confirmation)), generated in a persona-carrying context, not the bare research session.
@@ -1120,7 +1120,7 @@ section that specifies it. Build + format + the relevant unit test after each lo
 
 0a. **Two build-time confirmations** ([§4a](#4a-context-reconstruction--the-core-mechanism)) — cheap reads,
    but they decide whether the mechanism is sound:
-   - Confirm `session_llm_call_with_tts_vision_no_add` (`session_manager_llm.c`) does **not** itself re-inject
+   - Confirm `session_llm_call_with_tts_no_add` (`session_manager_llm.c`) does **not** itself re-inject
      memory — the per-turn builder should be the only composer. If it does, the bare-session guarantee needs a
      second suppression point.
    - Confirm native tool schemas attach from the registry at the LLM call **independent of the prompt text**,

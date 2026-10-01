@@ -37,6 +37,7 @@
 #include "config/dawn_config.h"
 #include "core/focus/focus_handles.h"
 #include "core/prefix_in_force.h"
+#include "core/prefix_tools.h"
 #include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
@@ -44,6 +45,9 @@
 #include "llm/llm_compaction.h"
 #include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_tool_defs.h"
+#include "llm/llm_tool_images.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_turn_blocks.h"
 #include "memory/memory_history_loader.h"
 #include "unity.h"
@@ -124,6 +128,16 @@ void llm_context_calibration(uint32_t session_id,
    (void)session_id, (void)type, (void)provider, (void)model;
    memset(out, 0, sizeof(*out));
 }
+/* The images one request may carry (llm_tool_images.c reads models.toml). */
+static llm_image_limit_t s_image_limit = { 600, 24000000 };
+bool llm_tool_images_request_limit(llm_type_t type,
+                                   cloud_provider_t provider,
+                                   const char *model,
+                                   llm_image_limit_t *out) {
+   (void)type, (void)provider, (void)model;
+   *out = s_image_limit;
+   return true;
+}
 float llm_context_hard_threshold(void) {
    return 0.85f;
 }
@@ -175,6 +189,12 @@ char *session_take_new_notices_locked(session_t *session, int viewer_user_id) {
 }
 
 #define FLAGS (JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE)
+
+/* A tool definition (llm_tool_defs.h), as the registry projects one. */
+#define TDEF(name, desc)                                                 \
+   "{\"name\":\"" name "\",\"description\":\"" desc "\",\"parameters\":" \
+   "{\"type\":\"object\",\"properties\":{}}}"
+#define WEATHER_DEFS "[" TDEF("weather", "Weather") "]"
 
 static session_t *s;
 
@@ -482,32 +502,6 @@ static void test_guest_turn_keeps_its_prompt(void) {
    TEST_ASSERT_NOT_NULL(strstr(q, "--- END TURN CONTEXT (dawn-"));
 }
 
-/* A frozen tool's schema is recorded, and a change to it is recorded too (and
- * logged): the tools a conversation sends are rendered on every request. */
-static void test_tool_schemas_are_recorded(void) {
-   add("user", "Q1");
-   composed_prompt_t cp = prompt("P", NULL, "", NULL);
-   cp.tool_names = strdup("[\"a\",\"b\"]");
-   cp.tool_schemas = strdup("{\"a\":\"h1\",\"b\":\"h2\",\"c\":\"h3\"}");
-   session_prefix_apply_turn(s, &cp, NULL);
-   composed_prompt_free(&cp);
-   char *rec = prefix_in_force_json(s->conversation_history);
-   TEST_ASSERT_NOT_NULL(strstr(rec, "\"tool_schemas\":{\"a\":\"h1\",\"b\":\"h2\"}"));
-   free(rec);
-
-   add("assistant", "A1");
-   add("user", "Q2");
-   cp = prompt("P", NULL, "", NULL);
-   cp.tool_names = strdup("[\"a\",\"b\"]");
-   cp.tool_schemas = strdup("{\"a\":\"h1-changed\",\"b\":\"h2\"}");
-   session_prefix_apply_turn(s, &cp, NULL);
-   composed_prompt_free(&cp);
-   rec = prefix_in_force_json(s->conversation_history);
-   TEST_ASSERT_NOT_NULL(strstr(rec, "\"a\":\"h1-changed\""));
-   free(rec);
-   TEST_ASSERT_EQUAL_INT(4, count()); /* no boundary, nothing appended */
-}
-
 /* A background job's report (untrusted) never shares a message with DAWN's
  * context: the context goes in a message of its own just before it. */
 static void test_an_envelope_gets_its_context_apart(void) {
@@ -598,14 +592,14 @@ static void check_saved_turn(int64_t conv, int64_t qid) {
    conv_prefix_t p;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_prefix_get(conv, s_user, &p));
    TEST_ASSERT_EQUAL_STRING("P", p.prefix);
-   TEST_ASSERT_EQUAL_STRING("[\"weather\"]", p.tools);
+   TEST_ASSERT_EQUAL_STRING(WEATHER_DEFS, p.tools);
    conv_prefix_free(&p);
    TEST_ASSERT_NULL(s->prefix_turn); /* nothing left to save */
 }
 
 static void apply_first_turn(void) {
    composed_prompt_t cp = prompt("P", "MEM", "D", CTX("09:00"));
-   cp.tool_names = strdup("[\"weather\"]");
+   cp.tool_defs = strdup(WEATHER_DEFS);
    session_prefix_apply_turn(s, &cp, NULL);
    composed_prompt_free(&cp);
 }
@@ -655,7 +649,7 @@ static void test_an_unsaved_turn_is_given_up_for_the_next(void) {
    add("assistant", "A1");
    add("user", "Q2");
    composed_prompt_t cp = prompt("P", "MEM", "D", CTX("09:05"));
-   cp.tool_names = strdup("[\"weather\"]");
+   cp.tool_defs = strdup(WEATHER_DEFS);
    session_prefix_apply_turn(s, &cp, NULL);
    composed_prompt_free(&cp);
    const int64_t qid = save_question(conv, 4);
@@ -689,7 +683,7 @@ static void test_each_turn_saves_with_its_own_question(void) {
    add("assistant", "A1");
    add("user", "Q2");
    composed_prompt_t cp = prompt("P", "MEM", "D2", CTX("09:05"));
-   cp.tool_names = strdup("[\"weather\"]");
+   cp.tool_defs = strdup(WEATHER_DEFS);
    session_prefix_apply_turn(s, &cp, NULL);
    composed_prompt_free(&cp);
    const int64_t q1 = save_question(conv, 1);
@@ -975,6 +969,40 @@ static void test_a_compaction_applies_at_the_seam_and_reloads_the_same(void) {
    db_close();
 }
 
+/* A history whose images leave no room for one more under the model's
+ * per-request limit is compacted at the seam, its tokens well under the
+ * window: a turn's tool loop can't compact, so the room is made first. */
+static void test_images_at_the_limit_compact_at_the_seam(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   /* A tool result that carried an image, early in the history. */
+   struct json_object *tool = json_tokener_parse(
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":[{\"type\":\"text\","
+       "\"text\":\"Image captured.\"},{\"type\":\"image_url\",\"image_url\":{\"url\":"
+       "\"data:image/png;base64,iVBORw0KGgo=\"}}]}");
+   json_object_array_put_idx(s->conversation_history, 2, tool);
+   add("user", "Qn");
+   save_question(conv, count() - 1);
+   s_over = false;
+   s_summary = "S";
+
+   s_image_limit = (llm_image_limit_t){ 2, 24000000 }; /* room for one more */
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+
+   s_image_limit = (llm_image_limit_t){ 1, 24000000 }; /* none */
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+
+   s_image_limit = (llm_image_limit_t){ 600, 24000000 };
+   db_close();
+}
+
 /* A summary of a range the history no longer holds as it was is dropped. */
 static void test_a_stale_summary_is_dropped(void) {
    const int64_t conv = db_open_conv();
@@ -1129,6 +1157,644 @@ static void test_a_switch_summarizes_again(void) {
    db_close();
 }
 
+/* ---- a conversation's tools, by value (prefix_tools.h) ---- */
+
+static composed_prompt_t tooled(const char *defs, bool inline_tools) {
+   composed_prompt_t cp = prompt("P", NULL, "", NULL);
+   cp.tool_defs = strdup(defs);
+   cp.inline_tools = inline_tools;
+   return cp;
+}
+
+static void apply_tools(const char *defs, bool inline_tools) {
+   composed_prompt_t cp = tooled(defs, inline_tools);
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+}
+
+/* An answer with the reasoning its model gave it: a boundary drops it. */
+static void add_reasoned(const char *text) {
+   add("assistant", text);
+   json_object_object_add(at(count() - 1), LLM_TURN_BLOCKS_KEY, json_object_new_array());
+}
+
+static bool reasoning_kept(void) {
+   for (int i = 0; i < count(); i++) {
+      if (json_object_object_get_ex(at(i), LLM_TURN_BLOCKS_KEY, NULL)) {
+         return true;
+      }
+   }
+   return false;
+}
+
+static char *frozen_tools_json(void) {
+   return strdup(
+       json_object_to_json_string_ext(llm_history_frozen_tools(s->conversation_history), FLAGS));
+}
+
+/* The names a request built from the history defines, comma-joined. */
+static const char *request_names(struct json_object *hist, bool inline_ok) {
+   static char out[256];
+   out[0] = '\0';
+   struct json_object *defs = llm_tool_defs_for_request(hist, inline_ok);
+   for (size_t i = 0; defs && i < json_object_array_length(defs); i++) {
+      const char *name = llm_tool_def_name(json_object_array_get_idx(defs, i));
+      snprintf(out + strlen(out), sizeof(out) - strlen(out), "%s%s", i ? "," : "", name);
+   }
+   json_object_put(defs);
+   return out;
+}
+
+static int last_of_kind(message_kind_t kind) {
+   for (int i = count() - 1; i >= 0; i--) {
+      if (llm_history_kind_of(at(i)) == kind) {
+         return i;
+      }
+   }
+   return -1;
+}
+
+/* A tool added after the conversation froze, on a model that takes a tool
+ * defined in a message: the frozen tools stay byte for byte, the new tool is
+ * appended in place, and the earlier reasoning stays valid. */
+static void test_a_tool_added_after_freeze_goes_in_place(void) {
+   add("user", "Q1");
+   apply_tools("[" TDEF("a", "A") "]", true);
+   char *frozen = frozen_tools_json();
+   add_reasoned("A1");
+   add("user", "Q2");
+   apply_tools("[" TDEF("a", "A") "," TDEF("b", "B") "]", true);
+
+   char *now = frozen_tools_json();
+   TEST_ASSERT_EQUAL_STRING(frozen, now);
+   free(frozen);
+   free(now);
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   const int row = last_of_kind(MESSAGE_KIND_TOOL_CHANGE);
+   TEST_ASSERT_EQUAL_INT(count() - 1, row);
+   TEST_ASSERT_EQUAL_STRING("system",
+                            json_object_get_string(json_object_object_get(at(row), "role")));
+   TEST_ASSERT_TRUE(llm_tool_change_stored_inline(at(row)));
+   TEST_ASSERT_TRUE(llm_tool_change_renders_inline(s->conversation_history, (size_t)row, true));
+   TEST_ASSERT_TRUE(reasoning_kept()); /* no boundary */
+   TEST_ASSERT_EQUAL_STRING("a", request_names(s->conversation_history, true));
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(s->conversation_history, false));
+
+   /* The same tools again: nothing appended. */
+   add("assistant", "A2");
+   add("user", "Q3");
+   apply_tools("[" TDEF("a", "A") "," TDEF("b", "B") "]", true);
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+}
+
+/* The same on a model that doesn't (chat completions, Sonnet 5, a gateway):
+ * the change folds into the request's tools, a declared boundary that raises
+ * the conversation's floor. */
+static void test_a_tool_added_elsewhere_folds_with_a_boundary(void) {
+   const int64_t conv = db_open_conv();
+   add("system", "start");
+   add("user", "Q1");
+   save_question(conv, 1);
+   apply_tools("[" TDEF("a", "A") "]", false);
+   add_reasoned("A1");
+   add("user", "Q2");
+   const int64_t q2 = save_question(conv, count() - 1);
+   apply_tools("[" TDEF("a", "A") "," TDEF("b", "B") "]", false);
+
+   const int row = last_of_kind(MESSAGE_KIND_TOOL_CHANGE);
+   TEST_ASSERT_TRUE(row > 0);
+   TEST_ASSERT_FALSE(llm_tool_change_stored_inline(at(row)));
+   TEST_ASSERT_FALSE(reasoning_kept());
+   /* Folded whatever the request could do. */
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(s->conversation_history, true));
+   conv_prefix_t p;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_prefix_get(conv, s_user, &p));
+   TEST_ASSERT_EQUAL_INT64(q2, p.reasoning_floor_msg_id);
+   conv_prefix_free(&p);
+   db_close();
+}
+
+/* A same-name tool whose description changed: a row with the new definition,
+ * a boundary where it can't go in place; key order alone is no change. */
+static void test_a_same_name_change_is_a_row(void) {
+   add("user", "Q1");
+   apply_tools("[" TDEF("a", "A") "]", false);
+   add_reasoned("A1");
+   add("user", "Q2");
+   apply_tools("[" TDEF("a", "A v2") "]", false);
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   TEST_ASSERT_FALSE(reasoning_kept());
+   struct json_object *defs = llm_tool_defs_for_request(s->conversation_history, false);
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(defs));
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(defs), "A v2"));
+   json_object_put(defs);
+
+   add("assistant", "A2");
+   add("user", "Q3");
+   apply_tools("[{\"parameters\":{\"properties\":{},\"type\":\"object\"},\"description\":\"A v2\","
+               "\"name\":\"a\"}]",
+               false);
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+}
+
+/* A tool no longer registered (an MCP server gone) adds nothing: its
+ * definition stays (a call to it is refused when made). */
+static void test_a_removed_tool_keeps_its_definition(void) {
+   add("user", "Q1");
+   apply_tools("[" TDEF("a", "A") "," TDEF("b", "B") "]", true);
+   add_reasoned("A1");
+   add("user", "Q2");
+   apply_tools("[" TDEF("a", "A") "]", true);
+   TEST_ASSERT_EQUAL_INT(0, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   TEST_ASSERT_TRUE(reasoning_kept());
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(s->conversation_history, true));
+}
+
+/* One turn with tools, as a surface runs it. */
+static void run_tool_turn(int64_t conv, const char *q, const char *a, const char *defs, bool in) {
+   add("user", q);
+   save_question(conv, count() - 1);
+   apply_tools(defs, in);
+   add("assistant", a);
+   int64_t id = 0;
+   const conv_message_row_t row = { .role = "assistant", .content = a };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
+   json_object_object_add(at(count() - 1), "id", json_object_new_int64(id));
+}
+
+/* Saved and reloaded, a conversation's tools are what it sent (a large change
+ * stored by hash comes back whole), and nothing is appended again. */
+static void test_tool_changes_reload_as_sent(void) {
+   const int64_t conv = db_open_conv();
+   atomic_store(&s->history_conversation_id, conv);
+   static char big[10240];
+   snprintf(big, sizeof(big), "[" TDEF("a", "A") ",{\"name\":\"b\",\"description\":\"");
+   memset(big + strlen(big), 'x', 9000);
+   snprintf(big + strlen(big), sizeof(big) - strlen(big),
+            "\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}]");
+   run_tool_turn(conv, "Q1", "A1", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q2", "A2", big, true);
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+
+   struct json_object *reloaded = memory_history_request_context(conv, s_user, 0, NULL, NULL, NULL);
+   TEST_ASSERT_NOT_NULL(reloaded);
+   char *live = wire_of(s->conversation_history);
+   char *again = wire_of(reloaded);
+   TEST_ASSERT_EQUAL_STRING(live, again);
+   free(live);
+   free(again);
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(reloaded, false));
+   TEST_ASSERT_EQUAL_STRING("a", request_names(reloaded, true));
+
+   /* The next turn, on the reloaded conversation: nothing new. */
+   json_object_put(s->conversation_history);
+   s->conversation_history = reloaded;
+   run_tool_turn(conv, "Q3", "A3", big, true);
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   db_close();
+}
+
+/* A compaction that summarizes a tool change away and a new change at the
+ * same seam: one row, holding both (the definitions aren't summarized). */
+static void test_a_compaction_and_a_change_at_one_seam_append_one_row(void) {
+   const int64_t conv = db_open_conv();
+   run_tool_turn(conv, "Q1", "A1", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q2", "A2", "[" TDEF("a", "A") "," TDEF("b", "Tool B") "]", true);
+   for (int i = 3; i <= 5; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_tool_turn(conv, q, a, "[" TDEF("a", "A") "," TDEF("b", "Tool B") "]", true);
+   }
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+
+   add("user", "Q6");
+   save_question(conv, count() - 1);
+   s_over = true;
+   s_summary = "They talked.";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   TEST_ASSERT_NULL(strstr(s_summarized, "Tool B")); /* never summarized */
+   apply_tools("[" TDEF("a", "A") "," TDEF("b", "Tool B") "," TDEF("c", "C") "]", true);
+
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   struct json_object *defs = llm_tool_change_defs(at(last_of_kind(MESSAGE_KIND_TOOL_CHANGE)));
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(defs));
+   json_object_put(defs);
+   TEST_ASSERT_EQUAL_STRING("a,b,c", request_names(s->conversation_history, false));
+   db_close();
+}
+
+/* The Claude API rejected tools defined in a message: the conversation
+ * records it, and after a restart its changes fold (stored and new). */
+static void test_a_rejected_beta_folds_after_a_restart(void) {
+   const int64_t conv = db_open_conv();
+   atomic_store(&s->history_conversation_id, conv);
+   run_tool_turn(conv, "Q1", "A1", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q2", "A2", "[" TDEF("a", "A") "," TDEF("b", "B") "]", true);
+   TEST_ASSERT_EQUAL_STRING("a", request_names(s->conversation_history, true));
+   session_prefix_inline_tools_rejected(s);
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(s->conversation_history, true));
+
+   struct json_object *reloaded = memory_history_request_context(conv, s_user, 0, NULL, NULL, NULL);
+   TEST_ASSERT_NOT_NULL(reloaded);
+   TEST_ASSERT_TRUE(llm_tool_defs_inline_rejected(reloaded));
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(reloaded, true));
+   json_object_put(s->conversation_history);
+   s->conversation_history = reloaded;
+   run_tool_turn(conv, "Q3", "A3", "[" TDEF("a", "A") "," TDEF("b", "B") "," TDEF("c", "C") "]",
+                 true);
+   TEST_ASSERT_FALSE(llm_tool_change_stored_inline(at(last_of_kind(MESSAGE_KIND_TOOL_CHANGE))));
+   conv_prefix_t p;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_prefix_get(conv, s_user, &p));
+   TEST_ASSERT_TRUE(p.reasoning_floor_msg_id > 0); /* a declared boundary */
+   conv_prefix_free(&p);
+   db_close();
+}
+
+/* A conversation an older build froze by name: its tools become definitions
+ * once, whole when the hashes it recorded still match (a name it never sent
+ * left out); else a declared boundary. */
+static void freeze_names_only(const char *names, const char *hashes) {
+   add("system", "P");
+   add("user", "Q1");
+   session_prefix_apply_turn(s, NULL, NULL);
+   json_object_object_add(at(0), LLM_HISTORY_TOOLS_KEY, json_tokener_parse(names));
+   struct json_object *rec = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(at(0), LLM_HISTORY_IN_FORCE_KEY, &rec));
+   if (hashes) {
+      json_object_object_add(rec, "tool_schemas", json_tokener_parse(hashes));
+   }
+   add_reasoned("A1");
+   add("user", "Q2");
+}
+
+static void test_an_older_set_of_names_converts_once(void) {
+   freeze_names_only("[\"a\",\"b\",\"never\"]", "{\"a\":\"h1\",\"b\":\"h2\"}");
+   composed_prompt_t cp = tooled("[" TDEF("a", "A") "," TDEF("b", "B") "]", true);
+   cp.tool_schemas = strdup("{\"a\":\"h1\",\"b\":\"h2\"}");
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+   char *now = frozen_tools_json();
+   TEST_ASSERT_EQUAL_STRING("[" TDEF("a", "A") "," TDEF("b", "B") "]", now);
+   free(now);
+   TEST_ASSERT_TRUE(reasoning_kept());
+   TEST_ASSERT_EQUAL_INT(0, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   char *rec = prefix_in_force_json(s->conversation_history);
+   TEST_ASSERT_NULL(strstr(rec, "tool_schemas"));
+   free(rec);
+}
+
+static void test_an_older_set_that_changed_converts_with_a_boundary(void) {
+   freeze_names_only("[\"a\"]", "{\"a\":\"h1\"}");
+   composed_prompt_t cp = tooled("[" TDEF("a", "A") "]", true);
+   cp.tool_schemas = strdup("{\"a\":\"h1-changed\"}");
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+   TEST_ASSERT_FALSE(reasoning_kept());
+   TEST_ASSERT_EQUAL_STRING("a", request_names(s->conversation_history, false));
+}
+
+/* Changes are bounded per conversation: past the bound the definitions in
+ * force stay. */
+static void test_tool_changes_are_bounded(void) {
+   add("user", "Q0");
+   apply_tools("[" TDEF("a", "A0") "]", true);
+   for (int i = 1; i <= PREFIX_TOOL_CHANGES_PER_SERVER_HOUR + 2; i++) {
+      char q[8], desc[8], defs[256];
+      add("assistant", "A");
+      snprintf(q, sizeof(q), "Q%d", i);
+      add("user", q);
+      snprintf(desc, sizeof(desc), "A%d", i);
+      snprintf(defs, sizeof(defs),
+               "[{\"name\":\"a\",\"description\":\"%s\",\"parameters\":{\"type\":\"object\","
+               "\"properties\":{}}}]",
+               desc);
+      apply_tools(defs, true);
+   }
+   /* DAWN's own tools count as one source: its hourly bound holds. */
+   TEST_ASSERT_EQUAL_INT(PREFIX_TOOL_CHANGES_PER_SERVER_HOUR, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+}
+
+/* A turn whose target no longer takes tools defined in a message (models.toml
+ * dropped the model, another endpoint, a restart's empty rejection table
+ * aside): the conversation's inline changes fold from then on, its record
+ * says so, and the boundary is declared once. */
+static void test_a_target_that_stops_taking_inline_folds_once(void) {
+   const int64_t conv = db_open_conv();
+   atomic_store(&s->history_conversation_id, conv);
+   run_tool_turn(conv, "Q1", "A1", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q2", "A2", "[" TDEF("a", "A") "," TDEF("b", "B") "]", true);
+   json_object_object_add(at(count() - 1), LLM_TURN_BLOCKS_KEY, json_object_new_array());
+   TEST_ASSERT_EQUAL_STRING("a", request_names(s->conversation_history, true));
+
+   add("user", "Q3");
+   const int64_t q3 = save_question(conv, count() - 1);
+   apply_tools("[" TDEF("a", "A") "," TDEF("b", "B") "]", false);
+   TEST_ASSERT_TRUE(llm_tool_defs_inline_rejected(s->conversation_history));
+   TEST_ASSERT_FALSE(reasoning_kept());
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(s->conversation_history, true));
+   conv_prefix_t p;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_prefix_get(conv, s_user, &p));
+   TEST_ASSERT_EQUAL_INT64(q3, p.reasoning_floor_msg_id);
+   conv_prefix_free(&p);
+   add_reasoned("A3");
+
+   /* Once: the next such turn keeps its reasoning. */
+   add("user", "Q4");
+   save_question(conv, count() - 1);
+   apply_tools("[" TDEF("a", "A") "," TDEF("b", "B") "]", false);
+   TEST_ASSERT_TRUE(reasoning_kept());
+
+   /* Reloaded (a restart), it renders as the live one does. */
+   struct json_object *reloaded = memory_history_request_context(conv, s_user, 0, NULL, NULL, NULL);
+   TEST_ASSERT_NOT_NULL(reloaded);
+   TEST_ASSERT_TRUE(llm_tool_defs_inline_rejected(reloaded));
+   TEST_ASSERT_EQUAL_STRING("a,b", request_names(reloaded, true));
+   json_object_put(reloaded);
+   db_close();
+}
+
+/* A conversation whose inline changes nobody rejected renders them in place
+ * after a restart, as before it: its rows decide, not the process. */
+static void test_stored_inline_changes_render_the_same_after_a_restart(void) {
+   const int64_t conv = db_open_conv();
+   atomic_store(&s->history_conversation_id, conv);
+   run_tool_turn(conv, "Q1", "A1", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q2", "A2", "[" TDEF("a", "A") "," TDEF("b", "B") "]", true);
+   struct json_object *reloaded = memory_history_request_context(conv, s_user, 0, NULL, NULL, NULL);
+   TEST_ASSERT_NOT_NULL(reloaded);
+   TEST_ASSERT_FALSE(llm_tool_defs_inline_rejected(reloaded));
+   TEST_ASSERT_EQUAL_STRING(request_names(s->conversation_history, true),
+                            request_names(reloaded, true));
+   json_object_put(reloaded);
+   db_close();
+}
+
+/* An MCP tool's definition, from server "srv". */
+#define MCPDEF(name)                                                                      \
+   "{\"name\":\"" name "\",\"description\":\"[BEGIN UNTRUSTED MCP TOOL DESCRIPTION from " \
+   "server 'srv']\\nM\\n[END UNTRUSTED MCP TOOL DESCRIPTION]\",\"parameters\":"           \
+   "{\"type\":\"object\",\"properties\":{}}}"
+
+/* A tool added mid-conversation whose server has since gone: a compaction that
+ * summarizes its change appends its definition again from that row (the
+ * registry no longer has it), even with its server past its hourly bound. */
+static void test_a_compaction_keeps_a_gone_servers_definition(void) {
+   const int64_t conv = db_open_conv();
+   run_tool_turn(conv, "Q1", "A1", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q2", "A2", "[" TDEF("a", "A") "," MCPDEF("m") "]", true);
+   for (int i = 3; i <= 5; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_tool_turn(conv, q, a, "[" TDEF("a", "A") "]", true); /* srv disconnected */
+   }
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   /* srv is at its hourly bound. */
+   struct json_object *rec = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(at(0), LLM_HISTORY_IN_FORCE_KEY, &rec));
+   char servers[128];
+   snprintf(servers, sizeof(servers), "{\"srv\":{\"t\":%lld,\"n\":%d}}", (long long)time(NULL),
+            PREFIX_TOOL_CHANGES_PER_SERVER_HOUR);
+   json_object_object_add(rec, "tool_change_servers", json_tokener_parse(servers));
+
+   add("user", "Q6");
+   save_question(conv, count() - 1);
+   s_over = true;
+   s_summary = "They talked.";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   apply_tools("[" TDEF("a", "A") "]", true);
+
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE)); /* a new one */
+   TEST_ASSERT_EQUAL_STRING("a,m", request_names(s->conversation_history, false));
+   struct json_object *defs = llm_tool_change_defs(at(last_of_kind(MESSAGE_KIND_TOOL_CHANGE)));
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(defs));
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(defs), "from server 'srv'"));
+   json_object_put(defs);
+   db_close();
+}
+
+/* A name a change the compaction kept still defines keeps that definition:
+ * the older one it summarized away isn't appended over it. */
+static void test_a_compaction_keeps_the_newer_definition(void) {
+   const int64_t conv = db_open_conv();
+   run_tool_turn(conv, "Q1", "A1", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q2", "A2", "[" TDEF("a", "A") "," TDEF("b", "B1") "]", true);
+   run_tool_turn(conv, "Q3", "A3", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q4", "A4", "[" TDEF("a", "A") "]", true);
+   run_tool_turn(conv, "Q5", "A5", "[" TDEF("a", "A") "," TDEF("b", "B2") "]", true);
+   TEST_ASSERT_EQUAL_INT(2, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   add("user", "Q6");
+   save_question(conv, count() - 1);
+   s_over = true;
+   s_summary = "They talked.";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   apply_tools("[" TDEF("a", "A") "]", true);
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE)); /* Q5's, kept */
+   struct json_object *defs = llm_tool_defs_for_request(s->conversation_history, false);
+   const char *wire = json_object_to_json_string(defs);
+   TEST_ASSERT_NOT_NULL(strstr(wire, "B2"));
+   TEST_ASSERT_NULL(strstr(wire, "B1"));
+   json_object_put(defs);
+   db_close();
+}
+
+/* The registered set with its hashes, as dawn_build_prompt gives it. */
+static composed_prompt_t hashed(const char *defs, bool inline_tools) {
+   composed_prompt_t cp = tooled(defs, inline_tools);
+   struct json_object *arr = json_tokener_parse(defs);
+   struct json_object *h = llm_tool_defs_hashes(arr, cp.tool_defs_fp);
+   TEST_ASSERT_NOT_NULL(h);
+   cp.tool_def_hashes = strdup(json_object_to_json_string_ext(h, FLAGS));
+   json_object_put(h);
+   json_object_put(arr);
+   return cp;
+}
+
+static void apply_hashed(const char *defs) {
+   composed_prompt_t cp = hashed(defs, true);
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+}
+
+/* A turn whose registered tools are the ones last seen compares nothing; one
+ * whose tools changed compares once, and appends what it did before. */
+static void test_an_unchanged_turn_does_no_tool_work(void) {
+   add("user", "Q1");
+   apply_hashed("[" TDEF("a", "A") "]");
+   const uint64_t after_bind = prefix_tools_diffs();
+   add("assistant", "A1");
+   add("user", "Q2");
+   apply_hashed("[" TDEF("a", "A") "]");
+   TEST_ASSERT_EQUAL_UINT64(after_bind, prefix_tools_diffs());
+
+   add("assistant", "A2");
+   add("user", "Q3");
+   apply_hashed("[" TDEF("a", "A") "," TDEF("b", "B") "]");
+   TEST_ASSERT_EQUAL_UINT64(after_bind + 1, prefix_tools_diffs());
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+   struct json_object *defs = llm_tool_defs_for_request(s->conversation_history, false);
+   TEST_ASSERT_EQUAL_STRING("[" TDEF("a", "A") "," TDEF("b", "B") "]",
+                            json_object_to_json_string_ext(defs, FLAGS));
+   json_object_put(defs);
+
+   add("assistant", "A3");
+   add("user", "Q4");
+   apply_hashed("[" TDEF("a", "A") "," TDEF("b", "B") "]");
+   TEST_ASSERT_EQUAL_UINT64(after_bind + 1, prefix_tools_diffs());
+   TEST_ASSERT_EQUAL_INT(1, kind_count(MESSAGE_KIND_TOOL_CHANGE));
+}
+
+/* A turn whose tool returned as many captures as one request can carry: the
+ * next seam's compaction takes that turn too (the newest question kept), so
+ * the seam after it doesn't compact again for the same images. */
+static void test_images_of_one_turn_compact_once(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   add("user", "Qc");
+   save_question(conv, count() - 1);
+   struct json_object *call = json_tokener_parse(
+       "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"camera\",\"arguments\":\"{}\"}}]}");
+   json_object_array_add(s->conversation_history, call);
+   struct json_object *tool = json_tokener_parse(
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":[{\"type\":\"text\","
+       "\"text\":\"Captured.\"}]}");
+   struct json_object *parts = json_object_object_get(tool, "content");
+   for (int i = 0; i < 16; i++) {
+      json_object_array_add(parts, json_tokener_parse("{\"type\":\"image_url\",\"image_url\":"
+                                                      "{\"url\":\"data:image/png;base64,"
+                                                      "iVBORw0KGgo=\"}}"));
+   }
+   json_object_array_add(s->conversation_history, tool);
+   add("assistant", "Sixteen pictures.");
+   int64_t id = 0;
+   const conv_message_row_t row = { .role = "assistant", .content = "Sixteen pictures." };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
+   json_object_object_add(at(count() - 1), "id", json_object_new_int64(id));
+   add("user", "Qn");
+   save_question(conv, count() - 1);
+
+   s_image_limit = (llm_image_limit_t){ 16, 24000000 }; /* a local model's */
+   s_over = false;
+   s_summary = "S";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   composed_prompt_t cp = sectioned("P", "R", "U");
+   session_prefix_apply_turn(s, &cp, NULL);
+   composed_prompt_free(&cp);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   int images = -1;
+   llm_history_image_totals(s->conversation_history, 0, -1, &images, NULL);
+   TEST_ASSERT_EQUAL_INT(0, images);
+
+   /* The next seam: nothing to compact. */
+   add("assistant", "An");
+   add("user", "Qm");
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   s_image_limit = (llm_image_limit_t){ 600, 24000000 };
+   db_close();
+}
+
+/* Images alone over the limit, all in what a compaction must keep (the
+ * newest question's turn): none is made. */
+static void test_images_only_in_the_kept_turn_make_no_compaction(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   add("user", "Qn");
+   save_question(conv, count() - 1);
+   struct json_object *tool = json_tokener_parse(
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":[{\"type\":\"text\","
+       "\"text\":\"Captured.\"},{\"type\":\"image_url\",\"image_url\":{\"url\":"
+       "\"data:image/png;base64,iVBORw0KGgo=\"}}]}");
+   json_object_array_add(s->conversation_history, tool);
+   s_image_limit = (llm_image_limit_t){ 1, 24000000 };
+   s_over = false;
+   s_summary = "S";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   s_image_limit = (llm_image_limit_t){ 600, 24000000 };
+   db_close();
+}
+
+/* Images alone over the limit, in a turn whose reply isn't saved yet: the
+ * range a compaction may take ends before it, so none is made, and none is
+ * planned again until a row is saved; then the turn goes with the range. */
+static void test_images_past_an_unsaved_row_wait_for_the_save(void) {
+   const int64_t conv = db_open_conv();
+   for (int i = 0; i < 4; i++) {
+      char q[8], a[8];
+      snprintf(q, sizeof(q), "Q%d", i);
+      snprintf(a, sizeof(a), "A%d", i);
+      run_turn(conv, q, a, "P");
+   }
+   add("user", "Qc");
+   save_question(conv, count() - 1);
+   json_object_array_add(s->conversation_history,
+                         json_tokener_parse("{\"role\":\"assistant\",\"content\":\"\","
+                                            "\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+                                            "\"function\",\"function\":{\"name\":\"camera\","
+                                            "\"arguments\":\"{}\"}}]}"));
+   json_object_array_add(s->conversation_history,
+                         json_tokener_parse("{\"role\":\"tool\",\"tool_call_id\":\"c1\","
+                                            "\"content\":[{\"type\":\"text\",\"text\":"
+                                            "\"Captured.\"},{\"type\":\"image_url\","
+                                            "\"image_url\":{\"url\":\"data:image/png;base64,"
+                                            "iVBORw0KGgo=\"}}]}"));
+   add("assistant", "Seen."); /* its row not saved yet */
+   const int reply = count() - 1;
+   add("user", "Qn");
+   save_question(conv, count() - 1);
+
+   s_image_limit = (llm_image_limit_t){ 1, 24000000 };
+   s_over = false;
+   s_summary = "S";
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_TRUE(s->compaction.images_stalled);
+   /* Nothing saved since: the same plan isn't made again. */
+   const int64_t mark = s->compaction.images_stall_mark;
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_IDLE, atomic_load(&s->compaction.state));
+   TEST_ASSERT_EQUAL_INT64(mark, s->compaction.images_stall_mark);
+
+   /* A reset history starts with no stall (its length can't be compared with
+    * the old mark); the next seam plans again and stalls again. */
+   pthread_mutex_lock(&s->history_mutex);
+   session_compaction_reset_locked(s);
+   pthread_mutex_unlock(&s->history_mutex);
+   TEST_ASSERT_FALSE(s->compaction.images_stalled);
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_TRUE(s->compaction.images_stalled);
+
+   /* The reply's row is saved: the range reaches past the images. */
+   int64_t id = 0;
+   const conv_message_row_t row = { .role = "assistant", .content = "Seen." };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
+   json_object_object_add(at(reply), "id", json_object_new_int64(id));
+   session_compaction_prepare(s, 0);
+   TEST_ASSERT_EQUAL_INT(COMPACTION_READY, atomic_load(&s->compaction.state));
+   TEST_ASSERT_FALSE(s->compaction.images_stalled);
+   s_image_limit = (llm_image_limit_t){ 600, 24000000 };
+   db_close();
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_turns_append_and_never_rewrite);
@@ -1137,7 +1803,6 @@ int main(void) {
    RUN_TEST(test_a_change_appends_only_the_changed_section);
    RUN_TEST(test_a_history_with_no_record_keeps_what_it_has);
    RUN_TEST(test_directions_are_tracked_by_the_record);
-   RUN_TEST(test_tool_schemas_are_recorded);
    RUN_TEST(test_an_envelope_gets_its_context_apart);
    RUN_TEST(test_a_turn_saves_when_its_prompt_is_applied);
    RUN_TEST(test_a_turn_saves_when_its_question_is_saved);
@@ -1149,9 +1814,28 @@ int main(void) {
    RUN_TEST(test_a_live_history_withdraws_too);
    RUN_TEST(test_a_compaction_applies_at_the_seam_and_reloads_the_same);
    RUN_TEST(test_a_stale_summary_is_dropped);
+   RUN_TEST(test_images_at_the_limit_compact_at_the_seam);
    RUN_TEST(test_a_summary_follows_its_history_when_frozen);
    RUN_TEST(test_a_closed_or_reset_session_keeps_no_summary);
    RUN_TEST(test_a_switch_summarizes_again);
    RUN_TEST(test_a_stopped_turn_stops_waiting);
+   RUN_TEST(test_a_tool_added_after_freeze_goes_in_place);
+   RUN_TEST(test_a_tool_added_elsewhere_folds_with_a_boundary);
+   RUN_TEST(test_a_same_name_change_is_a_row);
+   RUN_TEST(test_a_removed_tool_keeps_its_definition);
+   RUN_TEST(test_tool_changes_reload_as_sent);
+   RUN_TEST(test_a_compaction_and_a_change_at_one_seam_append_one_row);
+   RUN_TEST(test_a_rejected_beta_folds_after_a_restart);
+   RUN_TEST(test_an_older_set_of_names_converts_once);
+   RUN_TEST(test_an_older_set_that_changed_converts_with_a_boundary);
+   RUN_TEST(test_tool_changes_are_bounded);
+   RUN_TEST(test_a_target_that_stops_taking_inline_folds_once);
+   RUN_TEST(test_stored_inline_changes_render_the_same_after_a_restart);
+   RUN_TEST(test_a_compaction_keeps_a_gone_servers_definition);
+   RUN_TEST(test_a_compaction_keeps_the_newer_definition);
+   RUN_TEST(test_an_unchanged_turn_does_no_tool_work);
+   RUN_TEST(test_images_of_one_turn_compact_once);
+   RUN_TEST(test_images_only_in_the_kept_turn_make_no_compaction);
+   RUN_TEST(test_images_past_an_unsaved_row_wait_for_the_save);
    return UNITY_END();
 }

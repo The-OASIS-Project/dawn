@@ -34,6 +34,7 @@
 #include "core/focus/focus_handles.h"
 #include "core/prefix_in_force.h"
 #include "core/prefix_message.h"
+#include "core/prefix_tools.h"
 #include "core/session_compaction.h"
 #include "core/session_history.h"
 #include "core/session_manager.h"
@@ -43,6 +44,7 @@
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_history_rows.h"
+#include "llm/llm_tool_defs.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
@@ -252,29 +254,69 @@ bool session_prefix_owns_locked(session_t *session, struct json_object *msg) {
    return false;
 }
 
-struct json_object *session_prefix_tool_names(session_t *session) {
+struct json_object *session_prefix_tool_defs(session_t *session) {
    if (!session) {
       return NULL;
    }
    struct json_object *out = NULL;
    pthread_mutex_lock(&session->history_mutex);
-   /* Copied element by element (a running turn reads the history unlocked;
-    * serializing an object caches into it). */
-   struct json_object *names = session_turn_reads_elsewhere_locked(session)
-                                   ? NULL
-                                   : llm_history_frozen_tools(session->conversation_history);
-   const size_t n = names ? json_object_array_length(names) : 0;
-   if (names) {
-      out = json_object_new_array();
+   /* Copied (a running turn reads the history unlocked; serializing an object
+    * caches into it). */
+   struct json_object *defs = session_turn_reads_elsewhere_locked(session)
+                                  ? NULL
+                                  : llm_tool_defs_for_request(session->conversation_history, false);
+   if (defs && json_object_deep_copy(defs, &out, NULL) != 0) {
+      out = NULL;
    }
-   for (size_t i = 0; out && i < n; i++) {
-      const char *name = json_object_get_string(json_object_array_get_idx(names, i));
-      if (name) {
-         json_object_array_add(out, json_object_new_string(name));
-      }
-   }
+   json_object_put(defs);
    pthread_mutex_unlock(&session->history_mutex);
    return out;
+}
+
+void session_prefix_inline_tools_rejected(session_t *session) {
+   if (!session) {
+      return;
+   }
+   const int user = session_effective_user_id(session);
+   pthread_mutex_lock(&session->history_mutex);
+   /* The running turn's history (its request was the one rejected). */
+   struct json_object *hist = session->turn_history ? session->turn_history
+                                                    : session->conversation_history;
+   if (!prefix_tools_mark_rejected(hist)) {
+      pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
+   /* Its changes fold into `tools` from now on: a declared boundary. */
+   const int dropped = llm_history_drop_turn_blocks(hist);
+   char *in_force = prefix_in_force_json(hist);
+   bool queued = false;
+   for (struct session_prefix_turn *t = session->prefix_turn; t; t = t->next) {
+      if (t->hist == hist) {
+         free(t->in_force);
+         t->in_force = in_force ? strdup(in_force) : NULL;
+         t->boundary = true;
+         queued = true;
+      }
+   }
+   const int64_t conv = hist == session->turn_history && hist != session->conversation_history
+                            ? session->turn_history_conv
+                            : atomic_load(&session->history_conversation_id);
+   const bool whole = session_saved_whole(session);
+   pthread_mutex_unlock(&session->history_mutex);
+   OLOG_INFO("Session %u: prefix boundary (tool_set_changed): tools defined in a message were "
+             "rejected; the conversation's changes fold into its tools, %d turn(s) replay "
+             "without their reasoning",
+             session->session_id, dropped);
+   /* No record waits to save it: saved now (a voice surface saves it whole). */
+   if (!queued && !whole && conv > 0 && user > 0 && in_force) {
+      const conv_turn_save_t save = { .in_force = in_force, .floor_at_rows = true };
+      const int rc = conv_db_save_turn(conv, user, &save, NULL);
+      if (rc != AUTH_DB_SUCCESS) {
+         OLOG_WARNING("Session %u: the rejected inline tools weren't recorded on conv %lld (%d)",
+                      session->session_id, (long long)conv, rc);
+      }
+   }
+   free(in_force);
 }
 
 bool session_prefix_tag(session_t *session, char *out, size_t size) {
@@ -396,36 +438,6 @@ static bool freeze_locked(session_t *session,
       json_object_put(session->turn_history);
       session->turn_history = json_object_get(session->conversation_history);
    }
-   return true;
-}
-
-/* Caller holds history_mutex.  Fix the conversation's tool set to @p names (a
- * JSON array).  A conversation's first sets it; a change after that (a tool
- * registered or gone: an MCP server connecting) is a declared boundary. */
-static bool set_tool_set_locked(session_t *session,
-                                struct json_object *hist,
-                                const char *names,
-                                bool *boundary) {
-   struct json_object *want = names ? json_tokener_parse(names) : NULL;
-   if (!json_object_is_type(want, json_type_array)) {
-      json_object_put(want);
-      return false;
-   }
-   struct json_object *prefix = json_object_array_get_idx(hist, 0);
-   struct json_object *had = NULL;
-   json_object_object_get_ex(prefix, LLM_HISTORY_TOOLS_KEY, &had);
-   if (had && json_object_equal(had, want)) {
-      json_object_put(want);
-      return false;
-   }
-   const int dropped = drop_reasoning(hist);
-   if (had || dropped > 0) {
-      OLOG_INFO("Session %u: prefix boundary (tool_set_changed): %zu tool(s) now, %d turn(s) "
-                "replay without their reasoning",
-                session->session_id, json_object_array_length(want), dropped);
-   }
-   *boundary = *boundary || dropped > 0;
-   json_object_object_add(prefix, LLM_HISTORY_TOOLS_KEY, want);
    return true;
 }
 
@@ -681,25 +693,14 @@ void session_prefix_apply_turn(session_t *session,
    }
    struct json_object *hist = *slot;
    const bool frozen = session_prefix_is_frozen(hist);
-   if (frozen && cp && cp->tool_names) {
-      bind = set_tool_set_locked(session, hist, cp->tool_names, &boundary) || bind;
-   }
-   if (turn && bind) {
-      struct json_object *first = json_object_array_get_idx(hist, 0);
-      struct json_object *tools = NULL;
-      free(turn->prefix);
-      free(turn->tools);
-      turn->prefix = llm_history_text(first) ? strdup(llm_history_text(first)) : NULL;
-      turn->tools = NULL;
-      if (json_object_object_get_ex(first, LLM_HISTORY_TOOLS_KEY, &tools)) {
-         turn->tools = strdup(json_object_to_json_string_ext(tools, JSON_C_TO_STRING_PLAIN));
-      }
-   }
    /* A ready summary of this history, applied here (a turn seam) and nowhere
     * else: a declared boundary, and what is in force worked out again from
     * what the history still shows (so what it no longer shows is appended). */
    session_compaction_commit_t compacted = { 0 };
    const bool did_compact = frozen && session_compaction_apply_locked(session, hist, &compacted);
+   /* The tool definitions it summarized away, for the tools below. */
+   struct json_object *removed_tools = compacted.removed_tools;
+   compacted.removed_tools = NULL;
    /* What the client is told once the lock is released. */
    session_compaction_commit_t notice = { 0 };
    int64_t notice_conv = 0;
@@ -759,8 +760,35 @@ void session_prefix_apply_turn(session_t *session,
          }
       }
    }
-   if (frozen && cp && cp->tool_schemas) {
-      prefix_in_force_check_tool_schemas(hist, cp->tool_schemas);
+   /* The tools: frozen by value on the first turn, an older set converted,
+    * and what changed since appended (after the compaction above, so what it
+    * summarized away is appended again, once). */
+   if (frozen) {
+      prefix_tools_result_t tools = { 0 };
+      prefix_tools_apply(hist, cp, question_locked(session, hist) != NULL, removed_tools,
+                         session->session_id, &tools);
+      bind = bind || tools.bind;
+      if (tools.boundary) {
+         boundary = true;
+         if (turn) {
+            turn->boundary = true;
+         }
+      }
+      if (tools.appended && turn && turn->appended) {
+         json_object_array_add(turn->appended, json_object_get(tools.appended));
+      }
+   }
+   json_object_put(removed_tools);
+   if (turn && bind) {
+      struct json_object *first = json_object_array_get_idx(hist, 0);
+      struct json_object *tools = NULL;
+      free(turn->prefix);
+      free(turn->tools);
+      turn->prefix = llm_history_text(first) ? strdup(llm_history_text(first)) : NULL;
+      turn->tools = NULL;
+      if (json_object_object_get_ex(first, LLM_HISTORY_TOOLS_KEY, &tools)) {
+         turn->tools = strdup(json_object_to_json_string_ext(tools, JSON_C_TO_STRING_PLAIN));
+      }
    }
    /* What is in force, to store when it changed. */
    char *in_force_after = prefix_in_force_json(hist);
@@ -1038,7 +1066,8 @@ void session_prefix_question_saved(session_t *session,
 }
 
 struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
-                                                            struct json_object *question) {
+                                                            struct json_object *question,
+                                                            bool boundary) {
    if (!session || !question) {
       return NULL;
    }
@@ -1048,10 +1077,12 @@ struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
          turn = t;
       }
    }
-   /* A saved one went with its question (a retraction handles the rows). */
+   /* A saved one went with its question (a retraction handles the rows, and
+    * the floor: conv_db_retract_envelope). */
    if (!turn || turn->saved) {
       return NULL;
    }
+   turn->boundary = turn->boundary || boundary;
    /* The question and its context go with the turn; what it announced to the
     * conversation stays in the history, and is saved now, in place, naming
     * no question. */

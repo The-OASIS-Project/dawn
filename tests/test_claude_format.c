@@ -35,10 +35,12 @@
 #include <stdlib.h>
 
 #include "config/dawn_config.h"
+#include "core/image_rehydrate.h"
 #include "llm/llm_capabilities.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "tools/toml.h"
@@ -66,9 +68,10 @@ const char *llm_get_current_thinking_mode(void) {
 const char *llm_get_current_reasoning_effort(void) {
    return s_effort;
 }
+static bool s_tools_on;
 bool llm_tools_enabled(const llm_resolved_config_t *c) {
    (void)c;
-   return false;
+   return s_tools_on;
 }
 bool llm_tools_suppressed(void) {
    return s_suppressed;
@@ -87,24 +90,32 @@ struct json_object *llm_tools_get_claude_format_filtered(bool r) {
    (void)r;
    return NULL;
 }
-/* The conversation's frozen set, as names only (llm_tools_request_tools). */
+/* The conversation's tools by value (llm_tools_request_tools): its frozen set
+ * and the changes not sent in place, a name rendered as itself. */
 struct json_object *llm_tools_request_tools(struct json_object *history,
                                             bool r,
                                             bool claude,
+                                            bool inline_ok,
                                             const char **source) {
    (void)r;
-   (void)claude;
    if (source)
-      *source = "stub";
-   struct json_object *names = llm_history_frozen_tools(history);
-   if (!names)
+      *source = "the conversation's set";
+   struct json_object *defs = llm_tool_defs_for_request(history, inline_ok);
+   if (!defs)
       return NULL;
    struct json_object *out = json_object_new_array();
-   for (size_t i = 0; i < json_object_array_length(names); i++) {
-      struct json_object *tool = json_object_new_object();
-      json_object_object_add(tool, "name", json_object_get(json_object_array_get_idx(names, i)));
+   for (size_t i = 0; i < json_object_array_length(defs); i++) {
+      struct json_object *def = json_object_array_get_idx(defs, i);
+      struct json_object *tool = NULL;
+      if (json_object_is_type(def, json_type_string)) {
+         tool = json_object_new_object();
+         json_object_object_add(tool, "name", json_object_get(def));
+      } else {
+         tool = llm_tool_def_render(def, claude);
+      }
       json_object_array_add(out, tool);
    }
+   json_object_put(defs);
    return out;
 }
 int llm_tools_get_enabled_count_filtered(bool r) {
@@ -133,6 +144,12 @@ void webui_send_error_ex(struct session *s, const char *code, const char *messag
    (void)code;
    (void)message;
    (void)severity;
+}
+
+/* Whether the model takes images (llm_command_parser.c). */
+static int s_vision = 1;
+int is_vision_enabled_for_current_llm(void) {
+   return s_vision;
 }
 
 void setUp(void) {
@@ -187,8 +204,8 @@ static void test_parallel_tool_results_no_double_free(void) {
       add_tool_result(conv, i);
    }
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
-                                               TEST_CLAUDE_CARRIER, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
+                                               0, false);
    TEST_ASSERT_NOT_NULL(req);
 
    /* The N tool_results must coalesce into ONE user message holding N blocks. */
@@ -211,9 +228,28 @@ static void test_single_tool_result_ok(void) {
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0);
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
-                                               TEST_CLAUDE_CARRIER, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
+                                               0, false);
    TEST_ASSERT_NOT_NULL(req);
+   json_object_put(req);
+   json_object_put(conv);
+}
+
+/* A tool result's image that doesn't convert (here a URL that is no data URI;
+ * out of memory takes the same path) is the fixed stand-in, not dropped. */
+static void test_an_image_that_doesnt_convert_is_a_stand_in(void) {
+   json_object *conv = json_object_new_array();
+   json_object_array_add(conv, assistant_with_tool_calls(1));
+   json_object_array_add(conv, json_tokener_parse(
+                                   "{\"role\":\"tool\",\"tool_call_id\":\"call_00\",\"content\":"
+                                   "[{\"type\":\"text\",\"text\":\"Captured.\"},{\"type\":"
+                                   "\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}"));
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
+                                               0, false);
+   TEST_ASSERT_NOT_NULL(req);
+   const char *wire = json_object_to_json_string(req);
+   TEST_ASSERT_NOT_NULL(strstr(wire, IMAGE_REHYDRATE_MISSING_TEXT));
+   TEST_ASSERT_NOT_NULL(strstr(wire, "Captured."));
    json_object_put(req);
    json_object_put(conv);
 }
@@ -251,8 +287,7 @@ static const char *effort_of(json_object *req) {
 
 static json_object *request_for(const char *model) {
    json_object *conv = one_user_turn();
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, model,
-                                               TEST_CLAUDE_CARRIER, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, model, TEST_CLAUDE_CARRIER, 0, false);
    json_object_put(conv);
    TEST_ASSERT_NOT_NULL(req);
    return req;
@@ -318,8 +353,8 @@ static void test_tool_use_without_thinking_keeps_reasoning(void) {
    json_object *conv = one_user_turn();
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0);
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5",
-                                               TEST_CLAUDE_CARRIER, 1);
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-opus-5-5", TEST_CLAUDE_CARRIER,
+                                               1, false);
    json_object_put(conv);
    TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
    TEST_ASSERT_EQUAL_STRING("medium", effort_of(req));
@@ -346,8 +381,8 @@ static void test_final_answer_replays_its_blocks(void) {
    json_object_object_add(next, "content", json_object_new_string("And tomorrow?"));
    json_object_array_add(conv, next);
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5",
-                                               TEST_CLAUDE_CARRIER, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-opus-5-5", TEST_CLAUDE_CARRIER,
+                                               0, false);
    json_object *messages = NULL;
    TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
    json_object *assistant = json_object_array_get_idx(messages, 1);
@@ -379,8 +414,8 @@ static void test_results_without_their_call_become_notes(void) {
    add_tool_result(conv, 5); /* its call is in the summary */
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0); /* answered properly */
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
-                                               TEST_CLAUDE_CARRIER, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
+                                               0, false);
    TEST_ASSERT_NOT_NULL(req);
    const char *wire = json_object_to_json_string(req);
    TEST_ASSERT_NULL(strstr(wire, "\"call_05\""));
@@ -405,8 +440,8 @@ static void test_calls_and_results_are_paired(void) {
    json_object_object_add(lost, "content", json_object_new_string("stray"));
    json_object_array_add(conv, lost);
    add_tool_result(conv, 1);
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
-                                               TEST_CLAUDE_CARRIER, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
+                                               0, false);
    TEST_ASSERT_NOT_NULL(req);
    json_object *messages = NULL;
    TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
@@ -473,8 +508,8 @@ static void test_reasoning_only_turn_and_user_text(void) {
    json_object_array_add(conv, u);
    add_tool_result(conv, 3); /* follows the user's text; its call isn't anywhere */
 
-   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6",
-                                               TEST_CLAUDE_CARRIER, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
+                                               0, false);
    TEST_ASSERT_NOT_NULL(req);
    const char *wire = json_object_to_json_string(req);
    TEST_ASSERT_NULL(strstr(wire, "SIG"));
@@ -496,6 +531,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_parallel_tool_results_no_double_free);
    RUN_TEST(test_single_tool_result_ok);
+   RUN_TEST(test_an_image_that_doesnt_convert_is_a_stand_in);
    RUN_TEST(test_disabled_on_adaptive_only_model_is_lowest_adaptive);
    RUN_TEST(test_disabled_is_sent_where_accepted);
    RUN_TEST(test_adaptive_carries_the_session_effort);

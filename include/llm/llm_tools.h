@@ -47,6 +47,7 @@ typedef struct llm_tools_config llm_tools_config_t;
 extern "C" {
 #endif
 
+
 /* =============================================================================
  * History Format Hint (for dual-format duplicate detection)
  * ============================================================================= */
@@ -147,6 +148,9 @@ typedef struct {
  * Represents a tool invocation requested by the LLM. The id is used to
  * correlate results back to the correct tool call (important for parallel calls).
  */
+/** An image id's buffer (image_store.h IMAGE_ID_LEN; llm_tool_images.c checks). */
+#define LLM_TOOLS_IMAGE_ID_LEN 17
+
 typedef struct {
    char id[LLM_TOOLS_ID_LEN];          /**< Tool call ID (for response correlation) */
    char name[LLM_TOOLS_NAME_LEN];      /**< Tool name (maps to device type) */
@@ -185,7 +189,10 @@ typedef struct {
    bool should_respond;      /**< If false, tool handled its own output — suppress follow-up */
    char *vision_image;       /**< Base64 vision image (caller must free) */
    size_t vision_image_size; /**< Size of vision image data */
-   bool finished;            /**< Neutralized and announced (llm_tools_finish_result) */
+   char vision_image_id[LLM_TOOLS_IMAGE_ID_LEN]; /**< The image as stored (llm_tool_images.h);
+                                                  *   "" when kept in memory only */
+   int vision_image_owner;                       /**< Its owner, when stored */
+   bool finished; /**< Neutralized and announced (llm_tools_finish_result) */
 } tool_result_t;
 
 /**
@@ -327,49 +334,71 @@ struct json_object *llm_tools_get_claude_format(void);
 struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session);
 
 /**
- * @brief The names of a conversation's tool set, as a JSON array (caller frees)
+ * @brief Every registered tool's neutral definition (llm_tool_defs.h), in
+ *        registry order, as a JSON array (caller frees)
  *
- * Every registered tool (research's own excepted), whether or not it is
- * enabled, available, or allowed on the current surface right now: a
- * conversation advertises the same tools on every request, so toggling a tool
- * in settings is no boundary.  One it may not use is refused when called
- * (llm_tools_execute), and the turn's standing directions say which
- * (llm_tools_build_disabled_hint).  NULL when the registry isn't up.
+ * Research's own tools excepted; every other registered tool, whether or not
+ * it is enabled, available, or allowed on any surface now: a conversation
+ * freezes what is registered, so toggling a tool or a component coming online
+ * changes nothing it sends (a tool it may not use is refused when called, and
+ * the turn's standing directions say which).  The description is the registry's (an MCP
+ * tool's wrapped and UTF-8 repaired at ingest), the parameters the schema a
+ * request sends.  A definition past the caps llm_tool_def_valid() checks is
+ * left out (logged).  Recomputed only when a tool or schema could have
+ * changed.  NULL when the registry isn't up.
  */
-char *llm_tools_freeze_names(void);
+char *llm_tools_definitions(void);
 
 /**
- * @brief Tool schemas for exactly @p names (a JSON array), in that order
+ * @brief llm_tools_definitions, with each definition's canonical hash by name
+ *        (a JSON object, llm_tool_defs_hashes) in @p hashes_out and the set's
+ *        fingerprint in @p fp_out (65 bytes: a SHA-256 in hex), all three of
+ *        one registry generation and hashed once per generation
  *
- * Claude's shape when @p claude, else OpenAI's function shape.  A name no
- * longer registered is left out.  NULL when none are.
+ * @p hashes_out is NULL (and @p fp_out "") when they couldn't be computed.
+ * @return The definitions (caller frees), or NULL
  */
-struct json_object *llm_tools_format_named(struct json_object *names, bool claude);
+char *llm_tools_definitions_hashed(char **hashes_out, char *fp_out);
+
+/**
+ * @brief Render @p defs (neutral definitions, llm_tool_defs.h) for a request:
+ *        Claude's shape when @p claude, else OpenAI's function shape, in
+ *        order
+ *
+ * A name in place of a definition (an older conversation's set, not yet
+ * converted) is rendered from the registry, left out when no longer
+ * registered.  NULL when nothing is left.
+ */
+struct json_object *llm_tools_render_frozen(struct json_object *defs, bool claude);
 
 /**
  * @brief The tools a request carries
  *
  * None on a turn whose tools are suppressed (a no-tools synthesis turn); a
- * research run's allowlist during one; otherwise the conversation's frozen
- * set (@p history's prefix, llm_history_frozen_tools), or with none frozen the
+ * research run's allowlist during one; otherwise the conversation's tools by
+ * value (llm_tool_defs_for_request: the frozen set and its later changes,
+ * those sent in place excepted when @p inline_ok), or with none frozen the
  * tools this surface may use now.
  *
+ * @param inline_ok Whether the request sends tool changes in place (Claude API,
+ *                  beta inline-tools-2026-09-15)
  * @param source_out Receives what the set is, for logging (may be NULL)
  * @return JSON array (caller puts), or NULL for no tools
  */
 struct json_object *llm_tools_request_tools(struct json_object *history,
                                             bool is_remote,
                                             bool claude,
+                                            bool inline_ok,
                                             const char **source_out);
 
 /**
- * @brief Each registered tool's schema hash, as a JSON object of name to
- *        SHA-256 hex (caller frees)
+ * @brief Each registered tool's schema hash as an older build recorded it
+ *        (SHA-256 hex of its OpenAI-shaped schema), as a JSON object of name
+ *        to hash (caller frees)
  *
- * A conversation's tools are frozen by name and rendered on every request, so
- * a change to a tool's description or parameters changes the bytes it is
- * sent: this is how that shows (prefix_in_force_check_tool_schemas).  NULL
- * when the registry isn't up.
+ * A conversation an older build froze by name records these: converting it
+ * to definitions keeps it whole when they still match.  NULL when the
+ * registry isn't up.
  */
 char *llm_tools_schema_hashes(void);
 
@@ -540,9 +569,9 @@ void llm_tools_result_set_content(tool_result_t *result, char *text);
 
 /**
  * @brief Whether the request built from @p history offers tool @p name and
- *        would run it: in the tools it carries (llm_tools_request_tools) and
- *        enabled for this session (a frozen set can name a tool that is now
- *        refused)
+ *        would run it: in the tools it defines (the frozen set and its later
+ *        changes, llm_tool_defs_for_request) and enabled for this session (a
+ *        definition stays after its tool is gone or disabled; it is refused)
  */
 bool llm_tools_request_offers(struct json_object *history, bool is_remote, const char *name);
 
@@ -749,25 +778,6 @@ int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_si
 void llm_tool_response_free(llm_tool_response_t *response);
 
 /**
- * @brief Strip image content blocks from conversation history
- *
- * Replaces `image_url` (OpenAI shape) / `image` (Claude shape) content parts
- * with a short text placeholder, preserving any sibling text in the same
- * message. Two callers: llm_openai_prepare_chat_history() strips vision
- * content when the active model doesn't support it; llm_context.c's
- * LLM-summarization compaction path strips it so a persisted tool-captured
- * image (see llm_tools_add_results_openai/claude) doesn't get JSON-serialized
- * whole into the summarizer prompt as literal base64 text.
- *
- * If history has no vision content, returns a new reference to the same
- * array (json_object_get) rather than copying — cheap no-op path.
- *
- * @param history JSON array of messages.
- * @return New array (caller json_object_put), or NULL on error.
- */
-struct json_object *llm_history_strip_vision_content(struct json_object *history);
-
-/**
  * @brief Check if a tool call is a duplicate of a previous call in conversation history
  *
  * Prevents infinite loops where the LLM keeps making the same tool call repeatedly.
@@ -795,12 +805,9 @@ bool llm_tools_is_duplicate_call(struct json_object *history,
  * @brief Context returned from tool execution for follow-up decisions
  */
 typedef struct {
-   bool skip_followup;         /**< True if follow-up should be skipped */
-   bool all_silent;            /**< True if all tools set should_respond=false (history-safe) */
-   bool has_pending_vision;    /**< True if viewing tool captured an image */
-   const char *pending_vision; /**< Base64 vision data (if any) */
-   size_t pending_vision_size; /**< Size of pending vision */
-   char *direct_response;      /**< Response for skip_followup (caller must free) */
+   bool skip_followup;    /**< True if follow-up should be skipped */
+   bool all_silent;       /**< True if all tools set should_respond=false (history-safe) */
+   char *direct_response; /**< Response for skip_followup (caller must free) */
 } tool_followup_context_t;
 
 /**

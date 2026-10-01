@@ -198,7 +198,12 @@ Layer 2 (Services)
 │   ├── llm_tool_views_plan.c      - The tool loop's view stage: batch budget, split, header (pure)
 │   ├── llm_tool_views_apply.c     - ...applied to a batch as its finish step: views, stores, finishes
 │   │                                (deps: tool_result_store, session_prefix, llm_context, tool_registry)
-│   └── llm_tool_view_path.c       - JSON paths as views write them and readers take them back (pure)
+│   ├── llm_tool_view_path.c       - JSON paths as views write them and readers take them back (pure)
+│   ├── llm_tool_defs.c            - A conversation's tools by value: frozen definitions + tool_change rows (pure)
+│   ├── llm_claude_tools.c         - A Claude request's tools: the tools array, inline tool_addition blocks
+│   ├── llm_tool_images.c          - Images a tool returns: checked, stored unbound (owner-only), shown (deps: image_store)
+│   ├── llm_tool_images_render.c   - A tool's images in a request, per provider; a vision-less model gets text (pure)
+│   └── llm_turn_result.c          - A turn's result beyond its text (inline tools rejected), provider-neutral
 ├── src/core/embedding_engine.c    - Shared embedding infrastructure (deps: Layer 0-1)
 ├── src/core/crypto_store.c        - Shared libsodium encryption (deps: Layer 0)
 ├── src/core/scheduler.c           - Scheduler engine + background thread (deps: Layer 0-1)
@@ -207,10 +212,20 @@ Layer 2 (Services)
 ├── src/core/session_prefix.c      - Append-only conversation request: freezes the prefix, appends changes + turn context, saves each turn's record, withdraws forgotten items live (deps: Layer 0-1, llm, auth)
 │                                    session_manager.c (the dispatch), session_history.c (history lifecycle) and session_compaction.c call into it
 │                                    and it back into them: read the four as one Layer-2 session unit
+│                                    (session_image_hold.c joins it: the image store reaches it only through a weak
+│                                    symbol, never an include)
 ├── src/core/session_compaction.c  - Compaction: a range summarized ahead on a worker, applied at a turn seam, saved with the turn
 │                                    (deps: Layer 0-1, llm, auth, tts; its client marker is a weak hook the WebUI replaces)
 ├── src/core/prefix_in_force.c     - What a conversation has in force (section/directive/tool-schema hashes) and the deltas to append (deps: llm)
 ├── src/core/prefix_message.c      - The one maker of a conversation's frozen prefix message (deps: llm)
+├── src/core/prefix_tools.c        - A conversation's tools at a turn seam: frozen on its first turn, changes appended
+│                                    as tool_change rows, bounded per conversation and per MCP server (deps: llm)
+├── src/core/conv_images.c         - Deleting a conversation with the images only it names; purging a user's stores
+│                                    (deps: auth_db, image_store, document_original_store)
+├── src/core/session_image_hold.c  - Which unbound images a live session (interactive or a job's) of their owner still
+│                                    holds.  The image store, a layer below, calls up into it through a weak symbol
+│                                    (session_images_held), so a build without sessions links and holds nothing: an
+│                                    upward call by design, part of the session unit below
 ├── src/core/image_rehydrate.c     - Rebuilds image content from stored markers for replay (deps: image_store)
 ├── src/core/tool_result_store.c   - Tool results kept whole behind a view: who may read one (its conversation, or
 │                                    before one exists the turn that stored it), binding, a parsed-tree cache
@@ -444,6 +459,12 @@ Per-module locks (scoped to a single subsystem):
                                                                      history_mutex; held only to find, pin, insert and release a slot, never across a render)
   tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that
                                                                      read's render; takes no other lock, never taken under history_mutex or the auth_db lock)
+  image sweep (src/blob_store.c → src/core/session_image_hold.c) — no lock of its own: the unbound-image sweep chooses a batch under the
+                                                                     auth_db lock, RELEASES it, asks what holds the batch (the session registry's
+                                                                     rwlock and then job_manager::s_pool_mutex, each only to snapshot ids, released;
+                                                                     then each owner's session history_mutex in turn), and takes the auth_db lock
+                                                                     again to delete.  Never run image_store_cleanup / image_store_reclaim_unbound
+                                                                     while holding a history_mutex or the auth_db lock
   job_manager::s_pool_mutex (src/core/job_manager.c)       — background-job session pool (REGISTRY tier, like session_manager_rwlock: released before any ref-cond wait, session_free, or conv_db_*/scheduler_* callout)
   job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
   memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)

@@ -389,7 +389,7 @@ static char *research_synthesize(struct session *s,
    /* A side call on the run's session: recorded, but it doesn't touch the
     * rounds' cache key or context numbers. */
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
-   char *prose = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+   char *prose = core_text_input_dispatch(s, directive, &opts);
    llm_cache_monitor_pop_kind(kind_prev);
    session_set_tools_suppressed(s, false);
    free(directive);
@@ -438,7 +438,7 @@ static int research_run_critic(struct session *s,
    /* A side call on the run's session: recorded, but it doesn't touch the
     * rounds' cache key or context numbers. */
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
-   char *resp = core_text_input_dispatch(s, digest, NULL, NULL, NULL, 0, &opts);
+   char *resp = core_text_input_dispatch(s, digest, &opts);
    llm_cache_monitor_pop_kind(kind_prev);
    session_set_input_token_ceiling(s, b->max_input_tokens);
    session_set_tools_suppressed(s, false);
@@ -683,7 +683,7 @@ static char *research_commentary(struct session *s, const research_run_t *run0, 
    /* A side call on the run's session: recorded, but it doesn't touch the
     * rounds' cache key or context numbers. */
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
-   char *take = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+   char *take = core_text_input_dispatch(s, directive, &opts);
    llm_cache_monitor_pop_kind(kind_prev);
    session_set_tools_suppressed(s, false);
    free(directive);
@@ -768,7 +768,7 @@ const char *research_run_execute(struct session *s,
          .auth_user_id = run0->user_id,
          .skip_prompt_rebuild = true, /* keep the per-turn builder (memory) OUT of the loop */
       };
-      char *resp = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+      char *resp = core_text_input_dispatch(s, directive, &opts);
       const bool round_failed = (resp == NULL);
       free(resp);
 

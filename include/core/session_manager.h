@@ -387,6 +387,16 @@ typedef struct {
    struct json_object *voice_removed;
    char *voice_summary;
    int voice_level;
+
+   // Images alone over the limit, and none in a range a compaction may take
+   // (they are in what it keeps, or in rows not saved yet): no plan is made
+   // again for that conversation until a row of it is saved (saved whole: until
+   // its history grows), and that is logged once per conversation.
+   bool images_stalled;
+   int64_t images_stall_conv;  // the conversation it is for
+   int64_t images_stall_mark;  // its newest saved row id then (saved whole: its length)
+   bool images_stall_logged;
+   int64_t images_logged_conv;  // the conversation it was logged for
 } session_compaction_t;
 
 /**
@@ -400,7 +410,9 @@ typedef struct {
  * role="tool" row whose call failed, so a reloaded conversation reds its pill.
  * @p kind names a row of request context the loop added (a loop note: the
  * directions it gave the model, or the reply it closed a turn with); NULL for
- * the model's own turns and results.
+ * the model's own turns and results.  @p images names the images a role="tool"
+ * row's result carried (a JSON array of image ids; NULL otherwise): the row
+ * binds them when it is saved (auth_db_messages.h).
  */
 typedef struct {
    const char *role;
@@ -411,6 +423,7 @@ typedef struct {
    const char *llm_blocks;
    const char *kind;
    bool is_error;
+   const char *images;
 } session_tool_row_t;
 
 /**
@@ -1478,6 +1491,15 @@ void session_manager_for_each_user_session(int user_id,
                                            void *ctx);
 
 /**
+ * @brief Call @p fn on every session in the manager, disconnected ones
+ *        included (a satellite that dropped before its idle save still holds
+ *        its unsaved history)
+ *
+ * Each session is retained for the call; no manager lock is held across it.
+ */
+void session_manager_for_each_session_any(void (*fn)(session_t *session, void *ctx), void *ctx);
+
+/**
  * @brief session_post_notice() on every live interactive session.
  *
  * Interactive = local mic (SESSION_TYPE_LOCAL), satellites (DAP/DAP2), and
@@ -1577,33 +1599,6 @@ int64_t session_get_last_user_msg_id(session_t *session);
 char *session_previous_question_dup(session_t *session);
 
 /**
- * @brief Add message with images to session's conversation history
- *
- * Creates a multi-part content message in OpenAI format:
- * { "role": "user", "content": [
- *     { "type": "text", "text": "..." },
- *     { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } },
- *     ...
- * ]}
- *
- * This allows images to persist across conversation turns for follow-up questions.
- *
- * @param session Session to update
- * @param role Message role ("user" typically)
- * @param text Text content of the message
- * @param vision_images Array of base64-encoded image strings
- * @param vision_image_count Number of images in array
- *
- * @locks session->history_mutex
- * @lock_order 3
- */
-void session_add_message_with_images(session_t *session,
-                                     const char *role,
-                                     const char *text,
-                                     const char *const *vision_images,
-                                     int vision_image_count);
-
-/**
  * @brief Set (or clear) the tool-turn persist hook for a session.
  *
  * The WebUI sets this around a turn so the LLM tool loop can persist structured
@@ -1678,13 +1673,6 @@ void session_final_answer_clear(session_t *session);
 bool session_add_turn_assistant(session_t *session,
                                 const char *content,
                                 struct json_object *blocks);
-
-/** Image variant of session_add_turn_message(); see session_add_message_with_images(). */
-bool session_add_turn_message_with_images(session_t *session,
-                                          const char *role,
-                                          const char *text,
-                                          const char *const *vision_images,
-                                          int vision_image_count);
 
 /**
  * @brief Check if session has user messages (beyond system prompt)
@@ -1890,33 +1878,22 @@ char *session_llm_call_with_tts(session_t *session,
                                 void *userdata);
 
 /**
- * @brief Unified LLM call with optional TTS and vision, without adding user message
+ * @brief LLM call with optional TTS, without adding the user message
  *
- * Flexible LLM call that supports:
- * - Optional vision images (pass NULL/0 for text-only)
- * - Optional TTS sentence streaming (pass NULL for no TTS)
- *
- * Use when caller has already added the message before the call.
- * This ensures message is in history even if the call is cancelled.
+ * Use when the caller has already added the question to the history (its
+ * images, if any, are parts of that message): the question is in history even
+ * if the call is cancelled.
  *
  * @param session Session context
  * @param user_text User input text
- * @param vision_images Array of base64 encoded image data (NULL for text-only)
- * @param vision_image_sizes Array of image sizes (NULL for text-only)
- * @param vision_mimes Array of MIME type strings (NULL for text-only)
- * @param vision_image_count Number of images (0 for text-only)
  * @param sentence_cb Callback for each complete sentence (NULL to disable TTS)
  * @param userdata Context passed to sentence callback
  * @return LLM response (caller must free), or NULL on failure
  */
-char *session_llm_call_with_tts_vision_no_add(session_t *session,
-                                              const char *user_text,
-                                              const char **vision_images,
-                                              const size_t *vision_image_sizes,
-                                              const char (*vision_mimes)[24],
-                                              int vision_image_count,
-                                              session_sentence_callback sentence_cb,
-                                              void *userdata);
+char *session_llm_call_with_tts_no_add(session_t *session,
+                                       const char *user_text,
+                                       session_sentence_callback sentence_cb,
+                                       void *userdata);
 #endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================

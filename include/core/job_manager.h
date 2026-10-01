@@ -240,6 +240,15 @@ bool job_manager_is_shutting_down(void);
 bool job_manager_conv_is_live(int64_t conv_id);
 
 /**
+ * @brief Call @p fn on each live job session, retained for the call (a
+ *        cancelled one too: its history is still its own until it ends)
+ *
+ * The pool lock is held only to snapshot the ids; @p fn runs with no
+ * job_manager lock held, so it may take the session's own locks.
+ */
+void job_manager_for_each_session(void (*fn)(session_t *session, void *ctx), void *ctx);
+
+/**
  * @brief Flag that a job reached a terminal state, so the next monitor tick
  *        scans for pending completion follow-ups (dirty-gate: an idle system
  *        does zero per-tick DB work).  Called by the worker + boot scan.

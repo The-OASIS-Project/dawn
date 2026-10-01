@@ -31,6 +31,10 @@ struct json_object;
 /** Key on a row object holding its stored blocks (assistant rows only). */
 #define LLM_HISTORY_ROW_STORED_KEY "_stored"
 
+/** Key on a row object holding the image ids its tool result carried (a JSON
+ *  array, tool rows only): saved in messages.images. */
+#define LLM_HISTORY_ROW_IMAGES_KEY "_images"
+
 /**
  * @brief Append the rows @p msg is saved as to @p out
  *
@@ -43,8 +47,11 @@ struct json_object;
  *    when the turn has its own blocks and they record the row's calls;
  *  - a Claude user message of tool results is one tool row per result;
  *  - an OpenAI tool message is one tool row;
+ *  - a tool row's text is its result's text parts; the images it carried
+ *    (parts marked with IMAGE_PART_ID_KEY, image_rehydrate.h) go under
+ *    LLM_HISTORY_ROW_IMAGES_KEY by id, never into its text;
  *  - anything else is one row of its role and text (a content array's text
- *    parts joined, an image as "[image]").
+ *    parts joined, an unstored image as "[image]").
  *
  * Request context (llm_history_kind.h) is saved as rows of its kind, marked
  * with MESSAGE_KIND_KEY: a context message's rows carry its kind, and each

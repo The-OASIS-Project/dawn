@@ -18,7 +18,7 @@
  *
  * WebUI text-input processing — async worker thread.
  *
- * Owns `webui_process_text_input_with_vision` and `webui_process_text_input`,
+ * Owns `webui_process_text_input_with_images` and `webui_process_text_input`,
  * the two public entry points used by the JSON-message dispatcher when the
  * client sends text (with or without attached images), plus the
  * `text_worker_thread` that actually drives the session through the LLM
@@ -73,16 +73,41 @@ typedef struct {
    bool input_was_voice;     /* True = this turn's input was ASR-transcribed (voice); applied
                               * to session->input_was_voice on the worker thread right before
                               * dispatch so the prompt builder gates the ASR hint per turn. */
-   /* Vision support fields - supports multiple images per message */
-   char *vision_images[WEBUI_MAX_VISION_IMAGES_CAP];       /* Base64 encoded images */
-   size_t vision_image_sizes[WEBUI_MAX_VISION_IMAGES_CAP]; /* Size of each image */
-   char vision_mimes[WEBUI_MAX_VISION_IMAGES_CAP][WEBUI_VISION_MIME_MAX]; /* MIME types */
-   int vision_image_count;                                                /* Number of images */
+   /* The images the turn was sent with, by id (the stored files are read on
+    * the worker); none for a text turn. */
+   char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+   int image_id_count;
    char *persist_content; /* Server-authoritative persisted form (text + [IMAGE:<id>] markers)
                            * for an image turn; NULL persists plain text. Owned/freed here. */
 } text_work_t;
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
+
+void webui_image_error_describe(int rc, const char **code_out, const char **message_out) {
+   switch (rc) {
+      case IMAGE_REHYDRATE_ERR_NOT_FOUND:
+         *code_out = WEBUI_ERR_IMAGE_UNAVAILABLE;
+         *message_out = "An attached image isn't available (deleted, or not yours). "
+                        "Attach it again.";
+         break;
+      case IMAGE_REHYDRATE_ERR_LIMIT:
+         *code_out = WEBUI_ERR_IMAGE_LIMIT;
+         *message_out = "Too many or too large images for one message.";
+         break;
+      default:
+         *code_out = WEBUI_ERR_IMAGE_ERROR;
+         *message_out = "The attached images couldn't be prepared. Try again.";
+         break;
+   }
+}
+
+/* A turn's images refused (image_rehydrate_question's @p rc), to its client. */
+static void webui_send_image_error(session_t *session, int rc) {
+   const char *code = NULL;
+   const char *message = NULL;
+   webui_image_error_describe(rc, &code, &message);
+   webui_send_error(session, code, message);
+}
 
 /* A new chat's first message is dispatched before its conversation exists, so
  * it has no row yet.  Once the conversation is created for it
@@ -186,7 +211,8 @@ static int64_t webui_tool_persist_cb(void *userdata, const session_tool_row_t *r
                                        .reasoning = row->reasoning,
                                        .llm_blocks = row->llm_blocks,
                                        .kind = row->kind,
-                                       .is_error = row->is_error };
+                                       .is_error = row->is_error,
+                                       .images = row->images };
    int64_t id = 0;
    if (conv_db_add_row(conv_id, ctx->auth_user_id, &db_row, &id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("WebUI: failed to persist tool-turn %s row to conv %lld (may orphan on reload)",
@@ -355,14 +381,6 @@ static void text_worker_cleanup(text_work_t *work, session_t *session, char *tex
       free(text);
    }
    if (work) {
-      /* Free all vision images if present */
-      for (int i = 0; i < work->vision_image_count; i++) {
-         if (work->vision_images[i]) {
-            free(work->vision_images[i]);
-            work->vision_images[i] = NULL;
-         }
-      }
-      work->vision_image_count = 0;
       free(work->persist_content); /* separate alloc from `text` (work->text alias) */
       free(work);
    }
@@ -420,16 +438,8 @@ static void *text_worker_thread(void *arg) {
     * at every subsequent exit. */
    atomic_fetch_add(&session->turn_in_flight, 1);
 
-   if (work->vision_image_count > 0) {
-      size_t total_bytes = 0;
-      for (int i = 0; i < work->vision_image_count; i++) {
-         total_bytes += work->vision_image_sizes[i];
-      }
-      OLOG_INFO("WebUI: Processing text+vision for session %u: %s (%d images, %zu total bytes)",
-                session->session_id, text, work->vision_image_count, total_bytes);
-   } else {
-      OLOG_INFO("WebUI: Processing text input for session %u: %s", session->session_id, text);
-   }
+   OLOG_INFO("WebUI: Processing text input for session %u: %s (%d image(s))", session->session_id,
+             text, work->image_id_count);
 
    /* Clear stale pending_visual from a previous turn that may not have
     * been consumed (e.g., LLM response interrupted or error). Prevents
@@ -440,8 +450,8 @@ static void *text_worker_thread(void *arg) {
    pthread_mutex_unlock(&session->tools_mutex);
 
    /* Send "thinking" state */
-   if (work->vision_image_count > 0) {
-      if (work->vision_image_count == 1) {
+   if (work->image_id_count > 0) {
+      if (work->image_id_count == 1) {
          webui_send_state_with_detail(session, "thinking", "Analyzing image...");
       } else {
          webui_send_state_with_detail(session, "thinking", "Analyzing images...");
@@ -469,10 +479,31 @@ static void *text_worker_thread(void *arg) {
     * prompt builder reads session->input_was_voice to gate the ASR hint. */
    session->input_was_voice = work->input_was_voice;
 
+   /* An image question goes into the history exactly as a reload rebuilds it,
+    * from the stored files its ids name, or not at all: an id that names no
+    * image of this user's (or OOM) fails the turn back to the client, with
+    * nothing added to the history or saved. */
+   struct json_object *question = NULL;
+   if (work->image_id_count > 0) {
+      const int qrc = image_rehydrate_question(turn_user_id, work->persist_content,
+                                               (const char(*)[IMAGE_ID_LEN])work->image_ids,
+                                               work->image_id_count, &question);
+      if (qrc != SUCCESS) {
+         OLOG_WARNING("WebUI: session %u: image question refused (%d), %d image(s)",
+                      session->session_id, qrc, work->image_id_count);
+         webui_send_image_error(session, qrc);
+         webui_send_state(session, "idle");
+         text_worker_end(session);
+         free(text);
+         free(work->persist_content);
+         free(work);
+         return NULL;
+      }
+   }
+
    /* Dispatch the turn through the provider-agnostic Layer 2 helper:
     * add user msg → persist to conv_db → transcript echo (via callback)
-    * → focus injection → LLM call.  Vision buffers are owned by `work`
-    * and freed below after the LLM call returns. */
+    * → focus injection → LLM call. */
    /* Use the turn's CAPTURED conversation (set at dispatch, back-filled at
     * creation) rather than a live re-read of conn->active_conversation_id, which
     * this worker could observe AFTER a mid-turn view switch — that would persist
@@ -493,7 +524,7 @@ static void *text_worker_thread(void *arg) {
       .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
       .persist_content_override = work->persist_content, /* text + [IMAGE:<id>] for image turns */
-      .build_history_message = image_rehydrate_message,  /* ...as a reload rebuilds it */
+      .question_message = question,                      /* ...as a reload rebuilds it */
       .await_conversation = turn_conv <= 0,
       .sentence_cb = fanout_tts ? webui_sentence_audio_fanout_callback : NULL,
       .sentence_userdata = fanout_tts ? session : NULL,
@@ -514,39 +545,21 @@ static void *text_worker_thread(void *arg) {
     * will_persist_turn before this worker ran, so reset-then-arm holds. */
    webui_turn_persist_scope_t persist_scope;
    webui_turn_persist_arm(session, conn ? conn->auth_user_id : 0, &persist_scope);
-   char *response = core_text_input_dispatch(
-       session, text, (const char **)work->vision_images, work->vision_image_sizes,
-       (const char(*)[WEBUI_VISION_MIME_MAX])work->vision_mimes, work->vision_image_count,
-       &dispatch_opts);
+   char *response = core_text_input_dispatch(session, text, &dispatch_opts);
    webui_turn_persist_disarm(session, &persist_scope);
+   json_object_put(question); /* the history holds its own reference */
+   question = NULL;
 
    /* Promote the persisted image turn's images to permanent retention — AFTER
     * dispatch persisted the row, so images are pinned only for turns that reached
     * here (queue-full/superseded-before-dequeue rejections never do).  Images have
     * no orphan sweep and PERMANENT is LRU-exempt, so pinning a never-persisted turn
-    * would leak forever.  Re-collect ids from the persisted marker string with the
-    * same parser the reload path uses, so we pin exactly what the row references —
-    * keeping image_store in the WebUI layer, off core. */
-   if (work->persist_content && conn) {
-      char persisted_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
-      int persisted_id_count = 0;
-      if (image_marker_collect_ids(work->persist_content, persisted_ids,
-                                   WEBUI_MAX_VISION_IMAGES_CAP, &persisted_id_count) == SUCCESS) {
-         for (int i = 0; i < persisted_id_count; i++) {
-            image_store_update_retention(persisted_ids[i], conn->auth_user_id,
-                                         IMAGE_RETAIN_PERMANENT);
-         }
-      }
+    * would leak forever.  The ids are exactly those the row's markers name (built
+    * from them), and the owner is the disconnect-safe turn user, never conn (which
+    * libwebsockets may have freed during the call). */
+   for (int i = 0; turn_user_id > 0 && i < work->image_id_count; i++) {
+      image_store_update_retention(work->image_ids[i], turn_user_id, IMAGE_RETAIN_PERMANENT);
    }
-
-   /* Free vision data after LLM call (it's been sent over HTTP, no longer needed) */
-   for (int i = 0; i < work->vision_image_count; i++) {
-      if (work->vision_images[i]) {
-         free(work->vision_images[i]);
-         work->vision_images[i] = NULL;
-      }
-   }
-   work->vision_image_count = 0;
 
    /* Check if request was superseded during LLM call */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
@@ -681,9 +694,6 @@ static void webui_text_turn_free(void *work) {
    }
    free(w->text);
    free(w->persist_content);
-   for (int i = 0; i < w->vision_image_count; i++) {
-      free(w->vision_images[i]);
-   }
    free(w);
 }
 
@@ -734,35 +744,20 @@ static void webui_text_turn_spawn(void *work) {
    }
 }
 
-/**
- * @brief Process text input with optional vision images (internal)
- *
- * @param session Session context
- * @param text User text input
- * @param vision_images Array of base64 encoded image data (NULL for text-only)
- * @param vision_image_sizes Array of image sizes
- * @param vision_mimes Array of MIME type strings
- * @param vision_image_count Number of images (0 for text-only)
- * @return 0 on success, non-zero on failure
- */
-int webui_process_text_input_with_vision(session_t *session,
+int webui_process_text_input_with_images(session_t *session,
                                          const char *text,
-                                         const char **vision_images,
-                                         const size_t *vision_image_sizes,
-                                         const char **vision_mimes,
-                                         int vision_image_count,
+                                         const char image_ids[][IMAGE_ID_LEN],
+                                         int image_id_count,
                                          const char *persist_content,
                                          bool input_was_voice) {
    if (!session || !text || strlen(text) == 0) {
       return 1;
    }
-
-   /* Validate image count */
-   const int max_vision_images = g_config.vision.max_images;
-   if (vision_image_count > max_vision_images) {
-      OLOG_WARNING("WebUI: Too many images (%d), limiting to %d", vision_image_count,
-                   max_vision_images);
-      vision_image_count = max_vision_images;
+   /* The caller refuses more (an image is never silently dropped); this guards
+    * the array. */
+   if (image_id_count < 0 || image_id_count > WEBUI_MAX_VISION_IMAGES_CAP ||
+       (image_id_count > 0 && (!image_ids || !persist_content))) {
+      return 1;
    }
 
    /* Turn queue (P1): this turn is SERIALIZED behind any turn already in flight
@@ -817,32 +812,10 @@ int webui_process_text_input_with_vision(session_t *session,
       }
    }
 
-   /* Copy vision images if present */
-   if (vision_images && vision_image_count > 0) {
-      for (int i = 0; i < vision_image_count; i++) {
-         if (!vision_images[i] || vision_image_sizes[i] == 0) {
-            continue;
-         }
-
-         work->vision_images[work->vision_image_count] = strdup(vision_images[i]);
-         if (!work->vision_images[work->vision_image_count]) {
-            OLOG_ERROR("WebUI: Failed to allocate vision image %d copy", i);
-            /* Free previously allocated images */
-            for (int j = 0; j < work->vision_image_count; j++) {
-               free(work->vision_images[j]);
-            }
-            free(work->text);
-            free(work->persist_content);
-            free(work);
-            return 1;
-         }
-         work->vision_image_sizes[work->vision_image_count] = vision_image_sizes[i];
-         if (vision_mimes && vision_mimes[i]) {
-            safe_strscpy(work->vision_mimes[work->vision_image_count], vision_mimes[i]);
-         }
-         work->vision_image_count++;
-      }
+   for (int i = 0; i < image_id_count; i++) {
+      safe_strscpy(work->image_ids[i], image_ids[i]);
    }
+   work->image_id_count = image_id_count;
 
    /* Retain the session for the queued turn (released by the worker when it runs,
     * or by webui_text_turn_free on purge/reject). */
@@ -873,6 +846,6 @@ int webui_process_text_input_with_vision(session_t *session,
  * path synchronously flushed lws, a CLOSED callback could free a snapshotted
  * connection mid-sweep. */
 int webui_process_text_input(session_t *session, const char *text, bool input_was_voice) {
-   return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0,
+   return webui_process_text_input_with_images(session, text, NULL, 0,
                                                /*persist_content=*/NULL, input_was_voice);
 }

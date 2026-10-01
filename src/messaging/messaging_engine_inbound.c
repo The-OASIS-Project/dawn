@@ -546,7 +546,7 @@ static void process_inbound(inbound_item_t *item) {
    }
    /* The turn belongs to the channel's conversation (see session_turn_begin). */
    session_turn_begin(session, conv_id, item->user_id);
-   char *response = core_text_input_dispatch(session, item->body, NULL, NULL, NULL, 0, &opts);
+   char *response = core_text_input_dispatch(session, item->body, &opts);
    /* The reply's own blocks.  The turn stays open until the reply is saved, so
     * the row, its id and any truncation land on this turn's history. */
    struct json_object *reply_blocks = session_take_reply_blocks(session);

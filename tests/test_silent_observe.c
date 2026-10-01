@@ -107,15 +107,9 @@ void llm_cache_monitor_pop_kind(int previous) {
  * directly; we don't link against the real provider stack. */
 char *llm_chat_completion_with_config(struct json_object *conversation_history,
                                       const char *input_text,
-                                      const char **vision_images,
-                                      const size_t *vision_image_sizes,
-                                      int vision_image_count,
                                       const llm_resolved_config_t *config) {
    (void)conversation_history;
    (void)input_text;
-   (void)vision_images;
-   (void)vision_image_sizes;
-   (void)vision_image_count;
    (void)config;
    s_mock_response_called++;
    if (!s_mock_response)

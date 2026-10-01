@@ -76,10 +76,22 @@ typedef struct {
    int context_of_row;       /**< conv_db_add_rows only: that question as a row of the
                                   same batch (1-based); 0 = context_of */
    bool is_error;            /**< tool: 1 = confirmed failure */
+   const char *images;       /**< tool: the result's images, a JSON array of image ids
+                                  (at most CONV_MESSAGE_IMAGES_MAX); NULL = none */
+   bool images_bind_later;   /**< leave those images unbound: the caller binds them
+                                  with conv_db_bind_images() as its last step */
 } conv_message_row_t;
+
+/** Most image ids one row names (a tool result's images). */
+#define CONV_MESSAGE_IMAGES_MAX 64
 
 /**
  * @brief Insert a message row, checking the conversation belongs to @p user_id.
+ *
+ * A row naming `images` binds them (unbound captures of the user's, made
+ * permanent) in the same transaction as its insert, unless
+ * `images_bind_later`.  Ids a row can't hold (not a tool row, not a JSON
+ * array of image ids) are dropped with a warning; the row still saves.
  *
  * Updates the conversation's updated_at and message count. `llm_blocks` is
  * accepted on assistant rows only, and only up to CONV_LLM_BLOCKS_MAX bytes.
@@ -129,6 +141,7 @@ typedef struct {
    int64_t context_of; /**< a kinded row's question, or 0 */
    time_t created_at;
    int is_error;
+   const char *images; /**< a tool row's image ids (JSON array), or NULL */
 } conversation_llm_row_t;
 
 /** @return 0 to continue, non-zero to stop. */
@@ -149,6 +162,70 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
                                  int64_t after_id,
                                  conversation_llm_row_cb callback,
                                  void *ctx);
+
+/**
+ * @brief Bind the images @p conv_id's rows name: the user's unbound captures
+ *        become permanent (they go with the conversation).  A voice save's
+ *        last step: its rows are written with images_bind_later.
+ *
+ * A capture a row names that is no longer stored (the unbound grace reclaimed
+ * it) can never be bound: the bind is short.  That is a warning, not a
+ * failure (a save that failed on it would fail on every retry), counted in
+ * @p missing_out (may be NULL).
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_bind_images(int64_t conv_id, int user_id, int *missing_out);
+
+/* -----------------------------------------------------------------------------
+ * The images a conversation owns
+ *
+ * A conversation names an image in conversation_images (v98) when a row that
+ * holds it is stored: a tool row's captures (messages.images) and a question's
+ * uploads or MMS ([IMAGE:<id>] markers on an ordinary user row), the owner's
+ * only.  A reply's marker names nothing: a reply can quote any id.  An image
+ * the conversation owns is one only it names, bound (never one a running turn
+ * or a save to be retried still holds); a conversation delete takes those with
+ * it, in the same transaction.
+ * -------------------------------------------------------------------------- */
+
+/** What a conversation delete does with the images it owns. */
+typedef enum {
+   CONV_IMAGES_KEEP,   /**< they stay (images outlive the conversation) */
+   CONV_IMAGES_DELETE, /**< they go: rows in the delete's transaction, files after */
+   CONV_IMAGES_UNBIND, /**< a save rolled back: the captures it bound go back to
+                            unbound, for its retry (or the grace sweep) */
+} conv_images_mode_t;
+
+/** Longest image file name a delete hands back. */
+#define CONV_IMAGE_FILENAME_MAX 40
+
+/** The files of the images a delete removed, for the caller to unlink once
+ *  the database lock is released.  Free with conv_image_files_free(). */
+typedef struct {
+   char (*names)[CONV_IMAGE_FILENAME_MAX];
+   int count;
+} conv_image_files_t;
+
+void conv_image_files_free(conv_image_files_t *files);
+
+/**
+ * @brief Delete a conversation, and with @p mode the images it owns, in one
+ *        transaction under the database lock
+ *
+ * conv_db_delete() (or, with @p admin, conv_db_delete_admin(): any owner's)
+ * with its images: their rows are removed (or unbound) in the same
+ * transaction as the conversation, so no row naming one can be stored between
+ * the choice and the delete.  The removed images' files come back in
+ * @p files_out (CONV_IMAGES_DELETE; may be NULL only for the other modes).
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_INVALID or
+ *         AUTH_DB_FAILURE (nothing deleted, *@p files_out empty).
+ */
+int conv_db_delete_ex(int64_t conv_id,
+                      int user_id,
+                      bool admin,
+                      conv_images_mode_t mode,
+                      conv_image_files_t *files_out);
 
 /**
  * @brief Drop stored blocks no reload reads any more

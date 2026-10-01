@@ -231,7 +231,7 @@ static void job_worker_run(job_work_t *work) {
     * expansion and focus read it from the turn, like every other surface). */
    session_turn_begin(s, work->conv_id, work->user_id);
    atomic_store(&s->turn_overflowed, false);
-   char *response = core_text_input_dispatch(s, dispatch_text, NULL, NULL, NULL, 0, &opts);
+   char *response = core_text_input_dispatch(s, dispatch_text, &opts);
    /* A turn that filled its context closed to go on in another, whose seam
     * compacts the history (session_compaction.h): DAWN's own question, saved as
     * an envelope, not as something the user said. */
@@ -247,7 +247,7 @@ static void job_worker_run(job_work_t *work) {
       text_input_dispatch_opts_t more = opts;
       more.question_kind = MESSAGE_KIND_ENVELOPE;
       const unsigned compacted_before = atomic_load(&s->compaction.applied);
-      response = core_text_input_dispatch(s, JOB_CONTINUE_DIRECTIVE, NULL, NULL, NULL, 0, &more);
+      response = core_text_input_dispatch(s, JOB_CONTINUE_DIRECTIVE, &more);
       if (atomic_load(&s->turn_overflowed) &&
           atomic_load(&s->compaction.applied) == compacted_before) {
          /* Its seam found nothing to summarize: another turn would fill the

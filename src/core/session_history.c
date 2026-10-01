@@ -38,6 +38,7 @@
 #include "core/tool_result_store.h"
 #include "dawn_error.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -286,14 +287,31 @@ static bool add_message_impl(session_t *session,
 }
 
 /* Caller holds history_mutex.  Take back @p hist[from, len) except the
- * instruction and standing-direction changes the turn announced: they are the
- * conversation's, not the turn's (what is in force says they were sent), so
- * they stay where they are.  Returns how many messages went. */
+ * instruction, standing-direction and tool-set changes the turn announced:
+ * they are the conversation's, not the turn's (what is in force says they were
+ * sent), so they stay where they are.  Returns how many messages went. */
+/* Whether taking back [@p from, @p len) of @p hist strands an inline tool
+ * change: one kept (it is the conversation's) that sat after the turn's
+ * question goes from now on with no user turn before it, so it folds into the
+ * request's tools (llm_tool_change_renders_inline: live and on reload alike),
+ * and the reasoning before it was given other tools: a declared boundary. */
+static bool strands_inline_change(struct json_object *hist, int from, int len) {
+   if (llm_tool_defs_inline_rejected(hist)) {
+      return false; /* they fold already */
+   }
+   for (int i = from; i < len; i++) {
+      if (llm_tool_change_stored_inline(json_object_array_get_idx(hist, i))) {
+         return true;
+      }
+   }
+   return false;
+}
+
 static int take_back_locked(struct json_object *hist, int from, int len) {
    int removed = 0;
    for (int i = len - 1; i >= from; i--) {
       const message_kind_t kind = llm_history_kind_of(json_object_array_get_idx(hist, i));
-      if (kind == MESSAGE_KIND_INSTRUCTION || kind == MESSAGE_KIND_DIRECTIVE) {
+      if (message_kind_conversation_scoped(kind)) {
          continue;
       }
       json_object_array_del_idx(hist, (size_t)i, 1);
@@ -337,8 +355,16 @@ int session_rollback_turn(session_t *session) {
           llm_history_kind_of(before) == MESSAGE_KIND_NONE && llm_history_is_context(before)) {
          from--;
       }
-      taken = session_prefix_take_back_locked(session, session->turn_user_msg);
+      const bool stranded = strands_inline_change(hist, from, len);
+      taken = session_prefix_take_back_locked(session, session->turn_user_msg, stranded);
       removed = take_back_locked(hist, from, len);
+      if (stranded) {
+         const int dropped = llm_history_drop_turn_blocks(hist);
+         OLOG_INFO("Session %u: prefix boundary (tool_set_changed): a tool change sent in "
+                   "place lost its question to a take-back and folds into the tools; %d "
+                   "turn(s) replay without their reasoning",
+                   session->session_id, dropped);
+      }
       /* The device events it was told went with its question: the next turn
        * tells them. */
       for (int i = 0; i < session->notice_count; i++) {
@@ -746,115 +772,6 @@ char *session_previous_question_dup(session_t *session) {
    return text;
 }
 
-static bool add_message_with_images_impl(session_t *session,
-                                         const char *role,
-                                         const char *text,
-                                         const char *const *vision_images,
-                                         int vision_image_count,
-                                         bool turn) {
-   if (!session || !role || !text) {
-      return false;
-   }
-
-   /* No images? Fall back to simple text message */
-   if (!vision_images || vision_image_count <= 0) {
-      return add_message_impl(session, role, text, turn, NULL);
-   }
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   if (turn && session->turn_active && !turn_is_caller_locked(session)) {
-      /* A turn's message from a thread that isn't the running turn's (one
-       * replaced by a later turn): the history is that turn's now. */
-      pthread_mutex_unlock(&session->history_mutex);
-      OLOG_ERROR("Session %u: dropped a %s message from a turn that is no longer running",
-                 session->session_id, role);
-      return false;
-   }
-
-   struct json_object *mirror = NULL;
-   struct json_object *target = turn ? turn_append_target_locked(session, role, &mirror)
-                                     : live_history_locked(session);
-   if (!target) {
-      pthread_mutex_unlock(&session->history_mutex);
-      return false;
-   }
-   bool into_live = (target == session->conversation_history);
-
-   struct json_object *message = json_object_new_object();
-   if (!message) {
-      pthread_mutex_unlock(&session->history_mutex);
-      OLOG_ERROR("Failed to create message object");
-      return false;
-   }
-
-   json_object_object_add(message, "role", json_object_new_string(role));
-
-   /* Build multi-part content array in OpenAI format */
-   struct json_object *content = json_object_new_array();
-   if (!content) {
-      json_object_put(message);
-      pthread_mutex_unlock(&session->history_mutex);
-      OLOG_ERROR("Failed to create content array");
-      return false;
-   }
-
-   /* Add text part first.  INVARIANT: this text part must always precede any
-    * image part, so a user-attached image message never collapses to a
-    * lone-image content array — llm_tools.c's is_capture_image_message()
-    * relies on that shape (single-element array, image-only) to distinguish
-    * ambient tool captures (eviction-eligible) from images the user
-    * deliberately attached (never evicted). Keep this ordering if this
-    * function is ever changed to allow an empty/absent text argument. */
-   struct json_object *text_part = json_object_new_object();
-   json_object_object_add(text_part, "type", json_object_new_string("text"));
-   json_object_object_add(text_part, "text", json_object_new_string(text));
-   json_object_array_add(content, text_part);
-
-   /* Add image parts */
-   for (int i = 0; i < vision_image_count; i++) {
-      if (!vision_images[i] || vision_images[i][0] == '\0') {
-         continue;
-      }
-
-      struct json_object *image_part = json_object_new_object();
-      json_object_object_add(image_part, "type", json_object_new_string("image_url"));
-
-      struct json_object *image_url = json_object_new_object();
-
-      /* Build data URI: data:image/jpeg;base64,<data> */
-      size_t data_len = strlen(vision_images[i]);
-      size_t uri_len = 23 + data_len + 1; /* "data:image/jpeg;base64," + data + null */
-      char *data_uri = malloc(uri_len);
-      if (data_uri) {
-         snprintf(data_uri, uri_len, "data:image/jpeg;base64,%s", vision_images[i]);
-         json_object_object_add(image_url, "url", json_object_new_string(data_uri));
-         free(data_uri);
-      }
-
-      json_object_object_add(image_part, "image_url", image_url);
-      json_object_array_add(content, image_part);
-   }
-
-   json_object_object_add(message, "content", content);
-   append_message_locked(session, target, mirror, message, role, turn);
-
-   OLOG_INFO("Session %u: Added message with %d images to %shistory", session->session_id,
-             vision_image_count, into_live ? "" : "turn ");
-
-   pthread_mutex_unlock(&session->history_mutex);
-   return true;
-}
-
-void session_add_message_with_images(session_t *session,
-                                     const char *role,
-                                     const char *text,
-                                     const char *const *vision_images,
-                                     int vision_image_count) {
-   (void)add_message_with_images_impl(session, role, text, vision_images, vision_image_count,
-                                      false);
-}
-
 bool session_add_turn_message_object(session_t *session, struct json_object *message) {
    const char *role = NULL;
    struct json_object *role_obj = NULL;
@@ -894,15 +811,6 @@ void session_stamp_message_id(session_t *session, struct json_object *message, i
       json_object_object_add(message, "id", json_object_new_int64(row_id));
    }
    pthread_mutex_unlock(&session->history_mutex);
-}
-
-bool session_add_turn_message_with_images(session_t *session,
-                                          const char *role,
-                                          const char *text,
-                                          const char *const *vision_images,
-                                          int vision_image_count) {
-   return add_message_with_images_impl(session, role, text, vision_images, vision_image_count,
-                                       true);
 }
 
 struct json_object *session_get_history(session_t *session) {

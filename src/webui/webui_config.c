@@ -1120,11 +1120,9 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "max_image_size_kb", config->vision.max_image_size_kb);
       JSON_TO_CONFIG_INT(section, "max_dimension", config->vision.max_dimension);
       JSON_TO_CONFIG_INT(section, "max_images", config->vision.max_images);
-      JSON_TO_CONFIG_INT(section, "capture_history_count", config->vision.capture_history_count);
       CONFIG_CLAMP(config->vision.max_image_size_kb, 512, 16384);
       CONFIG_CLAMP(config->vision.max_dimension, 256, 4096);
       CONFIG_CLAMP(config->vision.max_images, 1, 10);
-      CONFIG_CLAMP(config->vision.capture_history_count, 0, 50);
    }
 
    /* [scheduler] */

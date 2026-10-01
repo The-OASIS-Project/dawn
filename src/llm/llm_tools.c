@@ -57,6 +57,8 @@
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tool_images.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools_internal.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
@@ -471,24 +473,6 @@ static bool extract_vision_image(const char *data,
       OLOG_INFO("Image file encoded: %zu bytes base64", strlen(base64_image));
    }
 
-   /* Defense-in-depth: MQTT-sourced captures (e.g. the `viewing` camera tool) have
-    * no upstream size cap the way WebUI uploads do — MIRAGE (or a device
-    * impersonating it, if the broker is compromised) fully controls these bytes.
-    * Reuse the existing upload cap so a captured image can't grow the persisted
-    * conversation_history entry (see llm_tools_add_results_openai/claude)
-    * without bound. */
-   size_t max_bytes = (size_t)g_config.vision.max_image_size_kb * 1024;
-   if (strlen(base64_image) > max_bytes) {
-      OLOG_WARNING("Vision image exceeds max_image_size_kb (%d KB, %zu bytes received) — rejecting",
-                   g_config.vision.max_image_size_kb, strlen(base64_image));
-      free(base64_image);
-      if (error_buf) {
-         snprintf(error_buf, error_len, "Error: Image exceeds maximum size (%d KB)",
-                  g_config.vision.max_image_size_kb);
-      }
-      return false;
-   }
-
    *image_out = base64_image;
    *image_size_out = strlen(base64_image) + 1;
    return true;
@@ -546,21 +530,20 @@ static bool execute_viewing_sync(const char *action,
       return false;
    }
 
-   /* Extract vision image and store in tool result */
+   /* Extract the image; checked, stored and kept in the result
+    * (llm_tool_images.h). */
    char *vision_image = NULL;
    size_t vision_size = 0;
    bool success = extract_vision_image(exec_result.result, &vision_image, &vision_size,
                                        tool_result->result, LLM_TOOLS_RESULT_LEN);
    cmd_exec_result_free(&exec_result);
 
-   if (success) {
-      tool_result->vision_image = vision_image;
-      tool_result->vision_image_size = vision_size;
+   if (success && llm_tool_images_ingest(vision_image, tool_result)) {
       snprintf(tool_result->result, LLM_TOOLS_RESULT_LEN,
                "Image captured successfully. Please analyze and respond to the user's request.");
-      OLOG_INFO("Vision image stored in tool result: %zu bytes", vision_size);
+      return true;
    }
-   return success;
+   return false;
 }
 
 /* =============================================================================
@@ -718,11 +701,9 @@ void llm_tools_refresh(void) {
          /* Also honor the tool's own availability gate (hud_control requires
           * discovered elements; hud_mode requires >1 mode).  hud_available
           * flips true when the HUD keepalive comes online, but discovery
-          * responses land a beat later — without this the native schema could
-          * ship hud_control with an empty `element` enum (emitted as an
-          * unconstrained string) in that window and the LLM fabricates element
-          * names.  Discovery re-runs llm_tools_refresh() once the enum is
-          * populated, so this re-enables the tool automatically. */
+          * responses land a beat later: until they do there is nothing to
+          * control.  Discovery re-runs llm_tools_refresh() once it lists
+          * them, so this re-enables the tool automatically. */
          const tool_metadata_t *meta = tool_registry_find(t->name);
          if (meta != NULL && meta->is_available != NULL && !meta->is_available()) {
             t->enabled = false;
@@ -1485,6 +1466,22 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       }
    }
 
+   /* Values that change at runtime aren't in the schema: checked here. */
+   if (meta->validate_call) {
+      char why[256] = "";
+      if (meta->validate_call(effective_device, action_name, value_buf, why, sizeof(why)) !=
+          SUCCESS) {
+         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Refused: %s",
+                  why[0] ? why : "the call's arguments aren't valid now");
+         result->success = false;
+         result->is_error = true;
+         result->should_respond = true;
+         OLOG_WARNING("Refused tool '%s': %s", call->name, result->result);
+         notify_tool_execution(call->name, call->arguments, result->result, false);
+         return 1;
+      }
+   }
+
    OLOG_INFO("Executing tool '%s' (treg) -> device='%s', action='%s', value='%s'", call->name,
              effective_device, action_name, value_buf);
 
@@ -2231,117 +2228,6 @@ int llm_tools_get_enabled_count(void) {
 }
 
 
-#define VISION_STRIP_TEXT_BUF_MAX 8192
-
-static bool is_vision_content_block(struct json_object *block) {
-   struct json_object *type_obj;
-   if (!json_object_object_get_ex(block, "type", &type_obj)) {
-      return false;
-   }
-   const char *type_str = json_object_get_string(type_obj);
-   return (strcmp(type_str, "image_url") == 0 || strcmp(type_str, "image") == 0);
-}
-
-struct json_object *llm_history_strip_vision_content(struct json_object *history) {
-   if (!history || json_object_get_type(history) != json_type_array) {
-      return NULL;
-   }
-
-   int len = json_object_array_length(history);
-
-   bool has_vision = false;
-   for (int i = 0; i < len && !has_vision; i++) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *content_obj;
-      if (json_object_object_get_ex(msg, "content", &content_obj) &&
-          json_object_get_type(content_obj) == json_type_array) {
-         int arr_len = json_object_array_length(content_obj);
-         for (int j = 0; j < arr_len; j++) {
-            struct json_object *elem = json_object_array_get_idx(content_obj, j);
-            if (is_vision_content_block(elem)) {
-               has_vision = true;
-               break;
-            }
-         }
-      }
-   }
-
-   if (!has_vision) {
-      return json_object_get(history);
-   }
-
-   OLOG_INFO("Stripping vision content from history");
-
-   struct json_object *sanitized = json_object_new_array();
-
-   for (int i = 0; i < len; i++) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *content_obj;
-
-      if (json_object_object_get_ex(msg, "content", &content_obj) &&
-          json_object_get_type(content_obj) == json_type_array) {
-         int arr_len = json_object_array_length(content_obj);
-         char text_buffer[VISION_STRIP_TEXT_BUF_MAX] = "";
-         size_t text_len = 0;
-         bool found_image = false;
-
-         for (int j = 0; j < arr_len; j++) {
-            struct json_object *elem = json_object_array_get_idx(content_obj, j);
-            struct json_object *type_obj;
-            if (json_object_object_get_ex(elem, "type", &type_obj)) {
-               const char *type_str = json_object_get_string(type_obj);
-               if (strcmp(type_str, "text") == 0) {
-                  struct json_object *text_obj;
-                  if (json_object_object_get_ex(elem, "text", &text_obj)) {
-                     const char *text = json_object_get_string(text_obj);
-                     if (text && text_len < sizeof(text_buffer) - 1) {
-                        if (text_len > 0) {
-                           text_buffer[text_len++] = ' ';
-                        }
-                        size_t copy_len = strlen(text);
-                        if (text_len + copy_len >= sizeof(text_buffer)) {
-                           copy_len = sizeof(text_buffer) - text_len - 1;
-                        }
-                        memcpy(text_buffer + text_len, text, copy_len);
-                        text_len += copy_len;
-                        text_buffer[text_len] = '\0';
-                     }
-                  }
-               } else if (is_vision_content_block(elem)) {
-                  found_image = true;
-               }
-            }
-         }
-
-         struct json_object *new_msg = json_object_new_object();
-         struct json_object *role_obj;
-         if (json_object_object_get_ex(msg, "role", &role_obj)) {
-            json_object_object_add(new_msg, "role", json_object_get(role_obj));
-         }
-
-         if (found_image) {
-            if (text_len > 0) {
-               char combined[VISION_STRIP_TEXT_BUF_MAX + 128];
-               snprintf(combined, sizeof(combined), "%s [An image was shared earlier]",
-                        text_buffer);
-               json_object_object_add(new_msg, "content", json_object_new_string(combined));
-            } else {
-               json_object_object_add(new_msg, "content",
-                                      json_object_new_string("[An image was shared here]"));
-            }
-         } else {
-            json_object_object_add(new_msg, "content", json_object_new_string(text_buffer));
-         }
-
-         json_object_array_add(sanitized, new_msg);
-      } else {
-         json_object_array_add(sanitized, json_object_get(msg));
-      }
-   }
-
-   return sanitized;
-}
-
 void llm_tool_response_free(llm_tool_response_t *response) {
    if (response) {
       if (response->text) {
@@ -2396,18 +2282,5 @@ void llm_tools_prepare_followup(const tool_result_list_t *results, tool_followup
          }
       }
       ctx->all_silent = all_silent;
-   }
-
-   /* Check for vision data in tool results (session-isolated) */
-   if (results) {
-      for (int i = 0; i < results->count; i++) {
-         const tool_result_t *r = &results->results[i];
-         if (r->vision_image && r->vision_image_size > 0) {
-            ctx->has_pending_vision = true;
-            ctx->pending_vision = r->vision_image;
-            ctx->pending_vision_size = r->vision_image_size;
-            break; /* Only one vision image per call */
-         }
-      }
    }
 }

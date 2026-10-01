@@ -123,7 +123,7 @@ static int process_batch(int user_id,
    free(prompt);
 
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
-   char *response = llm_chat_completion_with_config(history, NULL, NULL, NULL, 0, cfg);
+   char *response = llm_chat_completion_with_config(history, NULL, cfg);
    llm_cache_monitor_pop_kind(kind_prev);
    json_object_put(history);
 

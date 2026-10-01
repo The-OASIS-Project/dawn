@@ -249,31 +249,15 @@ static const char *SCHEMA_SQL =
     /* Note: idx_conversations_continued is created during migration or post-init
      * to handle both new databases and upgrades from v6 */
 
-    /* Messages table (added in schema v4) */
-    "CREATE TABLE IF NOT EXISTS messages ("
-    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "   conversation_id INTEGER NOT NULL,"
-    "   role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),"
-    "   content TEXT NOT NULL,"
-    "   tool_calls TEXT,"   /* assistant rows: OpenAI tool_calls JSON array (v56) */
-    "   tool_call_id TEXT," /* role='tool' rows: matching tool_call id (v56) */
-    "   reasoning TEXT,"    /* assistant rows: display-only reasoning JSON (v57) */
-    "   created_at INTEGER NOT NULL,"
-    "   is_error INTEGER NOT NULL DEFAULT 0," /* role='tool' rows: 1 = confirmed failure (v81) */
-    /* assistant rows: the turn's stored blocks, read only to rebuild an LLM
-     * context (v92). Last column so the v92 ALTER yields the same table. */
-    "   llm_blocks_len INTEGER,"
-    "   llm_blocks TEXT " CONV_LLM_BLOCKS_CHECK_SQL ","
-    /* kind (v94): NULL = a message someone sees; otherwise request context the
-     * model reads and no client or search does (turn context, memory,
-     * directives, operator instructions, loop notes, envelopes). */
-    "   kind TEXT DEFAULT NULL " CONV_MESSAGE_KIND_CHECK_SQL ","
-    /* context_of (v94): a turn's context row names the question it goes in
-     * front of, so it attaches there whatever rows land between them. */
-    "   context_of INTEGER DEFAULT NULL,"
-    "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
-    ");"
-    "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"
+    /* Messages (schema v4; its v98 shape, the same text the v98 rebuild runs).
+     * tool_calls/tool_call_id (v56), reasoning (v57), is_error (v81),
+     * llm_blocks (v92: an assistant turn's stored blocks), kind/context_of (v94:
+     * request context the model reads and no client or search does, and the
+     * question a turn's context goes in front of), images (v98: a tool
+     * result's image ids).  Its other indexes and its triggers index or read
+     * migration-added columns, so the ladder makes them (v92, v94, v98), for a
+     * new database too. */
+    CONV_MESSAGES_TABLE_SQL CONV_MESSAGES_IDX_CONVERSATION_SQL
 
     /* Content-addressed request prefixes (v94): a conversation's frozen system
      * prompt and tool set, by SHA-256; shared by every conversation that sent the
@@ -384,6 +368,8 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);"
+    /* Which conversations name which images (v98). */
+    AUTH_DB_CONVERSATION_IMAGES_SQL
 
     /* Generic blob store — original-file storage (v68).  Filesystem-backed:
      * metadata only here.  Per-user content-hash dedup; `kind` tags the consumer

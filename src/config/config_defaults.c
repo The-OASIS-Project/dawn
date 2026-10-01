@@ -309,7 +309,6 @@ void config_set_defaults(dawn_config_t *config) {
    config->vision.max_image_size_kb = 4096;
    config->vision.max_dimension = 1024;
    config->vision.max_images = 5;
-   config->vision.capture_history_count = 1;
 
    /* Memory - persistent user memory system */
    config->memory.enabled = true;

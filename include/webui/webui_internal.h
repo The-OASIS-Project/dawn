@@ -96,8 +96,9 @@ extern "C" {
 
 /* WebSocket text buffer limits */
 #define WEBUI_TEXT_BUFFER_INITIAL_CAP 8192
-#define WEBUI_TEXT_BUFFER_MAX_CAP \
-   (8 * 1024 * 1024) /* 8MB for vision (4MB image + base64 overhead) */
+#define WEBUI_TEXT_BUFFER_MAX_CAP                                                        \
+   (8 * 1024 * 1024) /* 8MB: attached documents' text; an older client's base64 images[] \
+                      * still arrive whole to be ignored rather than dropped */
 
 /* =============================================================================
  * Per-WebSocket Connection Data
@@ -491,18 +492,25 @@ void webui_broadcast_silent_observation(const char *category,
 void handle_json_message(ws_connection_t *conn, const char *data, size_t len);
 
 /**
- * @brief Handle a `text` message — text input from the user with optional
- * vision images.  Defined in webui_server.c; called from
+ * @brief Handle a `text` message — text input from the user, with the images
+ * attached to it by id (@p image_ids, @p image_id_count; persisted as
+ * @p persist_content).  Defined in webui_server.c; called from
  * handle_json_message in webui_message_dispatch.c.
  */
 void handle_text_message(ws_connection_t *conn,
                          const char *text,
                          size_t len,
-                         const char **vision_images,
-                         const size_t *vision_image_sizes,
-                         const char **vision_mimes,
-                         int vision_image_count,
+                         const char image_ids[][IMAGE_ID_LEN],
+                         int image_id_count,
                          const char *persist_content);
+
+/**
+ * @brief The `error` frame code and message for a turn whose images were
+ *        refused: @p rc an IMAGE_REHYDRATE_ERR_* code (other values: the
+ *        generic IMAGE_ERROR).  Both strings are static.  Defined in
+ *        webui_text_processing.c.
+ */
+void webui_image_error_describe(int rc, const char **code_out, const char **message_out);
 
 /**
  * @brief Handle a `get_metrics` message — emit the current session-metrics
@@ -576,24 +584,6 @@ void webui_turn_persist_arm(session_t *session,
                             int auth_user_id,
                             webui_turn_persist_scope_t *scope);
 void webui_turn_persist_disarm(session_t *session, webui_turn_persist_scope_t *scope);
-
-/**
- * @brief Validate base64-encoded image data (security-hardened).
- *
- * MIME whitelist + size cap + base64-charset + magic-byte check.  Defined
- * in webui_vision_validate.c.
- *
- * INTERNAL TO THE WEBUI MODULE.  Callers MUST enforce an upstream byte cap
- * on `base64_len` (the WebSocket receive cap is the established
- * boundary).  Passing an unbounded `base64_len` up to
- * `WEBUI_MAX_BASE64_SIZE` will allocate a multi-megabyte decode buffer
- * even though only the 24-byte prefix is decoded here — the size check
- * defends amplification against the *upstream* allocation, not this
- * function's own.
- *
- * @return 0 on success, 1-5 on failure (see implementation for codes)
- */
-int validate_image_data(const char *base64_data, size_t base64_len, const char *mime_type);
 
 /* free_response moved to webui/webui_send.h */
 

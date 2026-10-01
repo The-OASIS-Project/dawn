@@ -166,18 +166,14 @@ static void llm_openai_discard_text_chunk(const char *chunk, void *userdata) {
  * which has no non-streaming transport of its own. `sink` must be non-NULL. */
 static char *llm_openai_single_shot_collect_text(struct json_object *conversation_history,
                                                  const char *input_text,
-                                                 const char **vision_images,
-                                                 const size_t *vision_image_sizes,
-                                                 int vision_image_count,
                                                  const char *base_url,
                                                  const char *api_key,
                                                  const char *model,
                                                  llm_openai_text_chunk_callback sink,
                                                  void *sink_userdata) {
    llm_tool_response_t result = { 0 };
-   int rc = llm_openai_streaming_single_shot(conversation_history, input_text, vision_images,
-                                             vision_image_sizes, vision_image_count, base_url,
-                                             api_key, model, sink, sink_userdata, 0, &result);
+   int rc = llm_openai_streaming_single_shot(conversation_history, input_text, base_url, api_key,
+                                             model, sink, sink_userdata, 0, &result);
    char *text = (rc == 0 && result.text) ? strdup(result.text) : NULL;
    llm_tool_response_free(&result);
    return text;
@@ -185,9 +181,6 @@ static char *llm_openai_single_shot_collect_text(struct json_object *conversatio
 
 char *llm_openai_chat_completion(struct json_object *conversation_history,
                                  const char *input_text,
-                                 const char **vision_images,
-                                 const size_t *vision_image_sizes,
-                                 int vision_image_count,
                                  const char *base_url,
                                  const char *api_key,
                                  const char *model) {
@@ -195,22 +188,16 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
       /* Responses has no non-streaming transport; drive the streaming single-shot
        * with a discard sink so bare-completion callers (briefings, compaction,
        * memory extraction, summarizers) keep working on Responses-only models. */
-      return llm_openai_single_shot_collect_text(conversation_history, input_text, vision_images,
-                                                 vision_image_sizes, vision_image_count, base_url,
+      return llm_openai_single_shot_collect_text(conversation_history, input_text, base_url,
                                                  api_key, model, llm_openai_discard_text_chunk,
                                                  NULL);
    }
 
-   return llm_openai_cc_chat_completion(conversation_history, input_text, vision_images,
-                                        vision_image_sizes, vision_image_count, base_url, api_key,
-                                        model);
+   return llm_openai_cc_chat_completion(conversation_history, input_text, base_url, api_key, model);
 }
 
 int llm_openai_streaming_single_shot(struct json_object *conversation_history,
                                      const char *input_text,
-                                     const char **vision_images,
-                                     const size_t *vision_image_sizes,
-                                     int vision_image_count,
                                      const char *base_url,
                                      const char *api_key,
                                      const char *model,
@@ -229,13 +216,12 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
    }
 
    if (should_dispatch_to_responses_api(api_key, base_url, route_model)) {
-      return llm_openai_responses_streaming_single_shot(
-          conversation_history, input_text, vision_images, vision_image_sizes, vision_image_count,
-          base_url, api_key, route_model, chunk_callback, callback_userdata, iteration, result);
+      return llm_openai_responses_streaming_single_shot(conversation_history, input_text, base_url,
+                                                        api_key, route_model, chunk_callback,
+                                                        callback_userdata, iteration, result);
    }
 
-   return llm_openai_cc_streaming_single_shot(conversation_history, input_text, vision_images,
-                                              vision_image_sizes, vision_image_count, base_url,
-                                              api_key, model, chunk_callback, callback_userdata,
-                                              iteration, result);
+   return llm_openai_cc_streaming_single_shot(conversation_history, input_text, base_url, api_key,
+                                              model, chunk_callback, callback_userdata, iteration,
+                                              result);
 }

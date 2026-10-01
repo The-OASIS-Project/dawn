@@ -27,6 +27,7 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_conv_prefix.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_tool_defs.h"
 #include "logging.h"
 
 struct json_object *prefix_message_new(const char *text,
@@ -39,11 +40,12 @@ struct json_object *prefix_message_new(const char *text,
    json_object_object_add(msg, "role", json_object_new_string("system"));
    json_object_object_add(msg, "content", json_object_new_string(text ? text : ""));
    llm_history_set_kind(msg, MESSAGE_KIND_PREFIX);
-   struct json_object *tools = tools_json ? json_tokener_parse(tools_json) : NULL;
-   if (json_object_is_type(tools, json_type_array)) {
+   /* Validated once, here: every request reads the frozen set as it is. */
+   struct json_object *parsed = tools_json ? json_tokener_parse(tools_json) : NULL;
+   struct json_object *tools = llm_tool_defs_usable(parsed);
+   json_object_put(parsed);
+   if (tools) {
       json_object_object_add(msg, LLM_HISTORY_TOOLS_KEY, tools);
-   } else {
-      json_object_put(tools);
    }
    /* What is in force (prefix_in_force.h): without it, the next turn works it
     * out from the prefix's text. */

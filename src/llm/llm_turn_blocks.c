@@ -598,8 +598,9 @@ static bool has_internal_key(struct json_object *obj, bool keep_kind) {
    return false;
 }
 
-/* Whether any of a content array's parts has a key of DAWN's own (a turn's
- * context parts carry their kind). */
+/* Whether any of a content array's parts, at any depth, has a key of DAWN's
+ * own (a turn's context parts carry their kind; a tool result's images, in a
+ * Claude tool_result's own content, their stored id). */
 static bool parts_have_internal_key(struct json_object *msg, bool keep_kind) {
    struct json_object *content = NULL;
    if (!json_object_object_get_ex(msg, "content", &content) ||
@@ -609,7 +610,8 @@ static bool parts_have_internal_key(struct json_object *msg, bool keep_kind) {
    const size_t n = json_object_array_length(content);
    for (size_t i = 0; i < n; i++) {
       struct json_object *part = json_object_array_get_idx(content, i);
-      if (json_object_is_type(part, json_type_object) && has_internal_key(part, keep_kind)) {
+      if (json_object_is_type(part, json_type_object) &&
+          (has_internal_key(part, keep_kind) || parts_have_internal_key(part, keep_kind))) {
          return true;
       }
    }

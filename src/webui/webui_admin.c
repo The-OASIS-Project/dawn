@@ -31,6 +31,7 @@
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
 #include "auth/auth_db_withdraw.h"
+#include "core/conv_images.h"
 #include "core/session_prefix.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
@@ -215,6 +216,13 @@ void handle_delete_user(ws_connection_t *conn, struct json_object *payload) {
     * and memories go with it: removed on its behalf, and withdrawn. */
    auth_user_t target;
    const int target_id = auth_db_get_user(username, &target) == AUTH_DB_SUCCESS ? target.id : 0;
+   /* The account's stores (images, document originals) go first: their rows
+    * cascade with the user, their files don't, and after it nothing names
+    * them.  As on the admin socket: a refused delete (the last admin) has
+    * lost them already, a blocked misuse. */
+   if (target_id > 0) {
+      (void)conv_images_purge_user(target_id);
+   }
    conv_db_withdraw_intent_begin(target_id);
    int result = auth_db_delete_user(username);
    conv_db_withdraw_intent_end();

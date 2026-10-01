@@ -43,11 +43,13 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/text_filter.h"
+#include "llm/llm_claude_betas.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_context.h"
+#include "tools/hud_discovery.h"
 #include "utils/string_utils.h"
 #include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
@@ -734,6 +736,9 @@ static char *build_directives(session_t *dispatch) {
       char hint[2048];
       if (llm_tools_build_disabled_hint(is_remote, hint, sizeof(hint)) > 0)
          set = add_directive(set, hint);
+      /* What the helmet offers now (the HUD tools' schemas name no values). */
+      if (hud_discovery_describe(hint, sizeof(hint)) > 0)
+         set = add_directive(set, hint);
    }
    if (dispatch == NULL)
       return set;
@@ -767,6 +772,27 @@ static char *build_directives(session_t *dispatch) {
          set = add_directive(set, voice_directive_webui_effective());
    }
    return set;
+}
+
+/* Whether @p session's turn sends a tool change in place: its model, on the
+ * Claude API itself (claude_betas_inline_tools_ok). */
+static bool inline_tools_for(session_t *session) {
+   if (session == NULL) {
+      return false;
+   }
+   session_llm_config_t config;
+   session_get_llm_config(session, &config);
+   llm_resolved_config_t resolved;
+   if (llm_resolve_config(&config, &resolved) != 0 || resolved.type != LLM_CLOUD ||
+       resolved.cloud_provider != CLOUD_PROVIDER_CLAUDE) {
+      return false;
+   }
+   /* Copied at once (the resolved strings may point at the stack). */
+   char model[LLM_MODEL_NAME_MAX];
+   char endpoint[512];
+   snprintf(model, sizeof(model), "%s", resolved.model ? resolved.model : "");
+   snprintf(endpoint, sizeof(endpoint), "%s", resolved.endpoint ? resolved.endpoint : CLAUDE_URL);
+   return claude_betas_inline_tools_ok(endpoint, model[0] ? model : llm_get_default_claude_model());
 }
 
 int dawn_build_prompt(session_t *session,
@@ -807,8 +833,9 @@ int dawn_build_prompt(session_t *session,
       }
    }
    if (llm_tools_enabled(NULL)) {
-      out->tool_names = llm_tools_freeze_names();
+      out->tool_defs = llm_tools_definitions_hashed(&out->tool_def_hashes, out->tool_defs_fp);
       out->tool_schemas = llm_tools_schema_hashes();
+      out->inline_tools = inline_tools_for(dispatch);
    }
 
    /* This turn's context: the time, the retrieved items, per-turn notes. */

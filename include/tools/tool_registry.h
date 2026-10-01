@@ -413,6 +413,18 @@ typedef struct {
     *  @return SUCCESS if `action` may be scheduled, FAILURE otherwise (writes err_buf). */
    int (*validate_schedulable_action)(const char *action, char *err_buf, size_t err_buf_size);
 
+   /** Optional check of a call's resolved arguments before it runs (NULL =
+    *  none): for a parameter whose valid values change at runtime and so are
+    *  kept out of the schema (a conversation freezes the schema; the live set
+    *  reaches the model in its standing directions).
+    *  @return SUCCESS to run it, FAILURE to refuse it (writes err_buf, which
+    *          the model is told). */
+   int (*validate_call)(const char *device,
+                        const char *action,
+                        const char *value,
+                        char *err_buf,
+                        size_t err_buf_size);
+
    /* Config (optional - NULL if tool has no config) */
    void *config;                        /**< Pointer to tool's config struct */
    size_t config_size;                  /**< sizeof() the config struct */

@@ -36,9 +36,6 @@
 int is_vision_enabled_for_current_llm(void) {
    return 1;
 }
-struct json_object *llm_history_strip_vision_content(struct json_object *history) {
-   return json_object_get(history);
-}
 
 void setUp(void) {
 }
@@ -196,7 +193,7 @@ static void test_partial_turn_keeps_its_reasoning(void) {
 }
 
 /* A turn's context in front of its question as one string, a direction as an
- * operator's note after it; no marks on the wire; a vision request keeps both. */
+ * operator's note after it; no marks on the wire; an image question keeps both. */
 static void test_request_context_for_chat(void) {
    json_object *history = json_tokener_parse(
        "[{\"role\":\"system\",\"content\":\"P\"},"
@@ -210,15 +207,26 @@ static void test_request_context_for_chat(void) {
    TEST_ASSERT_EQUAL_STRING("[{\"role\":\"system\",\"content\":\"P\"},{\"role\":\"user\","
                             "\"content\":\"MEM\\n\\nCTX\\n\\nHi\\n\\n[Operator note] D\"}]",
                             json_object_to_json_string_ext(prepared, JSON_C_TO_STRING_PLAIN));
-   const char *image = "iVBORw0KGgo=";
-   const char *images[] = { image };
-   const size_t sizes[] = { strlen(image) };
-   json_object *vision = llm_openai_apply_vision_images(prepared, "Hi", images, sizes, 1);
-   json_object *parts = json_object_object_get(json_object_array_get_idx(vision, 1), "content");
+   json_object_put(prepared);
+   json_object_put(history);
+
+   /* An image question (its images parts of its own message, as the dispatch
+    * builds it): its context in front, the image after its text, the note last. */
+   history = json_tokener_parse(
+       "[{\"role\":\"system\",\"content\":\"P\"},"
+       "{\"role\":\"user\",\"content\":["
+       "{\"type\":\"text\",\"text\":\"MEM\",\"_kind\":\"memory\"},"
+       "{\"type\":\"text\",\"text\":\"CTX\",\"_kind\":\"turn_context\"},"
+       "{\"type\":\"text\",\"text\":\"Hi\"},"
+       "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBO\"}}]},"
+       "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"}]");
+   prepared = llm_openai_prepare_chat_history(history, "api.example.com#00000000", "m");
    TEST_ASSERT_EQUAL_STRING(
-       "MEM\n\nCTX\n\nHi\n\n[Operator note] D",
-       json_object_get_string(json_object_object_get(json_object_array_get_idx(parts, 0), "text")));
-   json_object_put(vision);
+       "[{\"role\":\"system\",\"content\":\"P\"},{\"role\":\"user\",\"content\":["
+       "{\"type\":\"text\",\"text\":\"MEM\"},{\"type\":\"text\",\"text\":\"CTX\"},"
+       "{\"type\":\"text\",\"text\":\"Hi\"},{\"type\":\"image_url\",\"image_url\":{\"url\":"
+       "\"data:image\\/png;base64,iVBO\"}},{\"type\":\"text\",\"text\":\"[Operator note] D\"}]}]",
+       json_object_to_json_string_ext(prepared, JSON_C_TO_STRING_PLAIN));
    json_object_put(prepared);
    json_object_put(history);
 }

@@ -58,7 +58,7 @@ static bool blob_input_ok(const char *prefix, const char *tools) {
 
 /* Store bytes under their hash (already stored: kept as is). Caller holds the
  * lock. */
-static int blob_put(const char *bytes, char hash_out[DAWN_SHA256_HEX_LEN]) {
+int conv_prompt_blob_put_locked(const char *bytes, char hash_out[DAWN_SHA256_HEX_LEN]) {
    size_t len = strlen(bytes);
    dawn_sha256_hex(bytes, len, hash_out);
    sqlite3_stmt *st = NULL;
@@ -83,7 +83,7 @@ static int blob_put(const char *bytes, char hash_out[DAWN_SHA256_HEX_LEN]) {
 
 /* The bytes stored under `hash`, checked against it: AUTH_DB_INVALID when they
  * are missing or don't match. Caller holds the lock. */
-static int blob_get(const char *hash, char **out) {
+int conv_prompt_blob_get_locked(const char *hash, char **out) {
    *out = NULL;
    sqlite3_stmt *st = NULL;
    if (sqlite3_prepare_v2(s_db.db, "SELECT bytes FROM prompt_blobs WHERE hash = ?", -1, &st,
@@ -148,12 +148,13 @@ static int prefix_read_locked(int64_t conv_id, int user_id, conv_prefix_t *out) 
    }
    sqlite3_finalize(st);
 
-   int result = out->prefix_hash[0] ? blob_get(out->prefix_hash, &out->prefix) : AUTH_DB_SUCCESS;
+   int result = out->prefix_hash[0] ? conv_prompt_blob_get_locked(out->prefix_hash, &out->prefix)
+                                    : AUTH_DB_SUCCESS;
    if (result == AUTH_DB_SUCCESS && out->tools_hash[0]) {
-      result = blob_get(out->tools_hash, &out->tools);
+      result = conv_prompt_blob_get_locked(out->tools_hash, &out->tools);
    }
    if (result == AUTH_DB_SUCCESS && out->in_force_hash[0]) {
-      result = blob_get(out->in_force_hash, &out->in_force);
+      result = conv_prompt_blob_get_locked(out->in_force_hash, &out->in_force);
    }
    if (result != AUTH_DB_SUCCESS) {
       conv_prefix_free(out);
@@ -182,8 +183,9 @@ static int turn_prefix_locked(int64_t conv_id, int user_id, const conv_turn_save
    if (save->prefix) {
       char prefix_hash[DAWN_SHA256_HEX_LEN];
       char tools_hash[DAWN_SHA256_HEX_LEN] = { 0 };
-      if (blob_put(save->prefix, prefix_hash) != AUTH_DB_SUCCESS ||
-          (save->tools && blob_put(save->tools, tools_hash) != AUTH_DB_SUCCESS)) {
+      if (conv_prompt_blob_put_locked(save->prefix, prefix_hash) != AUTH_DB_SUCCESS ||
+          (save->tools &&
+           conv_prompt_blob_put_locked(save->tools, tools_hash) != AUTH_DB_SUCCESS)) {
          return AUTH_DB_FAILURE;
       }
       sqlite3_stmt *st = NULL;
@@ -212,7 +214,7 @@ static int turn_prefix_locked(int64_t conv_id, int user_id, const conv_turn_save
    }
    if (save->in_force) {
       char hash[DAWN_SHA256_HEX_LEN];
-      if (blob_put(save->in_force, hash) != AUTH_DB_SUCCESS) {
+      if (conv_prompt_blob_put_locked(save->in_force, hash) != AUTH_DB_SUCCESS) {
          return AUTH_DB_FAILURE;
       }
       sqlite3_stmt *st = NULL;
@@ -478,7 +480,7 @@ int conv_db_retract_envelope(int64_t conv_id, int user_id, int64_t envelope_id) 
                                   "conversation_id = ?1 AND kind = 'envelope'), "
                                   "(SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 "
                                   "AND id > ?2 AND context_of IS NOT ?2 AND "
-                                  "(kind IS NULL OR kind NOT IN ('instruction', 'directive')))",
+                                  "(kind IS NULL OR kind NOT IN " CONV_SCOPED_KINDS_SQL "))",
                                   -1, &st, NULL) == SQLITE_OK
                    ? AUTH_DB_SUCCESS
                    : AUTH_DB_FAILURE;
@@ -498,14 +500,22 @@ int conv_db_retract_envelope(int64_t conv_id, int user_id, int64_t envelope_id) 
    st = NULL;
    if (result == AUTH_DB_SUCCESS) {
       /* kind-rows: the envelope and the context sent in front of it go; what
-       * its turn announced to the conversation (an instruction or direction
-       * change) stays where it is, naming no question. */
+       * its turn announced to the conversation (an instruction, direction or
+       * tool-set change) stays where it is, naming no question. */
+      /* A tool change it announced in place now follows no user turn: it
+       * folds into the request's tools (live and on reload alike), so the
+       * reasoning before it was given other tools: the floor goes past it. */
       static const char *const k_retract[] = {
          "DELETE FROM messages WHERE conversation_id = ?1 AND (id = ?2 OR (context_of = ?2 "
          "AND kind IN ('turn_context', 'memory')))",
          "UPDATE messages SET context_of = NULL WHERE conversation_id = ?1 AND context_of = ?2",
+         "UPDATE conversations SET reasoning_floor_msg_id = MAX(reasoning_floor_msg_id, "
+         "(SELECT MIN(id) FROM messages WHERE conversation_id = ?1 AND id > ?2 AND "
+         "kind = 'tool_change')) WHERE id = ?1 AND EXISTS (SELECT 1 FROM messages WHERE "
+         "conversation_id = ?1 AND id > ?2 AND kind = 'tool_change')",
       };
-      for (size_t i = 0; result == AUTH_DB_SUCCESS && i < 2; i++) {
+      for (size_t i = 0; result == AUTH_DB_SUCCESS && i < sizeof(k_retract) / sizeof(k_retract[0]);
+           i++) {
          result = sqlite3_prepare_v2(s_db.db, k_retract[i], -1, &st, NULL) == SQLITE_OK
                       ? AUTH_DB_SUCCESS
                       : AUTH_DB_FAILURE;
@@ -540,7 +550,11 @@ int conv_db_prompt_blobs_gc(int *deleted_out) {
                          "SELECT prefix_hash FROM conversations WHERE prefix_hash IS NOT NULL "
                          "UNION SELECT tools_hash FROM conversations WHERE tools_hash IS NOT NULL "
                          "UNION SELECT in_force_hash FROM conversations "
-                         "WHERE in_force_hash IS NOT NULL)",
+                         "WHERE in_force_hash IS NOT NULL "
+                         /* kind-rows: a large tool change's definitions. */
+                         "UNION SELECT json_extract(content, '$.blob') FROM messages "
+                         "WHERE kind = 'tool_change' AND json_valid(content) "
+                         "AND json_extract(content, '$.blob') IS NOT NULL)",
                          NULL, NULL, NULL);
    int deleted = sqlite3_changes(s_db.db);
    if (rc != SQLITE_OK) {

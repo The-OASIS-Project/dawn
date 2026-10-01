@@ -115,6 +115,8 @@ static bool batch_add(row_batch_t *b,
       }
       struct json_object *calls = NULL;
       json_object_object_get_ex(row, "tool_calls", &calls);
+      struct json_object *images = NULL;
+      json_object_object_get_ex(row, LLM_HISTORY_ROW_IMAGES_KEY, &images);
       const message_kind_t kind = llm_history_kind_of(row);
       /* A question's context rows follow its own row and name it. */
       b->rows[b->n] = (conv_message_row_t){
@@ -125,6 +127,10 @@ static bool batch_add(row_batch_t *b,
          .llm_blocks = row_field(row, LLM_HISTORY_ROW_STORED_KEY),
          .kind = row_field(row, MESSAGE_KIND_KEY),
          .context_of_row = kind != MESSAGE_KIND_NONE ? question : 0,
+         /* Bound as the save's last step (conv_db_bind_images), so a save
+          * that fails leaves them for its retry. */
+         .images = images ? json_object_to_json_string_ext(images, JSON_C_TO_STRING_PLAIN) : NULL,
+         .images_bind_later = true,
       };
       b->n++;
       if (each_row && !batch_stamp(b, row, b->n - 1)) {
@@ -352,15 +358,27 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
          saved = kept;
       }
    }
-   /* The results its turns stored, readable in it from now on.  Last: a
-    * failure before it deletes the conversation, and would take them with it. */
+   /* The results its turns stored, readable in it from now on, then the
+    * images its tool rows name, the conversation's from now on.  Last: a
+    * failure before them deletes the conversation, and would take them with
+    * it.  The captures stay unbound until here, so they wait for the retry
+    * (within IMAGE_UNBOUND_GRACE_SEC of their capture; the sweep spares any a
+    * live session still holds past it: session_image_hold.c).  A capture
+    * already reclaimed can never bind: the save goes on without it. */
    if (saved == AUTH_DB_SUCCESS) {
       saved = tool_result_store_bind_locked(session, conv_id, 0, true);
+   }
+   if (saved == AUTH_DB_SUCCESS) {
+      saved = conv_db_bind_images(conv_id, user_id, NULL);
    }
    if (saved != AUTH_DB_SUCCESS) {
       OLOG_ERROR("Session %u: voice conversation %lld not saved (%d); tried again later",
                  session->session_id, (long long)conv_id, saved);
-      (void)conv_db_delete(conv_id, user_id);
+      /* The rollback: only database work (no image file is removed, so no
+       * disk I/O under history_mutex).  Any capture this save bound goes
+       * back to unbound for the retry; nothing a reply names, nor anything
+       * another conversation names, is touched. */
+      (void)conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_UNBIND, NULL);
       batch_free(&batch);
       free(ids);
       pthread_mutex_unlock(&session->history_mutex);

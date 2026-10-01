@@ -29,6 +29,7 @@
 
 #include "llm/llm_claude_parts.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
@@ -71,9 +72,9 @@ int llm_responses_count_leading_system_run(struct json_object *history) {
          break;
       if (strcmp(json_object_get_string(role_obj), "system") != 0)
          break;
-      /* A directive or instruction change is the conversation's, not the prompt's. */
-      const message_kind_t kind = llm_history_kind_of(msg);
-      if (kind == MESSAGE_KIND_DIRECTIVE || kind == MESSAGE_KIND_INSTRUCTION)
+      /* A directive, instruction or tool-set change is the conversation's, not
+       * the prompt's. */
+      if (message_kind_conversation_scoped(llm_history_kind_of(msg)))
          break;
       run++;
    }
@@ -131,31 +132,6 @@ char *llm_responses_extract_volatile_context(struct json_object *history) {
    return out;
 }
 
-/* Append vision images to a content_part array (Responses schema). */
-void llm_responses_append_vision_parts(struct json_object *content_array,
-                                       const char **vision_images,
-                                       const size_t *vision_image_sizes,
-                                       int vision_image_count) {
-   for (int i = 0; i < vision_image_count; i++) {
-      if (!vision_images[i])
-         continue;
-      if (vision_image_sizes && vision_image_sizes[i] == 0)
-         continue;
-
-      struct json_object *part = json_object_new_object();
-      json_object_object_add(part, "type", json_object_new_string("input_image"));
-      const char *prefix = "data:image/jpeg;base64,";
-      size_t uri_len = strlen(prefix) + strlen(vision_images[i]) + 1;
-      char *uri = malloc(uri_len);
-      if (uri) {
-         snprintf(uri, uri_len, "%s%s", prefix, vision_images[i]);
-         json_object_object_add(part, "image_url", json_object_new_string(uri));
-         free(uri);
-      }
-      json_object_array_add(content_array, part);
-   }
-}
-
 /*
  * Stamp an explicit prompt-cache breakpoint on the last stable input_text block.
  *
@@ -206,15 +182,18 @@ static void responses_add_claude_tool_result(struct json_object *part, struct js
    if (!call_id) {
       return; /* unpairable: sending it would be an API error */
    }
-   char *text = llm_claude_tool_result_text(part);
-   struct json_object *item = text ? json_object_new_object() : NULL;
+   struct json_object *content = NULL;
+   json_object_object_get_ex(part, "content", &content);
+   struct json_object *output = llm_tool_images_responses_output(content);
+   struct json_object *item = output ? json_object_new_object() : NULL;
    if (item) {
       json_object_object_add(item, "type", json_object_new_string("function_call_output"));
       json_object_object_add(item, "call_id", json_object_new_string(call_id));
-      json_object_object_add(item, "output", json_object_new_string(text));
+      json_object_object_add(item, "output", output);
       json_object_array_add(input, item);
+   } else {
+      json_object_put(output);
    }
-   free(text);
 }
 
 /* A Claude base64 image part as an input_image part. */
@@ -294,9 +273,6 @@ static struct json_object *drop_unpaired_calls(struct json_object *input) {
 
 struct json_object *llm_responses_build_input(struct json_object *history,
                                               const char *input_text,
-                                              const char **vision_images,
-                                              const size_t *vision_image_sizes,
-                                              int vision_image_count,
                                               const char *volatile_block,
                                               int leading_system_run,
                                               bool enable_cache_breakpoint,
@@ -324,6 +300,10 @@ struct json_object *llm_responses_build_input(struct json_object *history,
        * and stays frozen in the cacheable prefix. */
       if (strcmp(role, "system") == 0) {
          if (i < leading_system_run)
+            continue;
+         /* A tool-set change goes in the request's tools (folded:
+          * llm_tool_defs_for_request), not here. */
+         if (llm_history_kind_of(msg) == MESSAGE_KIND_TOOL_CHANGE)
             continue;
          struct json_object *bc_content;
          if (!json_object_object_get_ex(msg, "content", &bc_content))
@@ -358,8 +338,10 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          json_object_object_add(item, "type", json_object_new_string("function_call_output"));
          json_object_object_add(item, "call_id",
                                 json_object_new_string(json_object_get_string(call_id_obj)));
-         json_object_object_add(item, "output",
-                                json_object_new_string(json_object_get_string(content_obj)));
+         /* A result that carried images: its text and images, in order
+          * (input_text / input_image items: llm_tool_images_render.h). */
+         struct json_object *output = llm_tool_images_responses_output(content_obj);
+         json_object_object_add(item, "output", output ? output : json_object_new_string(""));
          json_object_array_add(input, item);
          question_item = NULL;
          continue;
@@ -456,22 +438,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
     * which also poisons cross-turn prompt caching. The chat-completions builder guards
     * this with the identical last-is-user check (llm_openai_history.c:638); mirror it so
     * the Responses request carries the question exactly once. When the last item already
-    * IS the user turn, attach any vision to it instead of emitting a duplicate. */
-   struct json_object *tail_item = question_item;
-   const bool tail_is_user = tail_item != NULL;
-
-   if (tail_is_user) {
-      /* The question is already the last history item, as sent: its context,
-       * its text and its own images (a turn's images live in its question's
-       * history message).  Kept exactly as built above; images a caller still
-       * passes are added to it. */
-      struct json_object *content_obj;
-      if (vision_image_count > 0 && json_object_object_get_ex(tail_item, "content", &content_obj) &&
-          json_object_get_type(content_obj) == json_type_array) {
-         llm_responses_append_vision_parts(content_obj, vision_images, vision_image_sizes,
-                                           vision_image_count);
-      }
-   } else if (input_text && *input_text) {
+    * IS the user turn (its context, its text and its own images: a turn's images live
+    * in its question's history message), it is kept exactly as built above. */
+   if (question_item == NULL && input_text && *input_text) {
       struct json_object *item = json_object_new_object();
       json_object_object_add(item, "type", json_object_new_string("message"));
       json_object_object_add(item, "role", json_object_new_string("user"));
@@ -480,8 +449,6 @@ struct json_object *llm_responses_build_input(struct json_object *history,
       json_object_object_add(part, "type", json_object_new_string("input_text"));
       json_object_object_add(part, "text", json_object_new_string(input_text));
       json_object_array_add(content_array, part);
-      llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
-                                        vision_image_count);
       json_object_object_add(item, "content", content_array);
       json_object_array_add(input, item);
    }
@@ -492,7 +459,7 @@ struct json_object *llm_responses_build_input(struct json_object *history,
 
    /* Reposition the volatile TURN CONTEXT block as a user item IMMEDIATELY BEFORE the
     * current question (the last user-role item in the fully-assembled input, after
-    * both vision branches above). This keeps `instructions` byte-stable so
+    * the question's placement above). This keeps `instructions` byte-stable so
     * [instructions][tools][history] caches cross-turn (see the cache-layout note at
     * the top of this file). Anchoring on "last user item" is robust to whether the
     * question arrived via history or input_text, and keeps the volatile pinned before

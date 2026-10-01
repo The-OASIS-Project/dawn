@@ -589,6 +589,7 @@ set(DAWN_SOURCES
 
     # LLM subsystem
     src/llm/llm_interface.c
+    src/llm/llm_turn_result.c
     src/llm/llm_model_version.c
     src/llm/llm_silent_observe.c
     src/llm/llm_openai.c
@@ -599,11 +600,15 @@ set(DAWN_SOURCES
     src/llm/llm_openai_responses_input.c
     src/llm/llm_claude.c
     src/llm/llm_claude_format.c
+    src/llm/llm_claude_tools.c
+    src/llm/llm_tool_defs.c
     src/llm/llm_streaming.c
     src/llm/llm_command_parser.c
     src/llm/llm_tools.c
     src/llm/llm_tools_filter.c
     src/llm/llm_tools_results.c
+    src/llm/llm_tool_images.c
+    src/llm/llm_tool_images_render.c
     src/llm/llm_tools_dup.c
     src/llm/llm_tool_loop.c
     src/llm/llm_tool_views_plan.c
@@ -715,7 +720,6 @@ if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/webui/webui_server.c
         src/webui/webui_text_processing.c
-        src/webui/webui_vision_validate.c
         src/webui/webui_auth_helpers.c
         src/webui/webui_broadcasts.c
         src/webui/webui_events.c
@@ -781,6 +785,7 @@ if(ENABLE_WEBUI)
         src/core/session_manager.c
         src/core/session_reaper.c
         src/core/session_voice_save.c
+        src/core/session_image_hold.c
         src/core/session_history.c
         src/core/turn_queue.c
         src/core/session_manager_llm.c
@@ -796,6 +801,7 @@ if(ENABLE_WEBUI)
         src/core/text_input_dispatch.c
         src/core/prompt_sections.c
         src/core/prefix_in_force.c
+        src/core/prefix_tools.c
         src/core/session_dedup.c
         src/core/session_prefix.c
         src/core/tool_result_store.c
@@ -933,6 +939,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v95.c
     src/auth/auth_db_migrations_v96.c
     src/auth/auth_db_migrations_v97.c
+    src/auth/auth_db_migrations_v98.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
@@ -957,6 +964,7 @@ list(APPEND DAWN_SOURCES
     src/document_original_store.c
     src/image_store.c
     src/core/image_rehydrate.c
+    src/core/conv_images.c
     src/memory/memory_db.c
     src/memory/memory_citation.c
     src/memory/memory_citation_parse.c

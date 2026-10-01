@@ -1577,7 +1577,7 @@ static void *audio_worker_thread(void *arg) {
    session->input_was_voice = true;
 
    /* Refresh events_observable for THIS turn.  The voice worker calls the LLM directly
-    * (session_llm_call_with_tts_vision_no_add below) and never passes through
+    * (session_llm_call_with_tts_no_add below) and never passes through
     * core_text_input_dispatch, which is the ONLY other writer of this flag (it "sets every
     * dispatch to reflect THIS turn", text_input_dispatch.c).  Without this the flag is stale
     * from a prior turn on this session: a preceding turn into a job conversation leaves it
@@ -1616,8 +1616,7 @@ static void *audio_worker_thread(void *arg) {
    session->pending_visual = NULL;
    pthread_mutex_unlock(&session->tools_mutex);
 
-   /* Call LLM with TTS streaming - audio is generated and sent per-sentence
-    * No vision images for voice input (pass NULL for vision params).
+   /* Call LLM with TTS streaming - audio is generated and sent per-sentence.
     * Arm the Model A promise so the final stream_end stands the browser down from its
     * client-save; the server persists the reply in the tail.  Arm the FULL WebUI
     * persistence contract via the shared helper (tool-persist hook + tool-iteration hook +
@@ -1637,8 +1636,7 @@ static void *audio_worker_thread(void *arg) {
                                             session->tier == DAP2_TIER_2)
                                                ? webui_sentence_audio_callback
                                                : webui_sentence_audio_fanout_callback;
-   char *response = session_llm_call_with_tts_vision_no_add(session, transcript, NULL, NULL, NULL,
-                                                            0, sentence_cb, session);
+   char *response = session_llm_call_with_tts_no_add(session, transcript, sentence_cb, session);
    webui_turn_persist_disarm(session, &voice_persist_scope);
    free(transcript);
 

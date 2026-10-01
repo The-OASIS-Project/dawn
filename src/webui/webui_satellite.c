@@ -295,9 +295,10 @@ static void *satellite_worker_thread(void *arg) {
     * Tier 1 satellites have local TTS and only need the text response, but
     * Tier 2 devices need the daemon to synthesize speech and send PCM audio. */
    bool needs_server_tts = !session->capabilities.local_tts;
-   response = session_llm_call_with_tts_vision_no_add(
-       session, text, NULL, NULL, NULL, 0, needs_server_tts ? webui_sentence_audio_callback : NULL,
-       needs_server_tts ? session : NULL);
+   response = session_llm_call_with_tts_no_add(session, text,
+                                               needs_server_tts ? webui_sentence_audio_callback
+                                                                : NULL,
+                                               needs_server_tts ? session : NULL);
 
    /* Check if request was superseded during LLM call.  A superseding query has
     * already spawned a successor worker that will emit the terminal frame, so

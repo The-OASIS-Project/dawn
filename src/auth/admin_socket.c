@@ -50,11 +50,10 @@
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
 #include "auth/auth_db_withdraw.h"
+#include "core/conv_images.h"
 #include "core/path_utils.h"
 #include "core/session_prefix.h"
 #include "dawn_error.h"
-#include "document_original_store.h"
-#include "image_store.h"
 #include "logging.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
@@ -1033,18 +1032,9 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
     * deleting the last admin is a blocked misuse anyway. */
    auth_user_t del_user;
    if (auth_db_get_user(target, &del_user) == AUTH_DB_SUCCESS && del_user.id > 0) {
-      if (image_store_delete_user(del_user.id) != IMAGE_STORE_SUCCESS) {
-         /* Surface an incomplete purge — rows or files may have leaked, which matters
-          * for a deletion guarantee.  The FK cascade still removes rows on user delete. */
-         OLOG_WARNING("DELETE_USER: image purge for user %d incomplete (rows/files may remain)",
-                      del_user.id);
-      }
-      /* Same rationale for stored document originals (blobs FK cascades rows but
-       * leaks files) — purge before the user delete. */
-      if (document_originals_ready() &&
-          document_original_delete_user(del_user.id) != BLOB_STORE_SUCCESS) {
-         OLOG_WARNING("DELETE_USER: document-original purge for user %d incomplete", del_user.id);
-      }
+      /* An incomplete purge is logged (rows or files may have leaked, which
+       * matters for a deletion guarantee); the FK cascade still removes rows. */
+      (void)conv_images_purge_user(del_user.id);
    }
 
    /* Delete the user: its documents (a shared one is in other users'
@@ -2103,8 +2093,9 @@ static int handle_delete_conversation(int client_fd, const char *payload, uint16
    int64_t conv_id;
    memcpy(&conv_id, payload + auth_size, 8);
 
-   /* Admin access - no ownership check */
-   int rc = conv_db_delete_admin(conv_id);
+   /* Admin access - no ownership check.  The images it owns go with it, in
+    * one transaction, as their owner's. */
+   int rc = conv_images_delete_conversation(conv_id, 0);
 
    if (rc == AUTH_DB_NOT_FOUND) {
       OLOG_WARNING("DELETE_CONVERSATION: conversation %lld not found", (long long)conv_id);

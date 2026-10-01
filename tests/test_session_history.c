@@ -23,12 +23,14 @@
 
 #include <json-c/json.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_turn_blocks.h"
 #include "unity.h"
 
 static session_t *s;
@@ -95,10 +97,14 @@ void session_prefix_release_locked(session_t *session) {
 void session_compaction_reset_locked(session_t *session) {
    (void)session;
 }
+/* The boundary the last take-back declared to its turn's record. */
+static int s_take_back_boundary = -1;
 struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
-                                                            struct json_object *question) {
+                                                            struct json_object *question,
+                                                            bool boundary) {
    (void)session;
    (void)question;
+   s_take_back_boundary = boundary;
    return NULL;
 }
 void session_prefix_save_taken(session_t *session, struct session_prefix_turn *turn) {
@@ -1075,6 +1081,63 @@ void test_rollback_takes_back_the_turn_from_its_question(void) {
    TEST_ASSERT_EQUAL_INT(3, len(s->conversation_history));
 }
 
+/* A tool-set change the turn's seam appended is the conversation's: taking
+ * the turn back keeps it (message_kind_conversation_scoped). */
+void test_rollback_keeps_a_tool_change(void) {
+   load_live(3, 2);
+   session_turn_begin(s, 3, 1);
+   session_add_turn_message(s, "user", "q");
+   struct json_object *h = session_get_turn_history(s);
+   struct json_object *change = json_object_new_object();
+   json_object_object_add(change, "role", json_object_new_string("system"));
+   json_object_object_add(change, "content", json_object_new_string("{\"tools\":[]}"));
+   llm_history_set_kind(change, MESSAGE_KIND_TOOL_CHANGE);
+   json_object_array_add(h, change);
+   json_object_put(h);
+   session_add_turn_message(s, "assistant", "partial");
+   TEST_ASSERT_EQUAL_INT(2, session_rollback_turn(s));
+   TEST_ASSERT_EQUAL_INT(4, len(s->conversation_history));
+   TEST_ASSERT_EQUAL_INT(MESSAGE_KIND_TOOL_CHANGE, llm_history_kind_of(json_object_array_get_idx(
+                                                       s->conversation_history, 3)));
+}
+
+/* A tool change sent in place after the turn's question: taken back, it
+ * follows no user turn and folds (llm_tool_change_renders_inline), so the
+ * reasoning before it goes, and the record saves the boundary; a folded one
+ * changes nothing. */
+static void take_back_with_change(const char *rendered) {
+   load_live(3, 2);
+   json_object_object_add(json_object_array_get_idx(s->conversation_history, 2),
+                          LLM_TURN_BLOCKS_KEY, json_object_new_array());
+   session_turn_begin(s, 3, 1);
+   session_add_turn_message(s, "user", "q");
+   struct json_object *h = session_get_turn_history(s);
+   char body[128];
+   snprintf(body, sizeof(body), "{\"rendered\":\"%s\",\"tools\":[]}", rendered);
+   struct json_object *change = json_object_new_object();
+   json_object_object_add(change, "role", json_object_new_string("system"));
+   json_object_object_add(change, "content", json_object_new_string(body));
+   llm_history_set_kind(change, MESSAGE_KIND_TOOL_CHANGE);
+   json_object_array_add(h, change);
+   json_object_put(h);
+   s_take_back_boundary = -1;
+   TEST_ASSERT_EQUAL_INT(1, session_rollback_turn(s));
+}
+
+void test_rollback_stranding_an_inline_change_is_a_boundary(void) {
+   take_back_with_change("inline");
+   TEST_ASSERT_EQUAL_INT(1, s_take_back_boundary);
+   TEST_ASSERT_FALSE(json_object_object_get_ex(
+       json_object_array_get_idx(s->conversation_history, 2), LLM_TURN_BLOCKS_KEY, NULL));
+}
+
+void test_rollback_of_a_folded_change_keeps_the_reasoning(void) {
+   take_back_with_change("folded");
+   TEST_ASSERT_EQUAL_INT(0, s_take_back_boundary);
+   TEST_ASSERT_TRUE(json_object_object_get_ex(json_object_array_get_idx(s->conversation_history, 2),
+                                              LLM_TURN_BLOCKS_KEY, NULL));
+}
+
 void test_stop_keeps_the_question_with_a_note(void) {
    load_live(3, 2);
    session_turn_begin(s, 3, 1);
@@ -1333,6 +1396,9 @@ int main(void) {
    RUN_TEST(test_new_context_drops_waiting_facts);
    RUN_TEST(test_voice_save_records_only_the_owners_facts);
    RUN_TEST(test_rollback_takes_back_the_turn_from_its_question);
+   RUN_TEST(test_rollback_keeps_a_tool_change);
+   RUN_TEST(test_rollback_stranding_an_inline_change_is_a_boundary);
+   RUN_TEST(test_rollback_of_a_folded_change_keeps_the_reasoning);
    RUN_TEST(test_stop_keeps_the_question_with_a_note);
    RUN_TEST(test_stop_without_its_question_leaves_it_to_rollback);
    return UNITY_END();

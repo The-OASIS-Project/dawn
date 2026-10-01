@@ -116,7 +116,9 @@ int conv_db_save_turn(int64_t conv_id, int user_id, const conv_turn_save_t *save
  * nothing, and is tried again with a new one): the envelope row and the
  * context sent in front of it go, so the conversation doesn't keep an
  * unanswered copy per attempt; the instruction or direction changes its turn
- * announced stay, naming no question (as session_rollback_turn keeps them).
+ * announced stay, naming no question (as session_rollback_turn keeps them);
+ * a tool change among them now follows no user turn and folds, so the
+ * conversation's reasoning floor goes past it (a declared boundary).
  * Only when nothing else was saved to the conversation after it (such
  * announcements aside); otherwise it stays (AUTH_DB_DUPLICATE: the attempt
  * did work, or another writer's rows follow it).

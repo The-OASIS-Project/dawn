@@ -399,7 +399,7 @@ static int summarize_with_default_llm(const char *prompt, char **out_summary) {
    // Pass allow_fallback=false to prevent summarizer failures from triggering
    // global LLM fallback (which would switch to local LLM and play TTS notification)
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SUMMARIZER);
-   char *response = llm_chat_completion(conversation, prompt, NULL, NULL, 0, false);
+   char *response = llm_chat_completion(conversation, prompt, false);
    llm_cache_monitor_pop_kind(kind_prev);
 
    // Restore tools

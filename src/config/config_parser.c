@@ -1180,8 +1180,16 @@ static void parse_vision(toml_table_t *table, vision_config_t *config) {
    PARSE_INT(table, "max_images", config->max_images);
    CONFIG_CLAMP(config->max_images, 1, 10);
 
-   PARSE_INT(table, "capture_history_count", config->capture_history_count);
-   CONFIG_CLAMP(config->capture_history_count, 0, 50);
+   /* Retired: a tool's images stay in the history (inside its result) until a
+    * compaction summarizes them; the model's per-request image limit
+    * (models.toml [max_request_images]) bounds them.  Still a known key, so an
+    * older dawn.toml that sets it gets this note once, not a typo warning. */
+   static bool s_capture_history_warned = false;
+   if (toml_key_exists(table, "capture_history_count") && !s_capture_history_warned) {
+      s_capture_history_warned = true;
+      OLOG_WARNING("[vision] capture_history_count is retired and ignored: tool images stay in "
+                   "the conversation until compaction (see UPGRADING.md)");
+   }
 }
 
 static void parse_memory(toml_table_t *table, memory_config_t *config) {

@@ -27,6 +27,7 @@
  */
 #include "core/text_input_dispatch.h"
 
+#include <json-c/json.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,10 +43,6 @@
 
 char *core_text_input_dispatch(session_t *session,
                                const char *text,
-                               const char **vision_images,
-                               const size_t *vision_image_sizes,
-                               const char (*vision_mimes)[24],
-                               int vision_image_count,
                                const text_input_dispatch_opts_t *opts) {
    if (!session || !text || text[0] == '\0') {
       return NULL;
@@ -76,9 +73,9 @@ char *core_text_input_dispatch(session_t *session,
       conv_event_emit(status_conv, status_user, CONV_EVENT_STATUS, event_payload_status(true));
    }
 
-   /* Step 1: add user message to session history.  When images are
-    * attached, store in the multi-part shape so they persist across
-    * turns. */
+   /* Step 1: add user message to session history: the caller's prebuilt
+    * message when it has one (an image question, built as a reload rebuilds
+    * it), else the text. */
    /* The turn's conversation may only be resolved here (fallback to the active
     * one) rather than at dequeue; record it before the append attributes it. */
    if (opts && opts->is_background_turn) {
@@ -101,17 +98,8 @@ char *core_text_input_dispatch(session_t *session,
             kinded_question = NULL;
          }
       }
-   } else if (vision_image_count > 0 && vision_images) {
-      struct json_object *built = (opts && opts->build_history_message &&
-                                   opts->persist_content_override)
-                                      ? opts->build_history_message(opts->auth_user_id, "user",
-                                                                    opts->persist_content_override)
-                                      : NULL;
-      if (!built || !session_add_turn_message_object(session, built)) {
-         session_add_turn_message_with_images(session, "user", text,
-                                              (const char *const *)vision_images,
-                                              vision_image_count);
-      }
+   } else if (opts && opts->question_message) {
+      session_add_turn_message_object(session, json_object_get(opts->question_message));
    } else {
       session_add_turn_message(session, "user", text);
    }
@@ -217,10 +205,7 @@ char *core_text_input_dispatch(session_t *session,
 
    /* The images are in the question's own history message (Step 1): every
     * request of the turn, and every later one, sends them from there. */
-   (void)vision_image_sizes;
-   (void)vision_mimes;
-   char *response = session_llm_call_with_tts_vision_no_add(session, text, NULL, NULL, NULL, 0,
-                                                            sentence_cb, sentence_userdata);
+   char *response = session_llm_call_with_tts_no_add(session, text, sentence_cb, sentence_userdata);
 
    /* Turn end.  This function has a single return, and the LLM call above is
     * synchronous, so one emit here covers success, cancellation and failure

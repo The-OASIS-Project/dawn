@@ -80,6 +80,9 @@ char *session_prefix_mask_secret(session_t *session, char *text) {
    (void)session;
    return text;
 }
+void session_prefix_inline_tools_rejected(session_t *session) {
+   (void)session;
+}
 void session_withdraw_forgotten_async(int user_id, bool memory_bodies) {
    (void)user_id;
    (void)memory_bodies;

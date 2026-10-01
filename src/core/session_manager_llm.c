@@ -20,7 +20,7 @@
  *
  * Owns the three public LLM entry points used by every caller that needs to
  * run a turn through the LLM (session_llm_call,
- * session_llm_call_with_tts, session_llm_call_with_tts_vision_no_add),
+ * session_llm_call_with_tts, session_llm_call_with_tts_no_add),
  * the three static helpers that share their setup/teardown contract
  * (llm_call_prepare / llm_call_cleanup / llm_call_finalize), and the two
  * sentence-buffer streaming callbacks (combined_sentence_callback /
@@ -39,6 +39,7 @@
 
 #include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/text_filter.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
@@ -57,7 +58,7 @@
  * Sends text to WebUI for real-time display.  Command-tag filtering is
  * handled by webui_send_stream_delta() internally.  Tracks timing metrics
  * for TTFT and token-rate visualization.  Used by session_llm_call() and
- * session_llm_call_with_tts_vision_no_add() — the paths that don't run
+ * session_llm_call_with_tts_no_add() — the paths that don't run
  * through the sentence-buffer (TTS) layer.
  * ============================================================================= */
 
@@ -183,6 +184,10 @@ static int llm_call_prepare(session_t *session,
     * prepare-clear cannot clobber the current turn's stash. */
    session_final_answer_clear(session);
 
+   /* What an earlier call of this thread left in the turn result (a side
+    * call's) is not this turn's. */
+   llm_turn_result_reset();
+
    /* Turn-start reset of the per-turn cache-token trackers so an interrupted or
     * usage-less turn (Stop / wake-word barge-in / a provider that omits the usage
     * chunk) reports 0 cache tokens on its idle metrics frame rather than carrying
@@ -269,6 +274,13 @@ static void llm_call_cleanup(llm_call_ctx_t *ctx) {
  * @return Response string on success, NULL on failure (takes ownership of response)
  */
 static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_t *ctx) {
+   /* Tools defined in a message rejected on this turn (its later requests
+    * folded them): the conversation records it, with a declared boundary, so
+    * its later turns fold them too, after a restart.  Same thread as the call
+    * (see below). */
+   if (llm_take_inline_tools_rejected()) {
+      session_prefix_inline_tools_rejected(session);
+   }
    /* Capture the provider's error code before any cleanup path can mutate it.
     * Used both to set a distinguishable WebUI stream-end reason and to refine
     * the failure log so transient retries-exhausted aren't conflated with
@@ -451,9 +463,9 @@ char *session_llm_call(session_t *session, const char *user_text) {
    /* Set per-session cancel flag for multi-user WebUI support */
    llm_set_cancel_flag(&session->cancel_requested);
 
-   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input, NULL,
-                                                              NULL, 0, session_text_chunk_callback,
-                                                              session, &ctx.resolved_config);
+   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                              session_text_chunk_callback, session,
+                                                              &ctx.resolved_config);
 
    /* Clear per-session cancel flag */
    llm_set_cancel_flag(NULL);
@@ -615,9 +627,9 @@ char *session_llm_call_with_tts(session_t *session,
    llm_set_cancel_flag(&session->cancel_requested);
 
    // Call LLM with combined callback (text streaming + sentence buffering)
-   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input, NULL,
-                                                              NULL, 0, combined_chunk_callback,
-                                                              &stream_ctx, &ctx.resolved_config);
+   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                              combined_chunk_callback, &stream_ctx,
+                                                              &ctx.resolved_config);
 
    /* Clear per-session cancel flag */
    llm_set_cancel_flag(NULL);
@@ -629,16 +641,10 @@ char *session_llm_call_with_tts(session_t *session,
    return llm_call_finalize(session, response, &ctx);
 }
 
-char *session_llm_call_with_tts_vision_no_add(session_t *session,
-                                              const char *user_text,
-                                              const char **vision_images,
-                                              const size_t *vision_image_sizes,
-                                              const char (*vision_mimes)[24],
-                                              int vision_image_count,
-                                              session_sentence_callback sentence_cb,
-                                              void *userdata) {
-   (void)vision_mimes; /* MIME types passed to LLM layer via provider-specific handling */
-
+char *session_llm_call_with_tts_no_add(session_t *session,
+                                       const char *user_text,
+                                       session_sentence_callback sentence_cb,
+                                       void *userdata) {
    if (!session || !user_text) {
       return NULL;
    }
@@ -654,22 +660,8 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
       return NULL;
    }
 
-   /* Log call details */
-   const char *mode = sentence_cb ? (vision_image_count > 0 ? "TTS+vision" : "TTS") : "no-add";
-   if (vision_image_count > 0) {
-      size_t total_bytes = 0;
-      for (int i = 0; i < vision_image_count; i++) {
-         if (vision_image_sizes) {
-            total_bytes += vision_image_sizes[i];
-         }
-      }
-      OLOG_INFO("Session %u: Calling LLM (%s) with %d messages + %d images (%zu bytes)",
-                session->session_id, mode, json_object_array_length(ctx.history),
-                vision_image_count, total_bytes);
-   } else {
-      OLOG_INFO("Session %u: Calling LLM (%s) with %d messages in history", session->session_id,
-                mode, json_object_array_length(ctx.history));
-   }
+   OLOG_INFO("Session %u: Calling LLM (%s) with %d messages in history", session->session_id,
+             sentence_cb ? "TTS" : "no-add", json_object_array_length(ctx.history));
 
    /* Initialize streaming metrics before LLM call */
    session->stream_start_ms = get_time_ms();
@@ -700,17 +692,17 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
          return NULL;
       }
 
-      response = llm_chat_completion_streaming_with_config(
-          ctx.history, ctx.llm_input, vision_images, vision_image_sizes, vision_image_count,
-          combined_chunk_callback, &stream_ctx, &ctx.resolved_config);
+      response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                           combined_chunk_callback, &stream_ctx,
+                                                           &ctx.resolved_config);
 
       sentence_buffer_flush(stream_ctx.sentence_buffer);
       sentence_buffer_free(stream_ctx.sentence_buffer);
    } else {
       /* No TTS: use simple text streaming callback */
-      response = llm_chat_completion_streaming_with_config(
-          ctx.history, ctx.llm_input, vision_images, vision_image_sizes, vision_image_count,
-          session_text_chunk_callback, session, &ctx.resolved_config);
+      response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                           session_text_chunk_callback, session,
+                                                           &ctx.resolved_config);
    }
 
    /* Clear per-session cancel flag */

@@ -31,6 +31,7 @@
 #include "dawn_error.h"
 #include "llm/llm_compaction_range.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_tool_defs.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
@@ -342,6 +343,10 @@ static char *strip_leading_dawn_markers(const char *content) {
    return strdup(skip_ws(p)); /* trim the blank line before the real answer */
 }
 
+/* Key a staged tool row holds its images under until its message is built;
+ * never seen outside this file. */
+#define STAGED_IMAGES_KEY "_images_staged"
+
 /* A row as read, under the database lock: copied only (no file reads). */
 static int stage_row(const conversation_llm_row_t *row, void *ctx) {
    struct json_object *arr = ctx;
@@ -361,13 +366,59 @@ static int stage_row(const conversation_llm_row_t *row, void *ctx) {
    if (row->tool_call_id && row->tool_call_id[0]) {
       json_object_object_add(obj, "tool_call_id", json_object_new_string(row->tool_call_id));
    }
+   if (row->images && strcmp(row->role, "tool") == 0) {
+      struct json_object *images = json_tokener_parse(row->images);
+      if (json_object_is_type(images, json_type_array)) {
+         json_object_object_add(obj, STAGED_IMAGES_KEY, images);
+      } else {
+         json_object_put(images);
+      }
+   }
    json_object_array_add(arr, obj);
    return 0;
 }
 
+/* A tool row's content: its text, then the images its result carried, from
+ * the store as the live turn built them (image_rehydrate_parts: the user's
+ * captures only, under the rehydrate ceilings).  Its text alone when it has
+ * none, or on out of memory. */
+static struct json_object *tool_content(int user_id, const char *text, struct json_object *images) {
+   char ids[IMAGE_REHYDRATE_MAX_IMAGES][IMAGE_ID_LEN];
+   int n = 0;
+   const size_t len = images ? json_object_array_length(images) : 0;
+   for (size_t i = 0; i < len && n < IMAGE_REHYDRATE_MAX_IMAGES; i++) {
+      const char *id = json_object_get_string(json_object_array_get_idx(images, i));
+      if (id && strlen(id) == IMAGE_ID_LEN - 1) {
+         memcpy(ids[n++], id, IMAGE_ID_LEN);
+      }
+   }
+   struct json_object *parts = n > 0 ? image_rehydrate_parts(user_id,
+                                                             (const char(*)[IMAGE_ID_LEN])ids, n,
+                                                             IMAGE_SOURCE_CAPTURE)
+                                     : NULL;
+   struct json_object *content = parts ? json_object_new_array() : NULL;
+   struct json_object *text_part = content ? json_object_new_object() : NULL;
+   if (!text_part) {
+      json_object_put(content);
+      json_object_put(parts);
+      return json_object_new_string(text);
+   }
+   json_object_object_add(text_part, "type", json_object_new_string("text"));
+   json_object_object_add(text_part, "text", json_object_new_string(text));
+   json_object_array_add(content, text_part);
+   const size_t np = json_object_array_length(parts);
+   for (size_t i = 0; i < np; i++) {
+      json_object_array_add(content, json_object_get(json_object_array_get_idx(parts, i)));
+   }
+   json_object_put(parts);
+   return content;
+}
+
 /* A staged row as the message a model's request carries: a turn's images
- * back in its question (owner-checked), request context as the text it was
- * sent, tool fields and the turn's blocks as they were. */
+ * back in its question (owner-checked), a tool result's images back in its
+ * result (owner-checked captures, named by the row's images only: a marker
+ * in a result or a reply is text), request context as the text it was sent,
+ * tool fields and the turn's blocks as they were. */
 static struct json_object *request_message(int user_id, struct json_object *row) {
    const char *role = json_object_get_string(json_object_object_get(row, "role"));
    const char *content = json_object_get_string(json_object_object_get(row, "content"));
@@ -387,8 +438,13 @@ static struct json_object *request_message(int user_id, struct json_object *row)
        * is no image of this turn's). */
       m = json_object_new_object();
       if (m) {
+         struct json_object *images = NULL;
+         json_object_object_get_ex(row, STAGED_IMAGES_KEY, &images);
          json_object_object_add(m, "role", json_object_new_string(role ? role : "user"));
-         json_object_object_add(m, "content", json_object_new_string(content ? content : ""));
+         json_object_object_add(m, "content",
+                                has_tcid && images
+                                    ? tool_content(user_id, content ? content : "", images)
+                                    : json_object_new_string(content ? content : ""));
          if (has_tc) {
             json_object_object_add(m, "tool_calls", json_object_get(tc));
          }
@@ -396,14 +452,26 @@ static struct json_object *request_message(int user_id, struct json_object *row)
             json_object_object_add(m, "tool_call_id", json_object_get(tcid));
          }
       }
+   } else if (role && strcmp(role, "user") == 0) {
+      m = image_rehydrate_message(user_id, role, content ? content : "");
    } else {
-      m = image_rehydrate_message(user_id, role ? role : "user", content ? content : "");
+      /* A reply's markers stay text: a model's reply can quote any id. */
+      m = json_object_new_object();
+      if (m) {
+         json_object_object_add(m, "role", json_object_new_string(role ? role : "user"));
+         json_object_object_add(m, "content", json_object_new_string(content ? content : ""));
+      }
    }
    free(stripped);
    if (!m) {
       return NULL;
    }
    llm_history_set_kind(m, kind);
+   /* A tool change's definitions, validated once, here (every request reads
+    * them as loaded). */
+   if (kind == MESSAGE_KIND_TOOL_CHANGE && !llm_tool_change_normalize(m)) {
+      OLOG_WARNING("memory_history_loader: a tool change row holds no usable definition");
+   }
    static const char *const carried[] = { "id", LLM_HISTORY_CONTEXT_OF_KEY, LLM_TURN_BLOCKS_KEY };
    for (size_t i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
       struct json_object *v = NULL;

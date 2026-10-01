@@ -98,15 +98,6 @@ bool prefix_in_force_directives_changed(struct json_object *hist, const char *di
  */
 const char *prefix_in_force_directives_text(const char *directives);
 
-/**
- * @brief Check the schemas of @p hist's frozen tools against @p schemas (each
- *        registered tool's hash, llm_tools_schema_hashes), and record them
- *
- * A frozen tool whose description or parameters changed, or that is no longer
- * registered, changes what every later request sends: logged once per change.
- */
-void prefix_in_force_check_tool_schemas(struct json_object *hist, const char *schemas);
-
 /** The record on @p hist's prefix message as JSON (caller frees), or NULL. */
 char *prefix_in_force_json(struct json_object *hist);
 
@@ -117,7 +108,9 @@ char *prefix_in_force_json(struct json_object *hist);
  *
  * A compaction summarizes part of a history, and with it the instruction and
  * directive messages that changed what is in force; after one, whatever the
- * kept part doesn't show is appended again.  The tag and the tool schemas stay.
+ * kept part doesn't show is appended again.  The tag and the tool-change
+ * bounds stay (prefix_tools.h: what tools are in force is read from the
+ * history).
  */
 void prefix_in_force_reset_to_history(struct json_object *hist);
 

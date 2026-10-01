@@ -63,8 +63,12 @@ typedef struct {
    int64_t last_id;                /**< last summarized row (before tail rows) */
    int64_t kept_first_id;          /**< first kept row, 0 when unsaved */
    struct json_object *tail_calls; /**< summarized tool calls' ids, for rows past last_id */
-   int count;                      /**< messages summarized */
-   int tokens_before;              /**< the history's estimate before and after */
+   /** The definitions the summarized tool changes held, merged by name in
+    *  order (prefix_tools_apply appends again what is no longer in force);
+    *  NULL when it summarized none */
+   struct json_object *removed_tools;
+   int count;         /**< messages summarized */
+   int tokens_before; /**< the history's estimate before and after */
    int tokens_after;
 } session_compaction_commit_t;
 

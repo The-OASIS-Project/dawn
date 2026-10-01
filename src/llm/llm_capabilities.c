@@ -23,6 +23,7 @@
 #include "llm/llm_capabilities.h"
 
 #include <json-c/json.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,8 +179,10 @@ static void free_rows(caps_row_t **arr) {
 }
 
 /* Anthropic model-id prefixes that take a mid-conversation system message
- * (models.toml [mid_system]), NULL-terminated; loaded once, read-only after. */
+ * (models.toml [mid_system]), and those that take a tool defined in one
+ * ([inline_tools]); NULL-terminated, loaded once, read-only after. */
 static char **s_mid_system;
+static char **s_inline_tools;
 
 static void free_thinking_rows(void) {
    free_rows(&s_anthropic_rows);
@@ -187,12 +190,50 @@ static void free_thinking_rows(void) {
    free_rows(&s_gemini_rows);
 }
 
-static void free_mid_system(void) {
-   for (int i = 0; s_mid_system && s_mid_system[i]; i++) {
-      free(s_mid_system[i]);
+static void free_prefixes(char ***list) {
+   for (int i = 0; *list && (*list)[i]; i++) {
+      free((*list)[i]);
    }
-   free(s_mid_system);
-   s_mid_system = NULL;
+   free(*list);
+   *list = NULL;
+}
+
+static void free_mid_system(void) {
+   free_prefixes(&s_mid_system);
+   free_prefixes(&s_inline_tools);
+}
+
+/* models.toml [<table>] anthropic = [prefix, ...] into @p out. */
+static void load_prefixes(struct toml_table_t *root, const char *table_name, char ***out) {
+   free_prefixes(out);
+   toml_table_t *table = root ? toml_table_in(root, table_name) : NULL;
+   toml_array_t *list = table ? toml_array_in(table, "anthropic") : NULL;
+   const int n = list ? toml_array_nelem(list) : 0;
+   if (n <= 0) {
+      return;
+   }
+   *out = calloc((size_t)n + 1, sizeof(**out));
+   if (!*out) {
+      return;
+   }
+   int kept = 0;
+   for (int i = 0; i < n; i++) {
+      toml_datum_t d = toml_string_at(list, i);
+      if (d.ok && d.u.s && d.u.s[0]) {
+         (*out)[kept++] = d.u.s; /* owned now */
+      } else if (d.ok) {
+         free(d.u.s);
+      }
+   }
+}
+
+static bool has_prefix(char **list, const char *model) {
+   for (int i = 0; model && list && list[i]; i++) {
+      if (strncmp(model, list[i], strlen(list[i])) == 0) {
+         return true;
+      }
+   }
+   return false;
 }
 
 void llm_capabilities_load_registry(struct toml_table_t *root) {
@@ -207,31 +248,57 @@ void llm_capabilities_load_registry(struct toml_table_t *root) {
 }
 
 void llm_capabilities_load_mid_system(struct toml_table_t *root) {
-   free_mid_system();
-   toml_table_t *table = root ? toml_table_in(root, "mid_system") : NULL;
-   toml_array_t *list = table ? toml_array_in(table, "anthropic") : NULL;
-   const int n = list ? toml_array_nelem(list) : 0;
-   if (n <= 0) {
-      return;
-   }
-   s_mid_system = calloc((size_t)n + 1, sizeof(*s_mid_system));
-   if (!s_mid_system) {
-      return;
-   }
-   int kept = 0;
-   for (int i = 0; i < n; i++) {
-      toml_datum_t d = toml_string_at(list, i);
-      if (d.ok && d.u.s && d.u.s[0]) {
-         s_mid_system[kept++] = d.u.s; /* owned now */
-      } else if (d.ok) {
-         free(d.u.s);
-      }
-   }
+   load_prefixes(root, "mid_system", &s_mid_system);
 }
 
 bool llm_model_mid_system(const char *model) {
-   for (int i = 0; model && s_mid_system && s_mid_system[i]; i++) {
-      if (strncmp(model, s_mid_system[i], strlen(s_mid_system[i])) == 0) {
+   return has_prefix(s_mid_system, model);
+}
+
+void llm_capabilities_load_inline_tools(struct toml_table_t *root) {
+   load_prefixes(root, "inline_tools", &s_inline_tools);
+}
+
+bool llm_model_inline_tools(const char *model) {
+   return has_prefix(s_inline_tools, model);
+}
+
+/* models.toml [max_request_images]: one row per vendor key.  Loaded once,
+ * read-only after. */
+typedef struct {
+   char key[LLM_IMAGE_LIMIT_KEY_MAX];
+   llm_image_limit_t limit;
+} image_limit_row_t;
+
+#define IMAGE_LIMIT_ROWS_MAX 16
+static image_limit_row_t s_image_limits[IMAGE_LIMIT_ROWS_MAX];
+static int s_image_limit_count;
+
+void llm_capabilities_load_image_limits(struct toml_table_t *root) {
+   s_image_limit_count = 0;
+   toml_table_t *table = root ? toml_table_in(root, "max_request_images") : NULL;
+   const char *key = NULL;
+   for (int i = 0; table && (key = toml_key_in(table, i)) != NULL; i++) {
+      toml_table_t *row = toml_table_in(table, key);
+      toml_datum_t count = row ? toml_int_in(row, "count") : (toml_datum_t){ 0 };
+      toml_datum_t bytes = row ? toml_int_in(row, "bytes") : (toml_datum_t){ 0 };
+      if (!count.ok || !bytes.ok || count.u.i <= 0 || bytes.u.i <= 0 ||
+          strlen(key) >= LLM_IMAGE_LIMIT_KEY_MAX || s_image_limit_count >= IMAGE_LIMIT_ROWS_MAX) {
+         OLOG_WARNING("models.toml: [max_request_images] %s ignored (needs count and bytes > 0)",
+                      key);
+         continue;
+      }
+      image_limit_row_t *r = &s_image_limits[s_image_limit_count++];
+      snprintf(r->key, sizeof(r->key), "%s", key);
+      r->limit.count = count.u.i > INT_MAX ? INT_MAX : (int)count.u.i;
+      r->limit.bytes = (int64_t)bytes.u.i;
+   }
+}
+
+bool llm_capabilities_image_limit(const char *key, llm_image_limit_t *out) {
+   for (int i = 0; key && i < s_image_limit_count; i++) {
+      if (strcmp(s_image_limits[i].key, key) == 0) {
+         *out = s_image_limits[i].limit;
          return true;
       }
    }
@@ -241,6 +308,7 @@ bool llm_model_mid_system(const char *model) {
 void llm_capabilities_free_registry(void) {
    free_thinking_rows();
    free_mid_system();
+   s_image_limit_count = 0;
 }
 
 static const caps_row_t *lookup(const caps_row_t *arr, const char *model) {

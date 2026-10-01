@@ -26,6 +26,7 @@
 #ifndef CORE_PROMPT_PARTS_H
 #define CORE_PROMPT_PARTS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -37,6 +38,8 @@ extern "C" {
 #define PROMPT_SECTIONS_MAX 16
 /** Longest section name, with its NUL. */
 #define PROMPT_SECTION_NAME_MAX 32
+/** A tool set's fingerprint: a SHA-256 in hex, with its NUL (DAWN_SHA256_HEX_LEN). */
+#define PROMPT_TOOLS_FP_LEN 65
 
 /** Longest section title, with its NUL. */
 #define PROMPT_SECTION_TITLE_MAX 64
@@ -71,12 +74,27 @@ typedef struct {
     *  channel, room, headless job, tool availability); "" for none.  Appended
     *  when they differ from what the conversation last had. */
    char *directives;
-   /** The tool set a conversation starting now would advertise, as a JSON
-    *  array of names (llm_tools_freeze_names); NULL when tools are off. */
-   char *tool_names;
-   /** Each registered tool's schema hash, a JSON object of name to hash
-    *  (llm_tools_schema_hashes); NULL when tools are off. */
+   /** Every registered tool's neutral definition, a JSON array in registry
+    *  order (llm_tools_definitions): what a conversation starting now freezes,
+    *  and what a running one's later changes are compared against.  Decided
+    *  by registration, not by enable flags: a tool this surface may not use
+    *  is refused when called, and the turn's standing directions say which.
+    *  NULL when tools are off. */
+   char *tool_defs;
+   /** Each of tool_defs' canonical hashes by name, a JSON object in the same
+    *  order (llm_tools_definitions_hashed, computed once per registry
+    *  generation), and the set's fingerprint (the hash of that object, hex).
+    *  NULL / "" when not computed: the seam hashes tool_defs itself. */
+   char *tool_def_hashes;
+   char tool_defs_fp[PROMPT_TOOLS_FP_LEN];
+   /** Each registered tool's schema hash as an older build recorded it
+    *  (llm_tools_schema_hashes): converting a conversation frozen by name;
+    *  NULL when tools are off. */
    char *tool_schemas;
+   /** Whether this turn's request sends a tool change in place (the Claude API
+    *  itself, a models.toml [inline_tools] model, the beta not rejected for
+    *  it): a change is stored inline, else folded with a boundary. */
+   bool inline_tools;
    /** When this was built (unix time), and where withdrawals stood then
     *  (conv_db_withdraw_seq): what the user forgot after it is withdrawn from
     *  the turn's rows as they are saved. */
@@ -116,10 +134,14 @@ static inline void composed_prompt_free(composed_prompt_t *p) {
    free(p->volatile_block);
    free(p->memory_body);
    free(p->directives);
-   free(p->tool_names);
+   free(p->tool_defs);
    free(p->tool_schemas);
-   p->tool_names = NULL;
+   free(p->tool_def_hashes);
+   p->tool_def_hashes = NULL;
+   p->tool_defs_fp[0] = '\0';
+   p->tool_defs = NULL;
    p->tool_schemas = NULL;
+   p->inline_tools = false;
    p->stable_prefix = NULL;
    p->volatile_block = NULL;
    p->memory_body = NULL;

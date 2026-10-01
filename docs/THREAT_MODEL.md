@@ -11,7 +11,7 @@ procedures, and recorded test results — lives in
 [SECURITY_HARDENING_GUIDE.md](SECURITY_HARDENING_GUIDE.md). Read this to understand what DAWN
 trusts; read that to deploy it safely.
 
-**Last updated**: September 2026.
+**Last updated**: October 2026.
 
 ## Table of Contents
 
@@ -22,6 +22,7 @@ trusts; read that to deploy it safely.
 - [Component Trust Boundaries](#component-trust-boundaries)
 - [The LLM Agent as a Confused Deputy](#the-llm-agent-as-a-confused-deputy)
 - [Prompt-Injection Hardening](#prompt-injection-hardening)
+- [Tool Images and Tool Definitions](#tool-images-and-tool-definitions)
 - [Cross-Origin / CSRF](#cross-origin--csrf)
 - [Known Gaps](#known-gaps)
 
@@ -312,6 +313,45 @@ content-shaping-plus-egress path — if the instructions channel is ever set via
 restructuring the summarization prompt. This composes with the autonomously-dangerous-tool /
 capability-mask work below (an injected owner turn that can write `instructions`/`deliver_to` is
 the same confused-deputy seam).
+
+---
+
+## Tool Images and Tool Definitions
+
+**Images a tool returns** (a camera capture) are private user data with their own lifecycle:
+
+- **Owner-only.** A capture is stored as the turn's user's (`IMAGE_SOURCE_CAPTURE`), readable by
+  that user alone (service tokens and other users are refused, as for uploads). A guest's capture
+  is never stored: it stays in that turn's memory.
+- **Kept for the conversation's lifetime.** The tool row that names a capture binds it when the
+  row is saved, and the conversation records it (`conversation_images`). Deleting the
+  conversation deletes the images only it names (rows in the delete's transaction, files after);
+  an image another conversation also names stays. Deleting an account purges the user's image
+  and document stores before the user row goes.
+- **Unbound captures are reclaimed.** One no saved row names (a turn that failed, a save never
+  retried) is deleted after 24 hours (`IMAGE_UNBOUND_GRACE_SEC`), unless a live session of **its
+  owner** still names it in unsaved history (a long voice session, a running background job).
+  Another user's session naming the id doesn't hold it. The sweep walks oldest first by a
+  cursor, so images held by live sessions can't keep it from reaching the rest.
+- **Bounded per request.** `models.toml [max_request_images]` caps the images and bytes one
+  request carries; a capture past it is refused and deleted in its turn.
+
+**Tool definitions are stored and replayed by value.** A conversation freezes the definitions
+of its tools on its first turn and appends later changes as rows (see
+[llm.md](arch/subsystems/llm.md#tools-on-the-wire)). An MCP server's definitions are text from
+outside DAWN that reaches every request of the conversations that saw them, so each must pass
+`llm_tool_def_valid()` (a plain name; description and schema within size caps; valid UTF-8)
+before it is stored. Changes are bounded per conversation and per MCP server per hour, so a
+server that keeps changing its tools can't grow every conversation's request without limit. A
+server that changes or disappears can't rewrite what a conversation already holds, and a
+compaction never feeds a definition's text to the summarizer.
+
+**Runtime values stay out of schemas.** A value set that changes at runtime (the HUD elements
+and modes MIRAGE announces over MQTT) would change a frozen schema, so it goes in the
+conversation's standing directions instead, and the tool's `validate_call` is the trust point: a
+call naming a value not in the live set is refused before it runs. Announced names reach every
+conversation's directions, so they are held to a plain shape (1 to 32 letters, digits, spaces,
+`_` or `-`, `hud_discovery.h`) and the number of changes applied per hour is capped.
 
 ---
 

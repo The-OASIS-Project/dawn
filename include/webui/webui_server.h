@@ -35,6 +35,7 @@
 
 #include <stdbool.h>
 
+#include "image_store.h"       /* IMAGE_ID_LEN */
 #include "webui/webui_audio.h" /* For WEBUI_MAX_RECORDING_SECONDS */
 
 #ifdef __cplusplus
@@ -50,14 +51,15 @@ extern "C" {
 #define WEBUI_MAX_CLIENTS 4
 #define WEBUI_SUBPROTOCOL "dawn-1.0"
 
-/* Vision image limits — configurable values in vision_config_t (dawn_config.h).
- * WEBUI_MAX_BASE64_SIZE and WEBUI_MAX_VISION_IMAGES_CAP are sized for the
- * maximum configurable values and used only for array/buffer allocation.
- * Actual enforcement uses runtime config (g_config.vision.*). */
-#define WEBUI_MAX_BASE64_SIZE (16384 * 1024 * 4 / 3 + 4) /* Upper-bound buffer for base64 */
-#define WEBUI_MAX_VISION_IMAGES_CAP 10                   /* Array dim cap (max configurable) */
-#define WEBUI_MAX_CONCURRENT_VISION 2                    /* Limit concurrent (thread safety) */
-#define WEBUI_VISION_MIME_MAX 24                         /* MIME type buffer */
+/* Images per message — configurable in vision_config_t (dawn_config.h,
+ * g_config.vision.max_images); this cap, its largest value, sizes the arrays. */
+#define WEBUI_MAX_VISION_IMAGES_CAP 10
+
+/* Error codes of a turn whose images were refused (an `error` frame's
+ * payload.code; webui_image_error_describe). */
+#define WEBUI_ERR_IMAGE_UNAVAILABLE "IMAGE_UNAVAILABLE" /* an id names no image of yours */
+#define WEBUI_ERR_IMAGE_LIMIT "IMAGE_LIMIT"             /* too many / too large */
+#define WEBUI_ERR_IMAGE_ERROR "IMAGE_ERROR"             /* the server couldn't build it */
 
 /* Thumbnail limits for conversation history storage (security/DoS prevention) */
 #define WEBUI_MAX_THUMBNAIL_SIZE (150 * 1024)   /* 150KB max per thumbnail */
@@ -543,23 +545,26 @@ void webui_send_conversation_reset(struct session *session);
 int webui_process_text_input(struct session *session, const char *text, bool input_was_voice);
 
 /**
- * @brief Process text input message with optional vision images.
+ * @brief Process a text message with the images attached to it, by id.
  *
- * Like `webui_process_text_input` but accepts up to
- * `WEBUI_MAX_VISION_IMAGES_CAP` base64-encoded images.  Pass NULL/0 for
- * the vision arrays to behave as the plain text variant.  Defined in
- * webui_text_processing.c.
+ * Like `webui_process_text_input`, for a turn sent with up to
+ * `WEBUI_MAX_VISION_IMAGES_CAP` stored images.  The worker builds the
+ * question from the stored files (image_rehydrate_question): an id that names
+ * no image of the user's fails the turn with an error frame, nothing added to
+ * the history or saved.  Defined in webui_text_processing.c.
  *
+ * @param image_ids       Validated image ids (NULL when @p image_id_count is 0).
+ * @param image_id_count  Number of ids (0 for a text-only turn).
+ * @param persist_content The persisted form: text + one `[IMAGE:<id>]` marker
+ *                        per id (image_marker_build_content); NULL for text-only.
  * @param input_was_voice True if voice (ASR) input, false if typed.  See the
  *                        wrapper above.
  * @return 0 on success, non-zero on error
  */
-int webui_process_text_input_with_vision(struct session *session,
+int webui_process_text_input_with_images(struct session *session,
                                          const char *text,
-                                         const char **vision_images,
-                                         const size_t *vision_image_sizes,
-                                         const char **vision_mimes,
-                                         int vision_image_count,
+                                         const char image_ids[][IMAGE_ID_LEN],
+                                         int image_id_count,
                                          const char *persist_content,
                                          bool input_was_voice);
 

@@ -68,6 +68,15 @@ static int64_t free_bytes(const char *dir) {
    return (int64_t)vfs.f_bavail * (int64_t)vfs.f_frsize;
 }
 
+int64_t auth_db_storage_free_bytes(const char *path) {
+   if (!path || strlen(path) >= AUTH_DB_STORAGE_PATH_MAX) {
+      return -1;
+   }
+   char dir_buf[AUTH_DB_STORAGE_PATH_MAX];
+   snprintf(dir_buf, sizeof(dir_buf), "%s", path);
+   return free_bytes(dirname(dir_buf));
+}
+
 /* ---------------------------------------------------------------------------
  * The main connection's settings, and the one-time conversion
  * ------------------------------------------------------------------------- */

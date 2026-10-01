@@ -37,12 +37,6 @@
 extern "C" {
 #endif
 
-/* Append vision images to a Responses content_part array (data:image/jpeg;base64). */
-void llm_responses_append_vision_parts(struct json_object *content_array,
-                                       const char **vision_images,
-                                       const size_t *vision_image_sizes,
-                                       int vision_image_count);
-
 /* Count the leading contiguous run of role:"system" messages from index 0 (the
  * stable+volatile pair; anything after the run is a mid-history broadcast). */
 int llm_responses_count_leading_system_run(struct json_object *history);
@@ -70,9 +64,6 @@ char *llm_responses_extract_volatile_context(struct json_object *history);
  * error.  New array (caller json_object_put), or NULL on error. */
 struct json_object *llm_responses_build_input(struct json_object *history,
                                               const char *input_text,
-                                              const char **vision_images,
-                                              const size_t *vision_image_sizes,
-                                              int vision_image_count,
                                               const char *volatile_block,
                                               int leading_system_run,
                                               bool enable_cache_breakpoint,

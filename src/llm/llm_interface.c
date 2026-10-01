@@ -1028,9 +1028,6 @@ int llm_curl_progress_callback(void *clientp,
 
 char *llm_chat_completion(struct json_object *conversation_history,
                           const char *input_text,
-                          const char **vision_images,
-                          const size_t *vision_image_sizes,
-                          int vision_image_count,
                           bool allow_fallback) {
    llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    char *response = NULL;
@@ -1084,30 +1081,25 @@ char *llm_chat_completion(struct json_object *conversation_history,
 
    if (type == LLM_LOCAL) {
       /* Local LLM uses OpenAI-compatible API (no API key needed) */
-      response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                            vision_image_sizes, vision_image_count, url, NULL,
-                                            model);
+      response = llm_openai_chat_completion(conversation_history, input_text, url, NULL, model);
    } else {
       /* Route to cloud provider */
       switch (provider) {
          case CLOUD_PROVIDER_OPENAI:
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, url,
-                                                  api_key, model);
+            response = llm_openai_chat_completion(conversation_history, input_text, url, api_key,
+                                                  model);
             break;
 
          case CLOUD_PROVIDER_CLAUDE:
-            response = llm_claude_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, url,
-                                                  api_key, model);
+            response = llm_claude_chat_completion(conversation_history, input_text, url, api_key,
+                                                  model);
             break;
 
          case CLOUD_PROVIDER_GEMINI:
          case CLOUD_PROVIDER_OPENROUTER:
             /* Gemini and OpenRouter both use the OpenAI-compatible API */
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, url,
-                                                  api_key, model);
+            response = llm_openai_chat_completion(conversation_history, input_text, url, api_key,
+                                                  model);
             break;
 
          default:
@@ -1130,9 +1122,8 @@ char *llm_chat_completion(struct json_object *conversation_history,
          llm_set_type(LLM_LOCAL);
 
          /* Retry with local LLM (uses OpenAI-compatible API without auth) */
-         response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                               vision_image_sizes, vision_image_count, llm_url,
-                                               NULL, NULL);
+         response = llm_openai_chat_completion(conversation_history, input_text, llm_url, NULL,
+                                               NULL);
       }
    }
 
@@ -1141,9 +1132,6 @@ char *llm_chat_completion(struct json_object *conversation_history,
 
 char *llm_chat_completion_streaming(struct json_object *conversation_history,
                                     const char *input_text,
-                                    const char **vision_images,
-                                    const size_t *vision_image_sizes,
-                                    int vision_image_count,
                                     llm_text_chunk_callback chunk_callback,
                                     void *callback_userdata,
                                     bool allow_fallback) {
@@ -1220,9 +1208,6 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
    llm_tool_loop_params_t loop_params = {
       .conversation_history = conversation_history,
       .input_text = input_text,
-      .vision_images = vision_images,
-      .vision_image_sizes = vision_image_sizes,
-      .vision_image_count = vision_image_count,
       .base_url = url,
       .api_key = api_key,
       .model = model,
@@ -1347,9 +1332,6 @@ static void tts_sentence_callback(const char *sentence, void *userdata) {
 
 char *llm_chat_completion_streaming_tts(struct json_object *conversation_history,
                                         const char *input_text,
-                                        const char **vision_images,
-                                        const size_t *vision_image_sizes,
-                                        int vision_image_count,
                                         llm_sentence_callback sentence_callback,
                                         void *callback_userdata,
                                         bool allow_fallback) {
@@ -1368,9 +1350,8 @@ char *llm_chat_completion_streaming_tts(struct json_object *conversation_history
    ctx.user_userdata = callback_userdata;
 
    // Call streaming with chunk callback that feeds sentence buffer
-   response = llm_chat_completion_streaming(conversation_history, input_text, vision_images,
-                                            vision_image_sizes, vision_image_count,
-                                            tts_chunk_callback, &ctx, allow_fallback);
+   response = llm_chat_completion_streaming(conversation_history, input_text, tts_chunk_callback,
+                                            &ctx, allow_fallback);
 
    // Flush any remaining sentence
    sentence_buffer_flush(ctx.sentence_buffer);
@@ -1592,9 +1573,6 @@ int llm_resolve_config(const session_llm_config_t *session_config,
 
 char *llm_chat_completion_with_config(struct json_object *conversation_history,
                                       const char *input_text,
-                                      const char **vision_images,
-                                      const size_t *vision_image_sizes,
-                                      int vision_image_count,
                                       const llm_resolved_config_t *config) {
    /* Reset per-call so callers reading llm_last_error() after a NULL return
     * see only THIS call's outcome, not a stale signal from an earlier call
@@ -1605,8 +1583,7 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
 
    if (!config) {
       // No config provided, use global (with fallback enabled)
-      return llm_chat_completion(conversation_history, input_text, vision_images,
-                                 vision_image_sizes, vision_image_count, true);
+      return llm_chat_completion(conversation_history, input_text, true);
    }
 
    char *response = NULL;
@@ -1652,29 +1629,25 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
 
    if (config->type == LLM_LOCAL) {
       // Local LLM uses OpenAI-compatible API (no API key needed)
-      response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                            vision_image_sizes, vision_image_count, endpoint, NULL,
+      response = llm_openai_chat_completion(conversation_history, input_text, endpoint, NULL,
                                             config->model);
    } else {
       // Route to cloud provider
       switch (config->cloud_provider) {
          case CLOUD_PROVIDER_OPENAI:
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, endpoint,
+            response = llm_openai_chat_completion(conversation_history, input_text, endpoint,
                                                   config->api_key, config->model);
             break;
 
          case CLOUD_PROVIDER_CLAUDE:
-            response = llm_claude_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, endpoint,
+            response = llm_claude_chat_completion(conversation_history, input_text, endpoint,
                                                   config->api_key, config->model);
             break;
 
          case CLOUD_PROVIDER_GEMINI:
          case CLOUD_PROVIDER_OPENROUTER:
             /* Gemini and OpenRouter both use the OpenAI-compatible API */
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, endpoint,
+            response = llm_openai_chat_completion(conversation_history, input_text, endpoint,
                                                   config->api_key, config->model);
             break;
 
@@ -1697,9 +1670,6 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
 
 char *llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
                                                 const char *input_text,
-                                                const char **vision_images,
-                                                const size_t *vision_image_sizes,
-                                                int vision_image_count,
                                                 llm_text_chunk_callback chunk_callback,
                                                 void *callback_userdata,
                                                 const llm_resolved_config_t *config) {
@@ -1709,8 +1679,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 
    if (!config) {
       // No config provided, use global (with fallback enabled)
-      return llm_chat_completion_streaming(conversation_history, input_text, vision_images,
-                                           vision_image_sizes, vision_image_count, chunk_callback,
+      return llm_chat_completion_streaming(conversation_history, input_text, chunk_callback,
                                            callback_userdata, true);
    }
 
@@ -1744,9 +1713,6 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    llm_tool_loop_params_t loop_params = {
       .conversation_history = conversation_history,
       .input_text = input_text,
-      .vision_images = vision_images,
-      .vision_image_sizes = vision_image_sizes,
-      .vision_image_count = vision_image_count,
       .base_url = config->endpoint,
       .api_key = (config->type == LLM_LOCAL) ? NULL : config->api_key,
       .model = config->model,
@@ -1799,18 +1765,14 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 
 char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversation_history,
                                                     const char *input_text,
-                                                    const char **vision_images,
-                                                    const size_t *vision_image_sizes,
-                                                    int vision_image_count,
                                                     llm_sentence_callback sentence_callback,
                                                     void *callback_userdata,
                                                     const llm_resolved_config_t *config) {
    llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    if (!config) {
       // No config provided, use global (with fallback enabled)
-      return llm_chat_completion_streaming_tts(conversation_history, input_text, vision_images,
-                                               vision_image_sizes, vision_image_count,
-                                               sentence_callback, callback_userdata, true);
+      return llm_chat_completion_streaming_tts(conversation_history, input_text, sentence_callback,
+                                               callback_userdata, true);
    }
 
    char *response = NULL;
@@ -1828,9 +1790,7 @@ char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversa
 
    // Call streaming with chunk callback that feeds sentence buffer
    response = llm_chat_completion_streaming_with_config(conversation_history, input_text,
-                                                        vision_images, vision_image_sizes,
-                                                        vision_image_count, tts_chunk_callback,
-                                                        &ctx, config);
+                                                        tts_chunk_callback, &ctx, config);
 
    // Flush any remaining sentence
    sentence_buffer_flush(ctx.sentence_buffer);

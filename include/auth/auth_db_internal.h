@@ -44,6 +44,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
+#include "core/hash_util.h"
 
 /* =============================================================================
  * Constants
@@ -65,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 97
+#define AUTH_DB_SCHEMA_VERSION 98
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -123,12 +124,129 @@
    "AND llm_blocks_len = length(CAST(llm_blocks AS BLOB)) "                        \
    "AND llm_blocks_len <= " STRINGIFY(CONV_LLM_BLOCKS_MAX) "))"
 
-/* messages.kind (v94): which role each kind of request-context row takes.
- * Kept in step with include/core/message_kind.h. */
-#define CONV_MESSAGE_KIND_CHECK_SQL                                              \
+/* messages.kind as v94 added it: a column CHECK.  Only the v94 ALTER uses it
+ * (a database older than v94); v98 rebuilt messages without it and checks
+ * kinds with triggers (CONV_MESSAGE_KIND_TRIGGERS_SQL), so a new kind needs
+ * no table rebuild.  Frozen: never add a kind here. */
+#define CONV_MESSAGE_KIND_CHECK_V94_SQL                                          \
    "CHECK(kind IS NULL OR (kind IN ('turn_context','memory','envelope') AND "    \
    "role = 'user') OR (kind = 'loop_note' AND role IN ('user','assistant')) OR " \
    "(kind IN ('directive','instruction') AND role = 'system'))"
+
+/* Which role each kind of request-context row takes (v98), over the row a
+ * trigger sees.  The one place the schema lists kinds: kept in step with
+ * message_kind_role_ok() in include/core/message_kind.h (a test checks every
+ * kind against every role).  Never NULL for a row with a role. */
+#define CONV_MESSAGE_KIND_ROLE_OK_SQL                                                        \
+   "(NEW.kind IS NULL OR (NEW.kind IN ('turn_context','memory','envelope') AND "             \
+   "NEW.role = 'user') OR (NEW.kind = 'loop_note' AND NEW.role IN ('user','assistant')) OR " \
+   "(NEW.kind IN ('directive','instruction','tool_change') AND NEW.role = 'system'))"
+
+/* messages.images (v98): the images a tool result carried, as a JSON array of
+ * image ids; on role='tool' rows only. */
+#define CONV_MESSAGE_IMAGES_CHECK_SQL                                         \
+   "CHECK(images IS NULL OR (role = 'tool' AND CASE WHEN json_valid(images) " \
+   "THEN json_type(images) = 'array' ELSE 0 END))"
+
+/* The messages table (v98).  The base schema (a new database) and the v98
+ * rebuild (an existing one) both run this, so the two can't differ, down to
+ * the stored text.  Column order matters to the reads: a turn's stored blocks
+ * are the largest value a row holds and spill to overflow pages, so they come
+ * last, after every column a filter or index reads (kind, context_of,
+ * images); llm_blocks_len sits just before them, so a size or presence check
+ * never reads the blob's overflow pages either. */
+#define CONV_MESSAGES_TABLE_SQL                                                      \
+   "CREATE TABLE IF NOT EXISTS messages ("                                           \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
+   "   conversation_id INTEGER NOT NULL,"                                            \
+   "   role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),"   \
+   "   content TEXT NOT NULL,"                                                       \
+   "   tool_calls TEXT,"                                                             \
+   "   tool_call_id TEXT,"                                                           \
+   "   reasoning TEXT,"                                                              \
+   "   created_at INTEGER NOT NULL,"                                                 \
+   "   is_error INTEGER NOT NULL DEFAULT 0,"                                         \
+   "   kind TEXT DEFAULT NULL,"                                                      \
+   "   context_of INTEGER DEFAULT NULL,"                                             \
+   "   images TEXT DEFAULT NULL " CONV_MESSAGE_IMAGES_CHECK_SQL ","                  \
+   "   llm_blocks_len INTEGER,"                                                      \
+   "   llm_blocks TEXT " CONV_LLM_BLOCKS_CHECK_SQL ","                               \
+   "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE" \
+   ");"
+
+/* messages' indexes and triggers, each defined once: the migration that made
+ * it and the v98 rebuild run the same text, so a new database and a migrated
+ * one store the same schema. */
+#define CONV_MESSAGES_IDX_CONVERSATION_SQL \
+   "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"
+/* Rows holding blocks, for the watermark GC and the cleanup sweep (v92). */
+#define CONV_MESSAGES_IDX_LLM_BLOCKS_SQL                             \
+   "CREATE INDEX IF NOT EXISTS idx_messages_llm_blocks ON messages " \
+   "(conversation_id, id) WHERE llm_blocks_len IS NOT NULL;"
+/* Every display read (kind IS NULL) without reading `kind` from the row,
+ * which sits after a turn's stored blocks (v94). */
+#define CONV_MESSAGES_IDX_DISPLAY_SQL                                                   \
+   "CREATE INDEX IF NOT EXISTS idx_messages_display ON messages (conversation_id, id) " \
+   "WHERE kind IS NULL;"
+/* A conversation's (or a user's) context rows of one kind (v94). */
+#define CONV_MESSAGES_IDX_KIND_SQL                                                         \
+   "CREATE INDEX IF NOT EXISTS idx_messages_kind ON messages (kind, conversation_id, id) " \
+   "WHERE kind IS NOT NULL;"
+/* Tool rows holding images (v98): a conversation's, for binding and
+ * deleting them, and every one, for whether another conversation names an
+ * image; few rows hold images, so either reads this index alone. */
+#define CONV_MESSAGES_IDX_IMAGES_SQL                             \
+   "CREATE INDEX IF NOT EXISTS idx_messages_images ON messages " \
+   "(conversation_id, id) WHERE images IS NOT NULL;"
+/* A row's stored blocks go when its text changes (v92). */
+#define CONV_MESSAGES_LLM_BLOCKS_TRIGGER_SQL                                                \
+   "CREATE TRIGGER IF NOT EXISTS messages_llm_blocks_on_edit "                              \
+   "AFTER UPDATE OF content, tool_calls ON messages "                                       \
+   "WHEN NEW.llm_blocks_len IS NOT NULL AND "                                               \
+   "(NEW.content IS NOT OLD.content OR NEW.tool_calls IS NOT OLD.tool_calls) "              \
+   "BEGIN UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id = NEW.id; " \
+   "END;"
+/* A kind fits its role (v98), on every write that sets either.  Each
+ * trigger is dropped and made again, so running this refreshes them: a later
+ * migration that adds a kind (to CONV_MESSAGE_KIND_ROLE_OK_SQL) re-runs
+ * CONV_MESSAGES_OBJECTS_SQL and nothing else. */
+#define CONV_MESSAGE_KIND_TRIGGERS_SQL \
+   CONV_MESSAGE_KIND_TRIGGERS_WITH_SQL(CONV_MESSAGE_KIND_ROLE_OK_SQL)
+/* The same over a given kind/role check (tests extend the set with it). */
+#define CONV_MESSAGE_KIND_TRIGGERS_WITH_SQL(role_ok)                        \
+   "DROP TRIGGER IF EXISTS messages_kind_on_insert;"                        \
+   "CREATE TRIGGER messages_kind_on_insert BEFORE INSERT ON messages "      \
+   "WHEN NOT " role_ok " BEGIN "                                            \
+   "SELECT RAISE(ABORT, 'messages: kind does not fit the role'); END;"      \
+   "DROP TRIGGER IF EXISTS messages_kind_on_update;"                        \
+   "CREATE TRIGGER messages_kind_on_update BEFORE UPDATE OF kind, role ON " \
+   "messages WHEN NOT " role_ok " BEGIN "                                   \
+   "SELECT RAISE(ABORT, 'messages: kind does not fit the role'); END;"
+/* All of them, for the v98 rebuild (and, as no-ops, a new database); re-run
+ * whole by a migration that adds a kind. */
+#define CONV_MESSAGES_OBJECTS_SQL                                                            \
+   CONV_MESSAGES_IDX_CONVERSATION_SQL CONV_MESSAGES_IDX_LLM_BLOCKS_SQL                       \
+       CONV_MESSAGES_IDX_DISPLAY_SQL CONV_MESSAGES_IDX_KIND_SQL CONV_MESSAGES_IDX_IMAGES_SQL \
+           CONV_MESSAGES_LLM_BLOCKS_TRIGGER_SQL CONV_MESSAGE_KIND_TRIGGERS_SQL
+
+/* The images a conversation names (v98): a tool row's captures, a question's
+ * uploads; see auth_db_messages.h.  A superset index: a record is added when a
+ * row naming the image is stored (or, for rows from before v98, by its
+ * backfill) and is never removed while the conversation lives, even when the
+ * row that named it is edited or deleted.  So it only grows until the
+ * conversation is deleted: an image it lists may no longer be named by any of
+ * the conversation's rows, never the reverse.  Records go with the
+ * conversation or the image (FK cascades); a conversation delete takes the
+ * images only it names.  Its tables are base-schema tables, so this is in the
+ * base schema. */
+#define AUTH_DB_CONVERSATION_IMAGES_SQL                                                  \
+   "CREATE TABLE IF NOT EXISTS conversation_images ("                                    \
+   "   image_id TEXT NOT NULL REFERENCES images(id) ON DELETE CASCADE,"                  \
+   "   conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE," \
+   "   PRIMARY KEY (image_id, conversation_id)"                                          \
+   ") WITHOUT ROWID;"                                                                    \
+   "CREATE INDEX IF NOT EXISTS idx_conversation_images_conv ON "                         \
+   "conversation_images(conversation_id);"
 
 /* Tool results kept whole while the model is shown a view of them (v97).
  * Readable only in the conversation that stored them (or, before it exists,
@@ -356,6 +474,9 @@ typedef struct {
    sqlite3_stmt *stmt_msg_llm_sizes;    /* block sizes for the per-load budget */
    sqlite3_stmt *stmt_msg_gc_blocks;    /* blocks dropped below the watermark */
    sqlite3_stmt *stmt_msg_sweep_blocks; /* the same, across conversations */
+   sqlite3_stmt *stmt_msg_bind_images;  /* a row's images made permanent with it */
+   sqlite3_stmt *stmt_msg_ref_captures; /* a tool row's captures, named by its conversation */
+   sqlite3_stmt *stmt_msg_ref_uploads;  /* a question's uploads, named by its conversation */
    sqlite3_stmt *stmt_msg_get_admin;
    sqlite3_stmt *stmt_conv_update_meta;
    sqlite3_stmt *stmt_conv_update_context;
@@ -378,12 +499,15 @@ typedef struct {
    sqlite3_stmt *stmt_image_update_access;
    sqlite3_stmt *stmt_image_update_retention;
    sqlite3_stmt *stmt_image_count_user;
+   sqlite3_stmt *stmt_image_count_user_source; /* COUNT by user_id + source */
    sqlite3_stmt *stmt_image_delete_old;        /* DEFAULT retention: created_at < cutoff */
    sqlite3_stmt *stmt_image_cache_total_size;  /* SUM(size) for RETAIN_CACHE images */
    sqlite3_stmt *stmt_image_delete_cache_lru;  /* oldest CACHE image by last_accessed */
    sqlite3_stmt *stmt_image_get_expired_ids;   /* IDs + filenames of expired images */
    sqlite3_stmt *stmt_image_get_cache_lru_ids; /* IDs + filenames of LRU cache overflow */
    sqlite3_stmt *stmt_image_stats;             /* COUNT + SUM(size) for all images */
+   sqlite3_stmt *stmt_image_get_unbound_ids;   /* IDs + filenames of unbound images by cutoff */
+   sqlite3_stmt *stmt_image_delete_unbound;    /* one of those, if still unbound */
 
    /* === Memory module statements (memory_db.c) === */
    sqlite3_stmt *stmt_memory_fact_create;
@@ -843,6 +967,43 @@ int auth_db_migrations_v96(sqlite3 *db);
  */
 int auth_db_migrations_v97(sqlite3 *db);
 
+/**
+ * @brief v98 migration: messages rebuilt once (same rows, ids and sequence)
+ *        with messages.images and with kinds checked by triggers rather than
+ *        a column CHECK (kind tool_change added), then the WAL truncated.
+ *        Idempotent: a table that already has `images` only gets its
+ *        indexes and triggers made.  Not inside a transaction (it turns
+ *        foreign keys off around its own).
+ * @param db_path The database file, for the free-space check (may be NULL:
+ *        no check).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (the table as it was).
+ */
+int auth_db_migrations_v98(sqlite3 *db, const char *db_path);
+
+/**
+ * @brief The v98 rebuild's room check: the bytes it needs free next to the
+ *        database for a messages table (and its indexes) of @p table_bytes
+ *        (*@p need_out), and whether @p free_bytes covers them.  A free size
+ *        that can't be read (< 0) passes: the rebuild then fails on its own
+ *        if the disk fills, and rolls back.
+ */
+bool auth_db_v98_has_room(int64_t table_bytes, int64_t free_bytes, int64_t *need_out);
+
+/**
+ * @brief Record, for every stored row, the images its conversation names, as
+ *        conv_db_add_row() records them for a new row: an ordinary question's
+ *        [IMAGE:<id>] uploads and MMS, and a tool row's captures
+ *        (messages.images), the conversation owner's images only (v98, for
+ *        rows stored before conversation_images existed)
+ *
+ * Same statements and marker parsing as the insert path, so the two can't
+ * record differently.  Idempotent (INSERT OR IGNORE).  Caller holds the
+ * transaction; messages must already have its images column.
+ * @param recorded_out Records added (may be NULL)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_conv_images_backfill(sqlite3 *db, int64_t *recorded_out);
+
 /** Whether @p table has column @p col (a migration's probe before an ALTER;
  *  auth_db_migrations.c). */
 bool auth_db_column_exists(sqlite3 *db, const char *table, const char *col);
@@ -893,6 +1054,30 @@ int msg_insert_locked(int64_t conv_id,
                       time_t now,
                       int64_t *id_out);
 void auth_db_messages_finalize(void);
+
+/**
+ * @brief The images @p conv_id owns (auth_db_messages.h), under @p mode:
+ *        deleted (their files added to @p files) or unbound.  The caller holds
+ *        the lock and a transaction, and deletes the conversation next.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (the caller rolls back)
+ */
+int conv_images_take_locked(int64_t conv_id,
+                            int owner,
+                            conv_images_mode_t mode,
+                            conv_image_files_t *files);
+
+/** A tool_change row's content past this many bytes is stored in prompt_blobs
+ *  by hash (deduplicated: a change appended again after a compaction is the
+ *  same bytes); the row holds {"blob": "<hash>"}. */
+#define CONV_TOOL_CHANGE_INLINE_MAX 8192
+
+/** Store @p bytes in prompt_blobs under their SHA-256 (kept when already
+ *  there); the caller holds the lock (auth_db_conv_prefix.c). */
+int conv_prompt_blob_put_locked(const char *bytes, char hash_out[DAWN_SHA256_HEX_LEN]);
+
+/** The bytes stored under @p hash (caller frees), checked against it:
+ *  AUTH_DB_INVALID when missing or not matching.  Caller holds the lock. */
+int conv_prompt_blob_get_locked(const char *hash, char **out);
 
 /** Whether conversation @p conv_id is @p user_id's: AUTH_DB_SUCCESS,
  *  AUTH_DB_NOT_FOUND or AUTH_DB_FAILURE.  Caller holds the lock

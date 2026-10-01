@@ -24,7 +24,7 @@
  *    "sections":     {"<name>": {"h": "<sha256 of its text>", "t": "<title>"}, ...},
  *    "previous":     {"<name>": "<the hash it held before its last change>", ...},
  *    "directives":   "<sha256 of the standing directions in force>",
- *    "tool_schemas": {"<frozen tool>": "<sha256 of its schema>", ...}}
+ *    ...the tool-change bounds and flags (prefix_tools.c)}
  * A section's hash is of its text as built (the tag placeholder unfilled).
  */
 
@@ -353,51 +353,6 @@ bool prefix_in_force_directives_changed(struct json_object *hist, const char *di
    return true;
 }
 
-void prefix_in_force_check_tool_schemas(struct json_object *hist, const char *schemas) {
-   struct json_object *prefix = prefix_of(hist);
-   struct json_object *names = llm_history_frozen_tools(hist);
-   struct json_object *rec = prefix ? record_of(prefix) : NULL;
-   struct json_object *now = schemas ? json_tokener_parse(schemas) : NULL;
-   if (!rec || !names || !json_object_is_type(now, json_type_object)) {
-      json_object_put(now);
-      return;
-   }
-   struct json_object *had = NULL;
-   const bool known = json_object_object_get_ex(rec, "tool_schemas", &had) &&
-                      json_object_is_type(had, json_type_object);
-   struct json_object *next = json_object_new_object();
-   strbuf_t changed;
-   strbuf_init(&changed, 128);
-   const size_t n = json_object_array_length(names);
-   for (size_t i = 0; next && i < n; i++) {
-      const char *name = json_object_get_string(json_object_array_get_idx(names, i));
-      if (!name) {
-         continue;
-      }
-      const char *h = str_of(now, name);
-      const char *was = known ? str_of(had, name) : NULL;
-      if (known && (!h || !was || strcmp(h, was) != 0)) {
-         strbuf_appendf(&changed, "%s%s%s", strbuf_len(&changed) ? ", " : "", name,
-                        h ? "" : " (gone)");
-      }
-      if (h) {
-         json_object_object_add(next, name, json_object_new_string(h));
-      }
-   }
-   if (strbuf_len(&changed) > 0) {
-      OLOG_WARNING("prefix: the conversation's frozen tools changed since it froze them (%s): "
-                   "every later request sends them as they are now",
-                   strbuf_str(&changed));
-   }
-   strbuf_free(&changed);
-   json_object_put(now);
-   if (next && (!known || !json_object_equal(had, next))) {
-      json_object_object_add(rec, "tool_schemas", next);
-   } else {
-      json_object_put(next);
-   }
-}
-
 char *prefix_in_force_json(struct json_object *hist) {
    struct json_object *prefix = prefix_of(hist);
    struct json_object *rec = NULL;
@@ -415,7 +370,10 @@ void prefix_in_force_reset_to_history(struct json_object *hist) {
        !json_object_is_type(rec, json_type_object)) {
       return;
    }
-   /* The tag and the tool schemas stay: the frozen prefix still declares them. */
+   /* The tag stays (the frozen prefix still declares it), and so do the
+    * tool-change bounds and flags: what tools are in force is read from the
+    * history itself (prefix_tools.c), the changes a compaction summarized
+    * away appended again at this seam. */
    json_object_object_del(rec, "sections");
    json_object_object_del(rec, "previous");
    json_object_object_del(rec, "directives");

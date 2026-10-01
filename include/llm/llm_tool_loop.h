@@ -52,9 +52,6 @@ extern "C" {
  *
  * @param conversation_history JSON array of messages
  * @param input_text User input (empty string for follow-up calls)
- * @param vision_images Vision images array (NULL if none)
- * @param vision_image_sizes Vision image sizes (NULL if none)
- * @param vision_image_count Number of vision images
  * @param base_url Provider endpoint URL
  * @param api_key API key (NULL for local)
  * @param model Model name
@@ -66,9 +63,6 @@ extern "C" {
  */
 typedef int (*llm_single_shot_fn)(struct json_object *conversation_history,
                                   const char *input_text,
-                                  const char **vision_images,
-                                  const size_t *vision_image_sizes,
-                                  int vision_image_count,
                                   const char *base_url,
                                   const char *api_key,
                                   const char *model,
@@ -86,9 +80,6 @@ typedef int (*llm_single_shot_fn)(struct json_object *conversation_history,
 typedef struct {
    struct json_object *conversation_history; /**< Conversation history (modified in place) */
    const char *input_text;                   /**< User input text */
-   const char **vision_images;               /**< Vision images (NULL if none) */
-   const size_t *vision_image_sizes;         /**< Vision image sizes */
-   int vision_image_count;                   /**< Number of vision images */
    const char *base_url;                     /**< Provider endpoint URL */
    const char *api_key;                      /**< API key (NULL for local) */
    const char *model;                        /**< Model name (ptr into model_storage or external) */

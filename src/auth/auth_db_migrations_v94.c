@@ -148,7 +148,7 @@ int auth_db_migrations_v94(sqlite3 *db) {
       const char *sql;
    } columns[] = {
       { "messages", "kind",
-        "ALTER TABLE messages ADD COLUMN kind TEXT DEFAULT NULL " CONV_MESSAGE_KIND_CHECK_SQL },
+        "ALTER TABLE messages ADD COLUMN kind TEXT DEFAULT NULL " CONV_MESSAGE_KIND_CHECK_V94_SQL },
       { "messages", "context_of",
         "ALTER TABLE messages ADD COLUMN context_of INTEGER DEFAULT NULL" },
       { "conversations", "prefix_hash",
@@ -202,10 +202,8 @@ int auth_db_migrations_v94(sqlite3 *db) {
       "CREATE INDEX IF NOT EXISTS idx_withdrawn_items_time ON withdrawn_items(created_at)",
       "CREATE INDEX IF NOT EXISTS idx_withdrawn_items_open ON withdrawn_items(user_id) "
       "WHERE delivered = 0",
-      "CREATE INDEX IF NOT EXISTS idx_messages_display ON messages (conversation_id, id) "
-      "WHERE kind IS NULL",
-      "CREATE INDEX IF NOT EXISTS idx_messages_kind ON messages (kind, conversation_id, id) "
-      "WHERE kind IS NOT NULL",
+      CONV_MESSAGES_IDX_DISPLAY_SQL,
+      CONV_MESSAGES_IDX_KIND_SQL,
       "CREATE INDEX IF NOT EXISTS idx_conversations_prefix ON conversations (prefix_hash) "
       "WHERE prefix_hash IS NOT NULL",
       "CREATE INDEX IF NOT EXISTS idx_conversations_tools ON conversations (tools_hash) "

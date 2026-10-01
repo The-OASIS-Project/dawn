@@ -26,6 +26,7 @@
 #define LLM_CAPABILITIES_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "llm/llm_interface.h" /* llm_type_t, cloud_provider_t */
 
@@ -106,7 +107,46 @@ void llm_capabilities_load_mid_system(struct toml_table_t *root);
  */
 bool llm_model_mid_system(const char *model);
 
-/** Free what llm_capabilities_load_registry() and _load_mid_system() loaded. */
+/**
+ * @brief Load models.toml [inline_tools]: the Anthropic models that take a tool
+ *        defined in a message (beta inline-tools-2026-09-15)
+ *
+ * Called once at startup.  Read-only afterwards.
+ */
+void llm_capabilities_load_inline_tools(struct toml_table_t *root);
+
+/**
+ * @brief Whether Anthropic @p model takes a tool defined in a message: its id
+ *        starts with a models.toml [inline_tools] prefix.  A conversation's
+ *        later tool changes are sent in place only on such a model (and only
+ *        on the Claude API itself); anywhere else they fold into `tools`.
+ */
+bool llm_model_inline_tools(const char *model);
+
+/** A vendor's per-request image limit (models.toml [max_request_images]). */
+typedef struct {
+   int count;     /**< Images one request may carry */
+   int64_t bytes; /**< Their bytes as sent (base64), under the vendor's request-size limit */
+} llm_image_limit_t;
+
+#define LLM_IMAGE_LIMIT_KEY_MAX 32
+
+/**
+ * @brief Load models.toml [max_request_images]: per vendor key ("anthropic",
+ *        "anthropic_200k", "openai", "gemini", "other", "local"), the images a
+ *        request may carry
+ *
+ * Called once at startup, after llm_capabilities_load_registry().  Read-only
+ * afterwards.  A row without a positive count and bytes is ignored (logged).
+ */
+void llm_capabilities_load_image_limits(struct toml_table_t *root);
+
+/** @brief The limit models.toml gives vendor key @p key, into @p out; false
+ *         when it gives none. */
+bool llm_capabilities_image_limit(const char *key, llm_image_limit_t *out);
+
+/** Free what llm_capabilities_load_registry(), _load_mid_system(),
+ *  _load_inline_tools() and _load_image_limits() loaded. */
 void llm_capabilities_free_registry(void);
 
 /**

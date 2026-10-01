@@ -358,6 +358,32 @@ static void test_use_openrouter_not_written(void) {
    TEST_ASSERT_FALSE_MESSAGE(found, "retired use_openrouter must not be written to dawn.toml");
 }
 
+/* --- [vision] capture_history_count retirement ---------------------------- */
+
+/* Retired: never written back, and an older dawn.toml that still sets it
+ * parses (one "retired, ignored" warning, not a typo warning). */
+static void test_capture_history_count_retired(void) {
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+   FILE *fp = fopen(RT_PATH, "r");
+   TEST_ASSERT_NOT_NULL(fp);
+   char line[512];
+   bool found = false;
+   while (fgets(line, sizeof(line), fp)) {
+      found = found || strstr(line, "capture_history_count") != NULL;
+   }
+   fclose(fp);
+   TEST_ASSERT_FALSE_MESSAGE(found, "retired capture_history_count must not be written");
+
+   fp = fopen(RT_PATH, "w");
+   TEST_ASSERT_NOT_NULL(fp);
+   fputs("[vision]\nmax_images = 3\ncapture_history_count = 4\n", fp);
+   fclose(fp);
+   test_stub_reset_warnings();
+   TEST_ASSERT_EQUAL_INT(0, config_parse_file(RT_PATH, &g_read));
+   TEST_ASSERT_EQUAL_INT(3, g_read.vision.max_images);
+   TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
+}
+
 static void test_all_writer_owned_sections_present(void) {
    /* Every section config_write_toml() emits, INCLUDING sub-tables. Parent-only
     * coverage would let an entire [llm.tools] or [memory.embeddings] writer block
@@ -527,6 +553,7 @@ int main(void) {
    RUN_TEST(test_memory_fact_cache_mb_is_clamped);
    RUN_TEST(test_memory_idle_timeout_bounds);
    RUN_TEST(test_use_openrouter_migrates_to_provider);
+   RUN_TEST(test_capture_history_count_retired);
    RUN_TEST(test_use_openrouter_not_written);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);

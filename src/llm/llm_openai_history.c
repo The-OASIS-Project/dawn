@@ -20,7 +20,7 @@
  * Converts Claude-format tool/image blocks to OpenAI format and filters
  * orphaned tool messages from restored conversations. Vision stripping for
  * models that lack vision support delegates to the shared
- * llm_history_strip_vision_content() (llm_tools.c).
+ * llm_history_strip_vision_content() (llm_tool_images_render.c).
  */
 
 #include <json-c/json.h>
@@ -33,6 +33,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_openai_internal.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -168,7 +169,19 @@ int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *o
          struct json_object *tool_msg = json_object_new_object();
          json_object_object_add(tool_msg, "role", json_object_new_string("tool"));
          json_object_object_add(tool_msg, "tool_call_id", json_object_get(tuid));
-         /* A string, or its text parts joined (not the parts' JSON). */
+         /* A string, or its text parts joined (not the parts' JSON); a
+          * result that carried images keeps its parts, as a tool message
+          * holds them (llm_tool_images_render.h). */
+         struct json_object *parts = NULL;
+         if (json_object_object_get_ex(elem, "content", &parts) &&
+             json_object_is_type(parts, json_type_array)) {
+            if (llm_parts_have_image(parts)) {
+               json_object_object_add(tool_msg, "content", json_object_get(parts));
+               json_object_array_add(out_array, tool_msg);
+               appended++;
+               continue;
+            }
+         }
          char *result = llm_claude_tool_result_text(elem);
          if (!result) {
             OLOG_WARNING("OpenAI: tool result text not converted (out of memory); sent empty");
@@ -690,6 +703,9 @@ static json_object *render_context_for_chat(struct json_object *history, bool sy
    for (size_t i = 0; out && i < n; i++) {
       json_object *msg = json_object_array_get_idx(history, i);
       const message_kind_t kind = llm_history_kind_of(msg);
+      if (kind == MESSAGE_KIND_TOOL_CHANGE) {
+         continue; /* in the request's tools (folded: llm_tool_defs_for_request) */
+      }
       if (kind == MESSAGE_KIND_DIRECTIVE || kind == MESSAGE_KIND_INSTRUCTION) {
          json_object *content = NULL;
          json_object_object_get_ex(msg, "content", &content);
@@ -803,124 +819,17 @@ json_object *llm_openai_prepare_chat_history(struct json_object *conversation_hi
    if (!converted) {
       return NULL; /* never the unstripped history */
    }
-
    if (!is_vision_enabled_for_current_llm()) {
       json_object *sanitized = llm_history_strip_vision_content(converted);
       json_object_put(converted);
       converted = sanitized;
-   }
-
-   return converted;
-}
-
-/* Build a [{type:text,text:<text>}, {type:image_url,...}, ...] content array
- * from the vision images.  Shared by both branches of apply_vision_images. */
-static json_object *build_vision_content(const char *text,
-                                         const char **vision_images,
-                                         const size_t *vision_image_sizes,
-                                         int vision_image_count) {
-   json_object *content_array = json_object_new_array();
-   if (!content_array) {
-      return NULL;
-   }
-   json_object *text_obj = json_object_new_object();
-   json_object_object_add(text_obj, "type", json_object_new_string("text"));
-   json_object_object_add(text_obj, "text", json_object_new_string(text ? text : ""));
-   json_object_array_add(content_array, text_obj);
-
-   for (int i = 0; i < vision_image_count; i++) {
-      if (!vision_images[i] || (vision_image_sizes && vision_image_sizes[i] == 0)) {
-         continue;
-      }
-      json_object *image_obj = json_object_new_object();
-      json_object_object_add(image_obj, "type", json_object_new_string("image_url"));
-
-      json_object *image_url_obj = json_object_new_object();
-      const char *prefix = "data:image/jpeg;base64,";
-      size_t len = strlen(prefix) + strlen(vision_images[i]) + 1;
-      char *data_uri = malloc(len);
-      if (data_uri != NULL) {
-         snprintf(data_uri, len, "%s%s", prefix, vision_images[i]);
-         json_object_object_add(image_url_obj, "url", json_object_new_string(data_uri));
-         free(data_uri);
-      }
-      json_object_object_add(image_obj, "image_url", image_url_obj);
-      json_object_array_add(content_array, image_obj);
-   }
-   return content_array;
-}
-
-json_object *llm_openai_apply_vision_images(json_object *history,
-                                            const char *input_text,
-                                            const char **vision_images,
-                                            const size_t *vision_image_sizes,
-                                            int vision_image_count) {
-   if (!history || !json_object_is_type(history, json_type_array)) {
-      return NULL;
-   }
-   int n = json_object_array_length(history);
-   if (n <= 0) {
-      return NULL;
-   }
-
-   /* Shallow clone into a request-private array: every existing message is shared
-    * read-only (refcount bump).  prepare_chat_history may hand back the caller's
-    * conversation history by reference, so mutating a message in place would
-    * corrupt shared session state — copy-on-write the one message we change. */
-   json_object *out = json_object_new_array();
-   if (!out) {
-      return NULL;
-   }
-   for (int i = 0; i < n; i++) {
-      json_object_array_add(out, json_object_get(json_object_array_get_idx(history, i)));
-   }
-
-   json_object *last = json_object_array_get_idx(out, n - 1);
-   json_object *role_obj = NULL;
-   const char *role = (json_object_object_get_ex(last, "role", &role_obj) && role_obj)
-                          ? json_object_get_string(role_obj)
-                          : NULL;
-   bool last_is_user = (role != NULL && strcmp(role, "user") == 0);
-
-   if (last_is_user) {
-      /* Private copy of the last user message carrying the new content; replace
-       * the shared element (put_idx releases our clone's shared ref).  Its text
-       * stays whole when it holds the question (the turn's context goes in front
-       * of it, operators' notes after it), else the question is its text. */
-      json_object *last_content = NULL;
-      json_object_object_get_ex(last, "content", &last_content);
-      const char *text = input_text;
-      if (json_object_is_type(last_content, json_type_string) && input_text && *input_text &&
-          strstr(json_object_get_string(last_content), input_text)) {
-         text = json_object_get_string(last_content);
-      }
-      json_object *content = build_vision_content(text, vision_images, vision_image_sizes,
-                                                  vision_image_count);
-      json_object *priv = json_object_new_object();
-      if (!content || !priv) {
-         json_object_put(content);
-         json_object_put(priv);
-         json_object_put(out);
+      if (!converted) {
          return NULL;
       }
-      json_object_object_add(priv, "role", json_object_get(role_obj));
-      json_object_object_add(priv, "content", content);
-      json_object_array_put_idx(out, n - 1, priv);
-   } else {
-      /* Last turn isn't a user message — append a fresh user message. */
-      json_object *content = build_vision_content(
-          "Here are the captured images. Please respond to the user's request.", vision_images,
-          vision_image_sizes, vision_image_count);
-      json_object *msg = json_object_new_object();
-      if (!content || !msg) {
-         json_object_put(content);
-         json_object_put(msg);
-         json_object_put(out);
-         return NULL;
-      }
-      json_object_object_add(msg, "role", json_object_new_string("user"));
-      json_object_object_add(msg, "content", content);
-      json_object_array_add(out, msg);
    }
-   return out;
+   /* A tool message takes text only: a turn's tool images go in one user
+    * message after all its tool messages (llm_tool_images_render.h). */
+   json_object *shown = llm_tool_images_render_chat(converted);
+   json_object_put(converted);
+   return shown;
 }

@@ -556,13 +556,9 @@ typedef struct {
  * Vision Configuration (per-upload image size and dimension limits)
  * ============================================================================= */
 typedef struct {
-   int max_image_size_kb;     /* Max image upload size in KB (default: 4096, range: 512-16384) */
-   int max_dimension;         /* Max image dimension in px (default: 1024, range: 256-4096) */
-   int max_images;            /* Max images per message (default: 5, range: 1-10) */
-   int capture_history_count; /* Tool-captured images (e.g. the `viewing` camera tool) retained
-                               * in conversation history for follow-up questions. 0 = unlimited
-                               * (bounded only by context compaction, not per-capture eviction),
-                               * default: 1, range: 0-50. */
+   int max_image_size_kb; /* Max image upload size in KB (default: 4096, range: 512-16384) */
+   int max_dimension;     /* Max image dimension in px (default: 1024, range: 256-4096) */
+   int max_images;        /* Max images per message (default: 5, range: 1-10) */
 } vision_config_t;
 
 /* =============================================================================

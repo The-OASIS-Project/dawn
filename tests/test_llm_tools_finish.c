@@ -158,11 +158,29 @@ static void test_a_call_outside_a_batch_finishes_at_once(void) {
    free(single.result_extended);
 }
 
+/* A tool whose definition a conversation keeps after its server went away
+ * (llm_tool_defs.h: a removal leaves the definition) is refused when called,
+ * at the execute chokepoint. */
+static void test_a_call_to_a_gone_tool_is_refused(void) {
+   tool_result_t result;
+   memset(&result, 0, sizeof(result));
+   tool_call_t call;
+   memset(&call, 0, sizeof(call));
+   snprintf(call.id, sizeof(call.id), "call_gone");
+   snprintf(call.name, sizeof(call.name), "mcp_gone__search");
+   llm_tools_execute(&call, &result);
+   TEST_ASSERT_FALSE(result.success);
+   TEST_ASSERT_TRUE(result.is_error);
+   TEST_ASSERT_NOT_NULL(strstr(tool_result_content(&result), "Unknown tool"));
+   free(result.result_extended);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_a_batch_reaches_its_finish_raw_and_leaves_finished);
    RUN_TEST(test_a_header_is_put_on_after_neutralizing);
    RUN_TEST(test_no_finish_step_finishes_each);
    RUN_TEST(test_a_call_outside_a_batch_finishes_at_once);
+   RUN_TEST(test_a_call_to_a_gone_tool_is_refused);
    return UNITY_END();
 }

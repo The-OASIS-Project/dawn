@@ -1367,10 +1367,11 @@ void *llm_worker_thread(void *arg) {
    // it wait for the turn to end).
    // Vision is handled by native tool calling - viewing tool captures image internally
    struct json_object *history = interrupted ? NULL : session_get_turn_history(local_session);
-   char *response = history ? llm_chat_completion_streaming_tts_with_config(
-                                  history, request_text, NULL, NULL, 0, dawn_tts_sentence_callback,
-                                  NULL, &resolved_config)
-                            : NULL;
+   char *response = history
+                        ? llm_chat_completion_streaming_tts_with_config(history, request_text,
+                                                                        dawn_tts_sentence_callback,
+                                                                        NULL, &resolved_config)
+                        : NULL;
    session_put_history(local_session, history);
    llm_cache_monitor_set_local_mic(false);
    session_set_turn_token(0);

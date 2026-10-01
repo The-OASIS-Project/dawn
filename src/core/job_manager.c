@@ -608,6 +608,30 @@ bool job_manager_conv_is_live(int64_t conv_id) {
    return live;
 }
 
+void job_manager_for_each_session(void (*fn)(session_t *session, void *ctx), void *ctx) {
+   if (!fn) {
+      return;
+   }
+   /* Snapshot ids under the pool lock, then visit each retained session with
+    * it released (never a per-session lock under the registry lock). */
+   uint32_t ids[JOB_POOL_MAX_SLOTS];
+   int count = 0;
+   pthread_mutex_lock(&s_pool_mutex);
+   for (int i = 0; s_initialized && i < s_pool_size && count < JOB_POOL_MAX_SLOTS; i++) {
+      if (s_slots[i].session != NULL) {
+         ids[count++] = s_slots[i].session->session_id;
+      }
+   }
+   pthread_mutex_unlock(&s_pool_mutex);
+   for (int i = 0; i < count; i++) {
+      session_t *s = job_manager_resolve(ids[i], true); /* retains */
+      if (s) {
+         fn(s, ctx);
+         session_release(s);
+      }
+   }
+}
+
 int job_manager_running_count(void) {
    pthread_mutex_lock(&s_pool_mutex);
    int n = s_n_running_local + s_n_running_cloud;

@@ -46,9 +46,6 @@ struct llm_tool_response;
  *
  * @param conversation_history JSON array of messages (DAWN's OpenAI-shaped internal format).
  * @param input_text User input (empty string for follow-up calls inside a tool loop).
- * @param vision_images Array of base64 images (NULL if not used).
- * @param vision_image_sizes Array of image sizes (NULL if not used).
- * @param vision_image_count Number of images.
  * @param base_url API base URL (e.g. "https://api.openai.com").
  * @param api_key Cloud API key.
  * @param model Model name (must be a Responses-supported model).
@@ -61,9 +58,6 @@ struct llm_tool_response;
  */
 int llm_openai_responses_streaming_single_shot(struct json_object *conversation_history,
                                                const char *input_text,
-                                               const char **vision_images,
-                                               const size_t *vision_image_sizes,
-                                               int vision_image_count,
                                                const char *base_url,
                                                const char *api_key,
                                                const char *model,

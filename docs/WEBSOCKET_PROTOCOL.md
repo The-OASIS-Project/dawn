@@ -113,25 +113,32 @@ connection (and warns on a protocol it doesn't speak); nothing is enforced on it
 ### Core
 
 #### `text`
-Send a text message to the AI (with optional vision images).
+Send a text message to the AI, with the images attached to it by id.
 ```json
 {
    "type": "text",
    "payload": {
-      "text": "What is the weather?",
-      "images": [
-         {
-            "data": "<base64-encoded image>",
-            "mime_type": "image/jpeg"
-         }
-      ],
+      "text": "What is in this picture?",
       "image_ids": ["img_a1b2c3d4e5f6"]
    }
 }
 ```
-- `images` is optional, max 5 images, max 4MB each — the base64 data sent to the LLM for this turn.
-- Supported MIME types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
-- `image_ids` — the ids for those images returned by the `POST /api/images` HTTP upload (see `docs/arch/subsystems/vision-documents.md`), **ordered to match `images[]`**. The daemon is authoritative for user-turn persistence: it builds `[IMAGE:<id>]` markers from these ids and persists the turn itself, then echoes `server_saved: true` on the transcript so the client does **not** save the user row. **Mandatory on any image turn** — an image turn sent without `image_ids` persists text-only and the images will not re-render on reload (there is no client-save fallback). Omit for text-only turns.
+- `image_ids` — optional; the ids the `POST /api/images` HTTP upload returned (see
+  `docs/arch/subsystems/vision-documents.md`), at most `[vision] max_images` (default 5).
+  **The only way to attach an image:** the daemon reads the stored files, sends them to the
+  model, persists the turn as `text` + `[IMAGE:<id>]` markers, and echoes
+  `server_saved: true` on the transcript so the client does **not** save the user row.
+  Omit for a text-only turn.
+- The turn is sent with every image it names or not at all. It fails with an `error` frame,
+  and nothing is added to the conversation, when an id is malformed, names no image of the
+  user's (deleted, another user's, unreadable), or there are too many:
+  `IMAGE_UNAVAILABLE` (bad/missing/foreign id), `IMAGE_LIMIT` (more than `max_images`, or past
+  the per-message size ceiling), `IMAGE_ERROR` (the server couldn't build the message).
+  An inline `[IMAGE:data:...]` marker in `text` on an image turn also fails it
+  (`IMAGE_UNAVAILABLE`): images come only from `image_ids`.
+- `images` (base64 `[{data, mime_type}]`) is **no longer read** (since 2026-10): a frame that
+  still carries it is processed as if it didn't; its images reach the model only through
+  `image_ids`.
 - Requires authentication
 
 #### `cancel`
@@ -1464,6 +1471,8 @@ Error or informational notification.
   `INFO_THINKING_DISABLED`, severity `"info"`). A client should route/style on
   `severity` rather than the code prefix. Absent field ⇒ treat as `"error"`.
 - `recoverable`: Legacy field, currently always `true`. Prefer `severity`.
+- A `text` turn refused for its images carries `IMAGE_UNAVAILABLE`, `IMAGE_LIMIT` or
+  `IMAGE_ERROR` (see `text`); the turn did not run and nothing was saved.
 
 #### `force_logout`
 This connection's login ended: a logout (from this or another tab), a login over it

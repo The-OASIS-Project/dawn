@@ -50,6 +50,7 @@
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_rate_limit.h"
+#include "llm/llm_tool_images.h"
 #include "llm/llm_tool_views.h"
 #include "llm/llm_tool_views_apply.h"
 #include "llm/llm_tools.h"
@@ -137,13 +138,13 @@ static const char *str_field(struct json_object *obj, const char *key) {
 
 /* A request of this call's session is being sent: its size estimate, to
  * calibrate its model's density when its usage comes back (llm_compaction.h). */
-static void note_request(const llm_tool_loop_params_t *params, const char *input, int images) {
+static void note_request(const llm_tool_loop_params_t *params, const char *input) {
    if (!params->has_session) {
       return;
    }
    const size_t input_len = input ? strlen(input) : 0;
    const int estimate = llm_context_estimate_tokens(params->conversation_history) +
-                        (int)(input_len / 4) + images * (LLM_COMPACTION_IMAGE_ESTIMATE_CHARS / 4);
+                        (int)(input_len / 4);
    llm_context_note_request(params->session_id, estimate, params->llm_type, params->cloud_provider,
                             params->model);
 }
@@ -170,17 +171,9 @@ static session_t *call_session(const llm_tool_loop_params_t *params, bool even_d
  * appended — guaranteed unique because an assistant turn is always one row
  * (llm_history_rows_append) and only role:tool result rows fan out.
  *
- * A persisted capture-image message (see llm_tools_add_results_openai/claude,
- * llm_tools.c) is DELIBERATELY excluded here: it carries neither tool_calls
- * nor tool_call_id, so the walk below skips its row regardless of provider.  This is intentional,
- * not a gap: conv_db reload expects images as `[IMAGE:id]` markers pointing
- * at the image store (see image_rehydrate.c), not raw embedded base64
- * in a message row — writing the base64 JSON verbatim here would produce a
- * row the reload path can't parse back into a real image.  Wiring captures
- * through the image store's marker system is a real follow-up, not a
- * same-diff fix.  Net effect: tool-captured images stay visible for the
- * live session (in-memory conversation_history) but don't survive a WebUI
- * reconnect/reload — same as before this feature existed. */
+ * A result's images (llm_tool_images.h) go with its tool row: the row names
+ * them by id (messages.images) and binds them as it is saved, so a reload
+ * rebuilds them from the store as the live turn built them. */
 static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                        int before_len,
                                        const char *reasoning_json,
@@ -355,10 +348,16 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
             r_is_error = json_object_get_boolean(eo);
          }
          if (cb) {
-            const session_tool_row_t row = { .role = role,
-                                             .content = content ? content : "",
-                                             .tool_call_id = tcid,
-                                             .is_error = r_is_error };
+            struct json_object *images = NULL;
+            json_object_object_get_ex(m, LLM_HISTORY_ROW_IMAGES_KEY, &images);
+            const session_tool_row_t row = {
+               .role = role,
+               .content = content ? content : "",
+               .tool_call_id = tcid,
+               .is_error = r_is_error,
+               .images = images ? json_object_to_json_string_ext(images, JSON_C_TO_STRING_PLAIN)
+                                : NULL
+            };
             (void)cb(ud, &row);
          }
          if (ev_live) {
@@ -618,11 +617,10 @@ static char *final_answer_without_tools(llm_tool_loop_params_t *params,
    OLOG_INFO("Tool loop: Making final call without tools to present gathered results");
    llm_tool_response_t result;
    memset(&result, 0, sizeof(result));
-   note_request(params, "", 0);
-   const int rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0,
-                                      params->base_url, params->api_key, params->model,
-                                      params->chunk_callback, params->callback_userdata,
-                                      LLM_TOOLS_MAX_ITERATIONS, &result);
+   note_request(params, "");
+   const int rc = params->provider_fn(params->conversation_history, "", params->base_url,
+                                      params->api_key, params->model, params->chunk_callback,
+                                      params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
    char *text = NULL;
    if (rc == 0 && result.text) {
       text = strdup(result.text);
@@ -749,6 +747,17 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
  * Central Tool Iteration Loop
  * ============================================================================= */
 
+/* A batch's finish: its images held to what the next request may carry (a
+ * loop has no seam to compact at), then the view stage. */
+static void finish_batch(const tool_call_list_t *calls, tool_result_list_t *results, void *batch) {
+   const llm_tool_views_batch_t *b = batch;
+   llm_image_limit_t limit;
+   (void)llm_tool_images_request_limit(b->params->llm_type, b->params->cloud_provider,
+                                       b->params->model, &limit);
+   (void)llm_tool_images_cap_batch(b->params->conversation_history, results, &limit);
+   llm_tool_views_finish_batch(calls, results, batch);
+}
+
 static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
    if (!params || !params->provider_fn || !params->conversation_history) {
       OLOG_ERROR("Tool loop: Invalid parameters");
@@ -863,12 +872,11 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       llm_tool_response_t result;
       memset(&result, 0, sizeof(result));
 
-      note_request(params, params->input_text, params->vision_image_count);
+      note_request(params, params->input_text);
       int rc = params->provider_fn(params->conversation_history, params->input_text,
-                                   params->vision_images, params->vision_image_sizes,
-                                   params->vision_image_count, params->base_url, params->api_key,
-                                   params->model, params->chunk_callback, params->callback_userdata,
-                                   iteration, &result);
+                                   params->base_url, params->api_key, params->model,
+                                   params->chunk_callback, params->callback_userdata, iteration,
+                                   &result);
 
       /* Retry transient network failures (pre-flight unreachable, HTTP 429,
        * HTTP 5xx) with exponential backoff before bubbling up.  Each retry is
@@ -906,12 +914,11 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          }
          llm_tool_response_free(&result);
          memset(&result, 0, sizeof(result));
-         note_request(params, params->input_text, params->vision_image_count);
+         note_request(params, params->input_text);
          rc = params->provider_fn(params->conversation_history, params->input_text,
-                                  params->vision_images, params->vision_image_sizes,
-                                  params->vision_image_count, params->base_url, params->api_key,
-                                  params->model, params->chunk_callback, params->callback_userdata,
-                                  iteration, &result);
+                                  params->base_url, params->api_key, params->model,
+                                  params->chunk_callback, params->callback_userdata, iteration,
+                                  &result);
       }
 
       if (rc != 0) {
@@ -1025,8 +1032,8 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          /* Make one more call with tools disabled (iteration = MAX forces no tools) */
          OLOG_INFO("Tool loop: Making final call without tools to force text response");
          memset(&result, 0, sizeof(result));
-         note_request(params, "", 0);
-         rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0, params->base_url,
+         note_request(params, "");
+         rc = params->provider_fn(params->conversation_history, "", params->base_url,
                                   params->api_key, params->model, params->chunk_callback,
                                   params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
 
@@ -1065,8 +1072,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          .session = view_session,
          .budget = &view_budget,
       };
-      llm_tools_execute_all(&result.tool_calls, results, llm_tool_views_finish_batch,
-                            (void *)&view_batch);
+      llm_tools_execute_all(&result.tool_calls, results, finish_batch, (void *)&view_batch);
       if (view_session) {
          tool_result_store_set_read_budget(view_session, 0);
          session_release(view_session);
@@ -1151,16 +1157,6 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
              "information you have gathered — do not call any more tools.",
              iteration);
       }
-
-      /* Step 10: Vision images from a tool result (e.g. the `viewing` camera tool) are
-       * now persisted directly into conversation_history by
-       * llm_tools_add_results_openai/claude (Step 8), so they flow through normal
-       * history serialization on this and every future request instead of a
-       * one-shot injection. Clear the ephemeral params so a caller-supplied turn-0
-       * image (e.g. a WebUI upload) isn't resent on iteration 2+. */
-      params->vision_images = NULL;
-      params->vision_image_sizes = NULL;
-      params->vision_image_count = 0;
 
       /* Step 11: Check interrupt.  Background turns (job / research) break only
        * on their own session cancel flag; foreground turns also honor the global

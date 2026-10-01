@@ -32,6 +32,12 @@
  * field is only accepted beside thinking type "adaptive" or "enabled" (under
  * "disabled" it's a 400); with thinking omitted, the header alone selects the
  * beta's default, which is also drop_block.
+ *
+ * Inline tools: a conversation's later tool changes are sent in place, a
+ * `tool_addition` whose tool is a `tool_definition` in a mid-conversation
+ * system message, so `tools` stays what the conversation started with.  The
+ * header goes on every request whose body carries one (llm_claude_tools.c
+ * decides where they go).
  */
 
 #include "llm/llm_claude_betas.h"
@@ -44,10 +50,12 @@
 
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
+#include "llm/llm_capabilities.h"
 #include "logging.h"
 
 #define BETA_CACHE_DIAGNOSIS "cache-diagnosis-2026-04-07"
 #define BETA_BINDING_CONTROLS "thinking-binding-controls-2026-08-01"
+#define BETA_INLINE_TOOLS "inline-tools-2026-09-15"
 #define PREFIX_MISMATCH_BEHAVIOR "drop_block"
 
 /* The models Anthropic rejected a beta for: the rest of this process sends that
@@ -61,30 +69,40 @@ typedef struct {
    char model[64];
    bool diagnostics;
    bool binding;
+   bool inline_tools;
 } rejected_model_t;
 static rejected_model_t s_rejected[REJECTED_MODELS_MAX];
 static int s_rejected_count;
 static bool s_all_diagnostics_off;
 static bool s_all_binding_off;
+static bool s_all_inline_off;
 static pthread_mutex_t s_rejected_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Which betas are off for @p model. */
-static void rejected_for(const char *model, bool *diagnostics_off, bool *binding_off) {
+typedef struct {
+   bool diagnostics;
+   bool binding;
+   bool inline_tools;
+} betas_off_t;
+
+static betas_off_t rejected_for(const char *model) {
    pthread_mutex_lock(&s_rejected_mutex);
-   *diagnostics_off = s_all_diagnostics_off;
-   *binding_off = s_all_binding_off;
+   betas_off_t off = { s_all_diagnostics_off, s_all_binding_off, s_all_inline_off };
    for (int i = 0; i < s_rejected_count; i++) {
       if (strcmp(s_rejected[i].model, model) == 0) {
-         *diagnostics_off = *diagnostics_off || s_rejected[i].diagnostics;
-         *binding_off = *binding_off || s_rejected[i].binding;
+         off.diagnostics = off.diagnostics || s_rejected[i].diagnostics;
+         off.binding = off.binding || s_rejected[i].binding;
+         off.inline_tools = off.inline_tools || s_rejected[i].inline_tools;
          break;
       }
    }
    pthread_mutex_unlock(&s_rejected_mutex);
+   return off;
 }
 
-/* Turn a beta off for @p model.  Returns true the first time (to log once). */
-static bool reject_for(const char *model, bool diagnostics, bool binding) {
+/* Turn the betas @p off names off for @p model.  Returns true the first time
+ * (to log once). */
+static bool reject_for(const char *model, betas_off_t off) {
    bool first = false;
    pthread_mutex_lock(&s_rejected_mutex);
    rejected_model_t *entry = NULL;
@@ -100,19 +118,27 @@ static bool reject_for(const char *model, bool diagnostics, bool binding) {
       snprintf(entry->model, sizeof(entry->model), "%s", model);
    }
    if (entry) {
-      first = (diagnostics && !entry->diagnostics) || (binding && !entry->binding);
-      entry->diagnostics = entry->diagnostics || diagnostics;
-      entry->binding = entry->binding || binding;
+      first = (off.diagnostics && !entry->diagnostics) || (off.binding && !entry->binding) ||
+              (off.inline_tools && !entry->inline_tools);
+      entry->diagnostics = entry->diagnostics || off.diagnostics;
+      entry->binding = entry->binding || off.binding;
+      entry->inline_tools = entry->inline_tools || off.inline_tools;
    } else {
-      first = (diagnostics && !s_all_diagnostics_off) || (binding && !s_all_binding_off);
-      s_all_diagnostics_off = s_all_diagnostics_off || diagnostics;
-      s_all_binding_off = s_all_binding_off || binding;
+      first = (off.diagnostics && !s_all_diagnostics_off) || (off.binding && !s_all_binding_off) ||
+              (off.inline_tools && !s_all_inline_off);
+      s_all_diagnostics_off = s_all_diagnostics_off || off.diagnostics;
+      s_all_binding_off = s_all_binding_off || off.binding;
+      s_all_inline_off = s_all_inline_off || off.inline_tools;
    }
    pthread_mutex_unlock(&s_rejected_mutex);
    return first;
 }
 /* The calling thread's request was rejected for a beta: send it again. */
 static __thread bool t_retry = false;
+/* The calling thread's turn had tools defined in a message rejected: the rest
+ * of its requests fold them, and the session records it on the conversation
+ * once the turn's call returns (claude_betas_take_inline_rejected). */
+static __thread bool t_inline_rejected = false;
 
 /* The Anthropic API itself (exact host), where the betas exist; a gateway or
  * proxy in front of it may reject the unknown fields. */
@@ -172,9 +198,56 @@ static void add_binding_controls(struct json_object *request) {
    json_object_object_add(thinking, "block_binding", binding);
 }
 
+bool claude_betas_inline_tools_ok(const char *base_url, const char *model) {
+   return model && is_first_party_endpoint(base_url) && llm_model_inline_tools(model) &&
+          !rejected_for(model).inline_tools;
+}
+
+bool claude_betas_render_inline(const char *base_url) {
+   return !t_inline_rejected && is_first_party_endpoint(base_url);
+}
+
+bool claude_betas_take_inline_rejected(void) {
+   const bool rejected = t_inline_rejected;
+   t_inline_rejected = false;
+   return rejected;
+}
+
+/* Whether @p request defines a tool in a message (a tool_addition block in a
+ * mid-conversation system message). */
+static bool carries_inline_tools(struct json_object *request) {
+   struct json_object *messages = NULL;
+   if (!json_object_object_get_ex(request, "messages", &messages)) {
+      return false;
+   }
+   const size_t n = json_object_array_length(messages);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(messages, i);
+      struct json_object *role = NULL;
+      struct json_object *content = NULL;
+      if (!json_object_object_get_ex(msg, "role", &role) ||
+          strcmp(json_object_get_string(role), "system") != 0 ||
+          !json_object_object_get_ex(msg, "content", &content) ||
+          !json_object_is_type(content, json_type_array)) {
+         continue;
+      }
+      const size_t nb = json_object_array_length(content);
+      for (size_t b = 0; b < nb; b++) {
+         struct json_object *type = NULL;
+         if (json_object_object_get_ex(json_object_array_get_idx(content, b), "type", &type) &&
+             strcmp(json_object_get_string(type), "tool_addition") == 0) {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
 void claude_betas_add(struct json_object *request, const char *base_url, claude_betas_t *sent) {
    sent->diagnostics = false;
    sent->binding = false;
+   sent->inline_tools = false;
+   sent->inline_rejected = false;
    sent->model[0] = '\0';
    if (!request || !is_first_party_endpoint(base_url)) {
       return;
@@ -183,28 +256,39 @@ void claude_betas_add(struct json_object *request, const char *base_url, claude_
    if (json_object_object_get_ex(request, "model", &model)) {
       snprintf(sent->model, sizeof(sent->model), "%s", json_object_get_string(model));
    }
-   bool diagnostics_off = false;
-   bool binding_off = false;
-   rejected_for(sent->model, &diagnostics_off, &binding_off);
-   if (!diagnostics_off) {
+   const betas_off_t off = rejected_for(sent->model);
+   if (!off.diagnostics) {
       add_cache_diagnostics(request);
       sent->diagnostics = true;
    }
-   if (!binding_off) {
+   if (!off.binding) {
       add_binding_controls(request); /* the header goes on every request, thinking or not */
       sent->binding = true;
    }
+   /* The body decided (claude_betas_inline_tools_ok when it was built). */
+   sent->inline_tools = carries_inline_tools(request);
 }
 
 struct curl_slist *claude_betas_header(struct curl_slist *headers, const claude_betas_t *sent) {
-   if (!sent->diagnostics && !sent->binding) {
+   const char *on[3];
+   int n = 0;
+   if (sent->diagnostics) {
+      on[n++] = BETA_CACHE_DIAGNOSIS;
+   }
+   if (sent->binding) {
+      on[n++] = BETA_BINDING_CONTROLS;
+   }
+   if (sent->inline_tools) {
+      on[n++] = BETA_INLINE_TOOLS;
+   }
+   if (n == 0) {
       return headers;
    }
-   char header[160];
-   snprintf(header, sizeof(header), "anthropic-beta: %s%s%s",
-            sent->diagnostics ? BETA_CACHE_DIAGNOSIS : "",
-            sent->diagnostics && sent->binding ? "," : "",
-            sent->binding ? BETA_BINDING_CONTROLS : "");
+   char header[192];
+   int len = snprintf(header, sizeof(header), "anthropic-beta: ");
+   for (int i = 0; i < n && len > 0 && (size_t)len < sizeof(header); i++) {
+      len += snprintf(header + len, sizeof(header) - (size_t)len, "%s%s", i ? "," : "", on[i]);
+   }
    return curl_slist_append(headers, header);
 }
 
@@ -221,8 +305,9 @@ static bool refuses(const char *message, const char *beta, const char *field) {
    return strstr(message, "Extra inputs are not permitted") && strstr(message, field);
 }
 
-bool claude_betas_rejected(long http_code, const char *body, const claude_betas_t *sent) {
-   if (http_code != 400 || !body || !sent || (!sent->diagnostics && !sent->binding)) {
+bool claude_betas_rejected(long http_code, const char *body, claude_betas_t *sent) {
+   if (http_code != 400 || !body || !sent ||
+       (!sent->diagnostics && !sent->binding && !sent->inline_tools)) {
       return false;
    }
    json_object *parsed = json_tokener_parse(body);
@@ -241,7 +326,7 @@ bool claude_betas_rejected(long http_code, const char *body, const claude_betas_
    bool rejected = false;
    if (type && message && strcmp(type, "invalid_request_error") == 0) {
       if (sent->diagnostics && refuses(message, BETA_CACHE_DIAGNOSIS, "diagnostics")) {
-         if (reject_for(sent->model, true, false)) {
+         if (reject_for(sent->model, (betas_off_t){ .diagnostics = true })) {
             OLOG_WARNING("Claude API rejected the cache diagnostics for %s (%.200s); continuing "
                          "without them",
                          sent->model, message);
@@ -249,7 +334,7 @@ bool claude_betas_rejected(long http_code, const char *body, const claude_betas_
          rejected = true;
       }
       if (sent->binding && refuses(message, BETA_BINDING_CONTROLS, "block_binding")) {
-         if (reject_for(sent->model, false, true)) {
+         if (reject_for(sent->model, (betas_off_t){ .binding = true })) {
             /* Correctness, not telemetry: without the controls an account created
              * on or after 2026-08-31 gets a 400 on any history mismatch. */
             OLOG_ERROR("Claude API rejected the thinking binding controls for %s (%.200s); "
@@ -257,6 +342,20 @@ bool claude_betas_rejected(long http_code, const char *body, const claude_betas_
                        "request",
                        sent->model, message, sent->model);
          }
+         rejected = true;
+      }
+      /* Strictly an error naming the beta: one about a tool's definition
+       * itself (a bad schema) must fail as it is, not fold. */
+      if (sent->inline_tools && strstr(message, BETA_INLINE_TOOLS)) {
+         if (reject_for(sent->model, (betas_off_t){ .inline_tools = true })) {
+            OLOG_WARNING("Claude API rejected tools defined in a message for %s (%.200s); "
+                         "the conversation's tool changes fold into its tools from now on",
+                         sent->model, message);
+         }
+         /* This turn folds them from its resend on; the session records it on
+          * the conversation (its later requests, after a restart). */
+         sent->inline_rejected = true;
+         t_inline_rejected = true;
          rejected = true;
       }
    }

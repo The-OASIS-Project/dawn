@@ -31,12 +31,16 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/image_rehydrate.h"
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_capabilities.h"
+#include "llm/llm_claude_tools.h"
+#include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -58,69 +62,6 @@ static bool is_current_session_remote(void) {
 
 
 /**
- * @brief Detect MIME type from base64-encoded image data
- *
- * Checks the first few base64 characters which encode the magic bytes:
- * - PNG:  starts with "iVBORw0KGgo" (0x89 0x50 0x4E 0x47...)
- * - JPEG: starts with "/9j/"        (0xFF 0xD8 0xFF)
- * - GIF:  starts with "R0lGOD"      ("GIF8")
- * - WebP: starts with "UklGR"       ("RIFF")
- *
- * @param base64_data Base64-encoded image data
- * @return MIME type string (static, do not free)
- */
-const char *llm_claude_detect_image_mime_type(const char *base64_data) {
-   if (!base64_data || strlen(base64_data) < 8) {
-      return "image/jpeg"; /* Default fallback */
-   }
-
-   /* PNG: 0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A -> "iVBORw0KGgo" */
-   if (strncmp(base64_data, "iVBORw", 6) == 0) {
-      return "image/png";
-   }
-
-   /* JPEG: 0xFF 0xD8 0xFF -> "/9j/" */
-   if (strncmp(base64_data, "/9j/", 4) == 0) {
-      return "image/jpeg";
-   }
-
-   /* GIF: "GIF8" -> "R0lGOD" */
-   if (strncmp(base64_data, "R0lGOD", 6) == 0) {
-      return "image/gif";
-   }
-
-   /* WebP: "RIFF" -> "UklGR" */
-   if (strncmp(base64_data, "UklGR", 5) == 0) {
-      return "image/webp";
-   }
-
-   return "image/jpeg"; /* Default fallback */
-}
-
-/**
- * @brief Create a Claude-format image content block
- *
- * Automatically detects the image MIME type from the base64 data.
- */
-json_object *llm_claude_create_image_block(const char *vision_image) {
-   json_object *image_obj = json_object_new_object();
-   json_object_object_add(image_obj, "type", json_object_new_string("image"));
-
-   /* Detect actual MIME type from base64 data */
-   const char *media_type = llm_claude_detect_image_mime_type(vision_image);
-
-   json_object *source_obj = json_object_new_object();
-   json_object_object_add(source_obj, "type", json_object_new_string("base64"));
-   json_object_object_add(source_obj, "media_type", json_object_new_string(media_type));
-   json_object_object_add(source_obj, "data", json_object_new_string(vision_image));
-   json_object_object_add(image_obj, "source", source_obj);
-
-   OLOG_INFO("Claude: Created image block with detected media_type=%s", media_type);
-
-   return image_obj;
-}
-
-/**
  * @brief Convert OpenAI image_url content block to Claude image format
  *
  * OpenAI format: {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
@@ -130,6 +71,115 @@ json_object *llm_claude_create_image_block(const char *vision_image) {
  * @param block Content block to convert (or copy if not image_url)
  * @return New json_object in Claude format (caller must json_object_put), or NULL on error
  */
+/* Whether @p obj, or a part of its content, has a key of DAWN's own. */
+static bool has_internal_key(json_object *obj) {
+   json_object_object_foreach(obj, key, val) {
+      if (key[0] == '_') {
+         return true;
+      }
+      if (strcmp(key, "content") == 0 && json_object_is_type(val, json_type_array)) {
+         const size_t n = json_object_array_length(val);
+         for (size_t i = 0; i < n; i++) {
+            json_object *part = json_object_array_get_idx(val, i);
+            if (json_object_is_type(part, json_type_object) && has_internal_key(part)) {
+               return true;
+            }
+         }
+      }
+   }
+   return false;
+}
+
+/* @p block less DAWN's own keys, its content's parts too (a tool_result's
+ * images): a new reference.  NULL on out of memory. */
+static json_object *without_internal_keys(json_object *block) {
+   if (!has_internal_key(block)) {
+      return json_object_get(block);
+   }
+   json_object *copy = json_object_new_object();
+   if (!copy) {
+      return NULL;
+   }
+   json_object_object_foreach(block, k, v) {
+      if (k[0] == '_') {
+         continue;
+      }
+      json_object *value = NULL;
+      if (strcmp(k, "content") == 0 && json_object_is_type(v, json_type_array)) {
+         const size_t n = json_object_array_length(v);
+         value = json_object_new_array_ext((int)n);
+         for (size_t i = 0; value && i < n; i++) {
+            json_object *part = json_object_array_get_idx(v, i);
+            json_object *plain = json_object_is_type(part, json_type_object)
+                                     ? without_internal_keys(part)
+                                     : json_object_get(part);
+            if (!plain) {
+               json_object_put(value);
+               value = NULL;
+               break;
+            }
+            json_object_array_add(value, plain);
+         }
+      } else {
+         value = json_object_get(v);
+      }
+      if (v && !value) {
+         json_object_put(copy);
+         return NULL;
+      }
+      json_object_object_add(copy, k, value);
+   }
+   return copy;
+}
+
+static json_object *convert_content_block_to_claude(json_object *block);
+
+/* A tool result's @p parts converted into @p out.  An image that doesn't
+ * convert (out of memory, not a data URI) is the fixed stand-in a reload
+ * shows for a missing one, never dropped. */
+static void convert_result_parts(json_object *parts, json_object *out) {
+   const size_t n = json_object_array_length(parts);
+   for (size_t i = 0; i < n; i++) {
+      json_object *from = json_object_array_get_idx(parts, i);
+      json_object *part = convert_content_block_to_claude(from);
+      if (!part && llm_part_is_image(from)) {
+         part = json_object_new_object();
+         if (part) {
+            json_object_object_add(part, "type", json_object_new_string("text"));
+            json_object_object_add(part, "text",
+                                   json_object_new_string(IMAGE_REHYDRATE_MISSING_TEXT));
+         }
+      }
+      if (part) {
+         json_object_array_add(out, part);
+      }
+   }
+}
+
+/* A tool_result @p block whose content is @p parts, its parts converted (an
+ * image_url part an image block) and DAWN's own keys left out.  NULL on out
+ * of memory. */
+static json_object *convert_tool_result_to_claude(json_object *block, json_object *parts) {
+   json_object *copy = json_object_new_object();
+   json_object *converted = json_object_new_array();
+   if (!copy || !converted) {
+      json_object_put(copy);
+      json_object_put(converted);
+      return NULL;
+   }
+   convert_result_parts(parts, converted);
+   json_object_object_foreach(block, key, val) {
+      if (key[0] == '_') {
+         continue;
+      }
+      json_object_object_add(copy, key,
+                             strcmp(key, "content") == 0 ? json_object_get(converted)
+                                                         : json_object_get(val));
+   }
+   json_object_put(converted);
+   return copy;
+}
+
 static json_object *convert_content_block_to_claude(json_object *block) {
    if (!block) {
       return NULL;
@@ -154,27 +204,19 @@ static json_object *convert_content_block_to_claude(json_object *block) {
    }
 
    const char *block_type = json_object_get_string(type_obj);
+   json_object *result_parts = NULL;
+   if (block_type && strcmp(block_type, "tool_result") == 0 &&
+       json_object_object_get_ex(block, "content", &result_parts) &&
+       json_object_is_type(result_parts, json_type_array)) {
+      /* A result that carried images: its parts converted too (an image is
+       * an image_url part in every history, llm_tool_images_render.h). */
+      return convert_tool_result_to_claude(block, result_parts);
+   }
    if (!block_type || strcmp(block_type, "image_url") != 0) {
       /* Not image_url: the block as it is, less any key of DAWN's own (a
-       * turn's context parts carry their kind). */
-      bool internal = false;
-      json_object_object_foreach(block, key, val) {
-         (void)val;
-         internal = internal || key[0] == '_';
-      }
-      if (!internal) {
-         return json_object_get(block);
-      }
-      json_object *copy = json_object_new_object();
-      if (!copy) {
-         return NULL;
-      }
-      json_object_object_foreach(block, k, v) {
-         if (k[0] != '_') {
-            json_object_object_add(copy, k, json_object_get(v));
-         }
-      }
-      return copy;
+       * turn's context parts carry their kind, a result's images their
+       * stored id). */
+      return without_internal_keys(block);
    }
 
    // This is an OpenAI image_url block - convert to Claude format
@@ -240,171 +282,10 @@ static json_object *convert_content_block_to_claude(json_object *block) {
    return image_obj;
 }
 
-/**
- * @brief Add vision images to Claude messages array
- *
- * Either modifies the last user message to include the images, or creates
- * a new user message if the last message isn't suitable.
- *
- * @param messages_array Claude messages array
- * @param input_text Text to include with the images
- * @param vision_images Array of base64-encoded image data
- * @param vision_image_count Number of images in the array
- */
 static const char *msg_role(json_object *msg);
 static const char *part_type(json_object *part);
 static bool parts_have_type(json_object *parts, const char *type);
 static json_object *text_block(const char *text);
-
-/* How an operator's note opens on a model that can't take it as a system
- * message (llm_operator_note_label: with the conversation's tag). */
-#define OPERATOR_NOTE_OPEN "[Operator note"
-
-/* Whether @p text is one of DAWN's own blocks (an operator's note, a framed
- * turn context or memory), never the question.  None found: the question's
- * text and images go after them. */
-static bool is_dawn_block(const char *text) {
-   static const char *const k_opens[] = { OPERATOR_NOTE_OPEN, "--- TURN CONTEXT",
-                                          "--- USER MEMORY" };
-   for (size_t i = 0; text && i < sizeof(k_opens) / sizeof(k_opens[0]); i++) {
-      if (strncmp(text, k_opens[i], strlen(k_opens[i])) == 0) {
-         return true;
-      }
-   }
-   return false;
-}
-
-static void add_vision_to_claude_messages(json_object *messages_array,
-                                          const char *input_text,
-                                          const char **vision_images,
-                                          int vision_image_count) {
-   if (vision_image_count <= 0 || !vision_images) {
-      return;
-   }
-
-   int msg_count = json_object_array_length(messages_array);
-   /* The turn's user message: an operator's system message after it stays. */
-   while (msg_count > 0 && msg_role(json_object_array_get_idx(messages_array, msg_count - 1)) &&
-          strcmp(msg_role(json_object_array_get_idx(messages_array, msg_count - 1)), "system") ==
-              0) {
-      msg_count--;
-   }
-   json_object *last_msg = msg_count > 0 ? json_object_array_get_idx(messages_array, msg_count - 1)
-                                         : NULL;
-   json_object *role_obj = NULL;
-   const char *last_role_str = NULL;
-
-   if (last_msg && json_object_object_get_ex(last_msg, "role", &role_obj)) {
-      last_role_str = json_object_get_string(role_obj);
-   }
-
-   // Check if last message is a user message with plain text content
-   json_object *last_content = NULL;
-   bool is_text_user_message = false;
-   bool is_question_blocks = false; /* the question after its turn's context */
-   if (last_msg && last_role_str && strcmp(last_role_str, "user") == 0) {
-      if (json_object_object_get_ex(last_msg, "content", &last_content)) {
-         if (json_object_is_type(last_content, json_type_string)) {
-            is_text_user_message = true;
-         } else if (json_object_is_type(last_content, json_type_array) &&
-                    !parts_have_type(last_content, "tool_result") &&
-                    parts_have_type(last_content, "text")) {
-            is_question_blocks = true;
-         }
-      }
-   }
-
-   if (is_question_blocks) {
-      /* The context before it and any operator's note after it stay where they
-       * are; the question (the last text block that isn't a note) becomes the
-       * turn's text, followed by the images. */
-      json_object *content_array = json_object_new_array();
-      const size_t n = json_object_array_length(last_content);
-      size_t question = n;
-      /* The block that is the question's own text; failing that, the last
-       * that isn't a note (a question an image came with may have none). */
-      for (size_t i = n; input_text && i-- > 0;) {
-         json_object *part = json_object_array_get_idx(last_content, i);
-         json_object *text = NULL;
-         if (part_type(part) && strcmp(part_type(part), "text") == 0 &&
-             json_object_object_get_ex(part, "text", &text) &&
-             strcmp(json_object_get_string(text), input_text) == 0) {
-            question = i;
-            break;
-         }
-      }
-      for (size_t i = n; question == n && i-- > 0;) {
-         json_object *part = json_object_array_get_idx(last_content, i);
-         json_object *text = NULL;
-         if (part_type(part) && strcmp(part_type(part), "text") == 0 &&
-             json_object_object_get_ex(part, "text", &text) &&
-             !is_dawn_block(json_object_get_string(text))) {
-            question = i;
-            break;
-         }
-      }
-      for (size_t i = 0; content_array && i <= n; i++) {
-         if (i == question || (i == n && question == n)) {
-            if (input_text && input_text[0]) { /* an empty text block is refused */
-               json_object_array_add(content_array, text_block(input_text));
-            }
-            for (int k = 0; k < vision_image_count; k++) {
-               if (vision_images[k]) {
-                  json_object_array_add(content_array,
-                                        llm_claude_create_image_block(vision_images[k]));
-               }
-            }
-         } else if (i < n) {
-            json_object_array_add(content_array,
-                                  json_object_get(json_object_array_get_idx(last_content, i)));
-         }
-      }
-      if (content_array) {
-         json_object_object_add(last_msg, "content", content_array);
-      }
-   } else if (is_text_user_message) {
-      // Last message is user message with text - add vision content
-      json_object *content_array = json_object_new_array();
-
-      json_object *text_obj = json_object_new_object();
-      json_object_object_add(text_obj, "type", json_object_new_string("text"));
-      json_object_object_add(text_obj, "text", json_object_new_string(input_text));
-      json_object_array_add(content_array, text_obj);
-
-      // Add all images
-      for (int i = 0; i < vision_image_count; i++) {
-         if (vision_images[i]) {
-            json_object_array_add(content_array, llm_claude_create_image_block(vision_images[i]));
-         }
-      }
-      json_object_object_add(last_msg, "content", content_array);
-   } else {
-      // Create a new user message with the vision images
-      OLOG_INFO("Claude: Adding vision as new user message (last message not suitable)");
-
-      json_object *new_user_msg = json_object_new_object();
-      json_object_object_add(new_user_msg, "role", json_object_new_string("user"));
-
-      json_object *content_array = json_object_new_array();
-
-      json_object *text_obj = json_object_new_object();
-      json_object_object_add(text_obj, "type", json_object_new_string("text"));
-      json_object_object_add(text_obj, "text",
-                             json_object_new_string("Here are the captured images. "
-                                                    "Please respond to the user's request."));
-      json_object_array_add(content_array, text_obj);
-
-      // Add all images
-      for (int i = 0; i < vision_image_count; i++) {
-         if (vision_images[i]) {
-            json_object_array_add(content_array, llm_claude_create_image_block(vision_images[i]));
-         }
-      }
-      json_object_object_add(new_user_msg, "content", content_array);
-
-      json_object_array_add(messages_array, new_user_msg);
-   }
-}
 
 /* Longest text kept from a tool result turned into a note. */
 #define ORPHAN_RESULT_TEXT_MAX 1900
@@ -587,6 +468,13 @@ static void add_operator_message(json_object *messages,
    if (*last_role && strcmp(*last_role, "system") == 0 && *last_message) {
       json_object *content = NULL;
       json_object_object_get_ex(*last_message, "content", &content);
+      if (json_object_is_type(content, json_type_array)) {
+         json_object *block = text_block(text); /* beside a tool change's blocks */
+         if (block) {
+            json_object_array_add(content, block);
+         }
+         return;
+      }
       const char *before = json_object_get_string(content);
       const size_t len = strlen(before ? before : "") + strlen(text) + 3;
       char *joined = malloc(len);
@@ -656,11 +544,13 @@ static void place_system_messages(json_object *messages, const char *label) {
                               : NULL;
       const bool prev_user = prev && msg_role(prev) && strcmp(msg_role(prev), "user") == 0;
       const bool next_ok = !next || (msg_role(next) && strcmp(msg_role(next), "assistant") == 0);
-      if (prev_user && next_ok) {
-         continue;
-      }
       json_object *content = NULL;
       json_object_object_get_ex(msg, "content", &content);
+      /* One carrying a tool change was placed where it may sit (a note
+       * can't carry a definition). */
+      if ((prev_user && next_ok) || json_object_is_type(content, json_type_array)) {
+         continue;
+      }
       json_object *note = note_block(label, json_object_get_string(content));
       if (prev_user) {
          json_object *blocks = content_blocks(prev);
@@ -863,13 +753,19 @@ static int repair_tool_pairs(json_object *messages) {
 
 json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *input_text,
-                                      const char **vision_images,
-                                      const size_t *vision_image_sizes,
-                                      int vision_image_count,
                                       const char *model,
                                       const char *carrier,
-                                      int iteration) {
-   (void)vision_image_sizes;  // Sizes not needed for base64 strings
+                                      int iteration,
+                                      bool inline_tools) {
+   /* A model that takes no images reads a fixed text for each a tool returned. */
+   json_object *shown_history = NULL;
+   if (!is_vision_enabled_for_current_llm()) {
+      shown_history = llm_tool_images_without(openai_conversation);
+      if (!shown_history) {
+         return NULL;
+      }
+      openai_conversation = shown_history;
+   }
    json_object *claude_request = json_object_new_object();
 
    // Model: use passed model, or fall back to config default
@@ -919,51 +815,13 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
              thinking.effort[0] ? "/" : "", thinking.effort, model_name,
              thinking.clamped ? " (setting resolved to what the model accepts)" : "");
 
-   // Add tools if native tool calling is enabled
-   if (llm_tools_enabled(NULL)) {
-      /* The conversation's own tool set when it has one: the same on every
-       * request (a tool this surface may not use is refused when called). */
-      const char *source = NULL;
-      struct json_object *tools = llm_tools_request_tools(openai_conversation,
-                                                          is_current_session_remote(), true,
-                                                          &source);
-      if (tools) {
-         json_object_object_add(claude_request, "tools", tools);
-         OLOG_INFO("Claude: Added %zu tools to request (%s)", json_object_array_length(tools),
-                   source);
-         /* The loop's last call, for a text answer: the tools stay (the
-          * request reads as every other did), none may be called. */
-         if (iteration >= LLM_TOOLS_MAX_ITERATIONS) {
-            json_object *choice = json_object_new_object();
-            json_object_object_add(choice, "type", json_object_new_string("none"));
-            json_object_object_add(claude_request, "tool_choice", choice);
-         }
-
-         /* Attach cache_control to the LAST tool so the entire tools
-          * array is cacheable as its own prefix.  Anthropic caches
-          * "everything up to and including the block that carries the
-          * cache_control marker"; placing it on the final tool means
-          * the full tools list becomes a single cache breakpoint
-          * independent of the system block's cache breakpoint below.
-          *
-          * Tool schemas (~3-5 KB JSON across 27 tools today) change
-          * only on tool registry / capability edits — settings-stable
-          * across a session.  This saves another ~700-1300 tokens at
-          * the 90% read discount per turn, on top of the system-block
-          * cache.  Anthropic permits up to 4 cache_control blocks per
-          * request; we use 2 (last tool + first system block).  Two
-          * slots remain for future use. */
-         int tool_count = json_object_array_length(tools);
-         if (tool_count > 0) {
-            json_object *last_tool = json_object_array_get_idx(tools, tool_count - 1);
-            if (last_tool != NULL && json_object_is_type(last_tool, json_type_object)) {
-               json_object *cache_control = json_object_new_object();
-               json_object_object_add(cache_control, "type", json_object_new_string("ephemeral"));
-               json_object_object_add(last_tool, "cache_control", cache_control);
-            }
-         }
-      }
-   }
+   /* The request's tools; a conversation's tool changes go in place only
+    * beside its own set (not on a no-tools turn, not on a research run's). */
+   const bool tools_in_place = llm_tools_enabled(NULL) &&
+                               llm_claude_tools_add(claude_request, openai_conversation,
+                                                    inline_tools, is_current_session_remote(),
+                                                    iteration) &&
+                               inline_tools;
 
    // Extract system message and user/assistant messages
    json_object *system_array = json_object_new_array();
@@ -1199,8 +1057,18 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          json_object *result_block = json_object_new_object();
          json_object_object_add(result_block, "type", json_object_new_string("tool_result"));
          json_object_object_add(result_block, "tool_use_id", json_object_new_string(tool_call_id));
-         json_object_object_add(result_block, "content",
-                                json_object_new_string(result_content ? result_content : ""));
+         if (json_object_is_type(content_obj, json_type_array)) {
+            /* A result that carried images: its text and image parts, in the
+             * result, as a live Claude history holds them. */
+            json_object *parts = json_object_new_array();
+            if (parts) {
+               convert_result_parts(content_obj, parts);
+            }
+            json_object_object_add(result_block, "content", parts);
+         } else {
+            json_object_object_add(result_block, "content",
+                                   json_object_new_string(result_content ? result_content : ""));
+         }
          json_object_array_add(result_array, result_block);
 
          // Tool results must be in user messages for Claude
@@ -1241,6 +1109,12 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       }
 
       const message_kind_t kind = llm_history_kind_of(msg);
+      if (strcmp(role, "system") == 0 && kind == MESSAGE_KIND_TOOL_CHANGE) {
+         /* In place when it goes there; else it is in `tools` already. */
+         llm_claude_tool_change_add(messages_array, openai_conversation, (size_t)i, tools_in_place,
+                                    &last_message, &last_role);
+         continue;
+      }
       if (strcmp(role, "system") == 0 &&
           (kind == MESSAGE_KIND_DIRECTIVE || kind == MESSAGE_KIND_INSTRUCTION)) {
          /* In place, never in the top-level system prompt: that stays as the
@@ -1384,11 +1258,6 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       json_object_put(system_array);
    }
 
-   // If vision images are provided, add them to a user message
-   if (vision_images != NULL && vision_image_count > 0) {
-      add_vision_to_claude_messages(messages_array, input_text, vision_images, vision_image_count);
-   }
-
    place_system_messages(messages_array, note_label);
    (void)repair_tool_pairs(messages_array);
    /* A one-off request (a compaction's summary) is never read back: its cache
@@ -1397,6 +1266,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       mark_conversation_breakpoint(messages_array);
    }
    json_object_object_add(claude_request, "messages", messages_array);
+   json_object_put(shown_history);
 
    return claude_request;
 }

@@ -18,7 +18,7 @@
  *
  * OpenAI /v1/chat/completions API implementation. Non-streaming, streaming
  * (with recursive tool execution), and single-shot streaming paths including
- * vision handling and tool-call iteration. History conversion lives in
+ * tool-call iteration. History conversion lives in
  * llm_openai_history.c.
  */
 
@@ -234,9 +234,6 @@ static void add_cloud_reasoning_effort(json_object *root,
 
 char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                                     const char *input_text,
-                                    const char **vision_images,
-                                    const size_t *vision_image_sizes,
-                                    int vision_image_count,
                                     const char *base_url,
                                     const char *api_key,
                                     const char *model) {
@@ -282,18 +279,6 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
       json_object_object_add(root, "model", json_object_new_string(model_name));
    }
 
-   if (vision_images != NULL && vision_image_count > 0) {
-      /* Copy-on-write: converted_history may share message objects with the
-       * caller's session history, so apply vision to a private copy. */
-      json_object *with_vision = llm_openai_apply_vision_images(converted_history, input_text,
-                                                                vision_images, vision_image_sizes,
-                                                                vision_image_count);
-      if (with_vision != NULL) {
-         json_object_put(converted_history);
-         converted_history = with_vision;
-      }
-   }
-
    json_object_object_add(root, "messages", converted_history);
 
    if (api_key == NULL) {
@@ -307,7 +292,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
       /* The conversation's own tool set when it has one (llm_history_kind.h). */
       const char *source = NULL;
       struct json_object *tools = llm_tools_request_tools(conversation_history,
-                                                          is_current_session_remote(), false,
+                                                          is_current_session_remote(), false, false,
                                                           &source);
       if (tools) {
          json_object_object_add(root, "tools", tools);
@@ -552,9 +537,6 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
 
 int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history,
                                         const char *input_text,
-                                        const char **vision_images,
-                                        const size_t *vision_image_sizes,
-                                        int vision_image_count,
                                         const char *base_url,
                                         const char *api_key,
                                         const char *model,
@@ -609,18 +591,6 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       add_cloud_reasoning_effort(root, model_name, base_url);
    }
 
-   if (vision_images != NULL && vision_image_count > 0) {
-      /* Copy-on-write: converted_history may share message objects with the
-       * caller's session history, so apply vision to a private copy. */
-      json_object *with_vision = llm_openai_apply_vision_images(converted_history, input_text,
-                                                                vision_images, vision_image_sizes,
-                                                                vision_image_count);
-      if (with_vision != NULL) {
-         json_object_put(converted_history);
-         converted_history = with_vision;
-      }
-   }
-
    json_object_object_add(root, "messages", converted_history);
 
    if (api_key == NULL) {
@@ -634,7 +604,8 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
     * stay (the request reads as every other did), none may be called. */
    if (llm_tools_enabled(NULL)) {
       struct json_object *tools = llm_tools_request_tools(conversation_history,
-                                                          is_current_session_remote(), false, NULL);
+                                                          is_current_session_remote(), false, false,
+                                                          NULL);
       if (tools) {
          json_object_object_add(root, "tools", tools);
          json_object_object_add(root, "tool_choice",

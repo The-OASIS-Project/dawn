@@ -35,6 +35,10 @@
 #include "llm/llm_claude_format.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_openai_internal.h"
+#include "llm/llm_openai_responses_input.h"
+#include "llm/llm_tool_defs.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
 #include "tools/toml.h"
 #include "unity.h"
@@ -81,24 +85,32 @@ struct json_object *llm_tools_get_claude_format_filtered(bool r) {
    (void)r;
    return NULL;
 }
-/* The conversation's frozen set, as names only (llm_tools_request_tools). */
+/* The conversation's tools by value (llm_tools_request_tools): its frozen set
+ * and the changes not sent in place; a name (an older set) as itself. */
 struct json_object *llm_tools_request_tools(struct json_object *history,
                                             bool r,
                                             bool claude,
+                                            bool inline_ok,
                                             const char **source) {
    (void)r;
-   (void)claude;
    if (source)
-      *source = "stub";
-   struct json_object *names = llm_history_frozen_tools(history);
-   if (!names)
+      *source = "the conversation's set";
+   struct json_object *defs = llm_tool_defs_for_request(history, inline_ok);
+   if (!defs)
       return NULL;
    struct json_object *out = json_object_new_array();
-   for (size_t i = 0; i < json_object_array_length(names); i++) {
-      struct json_object *tool = json_object_new_object();
-      json_object_object_add(tool, "name", json_object_get(json_object_array_get_idx(names, i)));
+   for (size_t i = 0; i < json_object_array_length(defs); i++) {
+      struct json_object *def = json_object_array_get_idx(defs, i);
+      struct json_object *tool = NULL;
+      if (json_object_is_type(def, json_type_string)) {
+         tool = json_object_new_object();
+         json_object_object_add(tool, "name", json_object_get(def));
+      } else {
+         tool = llm_tool_def_render(def, claude);
+      }
       json_object_array_add(out, tool);
    }
+   json_object_put(defs);
    return out;
 }
 int llm_tools_get_enabled_count_filtered(bool r) {
@@ -124,6 +136,13 @@ void webui_send_error_ex(struct session *s, const char *code, const char *messag
 
 static toml_table_t *s_models;
 
+/* Whether the model takes images (llm_command_parser.c). */
+static int s_vision = 1;
+int is_vision_enabled_for_current_llm(void) {
+   return s_vision;
+}
+
+
 void setUp(void) {
    g_config.llm.max_tokens = 4096;
 }
@@ -139,8 +158,7 @@ static struct json_object *parse(const char *json) {
 }
 
 static struct json_object *render(struct json_object *history, const char *model) {
-   struct json_object *req = convert_to_claude_format(history, NULL, NULL, NULL, 0, model, CARRIER,
-                                                      0);
+   struct json_object *req = convert_to_claude_format(history, NULL, model, CARRIER, 0, false);
    TEST_ASSERT_NOT_NULL(req);
    return req;
 }
@@ -370,15 +388,18 @@ static void test_direction_before_a_question_becomes_a_note(void) {
    json_object_put(h);
 }
 
-/* Images go right after the question; its context stays in front. */
+/* An image question's images are parts of its own message (built from its
+ * stored ids): they go right after its text; its context stays in front. */
 static void test_images_follow_the_question(void) {
-   const char *msgs[] = { PREFIX, TURN2 };
+   const char *msgs[] = {
+      PREFIX, "{\"role\":\"user\",\"content\":["
+              "{\"type\":\"text\",\"text\":\"[system_time] 09:05\",\"_kind\":\"turn_context\"},"
+              "{\"type\":\"text\",\"text\":\"What is this?\"},"
+              "{\"type\":\"image_url\",\"image_url\":{\"url\":"
+              "\"data:image/png;base64,iVBORw0KGgo=\"}}]}"
+   };
    struct json_object *h = history(msgs, 2);
-   const char *image = "iVBORw0KGgo=";
-   const char *images[] = { image };
-   const size_t sizes[] = { strlen(image) };
-   struct json_object *req = convert_to_claude_format(h, "What is this?", images, sizes, 1,
-                                                      MID_SYSTEM_MODEL, CARRIER, 0);
+   struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0, false);
    struct json_object *messages = field(req, "messages");
    TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(messages));
    struct json_object *blocks = field(json_object_array_get_idx(messages, 0), "content");
@@ -387,8 +408,10 @@ static void test_images_follow_the_question(void) {
                             str(json_object_array_get_idx(blocks, 0)));
    TEST_ASSERT_EQUAL_STRING("{\"type\":\"text\",\"text\":\"What is this?\"}",
                             str(json_object_array_get_idx(blocks, 1)));
-   TEST_ASSERT_EQUAL_STRING("image", json_object_get_string(
-                                         field(json_object_array_get_idx(blocks, 2), "type")));
+   struct json_object *image = json_object_array_get_idx(blocks, 2);
+   TEST_ASSERT_EQUAL_STRING("image", json_object_get_string(field(image, "type")));
+   TEST_ASSERT_EQUAL_STRING("image/png",
+                            json_object_get_string(field(field(image, "source"), "media_type")));
    json_object_put(req);
    json_object_put(h);
 }
@@ -410,6 +433,292 @@ static void test_the_conversations_tool_set(void) {
    json_object_put(req);
    json_object_put(h);
    s_tools_on = false;
+}
+
+/* ---- A conversation's tool changes (llm_tool_defs.h), per provider ---- */
+
+#define TOOL_A "{\"name\":\"a\",\"description\":\"A\",\"parameters\":{\"type\":\"object\"}}"
+#define TOOL_B "{\"name\":\"b\",\"description\":\"B\",\"parameters\":{\"type\":\"object\"}}"
+static const char *TOOLED_PREFIX = "{\"role\":\"system\",\"content\":\"You are Friday.\","
+                                   "\"_kind\":\"prefix\",\"_tools\":[" TOOL_A "]}";
+static const char *QUESTION = "{\"role\":\"user\",\"content\":\"Hi\"}";
+static const char *ADDED_INLINE =
+    "{\"role\":\"system\",\"_kind\":\"tool_change\",\"content\":"
+    "\"{\\\"rendered\\\":\\\"inline\\\",\\\"tools\\\":[{\\\"name\\\":\\\"b\\\",\\\"description\\\":"
+    "\\\"B\\\",\\\"parameters\\\":{\\\"type\\\":\\\"object\\\"}}]}\"}";
+static const char *ANSWER = "{\"role\":\"assistant\",\"content\":\"Hello.\"}";
+static const char *NEXT = "{\"role\":\"user\",\"content\":\"And now?\"}";
+
+static struct json_object *render_tools(struct json_object *h, bool inline_tools) {
+   struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0,
+                                                      inline_tools);
+   TEST_ASSERT_NOT_NULL(req);
+   return req;
+}
+
+/* Claude, inline: `tools` stays the frozen set, the change is a system
+ * message of tool_addition blocks after the question, and it stays put. */
+static void test_claude_sends_a_tool_change_in_place(void) {
+   s_tools_on = true;
+   const char *m1[] = { TOOLED_PREFIX, QUESTION, ADDED_INLINE };
+   const char *m2[] = { TOOLED_PREFIX, QUESTION, ADDED_INLINE, ANSWER, NEXT };
+   struct json_object *h1 = history(m1, 3), *h2 = history(m2, 5);
+   struct json_object *r1 = render_tools(h1, true), *r2 = render_tools(h2, true);
+   TEST_ASSERT_EQUAL_STRING("[{\"name\":\"a\",\"description\":\"A\",\"input_schema\":{\"type\":"
+                            "\"object\"},\"cache_control\":{\"type\":\"ephemeral\"}}]",
+                            str(field(r1, "tools")));
+   TEST_ASSERT_EQUAL_STRING(str(field(r1, "tools")), str(field(r2, "tools")));
+   struct json_object *msgs1 = field(r1, "messages");
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(msgs1));
+   TEST_ASSERT_EQUAL_STRING("{\"role\":\"system\",\"content\":[{\"type\":\"tool_addition\","
+                            "\"tool\":{\"type\":\"tool_definition\",\"definition\":{\"name\":"
+                            "\"b\",\"description\":\"B\",\"input_schema\":{\"type\":\"object\"}}"
+                            "}}]}",
+                            str(json_object_array_get_idx(msgs1, 1)));
+   drop_breakpoints(r1);
+   drop_breakpoints(r2);
+   struct json_object *msgs2 = field(r2, "messages");
+   for (size_t i = 0; i < json_object_array_length(msgs1); i++) {
+      TEST_ASSERT_EQUAL_STRING(str(json_object_array_get_idx(msgs1, i)),
+                               str(json_object_array_get_idx(msgs2, i)));
+   }
+   TEST_ASSERT_NULL(strstr(str(r2), "_kind"));
+   json_object_put(r1);
+   json_object_put(r2);
+   json_object_put(h1);
+   json_object_put(h2);
+   s_tools_on = false;
+}
+
+/* Claude elsewhere (another model, another host, a rejected beta): the
+ * change folds into `tools`, and no message carries it. */
+static void test_claude_folds_a_tool_change_elsewhere(void) {
+   s_tools_on = true;
+   const char *m[] = { TOOLED_PREFIX, QUESTION, ADDED_INLINE };
+   struct json_object *h = history(m, 3);
+   struct json_object *req = render_tools(h, false);
+   TEST_ASSERT_EQUAL_STRING("[{\"name\":\"a\",\"description\":\"A\",\"input_schema\":{\"type\":"
+                            "\"object\"}},{\"name\":\"b\",\"description\":\"B\",\"input_schema\":"
+                            "{\"type\":\"object\"},\"cache_control\":{\"type\":\"ephemeral\"}}]",
+                            str(field(req, "tools")));
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(field(req, "messages")));
+   TEST_ASSERT_NULL(strstr(str(req), "tool_addition"));
+   json_object_put(req);
+   json_object_put(h);
+   s_tools_on = false;
+}
+
+/* Chat completions and Responses: a change is in the request's tools (folded),
+ * never a message. */
+static void test_openai_folds_a_tool_change(void) {
+   const char *m[] = { TOOLED_PREFIX, QUESTION, ADDED_INLINE, ANSWER };
+   struct json_object *h = history(m, 4);
+   struct json_object *chat = llm_openai_prepare_chat_history(h, "api.openai.com#00", "gpt-5.6");
+   TEST_ASSERT_NOT_NULL(chat);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(chat));
+   TEST_ASSERT_NULL(strstr(str(chat), "tool_change"));
+   TEST_ASSERT_NULL(strstr(str(chat), "rendered"));
+   struct json_object *input = llm_responses_build_input(h, NULL, NULL, 1, false,
+                                                         "api.openai.com#00", "gpt-5.6");
+   TEST_ASSERT_NOT_NULL(input);
+   TEST_ASSERT_NULL(strstr(str(input), "rendered"));
+   struct json_object *defs = llm_tool_defs_for_request(h, false);
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(defs));
+   json_object_put(defs);
+   json_object_put(input);
+   json_object_put(chat);
+   json_object_put(h);
+}
+
+/* ---- A tool's images (a camera capture), per provider ---- */
+
+#define PNG_DATA "iVBORw0KGgoAAAANSUhEUgAAAAE="
+#define PNG_URI "data:image/png;base64," PNG_DATA
+#define IMAGE_PART(id) \
+   "{\"type\":\"image_url\",\"image_url\":{\"url\":\"" PNG_URI "\"},\"_image_id\":\"" id "\"}"
+#define RESULT_PARTS(id) "[{\"type\":\"text\",\"text\":\"Image captured.\"}," IMAGE_PART(id) "]"
+
+static const char *Q1 = "{\"role\":\"user\",\"content\":\"What is on my desk?\"}";
+static const char *CALL1 = "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":"
+                           "\"c1\",\"type\":\"function\",\"function\":{\"name\":\"viewing\","
+                           "\"arguments\":\"{}\"}}]}";
+/* The result as a reload builds it (a tool row and its images) ... */
+static const char *RESULT1 = "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":" RESULT_PARTS(
+    "img_0000000000001") "}";
+/* ... and as a live Claude turn holds it. */
+static const char *RESULT1_LIVE_CLAUDE =
+    "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"c1\","
+    "\"content\":" RESULT_PARTS("img_0000000000001") "}]}";
+static const char *ANSWER1 = "{\"role\":\"assistant\",\"content\":\"A red mug.\"}";
+static const char *Q2 = "{\"role\":\"user\",\"content\":\"And its handle?\"}";
+static const char *ANSWER2 = "{\"role\":\"assistant\",\"content\":\"Chipped.\"}";
+static const char *Q3 = "{\"role\":\"user\",\"content\":\"Look again.\"}";
+static const char *CALL2 = "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":"
+                           "\"c2\",\"type\":\"function\",\"function\":{\"name\":\"viewing\","
+                           "\"arguments\":\"{}\"}}]}";
+static const char *RESULT2 = "{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":" RESULT_PARTS(
+    "img_0000000000002") "}";
+
+/* The tool_result block of the user message at @p i of a Claude request. */
+static struct json_object *claude_result(struct json_object *req, int i) {
+   struct json_object *msg = json_object_array_get_idx(field(req, "messages"), i);
+   return json_object_array_get_idx(field(msg, "content"), 0);
+}
+
+/* A capture's image goes in its tool_result, as the image it was (PNG), and
+ * every later request carries it byte for byte; a reload (a tool row with its
+ * images) renders as the live turn did. */
+static void test_tool_image_in_its_result_and_stays_put(void) {
+   const char *m1[] = { PREFIX, Q1, CALL1, RESULT1 };
+   const char *m2[] = { PREFIX, Q1, CALL1, RESULT1, ANSWER1, Q2 };
+   const char *m3[] = { PREFIX, Q1, CALL1, RESULT1, ANSWER1, Q2, ANSWER2, Q3 };
+   struct json_object *h1 = history(m1, 4), *h2 = history(m2, 6), *h3 = history(m3, 8);
+   struct json_object *r1 = render(h1, MID_SYSTEM_MODEL);
+   struct json_object *r2 = render(h2, MID_SYSTEM_MODEL);
+   struct json_object *r3 = render(h3, MID_SYSTEM_MODEL);
+
+   struct json_object *result = claude_result(r1, 2);
+   TEST_ASSERT_EQUAL_STRING("tool_result", json_object_get_string(field(result, "type")));
+   struct json_object *image = json_object_array_get_idx(field(result, "content"), 1);
+   TEST_ASSERT_EQUAL_STRING("{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":"
+                            "\"image/png\",\"data\":\"" PNG_DATA "\"}}",
+                            str(image));
+   TEST_ASSERT_NULL(strstr(str(r1), "_image_id"));
+   assert_prefix_of(r1, r2);
+   assert_prefix_of(r2, r3);
+
+   /* Live = reload. */
+   const char *live[] = { PREFIX, Q1, CALL1, RESULT1_LIVE_CLAUDE };
+   struct json_object *hl = history(live, 4);
+   struct json_object *rl = render(hl, MID_SYSTEM_MODEL);
+   drop_breakpoints(rl);
+   TEST_ASSERT_EQUAL_STRING(str(claude_result(r1, 2)), str(claude_result(rl, 2)));
+
+   json_object_put(rl);
+   json_object_put(hl);
+   json_object_put(r1);
+   json_object_put(r2);
+   json_object_put(r3);
+   json_object_put(h1);
+   json_object_put(h2);
+   json_object_put(h3);
+}
+
+/* A second capture leaves the first as it was sent. */
+static void test_second_capture_leaves_the_first(void) {
+   const char *m1[] = { PREFIX, Q1, CALL1, RESULT1, ANSWER1, Q3 };
+   const char *m2[] = { PREFIX, Q1, CALL1, RESULT1, ANSWER1, Q3, CALL2, RESULT2 };
+   struct json_object *h1 = history(m1, 6), *h2 = history(m2, 8);
+   struct json_object *r1 = render(h1, MID_SYSTEM_MODEL);
+   struct json_object *r2 = render(h2, MID_SYSTEM_MODEL);
+   assert_prefix_of(r1, r2);
+   int images = 0;
+   for (const char *p = str(field(r2, "messages")); (p = strstr(p, "\"type\":\"image\"")); p++) {
+      images++;
+   }
+   TEST_ASSERT_EQUAL_INT(2, images);
+   json_object_put(r1);
+   json_object_put(r2);
+   json_object_put(h1);
+   json_object_put(h2);
+}
+
+/* Chat completions: tool messages carry text; one user message after ALL of
+ * a turn's tool messages (parallel calls) carries their images, each call's
+ * labelled; the same on every request. */
+static void test_chat_image_message_follows_all_tool_messages(void) {
+   const char *calls = "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":["
+                       "{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"viewing\","
+                       "\"arguments\":\"{}\"}},"
+                       "{\"id\":\"c9\",\"type\":\"function\",\"function\":{\"name\":\"weather\","
+                       "\"arguments\":\"{}\"}}]}";
+   const char *weather = "{\"role\":\"tool\",\"tool_call_id\":\"c9\",\"content\":\"Sunny\"}";
+   const char *m1[] = { PREFIX, Q1, calls, RESULT1, weather };
+   const char *m2[] = { PREFIX, Q1, calls, RESULT1, weather, ANSWER1, Q2 };
+   struct json_object *h1 = history(m1, 5), *h2 = history(m2, 7);
+   struct json_object *p1 = llm_openai_prepare_chat_history(h1, "api.openai.com#00", "gpt-5.6");
+   struct json_object *p2 = llm_openai_prepare_chat_history(h2, "api.openai.com#00", "gpt-5.6");
+   TEST_ASSERT_NOT_NULL(p1);
+   TEST_ASSERT_NOT_NULL(p2);
+   TEST_ASSERT_EQUAL_INT(6, (int)json_object_array_length(p1));
+   TEST_ASSERT_EQUAL_STRING("{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"Image "
+                            "captured.\"}",
+                            str(json_object_array_get_idx(p1, 3)));
+   TEST_ASSERT_EQUAL_STRING("{\"role\":\"tool\",\"tool_call_id\":\"c9\",\"content\":\"Sunny\"}",
+                            str(json_object_array_get_idx(p1, 4)));
+   TEST_ASSERT_EQUAL_STRING("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+                            "\"Images returned by tool call c1:\"},{\"type\":\"image_url\","
+                            "\"image_url\":{\"url\":\"" PNG_URI "\"}}]}",
+                            str(json_object_array_get_idx(p1, 5)));
+   for (size_t i = 0; i < json_object_array_length(p1); i++) {
+      TEST_ASSERT_EQUAL_STRING(str(json_object_array_get_idx(p1, i)),
+                               str(json_object_array_get_idx(p2, i)));
+   }
+   TEST_ASSERT_NULL(strstr(str(p2), "_image_id"));
+   json_object_put(p1);
+   json_object_put(p2);
+   json_object_put(h1);
+   json_object_put(h2);
+}
+
+/* The output item of call @p id in a Responses input. */
+static struct json_object *output_of(struct json_object *input, const char *id) {
+   for (size_t i = 0; i < json_object_array_length(input); i++) {
+      struct json_object *item = json_object_array_get_idx(input, i);
+      struct json_object *t = NULL, *c = NULL;
+      if (json_object_object_get_ex(item, "type", &t) &&
+          strcmp(json_object_get_string(t), "function_call_output") == 0 &&
+          json_object_object_get_ex(item, "call_id", &c) &&
+          strcmp(json_object_get_string(c), id) == 0) {
+         return field(item, "output");
+      }
+   }
+   TEST_FAIL_MESSAGE(id);
+   return NULL;
+}
+
+/* Responses: the function_call_output carries the image (input_image). */
+static void test_responses_output_carries_the_image(void) {
+   const char *m[] = { PREFIX, Q1, CALL1, RESULT1 };
+   struct json_object *h = history(m, 4);
+   struct json_object *input = llm_responses_build_input(h, NULL, NULL, 1, false,
+                                                         "api.openai.com#00", "gpt-5.6");
+   TEST_ASSERT_NOT_NULL(input);
+   TEST_ASSERT_EQUAL_STRING("[{\"type\":\"input_text\",\"text\":\"Image captured.\"},"
+                            "{\"type\":\"input_image\",\"image_url\":\"" PNG_URI "\"}]",
+                            str(output_of(input, "c1")));
+   json_object_put(input);
+   json_object_put(h);
+}
+
+/* A model that takes no images: one fixed text per image, every request. */
+static void test_no_vision_gets_a_fixed_placeholder(void) {
+   const char *m[] = { PREFIX, Q1, CALL1, RESULT1 };
+   struct json_object *h = history(m, 4);
+   s_vision = 0;
+   struct json_object *r1 = render(h, MID_SYSTEM_MODEL);
+   struct json_object *r2 = render(h, MID_SYSTEM_MODEL);
+   s_vision = 1;
+   TEST_ASSERT_EQUAL_STRING(str(r1), str(r2));
+   TEST_ASSERT_NULL(strstr(str(r1), "\"type\":\"image\""));
+   TEST_ASSERT_NULL(strstr(str(r1), PNG_DATA));
+   struct json_object *parts = field(claude_result(r1, 2), "content");
+   TEST_ASSERT_EQUAL_STRING(LLM_TOOL_IMAGES_NO_VISION_TEXT,
+                            json_object_get_string(
+                                field(json_object_array_get_idx(parts, 1), "text")));
+   /* Responses, from the same no-vision history (llm_openai_responses.c). */
+   struct json_object *without = llm_tool_images_without(h);
+   struct json_object *input = llm_responses_build_input(without, NULL, NULL, 1, false,
+                                                         "api.openai.com#00", "gpt-5.6");
+   TEST_ASSERT_EQUAL_STRING("Image captured.\n" LLM_TOOL_IMAGES_NO_VISION_TEXT,
+                            json_object_get_string(output_of(input, "c1")));
+   /* The history itself keeps its image. */
+   TEST_ASSERT_NOT_NULL(strstr(str(h), PNG_DATA));
+   json_object_put(input);
+   json_object_put(without);
+   json_object_put(r1);
+   json_object_put(r2);
+   json_object_put(h);
 }
 
 int main(void) {
@@ -434,6 +743,14 @@ int main(void) {
    RUN_TEST(test_direction_before_a_question_becomes_a_note);
    RUN_TEST(test_images_follow_the_question);
    RUN_TEST(test_the_conversations_tool_set);
+   RUN_TEST(test_claude_sends_a_tool_change_in_place);
+   RUN_TEST(test_claude_folds_a_tool_change_elsewhere);
+   RUN_TEST(test_openai_folds_a_tool_change);
+   RUN_TEST(test_tool_image_in_its_result_and_stays_put);
+   RUN_TEST(test_second_capture_leaves_the_first);
+   RUN_TEST(test_chat_image_message_follows_all_tool_messages);
+   RUN_TEST(test_responses_output_carries_the_image);
+   RUN_TEST(test_no_vision_gets_a_fixed_placeholder);
    const int rc = UNITY_END();
    llm_capabilities_free_registry();
    toml_free(s_models);

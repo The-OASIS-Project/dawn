@@ -145,8 +145,7 @@ void test_volatile_before_question_in_history(void) {
    json_object_array_add(h, msg("assistant", "A1"));
    json_object_array_add(h, msg("user", "Q2"));
 
-   struct json_object *in = llm_responses_build_input(h, "", NULL, NULL, 0, "VOLATILE", 2, true,
-                                                      HOST, "m");
+   struct json_object *in = llm_responses_build_input(h, "", "VOLATILE", 2, true, HOST, "m");
    TEST_ASSERT_NOT_NULL(in);
 
    /* No system message from the leading run leaks into input. */
@@ -174,8 +173,7 @@ void test_volatile_before_question_via_input_text(void) {
    json_object_array_add(h, msg("user", "Q1"));
    json_object_array_add(h, msg("assistant", "A1"));
 
-   struct json_object *in = llm_responses_build_input(h, "Q2", NULL, NULL, 0, "VOLATILE", 2, true,
-                                                      HOST, "m");
+   struct json_object *in = llm_responses_build_input(h, "Q2", "VOLATILE", 2, true, HOST, "m");
    int lu = last_user_index(in);
    TEST_ASSERT_EQUAL_STRING("Q2", item_text(in, lu));
    TEST_ASSERT_EQUAL_STRING("VOLATILE", item_text(in, lu - 1));
@@ -202,8 +200,7 @@ void test_mid_history_broadcast_emitted_inline(void) {
    TEST_ASSERT_EQUAL_STRING("VOLATILE", vol);
    free(vol);
 
-   struct json_object *in = llm_responses_build_input(h, "", NULL, NULL, 0, "VOLATILE", 2, true,
-                                                      HOST, "m");
+   struct json_object *in = llm_responses_build_input(h, "", "VOLATILE", 2, true, HOST, "m");
 
    /* The broadcast survives inline as a system item (not dropped). */
    int n = json_object_array_length(in);
@@ -225,7 +222,7 @@ void test_mid_history_broadcast_emitted_inline(void) {
    json_object_put(h);
 }
 
-/* ---- vision images stay on the question item, not the volatile item -------- */
+/* ---- a question's images stay on its item, not the volatile item ---------- */
 
 /* A turn's images live in its question's history message: the question is
  * sent as it is, images included, the volatile item before it. */
@@ -239,8 +236,7 @@ void test_vision_stays_on_question(void) {
                                             "{\"type\":\"image_url\",\"image_url\":"
                                             "{\"url\":\"data:image/jpeg;base64,BASE64IMG\"}}]}"));
 
-   struct json_object *in = llm_responses_build_input(h, "Q2", NULL, NULL, 0, "VOLATILE", 2, true,
-                                                      HOST, "m");
+   struct json_object *in = llm_responses_build_input(h, "Q2", "VOLATILE", 2, true, HOST, "m");
 
    int lu = last_user_index(in); /* the question Q2 */
    TEST_ASSERT_EQUAL_STRING("Q2", item_text(in, lu));
@@ -249,16 +245,6 @@ void test_vision_stays_on_question(void) {
    TEST_ASSERT_EQUAL_STRING("VOLATILE", item_text(in, lu - 1));
    json_object_put(in);
 
-   /* Images a caller still passes join the question. */
-   const char *imgs[] = { "MORE" };
-   const size_t sizes[] = { 4 };
-   in = llm_responses_build_input(h, "Q2", imgs, sizes, 1, "VOLATILE", 2, true, HOST, "m");
-   lu = last_user_index(in);
-   struct json_object *content = NULL;
-   json_object_object_get_ex(json_object_array_get_idx(in, lu), "content", &content);
-   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(content));
-
-   json_object_put(in);
    json_object_put(h);
 }
 
@@ -303,8 +289,7 @@ static void test_assistant_blocks_in_order(void) {
    json_object_object_add(tool, "tool_call_id", json_object_new_string("call_7"));
    json_object_array_add(history, tool);
 
-   struct json_object *input = llm_responses_build_input(history, "", NULL, NULL, 0, NULL, 0, false,
-                                                         HOST, "m");
+   struct json_object *input = llm_responses_build_input(history, "", NULL, 0, false, HOST, "m");
    TEST_ASSERT_EQUAL_INT(5, json_object_array_length(input));
    TEST_ASSERT_EQUAL_STRING("reasoning", item_type(input, 1));
    TEST_ASSERT_EQUAL_STRING("ENC", item_str(input, 1, "encrypted_content"));
@@ -351,8 +336,8 @@ static void test_claude_shaped_history(void) {
    json_object_object_add(u, "content", uc);
    json_object_array_add(history, u);
 
-   struct json_object *input = llm_responses_build_input(history, "and tomorrow?", NULL, NULL, 0,
-                                                         NULL, 0, false, HOST, "m");
+   struct json_object *input = llm_responses_build_input(history, "and tomorrow?", NULL, 0, false,
+                                                         HOST, "m");
    TEST_ASSERT_EQUAL_INT(4, json_object_array_length(input));
    TEST_ASSERT_EQUAL_STRING("function_call", item_type(input, 1));
    TEST_ASSERT_EQUAL_STRING("toolu_1", item_str(input, 1, "call_id"));
@@ -383,8 +368,7 @@ static void test_claude_image_part(void) {
    json_object_object_add(u, "content", uc);
    json_object_array_add(history, u);
 
-   struct json_object *input = llm_responses_build_input(history, "", NULL, NULL, 0, NULL, 0, false,
-                                                         HOST, "m");
+   struct json_object *input = llm_responses_build_input(history, "", NULL, 0, false, HOST, "m");
    TEST_ASSERT_TRUE(item_has_image(input, 0));
    TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(input), "data:image\\/png;base64,QUJD"));
    json_object_put(input);
@@ -421,8 +405,7 @@ static void test_reasoning_binding_and_pairing(void) {
    json_object_object_add(stray, "tool_call_id", json_object_new_string("call_9"));
    json_object_array_add(history, stray);
 
-   struct json_object *input = llm_responses_build_input(history, "", NULL, NULL, 0, NULL, 0, false,
-                                                         HOST, "m");
+   struct json_object *input = llm_responses_build_input(history, "", NULL, 0, false, HOST, "m");
    const char *wire = json_object_to_json_string(input);
    TEST_ASSERT_NOT_NULL(strstr(wire, "ENC0"));
    TEST_ASSERT_NULL(strstr(wire, "ENC1"));
@@ -461,8 +444,7 @@ static void test_large_and_unknown_images(void) {
       json_object_array_add(uc, txt);
       json_object_object_add(u, "content", uc);
       json_object_array_add(history, u);
-      struct json_object *input = llm_responses_build_input(history, "", NULL, NULL, 0, NULL, 0,
-                                                            false, HOST, "m");
+      struct json_object *input = llm_responses_build_input(history, "", NULL, 0, false, HOST, "m");
       if (t == 0) {
          TEST_ASSERT_TRUE(item_has_image(input, 0));
          TEST_ASSERT_TRUE(strlen(json_object_to_json_string(input)) > big);
@@ -497,8 +479,7 @@ static void test_reused_ids_and_questions(void) {
    json_object_object_add(out, "tool_call_id", json_object_new_string("call_0"));
    json_object_array_add(history, out);
 
-   struct json_object *input = llm_responses_build_input(history, "Q3", NULL, NULL, 0, NULL, 0,
-                                                         false, HOST, "m");
+   struct json_object *input = llm_responses_build_input(history, "Q3", NULL, 0, false, HOST, "m");
    /* Q1, Q2, the second call and its output, Q3: the first call is gone. */
    TEST_ASSERT_EQUAL_INT(5, json_object_array_length(input));
    TEST_ASSERT_EQUAL_STRING("Q1", item_text(input, 0));
@@ -509,7 +490,7 @@ static void test_reused_ids_and_questions(void) {
 
    /* An unanswered call at the end: the new question is added, not swapped in. */
    json_object_array_del_idx(history, 2, 3); /* [Q1, unanswered call] */
-   input = llm_responses_build_input(history, "Q3", NULL, NULL, 0, NULL, 0, false, HOST, "m");
+   input = llm_responses_build_input(history, "Q3", NULL, 0, false, HOST, "m");
    TEST_ASSERT_EQUAL_INT(2, json_object_array_length(input));
    TEST_ASSERT_EQUAL_STRING("Q1", item_text(input, 0));
    TEST_ASSERT_EQUAL_STRING("Q3", item_text(input, 1));
@@ -526,8 +507,8 @@ static void test_question_keeps_its_context(void) {
        "{\"type\":\"text\",\"text\":\"CTX\",\"_kind\":\"turn_context\"},"
        "{\"type\":\"text\",\"text\":\"Hi\"}]},"
        "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"}]");
-   struct json_object *input = llm_responses_build_input(history, "Hi", NULL, NULL, 0, NULL, 1,
-                                                         false, HOST, "gpt-5.6");
+   struct json_object *input = llm_responses_build_input(history, "Hi", NULL, 1, false, HOST,
+                                                         "gpt-5.6");
    TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(input));
    TEST_ASSERT_EQUAL_STRING("user", item_role(input, 0));
    TEST_ASSERT_EQUAL_STRING("CTX", item_text(input, 0));

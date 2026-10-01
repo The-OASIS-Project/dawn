@@ -1379,6 +1379,30 @@ void session_manager_for_each_user_session(int user_id,
    }
 }
 
+void session_manager_for_each_session_any(void (*fn)(session_t *session, void *ctx), void *ctx) {
+   if (!initialized || !fn) {
+      return;
+   }
+   /* Retain each session under the read lock (disconnected or not), then
+    * visit them with it released. */
+   session_t *snapshot[MAX_SESSIONS];
+   int count = 0;
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (sessions[i]) {
+         pthread_mutex_lock(&sessions[i]->ref_mutex);
+         sessions[i]->ref_count++;
+         pthread_mutex_unlock(&sessions[i]->ref_mutex);
+         snapshot[count++] = sessions[i];
+      }
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+   for (int i = 0; i < count; i++) {
+      fn(snapshot[i], ctx);
+      session_release(snapshot[i]);
+   }
+}
+
 int session_broadcast_notice(const char *content) {
    return broadcast_notice(0, content);
 }

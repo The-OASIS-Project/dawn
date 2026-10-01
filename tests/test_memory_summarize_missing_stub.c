@@ -174,19 +174,12 @@ void llm_cache_monitor_pop_kind(int previous) {
 }
 
 /* llm_chat_completion_with_config — abort guard.  Signature must match the
- * header exactly (const char ** + const size_t * for the attachments
- * tuple) or the linker / compiler rejects the redeclaration. */
+ * header exactly or the linker / compiler rejects the redeclaration. */
 char *llm_chat_completion_with_config(struct json_object *conversation_history,
                                       const char *prompt,
-                                      const char **image_paths,
-                                      const size_t *image_sizes,
-                                      int num_images,
                                       const llm_resolved_config_t *cfg) {
    (void)conversation_history;
    (void)prompt;
-   (void)image_paths;
-   (void)image_sizes;
-   (void)num_images;
    (void)cfg;
    fprintf(stderr, "llm_chat_completion_with_config stub invoked\n");
    abort();

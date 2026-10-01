@@ -1205,6 +1205,8 @@ static int clear_memory_provenance(int64_t conv_id, int user_id) {
 static int delete_conversation_locked(sqlite3_stmt *del,
                                       int64_t conv_id,
                                       int owner,
+                                      conv_images_mode_t mode,
+                                      conv_image_files_t *files,
                                       int *changes_out) {
    *changes_out = 0;
    if (sqlite3_exec(s_db.db, "SAVEPOINT conv_delete", NULL, NULL, NULL) != SQLITE_OK) {
@@ -1213,6 +1215,11 @@ static int delete_conversation_locked(sqlite3_stmt *del,
    }
    int rc = SQLITE_DONE;
    if (owner > 0 && clear_memory_provenance(conv_id, owner) != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
+   /* The images it owns, before the cascade removes what names them. */
+   if (rc == SQLITE_DONE &&
+       conv_images_take_locked(conv_id, owner, mode, files) != AUTH_DB_SUCCESS) {
       rc = SQLITE_ERROR;
    }
    int changes = 0;
@@ -1229,11 +1236,12 @@ static int delete_conversation_locked(sqlite3_stmt *del,
       *changes_out = changes;
       return SQLITE_DONE;
    }
-   /* Undo both (a failed RELEASE, when outermost, is a failed commit). */
+   /* Undo all of it (a failed RELEASE, when outermost, is a failed commit). */
    OLOG_WARNING("conv_db_delete: conversation %lld not deleted: %s", (long long)conv_id,
                 sqlite3_errmsg(s_db.db));
    sqlite3_exec(s_db.db, "ROLLBACK TO conv_delete", NULL, NULL, NULL);
    sqlite3_exec(s_db.db, "RELEASE conv_delete", NULL, NULL, NULL);
+   conv_image_files_free(files);
    return rc == SQLITE_DONE ? SQLITE_ERROR : rc;
 }
 
@@ -1253,21 +1261,31 @@ static int conversation_owner_locked(int64_t conv_id, int user_id) {
    return (user_id > 0 && owner != user_id) ? 0 : owner;
 }
 
-int conv_db_delete(int64_t conv_id, int user_id) {
-   if (conv_id <= 0) {
+int conv_db_delete_ex(int64_t conv_id,
+                      int user_id,
+                      bool admin,
+                      conv_images_mode_t mode,
+                      conv_image_files_t *files_out) {
+   if (files_out) {
+      memset(files_out, 0, sizeof(*files_out));
+   }
+   if (conv_id <= 0 || (mode == CONV_IMAGES_DELETE && !files_out)) {
       return AUTH_DB_INVALID;
    }
 
    AUTH_DB_LOCK_OR_FAIL();
 
    /* Messages are deleted automatically via CASCADE */
-   sqlite3_reset(s_db.stmt_conv_delete);
-   sqlite3_bind_int64(s_db.stmt_conv_delete, 1, conv_id);
-   sqlite3_bind_int(s_db.stmt_conv_delete, 2, user_id);
+   sqlite3_stmt *del = admin ? s_db.stmt_conv_delete_admin : s_db.stmt_conv_delete;
+   sqlite3_reset(del);
+   sqlite3_bind_int64(del, 1, conv_id);
+   if (!admin) {
+      sqlite3_bind_int(del, 2, user_id);
+   }
 
    int changes = 0;
-   const int rc = delete_conversation_locked(s_db.stmt_conv_delete, conv_id,
-                                             conversation_owner_locked(conv_id, user_id), &changes);
+   const int owner = conversation_owner_locked(conv_id, admin ? 0 : user_id);
+   const int rc = delete_conversation_locked(del, conv_id, owner, mode, files_out, &changes);
 
    AUTH_DB_UNLOCK();
 
@@ -1276,7 +1294,11 @@ int conv_db_delete(int64_t conv_id, int user_id) {
    }
 
    if (changes > 0) {
-      OLOG_INFO("Deleted conversation %lld for user %d", (long long)conv_id, user_id);
+      if (admin) {
+         OLOG_INFO("Admin deleted conversation %lld", (long long)conv_id);
+      } else {
+         OLOG_INFO("Deleted conversation %lld for user %d", (long long)conv_id, user_id);
+      }
       /* Its frozen prompt holds the user's identity and settings. */
       (void)conv_db_prompt_blobs_gc(NULL);
       return AUTH_DB_SUCCESS;
@@ -1285,34 +1307,12 @@ int conv_db_delete(int64_t conv_id, int user_id) {
    return AUTH_DB_NOT_FOUND;
 }
 
+int conv_db_delete(int64_t conv_id, int user_id) {
+   return conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_KEEP, NULL);
+}
+
 int conv_db_delete_admin(int64_t conv_id) {
-   if (conv_id <= 0) {
-      return AUTH_DB_INVALID;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   const int owner = conversation_owner_locked(conv_id, 0);
-
-   sqlite3_reset(s_db.stmt_conv_delete_admin);
-   sqlite3_bind_int64(s_db.stmt_conv_delete_admin, 1, conv_id);
-
-   int changes = 0;
-   const int rc = delete_conversation_locked(s_db.stmt_conv_delete_admin, conv_id, owner, &changes);
-
-   AUTH_DB_UNLOCK();
-
-   if (rc != SQLITE_DONE) {
-      return AUTH_DB_FAILURE;
-   }
-
-   if (changes > 0) {
-      OLOG_INFO("Admin deleted conversation %lld", (long long)conv_id);
-      (void)conv_db_prompt_blobs_gc(NULL); /* its frozen prompt with it */
-      return AUTH_DB_SUCCESS;
-   }
-
-   return AUTH_DB_NOT_FOUND;
+   return conv_db_delete_ex(conv_id, 0, true, CONV_IMAGES_KEEP, NULL);
 }
 
 /* =============================================================================

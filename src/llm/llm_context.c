@@ -51,6 +51,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_models_toml.h"
 #include "llm/llm_pricing.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -302,6 +303,8 @@ static void load_model_registry(void) {
    llm_pricing_load_registry(llm_models_toml_root_for(&m, "cache_pricing"));
    llm_capabilities_load_registry(llm_models_toml_root_for(&m, "thinking"));
    llm_capabilities_load_mid_system(llm_models_toml_root_for(&m, "mid_system"));
+   llm_capabilities_load_inline_tools(llm_models_toml_root_for(&m, "inline_tools"));
+   llm_capabilities_load_image_limits(llm_models_toml_root_for(&m, "max_request_images"));
    OLOG_INFO("llm_context: loaded the model registry (%s)",
              m.disk ? m.path : "built-in models.toml");
    llm_models_toml_close(&m);
@@ -1360,10 +1363,12 @@ static char *compact_with_llm(struct json_object *to_summarize,
     * base64 shipped as literal prompt text to the summarizer for zero
     * summarization value. */
    struct json_object *no_vision = llm_history_strip_vision_content(clean);
-   if (no_vision) {
-      json_object_put(clean);
-      clean = no_vision;
+   json_object_put(clean);
+   if (!no_vision) {
+      OLOG_ERROR("llm_context: out of memory leaving images out of the summary input");
+      return NULL;
    }
+   clean = no_vision;
    const char *json_str = json_object_to_json_string(clean);
    size_t json_len = strlen(json_str);
 
@@ -1439,7 +1444,7 @@ static char *compact_with_llm(struct json_object *to_summarize,
    session_t *outer = session_get_command_context();
    session_set_command_context(NULL);
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_COMPACTION);
-   char *summary = llm_chat_completion_with_config(request, NULL, NULL, NULL, 0, &compact_cfg);
+   char *summary = llm_chat_completion_with_config(request, NULL, &compact_cfg);
    session_set_command_context(outer);
    llm_cache_monitor_pop_kind(kind_prev);
 

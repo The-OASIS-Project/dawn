@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include "auth/auth_db_messages.h"
-#include "llm/llm_claude_parts.h"
+#include "core/image_rehydrate.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -98,6 +98,70 @@ static int append_assistant(struct json_object *msg, struct json_object *out) {
    return 1;
 }
 
+/* The stored image @p part shows (or stands in for), or NULL. */
+static const char *part_image_id(struct json_object *part) {
+   return str_of(part, IMAGE_PART_ID_KEY);
+}
+
+/* A tool row: @p call_id's result, from its @p content (a string, or parts:
+ * its text parts joined as llm_claude_tool_result_text joins them, its
+ * images by id).  NULL on out of memory. */
+static struct json_object *tool_row(const char *call_id, struct json_object *content) {
+   if (!json_object_is_type(content, json_type_array)) {
+      struct json_object *row = new_row("tool", content ? json_object_get_string(content) : "");
+      if (row && call_id) {
+         json_object_object_add(row, "tool_call_id", json_object_new_string(call_id));
+      }
+      return row;
+   }
+   const size_t n = json_object_array_length(content);
+   size_t len = 1;
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *p = json_object_array_get_idx(content, i);
+      const char *text = str_of(p, "text");
+      if (is(str_of(p, "type"), "text") && text && !part_image_id(p)) {
+         len += strlen(text) + 1;
+      }
+   }
+   char *joined = malloc(len);
+   struct json_object *images = json_object_new_array();
+   if (!joined || !images) {
+      free(joined);
+      json_object_put(images);
+      return NULL;
+   }
+   size_t off = 0;
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *p = json_object_array_get_idx(content, i);
+      const char *id = part_image_id(p);
+      if (id) {
+         json_object_array_add(images, json_object_new_string(id));
+         continue;
+      }
+      const char *text = str_of(p, "text");
+      if (!is(str_of(p, "type"), "text") || !text) {
+         continue;
+      }
+      if (off > 0) {
+         joined[off++] = '\n';
+      }
+      memcpy(joined + off, text, strlen(text));
+      off += strlen(text);
+   }
+   joined[off] = '\0';
+   struct json_object *row = new_row("tool", joined);
+   free(joined);
+   if (row && call_id) {
+      json_object_object_add(row, "tool_call_id", json_object_new_string(call_id));
+   }
+   if (row && json_object_array_length(images) > 0) {
+      json_object_object_add(row, LLM_HISTORY_ROW_IMAGES_KEY, images);
+   } else {
+      json_object_put(images);
+   }
+   return row;
+}
+
 /* A Claude user message's tool results, one tool row each.  -1 when the
  * message isn't one. */
 static int append_claude_results(struct json_object *msg, struct json_object *out) {
@@ -125,11 +189,10 @@ static int append_claude_results(struct json_object *msg, struct json_object *ou
          OLOG_WARNING("history rows: a tool result with no call id not saved");
          continue;
       }
-      char *text = llm_claude_tool_result_text(part);
-      struct json_object *row = new_row("tool", text ? text : "");
-      free(text);
+      struct json_object *result = NULL;
+      json_object_object_get_ex(part, "content", &result);
+      struct json_object *row = tool_row(id, result);
       if (row) {
-         json_object_object_add(row, "tool_call_id", json_object_new_string(id));
          json_object_array_add(out, row);
          added++;
       }
@@ -137,8 +200,12 @@ static int append_claude_results(struct json_object *msg, struct json_object *ou
    return added;
 }
 
-/* What a content part reads as: its text, "[image]" for an image, else NULL. */
+/* What a content part reads as: its text, "[image]" for an unstored image,
+ * else NULL (a stored image is saved by id, never as text). */
 static const char *part_text(struct json_object *part) {
+   if (part_image_id(part)) {
+      return NULL;
+   }
    const char *type = str_of(part, "type");
    if (is(type, "text")) {
       return str_of(part, "text");
@@ -191,6 +258,14 @@ static int append_message(struct json_object *msg, const char *role, struct json
    }
    struct json_object *content = NULL;
    json_object_object_get_ex(msg, "content", &content);
+   if (is(role, "tool")) {
+      struct json_object *row = tool_row(str_of(msg, "tool_call_id"), content);
+      if (!row) {
+         return 0;
+      }
+      json_object_array_add(out, row);
+      return 1;
+   }
    char *parts_text = json_object_is_type(content, json_type_array) ? parts_as_text(content) : NULL;
    const char *text = "";
    if (parts_text) {
@@ -202,10 +277,6 @@ static int append_message(struct json_object *msg, const char *role, struct json
    free(parts_text);
    if (!row) {
       return 0;
-   }
-   const char *call_id = str_of(msg, "tool_call_id");
-   if (is(role, "tool") && call_id) {
-      json_object_object_add(row, "tool_call_id", json_object_new_string(call_id));
    }
    json_object_array_add(out, row);
    return 1;

@@ -44,6 +44,7 @@
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_capabilities.h"
+#include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
@@ -52,6 +53,7 @@
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
 #include "llm/llm_streaming.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "llm/sse_parser.h"
@@ -220,9 +222,6 @@ static bool is_current_session_remote_local(void) {
  */
 static struct json_object *build_responses_request(struct json_object *history,
                                                    const char *input_text,
-                                                   const char **vision_images,
-                                                   const size_t *vision_image_sizes,
-                                                   int vision_image_count,
                                                    const char *model_name,
                                                    const char *carrier,
                                                    int iteration,
@@ -335,17 +334,23 @@ static struct json_object *build_responses_request(struct json_object *history,
          json_object_object_add(part, "type", json_object_new_string("input_text"));
          json_object_object_add(part, "text", json_object_new_string(input_text));
          json_object_array_add(content_array, part);
-         llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
-                                           vision_image_count);
          json_object_object_add(item, "content", content_array);
          json_object_array_add(input, item);
       }
       json_object_object_add(root, "input", input);
       free(volatile_ctx);
    } else {
-      struct json_object *input = llm_responses_build_input(
-          history, input_text, vision_images, vision_image_sizes, vision_image_count, volatile_ctx,
-          leading_run, cache_explicit_supported, carrier, model_name);
+      /* A model that takes no images reads a fixed text for each a tool
+       * returned (llm_tool_images_render.h). */
+      struct json_object *shown = is_vision_enabled_for_current_llm()
+                                      ? json_object_get(history)
+                                      : llm_tool_images_without(history);
+      struct json_object *input = shown ? llm_responses_build_input(shown, input_text, volatile_ctx,
+                                                                    leading_run,
+                                                                    cache_explicit_supported,
+                                                                    carrier, model_name)
+                                        : NULL;
+      json_object_put(shown);
       free(volatile_ctx);
       if (!input) {
          json_object_put(root);
@@ -363,7 +368,7 @@ static struct json_object *build_responses_request(struct json_object *history,
    if (llm_tools_enabled(NULL)) {
       struct json_object *cc_tools = llm_tools_request_tools(history,
                                                              is_current_session_remote_local(),
-                                                             false, NULL);
+                                                             false, false, NULL);
       if (cc_tools) {
          struct json_object *flat = flatten_tools_for_responses(cc_tools);
          json_object_put(cc_tools);
@@ -898,9 +903,6 @@ static size_t responses_write_callback(void *contents, size_t size, size_t nmemb
 
 int llm_openai_responses_streaming_single_shot(struct json_object *conversation_history,
                                                const char *input_text,
-                                               const char **vision_images,
-                                               const size_t *vision_image_sizes,
-                                               int vision_image_count,
                                                const char *base_url,
                                                const char *api_key,
                                                const char *model,
@@ -929,10 +931,8 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
 
    /* Build request JSON */
-   struct json_object *root = build_responses_request(conversation_history, input_text,
-                                                      vision_images, vision_image_sizes,
-                                                      vision_image_count, model_name, carrier,
-                                                      iteration,
+   struct json_object *root = build_responses_request(conversation_history, input_text, model_name,
+                                                      carrier, iteration,
                                                       /*prior_response_id=*/NULL);
    if (!root) {
       OLOG_ERROR("Responses: failed to build request");

@@ -24,11 +24,14 @@
 
 #include <curl/curl.h>
 #include <json-c/json.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude_betas.h"
+#include "llm/llm_interface.h"
 #include "unity.h"
 
 /* ---- stubs ---- */
@@ -49,10 +52,16 @@ bool llm_cache_monitor_previous_message_id(uint32_t session_id,
    return false;
 }
 
+/* models.toml [inline_tools], as the test needs it. */
+bool llm_model_inline_tools(const char *model) {
+   return model && strncmp(model, "claude-opus-5", 13) == 0;
+}
+
 #define FIRST_PARTY "https://api.anthropic.com"
 
 void setUp(void) {
    claude_betas_take_retry();
+   claude_betas_take_inline_rejected();
 }
 void tearDown(void) {
 }
@@ -254,6 +263,110 @@ static void test_a_rejection_is_per_model(void) {
    json_object_put(opus_req);
 }
 
+/* A request defining a tool in a message (a tool_addition block in a system
+ * message) carries the inline-tools beta; a 400 naming it turns it off for that
+ * model, tells the conversation, and resends; an error about a definition that
+ * doesn't name the beta is no rejection. */
+static void test_inline_tools_beta(void) {
+   const char *model = "claude-opus-5-1";
+   TEST_ASSERT_TRUE(claude_betas_inline_tools_ok(FIRST_PARTY, model));
+   TEST_ASSERT_FALSE(claude_betas_inline_tools_ok("https://openrouter.ai/api", model));
+   TEST_ASSERT_FALSE(claude_betas_inline_tools_ok(FIRST_PARTY, "claude-sonnet-5"));
+
+   json_object *req = request_for(model);
+   claude_betas_t b;
+   claude_betas_add(req, FIRST_PARTY, &b);
+   TEST_ASSERT_FALSE(b.inline_tools); /* no tool defined in a message */
+   json_object *messages = json_tokener_parse(
+       "[{\"role\":\"user\",\"content\":\"Q\"},{\"role\":\"system\",\"content\":"
+       "[{\"type\":\"tool_addition\",\"tool\":{\"type\":\"tool_definition\","
+       "\"definition\":{\"name\":\"t\",\"description\":\"d\",\"input_schema\":{}}}}]}]");
+   json_object_object_add(req, "messages", messages);
+   claude_betas_add(req, FIRST_PARTY, &b);
+   TEST_ASSERT_TRUE(b.inline_tools);
+   TEST_ASSERT_NOT_NULL(strstr(header_of(&b), "inline-tools-2026-09-15"));
+
+   TEST_ASSERT_FALSE(claude_betas_rejected(
+       400, error_body("invalid_request_error", "tools.0.input_schema: Input should be an object"),
+       &b));
+   TEST_ASSERT_FALSE(b.inline_rejected);
+   TEST_ASSERT_TRUE(claude_betas_render_inline(FIRST_PARTY));
+   TEST_ASSERT_TRUE(claude_betas_rejected(
+       400,
+       error_body("invalid_request_error",
+                  "Unexpected value(s) `inline-tools-2026-09-15` for the `anthropic-beta` "
+                  "header."),
+       &b));
+   TEST_ASSERT_TRUE(claude_betas_take_retry());
+   /* Back to the caller on the request, and on the turn: its resend folds. */
+   TEST_ASSERT_TRUE(b.inline_rejected);
+   TEST_ASSERT_FALSE(claude_betas_render_inline(FIRST_PARTY));
+   TEST_ASSERT_TRUE(claude_betas_take_inline_rejected());
+   TEST_ASSERT_FALSE(claude_betas_take_inline_rejected());
+   TEST_ASSERT_FALSE(claude_betas_inline_tools_ok(FIRST_PARTY, model));
+   TEST_ASSERT_TRUE(b.binding); /* the other betas stay */
+   json_object_put(req);
+}
+
+/* A rejection reaches the session through the provider-neutral turn result
+ * (the Claude provider notes it from the request's betas), taken once; the
+ * next turn starts clean, the betas' own mark too. */
+static void test_rejection_reaches_the_turn_result(void) {
+   const char *model = "claude-opus-5-3";
+   claude_betas_t b = { .inline_tools = true };
+   snprintf(b.model, sizeof(b.model), "%s", model);
+   llm_turn_result_reset();
+   TEST_ASSERT_TRUE(claude_betas_rejected(
+       400,
+       error_body("invalid_request_error",
+                  "Unexpected value(s) `inline-tools-2026-09-15` for the `anthropic-beta` "
+                  "header."),
+       &b));
+   (void)claude_betas_take_retry();
+   if (b.inline_rejected) {
+      llm_note_inline_tools_rejected(); /* as llm_claude.c does */
+   }
+   TEST_ASSERT_FALSE(claude_betas_render_inline(FIRST_PARTY)); /* the turn's later requests */
+   TEST_ASSERT_TRUE(llm_take_inline_tools_rejected());
+   TEST_ASSERT_FALSE(llm_take_inline_tools_rejected());
+
+   llm_note_inline_tools_rejected(); /* a side call's, left behind */
+   llm_turn_result_reset();
+   TEST_ASSERT_FALSE(llm_take_inline_tools_rejected());
+   TEST_ASSERT_TRUE(claude_betas_render_inline(FIRST_PARTY));
+}
+
+/* Conversation A's request gets the inline beta rejected (on its thread):
+ * new changes for that model fold, but conversation B's stored inline changes
+ * render as they did (its record decides, not the process's table). */
+static void *reject_on_another_turn(void *arg) {
+   claude_betas_t *b = arg;
+   (void)claude_betas_rejected(
+       400,
+       error_body("invalid_request_error",
+                  "Unexpected value(s) `inline-tools-2026-09-15` for the `anthropic-beta` "
+                  "header."),
+       b);
+   (void)claude_betas_take_retry();
+   (void)claude_betas_take_inline_rejected(); /* A's session records it */
+   return NULL;
+}
+
+static void test_another_conversations_rejection_doesnt_change_this_render(void) {
+   const char *model = "claude-opus-5-2";
+   TEST_ASSERT_TRUE(claude_betas_render_inline(FIRST_PARTY));
+   TEST_ASSERT_FALSE(claude_betas_render_inline("https://openrouter.ai/api"));
+   claude_betas_t a = { .inline_tools = true };
+   snprintf(a.model, sizeof(a.model), "%s", model);
+   pthread_t t;
+   TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, reject_on_another_turn, &a));
+   pthread_join(t, NULL);
+   TEST_ASSERT_TRUE(a.inline_rejected);
+   TEST_ASSERT_FALSE(claude_betas_inline_tools_ok(FIRST_PARTY, model)); /* new rows fold */
+   TEST_ASSERT_TRUE(claude_betas_render_inline(FIRST_PARTY));           /* stored ones don't */
+   TEST_ASSERT_FALSE(claude_betas_take_inline_rejected());
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_only_first_party_gets_betas);
@@ -263,5 +376,8 @@ int main(void) {
    RUN_TEST(test_a_rejection_is_per_model);
    RUN_TEST(test_rejected_diagnostics_turn_off_alone);
    RUN_TEST(test_rejected_binding_field_turns_them_off);
+   RUN_TEST(test_inline_tools_beta);
+   RUN_TEST(test_another_conversations_rejection_doesnt_change_this_render);
+   RUN_TEST(test_rejection_reaches_the_turn_result);
    return UNITY_END();
 }

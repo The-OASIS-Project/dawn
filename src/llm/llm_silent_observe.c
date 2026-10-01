@@ -593,7 +593,7 @@ int llm_silent_observe(const char *input_text,
     * future refactor routes the call past the config-setting entry point. */
    llm_tools_suppress_push();
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_OBSERVE);
-   char *raw_response = llm_chat_completion_with_config(history, wrapped, NULL, NULL, 0, &cfg);
+   char *raw_response = llm_chat_completion_with_config(history, wrapped, &cfg);
    llm_cache_monitor_pop_kind(kind_prev);
    llm_tools_suppress_pop();
 

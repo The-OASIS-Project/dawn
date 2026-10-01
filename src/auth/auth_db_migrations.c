@@ -3377,6 +3377,24 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
+   /* v98: messages rebuilt once (same rows, ids and sequence) with
+    * messages.images, and kinds checked by triggers instead of a CHECK (kind
+    * tool_change).  Needs room for a copy of the table; held otherwise. */
+   bool v98_ok = (current_version >= 98);
+   if (!v98_ok) {
+      if (auth_db_migrations_v98(s_db.db, db_path) == AUTH_DB_SUCCESS) {
+         v98_ok = true;
+      } else {
+         /* Fatal: every message read and write needs the v98 table, so there
+          * is no degraded mode to run in.  The step logged why (and, when it
+          * is room, how much to free); the next start tries again. */
+         OLOG_ERROR("auth_db: v98 migration (messages rebuild: images, kind triggers) failed; "
+                    "the database stays at v%d and DAWN cannot start until it succeeds",
+                    current_version);
+         return AUTH_DB_FAILURE;
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3402,7 +3420,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
                               v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
                               v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
-                              v97_ok;
+                              v97_ok && v98_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

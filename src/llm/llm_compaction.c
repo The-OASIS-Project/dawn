@@ -48,6 +48,16 @@ static size_t str_len(struct json_object *obj) {
    return json_object_is_type(obj, json_type_string) ? (size_t)json_object_get_string_len(obj) : 0;
 }
 
+/* An image part ("image_url", or a Claude "image"). */
+static bool is_image_part(struct json_object *part) {
+   struct json_object *type_obj = NULL;
+   if (!json_object_object_get_ex(part, "type", &type_obj)) {
+      return false;
+   }
+   const char *type = json_object_get_string(type_obj);
+   return type && (strcmp(type, "image_url") == 0 || strcmp(type, "image") == 0);
+}
+
 int llm_compaction_estimate_range(struct json_object *history, int start_idx, int end_idx) {
    if (!history || !json_object_is_type(history, json_type_array))
       return 0;
@@ -98,15 +108,15 @@ int llm_compaction_estimate_range(struct json_object *history, int start_idx, in
                         if (json_object_object_get_ex(blk, "text", &btext)) {
                            total_chars += str_len(btext);
                         }
+                        /* An image a tool returned, inside its result. */
+                        if (is_image_part(blk)) {
+                           total_chars += LLM_COMPACTION_IMAGE_ESTIMATE_CHARS;
+                        }
                      }
                   }
                }
-               struct json_object *type_obj = NULL;
-               if (json_object_object_get_ex(part, "type", &type_obj)) {
-                  const char *type = json_object_get_string(type_obj);
-                  if (type && (strcmp(type, "image_url") == 0 || strcmp(type, "image") == 0)) {
-                     total_chars += LLM_COMPACTION_IMAGE_ESTIMATE_CHARS;
-                  }
+               if (is_image_part(part)) {
+                  total_chars += LLM_COMPACTION_IMAGE_ESTIMATE_CHARS;
                }
             }
          }

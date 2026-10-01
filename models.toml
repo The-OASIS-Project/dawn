@@ -233,3 +233,39 @@
 
 [mid_system]
 anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"]
+
+# ---------------------------------------------------------------------------
+# The Anthropic models that take a tool defined inside a {"role": "system"}
+# message (a `tool_addition` whose tool is a `tool_definition`, beta
+# inline-tools-2026-09-15, Claude API only).  On these, a tool an MCP server
+# adds or changes mid-conversation is sent where it happened, so the
+# conversation's `tools` stay byte for byte what it started with and its
+# reasoning stays valid.  Any other model (or another host) gets the change
+# folded into `tools`, a declared boundary.  Same models as [mid_system].
+# Prefixes, matched like the tables above.  Source: platform.claude.com
+# (mid-conversation system messages and tool changes), Sep 2026.
+
+[inline_tools]
+anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"]
+
+# -----------------------------------------------------------------------------
+# The images one request may carry, per vendor: `count` images, `bytes` of them
+# as sent (base64).  A tool's image (a camera capture) past either is refused
+# for that turn, and a history nearing either is compacted at the next turn's
+# seam (its oldest images are summarized away).  `count` is the vendor's
+# per-request limit; `bytes` stays under the vendor's request-size limit with
+# room for the rest of the request.  Keys: a vendor family ("anthropic_200k":
+# a Claude model with a 200K window), "other" (another OpenRouter vendor),
+# "local" (llama.cpp / Ollama: no vendor limit; DAWN's conservative choice).
+# Sources (Oct 2026): platform.claude.com vision (600 per request, 100 for
+# 200K-window models; 32 MB request body), developers.openai.com images-vision
+# (1,500 images, 512 MB payload), ai.google.dev image-understanding (3,600
+# images; 20 MB inline request).
+
+[max_request_images]
+anthropic = { count = 600, bytes = 24000000 }
+anthropic_200k = { count = 100, bytes = 24000000 }
+openai = { count = 1500, bytes = 256000000 }
+gemini = { count = 3600, bytes = 16000000 }
+other = { count = 20, bytes = 16000000 }
+local = { count = 16, bytes = 64000000 }

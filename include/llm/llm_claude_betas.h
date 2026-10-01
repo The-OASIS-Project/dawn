@@ -37,10 +37,47 @@ extern "C" {
 
 /** The betas one request carries (filled by claude_betas_add). */
 typedef struct {
-   bool diagnostics; /**< cache-diagnosis: diagnostics object + beta */
-   bool binding;     /**< thinking-binding-controls: block_binding + beta */
-   char model[64];   /**< The request's model: a rejection is recorded against it */
+   bool diagnostics;  /**< cache-diagnosis: diagnostics object + beta */
+   bool binding;      /**< thinking-binding-controls: block_binding + beta */
+   bool inline_tools; /**< inline-tools: the body defines a tool in a message */
+   /** Set by claude_betas_rejected: the API rejected tools defined in a
+    *  message (the turn folds them; claude_betas_take_inline_rejected) */
+   bool inline_rejected;
+   char model[64]; /**< The request's model: a rejection is recorded against it */
 } claude_betas_t;
+
+/**
+ * @brief Whether a request to @p base_url for @p model may send a
+ *        conversation's tool changes in place (tool_addition blocks carrying a
+ *        definition, beta inline-tools-2026-09-15): the Claude API itself, a
+ *        models.toml [inline_tools] model, and the API hasn't rejected the beta
+ *        for it in this process
+ */
+bool claude_betas_inline_tools_ok(const char *base_url, const char *model);
+
+/**
+ * @brief Whether a request to @p base_url may send a conversation's stored
+ *        inline tool changes in place: the Claude API itself, and the calling
+ *        thread's turn hasn't had them rejected
+ *
+ * Never the process's rejection table or models.toml: whether a stored
+ * change goes in place is the conversation's (llm_tool_change_renders_inline);
+ * a target that stops taking them is marked on it at the next seam, with a
+ * declared boundary (prefix_tools_apply).
+ */
+bool claude_betas_render_inline(const char *base_url);
+
+/**
+ * @brief Whether the calling thread's turn had tools defined in a message
+ *        rejected (claude_betas_rejected); clears it
+ *
+ * Governs only the thread's later requests in the turn (they fold the
+ * changes); a turn starts clean through llm_turn_result_reset().  The caller
+ * learns of a rejection through the provider-neutral turn result
+ * (llm_take_inline_tools_rejected), which the Claude provider sets from
+ * claude_betas_t.inline_rejected.
+ */
+bool claude_betas_take_inline_rejected(void);
 
 /**
  * @brief Add the betas' request fields to a finished request body
@@ -65,14 +102,19 @@ struct curl_slist *claude_betas_header(struct curl_slist *headers, const claude_
  * @brief Handle a failed request's error: is it a rejection of a beta it sent?
  *
  * Matches only the API's own rejection shapes (an unknown anthropic-beta value,
- * or "Extra inputs are not permitted" on the beta's field).  A rejected beta is
- * turned off for that model for the rest of the process (acceptance can differ
- * by model: one old model must not cost every other model its betas), and the
- * calling thread is marked for a resend (claude_betas_take_retry).
+ * or "Extra inputs are not permitted" on the beta's field; for inline tools, an
+ * error that names the beta).  A rejected beta is turned off for that model for
+ * the rest of the process (acceptance can differ by model: one old model must
+ * not cost every other model its betas), and the calling thread is marked for
+ * a resend (claude_betas_take_retry).  Rejected inline tools also set
+ * @p sent->inline_rejected and mark the calling thread's turn: its resend and
+ * later requests fold them; the Claude provider reports it in the turn's
+ * result (llm_take_inline_tools_rejected) and the session records it on the
+ * conversation, after a restart too.
  *
  * @return true if a beta was rejected (the caller shouldn't report the error)
  */
-bool claude_betas_rejected(long http_code, const char *body, const claude_betas_t *sent);
+bool claude_betas_rejected(long http_code, const char *body, claude_betas_t *sent);
 
 /**
  * @brief Whether the calling thread's last request should be sent again

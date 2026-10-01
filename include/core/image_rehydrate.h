@@ -46,6 +46,17 @@ extern "C" {
  * one too or restored messages will degrade to "[earlier image omitted]". */
 #define IMAGE_REHYDRATE_MAX_IMAGES 64
 
+/* What a request carries in place of an image that is gone (deleted, not the
+ * caller's, unreadable), and in place of one past the ceilings above.  The
+ * same text live and on reload: both build parts here. */
+#define IMAGE_REHYDRATE_MISSING_TEXT "[image no longer available]"
+#define IMAGE_REHYDRATE_OMITTED_TEXT "[earlier image omitted]"
+
+/* Key on a content part naming the stored image it shows (or stands in for):
+ * DAWN's own, never sent (every wire copy drops keys starting with '_'); the
+ * rows a message is saved as read it (llm_history_rows.h). */
+#define IMAGE_PART_ID_KEY "_image_id"
+
 /**
  * @brief Collect valid image IDs from [IMAGE:img_id] markers in @p content.
  *
@@ -88,6 +99,27 @@ int image_marker_collect_ids(const char *content,
 struct json_object *image_rehydrate_message(int user_id, const char *role, const char *content);
 
 /**
+ * @brief The content parts of stored images @p ids (a tool result's), one per
+ *        id, in order: an image_url part (data: URI with the image's real
+ *        mime), or a text part with IMAGE_REHYDRATE_MISSING_TEXT /
+ *        IMAGE_REHYDRATE_OMITTED_TEXT for one that can't be shown.  Every part
+ *        carries IMAGE_PART_ID_KEY.
+ *
+ * Shares image_rehydrate_message's loading: owner-only (an image of
+ * @p user_id's, never 0), and of @p source only (an image_source_t), under the
+ * same IMAGE_REHYDRATE_MAX_IMAGES / _MAX_BYTES ceilings.  A reload builds
+ * its parts here, from the stored file, in the form the live turn built them
+ * from the bytes it stored (llm_tool_images_result_content), so the two carry
+ * the same bytes.  Invalid ids are skipped.
+ *
+ * @return New array (caller owns), or NULL on no ids / OOM.
+ */
+struct json_object *image_rehydrate_parts(int user_id,
+                                          const char ids[][IMAGE_ID_LEN],
+                                          int count,
+                                          int source);
+
+/**
  * @brief Build the persisted form of an image turn: @p text + one `\n[IMAGE:<id>]`
  *        marker per id.
  *
@@ -105,6 +137,60 @@ struct json_object *image_rehydrate_message(int user_id, const char *role, const
  *         no valid ids, or NULL on OOM / NULL text.
  */
 char *image_marker_build_content(const char *text, const char ids[][IMAGE_ID_LEN], int count);
+
+/* Why image_rehydrate_question() refused a question (positive codes > 1). */
+#define IMAGE_REHYDRATE_ERR_NOT_FOUND                                                    \
+   2                                /* an id names no readable image of the user's       \
+                                     * (malformed, missing, another user's, unreadable), \
+                                     * or the text holds an inline data: image */
+#define IMAGE_REHYDRATE_ERR_LIMIT 3 /* past IMAGE_REHYDRATE_MAX_IMAGES / _MAX_BYTES */
+#define IMAGE_REHYDRATE_ERR_NOMEM 4 /* out of memory */
+
+/**
+ * @brief The history message of a user question being asked now, from its
+ *        persisted form (@p content: text + one `[IMAGE:<id>]` marker per id).
+ *
+ * The same message image_rehydrate_message() rebuilds on reload, byte for
+ * byte, but never degraded: where a reload would put a stand-in note for one
+ * of @p ids (missing, not the user's, unreadable, past the ceilings) or fall
+ * back to text on OOM, this fails, so the question is sent whole or not at
+ * all.  An inline `[IMAGE:data:...]` marker fails too: a question's images
+ * are stored ones, named by id.  Any other marker in its text reads as it
+ * does on reload.
+ *
+ * @param user_id The asking user (owner of every image; 0 has none).
+ * @param content The question's persisted form.
+ * @param ids     The images the question was sent with (validated ids).
+ * @param count   Number of @p ids (> 0).
+ * @param msg_out [out] The {role:"user", content} message (caller owns), or NULL.
+ * @return SUCCESS, FAILURE (bad args), or an IMAGE_REHYDRATE_ERR_* code.
+ */
+int image_rehydrate_question(int user_id,
+                             const char *content,
+                             const char ids[][IMAGE_ID_LEN],
+                             int count,
+                             struct json_object **msg_out);
+
+/**
+ * @brief The images a client's text turn names: its payload's `image_ids[]`
+ *        (stored image ids) into @p ids_out.
+ *
+ * The only source of a turn's images: any other field (an older client's
+ * base64 `images[]`) is never read.  Never a subset: an entry that isn't a
+ * well-formed id fails the turn (IMAGE_REHYDRATE_ERR_NOT_FOUND), as do more
+ * than @p max (IMAGE_REHYDRATE_ERR_LIMIT); whether each names an image of the
+ * user's is image_rehydrate_question's to decide.
+ *
+ * @param payload   The turn frame's payload object.
+ * @param max       Most ids a turn may carry (<= the capacity of @p ids_out).
+ * @param ids_out   Caller array of at least @p max ids.
+ * @param count_out [out] Number of ids (0: a text turn).
+ * @return SUCCESS, FAILURE (bad args), or an IMAGE_REHYDRATE_ERR_* code.
+ */
+int image_turn_ids_parse(struct json_object *payload,
+                         int max,
+                         char ids_out[][IMAGE_ID_LEN],
+                         int *count_out);
 
 #ifdef __cplusplus
 }

@@ -1678,8 +1678,7 @@ static void *extraction_thread(void *arg) {
     * tools-off guard (belt-and-suspenders alongside suppress_tools). */
    llm_tools_suppress_push();
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
-   response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
-                                              &extraction_config);
+   response = llm_chat_completion_with_config(extraction_history, prompt, &extraction_config);
    llm_tools_suppress_pop();
 
    /* Capture primary's transient status BEFORE any fallback runs.  The
@@ -1732,8 +1731,7 @@ static void *extraction_thread(void *arg) {
          }
 
          llm_tools_suppress_push();
-         response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
-                                                    &fallback_config);
+         response = llm_chat_completion_with_config(extraction_history, prompt, &fallback_config);
          llm_tools_suppress_pop();
          if (response) {
             used_fallback = true;

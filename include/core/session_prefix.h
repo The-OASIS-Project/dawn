@@ -110,11 +110,15 @@ void session_prefix_release_locked(struct session *session);
  *        which stay in the history), to save at once naming no question
  *
  * Caller holds the session's history_mutex, as the turn.
+ * @param boundary The take-back leaves the history's earlier reasoning behind
+ *                 (an inline tool change that followed the question now
+ *                 folds): the record saves the boundary with its rows
  * @return The record to pass to session_prefix_save_taken() once the lock
  *         is released, or NULL
  */
 struct session_prefix_turn *session_prefix_take_back_locked(struct session *session,
-                                                            struct json_object *question);
+                                                            struct json_object *question,
+                                                            bool boundary);
 
 /** Save @p turn (from session_prefix_take_back_locked) with its
  *  conversation.  Takes the history lock; NULL-safe. */
@@ -156,11 +160,20 @@ int session_withdraw_forgotten(int user_id, bool memory_bodies);
 void session_withdraw_forgotten_async(int user_id, bool memory_bodies);
 
 /**
- * @brief A copy of the tool set the session's conversation froze (a JSON
- *        array of names; caller puts), or NULL when it has none or a turn is
- *        reading the history on another thread (for a debug inspector)
+ * @brief A copy of the tools the session's conversation defines (its frozen
+ *        definitions and their later changes, llm_tool_defs_for_request; caller
+ *        puts), or NULL when it has none or a turn is reading the history on
+ *        another thread (for a debug inspector)
  */
-struct json_object *session_prefix_tool_names(struct session *session);
+struct json_object *session_prefix_tool_defs(struct session *session);
+
+/**
+ * @brief The Claude API rejected tools defined in a message on the session's
+ *        running conversation: record it there (what is in force, saved with
+ *        the conversation), so its tool changes fold into its tools from now on,
+ *        after a restart too; a declared boundary.  NULL-safe.
+ */
+void session_prefix_inline_tools_rejected(struct session *session);
 
 /**
  * @brief The tag of the conversation the session's turn runs on (its
@@ -206,9 +219,13 @@ static inline void session_withdraw_forgotten_async(int user_id, bool memory_bod
    (void)memory_bodies;
 }
 
-static inline struct json_object *session_prefix_tool_names(struct session *session) {
+static inline struct json_object *session_prefix_tool_defs(struct session *session) {
    (void)session;
    return NULL;
+}
+
+static inline void session_prefix_inline_tools_rejected(struct session *session) {
+   (void)session;
 }
 
 /* No sessions, no frozen prefix, no tag: llm_tools_execute's tag tripwire has
@@ -251,9 +268,11 @@ static inline void session_prefix_release_locked(struct session *session) {
 
 static inline struct session_prefix_turn *session_prefix_take_back_locked(
     struct session *session,
-    struct json_object *question) {
+    struct json_object *question,
+    bool boundary) {
    (void)session;
    (void)question;
+   (void)boundary;
    return NULL;
 }
 

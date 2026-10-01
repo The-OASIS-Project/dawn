@@ -17,9 +17,10 @@
  * the project author(s).
  *
  * Which tools a request advertises: what a surface may use now
- * (llm_tools_enabled_for_session), a conversation's frozen set, the research
- * allowlist; their schemas; and the standing direction naming the tools not
- * available now.  Split from llm_tools.c (shared state:
+ * (llm_tools_enabled_for_session), a conversation's tools by value
+ * (llm_tool_defs.h), the research allowlist; the registry's definitions and
+ * their schemas; and the standing direction naming the tools not available
+ * now.  Split from llm_tools.c (shared state:
  * llm_tools_internal.h).
  */
 
@@ -34,6 +35,7 @@
 #include "core/research_allowlist.h"
 #include "core/session_manager.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_tools_internal.h"
 #include "logging.h"
@@ -117,24 +119,24 @@ bool llm_tools_enabled_for_session(const tool_definition_t *t, bool is_remote) {
    return is_remote ? t->enabled_remote : t->enabled_local;
 }
 
-/* One tool's schema: OpenAI function shape, or Claude's. */
-static struct json_object *tool_schema(const tool_definition_t *t, bool claude) {
-   struct json_object *tool_obj = json_object_new_object();
-   if (claude) {
-      json_object_object_add(tool_obj, "name", json_object_new_string(t->name));
-      json_object_object_add(tool_obj, "description",
+/* A tool's neutral definition (llm_tool_defs.h): what the registry says now. */
+static struct json_object *neutral_def(const tool_definition_t *t) {
+   struct json_object *def = json_object_new_object();
+   if (def) {
+      json_object_object_add(def, "name", json_object_new_string(t->name));
+      json_object_object_add(def, "description",
                              json_object_new_string(llm_tools_effective_description(t)));
-      json_object_object_add(tool_obj, "input_schema", llm_tools_parameters_schema(t));
-      return tool_obj;
+      json_object_object_add(def, "parameters", llm_tools_parameters_schema(t));
    }
-   json_object_object_add(tool_obj, "type", json_object_new_string("function"));
-   struct json_object *function = json_object_new_object();
-   json_object_object_add(function, "name", json_object_new_string(t->name));
-   json_object_object_add(function, "description",
-                          json_object_new_string(llm_tools_effective_description(t)));
-   json_object_object_add(function, "parameters", llm_tools_parameters_schema(t));
-   json_object_object_add(tool_obj, "function", function);
-   return tool_obj;
+   return def;
+}
+
+/* One tool's schema as the registry renders it now. */
+static struct json_object *tool_schema(const tool_definition_t *t, bool claude) {
+   struct json_object *def = neutral_def(t);
+   struct json_object *out = def ? llm_tool_def_render(def, claude) : NULL;
+   json_object_put(def);
+   return out;
 }
 
 static struct json_object *format_filtered(bool is_remote_session, bool claude) {
@@ -167,49 +169,118 @@ struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session)
    return format_filtered(is_remote_session, true);
 }
 
-/* A conversation's tool set: every registered tool but research's own
- * (llm_tools_freeze_names). */
+/* A conversation's tool set comes from every registered tool but research's
+ * own (llm_tools_definitions). */
 static bool frozen_candidate(const tool_definition_t *t) {
    return !research_tool_is_research_only(t->name);
 }
 
-char *llm_tools_freeze_names(void) {
+/* The last definitions computed, their canonical hashes and the set's
+ * fingerprint, and the generations they are of (under llm_tools_mutex):
+ * hashed once per generation, not once per turn. */
+static char *s_defs;
+static char *s_def_hashes;
+static char s_defs_fp[DAWN_SHA256_HEX_LEN];
+static uint64_t s_defs_registry_gen;
+static uint64_t s_defs_table_gen;
+
+/* Caller holds llm_tools_mutex.  The definitions of the registry now. */
+static bool defs_rebuild_locked(uint64_t registry_gen, uint64_t table_gen) {
+   struct json_object *defs = json_object_new_array();
+   for (int i = 0; defs && i < llm_tools_count; i++) {
+      if (!frozen_candidate(&llm_tools_table[i])) {
+         continue;
+      }
+      struct json_object *def = neutral_def(&llm_tools_table[i]);
+      if (llm_tool_def_valid(def)) {
+         json_object_array_add(defs, def);
+      } else {
+         OLOG_WARNING("tools: '%s' has no definition a request can carry (too large or not "
+                      "UTF-8); left out of new conversations",
+                      llm_tools_table[i].name);
+         json_object_put(def);
+      }
+   }
+   char fp[DAWN_SHA256_HEX_LEN];
+   struct json_object *hashes = defs ? llm_tool_defs_hashes(defs, fp) : NULL;
+   const int flags = JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE;
+   char *json = defs ? strdup(json_object_to_json_string_ext(defs, flags)) : NULL;
+   char *hjson = hashes ? strdup(json_object_to_json_string_ext(hashes, flags)) : NULL;
+   json_object_put(defs);
+   json_object_put(hashes);
+   if (!json) {
+      free(hjson);
+      return false;
+   }
+   free(s_defs);
+   free(s_def_hashes);
+   s_defs = json;
+   s_def_hashes = hjson; /* NULL: the seam hashes the definitions itself */
+   snprintf(s_defs_fp, sizeof(s_defs_fp), "%s", hjson ? fp : "");
+   s_defs_registry_gen = registry_gen;
+   s_defs_table_gen = table_gen;
+   return true;
+}
+
+char *llm_tools_definitions_hashed(char **hashes_out, char *fp_out) {
+   if (hashes_out) {
+      *hashes_out = NULL;
+   }
+   if (fp_out) {
+      fp_out[0] = '\0';
+   }
    if (!llm_tools_ready) {
       return NULL;
    }
-   struct json_object *names = json_object_new_array();
-   if (!names) {
-      return NULL;
-   }
    pthread_mutex_lock(&llm_tools_mutex);
-   for (int i = 0; i < llm_tools_count; i++) {
-      if (frozen_candidate(&llm_tools_table[i])) {
-         json_object_array_add(names, json_object_new_string(llm_tools_table[i].name));
+   /* Read before computing: a change during it rises after, and is seen next. */
+   const uint64_t registry_gen = tool_registry_generation();
+   const uint64_t table_gen = atomic_load(&llm_tools_generation);
+   if (!s_defs || s_defs_registry_gen != registry_gen || s_defs_table_gen != table_gen) {
+      (void)defs_rebuild_locked(registry_gen, table_gen);
+   }
+   char *copy = s_defs ? strdup(s_defs) : NULL;
+   /* The three of one generation, or the definitions alone. */
+   if (copy && hashes_out && s_def_hashes) {
+      *hashes_out = strdup(s_def_hashes);
+      if (*hashes_out && fp_out) {
+         snprintf(fp_out, DAWN_SHA256_HEX_LEN, "%s", s_defs_fp);
       }
    }
    pthread_mutex_unlock(&llm_tools_mutex);
-   char *out = strdup(json_object_to_json_string_ext(names, JSON_C_TO_STRING_PLAIN));
-   json_object_put(names);
-   return out;
+   return copy;
 }
 
-struct json_object *llm_tools_format_named(struct json_object *names, bool claude) {
-   if (!llm_tools_ready || !json_object_is_type(names, json_type_array)) {
+char *llm_tools_definitions(void) {
+   return llm_tools_definitions_hashed(NULL, NULL);
+}
+
+struct json_object *llm_tools_render_frozen(struct json_object *defs, bool claude) {
+   if (!json_object_is_type(defs, json_type_array)) {
       return NULL;
    }
    struct json_object *tools_array = json_object_new_array();
-   const size_t n = json_object_array_length(names);
-   pthread_mutex_lock(&llm_tools_mutex);
+   const size_t n = json_object_array_length(defs);
    for (size_t k = 0; tools_array && k < n; k++) {
-      const char *name = json_object_get_string(json_object_array_get_idx(names, k));
-      for (int i = 0; name && i < llm_tools_count; i++) {
+      struct json_object *def = json_object_array_get_idx(defs, k);
+      if (!json_object_is_type(def, json_type_string)) {
+         struct json_object *tool = llm_tool_def_render(def, claude);
+         if (tool) {
+            json_object_array_add(tools_array, tool);
+         }
+         continue;
+      }
+      /* A name: an older conversation's set, rendered as the registry has it. */
+      const char *name = json_object_get_string(def);
+      pthread_mutex_lock(&llm_tools_mutex);
+      for (int i = 0; llm_tools_ready && i < llm_tools_count; i++) {
          if (strcmp(llm_tools_table[i].name, name) == 0) {
             json_object_array_add(tools_array, tool_schema(&llm_tools_table[i], claude));
             break;
          }
       }
+      pthread_mutex_unlock(&llm_tools_mutex);
    }
-   pthread_mutex_unlock(&llm_tools_mutex);
    if (tools_array && json_object_array_length(tools_array) == 0) {
       json_object_put(tools_array);
       return NULL;
@@ -220,6 +291,7 @@ struct json_object *llm_tools_format_named(struct json_object *names, bool claud
 struct json_object *llm_tools_request_tools(struct json_object *history,
                                             bool is_remote,
                                             bool claude,
+                                            bool inline_ok,
                                             const char **source_out) {
    const char *ignored = NULL;
    const char **source = source_out ? source_out : &ignored;
@@ -232,10 +304,12 @@ struct json_object *llm_tools_request_tools(struct json_object *history,
       *source = "the research allowlist";
       return format_filtered(is_remote, claude);
    }
-   struct json_object *frozen = llm_history_frozen_tools(history);
-   if (frozen) {
+   struct json_object *defs = llm_tool_defs_for_request(history, inline_ok);
+   if (defs) {
       *source = "the conversation's set";
-      return llm_tools_format_named(frozen, claude);
+      struct json_object *tools = llm_tools_render_frozen(defs, claude);
+      json_object_put(defs);
+      return tools;
    }
    *source = is_remote ? "remote session" : "local session";
    return format_filtered(is_remote, claude);
@@ -248,16 +322,18 @@ bool llm_tools_request_offers(struct json_object *history, bool is_remote, const
    session_t *ctx = session_get_command_context();
    const bool research = ctx != NULL && atomic_load(&ctx->research_run_id) > 0;
    if (!research) {
-      /* The conversation's frozen set, when it has one, is what the request
-       * carries: a tool it doesn't name isn't offered. */
-      struct json_object *frozen = llm_history_frozen_tools(history);
-      if (frozen) {
+      /* The conversation's tools, when it has them, are what the request
+       * defines (in `tools` or in place): a tool they don't name isn't
+       * offered. */
+      struct json_object *defs = llm_tool_defs_for_request(history, false);
+      if (defs) {
          bool named = false;
-         const size_t n = json_object_array_length(frozen);
+         const size_t n = json_object_array_length(defs);
          for (size_t k = 0; !named && k < n; k++) {
-            const char *f = json_object_get_string(json_object_array_get_idx(frozen, k));
+            const char *f = llm_tool_def_name(json_object_array_get_idx(defs, k));
             named = f && strcmp(f, name) == 0;
          }
+         json_object_put(defs);
          if (!named) {
             return false;
          }
@@ -287,6 +363,11 @@ void llm_tools_filter_release(void) {
    pthread_mutex_lock(&llm_tools_mutex);
    free(s_hashes);
    s_hashes = NULL;
+   free(s_defs);
+   s_defs = NULL;
+   free(s_def_hashes);
+   s_def_hashes = NULL;
+   s_defs_fp[0] = '\0';
    pthread_mutex_unlock(&llm_tools_mutex);
 }
 

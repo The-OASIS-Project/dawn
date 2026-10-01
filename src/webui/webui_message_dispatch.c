@@ -114,7 +114,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    json_object_object_get_ex(root, "payload", &payload);
 
    if (strcmp(type, "text") == 0) {
-      /* Text input from user (with optional vision images - supports multiple) */
+      /* Text input from user, with the images attached to it by id */
       if (payload) {
          struct json_object *text_obj;
          if (json_object_object_get_ex(payload, "text", &text_obj)) {
@@ -133,127 +133,57 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   conn_reanchor_conversation(conn, json_object_get_int64(conv_id_obj));
                }
 
-               /* Extract optional images for vision (array format) */
-               const char *vision_images[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };
-               size_t vision_image_sizes[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };
-               const char *vision_mimes[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };
-               int vision_image_count = 0;
-               const int max_vision_images = g_config.vision.max_images;
-
-               struct json_object *images_obj;
-               if (json_object_object_get_ex(payload, "images", &images_obj) &&
-                   json_object_is_type(images_obj, json_type_array)) {
-                  int array_len = json_object_array_length(images_obj);
-                  if (array_len > max_vision_images) {
-                     OLOG_WARNING("WebUI: Too many images (%d), limiting to %d", array_len,
-                                  max_vision_images);
-                     array_len = max_vision_images;
-                  }
-
-                  for (int i = 0; i < array_len; i++) {
-                     struct json_object *image_obj = json_object_array_get_idx(images_obj, i);
-                     struct json_object *data_obj, *mime_obj;
-                     if (json_object_object_get_ex(image_obj, "data", &data_obj) &&
-                         json_object_object_get_ex(image_obj, "mime_type", &mime_obj)) {
-                        const char *img_data = json_object_get_string(data_obj);
-                        const char *img_mime = json_object_get_string(mime_obj);
-                        if (img_data) {
-                           size_t img_size = strlen(img_data);
-
-                           /* Validate each image BEFORE passing to handler */
-                           int val_result = validate_image_data(img_data, img_size, img_mime);
-                           if (val_result != 0) {
-                              const char *err_msg = "Image validation failed";
-                              switch (val_result) {
-                                 case 1:
-                                    err_msg = "Unsupported image type";
-                                    break;
-                                 case 2:
-                                    err_msg = "Image too large (max 4MB)";
-                                    break;
-                                 case 3:
-                                    err_msg = "Invalid image data encoding";
-                                    break;
-                                 case 4:
-                                    err_msg = "Image format doesn't match declared type";
-                                    break;
-                              }
-                              send_error_impl(conn->wsi, "INVALID_IMAGE", err_msg);
-                              json_object_put(root);
-                              free(json_str);
-                              return;
-                           }
-
-                           vision_images[vision_image_count] = img_data;
-                           vision_image_sizes[vision_image_count] = img_size;
-                           vision_mimes[vision_image_count] = img_mime;
-                           vision_image_count++;
-                        }
-                     }
-                  }
-
-                  if (vision_image_count > 0) {
-                     OLOG_INFO("WebUI: %d vision image(s) attached", vision_image_count);
+               /* The turn's images come only from image_ids[] (/api/images ids;
+                * the worker reads the stored files).  Base64 images[] from an
+                * older client are neither read nor validated: ignored, not
+                * rejected, so its turn still arrives as text. */
+               if (json_object_object_get_ex(payload, "images", NULL)) {
+                  static atomic_bool s_images_ignored_logged = false;
+                  if (!atomic_exchange(&s_images_ignored_logged, true)) {
+                     OLOG_DEBUG("WebUI: ignoring a text frame's base64 images[] (only "
+                                "image_ids are read); logged once");
                   }
                }
 
-               /* Parse image_ids[] — the /api/images persistence keys the client
-                * holds, ordered to match images[].  The daemon is authoritative for
-                * user-turn persistence, so it builds the [IMAGE:<id>] markers itself
-                * (no client save).  Retention promotion is NOT done here: it happens
-                * post-persist in the worker so images are pinned only for turns that
-                * actually persisted (a turn rejected before persist — queue-full,
-                * superseded — would otherwise permanently pin images that have no
-                * orphan sweep).  The images[]<->image_ids[] correspondence is a
-                * client convention (both mapped from one array, see dawn.js); the
-                * server does not cross-check them — a bad pairing only mis-persists
-                * the sender's own turn. */
                char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
                int image_id_count = 0;
-               struct json_object *image_ids_obj;
-               if (json_object_object_get_ex(payload, "image_ids", &image_ids_obj) &&
-                   json_object_is_type(image_ids_obj, json_type_array)) {
-                  int id_len = json_object_array_length(image_ids_obj);
-                  /* Cap at the SAME effective limit as images[] (runtime, may be <
-                   * the array bound), then belt-and-suspenders at the array bound. */
-                  if (id_len > max_vision_images) {
-                     id_len = max_vision_images;
-                  }
-                  if (id_len > WEBUI_MAX_VISION_IMAGES_CAP) {
-                     id_len = WEBUI_MAX_VISION_IMAGES_CAP;
-                  }
-                  for (int i = 0; i < id_len; i++) {
-                     const char *img_id = json_object_get_string(
-                         json_object_array_get_idx(image_ids_obj, i));
-                     if (!img_id || !image_store_validate_id(img_id)) {
-                        OLOG_WARNING("WebUI: ignoring invalid image_id in turn frame");
-                        continue;
-                     }
-                     snprintf(image_ids[image_id_count], IMAGE_ID_LEN, "%s", img_id);
-                     image_id_count++;
-                  }
+               int max_images = g_config.vision.max_images;
+               if (max_images > WEBUI_MAX_VISION_IMAGES_CAP) {
+                  max_images = WEBUI_MAX_VISION_IMAGES_CAP;
+               }
+               const int rc = image_turn_ids_parse(payload, max_images, image_ids, &image_id_count);
+               if (rc != SUCCESS) {
+                  const char *code = NULL;
+                  const char *message = NULL;
+                  webui_image_error_describe(rc, &code, &message);
+                  send_error_impl(conn->wsi, code, message);
+                  json_object_put(root);
+                  free(json_str);
+                  return;
                }
 
                /* Server-authoritative persisted form for an image turn: clean text
                 * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
-                * text).  Freed after the call — the worker strdup's what it needs. */
+                * text).  Freed after the call — the worker strdup's what it needs.
+                * Retention promotion happens post-persist in the worker, so images
+                * are pinned only for turns that actually persisted. */
                char *persist_content = NULL;
                if (image_id_count > 0) {
-                  persist_content = image_marker_build_content(text, image_ids, image_id_count);
+                  persist_content = image_marker_build_content(
+                      text, (const char(*)[IMAGE_ID_LEN])image_ids, image_id_count);
                   if (!persist_content) {
-                     /* OOM building markers — persist plain text rather than fail the
-                      * turn.  Log loudly: the images won't re-render on reload (no
-                      * markers persisted) and won't be pinned (worker promotes only
-                      * what's in the marker string), so they LRU-evict normally — a
-                      * silent-on-reload degradation bounded to this OOM-gated turn. */
-                     OLOG_ERROR("WebUI: failed to build image markers (OOM); persisting text-only, "
-                                "%d image(s) will not re-render on reload",
-                                image_id_count);
+                     const char *code = NULL;
+                     const char *message = NULL;
+                     webui_image_error_describe(IMAGE_REHYDRATE_ERR_NOMEM, &code, &message);
+                     send_error_impl(conn->wsi, code, message);
+                     json_object_put(root);
+                     free(json_str);
+                     return;
                   }
                }
 
-               handle_text_message(conn, text, strlen(text), vision_images, vision_image_sizes,
-                                   vision_mimes, vision_image_count, persist_content);
+               handle_text_message(conn, text, strlen(text), (const char(*)[IMAGE_ID_LEN])image_ids,
+                                   image_id_count, persist_content);
                free(persist_content);
             }
          }
@@ -298,8 +228,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          /* The conversation's frozen set when it has one, as every request of
           * it is sent; else what this surface would get. */
          bool is_remote = (conn->session->type != SESSION_TYPE_LOCAL);
-         struct json_object *frozen = session_prefix_tool_names(conn->session);
-         struct json_object *tools = frozen ? llm_tools_format_named(frozen, false)
+         struct json_object *frozen = session_prefix_tool_defs(conn->session);
+         struct json_object *tools = frozen ? llm_tools_render_frozen(frozen, false)
                                             : llm_tools_get_openai_format_filtered(is_remote);
          json_object_put(frozen);
          if (tools) {

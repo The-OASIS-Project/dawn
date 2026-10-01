@@ -39,6 +39,9 @@
 #include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_history_rows.h"
+#include "llm/llm_tool_defs.h"
+#include "llm/llm_tool_images.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "tts/text_to_speech.h"
@@ -62,6 +65,7 @@ void session_compaction_commit_free(session_compaction_commit_t *c) {
    }
    free(c->summary);
    json_object_put(c->tail_calls);
+   json_object_put(c->removed_tools);
    memset(c, 0, sizeof(*c));
 }
 
@@ -96,6 +100,12 @@ typedef struct {
    llm_type_t type;
    cloud_provider_t provider;
    char model[64];
+   /* What drove it: the images (their limit and the share that triggers),
+    * and whether the tokens did too. */
+   bool images_over;
+   bool tokens_over;
+   llm_image_limit_t image_limit;
+   float image_fraction;
 } compaction_run_t;
 
 static void run_free(compaction_run_t *run) {
@@ -118,6 +128,16 @@ static int messages_start(struct json_object *hist) {
 /* A turn opens here: the user's question, or DAWN's (a continuation's). */
 static bool is_question_at(struct json_object *hist, int i) {
    return llm_history_is_question(json_object_array_get_idx(hist, i));
+}
+
+/* The first question in (@p from, @p len), or -1. */
+static int question_after(struct json_object *hist, int from, int len) {
+   for (int j = from + 1; j < len; j++) {
+      if (is_question_at(hist, j)) {
+         return j;
+      }
+   }
+   return -1;
 }
 
 /* The newest question in (@p start, @p from], or @p start. */
@@ -185,6 +205,38 @@ static void clear_range_locked(session_t *session) {
  * a turn record still holds ends the range at the question before it, and the
  * range must end on a row whose id is known (or a tool exchange, whose rows are
  * found by call id). */
+/* What says a row of @p hist was saved since: its newest saved row id, or, for
+ * a history saved whole (no row has an id until the voice save), its length. */
+static int64_t saved_mark(const session_t *session, struct json_object *hist, int len) {
+   if (session_saved_whole(session)) {
+      return len;
+   }
+   int64_t newest = 0;
+   for (int i = 0; i < len; i++) {
+      const int64_t id = llm_compaction_row_id(json_object_array_get_idx(hist, i));
+      newest = id > newest ? id : newest;
+   }
+   return newest;
+}
+
+/* Images alone drove a plan and the range it could take holds none.  The
+ * saved-row pull-back can't be bounded (past an unsaved row a reload couldn't
+ * tell where the range ends), so the plan waits: none is made again for this
+ * conversation until a row is saved, when the pull-back reaches further. */
+static void images_stall_locked(session_t *session, int64_t conv, int64_t mark) {
+   session_compaction_t *c = &session->compaction;
+   c->images_stalled = true;
+   c->images_stall_conv = conv;
+   c->images_stall_mark = mark;
+   if (!c->images_stall_logged || c->images_logged_conv != conv) {
+      c->images_stall_logged = true;
+      c->images_logged_conv = conv;
+      OLOG_INFO("Session %u: its images are all in what a compaction keeps or in rows not "
+                "saved yet; none made until a turn's rows are saved",
+                session->session_id);
+   }
+}
+
 static bool plan_locked(session_t *session, struct json_object *hist, compaction_run_t *run) {
    session_compaction_t *c = &session->compaction;
    const int len = json_object_is_type(hist, json_type_array) ? (int)json_object_array_length(hist)
@@ -193,10 +245,28 @@ static bool plan_locked(session_t *session, struct json_object *hist, compaction
    if (len - start < COMPACTION_MIN_MESSAGES) {
       return false;
    }
+   const bool images_only = run->images_over && !run->tokens_over;
+   const int64_t conv = atomic_load(&session->history_conversation_id);
+   const int64_t mark = images_only ? saved_mark(session, hist, len) : 0;
+   if (images_only && c->images_stalled && c->images_stall_conv == conv &&
+       c->images_stall_mark == mark) {
+      return false; /* nothing saved since: the same plan */
+   }
    int end = llm_compaction_keep_start(hist, start, LLM_COMPACTION_KEEP_EXCHANGES * 2);
    if (end <= start) {
       /* A tool exchange fills what would be kept: keep the newest question on. */
       end = question_at_or_before(hist, start, len - 1);
+   }
+   /* Images drove it: the cut goes on, a turn at a time (the newest question
+    * always kept), until what is kept leaves room for one more, or the next
+    * seam would compact again for the same images. */
+   while (run->images_over && end > start && end < len &&
+          llm_tool_images_range_over(hist, end, len, &run->image_limit, run->image_fraction)) {
+      const int next = question_after(hist, end, len);
+      if (next < 0) {
+         break;
+      }
+      end = next;
    }
    if (!session_saved_whole(session)) {
       for (int i = start; i < end; i++) {
@@ -225,6 +295,18 @@ static bool plan_locked(session_t *session, struct json_object *hist, compaction
    if (end - start < 2) {
       return false;
    }
+   /* Images alone drove it and the range holds none: summarizing it frees no
+    * room for one (they are all in what must be kept, or past a row not yet
+    * saved), so nothing is, until a row is saved. */
+   if (images_only) {
+      int in_range = 0;
+      llm_history_image_totals(hist, start, end, &in_range, NULL);
+      if (in_range == 0) {
+         images_stall_locked(session, conv, mark);
+         return false;
+      }
+   }
+   c->images_stalled = false;
 
    struct json_object *input = json_object_new_array();
    if (!input) {
@@ -240,6 +322,12 @@ static bool plan_locked(session_t *session, struct json_object *hist, compaction
       json_object_array_add(input, m);
    }
    for (int i = start; i < end; i++) {
+      /* A tool-set change isn't conversation to summarize (and an MCP
+       * server's text has no business in a summary): the definitions it holds
+       * are appended again at the seam that applies this (prefix_tools.h). */
+      if (llm_history_kind_of(json_object_array_get_idx(hist, i)) == MESSAGE_KIND_TOOL_CHANGE) {
+         continue;
+      }
       struct json_object *copy = input_copy(json_object_array_get_idx(hist, i));
       if (!copy) {
          json_object_put(input);
@@ -347,6 +435,32 @@ static bool run_model(compaction_run_t *run, const session_llm_config_t *cfg) {
    return true;
 }
 
+/* Whether @p hist's images reach @p fraction of what one request to the
+ * model may carry (models.toml [max_request_images]); @p run (may be NULL)
+ * keeps the limit, for the cut. */
+static bool images_over(session_t *session,
+                        struct json_object *hist,
+                        llm_type_t type,
+                        cloud_provider_t provider,
+                        const char *model,
+                        float fraction,
+                        compaction_run_t *run) {
+   llm_image_limit_t limit;
+   (void)llm_tool_images_request_limit(type, provider, model, &limit);
+   const bool over = llm_tool_images_history_over(hist, &limit, fraction);
+   if (over) {
+      OLOG_INFO("Session %u: its images reach %.0f%% of the model's per-request limit (%d images, "
+                "%lld bytes)",
+                session->session_id, fraction * 100.0f, limit.count, (long long)limit.bytes);
+   }
+   if (run) {
+      run->images_over = over;
+      run->image_limit = limit;
+      run->image_fraction = fraction;
+   }
+   return over;
+}
+
 void session_compaction_trigger(session_t *session,
                                 struct json_object *hist,
                                 llm_type_t type,
@@ -370,14 +484,17 @@ void session_compaction_trigger(session_t *session,
        (c->last_at > 0 && time(NULL) - c->last_at < COMPACTION_COOLDOWN_SEC)) {
       return;
    }
-   if (!llm_context_over_threshold(session->session_id, hist, 0, type, provider, model,
-                                   g_config.llm.compact_soft_threshold)) {
+   compaction_run_t *run = calloc(1, sizeof(*run));
+   if (!run) {
       return;
    }
-   compaction_run_t *run = calloc(1, sizeof(*run));
+   run->tokens_over = llm_context_over_threshold(session->session_id, hist, 0, type, provider,
+                                                 model, g_config.llm.compact_soft_threshold);
+   (void)images_over(session, hist, type, provider, model, g_config.llm.compact_soft_threshold,
+                     run);
    session_llm_config_t cfg;
    session_get_llm_config(session, &cfg);
-   if (!run || !run_model(run, &cfg)) {
+   if ((!run->tokens_over && !run->images_over) || !run_model(run, &cfg)) {
       free(run);
       return;
    }
@@ -452,10 +569,14 @@ void session_compaction_prepare(session_t *session, int extra_tokens) {
    struct json_object *hist = json_object_get(turn_history_locked(session));
    pthread_mutex_unlock(&session->history_mutex);
 
-   const bool over = hist &&
-                     llm_context_over_threshold(session->session_id, hist, extra_tokens, type,
-                                                provider, m, llm_context_hard_threshold());
-   if (!over) {
+   /* Its tokens, or its images: a turn's tool loop can't compact, so the
+    * history must leave room for an image before it starts. */
+   if (hist) {
+      run->tokens_over = llm_context_over_threshold(session->session_id, hist, extra_tokens, type,
+                                                    provider, m, llm_context_hard_threshold());
+      (void)images_over(session, hist, type, provider, m, 1.0f, run);
+   }
+   if (!run->tokens_over && !run->images_over) {
       session_release_ref(session, hist);
       run_free(run);
       return;
@@ -552,8 +673,10 @@ bool session_compaction_apply_locked(session_t *session,
 
    if (session_saved_whole(session)) {
       /* Saved at the voice save, before what is kept: the rows each message
-       * becomes, without the reasoning a compaction leaves behind anyway (and
-       * without the images the rows never carry). */
+       * becomes, without the reasoning a compaction leaves behind anyway.  A
+       * tool result's images stay on its row by id (LLM_HISTORY_ROW_IMAGES_KEY),
+       * so the voice save stores and binds them with the rest, and the unbound
+       * sweep sees them held meanwhile (session_images_held). */
       if (!c->voice_removed) {
          c->voice_removed = json_object_new_array();
       }
@@ -572,6 +695,20 @@ bool session_compaction_apply_locked(session_t *session,
       free(c->voice_summary);
       c->voice_summary = strdup(out->summary);
       c->voice_level = out->level;
+   }
+   /* The tool definitions it summarizes away: appended again at this seam
+    * from these rows (prefix_tools_apply), whatever the registry has now. */
+   for (int i = start; i < end; i++) {
+      struct json_object *msg = json_object_array_get_idx(hist, i);
+      if (llm_history_kind_of(msg) != MESSAGE_KIND_TOOL_CHANGE) {
+         continue;
+      }
+      struct json_object *defs = llm_tool_change_defs(msg);
+      if (defs && !out->removed_tools) {
+         out->removed_tools = json_object_new_array();
+      }
+      llm_tool_defs_merge(out->removed_tools, defs);
+      json_object_put(defs);
    }
    json_object_array_del_idx(hist, (size_t)start, (size_t)c->count);
    if (llm_history_attach_summary(hist, start, out->summary, c->tag[0] ? c->tag : NULL) < 0) {
@@ -635,6 +772,10 @@ void session_compaction_reset_locked(session_t *session) {
    c->voice_removed = NULL;
    free(c->voice_summary);
    c->voice_summary = NULL;
+   /* A new history starts with no stall: its length can't be compared with
+    * the old one's mark. */
+   c->images_stalled = false;
+   c->images_stall_logged = false;
 }
 
 typedef struct {

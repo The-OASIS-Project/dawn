@@ -12,6 +12,62 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-01 — Image messages attach images by id only (custom WebSocket clients)
+
+**What changed.** A `text` message's images now come only from its `image_ids`
+(the ids `POST /api/images` returns). The daemon reads the stored files and sends
+the model exactly what a reload of the conversation sends. The old base64
+`images[]` field is no longer read: a message that still carries it is handled as
+if it didn't. If an id is malformed, names no image of yours, or there are too
+many, the message is refused with an `error` frame (`IMAGE_UNAVAILABLE`,
+`IMAGE_LIMIT` or `IMAGE_ERROR`) and nothing is added to the conversation; before,
+DAWN sent what it could.
+
+**What you need to do.** Nothing for the bundled WebUI (reload the page once so it
+picks up the new script). A client of your own that sends images over the
+WebSocket must upload each image first and send its id in `image_ids`; see
+`docs/WEBSOCKET_PROTOCOL.md`.
+
+---
+
+## 2026-10-01 — Camera captures stay in the conversation; `capture_history_count` retired
+
+**What changed.**
+- **An image a tool returns (a camera capture from `viewing`, an MCP image) is now
+  kept with its conversation** in DAWN's image store, inside the tool's result, and
+  reloads with the conversation. Before, a capture lived only in memory and older
+  ones were blanked out as new ones came in. Captures are private to their owner and
+  are deleted with their conversation. Guests' captures stay in memory only.
+- **`[vision] capture_history_count` is retired and ignored.** If your `dawn.toml`
+  sets it, DAWN logs one warning at startup and carries on; the next settings save
+  removes it. Images are now bounded by the model instead: a request carries at most
+  the images its vendor allows (`models.toml` `[max_request_images]`), a capture past
+  that is refused for that turn, and the next turn compacts the conversation so its
+  oldest images are summarized away.
+- **Captures have their own per-user limit (1000)**, separate from uploads, so a
+  camera never fills the room your uploads need. At the limit a new capture is
+  refused (the reply says so); deleting conversations that hold captures frees room.
+- **A model without vision** (vision turned off for it) reads a short fixed note in
+  place of each captured image.
+- **Deleting a conversation deletes the images that belong only to it**: its
+  captures, and the photos attached to its questions. This covers conversations
+  from before this version too: the upgrade goes through your stored messages once
+  and records which images each conversation's questions attached. An image another
+  conversation also uses is kept. A reply, a memory or a note elsewhere that still
+  mentions a deleted image can't show it any more: the model reads
+  "[image no longer available]" in its place.
+- **This upgrade rebuilds the message table once**, and needs free disk space next to
+  the database for it (about twice the table's size, plus 64 MB). Without that room
+  DAWN stops at startup with an error saying how much to free; nothing is changed.
+
+**What you need to do.** Make sure the disk holding the database has that room
+before you upgrade (or free it and start DAWN again). If you keep a customized
+`models.toml`, merge in
+the new `[max_request_images]` table from the shipped one to tune the limits; without
+it DAWN uses the built-in copy.
+
+---
+
 ## 2026-09-30 — Logging out signs out every tab, at once
 
 **What changed.**

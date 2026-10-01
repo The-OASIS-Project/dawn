@@ -35,9 +35,9 @@
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
 #include "auth/auth_db_withdraw.h"
+#include "core/message_kind.h"
 #include "unity.h"
 
-int auth_db_migrations_v94(sqlite3 *db);
 
 static const char *TEST_DB = "/tmp/dawn_test_kind_prefix.db";
 static const char *OLD_DB = "/tmp/dawn_test_kind_prefix_v93.db";
@@ -545,6 +545,53 @@ static void test_gc_keeps_what_a_conversation_uses(void) {
    conv_prefix_free(&p);
 }
 
+static int keep_content(const conversation_llm_row_t *row, void *ctx) {
+   char **out = ctx;
+   if (row->kind && strcmp(row->kind, "tool_change") == 0) {
+      free(*out);
+      *out = strdup(row->content);
+   }
+   return 0;
+}
+
+/* A large tool change's definitions are stored by hash (the row names them),
+ * read back whole, kept by the collector while a row names them, and gone
+ * with the conversation. */
+static void test_a_large_tool_change_is_stored_by_hash(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   add_row(conv, "user", "Q", NULL);
+   char *big = malloc(12000);
+   TEST_ASSERT_NOT_NULL(big);
+   int n = snprintf(big, 12000,
+                    "{\"rendered\":\"inline\",\"tools\":[{\"name\":\"t\","
+                    "\"description\":\"");
+   memset(big + n, 'x', 10000);
+   snprintf(big + n + 10000, 12000 - (size_t)n - 10000, "\",\"parameters\":{}}]}");
+   add_row(conv, "system", big, "tool_change");
+
+   sqlite3 *db = raw_open(TEST_DB);
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE kind = "
+                                          "'tool_change' AND content LIKE '{\"blob\":%'"));
+   sqlite3_close(db);
+   char *read = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_for_llm(conv, alice_id, 0, keep_content, &read));
+   TEST_ASSERT_EQUAL_STRING(big, read);
+   free(read);
+
+   int deleted = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_prompt_blobs_gc(&deleted));
+   TEST_ASSERT_EQUAL_INT(0, deleted);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(conv, alice_id));
+   db = raw_open(TEST_DB);
+   char sql[64];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM prompt_blobs WHERE length(bytes) > 9000");
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(db, sql));
+   sqlite3_close(db);
+   free(big);
+}
+
 static void test_altered_prefix_bytes_are_refused(void) {
    int64_t conv = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
@@ -851,6 +898,379 @@ static void test_v96_leaves_compacted_reasoning_behind(void) {
    sqlite3_close(db);
 }
 
+/* ---- v98: messages rebuilt (images, kind triggers) ---- */
+
+/* The text a database stores for a messages object (NULL-safe copy). */
+static void object_sql(sqlite3 *db, const char *name, char *out, size_t out_size) {
+   sqlite3_stmt *st = NULL;
+   out[0] = '\0';
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(db,
+                                                       "SELECT sql FROM sqlite_master "
+                                                       "WHERE name = ? AND tbl_name = 'messages'",
+                                                       -1, &st, NULL));
+   sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+   if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0)) {
+      snprintf(out, out_size, "%s", (const char *)sqlite3_column_text(st, 0));
+   }
+   sqlite3_finalize(st);
+}
+
+/* A v97 database as one migrated from v94 has it: columns in the order the
+ * ALTERs added them, the kind CHECK, its indexes and trigger, a gap in the
+ * ids and a sequence past the newest row (an id handed out, then deleted). */
+static sqlite3 *v97_fixture(void) {
+   unlink(OLD_DB);
+   sqlite3 *db = raw_open(OLD_DB);
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_exec(db,
+                    "PRAGMA foreign_keys=ON;"
+                    "CREATE TABLE conversations (id INTEGER PRIMARY KEY, user_id INTEGER NOT "
+                    "NULL);"
+                    "CREATE TABLE images (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, "
+                    "source INTEGER NOT NULL DEFAULT 0, retention_policy INTEGER NOT NULL "
+                    "DEFAULT 0, mime_type TEXT NOT NULL, size INTEGER NOT NULL, filename TEXT "
+                    "NOT NULL, created_at INTEGER NOT NULL, last_accessed "
+                    "INTEGER);" AUTH_DB_CONVERSATION_IMAGES_SQL
+                    "CREATE TABLE \"messages\" (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "conversation_id INTEGER NOT NULL, role TEXT NOT NULL CHECK(role IN "
+                    "('system', 'user', 'assistant', 'tool')), content TEXT NOT NULL, created_at "
+                    "INTEGER NOT NULL, tool_calls TEXT, tool_call_id TEXT, reasoning TEXT, "
+                    "is_error INTEGER NOT NULL DEFAULT 0, llm_blocks_len INTEGER, "
+                    "llm_blocks TEXT " CONV_LLM_BLOCKS_CHECK_SQL ", kind TEXT DEFAULT "
+                    "NULL " CONV_MESSAGE_KIND_CHECK_V94_SQL ", context_of INTEGER DEFAULT NULL, "
+                    "FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE "
+                    "CASCADE);" CONV_MESSAGES_IDX_CONVERSATION_SQL CONV_MESSAGES_IDX_LLM_BLOCKS_SQL
+                        CONV_MESSAGES_IDX_DISPLAY_SQL CONV_MESSAGES_IDX_KIND_SQL
+                            CONV_MESSAGES_LLM_BLOCKS_TRIGGER_SQL
+                    /* Something else that names messages: it must still name it after. */
+                    "CREATE TRIGGER conversations_gone AFTER DELETE ON conversations BEGIN "
+                    "DELETE FROM messages WHERE conversation_id = OLD.id; END;"
+                    "INSERT INTO conversations VALUES (1, 1), (2, 1);"
+                    "INSERT INTO messages (id, conversation_id, role, content, created_at, "
+                    "tool_calls, tool_call_id, reasoning, is_error, llm_blocks_len, llm_blocks, "
+                    "kind, context_of) VALUES "
+                    "(1, 1, 'user', 'Q', 10, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL),"
+                    "(2, 1, 'user', 'ctx', 11, NULL, NULL, NULL, 0, NULL, NULL, 'turn_context', "
+                    "1),"
+                    "(3, 1, 'assistant', 'A', 12, '[{\"id\":\"t1\"}]', NULL, '{\"r\":1}', 0, 2, "
+                    "'[]', NULL, NULL),"
+                    "(5, 1, 'tool', 'R', 13, NULL, 't1', NULL, 1, NULL, NULL, NULL, NULL),"
+                    "(6, 2, 'system', 'D', 14, NULL, NULL, NULL, 0, NULL, NULL, 'directive', "
+                    "NULL);"
+                    "UPDATE sqlite_sequence SET seq = 40 WHERE name = 'messages';",
+                    NULL, NULL, NULL));
+   return db;
+}
+
+/* The rebuild keeps every row, id and the sequence; the new table, its
+ * indexes and its triggers are stored exactly as a new database stores them;
+ * nothing else that names messages is rewritten; it runs once. */
+static void test_v98_rebuilds_messages_keeping_rows_ids_and_sequence(void) {
+   sqlite3 *db = v97_fixture();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v98(db, OLD_DB));
+
+   TEST_ASSERT_EQUAL_INT64(5, raw_int(db, "SELECT COUNT(*) FROM messages"));
+   TEST_ASSERT_EQUAL_INT64(17, raw_int(db, "SELECT SUM(id) FROM messages"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE id = 2 AND "
+                                          "kind = 'turn_context' AND context_of = 1 AND "
+                                          "created_at = 11"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE id = 3 AND "
+                                          "tool_calls = '[{\"id\":\"t1\"}]' AND reasoning = "
+                                          "'{\"r\":1}' AND llm_blocks = '[]' AND "
+                                          "llm_blocks_len = 2"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE id = 5 AND "
+                                          "tool_call_id = 't1' AND is_error = 1 AND images "
+                                          "IS NULL"));
+   TEST_ASSERT_EQUAL_INT64(40, raw_int(db, "SELECT seq FROM sqlite_sequence WHERE name = "
+                                           "'messages'"));
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(db, "SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                                          "'messages_v97' OR tbl_name = 'messages_v97'"));
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(db, "SELECT COUNT(*) FROM sqlite_sequence WHERE name = "
+                                          "'messages_v97'"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "PRAGMA foreign_keys")); /* back on */
+
+   /* The same schema a new database (setUp's, the whole ladder) stores. */
+   sqlite3 *fresh = raw_open(TEST_DB);
+   TEST_ASSERT_EQUAL_INT64(9, raw_int(fresh, "SELECT COUNT(*) FROM sqlite_master WHERE "
+                                             "tbl_name = 'messages'"));
+   TEST_ASSERT_EQUAL_INT64(9, raw_int(db, "SELECT COUNT(*) FROM sqlite_master WHERE "
+                                          "tbl_name = 'messages'"));
+   static const char *const names[] = {
+      "messages",
+      "idx_messages_conversation",
+      "idx_messages_llm_blocks",
+      "idx_messages_display",
+      "idx_messages_kind",
+      "idx_messages_images",
+      "messages_llm_blocks_on_edit",
+      "messages_kind_on_insert",
+      "messages_kind_on_update",
+   };
+   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+      char migrated[2048];
+      char made[2048];
+      object_sql(db, names[i], migrated, sizeof(migrated));
+      object_sql(fresh, names[i], made, sizeof(made));
+      TEST_ASSERT_TRUE_MESSAGE(made[0] != '\0', names[i]);
+      TEST_ASSERT_EQUAL_STRING_MESSAGE(made, migrated, names[i]);
+   }
+   /* The stored blocks are the last columns (nothing a filter reads sits
+    * behind their overflow pages), in both. */
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(fresh, "SELECT name = 'llm_blocks' FROM "
+                                             "pragma_table_info('messages') ORDER BY cid DESC "
+                                             "LIMIT 1"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(fresh, "SELECT name = 'llm_blocks_len' FROM "
+                                             "pragma_table_info('messages') ORDER BY cid DESC "
+                                             "LIMIT 1 OFFSET 1"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT name = 'llm_blocks' FROM "
+                                          "pragma_table_info('messages') ORDER BY cid DESC "
+                                          "LIMIT 1"));
+   sqlite3_close(fresh);
+   TEST_ASSERT_EQUAL_INT64(3, raw_int(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = "
+                                          "'trigger' AND tbl_name = 'messages'"));
+   /* The images index serves the reads that name it. */
+   sqlite3_stmt *plan = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(db,
+                                                       "EXPLAIN QUERY PLAN SELECT id FROM messages "
+                                                       "WHERE conversation_id = 1 AND images IS "
+                                                       "NOT NULL",
+                                                       -1, &plan, NULL));
+   bool indexed = false;
+   while (sqlite3_step(plan) == SQLITE_ROW) {
+      const char *detail = (const char *)sqlite3_column_text(plan, 3);
+      indexed = indexed || (detail && strstr(detail, "idx_messages_images"));
+   }
+   sqlite3_finalize(plan);
+   TEST_ASSERT_TRUE(indexed);
+
+   /* The other table's trigger still names messages, and works. */
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                                          "'conversations_gone' AND sql LIKE '%FROM messages "
+                                          "WHERE%'"));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, "DELETE FROM conversations WHERE id = 2", NULL,
+                                                 NULL, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(db, "SELECT COUNT(*) FROM messages WHERE id = 6"));
+
+   /* The blocks trigger still clears blocks on an edit. */
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+                                                 "UPDATE messages SET content = 'B' WHERE "
+                                                 "id = 3",
+                                                 NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE id = 3 AND "
+                                          "llm_blocks IS NULL AND llm_blocks_len IS NULL"));
+
+   /* A new row takes an id past the old high-water mark, not past max(id). */
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(db,
+                                      "INSERT INTO messages (conversation_id, role, content, "
+                                      "created_at, kind) VALUES (1, 'system', 'T', 15, "
+                                      "'tool_change')",
+                                      NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT64(41, raw_int(db, "SELECT MAX(id) FROM messages"));
+
+   /* Once: a re-run finds the v98 table and leaves it be. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v98(db, OLD_DB));
+   TEST_ASSERT_EQUAL_INT64(5, raw_int(db, "SELECT COUNT(*) FROM messages"));
+   sqlite3_close(db);
+}
+
+/* A table made by an earlier v98 (images, then the blocks before them) is
+ * rebuilt into the final order, its images kept. */
+static void test_v98_moves_the_blocks_last(void) {
+   sqlite3 *db = v97_fixture();
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(db,
+                                      "ALTER TABLE messages ADD COLUMN images TEXT;"
+                                      "UPDATE messages SET images = '[\"img_aaaaaaaaaaaa\"]' "
+                                      "WHERE id = 5;",
+                                      NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v98(db, OLD_DB));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT name = 'llm_blocks' FROM "
+                                          "pragma_table_info('messages') ORDER BY cid DESC "
+                                          "LIMIT 1"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE id = 5 AND "
+                                          "images = '[\"img_aaaaaaaaaaaa\"]'"));
+   TEST_ASSERT_EQUAL_INT64(5, raw_int(db, "SELECT COUNT(*) FROM messages"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE id = 3 AND "
+                                          "llm_blocks = '[]' AND llm_blocks_len = 2"));
+   sqlite3_close(db);
+}
+
+/* The images the stored rows name are recorded as a new row's are: an
+ * ordinary question's uploads, a tool row's captures, the conversation
+ * owner's only; never a reply's marker, a kinded row's, or another user's
+ * image.  A re-run records nothing twice. */
+static void test_v98_records_the_images_rows_name(void) {
+   sqlite3 *db = v97_fixture();
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_exec(db,
+                    /* A table made by an earlier v98: a tool row's captures. */
+                    "ALTER TABLE messages ADD COLUMN images TEXT;"
+                    "UPDATE messages SET images = '[\"img_cccccccccccc\"]' WHERE id = 5;"
+                    "INSERT INTO images (id, user_id, source, retention_policy, mime_type, size, "
+                    "filename, created_at) VALUES "
+                    "('img_aaaaaaaaaaaa', 1, 0, 0, 'image/jpeg', 1, 'a.jpg', 1),"
+                    "('img_bbbbbbbbbbbb', 1, 3, 0, 'image/jpeg', 1, 'b.jpg', 1),"
+                    "('img_cccccccccccc', 1, 5, 1, 'image/png', 1, 'c.png', 1),"
+                    "('img_dddddddddddd', 2, 0, 0, 'image/jpeg', 1, 'd.jpg', 1),"
+                    "('img_eeeeeeeeeeee', 1, 0, 0, 'image/jpeg', 1, 'e.jpg', 1);"
+                    "INSERT INTO messages (id, conversation_id, role, content, created_at, kind, "
+                    "context_of) VALUES "
+                    "(7, 1, 'user', 'look [IMAGE:img_aaaaaaaaaaaa] [IMAGE:img_bbbbbbbbbbbb] "
+                    "[IMAGE:img_dddddddddddd]', 20, NULL, NULL),"
+                    "(8, 2, 'user', 'again [IMAGE:img_aaaaaaaaaaaa]', 21, NULL, NULL),"
+                    "(9, 2, 'assistant', 'as before [IMAGE:img_eeeeeeeeeeee]', 22, NULL, NULL),"
+                    "(10, 2, 'user', '[IMAGE:img_eeeeeeeeeeee]', 23, 'turn_context', 8);",
+                    NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v98(db, OLD_DB));
+
+   TEST_ASSERT_EQUAL_INT64(4, raw_int(db, "SELECT COUNT(*) FROM conversation_images"));
+   TEST_ASSERT_EQUAL_INT64(2, raw_int(db, "SELECT COUNT(*) FROM conversation_images WHERE "
+                                          "image_id = 'img_aaaaaaaaaaaa'")); /* both */
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM conversation_images WHERE "
+                                          "image_id = 'img_bbbbbbbbbbbb' AND "
+                                          "conversation_id = 1")); /* MMS */
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM conversation_images WHERE "
+                                          "image_id = 'img_cccccccccccc' AND "
+                                          "conversation_id = 1")); /* the capture */
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(db, "SELECT COUNT(*) FROM conversation_images WHERE "
+                                          "image_id IN ('img_dddddddddddd', "
+                                          "'img_eeeeeeeeeeee')"));
+
+   /* A re-run (the v98 table, records kept) adds nothing; one lost is made
+    * again. */
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+                                                 "DELETE FROM conversation_images WHERE "
+                                                 "conversation_id = 2",
+                                                 NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v98(db, OLD_DB));
+   TEST_ASSERT_EQUAL_INT64(4, raw_int(db, "SELECT COUNT(*) FROM conversation_images"));
+   sqlite3_close(db);
+}
+
+/* The room the rebuild asks for: about twice the table plus a margin; a free
+ * size that can't be read doesn't hold it. */
+static void test_v98_room_check(void) {
+   const int64_t mb = 1024 * 1024;
+   int64_t need = 0;
+   TEST_ASSERT_TRUE(auth_db_v98_has_room(100 * mb, 1000 * mb, &need));
+   TEST_ASSERT_TRUE(need > 200 * mb && need < 400 * mb);
+   TEST_ASSERT_FALSE(auth_db_v98_has_room(100 * mb, need - 1, &need));
+   TEST_ASSERT_TRUE(auth_db_v98_has_room(100 * mb, need, NULL));
+   TEST_ASSERT_TRUE(auth_db_v98_has_room(100 * mb, -1, NULL)); /* unknown */
+   TEST_ASSERT_FALSE(auth_db_v98_has_room(0, 0, &need));       /* the margin, at least */
+   TEST_ASSERT_TRUE(need > 0);
+}
+
+/* The kind triggers are made again each time the objects SQL runs: a
+ * migration that extends the kinds re-runs it and the new kind is taken (and
+ * a run with the old set takes it back). */
+static void test_kind_triggers_are_refreshed(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   sqlite3 *db = raw_open(TEST_DB);
+   char sql[256];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO messages (conversation_id, role, content, kind, created_at) VALUES "
+            "(%lld, 'user', 'x', 'later_kind', 1)",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_CONSTRAINT, sqlite3_exec(db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_exec(db,
+                    CONV_MESSAGE_KIND_TRIGGERS_WITH_SQL(
+                        "(NEW.kind = 'later_kind' OR " CONV_MESSAGE_KIND_ROLE_OK_SQL ")"),
+                    NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT64(2, raw_int(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = "
+                                          "'trigger' AND name LIKE 'messages_kind_on_%'"));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, CONV_MESSAGES_OBJECTS_SQL, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_CONSTRAINT, sqlite3_exec(db, sql, NULL, NULL, NULL));
+   sqlite3_close(db);
+}
+
+/* A kind fits its role exactly as message_kind_role_ok() says, for every kind
+ * and role, on insert and on update; an unknown kind never fits. */
+static void test_kind_triggers_agree_with_message_kind_h(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   static const char *const roles[] = { "system", "user", "assistant", "tool" };
+   sqlite3 *db = raw_open(TEST_DB);
+   for (int k = MESSAGE_KIND_TURN_CONTEXT; k <= MESSAGE_KIND_SUMMARY; k++) {
+      const char *name = message_kind_name((message_kind_t)k);
+      for (size_t r = 0; r < sizeof(roles) / sizeof(roles[0]); r++) {
+         char sql[256];
+         snprintf(sql, sizeof(sql),
+                  "INSERT INTO messages (conversation_id, role, content, kind, created_at) "
+                  "VALUES (%lld, '%s', 'x', '%s', 1)",
+                  (long long)conv, roles[r], name);
+         char what[64];
+         snprintf(what, sizeof(what), "%s as %s", name, roles[r]);
+         const bool ok = message_kind_role_ok((message_kind_t)k, roles[r]);
+         TEST_ASSERT_EQUAL_INT_MESSAGE(ok ? SQLITE_OK : SQLITE_CONSTRAINT,
+                                       sqlite3_exec(db, sql, NULL, NULL, NULL), what);
+      }
+   }
+   TEST_ASSERT_NOT_EQUAL(SQLITE_OK, sqlite3_exec(db,
+                                                 "INSERT INTO messages (conversation_id, role, "
+                                                 "content, kind, created_at) VALUES (1, 'user', "
+                                                 "'x', 'nonsense', 1)",
+                                                 NULL, NULL, NULL));
+   /* An update can't move a row out of its kind's role, or give it a kind
+    * its role can't take. */
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "UPDATE messages SET role = 'user' WHERE conversation_id = %lld AND kind = "
+            "'tool_change'",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_CONSTRAINT, sqlite3_exec(db, sql, NULL, NULL, NULL));
+   snprintf(sql, sizeof(sql),
+            "UPDATE messages SET kind = 'bogus' WHERE conversation_id = %lld AND kind = "
+            "'directive'",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_CONSTRAINT, sqlite3_exec(db, sql, NULL, NULL, NULL));
+   sqlite3_close(db);
+
+   /* And the API takes the new kind. */
+   const conv_message_row_t row = { .role = "system", .content = "x", .kind = "tool_change" };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &row, NULL));
+}
+
+/* images: a JSON array, on tool rows only. */
+static void test_images_only_on_tool_rows_as_a_json_array(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   static const struct {
+      const char *role;
+      const char *images; /* SQL literal */
+      int rc;
+   } cases[] = {
+      { "tool", "'[\"a1\",\"b2\"]'", SQLITE_OK },
+      { "tool", "'[]'", SQLITE_OK },
+      { "tool", "NULL", SQLITE_OK },
+      { "user", "NULL", SQLITE_OK },
+      { "user", "'[\"a1\"]'", SQLITE_CONSTRAINT },
+      { "assistant", "'[\"a1\"]'", SQLITE_CONSTRAINT },
+      { "tool", "'not json'", SQLITE_CONSTRAINT },
+      { "tool", "'{\"a\":1}'", SQLITE_CONSTRAINT },
+      { "tool", "'\"a1\"'", SQLITE_CONSTRAINT },
+   };
+   sqlite3 *db = raw_open(TEST_DB);
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      char sql[256];
+      snprintf(sql, sizeof(sql),
+               "INSERT INTO messages (conversation_id, role, content, created_at, images) "
+               "VALUES (%lld, '%s', 'x', 1, %s)",
+               (long long)conv, cases[i].role, cases[i].images);
+      TEST_ASSERT_EQUAL_INT_MESSAGE(cases[i].rc, sqlite3_exec(db, sql, NULL, NULL, NULL), sql);
+   }
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, "SELECT COUNT(*) FROM messages WHERE images = "
+                                          "'[\"a1\",\"b2\"]'"));
+   sqlite3_close(db);
+}
+
 /* An unanswered envelope goes with its context; one the attempt saved work
  * after stays, and a row that isn't an envelope is never taken. */
 static void test_an_unanswered_envelope_is_retracted(void) {
@@ -881,6 +1301,25 @@ static void test_an_unanswered_envelope_is_retracted(void) {
    db = raw_open(TEST_DB);
    snprintf(sql, sizeof(sql),
             "SELECT COUNT(*) FROM messages WHERE conversation_id = %lld AND kind = 'instruction'",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql));
+   sqlite3_close(db);
+
+   /* A tool-set change is the conversation's too; it now follows no user
+    * turn (it folds), so the reasoning floor goes past it. */
+   db = raw_open(TEST_DB);
+   snprintf(sql, sizeof(sql), "SELECT reasoning_floor_msg_id FROM conversations WHERE id = %lld",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(db, sql));
+   sqlite3_close(db);
+   const int64_t env4 = add_row(conv, "user", "job results", "envelope");
+   const int64_t change = add_row(conv, "system", "{\"rendered\":\"inline\",\"tools\":[]}",
+                                  "tool_change");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_retract_envelope(conv, alice_id, env4));
+   db = raw_open(TEST_DB);
+   TEST_ASSERT_EQUAL_INT64(change, raw_int(db, sql));
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = %lld AND kind = 'tool_change'",
             (long long)conv);
    TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql));
    sqlite3_close(db);
@@ -998,6 +1437,7 @@ int main(void) {
    RUN_TEST(test_turn_save_moves_the_prefix_and_raises_the_floor);
    RUN_TEST(test_replay_read_honors_the_reasoning_floor);
    RUN_TEST(test_gc_keeps_what_a_conversation_uses);
+   RUN_TEST(test_a_large_tool_change_is_stored_by_hash);
    RUN_TEST(test_altered_prefix_bytes_are_refused);
    RUN_TEST(test_a_forgotten_item_is_withdrawn);
    RUN_TEST(test_an_unmarked_delete_records_nothing);
@@ -1006,6 +1446,13 @@ int main(void) {
    RUN_TEST(test_a_purged_withdrawal_still_settles);
    RUN_TEST(test_a_turn_built_before_a_withdrawal_saves_behind_it);
    RUN_TEST(test_v96_leaves_compacted_reasoning_behind);
+   RUN_TEST(test_v98_rebuilds_messages_keeping_rows_ids_and_sequence);
+   RUN_TEST(test_v98_moves_the_blocks_last);
+   RUN_TEST(test_v98_records_the_images_rows_name);
+   RUN_TEST(test_v98_room_check);
+   RUN_TEST(test_kind_triggers_are_refreshed);
+   RUN_TEST(test_kind_triggers_agree_with_message_kind_h);
+   RUN_TEST(test_images_only_on_tool_rows_as_a_json_array);
    RUN_TEST(test_an_unanswered_envelope_is_retracted);
    RUN_TEST(test_handles_are_stable_per_conversation);
    RUN_TEST(test_handles_check_the_owner_and_input);

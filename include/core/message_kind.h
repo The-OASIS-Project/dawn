@@ -48,6 +48,7 @@ typedef enum {
    MESSAGE_KIND_LOOP_NOTE,    /**< a tool-loop hint or closing message (user/assistant) */
    MESSAGE_KIND_DIRECTIVE,    /**< the surface's standing directions (system) */
    MESSAGE_KIND_INSTRUCTION,  /**< a change to the frozen instructions (system) */
+   MESSAGE_KIND_TOOL_CHANGE,  /**< a change to the frozen tool set (system) */
    MESSAGE_KIND_PREFIX,       /**< the frozen system prompt; in memory only, never a row */
    MESSAGE_KIND_SUMMARY,      /**< a compaction's summary: a part of the first kept question;
                                    in memory only (the conversation holds it), never a row */
@@ -68,6 +69,8 @@ static inline const char *message_kind_name(message_kind_t kind) {
          return "directive";
       case MESSAGE_KIND_INSTRUCTION:
          return "instruction";
+      case MESSAGE_KIND_TOOL_CHANGE:
+         return "tool_change";
       case MESSAGE_KIND_PREFIX:
          return "prefix";
       case MESSAGE_KIND_SUMMARY:
@@ -91,12 +94,28 @@ static inline message_kind_t message_kind_parse(const char *name) {
    return MESSAGE_KIND_NONE;
 }
 
+/**
+ * Whether a row of @p kind belongs to the conversation rather than to the turn
+ * that appended it: a change to what is in force (the instructions, the
+ * surface's standing directions, the tool set).  Taking a turn back keeps
+ * them, and a reply that never came doesn't make them the turn's: what is in
+ * force says they were sent.  CONV_SCOPED_KINDS_SQL is the same set for SQL.
+ */
+static inline bool message_kind_conversation_scoped(message_kind_t kind) {
+   return kind == MESSAGE_KIND_INSTRUCTION || kind == MESSAGE_KIND_DIRECTIVE ||
+          kind == MESSAGE_KIND_TOOL_CHANGE;
+}
+
+/** The conversation-scoped kinds (message_kind_conversation_scoped) as an SQL list. */
+#define CONV_SCOPED_KINDS_SQL "('instruction', 'directive', 'tool_change')"
+
 /** Whether @p kind is held by the conversation, never saved as a row. */
 static inline bool message_kind_in_memory_only(message_kind_t kind) {
    return kind == MESSAGE_KIND_PREFIX || kind == MESSAGE_KIND_SUMMARY;
 }
 
-/** Whether a row of @p kind may have @p role (mirrors the schema's CHECK). */
+/** Whether a row of @p kind may have @p role (mirrors the schema's kind
+ *  triggers, CONV_MESSAGE_KIND_ROLE_OK_SQL in auth/auth_db_internal.h). */
 static inline bool message_kind_role_ok(message_kind_t kind, const char *role) {
    if (!role) {
       return false;
@@ -112,6 +131,7 @@ static inline bool message_kind_role_ok(message_kind_t kind, const char *role) {
          return strcmp(role, "user") == 0 || strcmp(role, "assistant") == 0;
       case MESSAGE_KIND_DIRECTIVE:
       case MESSAGE_KIND_INSTRUCTION:
+      case MESSAGE_KIND_TOOL_CHANGE:
          return strcmp(role, "system") == 0;
       case MESSAGE_KIND_PREFIX:
       case MESSAGE_KIND_SUMMARY:

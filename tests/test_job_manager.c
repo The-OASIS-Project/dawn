@@ -456,6 +456,31 @@ static void test_resolver(void) {
    job_manager_end(a);
 }
 
+/* The walk visits every live job session, retained for the call (a
+ * cancelled one too), and none once it has ended. */
+static int s_visited;
+static void count_visit(session_t *session, void *ctx) {
+   (void)ctx;
+   TEST_ASSERT_EQUAL_INT(2, session->ref_count); /* base 1 + the walk's */
+   s_visited++;
+}
+
+static void test_for_each_session(void) {
+   session_t *a = NULL, *b = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 801, JOB_PROVIDER_CLOUD, &a));
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(2, 802, JOB_PROVIDER_CLOUD, &b));
+   session_cancel_turn(b);
+   s_visited = 0;
+   job_manager_for_each_session(count_visit, NULL);
+   TEST_ASSERT_EQUAL_INT(2, s_visited);
+   TEST_ASSERT_EQUAL_INT(1, a->ref_count);
+   job_manager_end(a);
+   job_manager_end(b);
+   s_visited = 0;
+   job_manager_for_each_session(count_visit, NULL);
+   TEST_ASSERT_EQUAL_INT(0, s_visited);
+}
+
 static void test_cancel_ownership(void) {
    session_t *a = NULL;
    TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(5, 42, JOB_PROVIDER_CLOUD, &a));
@@ -921,6 +946,7 @@ int main(void) {
    RUN_TEST(test_provider_cap);
    RUN_TEST(test_user_cap);
    RUN_TEST(test_resolver);
+   RUN_TEST(test_for_each_session);
    RUN_TEST(test_cancel_ownership);
    RUN_TEST(test_reap_overdue);
    RUN_TEST(test_reap_not_yet_overdue);

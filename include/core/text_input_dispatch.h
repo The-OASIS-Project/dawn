@@ -92,13 +92,14 @@ typedef struct {
     * handed.  NULL for text-only turns and all non-WebUI callers. */
    const char *persist_content_override;
 
-   /* Optional: builds the question's history message from its persisted form
-    * (the WebUI's image rehydration: `persist_content_override`'s markers
-    * become the image parts).  With it, an image turn sends exactly what a
-    * reload of the conversation sends: the model's reasoning over that
-    * question stays valid, and the cache holds, across a reload.  NULL: the
-    * images go in as the dispatch received them. */
-   struct json_object *(*build_history_message)(int user_id, const char *role, const char *content);
+   /* Optional: the question's history message, built by the caller from its
+    * persisted form (the WebUI: image_rehydrate_question() of
+    * `persist_content_override`, so an image question sends exactly what a
+    * reload of the conversation sends: the model's reasoning over it stays
+    * valid, and the cache holds, across a reload).  Dispatch adds its own
+    * reference; the caller keeps (and puts) its own.  NULL: the question is
+    * `text`.  Ignored when question_kind is set. */
+   struct json_object *question_message;
 
    /* The question's kind: MESSAGE_KIND_NONE (0) for what someone said;
     * MESSAGE_KIND_ENVELOPE for input DAWN wrote for a turn it started itself (a
@@ -173,15 +174,15 @@ typedef struct {
  * @brief Dispatch a text-input turn through the LLM pipeline.
  *
  * Pipeline:
- *   1. Adds the user message to session history
- *      (session_add_message / session_add_message_with_images).
+ *   1. Adds the user message to session history (opts->question_message
+ *      when set, else `text`).
  *   2. If opts->conversation_id > 0, persists to conv_db and stamps the
  *      message ID into the in-memory history entry.
  *   3. Fires opts->on_user_msg_added (if set) with the persistence
  *      result — caller's hook for UI transcript echo.
  *   4. Runs per-turn focus injection (session_dispatch_user_turn).
- *   5. Calls session_llm_call_with_tts_vision_no_add with the supplied
- *      TTS sentence callback (or NULL).
+ *   5. Calls session_llm_call_with_tts_no_add with the supplied TTS
+ *      sentence callback (or NULL).
  *
  * Returns the LLM response text on success; caller must free().  Returns
  * NULL on LLM error or session cancellation (the caller is expected to
@@ -191,7 +192,6 @@ typedef struct {
  * Does NOT:
  *   - Increment / read session->request_generation (caller's lifecycle).
  *   - Post-process `<command>` tags in the response.
- *   - Free vision image buffers (caller owns them).
  *   - Release the session reference (caller acquired, caller releases).
  *
  * Thread safety: must be called from a worker thread.  Adds messages
@@ -200,20 +200,12 @@ typedef struct {
  *
  * @param session              Session context.
  * @param text                 User message text (must be non-NULL/non-empty).
- * @param vision_images        Array of base64-encoded image data, or NULL.
- * @param vision_image_sizes   Array of image sizes, or NULL.
- * @param vision_mimes         Array of MIME type strings, or NULL.
- * @param vision_image_count   Number of images (0 for text-only).
  * @param opts                 Per-call options, or NULL for all defaults.
  *
  * @return Allocated response string (caller frees), or NULL on failure.
  */
 char *core_text_input_dispatch(session_t *session,
                                const char *text,
-                               const char **vision_images,
-                               const size_t *vision_image_sizes,
-                               const char (*vision_mimes)[24],
-                               int vision_image_count,
                                const text_input_dispatch_opts_t *opts);
 
 #ifdef __cplusplus

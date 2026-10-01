@@ -17,8 +17,8 @@
  * the project author(s).
  *
  * Tool results added to a conversation's history (each provider's shape,
- * with any image a tool captured) and tool calls parsed from a provider's
- * response.  Split from llm_tools.c.
+ * an image a tool returned inside its result: llm_tool_images.h) and tool
+ * calls parsed from a provider's response.  Split from llm_tools.c.
  */
 
 #include <limits.h>
@@ -48,6 +48,7 @@
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tool_images.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_tools_internal.h"
 #include "logging.h"
@@ -61,146 +62,15 @@
  * Tool Result Formatting for Conversation History
  * ============================================================================= */
 
-/**
- * @brief Build a standalone user message holding exactly one captured-vision image
- *
- * OpenAI-shape: {"role":"user","content":[{"type":"image_url","image_url":{"url":...}}]}
- * No accompanying text. Persists a tool-captured image (e.g. the `viewing`
- * camera tool) into conversation history so follow-up turns can still see
- * it, instead of the image only being visible for the single turn it was
- * captured in. is_capture_image_message() recognizes this exact
- * single-part shape for retention pruning.
- */
-static struct json_object *build_openai_capture_image_message(const char *base64_data) {
-   const char *media_type = llm_claude_detect_image_mime_type(base64_data);
-   const char *prefix_fmt = "data:%s;base64,";
-   size_t data_uri_len = strlen(prefix_fmt) + strlen(media_type) + strlen(base64_data) + 1;
-   char *data_uri = malloc(data_uri_len);
-   if (!data_uri) {
-      OLOG_ERROR("Failed to allocate data URI for captured image (%zu bytes) — skipping persist",
-                 data_uri_len);
-      return NULL;
+/* A result's content: its text, and the image it holds (llm_tool_images.h).
+ * The text alone when building the content fails. */
+static struct json_object *result_content(const tool_result_t *r) {
+   struct json_object *content = llm_tool_images_result_content(r);
+   if (!content) {
+      OLOG_ERROR("Tool result %s: its image left out (out of memory)", r->tool_call_id);
+      content = json_object_new_string(tool_result_content(r));
    }
-   snprintf(data_uri, data_uri_len, "data:%s;base64,%s", media_type, base64_data);
-
-   struct json_object *image_url_obj = json_object_new_object();
-   json_object_object_add(image_url_obj, "url", json_object_new_string(data_uri));
-   free(data_uri);
-
-   struct json_object *image_obj = json_object_new_object();
-   json_object_object_add(image_obj, "type", json_object_new_string("image_url"));
-   json_object_object_add(image_obj, "image_url", image_url_obj);
-
-   struct json_object *content_array = json_object_new_array();
-   json_object_array_add(content_array, image_obj);
-
-   struct json_object *msg = json_object_new_object();
-   json_object_object_add(msg, "role", json_object_new_string("user"));
-   json_object_object_add(msg, "content", content_array);
-   return msg;
-}
-
-/**
- * @brief Build a standalone user message holding exactly one captured-vision image (Claude shape)
- *
- * Mirrors build_openai_capture_image_message() but wraps the image with
- * llm_claude_create_image_block(), matching what convert_to_claude_format()
- * already produces ephemerally for a caller-supplied vision image.
- */
-static struct json_object *build_claude_capture_image_message(const char *base64_data) {
-   struct json_object *content_array = json_object_new_array();
-   json_object_array_add(content_array, llm_claude_create_image_block(base64_data));
-
-   struct json_object *msg = json_object_new_object();
-   json_object_object_add(msg, "role", json_object_new_string("user"));
-   json_object_object_add(msg, "content", content_array);
-   return msg;
-}
-
-/**
- * @brief True if msg is a lone captured-vision-image message
- *
- * Recognizes the exact shape built above: a "user" message whose content is
- * a single-element array containing only an image part ("image_url" for
- * OpenAI shape, "image" for Claude shape). This is distinct from a
- * WebUI-uploaded image (session_add_message_with_images() always pairs an
- * image with a text part, so its content array has length >= 2), so
- * retention pruning only ever touches ambient tool captures, never images
- * the user deliberately attached to a message.
- */
-static bool is_capture_image_message(struct json_object *msg) {
-   struct json_object *role_obj = NULL;
-   struct json_object *content_obj = NULL;
-
-   if (!msg || !json_object_object_get_ex(msg, "role", &role_obj) ||
-       strcmp(json_object_get_string(role_obj), "user") != 0) {
-      return false;
-   }
-   if (!json_object_object_get_ex(msg, "content", &content_obj) ||
-       !json_object_is_type(content_obj, json_type_array) ||
-       json_object_array_length(content_obj) != 1) {
-      return false;
-   }
-
-   struct json_object *part = json_object_array_get_idx(content_obj, 0);
-   struct json_object *type_obj = NULL;
-   if (!part || !json_object_object_get_ex(part, "type", &type_obj)) {
-      return false;
-   }
-
-   const char *type = json_object_get_string(type_obj);
-   return type && (strcmp(type, "image_url") == 0 || strcmp(type, "image") == 0);
-}
-
-/**
- * @brief Keep only the most recent N tool-captured images in history
- *
- * Scans newest-to-oldest; the first retention_count capture-image messages
- * found are left intact, anything older is collapsed to a short text
- * placeholder. retention_count <= 0 means unlimited (no-op) — bounding is
- * then left entirely to normal context compaction.
- */
-static void evict_old_capture_images(struct json_object *history, int retention_count) {
-   if (!history || retention_count <= 0) {
-      return;
-   }
-
-   int live = 0;
-   for (int i = json_object_array_length(history) - 1; i >= 0; i--) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      if (!is_capture_image_message(msg)) {
-         continue;
-      }
-      live++;
-      if (live > retention_count) {
-         json_object_object_add(msg, "content",
-                                json_object_new_string(
-                                    "[earlier camera capture - image no longer retained]"));
-      }
-   }
-}
-
-/**
- * @brief Persist the first tool result carrying a captured image, if any
- *
- * Appends an image-only message via the given builder and prunes older
- * captures per [vision] capture_history_count. Matches the prior ephemeral
- * behavior of surfacing at most one captured image per tool iteration.
- */
-static void persist_capture_image_if_present(struct json_object *history,
-                                             const tool_result_list_t *results,
-                                             struct json_object *(*build_message)(const char *)) {
-   for (int i = 0; i < results->count; i++) {
-      const tool_result_t *r = &results->results[i];
-      if (r->vision_image && r->vision_image_size > 0) {
-         struct json_object *msg = build_message(r->vision_image);
-         if (msg) {
-            session_history_append(history, msg);
-            evict_old_capture_images(history, g_config.vision.capture_history_count);
-         }
-         return;
-      }
-   }
+   return content;
 }
 
 int llm_tools_add_results_openai(struct json_object *history, const tool_result_list_t *results) {
@@ -222,15 +92,10 @@ int llm_tools_add_results_openai(struct json_object *history, const tool_result_
       struct json_object *msg = json_object_new_object();
       json_object_object_add(msg, "role", json_object_new_string("tool"));
       json_object_object_add(msg, "tool_call_id", json_object_new_string(r->tool_call_id));
-      json_object_object_add(msg, "content", json_object_new_string(tool_result_content(r)));
+      json_object_object_add(msg, "content", result_content(r));
 
       session_history_append(history, msg);
    }
-
-   /* A tool that returned a captured image (e.g. `viewing`) only shows the
-    * model that image for the turn it was captured in unless we persist it
-    * here — see docs/arch/subsystems/llm.md vision notes. */
-   persist_capture_image_if_present(history, results, build_openai_capture_image_message);
 
    return 0;
 }
@@ -261,7 +126,7 @@ int llm_tools_add_results_claude(struct json_object *history, const tool_result_
       struct json_object *block = json_object_new_object();
       json_object_object_add(block, "type", json_object_new_string("tool_result"));
       json_object_object_add(block, "tool_use_id", json_object_new_string(r->tool_call_id));
-      json_object_object_add(block, "content", json_object_new_string(tool_result_content(r)));
+      json_object_object_add(block, "content", result_content(r));
 
       json_object_array_add(content_array, block);
    }
@@ -271,8 +136,6 @@ int llm_tools_add_results_claude(struct json_object *history, const tool_result_
    json_object_object_add(msg, "content", content_array);
 
    session_history_append(history, msg);
-
-   persist_capture_image_if_present(history, results, build_claude_capture_image_message);
 
    return 0;
 }

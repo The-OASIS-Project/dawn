@@ -86,6 +86,12 @@ extern "C" {
 void auth_db_storage_configure_locked(sqlite3 *db);
 
 /**
+ * @brief Free bytes on the filesystem holding the database file @p path
+ *        (statvfs of its directory), or -1 when unknown.
+ */
+int64_t auth_db_storage_free_bytes(const char *path);
+
+/**
  * @brief Convert an existing file to incremental auto-vacuum (a one-time
  *        VACUUM), after the migrations, when there's room for it; the file's
  *        header records it, so it runs once.  Caller holds the mutex; no

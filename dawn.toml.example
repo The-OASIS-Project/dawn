@@ -482,12 +482,10 @@
                                   # Range: 256-4096
 # max_images = 5                  # Maximum images per message
                                   # Range: 1-10
-# capture_history_count = 1       # Tool-captured images (e.g. the `viewing` camera tool) kept
-                                  # visible in conversation history for follow-up questions.
-                                  # 0 = unlimited: images are only bounded by normal context
-                                  # compaction (no per-capture eviction), so a long session with
-                                  # repeated captures can grow noticeably before compaction runs.
-                                  # Range: 0-50
+# capture_history_count            # Retired (ignored): an image a tool returns stays in the
+                                  # conversation, inside its result, until compaction summarizes
+                                  # it; models.toml [max_request_images] bounds how many a request
+                                  # carries.
 
 # =============================================================================
 # Document Library (RAG)

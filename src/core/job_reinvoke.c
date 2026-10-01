@@ -522,7 +522,7 @@ static void *reinvoke_turn_entry(void *arg) {
        * client-save; the unconditional persist below honors it.  Disarm right after
        * dispatch (the promise is read only at the in-dispatch stream_end). */
       atomic_store(&live->will_persist_turn, true);
-      char *response = core_text_input_dispatch(live, envelope, NULL, NULL, NULL, 0, &opts);
+      char *response = core_text_input_dispatch(live, envelope, &opts);
       atomic_store(&live->will_persist_turn, false);
       if (tts_wired) {
          /* Codec captured at begin (pre-dispatch) so this close never derefs a
@@ -626,7 +626,7 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
     * surfaces. */
    session_turn_begin(s, w->parent_conv, w->user_id);
    atomic_store(&s->keeps_directions, true);
-   char *response = core_text_input_dispatch(s, envelope, NULL, NULL, NULL, 0, &opts);
+   char *response = core_text_input_dispatch(s, envelope, &opts);
    atomic_store(&s->keeps_directions, false);
    session_set_tool_iteration_hook(s, NULL, NULL);
    session_set_tool_persist_hook(s, NULL, NULL);

@@ -515,22 +515,12 @@ int auth_db_migrations_v92(sqlite3 *db) {
    /* Rows holding blocks, for the watermark GC and the cleanup sweep (few:
     * blocks below a watermark are cleared).  Here, not in the base schema: it
     * indexes a column a migration adds. */
-   if (sqlite3_exec(db,
-                    "CREATE INDEX IF NOT EXISTS idx_messages_llm_blocks ON messages "
-                    "(conversation_id, id) WHERE llm_blocks_len IS NOT NULL",
-                    NULL, NULL, &errmsg) != SQLITE_OK) {
+   if (sqlite3_exec(db, CONV_MESSAGES_IDX_LLM_BLOCKS_SQL, NULL, NULL, &errmsg) != SQLITE_OK) {
       OLOG_ERROR("auth_db: v92 index failed: %s", errmsg ? errmsg : "unknown");
       sqlite3_free(errmsg);
       return AUTH_DB_FAILURE;
    }
-   if (sqlite3_exec(db,
-                    "CREATE TRIGGER IF NOT EXISTS messages_llm_blocks_on_edit "
-                    "AFTER UPDATE OF content, tool_calls ON messages "
-                    "WHEN NEW.llm_blocks_len IS NOT NULL AND "
-                    "(NEW.content IS NOT OLD.content OR NEW.tool_calls IS NOT OLD.tool_calls) "
-                    "BEGIN UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id = "
-                    "NEW.id; END",
-                    NULL, NULL, &errmsg) != SQLITE_OK) {
+   if (sqlite3_exec(db, CONV_MESSAGES_LLM_BLOCKS_TRIGGER_SQL, NULL, NULL, &errmsg) != SQLITE_OK) {
       OLOG_ERROR("auth_db: v92 trigger failed: %s", errmsg ? errmsg : "unknown");
       sqlite3_free(errmsg);
       return AUTH_DB_FAILURE;

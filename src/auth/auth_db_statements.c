@@ -573,6 +573,13 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   rc = sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*) FROM images WHERE user_id = ? AND source = ?",
+                           -1, &s_db.stmt_image_count_user_source, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare image_count_user_source failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    rc = sqlite3_prepare_v2(
        s_db.db,
        "DELETE FROM images WHERE retention_policy = 0 AND created_at < ? "
@@ -622,6 +629,28 @@ int auth_db_prepare_statements(void) {
                            &s_db.stmt_image_stats, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare image_stats failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Unbound images (retention 3: IMAGE_RETAIN_UNBOUND) no row named in time,
+    * oldest first past the sweep's cursor (blob_store.h, get_orphan_ids). */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, filename, created_at, user_id FROM images "
+                           "WHERE retention_policy = 3 AND created_at < ?1 "
+                           "AND (created_at, id) > (?2, ?3) "
+                           "ORDER BY created_at ASC, id ASC LIMIT 100",
+                           -1, &s_db.stmt_image_get_unbound_ids, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare image_get_unbound_ids failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* One of those, deleted only while still unbound (the sweep asks what
+    * holds them with the lock released; a row bound meanwhile stays). */
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM images WHERE id = ? AND retention_policy = 3", -1,
+                           &s_db.stmt_image_delete_unbound, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare image_delete_unbound failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -762,12 +791,14 @@ int auth_db_prepare_statements(void) {
         * This "blob:<id>]" marker is mirrored by the JS producer (dawn.js) and
         * parser (documents.js); kept in sync by scripts/check_blob_marker_sync.sh
         * — a drift here silently reclaims still-attached files (data loss).
-        * kind-rows: every row counts, so a file is kept while anything names it. */
-       "SELECT b.id, b.filename FROM blobs b "
-       "WHERE b.kind = 0 AND b.retention_policy != 1 AND b.created_at < ? "
+        * Oldest first past the sweep's cursor (blob_store.h, get_orphan_ids). */
+       "SELECT b.id, b.filename, b.created_at, b.user_id FROM blobs b "
+       "WHERE b.kind = 0 AND b.retention_policy != 1 AND b.created_at < ?1 "
+       "AND (b.created_at, b.id) > (?2, ?3) "
        "AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.original_blob_id = b.id) "
+       /* kind-rows: every row counts, so a file is kept while anything names it. */
        "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.content LIKE '%blob:' || b.id || ']%') "
-       "LIMIT 100",
+       "ORDER BY b.created_at ASC, b.id ASC LIMIT 100",
        -1, &s_db.stmt_blob_get_orphan_ids, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare blob_get_orphan_ids failed: %s", sqlite3_errmsg(s_db.db));
@@ -2752,6 +2783,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_update_retention);
    if (s_db.stmt_image_count_user)
       sqlite3_finalize(s_db.stmt_image_count_user);
+   if (s_db.stmt_image_count_user_source)
+      sqlite3_finalize(s_db.stmt_image_count_user_source);
    if (s_db.stmt_image_delete_old)
       sqlite3_finalize(s_db.stmt_image_delete_old);
    if (s_db.stmt_image_cache_total_size)
@@ -2764,6 +2797,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_get_cache_lru_ids);
    if (s_db.stmt_image_stats)
       sqlite3_finalize(s_db.stmt_image_stats);
+   if (s_db.stmt_image_get_unbound_ids)
+      sqlite3_finalize(s_db.stmt_image_get_unbound_ids);
+   if (s_db.stmt_image_delete_unbound)
+      sqlite3_finalize(s_db.stmt_image_delete_unbound);
    if (s_db.stmt_blob_create)
       sqlite3_finalize(s_db.stmt_blob_create);
    if (s_db.stmt_blob_get)

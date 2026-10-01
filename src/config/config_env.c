@@ -1769,8 +1769,6 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(vision, "max_dimension",
                           json_object_new_int(config->vision.max_dimension));
    json_object_object_add(vision, "max_images", json_object_new_int(config->vision.max_images));
-   json_object_object_add(vision, "capture_history_count",
-                          json_object_new_int(config->vision.capture_history_count));
    json_object_object_add(root, "vision", vision);
 
    /* [scheduler] */
@@ -2662,7 +2660,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_image_size_kb = %d\n", config->vision.max_image_size_kb);
    fprintf(fp, "max_dimension = %d\n", config->vision.max_dimension);
    fprintf(fp, "max_images = %d\n", config->vision.max_images);
-   fprintf(fp, "capture_history_count = %d\n", config->vision.capture_history_count);
 
    fprintf(fp, "\n[music]\n");
    fprintf(fp, "scan_interval_minutes = %d\n", config->music.scan_interval_minutes);

@@ -33,6 +33,7 @@
 #include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
+#include "core/conv_images.h"
 #include "core/conv_stream.h"
 #include "core/image_rehydrate.h"
 #include "core/job_manager.h"
@@ -1256,47 +1257,6 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
 /**
  * @brief Delete a conversation
  */
-/* Accumulator for the conversation's referenced image ids.  We must NOT call
- * image_store_delete() from inside the conv_db_get_messages() callback: that
- * function holds the (non-recursive) auth_db mutex during iteration, and
- * image_store_delete() re-acquires it → deadlock.  So the callback only collects
- * ids (string copy, no lock), and the deletes run after the lock is released. */
-typedef struct {
-   char (*ids)[IMAGE_ID_LEN];
-   int count;
-   int cap;
-} conv_image_id_acc_t;
-
-static int collect_conv_images_cb(const conversation_message_t *msg, void *ctx) {
-   conv_image_id_acc_t *acc = (conv_image_id_acc_t *)ctx;
-   if (!msg || !msg->content) {
-      return 0;
-   }
-   /* Per-message scan: the collect cap equals the per-turn upload cap
-    * (WEBUI_MAX_VISION_IMAGES_CAP), so a single message can never carry more ids than
-    * this buffer holds — no markers are missed for the cascade-delete. */
-   char ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
-   int count = 0;
-   if (image_marker_collect_ids(msg->content, ids, WEBUI_MAX_VISION_IMAGES_CAP, &count) !=
-       SUCCESS) {
-      return 0;
-   }
-   for (int i = 0; i < count; i++) {
-      if (acc->count == acc->cap) {
-         int new_cap = acc->cap ? acc->cap * 2 : 16;
-         char(*grown)[IMAGE_ID_LEN] = realloc(acc->ids, (size_t)new_cap * IMAGE_ID_LEN);
-         if (!grown) {
-            return 0; /* OOM — delete what we collected; never block the conv delete */
-         }
-         acc->ids = grown;
-         acc->cap = new_cap;
-      }
-      memcpy(acc->ids[acc->count], ids[i], IMAGE_ID_LEN);
-      acc->count++;
-   }
-   return 0; /* continue iteration */
-}
-
 /* Cancel + delete the DIRECT background-job children of a conversation being
  * deleted.  parent_id carries ON DELETE SET NULL, which would otherwise leave a
  * chat's research jobs orphaned (parentless, hidden) rather than cleaned up.
@@ -1308,7 +1268,7 @@ static int collect_conv_images_cb(const conversation_message_t *msg, void *ctx) 
  * until it returns on its own; those late writes fail harmlessly on the missing FK
  * and conv_event_emit swallows the FK error — no UAF, but tool side-effects can
  * still fire and the pool slot stays held until the turn ends.  Each child's
- * referenced images are freed the same way the parent's are.  Batched +
+ * own images go with it, the same way the parent's do.  Batched +
  * progress-guarded so a long-lived chat that spawned many jobs is fully covered
  * without an unbounded stack or a re-fetch loop. */
 static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
@@ -1328,17 +1288,8 @@ static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
              strcmp(kids[i].job_status, "queued") == 0) {
             job_manager_cancel_or_retire(kids[i].id, conn->auth_user_id, NULL, 0);
          }
-         /* Free the child's referenced images (mirrors the parent path below):
-          * image_store_delete re-takes the auth_db mutex, so collect under the
-          * message-read lock, then delete after the callback returns. */
-         conv_image_id_acc_t img = { 0 };
-         conv_db_get_messages(kids[i].id, conn->auth_user_id, collect_conv_images_cb, &img);
-         for (int k = 0; k < img.count; k++) {
-            image_store_delete(img.ids[k], conn->auth_user_id);
-         }
-         free(img.ids);
-
-         if (conv_db_delete(kids[i].id, conn->auth_user_id) == AUTH_DB_SUCCESS) {
+         /* The child's images go with it, in its delete (as the parent's do). */
+         if (conv_images_delete_conversation(kids[i].id, conn->auth_user_id) == AUTH_DB_SUCCESS) {
             conv_stream_clear(kids[i].id);
             total++;
             deleted_this_batch++;
@@ -1394,18 +1345,6 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
       return;
    }
 
-   /* Cascade-delete referenced images BEFORE the row cascade removes the markers
-    * (referenced images are conversation-lifecycle-owned, bumped to PERMANENT at save).
-    * Collect ids UNDER conv_db_get_messages' lock, then delete AFTER it returns —
-    * image_store_delete re-takes the same non-recursive auth_db mutex, so calling it
-    * from inside the callback would deadlock. */
-   conv_image_id_acc_t img_acc = { 0 };
-   conv_db_get_messages(conv_id, conn->auth_user_id, collect_conv_images_cb, &img_acc);
-   for (int i = 0; i < img_acc.count; i++) {
-      image_store_delete(img_acc.ids[i], conn->auth_user_id);
-   }
-   free(img_acc.ids);
-
    /* Cancel + delete this conversation's background-job children first, so a
     * chat's research jobs don't survive orphaned when the chat is deleted. */
    int cascaded = cascade_delete_child_jobs(conn, conv_id);
@@ -1418,7 +1357,8 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
       webui_broadcast_jobs_invalidate(conn->auth_user_id);
    }
 
-   int result = conv_db_delete(conv_id, conn->auth_user_id);
+   /* With the images it owns (its uploads and captures), in one transaction. */
+   int result = conv_images_delete_conversation(conv_id, conn->auth_user_id);
 
    if (result == AUTH_DB_SUCCESS) {
       /* Free any live-partial replay-ring entry for the deleted conversation. */
