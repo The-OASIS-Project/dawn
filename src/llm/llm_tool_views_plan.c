@@ -152,8 +152,9 @@ static size_t header_full(const llm_tool_views_header_t *h, char *out, size_t si
    o = (size_t)n;
    if (h->handle && h->offers_read) {
       n = snprintf(out + o, size - o,
-                   h->json ? "\n Full result: [tool-result %s]. result_read: read (lines), "
-                             "path ($.a[10:20]), grep (text), count / distinct ($.a, field)."
+                   h->json ? "\n Full result: [tool-result %s]. result_read: count / distinct "
+                             "($.a, field) tally a whole array in one call; path ($.a[10:20]), "
+                             "grep (text) and read (lines) return parts."
                            : "\n Full result: [tool-result %s]. result_read: read (lines), "
                              "grep (text).",
                    h->handle);
@@ -164,8 +165,9 @@ static size_t header_full(const llm_tool_views_header_t *h, char *out, size_t si
       }
    } else if (h->is_read) {
       n = snprintf(out + o, size - o,
-                   "\n Read a smaller part: a line range, a deeper path, or "
-                   "a narrower pattern.");
+                   h->json ? "\n Read a smaller part: a deeper path, or a narrower pattern; "
+                             "to tally an array, count / distinct ($.a, field)."
+                           : "\n Read a smaller part: a line range, or a narrower pattern.");
    } else {
       n = snprintf(out + o, size - o, "\n Call the tool again with narrower arguments for more.");
    }

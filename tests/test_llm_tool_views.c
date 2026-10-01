@@ -151,6 +151,8 @@ static void test_the_header_names_the_handle_and_how_to_read(void) {
    TEST_ASSERT_NULL(strstr(out, "tokens"));
    TEST_ASSERT_NOT_NULL(strstr(out, "[tool-result trs_abcdefghijkl]"));
    TEST_ASSERT_NOT_NULL(strstr(out, "path ("));
+   /* A tally points at count / distinct, one call over the whole array. */
+   TEST_ASSERT_NOT_NULL(strstr(out, "count / distinct ($.a, field) tally a whole array"));
    TEST_ASSERT_NOT_NULL(strstr(out, "The tool takes \"limit\""));
    TEST_ASSERT_EQUAL_CHAR('\n', out[strlen(out) - 1]);
    TEST_ASSERT_EQUAL_CHAR(']', out[strlen(out) - 2]);
@@ -198,6 +200,13 @@ static void test_a_reads_view_says_read_less(void) {
    TEST_ASSERT_TRUE(header(&h, out, sizeof(out)) > 0);
    TEST_ASSERT_NOT_NULL(strstr(out, "Read a smaller part"));
    TEST_ASSERT_NULL(strstr(out, "takes \""));
+   /* A JSON read's view points a tally at count / distinct; a text one doesn't. */
+   llm_tool_views_header_t j = h;
+   j.json = true;
+   TEST_ASSERT_TRUE(header(&j, out, sizeof(out)) > 0);
+   TEST_ASSERT_NOT_NULL(strstr(out, "count / distinct"));
+   TEST_ASSERT_TRUE(header(&h, out, sizeof(out)) > 0);
+   TEST_ASSERT_NULL(strstr(out, "count / distinct"));
 }
 
 static void test_a_header_that_doesnt_fit_is_empty(void) {
