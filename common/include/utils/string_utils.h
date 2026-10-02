@@ -104,13 +104,23 @@ extern "C" {
 #endif
 
 /**
+ * @brief Length of the well-formed multi-byte UTF-8 sequence at @p s
+ *
+ * RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF.  Never
+ * reads past a NUL.
+ *
+ * @return 2-4, or 0 when @p s doesn't start one (ASCII included)
+ */
+size_t utf8_valid_seq_len(const char *s);
+
+/**
  * @brief Sanitize string for safe use in JSON and LLM APIs
  *
  * Removes or replaces characters that cause problems with JSON parsing or
  * LLM API calls:
- * - Invalid UTF-8 sequences are replaced with '?'
- * - Control characters (except \n, \r, \t) are removed
- * - High surrogate/private use area codepoints are replaced
+ * - Ill-formed UTF-8 (RFC 3629: overlong forms, surrogates, past U+10FFFF,
+ *   truncated sequences) has its lead byte replaced with '?'
+ * - Control characters (except \n, \r, \t) and DEL are removed
  *
  * Modifies the string in-place for efficiency. Safe to call on any string
  * that will be embedded in JSON or sent to an API.

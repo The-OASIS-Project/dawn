@@ -69,15 +69,23 @@ int email_fetch_recent(const email_conn_t *conn,
                        int *out_count);
 
 /**
- * @brief Read a full message by UID from an IMAP folder.
- * Allocates msg->body on heap; caller must call email_message_free().
- * @param folder  IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
- * @return 0 on success, 1 on failure
+ * @brief Read a message by UID from an IMAP folder (email_mime.h does the reading)
+ *
+ * Fetches at most opts->fetch_bytes of it (a bigger message reads as
+ * truncated, never fails), or with opts->headers_only just From and Subject
+ * (FETCH ENVELOPE, which leaves the message unread).  A full read marks the
+ * message read on the server.
+ *
+ * @param folder IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
+ * @param err    Why it failed (may be NULL); EMAIL_ERR_NOT_FOUND for no such UID
+ * @return 0, or 1 with no heap left in @p out; free a success with email_message_free()
  */
 int email_read_message(const email_conn_t *conn,
                        const char *folder,
                        uint32_t uid,
-                       email_message_t *out);
+                       const email_read_opts_t *opts,
+                       email_message_t *out,
+                       email_err_t *err);
 
 /**
  * @brief Search emails by criteria in an IMAP folder.

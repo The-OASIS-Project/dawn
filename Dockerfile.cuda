@@ -46,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmupdf-dev libfreetype-dev libharfbuzz-dev libzip-dev libxml2-dev \
     libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev libjpeg-dev \
     libical-dev \
+    # Email message reading (MIME parts, charsets)
+    libgmime-3.0-dev \
     # BM25 keyword retrieval — Porter2 stemming (v48)
     libstemmer-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -156,6 +158,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgumbo1 libopenjp2-7 libjbig2dec0 libmujs1 libjpeg-turbo8 \
     libgomp1 \
     libical3 \
+    libgmime-3.0-0 \
     # BM25 Porter2 stemming runtime (v48)
     libstemmer0d \
     ca-certificates \

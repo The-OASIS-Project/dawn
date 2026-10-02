@@ -330,20 +330,30 @@ else()
     message(STATUS "DAWN: Calendar tool DISABLED")
 endif()
 
-# Email Tool (IMAP/SMTP)
+# Email Tool (IMAP/SMTP).  GMime reads messages (MIME parts, charsets): required
+# when email is on.  A build without email doesn't need it (-DDAWN_ENABLE_EMAIL_TOOL=OFF).
 if(DAWN_ENABLE_EMAIL_TOOL)
+    pkg_check_modules(GMIME REQUIRED gmime-3.0>=3.2)
+    include_directories(${GMIME_INCLUDE_DIRS})
+    message(STATUS "GMime: Found (${GMIME_VERSION})")
     add_definitions(-DDAWN_ENABLE_EMAIL_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/email_tool.c
         src/tools/email_service.c
+        src/tools/email_service_read.c
         src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c
         src/tools/email_imap_move.c
         src/tools/email_imap_roles.c
         src/tools/email_instrument.c
+        src/tools/email_mime.c
+        src/tools/email_display.c
+        src/tools/email_transfer.c
         src/tools/email_parse.c
         src/tools/gmail_client.c
+        src/tools/gmail_read.c
+        src/tools/gmail_parts.c
         src/webui/webui_email.c)
     # oauth_client.c may already be included by calendar tool
     if(NOT DAWN_ENABLE_CALENDAR_TOOL)

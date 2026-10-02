@@ -65,7 +65,7 @@ sudo apt update && sudo apt install -y \
   meson ninja-build libabsl-dev \
   libmupdf-dev libfreetype-dev libharfbuzz-dev \
   libzip-dev libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev \
-  libical-dev libxml2-dev libstemmer-dev
+  libical-dev libxml2-dev libstemmer-dev libgmime-3.0-dev
 ```
 
 > **`libstemmer-dev` note**: Provides Porter2 stemming for the memory subsystem's BM25 keyword index. Required as of May 2026 — without it the build fails to link `memory_stem.c`.

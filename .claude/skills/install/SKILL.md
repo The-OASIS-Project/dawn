@@ -123,7 +123,7 @@ libsamplerate0-dev libmpg123-dev libvorbis-dev libncurses-dev
 meson ninja-build libabsl-dev
 libmupdf-dev libfreetype-dev libharfbuzz-dev
 libzip-dev libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev
-libical-dev libspdlog-dev libxml2-dev libstemmer-dev
+libical-dev libspdlog-dev libxml2-dev libstemmer-dev libgmime-3.0-dev
 ```
 
 **Known package name variations:**

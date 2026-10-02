@@ -38,6 +38,7 @@ This document tracks all third-party dependencies used by the DAWN project.
 | libzip | BSD-3-Clause | DOCX ZIP archive reading |
 | libsodium | ISC | Encrypted credential/token storage (crypto_secretbox) |
 | libical | LGPL 2.1 / MPL 2.0 | iCalendar parsing, RRULE expansion, timezone handling |
+| GMime 3 (≥ 3.2) | LGPL 2.1 | Reading email: MIME parts, transfer encodings, charsets, address and RFC 2047/2231 header decoding (`src/tools/email_mime.c`, the only file that uses it). Required when the email tool is built (`DAWN_ENABLE_EMAIL_TOOL`, on by default). Brings `gobject-2.0`/`gio-2.0` and makes GLib a direct dependency. Install: `sudo apt install libgmime-3.0-dev` (runtime `libgmime-3.0-0`). It parses mail from any sender, so watch it for security updates. |
 | libxml2 | MIT | XML parsing (CalDAV PROPFIND/REPORT responses) |
 | freetype2 | FreeType (BSD-like) | MuPDF font rendering dependency |
 | harfbuzz | MIT | MuPDF text shaping dependency |
@@ -128,7 +129,7 @@ These are model files required at runtime, not source dependencies:
 
 All dependencies are compatible with GPLv3:
 - MIT, BSD, Apache 2.0 - Permissive, GPL-compatible
-- LGPL - Compatible when dynamically linked
+- LGPL (incl. GMime, libical) - Compatible when dynamically linked
 - EPL (Mosquitto) - Compatible via explicit dual-license (EDL)
 - espeak-ng GPL 3.0 - Same license as project
 - AGPL-3.0 (MuPDF) — Compatible, project is GPLv3

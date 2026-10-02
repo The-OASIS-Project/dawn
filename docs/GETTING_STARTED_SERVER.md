@@ -134,6 +134,9 @@ sudo apt install libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev
 
 # Calendar (CalDAV)
 sudo apt install libical-dev
+
+# Email (reading messages; required unless built with -DDAWN_ENABLE_EMAIL_TOOL=OFF)
+sudo apt install libgmime-3.0-dev
 ```
 
 > **Code Projects (coding harness)**: the `debug`, `default`, and `full` presets compile in the

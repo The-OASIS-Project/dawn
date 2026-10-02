@@ -1249,6 +1249,11 @@ if(DAWN_ENABLE_CALENDAR_TOOL)
     message(STATUS "Linking libical + libxml2 (CalDAV calendar)")
 endif()
 
+# GMime + GLib/GObject: the email tool's message reader
+if(DAWN_ENABLE_EMAIL_TOOL)
+    target_link_libraries(dawn ${GMIME_LINK_LIBRARIES})
+endif()
+
 # Always link SQLite3 (music metadata database)
 target_link_libraries(dawn ${SQLITE3_LIBRARIES})
 

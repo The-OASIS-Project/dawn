@@ -44,8 +44,11 @@
 #include "core/curl_buffer.h"
 #include "logging.h"
 #include "tools/email_client_internal.h"
+#include "tools/email_display.h"
 #include "tools/email_instrument.h"
+#include "tools/email_mime.h"
 #include "tools/email_parse.h"
+#include "tools/email_transfer.h"
 #include "tools/html_parser.h"
 
 /* =============================================================================
@@ -58,15 +61,6 @@
  * ============================================================================= */
 
 #define EMAIL_MAX_RESPONSE_SIZE (1024 * 1024) /* 1 MB cap on IMAP/SMTP responses */
-
-/* Byte ceiling for a single-message read fetch (IMAP BODY[]<0.N>).  We only need
- * headers + the first ~50 KB of decoded text body — reading a message must not
- * pull the entire raw MIME (base64 attachments can be many MB and would blow the
- * 1 MB response cap, failing the read outright).  512 KB covers headers plus a
- * large text/HTML part for essentially all real mail; a bigger message degrades
- * to a truncated body (out->truncated), never a failed read.  Attachments are a
- * separate feature (see EMAIL_ATTACHMENT_DOWNLOAD_DESIGN.md). */
-#define EMAIL_MAX_READ_FETCH_BYTES (512 * 1024)
 
 /* IMAP per-op timeout budget (TOTAL transfer time: connect + TLS + LOGIN + the
  * command).  The default covers the cheap ops (SEARCH ALL/UNSEEN, ENVELOPE
@@ -219,193 +213,6 @@ bool email_search_date_valid(const char *iso) {
  * email_imap_append_search_key) are pure string helpers and live in the
  * unit-tested email_parse.c — see the CRITICAL note there on curl's
  * CUSTOMREQUEST URL-decode (why '%' must be escaped). */
-
-/* RFC 2047 encoded-word decoding (email_decode_rfc2047) lives in email_parse.c
- * so both the IMAP and Gmail backends share one implementation — see the note
- * there.  copy_header_value below wraps it after unfolding. */
-
-/* =============================================================================
- * Header Parsing Helpers
- * ============================================================================= */
-
-/** Extract a header value from raw email headers */
-static const char *find_header(const char *headers, const char *name) {
-   const char *p = headers;
-   size_t name_len = strlen(name);
-   while (p && *p) {
-      if (strncasecmp(p, name, name_len) == 0 && p[name_len] == ':') {
-         p += name_len + 1;
-         while (*p == ' ' || *p == '\t')
-            p++;
-         return p;
-      }
-      /* Skip to next line */
-      p = strchr(p, '\n');
-      if (p)
-         p++;
-   }
-   return NULL;
-}
-
-/** Copy a header value with unfolding (joins continuation lines) and RFC 2047 decoding */
-static void copy_header_value(const char *start, char *out, size_t out_len) {
-   if (!start) {
-      out[0] = '\0';
-      return;
-   }
-
-   /* Step 1: Unfold — join continuation lines (lines starting with space/tab) */
-   char raw[512];
-   size_t j = 0;
-   const char *p = start;
-   while (*p && j < sizeof(raw) - 1) {
-      if (*p == '\r') {
-         p++;
-         continue;
-      }
-      if (*p == '\n') {
-         /* Check for continuation (next line starts with space/tab) */
-         if (p[1] == ' ' || p[1] == '\t') {
-            if (j > 0 && raw[j - 1] != ' ')
-               raw[j++] = ' ';
-            p++; /* skip \n */
-            while (*p == ' ' || *p == '\t')
-               p++; /* skip leading whitespace */
-            continue;
-         }
-         break; /* End of header */
-      }
-      raw[j++] = *p++;
-   }
-   raw[j] = '\0';
-
-   /* Step 2: Decode RFC 2047 encoded words */
-   email_decode_rfc2047(raw, out, out_len);
-}
-
-/** Parse "Display Name <email@example.com>" from a decoded From header value */
-static void parse_from_value(const char *decoded,
-                             char *name,
-                             size_t name_len,
-                             char *addr,
-                             size_t addr_len) {
-   if (!decoded || !decoded[0]) {
-      name[0] = '\0';
-      addr[0] = '\0';
-      return;
-   }
-
-   const char *lt = strchr(decoded, '<');
-   const char *gt = lt ? strchr(lt, '>') : NULL;
-
-   if (lt && gt && gt > lt + 1) {
-      /* Copy display name (before <) */
-      size_t n = lt - decoded;
-      while (n > 0 && (decoded[n - 1] == ' ' || decoded[n - 1] == '"'))
-         n--;
-      const char *ns = decoded;
-      while (n > 0 && (*ns == ' ' || *ns == '"'))
-         ns++, n--;
-      if (n > name_len - 1)
-         n = name_len - 1;
-      memcpy(name, ns, n);
-      name[n] = '\0';
-
-      /* Copy email address */
-      size_t a = gt - (lt + 1);
-      if (a > addr_len - 1)
-         a = addr_len - 1;
-      memcpy(addr, lt + 1, a);
-      addr[a] = '\0';
-   } else {
-      /* No angle brackets — entire thing is the address */
-      name[0] = '\0';
-      snprintf(addr, addr_len, "%s", decoded);
-   }
-}
-
-/* =============================================================================
- * Extract plain text body from email content
- * ============================================================================= */
-
-/** Check if content looks like HTML (starts with tag or doctype) */
-static bool looks_like_html(const char *text) {
-   /* Skip leading whitespace */
-   while (*text && isspace((unsigned char)*text))
-      text++;
-   if (strncasecmp(text, "<!doctype", 9) == 0)
-      return true;
-   if (strncasecmp(text, "<html", 5) == 0)
-      return true;
-   /* Check Content-Type header above the body for text/html */
-   return false;
-}
-
-/* Extract the plain-text body, capped at max_chars.  Sets *out_truncated to
- * reflect whether the EXTRACTED text (not the raw MIME) was clipped, so the
- * caller's truncation flag matches the Gmail backend.  No "[truncated]" marker
- * is appended here — the tool layer renders a single "[Message truncated]". */
-static char *extract_plain_body(const char *raw, int max_chars, bool *out_truncated) {
-   if (out_truncated)
-      *out_truncated = false;
-
-   /* Check Content-Type header for HTML before splitting */
-   const char *ct = find_header(raw, "Content-Type");
-   bool is_html = (ct && strcasestr(ct, "text/html"));
-
-   /* Find body start (after blank line separating headers from body) */
-   const char *body = strstr(raw, "\r\n\r\n");
-   if (!body)
-      body = strstr(raw, "\n\n");
-   if (!body)
-      return strdup("(No body)");
-
-   body += (body[0] == '\r') ? 4 : 2;
-
-   /* Heuristic fallback: detect HTML even without Content-Type header */
-   if (!is_html)
-      is_html = looks_like_html(body);
-
-   /* If body is HTML, convert to plain text via html_parser */
-   if (is_html) {
-      size_t body_len = strlen(body);
-      char *extracted = NULL;
-      if (html_extract_text_plain(body, body_len, &extracted) == HTML_PARSE_SUCCESS && extracted) {
-         size_t ext_len = strlen(extracted);
-         if (max_chars > 0 && (int)ext_len > max_chars) {
-            ext_len = max_chars;
-            if (out_truncated)
-               *out_truncated = true;
-         }
-         char *out = malloc(ext_len + 1);
-         if (!out) {
-            free(extracted);
-            return NULL;
-         }
-         memcpy(out, extracted, ext_len);
-         out[ext_len] = '\0';
-         free(extracted);
-         return out;
-      }
-      /* Fall through to raw extraction if html_extract_text fails */
-   }
-
-   /* Plain text: take text up to max_chars */
-   size_t len = strlen(body);
-   if (max_chars > 0 && (int)len > max_chars) {
-      len = max_chars;
-      if (out_truncated)
-         *out_truncated = true;
-   }
-
-   char *out = malloc(len + 1);
-   if (!out)
-      return NULL;
-
-   memcpy(out, body, len);
-   out[len] = '\0';
-   return out;
-}
 
 /* =============================================================================
  * UID page selection (shared by recent + search)
@@ -1082,121 +889,171 @@ int email_fetch_recent(const email_conn_t *conn,
  * Public API: Read Message
  * ============================================================================= */
 
+/* A read's sink: keeps at most `cap` bytes, then stops the transfer (a short
+ * write makes curl end it with CURLE_WRITE_ERROR), so a message larger than
+ * the read wants is never downloaded whole. */
+typedef struct {
+   curl_buffer_t buf;
+   size_t cap;
+   bool hit_cap;
+} read_sink_t;
+
+static size_t read_sink_write(void *data, size_t size, size_t nmemb, void *userp) {
+   read_sink_t *s = userp;
+   const size_t n = size * nmemb;
+   const size_t room = s->cap > s->buf.size ? s->cap - s->buf.size : 0;
+   if (n > room) {
+      if (room > 0)
+         curl_buffer_write_callback(data, 1, room, &s->buf);
+      s->hit_cap = true;
+      return 0;
+   }
+   return curl_buffer_write_callback(data, size, nmemb, &s->buf);
+}
+
+/* Subject and From without reading the body: FETCH (ENVELOPE) answers inline
+ * (no literal for libcurl to drop) and, unlike a body fetch, leaves the
+ * message unread. */
+static int read_headers_only(CURL *curl,
+                             email_instrument_ctx_t *dctx,
+                             const email_conn_t *conn,
+                             const char *folder_url,
+                             uint32_t uid,
+                             email_message_t *out,
+                             email_err_t *err) {
+   curl_easy_setopt(curl, CURLOPT_URL, folder_url);
+   char cmd[64];
+   snprintf(cmd, sizeof(cmd), "UID FETCH %u (ENVELOPE)", uid);
+   curl_buffer_t buf;
+   const CURLcode res = email_imap_run_command(curl, dctx, conn, "read", cmd, true, &buf);
+   if (res != CURLE_OK || !buf.data) {
+      *err = res == CURLE_OK ? EMAIL_ERR_NOT_FOUND : email_err_from_curl(res);
+      curl_buffer_free(&buf);
+      return 1;
+   }
+   char subject[512] = "";
+   char from_name[256] = "";
+   char from_addr[256] = "";
+   const bool ok = email_parse_envelope(buf.data, subject, sizeof(subject), from_name,
+                                        sizeof(from_name), from_addr, sizeof(from_addr));
+   curl_buffer_free(&buf);
+   if (!ok) {
+      *err = EMAIL_ERR_NOT_FOUND;
+      return 1;
+   }
+   email_mime_header_text(subject, out->subject, sizeof(out->subject));
+   email_mime_header_text(from_name, out->from_name, sizeof(out->from_name));
+   email_display_sanitize(from_addr, strlen(from_addr), out->from_addr, sizeof(out->from_addr), 0);
+   return 0;
+}
+
 int email_read_message(const email_conn_t *conn,
                        const char *folder,
                        uint32_t uid,
-                       email_message_t *out) {
+                       const email_read_opts_t *opts,
+                       email_message_t *out,
+                       email_err_t *err) {
+   email_err_t err_local;
+   if (!err)
+      err = &err_local;
+   *err = EMAIL_ERR_NONE;
    memset(out, 0, sizeof(*out));
-
+   if (!conn || !opts || uid == 0) {
+      *err = EMAIL_ERR_FAILED;
+      return 1;
+   }
    if (!folder || !folder[0])
       folder = "INBOX";
 
    char encoded_folder[256];
    url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
-
    CURL *curl = email_imap_handle_create(conn);
-   if (!curl)
+   if (!curl) {
+      *err = EMAIL_ERR_FAILED;
       return 1;
-
+   }
    email_instrument_ctx_t dctx;
    email_instrument_attach(curl, &dctx);
-
-   /* Fetch the message by UID.  First try a bounded partial fetch (IMAP
-    * BODY[]<0.N>, curl ";PARTIAL=") so a huge message (big attachments) can't
-    * blow the response cap and fail the read outright.  PARTIAL is core RFC 3501,
-    * but if a non-conforming server rejects it, fall back once to a full fetch
-    * (still capped at EMAIL_MAX_RESPONSE_SIZE) so reads keep working. */
+   email_transfer_set_cancel(curl, opts->cancel);
    char url[1024];
-   curl_buffer_t buf;
-   CURLcode res = CURLE_OK;
-   bool used_partial = true;
+   int rc = 1;
 
-   for (int attempt = 0; attempt < 2; attempt++) {
-      if (used_partial)
-         snprintf(url, sizeof(url), "%s/%s/;UID=%u;PARTIAL=0.%d", conn->imap_url, encoded_folder,
-                  uid, EMAIL_MAX_READ_FETCH_BYTES);
+   if (opts->headers_only) {
+      snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
+      rc = read_headers_only(curl, &dctx, conn, url, uid, out, err);
+      email_instrument_op_done(conn->username, "read", curl, &dctx);
+      curl_easy_cleanup(curl);
+      if (rc == 0)
+         out->uid = uid;
+      return rc;
+   }
+
+   /* A bounded fetch (IMAP BODY[]<0.N>, curl ";PARTIAL="): a message bigger than
+    * the read wants comes back cut, and is read as truncated.  PARTIAL is core
+    * RFC 3501; a server that rejects it gets one plain fetch, whose sink stops
+    * the transfer at the same size. */
+   const size_t cap = opts->fetch_bytes > 0 ? opts->fetch_bytes : EMAIL_READ_FETCH_TOOL;
+   read_sink_t sink;
+   bool raw_cut = false;
+   bool got = false;
+   for (int attempt = 0; attempt < 2 && !got; attempt++) {
+      const bool partial = attempt == 0;
+      if (partial)
+         snprintf(url, sizeof(url), "%s/%s/;UID=%u;PARTIAL=0.%zu", conn->imap_url, encoded_folder,
+                  uid, cap);
       else
          snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
       curl_easy_setopt(curl, CURLOPT_URL, url);
+      memset(&sink, 0, sizeof(sink));
+      dctx.last_reject[0] = '\0'; /* a refused command shows up here */
+      curl_buffer_init_with_max(&sink.buf, cap + 1);
+      sink.cap = cap;
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, read_sink_write);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
 
-      curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-
-      res = email_instrument_perform(curl, &dctx, conn->username, "read");
-      if (res == CURLE_OK && buf.data && !buf.truncated)
-         break; /* success */
-
-      bool was_truncated = buf.truncated;
-      curl_buffer_free(&buf);
-      /* A login denial is not a PARTIAL-unsupported server — do NOT fall through
-       * to a full fetch (that immediately re-logs-in, exactly the burst we're
-       * avoiding).  The instrumented perform already logged + guarded-retried. */
-      if (res == CURLE_LOGIN_DENIED) {
-         email_instrument_op_done(conn->username, "read", curl, &dctx);
-         curl_easy_cleanup(curl);
-         return 1;
-      }
-      if (used_partial) {
+      const CURLcode res = email_instrument_perform(curl, &dctx, conn->username, "read");
+      if (res == CURLE_OK && sink.buf.size > 0) {
+         raw_cut = partial && sink.buf.size >= cap;
+         got = true;
+      } else if (res == CURLE_WRITE_ERROR && sink.hit_cap && sink.buf.size > 0) {
+         raw_cut = true;
+         got = true;
+      } else if (res == CURLE_OK) {
+         /* The server answered and had no such message. */
+         *err = EMAIL_ERR_NOT_FOUND;
+         curl_buffer_free(&sink.buf);
+         break;
+      } else {
+         curl_buffer_free(&sink.buf);
+         *err = email_err_from_curl(res);
+         /* A server that refused PARTIAL gets the plain fetch.  libcurl reports
+          * that refusal as it reports a missing message (no FETCH answer); the
+          * server's tagged NO/BAD tells them apart, so a missing message costs
+          * one command.  Not a login denial (a second fetch would log in again,
+          * the burst the instrumented perform guards against), not a cancel. */
+         const bool refused = dctx.last_reject[0] != '\0';
+         if (*err == EMAIL_ERR_AUTH_FAILED || *err == EMAIL_ERR_CANCELLED || !partial ||
+             (*err == EMAIL_ERR_NOT_FOUND && !refused)) {
+            OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s", uid, curl_easy_strerror(res));
+            break;
+         }
          OLOG_WARNING("email: IMAP partial fetch uid=%u failed (%s); retrying full fetch", uid,
                       curl_easy_strerror(res));
-         used_partial = false;
-         continue; /* retry without PARTIAL */
       }
-      OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s%s", uid, curl_easy_strerror(res),
-                 was_truncated ? " (response exceeded cap)" : "");
-      email_instrument_op_done(conn->username, "read", curl, &dctx);
-      curl_easy_cleanup(curl);
-      return 1;
    }
    email_instrument_op_done(conn->username, "read", curl, &dctx);
    curl_easy_cleanup(curl);
+   if (!got)
+      return 1;
 
+   rc = email_mime_parse_raw(sink.buf.data, sink.buf.size, raw_cut, opts, out);
+   curl_buffer_free(&sink.buf);
+   if (rc != 0) {
+      *err = EMAIL_ERR_FAILED;
+      return 1;
+   }
+   *err = EMAIL_ERR_NONE;
    out->uid = uid;
-
-   /* Parse headers (unfold + RFC 2047 decode) */
-   char from_decoded[256];
-   const char *from_val = find_header(buf.data, "From");
-   copy_header_value(from_val, from_decoded, sizeof(from_decoded));
-   parse_from_value(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
-                    sizeof(out->from_addr));
-
-   const char *to_val = find_header(buf.data, "To");
-   copy_header_value(to_val, out->to, sizeof(out->to));
-
-   const char *subj_val = find_header(buf.data, "Subject");
-   copy_header_value(subj_val, out->subject, sizeof(out->subject));
-
-   const char *date_val = find_header(buf.data, "Date");
-   copy_header_value(date_val, out->date_str, sizeof(out->date_str));
-
-   /* The partial fetch caps the RAW MIME at EMAIL_MAX_READ_FETCH_BYTES; when it
-    * returns exactly the cap the message was cut, so the body may be incomplete
-    * even if the text extractor didn't hit its own max_chars limit (e.g. a large
-    * leading HTML/image part pushed the text/plain past the cut).  Fold that into
-    * the truncation flag so a clipped body is never reported as complete.  Only
-    * applies to the partial fetch — a full-fetch fallback got the whole message
-    * (a real overflow there would have set buf.truncated and failed above). */
-   bool raw_truncated = used_partial && (buf.size >= (size_t)EMAIL_MAX_READ_FETCH_BYTES);
-
-   /* Extract plain text body (defensive fallback; service layer always supplies
-    * a positive cap via build_conn_for_account) */
-   int max_chars = conn->max_body_chars > 0 ? conn->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
-   bool body_truncated = false;
-   out->body = extract_plain_body(buf.data, max_chars, &body_truncated);
-   if (out->body) {
-      out->body_len = strlen(out->body);
-      out->truncated = body_truncated || raw_truncated;
-   }
-
-   /* Count attachments (rough heuristic — count Content-Disposition: attachment) */
-   const char *p = buf.data;
-   while ((p = strcasestr(p, "Content-Disposition: attachment")) != NULL) {
-      out->attachment_count++;
-      p += 30;
-   }
-
-   curl_buffer_free(&buf);
    return 0;
 }
 
@@ -1638,16 +1495,4 @@ int email_list_folders(const email_conn_t *conn, char *out, size_t out_len) {
       pos += snprintf(out + pos, out_len - pos, "(none)");
 
    return 0;
-}
-
-/* =============================================================================
- * Public API: Free Message
- * ============================================================================= */
-
-void email_message_free(email_message_t *msg) {
-   if (msg) {
-      free(msg->body);
-      msg->body = NULL;
-      msg->body_len = 0;
-   }
 }

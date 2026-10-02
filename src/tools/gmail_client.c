@@ -43,18 +43,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "core/curl_buffer.h"
 #include "logging.h"
 #include "tools/email_parse.h"
+#include "tools/gmail_client_internal.h"
 #include "tools/html_parser.h"
 
 /* =============================================================================
  * Constants
  * ============================================================================= */
 
-#define GMAIL_API_BASE "https://gmail.googleapis.com/gmail/v1/users/me"
 #define GMAIL_BATCH_URL "https://gmail.googleapis.com/batch/gmail/v1"
 #define GMAIL_BATCH_BOUNDARY "dawn_gmail_batch"
 #define GMAIL_MAX_RESPONSE_SIZE (4 * 1024 * 1024) /* 4 MB */
@@ -78,7 +79,7 @@
  * Reject anything with non-hex chars to prevent path traversal.
  * ============================================================================= */
 
-static bool is_valid_gmail_id(const char *id) {
+bool gmail_message_id_valid(const char *id) {
    if (!id || !id[0])
       return false;
    for (const char *p = id; *p; p++) {
@@ -95,7 +96,7 @@ static bool is_valid_gmail_id(const char *id) {
  * Authorization header is wiped after each call.
  * ============================================================================= */
 
-static CURL *gmail_create_curl(void) {
+CURL *gmail_create_curl(void) {
    CURL *curl = curl_easy_init();
    if (!curl)
       return NULL;
@@ -112,13 +113,16 @@ static CURL *gmail_create_curl(void) {
 /* GET a Gmail API URL.  When @p http_code_out is non-NULL it receives the HTTP
  * status (0 if the transfer never completed), so callers can distinguish a 404
  * (message/resource not found) from a transport/network failure. */
-static int gmail_api_get(CURL *curl,
-                         const char *token,
-                         const char *url,
-                         curl_buffer_t *resp,
-                         long *http_code_out) {
+int gmail_api_get_ex(CURL *curl,
+                     const char *token,
+                     const char *url,
+                     curl_buffer_t *resp,
+                     long *http_code_out,
+                     CURLcode *res_out) {
    if (http_code_out)
       *http_code_out = 0;
+   if (res_out)
+      *res_out = CURLE_OK;
    curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
 
    char auth_header[2112];
@@ -136,6 +140,8 @@ static int gmail_api_get(CURL *curl,
 
    sodium_memzero(auth_header, sizeof(auth_header));
    curl_slist_free_all(headers);
+   if (res_out)
+      *res_out = res;
 
    if (res != CURLE_OK) {
       OLOG_ERROR("gmail: API request failed: %s", curl_easy_strerror(res));
@@ -151,12 +157,16 @@ static int gmail_api_get(CURL *curl,
 
    long http_code = 0;
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+   /* Gmail often answers a rate limit with 403 (rateLimitExceeded,
+    * userRateLimitExceeded) rather than 429: report it as the 429 it is. */
+   if (http_code == 403 && resp->data && strstr(resp->data, "ateLimitExceeded"))
+      http_code = 429;
    if (http_code_out)
       *http_code_out = http_code;
    if (http_code < 200 || http_code >= 300) {
       /* 404 is an expected "not in this mailbox" outcome — the multi-account read
        * fan-out probes every account, so logging each miss at ERROR is noise.  The
-       * caller maps it to GMAIL_RC_NOT_FOUND and surfaces it properly.  Real errors
+       * caller maps it to EMAIL_ERR_NOT_FOUND and surfaces it properly.  Real errors
        * (auth 401/403, 5xx) stay at ERROR. */
       if (http_code == 404)
          OLOG_DEBUG("gmail: API request returned HTTP 404 (not found)");
@@ -167,6 +177,14 @@ static int gmail_api_get(CURL *curl,
    }
 
    return 0;
+}
+
+int gmail_api_get(CURL *curl,
+                  const char *token,
+                  const char *url,
+                  curl_buffer_t *resp,
+                  long *http_code_out) {
+   return gmail_api_get_ex(curl, token, url, resp, http_code_out, NULL);
 }
 
 static int gmail_api_post(CURL *curl,
@@ -231,81 +249,6 @@ static int gmail_api_post(CURL *curl,
 static const char BASE64URL_CHARS[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/* Lookup table: 256 bytes of .rodata, replaces 5 branches per character */
-static const int8_t BASE64URL_LUT[256] = {
-   ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,  ['F'] = 5,  ['G'] = 6,  ['H'] = 7,
-   ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11, ['M'] = 12, ['N'] = 13, ['O'] = 14, ['P'] = 15,
-   ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19, ['U'] = 20, ['V'] = 21, ['W'] = 22, ['X'] = 23,
-   ['Y'] = 24, ['Z'] = 25, ['a'] = 26, ['b'] = 27, ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31,
-   ['g'] = 32, ['h'] = 33, ['i'] = 34, ['j'] = 35, ['k'] = 36, ['l'] = 37, ['m'] = 38, ['n'] = 39,
-   ['o'] = 40, ['p'] = 41, ['q'] = 42, ['r'] = 43, ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47,
-   ['w'] = 48, ['x'] = 49, ['y'] = 50, ['z'] = 51, ['0'] = 52, ['1'] = 53, ['2'] = 54, ['3'] = 55,
-   ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61, ['-'] = 62, ['_'] = 63,
-};
-
-/** Check if a character is a valid base64url character */
-static bool is_b64url_char(unsigned char c) {
-   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
-          c == '_';
-}
-
-/**
- * Decode base64url to heap-allocated buffer. Caller frees.
- * @param max_out  Maximum decoded bytes (0 = no limit)
- * @param out_len  Output: number of decoded bytes
- * @return Heap-allocated buffer, or NULL on failure
- */
-static unsigned char *base64url_decode(const char *input, size_t max_out, size_t *out_len) {
-   if (!input || !input[0]) {
-      *out_len = 0;
-      return NULL;
-   }
-
-   size_t in_len = strlen(input);
-   size_t alloc_size = (in_len * 3) / 4 + 4;
-   if (max_out > 0 && alloc_size > max_out + 2)
-      alloc_size = max_out + 2; /* +2: room for null termination by callers */
-
-   unsigned char *out = malloc(alloc_size);
-   if (!out)
-      return NULL;
-
-   size_t pos = 0;
-   size_t i = 0;
-   while (i < in_len) {
-      unsigned char ca = (i < in_len) ? (unsigned char)input[i++] : 0;
-      unsigned char cb = (i < in_len) ? (unsigned char)input[i++] : 0;
-      unsigned char cc = (i < in_len) ? (unsigned char)input[i++] : 0;
-      unsigned char cd = (i < in_len) ? (unsigned char)input[i++] : 0;
-
-      if (!is_b64url_char(ca) || !is_b64url_char(cb))
-         break;
-
-      int a = BASE64URL_LUT[ca];
-      int b = BASE64URL_LUT[cb];
-      bool have_c = is_b64url_char(cc);
-      bool have_d = is_b64url_char(cd);
-
-      uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12);
-      if (have_c)
-         triple |= ((uint32_t)BASE64URL_LUT[cc] << 6);
-      if (have_d)
-         triple |= (uint32_t)BASE64URL_LUT[cd];
-
-      if (pos < alloc_size)
-         out[pos++] = (triple >> 16) & 0xFF;
-      if (have_c && pos < alloc_size)
-         out[pos++] = (triple >> 8) & 0xFF;
-      if (have_d && pos < alloc_size)
-         out[pos++] = triple & 0xFF;
-
-      if (max_out > 0 && pos >= max_out)
-         break;
-   }
-
-   *out_len = pos;
-   return out;
-}
 
 static size_t base64url_encode(const unsigned char *data, size_t len, char *out, size_t out_len) {
    size_t needed = ((len * 4) / 3) + 4;
@@ -359,176 +302,11 @@ static size_t url_encode(const char *str, char *out, size_t out_len) {
 }
 
 /* =============================================================================
- * MIME Body Extraction
- *
- * Gmail API returns message body in a nested MIME parts tree.
- * Prefer text/plain, fall back to text/html with full HTML-to-text conversion
- * via html_parser (strips style/script blocks, entities, whitespace, etc.).
- * ============================================================================= */
-
-/**
- * Recursively extract text body from Gmail MIME payload.
- * @param payload  JSON object (Gmail message payload or part)
- * @param out      Output buffer
- * @param out_len  Size of output buffer
- * @param depth    Recursion depth (capped at GMAIL_MIME_MAX_DEPTH)
- * @return 1 if text/plain found, 2 if text/html found, 0 if nothing found
- */
-static int extract_text_body(struct json_object *payload, char *out, size_t out_len, int depth) {
-   if (!payload || depth > GMAIL_MIME_MAX_DEPTH)
-      return 0;
-
-   /* Check this part's mimeType */
-   struct json_object *mime_obj = NULL;
-   const char *mime_type = NULL;
-   if (json_object_object_get_ex(payload, "mimeType", &mime_obj))
-      mime_type = json_object_get_string(mime_obj);
-
-   /* If this is a leaf part with body data */
-   struct json_object *body_obj = NULL;
-   if (json_object_object_get_ex(payload, "body", &body_obj)) {
-      struct json_object *data_obj = NULL;
-      if (json_object_object_get_ex(body_obj, "data", &data_obj)) {
-         const char *b64data = json_object_get_string(data_obj);
-         if (b64data && b64data[0] && mime_type) {
-            if (strcasecmp(mime_type, "text/plain") == 0) {
-               size_t decoded_len = 0;
-               unsigned char *decoded = base64url_decode(b64data, out_len - 1, &decoded_len);
-               if (decoded) {
-                  decoded[decoded_len] = '\0';
-                  /* Some senders (Patreon/Mailgun) embed HTML tags in text/plain parts.
-                   * Detect and strip them so tracking URLs don't pollute the body. */
-                  bool has_html = false;
-                  size_t scan_limit = decoded_len < 256 ? decoded_len : 256;
-                  for (size_t si = 0; si < scan_limit; si++) {
-                     if (decoded[si] == '<' &&
-                         (isalpha((unsigned char)decoded[si + 1]) ||
-                          (decoded[si + 1] == '/' && isalpha((unsigned char)decoded[si + 2])))) {
-                        has_html = true;
-                        break;
-                     }
-                  }
-                  if (has_html) {
-                     char *cleaned = NULL;
-                     if (html_extract_text_plain((const char *)decoded, decoded_len, &cleaned) ==
-                             HTML_PARSE_SUCCESS &&
-                         cleaned) {
-                        size_t copy_len = strlen(cleaned);
-                        if (copy_len >= out_len)
-                           copy_len = out_len - 1;
-                        memcpy(out, cleaned, copy_len);
-                        out[copy_len] = '\0';
-                        free(cleaned);
-                        free(decoded);
-                        return 1;
-                     }
-                  }
-                  size_t copy_len = decoded_len < out_len - 1 ? decoded_len : out_len - 1;
-                  memcpy(out, decoded, copy_len);
-                  out[copy_len] = '\0';
-                  free(decoded);
-                  return 1;
-               }
-            }
-            if (strcasecmp(mime_type, "text/html") == 0 && out[0] == '\0') {
-               size_t decoded_len = 0;
-               /* Decode full HTML — marketing emails can be 30KB+ of HTML that
-                * compress to a few hundred chars of text. Cap at 2MB to prevent
-                * adversarial emails from causing unbounded allocation. */
-               unsigned char *decoded = base64url_decode(b64data, 2 * 1024 * 1024, &decoded_len);
-               if (decoded) {
-                  decoded[decoded_len] = '\0';
-                  char *extracted = NULL;
-                  if (html_extract_text_plain((const char *)decoded, decoded_len, &extracted) ==
-                          HTML_PARSE_SUCCESS &&
-                      extracted) {
-                     size_t copy_len = strlen(extracted);
-                     if (copy_len >= out_len)
-                        copy_len = out_len - 1;
-                     memcpy(out, extracted, copy_len);
-                     out[copy_len] = '\0';
-                     free(extracted);
-                  }
-                  free(decoded);
-                  return 2;
-               }
-            }
-         }
-      }
-   }
-
-   /* Recurse into parts */
-   struct json_object *parts_obj = NULL;
-   if (json_object_object_get_ex(payload, "parts", &parts_obj) &&
-       json_object_is_type(parts_obj, json_type_array)) {
-      int parts_len = json_object_array_length(parts_obj);
-      int best = 0;
-      for (int i = 0; i < parts_len; i++) {
-         struct json_object *part = json_object_array_get_idx(parts_obj, i);
-         int result = extract_text_body(part, out, out_len, depth + 1);
-         if (result == 1)
-            return 1; /* text/plain found — stop immediately */
-         if (result > best)
-            best = result;
-      }
-      return best;
-   }
-
-   return 0;
-}
-
-/** Count attachments in MIME parts (parts with filename in disposition) */
-static int count_attachments(struct json_object *payload, int depth) {
-   if (!payload || depth > GMAIL_MIME_MAX_DEPTH)
-      return 0;
-
-   int count = 0;
-
-   /* Check if this part has a filename */
-   struct json_object *filename_obj = NULL;
-   if (json_object_object_get_ex(payload, "filename", &filename_obj)) {
-      const char *filename = json_object_get_string(filename_obj);
-      if (filename && filename[0])
-         count++;
-   }
-
-   /* Recurse into parts */
-   struct json_object *parts_obj = NULL;
-   if (json_object_object_get_ex(payload, "parts", &parts_obj) &&
-       json_object_is_type(parts_obj, json_type_array)) {
-      int parts_len = json_object_array_length(parts_obj);
-      for (int i = 0; i < parts_len; i++) {
-         count += count_attachments(json_object_array_get_idx(parts_obj, i), depth + 1);
-      }
-   }
-
-   return count;
-}
-
-/* =============================================================================
  * Header Parsing
  *
  * Extract headers from Gmail API metadata format (payload.headers array).
  * ============================================================================= */
 
-static const char *find_gmail_header(struct json_object *headers_arr, const char *name) {
-   if (!headers_arr || !json_object_is_type(headers_arr, json_type_array))
-      return NULL;
-
-   int len = json_object_array_length(headers_arr);
-   for (int i = 0; i < len; i++) {
-      struct json_object *header = json_object_array_get_idx(headers_arr, i);
-      struct json_object *name_obj = NULL;
-      if (json_object_object_get_ex(header, "name", &name_obj)) {
-         if (strcasecmp(json_object_get_string(name_obj), name) == 0) {
-            struct json_object *val_obj = NULL;
-            if (json_object_object_get_ex(header, "value", &val_obj))
-               return json_object_get_string(val_obj);
-         }
-      }
-   }
-   return NULL;
-}
 
 /** Parse "Display Name <email@addr>" or bare "email@addr" */
 static void parse_from_field(const char *from,
@@ -684,16 +462,16 @@ static int parse_message_json(struct json_object *root, email_summary_t *out) {
     * RFC 2047-decode From/Subject here — otherwise a non-ASCII sender/subject
     * ("=?UTF-8?B?..?=") reaches the user as raw gibberish.  The encoded word
     * lives in the From display-name, so decode before splitting name/addr. */
-   const char *from = find_gmail_header(headers, "From");
+   const char *from = gmail_find_header(headers, "From");
    char from_decoded[512];
    email_decode_rfc2047(from, from_decoded, sizeof(from_decoded));
    parse_from_field(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
                     sizeof(out->from_addr));
 
-   const char *subject = find_gmail_header(headers, "Subject");
+   const char *subject = gmail_find_header(headers, "Subject");
    email_decode_rfc2047(subject, out->subject, sizeof(out->subject));
 
-   const char *date = find_gmail_header(headers, "Date");
+   const char *date = gmail_find_header(headers, "Date");
    if (date)
       snprintf(out->date_str, sizeof(out->date_str), "%s", date);
 
@@ -862,7 +640,7 @@ static char *build_batch_request(const gmail_msg_id_t *ids, int count) {
 
    int pos = 0;
    for (int i = 0; i < count; i++) {
-      if (!is_valid_gmail_id(ids[i].id))
+      if (!gmail_message_id_valid(ids[i].id))
          continue;
 
       pos += snprintf(body + pos, alloc_size - pos,
@@ -1113,7 +891,7 @@ int gmail_fetch_recent(const char *token,
 
    /* Fetch message IDs */
    /* Zeroed: a list entry without an "id" leaves its slot untouched, and
-    * is_valid_gmail_id() must then see an empty string, not stack garbage. */
+    * gmail_message_id_valid() must then see an empty string, not stack garbage. */
    gmail_msg_id_t ids[EMAIL_MAX_FETCH_RESULTS] = { 0 };
    int id_count = 0;
    int rc = fetch_message_ids(curl, token, query, count, page_token, ids, count, &id_count,
@@ -1128,95 +906,6 @@ int gmail_fetch_recent(const char *token,
 
    curl_easy_cleanup(curl);
    return rc;
-}
-
-/* =============================================================================
- * Public API: Read Message
- * ============================================================================= */
-
-int gmail_read_message(const char *token,
-                       const char *message_id,
-                       int max_body_chars,
-                       email_message_t *out) {
-   memset(out, 0, sizeof(*out));
-
-   if (!token || !token[0] || !message_id)
-      return 1;
-
-   if (!is_valid_gmail_id(message_id)) {
-      OLOG_ERROR("gmail: invalid message ID '%s'", message_id);
-      return 1;
-   }
-
-   snprintf(out->message_id, sizeof(out->message_id), "%s", message_id);
-   out->uid = 0;
-
-   CURL *curl = gmail_create_curl();
-   if (!curl)
-      return 1;
-
-   char url[512];
-   snprintf(url, sizeof(url), GMAIL_API_BASE "/messages/%s?format=full", message_id);
-
-   curl_buffer_t resp;
-   long http_code = 0;
-   if (gmail_api_get(curl, token, url, &resp, &http_code) != 0) {
-      curl_easy_cleanup(curl);
-      return http_code == 404 ? GMAIL_RC_NOT_FOUND : 1;
-   }
-
-   curl_easy_cleanup(curl);
-
-   struct json_object *root = json_tokener_parse(resp.data);
-   curl_buffer_free(&resp);
-   if (!root)
-      return 1;
-
-   /* Extract headers */
-   struct json_object *payload = NULL;
-   struct json_object *headers = NULL;
-   if (json_object_object_get_ex(root, "payload", &payload))
-      json_object_object_get_ex(payload, "headers", &headers);
-
-   /* RFC 2047-decode header values (Gmail's API leaves them encoded) — parity
-    * with the IMAP read path's copy_header_value. */
-   const char *from = find_gmail_header(headers, "From");
-   char from_decoded[512];
-   email_decode_rfc2047(from, from_decoded, sizeof(from_decoded));
-   parse_from_field(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
-                    sizeof(out->from_addr));
-
-   const char *to = find_gmail_header(headers, "To");
-   email_decode_rfc2047(to, out->to, sizeof(out->to));
-
-   const char *subject = find_gmail_header(headers, "Subject");
-   email_decode_rfc2047(subject, out->subject, sizeof(out->subject));
-
-   const char *date = find_gmail_header(headers, "Date");
-   if (date)
-      snprintf(out->date_str, sizeof(out->date_str), "%s", date);
-
-   /* Extract body (defensive fallback; service layer always supplies a positive cap) */
-   if (max_body_chars <= 0)
-      max_body_chars = EMAIL_MAX_READ_BODY_LEN;
-
-   char *body_buf = calloc(1, max_body_chars + 1);
-   if (body_buf) {
-      int result = extract_text_body(payload, body_buf, max_body_chars + 1, 0);
-      if (result > 0 && body_buf[0]) {
-         out->body = body_buf;
-         out->body_len = strlen(body_buf);
-         out->truncated = (out->body_len >= max_body_chars);
-      } else {
-         free(body_buf);
-      }
-   }
-
-   /* Count attachments */
-   out->attachment_count = count_attachments(payload, 0);
-
-   json_object_put(root);
-   return 0;
 }
 
 /* =============================================================================
@@ -1264,7 +953,7 @@ int gmail_search(const char *token,
 
    /* Fetch message IDs */
    /* Zeroed: a list entry without an "id" leaves its slot untouched, and
-    * is_valid_gmail_id() must then see an empty string, not stack garbage. */
+    * gmail_message_id_valid() must then see an empty string, not stack garbage. */
    gmail_msg_id_t ids[EMAIL_MAX_FETCH_RESULTS] = { 0 };
    int id_count = 0;
    const char *pt = params->page_token[0] ? params->page_token : NULL;
@@ -1540,7 +1229,7 @@ int gmail_list_labels(const char *token, char *out, size_t out_len) {
  * ============================================================================= */
 
 int gmail_trash_message(const char *token, const char *message_id) {
-   if (!token || !token[0] || !is_valid_gmail_id(message_id)) {
+   if (!token || !token[0] || !gmail_message_id_valid(message_id)) {
       OLOG_ERROR("gmail_trash: invalid token or message_id");
       return 1;
    }
@@ -1566,7 +1255,7 @@ int gmail_trash_message(const char *token, const char *message_id) {
 }
 
 int gmail_archive_message(const char *token, const char *message_id) {
-   if (!token || !token[0] || !is_valid_gmail_id(message_id)) {
+   if (!token || !token[0] || !gmail_message_id_valid(message_id)) {
       OLOG_ERROR("gmail_archive: invalid token or message_id");
       return 1;
    }

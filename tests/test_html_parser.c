@@ -19,8 +19,10 @@
  * Unit tests for src/tools/html_parser.c — HTML to Markdown conversion.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "tools/html_parser.h"
 #include "unity.h"
@@ -210,6 +212,52 @@ static void test_empty_html_returns_empty_error(void) {
 
 /* ── main ────────────────────────────────────────────────────────────────── */
 
+/* Hostile pages: an unclosed skip tag or noise class, or an unclosed comment,
+ * repeated.  Each used to rescan the rest of the page per occurrence
+ * (quadratic: 500 KB took a minute and more); now each search runs once. */
+static long elapsed_ms(const struct timespec *a) {
+   struct timespec b;
+   clock_gettime(CLOCK_MONOTONIC, &b);
+   return (b.tv_sec - a->tv_sec) * 1000L + (b.tv_nsec - a->tv_nsec) / 1000000L;
+}
+
+static void check_linear(const char *unit) {
+   const size_t n = strlen(unit);
+   const size_t reps = 500000 / n;
+   char *html = malloc(reps * n + 1);
+   TEST_ASSERT_NOT_NULL(html);
+   for (size_t i = 0; i < reps; i++)
+      memcpy(html + i * n, unit, n);
+   html[reps * n] = '\0';
+   struct timespec t;
+   clock_gettime(CLOCK_MONOTONIC, &t);
+   char *out = NULL;
+   html_extract_text_plain(html, reps * n, &out);
+   /* Linear is tens of ms (more under a sanitizer); quadratic was minutes. */
+   TEST_ASSERT_LESS_THAN_INT(3000, elapsed_ms(&t));
+   free(out);
+   free(html);
+}
+
+static void test_hostile_pages_are_linear(void) {
+   check_linear("<input>");
+   check_linear("<meta x>");
+   check_linear("<div class=\"modal\">");
+   check_linear("<!--x>");
+   /* More unclosed names than the parser remembers, cycling */
+   char cycle[2048] = "";
+   for (int i = 0; i < 40; i++) {
+      char one[48];
+      snprintf(one, sizeof(one), "<t%d class=modal>", i);
+      strcat(cycle, one);
+   }
+   check_linear(cycle);
+   /* CSS at-rules that never close: each used to rescan 64 KB */
+   check_linear("x @media {a ");
+   check_linear("x @media a ");
+   check_linear("<p>x @layer {a</p>");
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -239,6 +287,9 @@ int main(void) {
    RUN_TEST(test_null_input);
    RUN_TEST(test_null_output_param);
    RUN_TEST(test_empty_html_returns_empty_error);
+
+   /* Hostile input */
+   RUN_TEST(test_hostile_pages_are_linear);
 
    return UNITY_END();
 }

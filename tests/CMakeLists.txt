@@ -502,6 +502,20 @@ dawn_add_unit_test(test_email_imap_roles
    LIBS    unity
    LABEL   ci)
 
+# Reading a message: GMime over synthetic and hostile RFC 822, plus the Gmail
+# part-list path.  GMime is only found when the email tool is on.
+if(DAWN_ENABLE_EMAIL_TOOL)
+   dawn_add_unit_test(test_email_mime
+      SOURCES  test_email_mime.c
+               ${SRC_ROOT}/src/tools/email_mime.c
+               ${SRC_ROOT}/src/tools/email_display.c
+               ${SRC_ROOT}/src/tools/gmail_parts.c
+               ${SRC_ROOT}/src/tools/html_parser.c
+      LIBS     dawn_common unity ${GMIME_LINK_LIBRARIES} ${JSONC_LIBRARIES}
+      INCLUDES ${GMIME_INCLUDE_DIRS}
+      LABEL    ci)
+endif()
+
 dawn_add_unit_test(test_email_parse
    SOURCES test_email_parse.c
            ${SRC_ROOT}/src/tools/email_parse.c

@@ -59,6 +59,37 @@ void utf8_truncate(char *str, size_t max_bytes) {
    utf8_trim_incomplete(str);
 }
 
+size_t utf8_valid_seq_len(const char *str) {
+   const unsigned char *s = (const unsigned char *)str;
+   const unsigned char c = s[0];
+   size_t n;
+   unsigned char lo = 0x80, hi = 0xBF; /* allowed range of the second byte */
+   if (c >= 0xC2 && c <= 0xDF) {
+      n = 2;
+   } else if (c >= 0xE0 && c <= 0xEF) {
+      n = 3;
+      if (c == 0xE0)
+         lo = 0xA0; /* overlong */
+      else if (c == 0xED)
+         hi = 0x9F; /* surrogates */
+   } else if (c >= 0xF0 && c <= 0xF4) {
+      n = 4;
+      if (c == 0xF0)
+         lo = 0x90; /* overlong */
+      else if (c == 0xF4)
+         hi = 0x8F; /* past U+10FFFF */
+   } else {
+      return 0;
+   }
+   if (s[1] < lo || s[1] > hi)
+      return 0;
+   for (size_t i = 2; i < n; i++) {
+      if ((s[i] & 0xC0) != 0x80)
+         return 0;
+   }
+   return n;
+}
+
 void sanitize_utf8_for_json(char *str) {
    if (!str)
       return;
@@ -69,66 +100,23 @@ void sanitize_utf8_for_json(char *str) {
    while (*src) {
       unsigned char c = *src;
 
-      /* ASCII printable or allowed whitespace */
-      if (c >= 32 && c < 127) {
+      if ((c >= 32 && c < 127) || c == '\n' || c == '\r' || c == '\t') {
          *dst++ = c;
          src++;
-      } else if (c == '\n' || c == '\r' || c == '\t') {
-         *dst++ = c;
-         src++;
-      } else if (c < 32) {
+      } else if (c < 32 || c == 127) {
          /* Control character - skip */
          src++;
-      } else if ((c & 0xE0) == 0xC0) {
-         /* 2-byte UTF-8 sequence - check for truncation before accessing src[1] */
-         if (src[1] != '\0' && (src[1] & 0xC0) == 0x80) {
-            /* Valid 2-byte sequence - keep it */
-            *dst++ = *src++;
-            *dst++ = *src++;
-         } else {
-            /* Invalid/truncated sequence - replace with ? */
-            *dst++ = '?';
-            src++;
-         }
-      } else if ((c & 0xF0) == 0xE0) {
-         /* 3-byte UTF-8 sequence - check for truncation before accessing src[1], src[2] */
-         if (src[1] != '\0' && src[2] != '\0' && (src[1] & 0xC0) == 0x80 &&
-             (src[2] & 0xC0) == 0x80) {
-            /* Check for problematic codepoints (surrogates U+D800-U+DFFF) */
-            unsigned int codepoint = ((c & 0x0F) << 12) | ((src[1] & 0x3F) << 6) | (src[2] & 0x3F);
-            if (codepoint >= 0xD800 && codepoint <= 0xDFFF) {
-               /* Surrogate - invalid in UTF-8 */
-               *dst++ = '?';
-               src += 3;
-            } else {
-               /* Valid 3-byte sequence - keep it */
-               *dst++ = *src++;
-               *dst++ = *src++;
-               *dst++ = *src++;
-            }
-         } else {
-            /* Invalid/truncated sequence - replace with ? */
-            *dst++ = '?';
-            src++;
-         }
-      } else if ((c & 0xF8) == 0xF0) {
-         /* 4-byte UTF-8 sequence - check for truncation before accessing src[1-3] */
-         if (src[1] != '\0' && src[2] != '\0' && src[3] != '\0' && (src[1] & 0xC0) == 0x80 &&
-             (src[2] & 0xC0) == 0x80 && (src[3] & 0xC0) == 0x80) {
-            /* Valid 4-byte sequence - keep it */
-            *dst++ = *src++;
-            *dst++ = *src++;
-            *dst++ = *src++;
-            *dst++ = *src++;
-         } else {
-            /* Invalid/truncated sequence - replace with ? */
-            *dst++ = '?';
-            src++;
-         }
       } else {
-         /* Invalid UTF-8 start byte (0x80-0xBF or 0xF8-0xFF) */
-         *dst++ = '?';
-         src++;
+         const size_t n = utf8_valid_seq_len((const char *)src);
+         if (n) {
+            memmove(dst, src, n);
+            dst += n;
+            src += n;
+         } else {
+            /* Invalid, overlong or truncated - replace the lead byte */
+            *dst++ = '?';
+            src++;
+         }
       }
    }
    *dst = '\0';

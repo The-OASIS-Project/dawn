@@ -79,7 +79,7 @@ jobs:
             libmpg123-dev libvorbis-dev \
             libmupdf-dev libfreetype-dev libharfbuzz-dev libzip-dev libxml2-dev \
             libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev libjpeg-dev \
-            libical-dev \
+            libical-dev libgmime-3.0-dev \
             libstemmer-dev
 
       - name: Configure (ci preset)

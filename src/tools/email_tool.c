@@ -34,6 +34,7 @@
 
 #include "core/scheduled_context.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
@@ -340,6 +341,67 @@ static char *handle_recent(struct json_object *details, int user_id) {
    return buf;
 }
 
+/* Why a read failed, when the cause is known; otherwise the generic text for rc. */
+static char *read_error(int rc, email_err_t err, const char *account) {
+   if (rc == EMAIL_RC_FAILURE) {
+      switch (err) {
+         case EMAIL_ERR_AUTH_FAILED:
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the mail server refused the login. The account's password or "
+                          "app password may have changed; tell the user to check it in WebUI "
+                          "Settings -> Email.");
+         case EMAIL_ERR_AUTH_REVOKED:
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: access to this mailbox was revoked at the provider. Tell the "
+                          "user to reconnect the account in WebUI Settings -> Email.");
+         case EMAIL_ERR_UNREACHABLE:
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: couldn't reach the mail server (network, DNS or TLS). Retry "
+                          "once; if it persists, the server is down or unreachable from here.");
+         case EMAIL_ERR_TIMEOUT:
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the mail server didn't answer in time. Retry once.");
+         case EMAIL_ERR_RATE_LIMITED:
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the mail provider asked us to slow down. Wait a minute "
+                          "before trying again.");
+         default:
+            break;
+      }
+   }
+   return email_rc_to_error(rc, "read", account, NULL);
+}
+
+/* @p bytes as "512 B", "12 KB", "3.4 MB". */
+static void format_size(size_t bytes, char *out, size_t size) {
+   if (bytes < 1024)
+      snprintf(out, size, "%zu B", bytes);
+   else if (bytes < 1024 * 1024)
+      snprintf(out, size, "%zu KB", (bytes + 512) / 1024);
+   else
+      snprintf(out, size, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+}
+
+static void append_addrs(strbuf_t *sb,
+                         const char *label,
+                         const email_addr_t *list,
+                         int count,
+                         int total) {
+   if (count <= 0)
+      return;
+   strbuf_appendf(sb, "%s: ", label);
+   for (int i = 0; i < count; i++) {
+      /* A name that is just the address again isn't shown twice. */
+      if (list[i].name[0] && strcasecmp(list[i].name, list[i].addr) != 0)
+         strbuf_appendf(sb, "%s%s <%s>", i ? ", " : "", list[i].name, list[i].addr);
+      else
+         strbuf_appendf(sb, "%s%s", i ? ", " : "", list[i].addr);
+   }
+   if (total > count)
+      strbuf_appendf(sb, " (and %d more)", total - count);
+   strbuf_append(sb, "\n");
+}
+
 static char *handle_read(struct json_object *details, int user_id) {
    /* Accept message_id (string) or fall back to uid (int) for backward compat */
    const char *mid = json_get_str(details, "message_id");
@@ -356,40 +418,49 @@ static char *handle_read(struct json_object *details, int user_id) {
 
    const char *account = json_get_str(details, "account");
 
+   /* The account's own body cap; never HTML (the model reads text). */
+   const email_read_opts_t opts = { .fetch_bytes = EMAIL_READ_FETCH_TOOL };
    email_message_t msg = { 0 };
-   int rc = email_service_read(user_id, account, message_id, &msg);
+   email_err_t err = EMAIL_ERR_NONE;
+   int rc = email_service_read(user_id, account, message_id, &opts, &msg, &err);
    if (rc != EMAIL_RC_OK)
-      return email_rc_to_error(rc, "read", account, NULL);
+      return read_error(rc, err, account);
 
-   /* Size the buffer to the body — read bodies can be large (up to
-    * EMAIL_MAX_READ_BODY_LEN), so the fixed RESULT_BUF_SIZE would clip them.
-    * body_len == strlen(msg.body) by contract; guard the (impossible) negative
-    * so the cast to size_t can't wrap.  Header fields are bounded (from/to/
-    * subject 256, date 32); 1 KB slack covers them plus the labels and the
-    * "[Message truncated]" marker. */
-   size_t body_len = msg.body_len > 0 ? (size_t)msg.body_len : 0;
-   size_t buf_size = body_len + 1024;
-   char *buf = malloc(buf_size);
-   if (!buf) {
-      email_message_free(&msg);
+   /* Every field here is the sender's text, already made safe to show. */
+   /* Headers, 32+32 addresses and 16 attachment lines fit well within 64 KB. */
+   strbuf_t sb;
+   const size_t body = msg.body_len > 0 ? (size_t)msg.body_len : 0;
+   strbuf_init_with_max(&sb, body + 2048, body + 65536);
+   strbuf_appendf(&sb, "From: %s%s%s%s\n", msg.from_name, msg.from_name[0] ? " <" : "",
+                  msg.from_addr, msg.from_name[0] ? ">" : "");
+   append_addrs(&sb, "To", msg.to_list, msg.to_count, msg.to_total);
+   append_addrs(&sb, "Cc", msg.cc_list, msg.cc_count, msg.cc_total);
+   if (msg.reply_to.addr[0] && strcasecmp(msg.reply_to.addr, msg.from_addr) != 0)
+      strbuf_appendf(&sb, "Reply-To: %s\n", msg.reply_to.addr);
+   strbuf_appendf(&sb, "Subject: %s\nDate: %s\n", msg.subject, msg.date_str);
+   if (msg.attachment_count > 0) {
+      strbuf_append(&sb, "Attachments:\n");
+      for (int i = 0; i < msg.attachment_count; i++) {
+         const email_attachment_t *a = &msg.attachments[i];
+         char size[32];
+         format_size(a->size, size, sizeof(size));
+         strbuf_appendf(&sb, "  %d. %s (%s, %s%s)\n", i + 1,
+                        a->filename[0] ? a->filename : "(unnamed)", a->mime, size,
+                        a->is_inline ? ", inline" : "");
+      }
+      if (msg.attachments_truncated)
+         strbuf_append(&sb, "  (more attachments not listed)\n");
+   }
+   strbuf_appendf(&sb, "\n%s", msg.body && msg.body[0] ? msg.body : "(No body)");
+   if (msg.text_truncated)
+      strbuf_append(&sb, "\n[Message truncated]");
+   email_message_free(&msg);
+
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    }
-
-   int pos = 0;
-   pos += snprintf(buf, buf_size, "From: %s%s%s%s\nTo: %s\nSubject: %s\nDate: %s\n", msg.from_name,
-                   msg.from_name[0] ? " <" : "", msg.from_addr, msg.from_name[0] ? ">" : "", msg.to,
-                   msg.subject, msg.date_str);
-
-   if (msg.attachment_count > 0)
-      pos += snprintf(buf + pos, buf_size - pos, "Attachments: %d\n", msg.attachment_count);
-
-   pos += snprintf(buf + pos, buf_size - pos, "\n%s", msg.body ? msg.body : "(No body)");
-
-   if (msg.truncated)
-      pos += snprintf(buf + pos, buf_size - pos, "\n[Message truncated]");
-
-   email_message_free(&msg);
-   return buf;
+   return strbuf_steal(&sb);
 }
 
 static char *handle_search(struct json_object *details, int user_id) {

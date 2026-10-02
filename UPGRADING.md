@@ -12,6 +12,35 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-02 — Email reading uses GMime: install `libgmime-3.0-dev` before rebuilding
+
+**What you need to do.** If you build DAWN from source with email enabled (the default), install
+the GMime library before you rebuild:
+
+```bash
+sudo apt install libgmime-3.0-dev
+```
+
+Without it, CMake stops with `gmime-3.0 not found`. If you don't use email, build with
+`-DDAWN_ENABLE_EMAIL_TOOL=OFF` instead. The Docker images already include it.
+
+**What changed.**
+- **Both mail backends now read messages through one MIME reader.**
+  - Mail in other character sets (Latin-1, Windows smart quotes, Japanese, and others)
+    reads correctly.
+  - HTML-only mail is read as text.
+  - A message's attachments are listed by name, type and size, not just counted.
+  - Cc and Reply-To are shown.
+  - Senders' names, subjects and file names are cleaned of invisible and direction-reversing
+    characters before the assistant sees them.
+- **When a read fails, the assistant says why**: the server refused the login, access was
+  revoked, the server was unreachable or slow, or the provider asked it to slow down.
+- **Asking to trash an email no longer downloads it** just to show its sender and subject.
+  On IMAP it also no longer marks the message read.
+- **Gmail reads never download attachment bytes** to read the text.
+
+---
+
 ## 2026-10-02 — Email trash and archive over IMAP no longer purge other deleted mail
 
 **What changed.**

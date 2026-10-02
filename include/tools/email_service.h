@@ -216,10 +216,22 @@ int email_service_recent(int user_id,
                          char *next_page_token,
                          size_t npt_len);
 
+/**
+ * @brief Read a message (email_service_read.c)
+ *
+ * With no account named, each enabled account is tried until one has it.
+ * opts->max_text_chars <= 0 takes the account's own body cap.
+ *
+ * @param err Why it failed (may be NULL)
+ * @return EMAIL_RC_OK, EMAIL_RC_NOT_FOUND, EMAIL_RC_NO_ACCOUNTS, an account-lookup
+ *         code, or EMAIL_RC_FAILURE; free a success with email_message_free()
+ */
 int email_service_read(int user_id,
                        const char *account_name,
                        const char *message_id,
-                       email_message_t *out);
+                       const email_read_opts_t *opts,
+                       email_message_t *out,
+                       email_err_t *err);
 
 /**
  * @brief Search email across one or (when account_name is NULL) all enabled accounts.

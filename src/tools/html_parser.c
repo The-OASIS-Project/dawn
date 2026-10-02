@@ -116,6 +116,54 @@ static const char *find_tag_end(const char *start, const char *end) {
    return NULL;
 }
 
+/* Tags with no closing tag (HTML void elements): a search for one scans to
+ * the end of the document for nothing. */
+static int is_void_tag(const char *tag_name) {
+   static const char *const k_void[] = { "area",  "base",   "br",    "col",  "embed",
+                                         "hr",    "img",    "input", "link", "meta",
+                                         "param", "source", "track", "wbr",  NULL };
+   for (int i = 0; k_void[i]; i++) {
+      if (strcmp(tag_name, k_void[i]) == 0)
+         return 1;
+   }
+   return 0;
+}
+
+/* Closing tags a document turned out not to have.  A failed search for
+ * "</tag>" from one position fails from every later one too, so it is done
+ * once per tag name: without this, every unclosed <div class="modal"> rescans
+ * the rest of the document, quadratic in a hostile page (minutes of CPU for a
+ * few hundred KB). */
+#define MISSING_CLOSE_MAX 32
+typedef struct {
+   char name[MISSING_CLOSE_MAX][64];
+   int count;
+   /* Bytes failed searches may still scan: a page cycling through more
+    * unclosed tag names than the list holds can't make the cost quadratic. */
+   size_t budget;
+} missing_close_t;
+
+static int close_known_missing(const missing_close_t *m, const char *tag_name) {
+   if (m->budget == 0)
+      return 1;
+   for (int i = 0; i < m->count; i++) {
+      if (strcmp(m->name[i], tag_name) == 0)
+         return 1;
+   }
+   return 0;
+}
+
+/* A search for "</tag>" from @p from to @p end found nothing. */
+static void close_missing(missing_close_t *m,
+                          const char *tag_name,
+                          const char *from,
+                          const char *end) {
+   const size_t scanned = (size_t)(end - from);
+   m->budget = m->budget > scanned ? m->budget - scanned : 0;
+   if (m->count < MISSING_CLOSE_MAX)
+      safe_strncpy(m->name[m->count++], tag_name, sizeof(m->name[0]));
+}
+
 static const char *find_closing_tag(const char *html, const char *tag_name) {
    char close_tag[72];  // tag_name(64) + "</>" + null = 68 bytes, round up
    snprintf(close_tag, sizeof(close_tag), "</%s>", tag_name);
@@ -1229,10 +1277,15 @@ static size_t strip_css_artifacts(char *text) {
    const char *end = text + len;
    int consecutive_newlines = 0;
    bool at_line_start = true;
+   /* Bytes failed block searches may still scan.  A failed search scans up to
+    * CSS_BLOCK_MAX_SCAN for nothing, and text with an "@media" every few
+    * bytes would repeat that at each one (seconds for a hostile email); past
+    * the budget an "@" keyword is just text. */
+   size_t scan_budget = 4 * len;
 
    while (read < end) {
       /* Check for CSS @ blocks */
-      if (*read == '@') {
+      if (*read == '@' && scan_budget > 0) {
          bool is_css_block = false;
          for (size_t k = 0; k < CSS_BLOCK_KEYWORD_COUNT; k++) {
             size_t kw_len = strlen(CSS_BLOCK_KEYWORDS[k]);
@@ -1244,6 +1297,11 @@ static size_t strip_css_artifacts(char *text) {
 
          if (is_css_block) {
             const char *block_end = find_css_block_end(read, end);
+            if (!block_end) {
+               const size_t rest = (size_t)(end - read);
+               const size_t scanned = rest < CSS_BLOCK_MAX_SCAN ? rest : CSS_BLOCK_MAX_SCAN;
+               scan_budget = scan_budget > scanned ? scan_budget - scanned : 0;
+            }
             if (block_end) {
                /* Skip entire block */
                read = (char *)block_end;
@@ -1344,14 +1402,18 @@ static int html_extract_internal(const char *html,
          p = body_end + 1;
    }
 
+   missing_close_t missing = { .budget = 4 * html_len };
+   int no_comment_end = 0; /* no "-->" left: a later "<!--" can't find one either */
+
    while (p < end) {
       // HTML comment
-      if (strncmp(p, "<!--", 4) == 0) {
+      if (!no_comment_end && strncmp(p, "<!--", 4) == 0) {
          const char *comment_end = strstr(p + 4, "-->");
          if (comment_end) {
             p = comment_end + 3;
             continue;
          }
+         no_comment_end = 1;
       }
 
       // Start of tag
@@ -1387,11 +1449,18 @@ static int html_extract_internal(const char *html,
 
          // Check for skip tags
          if (!is_closing && is_skip_tag(tag_name, name_len)) {
-            const char *close = find_closing_tag(p, tag_name);
+            if (is_void_tag(tag_name)) {
+               p = tag_end + 1; /* nothing to skip past but the tag itself */
+               continue;
+            }
+            const int known = close_known_missing(&missing, tag_name);
+            const char *close = known ? NULL : find_closing_tag(p, tag_name);
             if (close) {
                p = close + 1;
                continue;
             }
+            if (!known)
+               close_missing(&missing, tag_name, p, end);
          }
 
          // Stop at </body>
@@ -1408,12 +1477,15 @@ static int html_extract_internal(const char *html,
          tag_content[copy_len] = '\0';
 
          // Check for noise class/id patterns (modals, popups, subscriptions, etc.)
-         if (!is_closing && has_noise_class_or_id(tag_content)) {
-            const char *close = find_closing_tag(p, tag_name);
+         if (!is_closing && !is_void_tag(tag_name) && has_noise_class_or_id(tag_content)) {
+            const int known = close_known_missing(&missing, tag_name);
+            const char *close = known ? NULL : find_closing_tag(p, tag_name);
             if (close) {
                p = close + 1;
                continue;
             }
+            if (!known)
+               close_missing(&missing, tag_name, p, end);
          }
 
          if (is_closing) {
@@ -1504,8 +1576,10 @@ static int html_extract_internal(const char *html,
       state.output[--state.out_pos] = '\0';
    }
 
-   // Check minimum content
-   if (state.out_pos < HTML_MIN_CONTENT_LEN) {
+   // Check minimum content.  A fetched web page this short is a failed
+   // extraction; plain text (an email's HTML part) is whatever it says, and a
+   // two-word reply is a whole message.
+   if (!plain_text && state.out_pos < HTML_MIN_CONTENT_LEN) {
       free(state.output);
       return HTML_PARSE_ERROR_EMPTY;
    }
