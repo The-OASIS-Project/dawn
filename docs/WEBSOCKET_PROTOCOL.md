@@ -83,6 +83,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `image_only_turns` | 2026-10-01 | A `text` turn with no words (empty, absent or whitespace `text`) but at least one `image_ids` entry runs with just the images; one with neither is refused with `EMPTY_MESSAGE` instead of being dropped silently. Without it, require text with an image: older daemons drop a turn with no text without a reply. |
 | `image_turns_by_id` | 2026-10-01 | A `text` turn takes images only through `image_ids`; `images[]` is ignored. A malformed, missing or foreign id, or too many, refuses the whole turn with `IMAGE_UNAVAILABLE` / `IMAGE_LIMIT` / `IMAGE_ERROR` and saves nothing (see `text`). Without it, send `images[]` with `image_ids` as before: older daemons send the model only `images[]`. |
 | `app_logins` | 2026-09-30 | One login per app: `"app"` on login, `?app=` on every other request, a cookie per app (see Connection Lifecycle). Without it, all front-ends in a browser share one login. |
 | `logout_closes_sockets` | 2026-09-30 | `POST /api/auth/logout` with the socket open is safe: the login's connections get `force_logout` and close with `4002`, the server closes the music socket, and the reply comes at once with the cookie cleared (see Connection Lifecycle, Logging out). Without it, close the socket before logging out. |
@@ -140,6 +141,14 @@ Send a text message to the AI, with the images attached to it by id.
 - `images` (base64 `[{data, mime_type}]`) is **no longer read** (since 2026-10): a frame that
   still carries it is processed as if it didn't; its images reach the model only through
   `image_ids`.
+- `text` may be empty (or absent, or only whitespace) when `image_ids` has at least one id: the
+  turn is just the images (flag `image_only_turns`). With neither, the turn is refused with
+  `EMPTY_MESSAGE`. The sender's own `transcript` echo of an image-only turn has empty `text`,
+  like any echo it carries the words only: the client shows the images it attached. Other
+  viewers and a reload get the images from the saved row.
+- A refused turn gets exactly one `error` frame: `TURN_QUEUE_FULL` when too many messages are
+  already queued for the session, `EMPTY_MESSAGE`, an `IMAGE_*` code, or `PROCESSING_ERROR`
+  for anything else.
 - Requires authentication
 
 #### `cancel`
@@ -1473,7 +1482,9 @@ Error or informational notification.
   `severity` rather than the code prefix. Absent field ⇒ treat as `"error"`.
 - `recoverable`: Legacy field, currently always `true`. Prefer `severity`.
 - A `text` turn refused for its images carries `IMAGE_UNAVAILABLE`, `IMAGE_LIMIT` or
-  `IMAGE_ERROR` (see `text`); the turn did not run and nothing was saved.
+  `IMAGE_ERROR`; one with neither text nor images, `EMPTY_MESSAGE`; one refused because too
+  many are queued, `TURN_QUEUE_FULL` (see `text`). The turn did not run and nothing was saved;
+  each refusal is one frame.
 
 #### `force_logout`
 This connection's login ended: a logout (from this or another tab), a login over it

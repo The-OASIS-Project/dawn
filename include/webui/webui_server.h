@@ -538,11 +538,16 @@ void webui_send_conversation_reset(struct session *session);
  *                        false if typed.  Applied to session->input_was_voice on
  *                        the worker thread right before dispatch so the prompt
  *                        builder gates the ASR-disambiguation hint per turn.
- * @return 0 on success, non-zero on error
+ * @return 0 on success; WEBUI_TEXT_INPUT_REPORTED when the client was already
+ *         told (a full queue); other non-zero on error
  *
  * @note Called from WebUI thread when text message received
  */
 int webui_process_text_input(struct session *session, const char *text, bool input_was_voice);
+
+/** A text turn was refused and the client already told (an error frame was
+ *  sent): the caller sends nothing more.  Returned by the functions below. */
+#define WEBUI_TEXT_INPUT_REPORTED 2
 
 /**
  * @brief Process a text message with the images attached to it, by id.
@@ -559,7 +564,10 @@ int webui_process_text_input(struct session *session, const char *text, bool inp
  *                        per id (image_marker_build_content); NULL for text-only.
  * @param input_was_voice True if voice (ASR) input, false if typed.  See the
  *                        wrapper above.
- * @return 0 on success, non-zero on error
+ * @return 0 on success; WEBUI_TEXT_INPUT_REPORTED when the turn was refused
+ *         and an error frame already sent (a full queue); other non-zero on
+ *         an error the caller reports.  @p text may be empty only with images;
+ *         whitespace-only text is the WebUI dispatcher's to refuse or empty.
  */
 int webui_process_text_input_with_images(struct session *session,
                                          const char *text,

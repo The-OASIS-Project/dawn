@@ -352,6 +352,14 @@ dawn_add_unit_test(test_image_question
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# core_text_input_dispatch's gate on a turn's words: an image-only turn runs,
+# an empty one doesn't (everything it calls stubbed in the test).
+dawn_add_unit_test(test_text_input_dispatch
+   SOURCES test_text_input_dispatch.c
+           ${SRC_ROOT}/src/core/text_input_dispatch.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Document-original store + blob engine dedup/orphan/caps + v68 stmt_blob_*.
 dawn_add_unit_test(test_document_original_store
    SOURCES test_document_original_store.c

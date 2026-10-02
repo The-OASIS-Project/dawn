@@ -44,7 +44,9 @@
 char *core_text_input_dispatch(session_t *session,
                                const char *text,
                                const text_input_dispatch_opts_t *opts) {
-   if (!session || !text || text[0] == '\0') {
+   /* A turn with no words is one only when its question carries images (an
+    * image-only turn: the caller builds the question message). */
+   if (!session || !text || (text[0] == '\0' && !(opts && opts->question_message))) {
       return NULL;
    }
 

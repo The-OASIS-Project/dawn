@@ -92,6 +92,42 @@ static void test_question_matches_reload(void) {
    free(content);
 }
 
+/* A question with no words: its content is just the markers, the message
+ * carries only images (no empty text part, which providers refuse), and a
+ * reload rebuilds the same message. */
+static void test_image_only_question(void) {
+   char ids[2][IMAGE_ID_LEN];
+   upload(1, "a", ids[0]);
+   upload(1, "b", ids[1]);
+   char *content = image_marker_build_content("", ids, 2);
+   TEST_ASSERT_NOT_NULL(content);
+   TEST_ASSERT_EQUAL_STRING_LEN("[IMAGE:", content, 7);
+
+   struct json_object *q = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, image_rehydrate_question(1, content, ids, 2, &q));
+   struct json_object *parts = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(q, "content", &parts));
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(parts));
+   for (size_t i = 0; i < json_object_array_length(parts); i++) {
+      struct json_object *type = NULL;
+      TEST_ASSERT_TRUE(
+          json_object_object_get_ex(json_object_array_get_idx(parts, i), "type", &type));
+      TEST_ASSERT_EQUAL_STRING("image_url", json_object_get_string(type));
+   }
+   struct json_object *reload = image_rehydrate_message(1, "user", content);
+   TEST_ASSERT_EQUAL_STRING(json_text(reload), json_text(q));
+
+   json_object_put(reload);
+   json_object_put(q);
+   free(content);
+}
+
+/* No words and no valid image: no content at all. */
+static void test_empty_content_without_images(void) {
+   char ids[1][IMAGE_ID_LEN] = { "not-an-id" };
+   TEST_ASSERT_NULL(image_marker_build_content("", ids, 1));
+}
+
 /* An id no image has: refused, nothing built. */
 static void test_unknown_id_refused(void) {
    char ids[1][IMAGE_ID_LEN] = { UNKNOWN_ID };
@@ -235,6 +271,8 @@ static void test_turn_ids_from_image_ids_only(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_question_matches_reload);
+   RUN_TEST(test_image_only_question);
+   RUN_TEST(test_empty_content_without_images);
    RUN_TEST(test_unknown_id_refused);
    RUN_TEST(test_foreign_id_refused);
    RUN_TEST(test_deleted_image_refused);

@@ -3351,7 +3351,9 @@ void handle_text_message(ws_connection_t *conn,
    int ret = webui_process_text_input_with_images(conn->session, text, image_ids, image_id_count,
                                                   persist_content,
                                                   /*input_was_voice=*/false);
-   if (ret != 0) {
+   /* A refusal the processing already reported (a full queue) is one error,
+    * not two. */
+   if (ret != 0 && ret != WEBUI_TEXT_INPUT_REPORTED) {
       send_error_impl(conn->wsi, "PROCESSING_ERROR", "Failed to process text input");
    }
 }

@@ -44,6 +44,9 @@ static const char *const s_features[] = {
     * bad, missing or foreign id, or too many, refuses the whole turn with
     * IMAGE_UNAVAILABLE / IMAGE_LIMIT / IMAGE_ERROR and saves nothing. */
    "image_turns_by_id",
+   /* A text turn with no words but image_ids runs with just the images; one
+    * with neither is refused with EMPTY_MESSAGE instead of dropped. */
+   "image_only_turns",
 };
 
 size_t webui_protocol_json_members(char *out, size_t size) {

@@ -249,12 +249,17 @@ char *image_marker_build_content(const char *text, const char ids[][IMAGE_ID_LEN
          OLOG_WARNING("WebUI: skipping invalid image id while building persist markers");
          continue;
       }
-      if (strbuf_appendf(&sb, "\n[IMAGE:%s]", ids[i]) < 0) {
+      /* An image-only turn has no text: its markers start the content. */
+      if (strbuf_appendf(&sb, "%s[IMAGE:%s]", strbuf_len(&sb) ? "\n" : "", ids[i]) < 0) {
          strbuf_free(&sb);
          return NULL;
       }
    }
-   char *out = strbuf_steal(&sb); /* text is non-empty, so never NULL */
+   if (strbuf_len(&sb) == 0) { /* no text and no valid id: nothing to persist */
+      strbuf_free(&sb);
+      return NULL;
+   }
+   char *out = strbuf_steal(&sb);
    strbuf_free(&sb);
    return out;
 }
@@ -512,10 +517,15 @@ static struct json_object *rehydrate_build(int user_id,
 
    json_object_object_add(message, "role", json_object_new_string(role));
 
-   struct json_object *text_part = json_object_new_object();
-   json_object_object_add(text_part, "type", json_object_new_string("text"));
-   json_object_object_add(text_part, "text", json_object_new_string(strbuf_str(&prose)));
-   json_object_array_add(content_arr, text_part);
+   /* An image-only question has no words: no text part (providers refuse an
+    * empty one). */
+   const char *prose_text = strbuf_str(&prose);
+   if (prose_text && prose_text[strspn(prose_text, " \t\r\n")] != '\0') {
+      struct json_object *text_part = json_object_new_object();
+      json_object_object_add(text_part, "type", json_object_new_string("text"));
+      json_object_object_add(text_part, "text", json_object_new_string(prose_text));
+      json_object_array_add(content_arr, text_part);
+   }
    strbuf_free(&prose);
 
    for (int i = 0; i < n_images; i++) {

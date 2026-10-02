@@ -133,8 +133,9 @@ struct json_object *image_rehydrate_parts(int user_id,
  * @param text  Clean user text (the prose half).
  * @param ids   Caller array of NUL-terminated image ids.
  * @param count Number of ids.
- * @return Heap string (caller frees) = text + markers, or a plain strdup(text) when
- *         no valid ids, or NULL on OOM / NULL text.
+ * @return Heap string (caller frees) = text + markers (with no text, just the
+ *         markers), or a plain strdup(text) when no valid ids; NULL on OOM, NULL
+ *         text, or empty text with no valid id.
  */
 char *image_marker_build_content(const char *text, const char ids[][IMAGE_ID_LEN], int count);
 

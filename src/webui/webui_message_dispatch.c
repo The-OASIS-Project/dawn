@@ -116,10 +116,17 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    if (strcmp(type, "text") == 0) {
       /* Text input from user, with the images attached to it by id */
       if (payload) {
-         struct json_object *text_obj;
-         if (json_object_object_get_ex(payload, "text", &text_obj)) {
-            const char *text = json_object_get_string(text_obj);
-            if (text && strlen(text) > 0) {
+         /* A turn is its words, its images, or both; absent text is no words. */
+         struct json_object *text_obj = NULL;
+         {
+            const char *text = NULL;
+            if (json_object_object_get_ex(payload, "text", &text_obj)) {
+               text = json_object_get_string(text_obj);
+            }
+            if (!text) {
+               text = "";
+            }
+            {
                /* Explicit target conversation (background-jobs delta routing): the
                 * client sends the conversation this message belongs to, so the
                 * server never has to infer it from the live view — robust across
@@ -162,6 +169,20 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   return;
                }
 
+               /* Nothing to say and nothing to show is refused, never dropped
+                * silently (the client is waiting for its echo).  Words that are
+                * only whitespace count as none. */
+               if (text[strspn(text, " \t\r\n")] == '\0') {
+                  if (image_id_count == 0) {
+                     send_error_impl(conn->wsi, "EMPTY_MESSAGE",
+                                     "A message needs text or at least one image");
+                     json_object_put(root);
+                     free(json_str);
+                     return;
+                  }
+                  text = "";
+               }
+
                /* Server-authoritative persisted form for an image turn: clean text
                 * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
                 * text).  Freed after the call — the worker strdup's what it needs.
@@ -187,6 +208,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                free(persist_content);
             }
          }
+      } else {
+         /* No payload: no words and no images, refused like any empty turn. */
+         send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
       }
    } else if (strcmp(type, "cancel") == 0) {
       /* Cancel current operation */

@@ -199,7 +199,8 @@ typedef struct {
  * call.
  *
  * @param session              Session context.
- * @param text                 User message text (must be non-NULL/non-empty).
+ * @param text                 User message text: non-NULL, and non-empty unless
+ *                             opts->question_message is set (an image-only turn).
  * @param opts                 Per-call options, or NULL for all defaults.
  *
  * @return Allocated response string (caller frees), or NULL on failure.

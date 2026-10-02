@@ -750,7 +750,8 @@ int webui_process_text_input_with_images(session_t *session,
                                          int image_id_count,
                                          const char *persist_content,
                                          bool input_was_voice) {
-   if (!session || !text || strlen(text) == 0) {
+   /* No words is a turn only when it carries images. */
+   if (!session || !text || (text[0] == '\0' && image_id_count <= 0)) {
       return 1;
    }
    /* The caller refuses more (an image is never silently dropped); this guards
@@ -833,7 +834,7 @@ int webui_process_text_input_with_images(session_t *session,
                           "You have too many messages queued — wait for the current reply.");
       }
       webui_text_turn_free(work); /* frees work AND releases the session retain */
-      return 1;
+      return qrc == TURN_QUEUE_FULL ? WEBUI_TEXT_INPUT_REPORTED : 1;
    }
 
    return 0;
