@@ -51,6 +51,7 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    bool image_turns = false;
    bool image_only = false;
    bool turn_refs = false;
+   bool attachments = false;
    for (size_t i = 0; i < json_object_array_length(features); i++) {
       const char *f = json_object_get_string(json_object_array_get_idx(features, i));
       logout = logout || strcmp(f, "logout_closes_sockets") == 0;
@@ -58,12 +59,14 @@ static void test_the_members_are_the_version_and_the_flags(void) {
       image_turns = image_turns || strcmp(f, "image_turns_by_id") == 0;
       image_only = image_only || strcmp(f, "image_only_turns") == 0;
       turn_refs = turn_refs || strcmp(f, "turn_refs") == 0;
+      attachments = attachments || strcmp(f, "document_attachments") == 0;
    }
    TEST_ASSERT_TRUE(logout);
    TEST_ASSERT_TRUE(app_logins);
    TEST_ASSERT_TRUE(image_turns);
    TEST_ASSERT_TRUE(image_only);
    TEST_ASSERT_TRUE(turn_refs);
+   TEST_ASSERT_TRUE(attachments);
    json_object_put(root);
 }
 

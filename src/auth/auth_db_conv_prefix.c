@@ -308,7 +308,9 @@ static int floor_settled_locked(int64_t conv_id, const conv_turn_save_t *save) {
  * after (never moved back), then a summary node after the conversation's
  * latest (or the latest of the one it continues).  A watermark already past
  * this one (a later compaction saved first) leaves both as they are.  Caller
- * holds the lock and the transaction. */
+ * holds the lock and the transaction.  The summary must be the one the turn
+ * sent, already neutralized when it was made (llm_compaction): it is stored
+ * as given and replayed verbatim. */
 static int compaction_locked(int64_t conv_id, int user_id, const conv_turn_save_t *save) {
    sqlite3_stmt *st = s_db.stmt_conv_set_watermark;
    sqlite3_reset(st);

@@ -125,6 +125,8 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v96.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v97.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v98.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v99.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v100.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -256,6 +258,7 @@ dawn_add_unit_test(test_mcp_result
 dawn_add_unit_test(test_mcp_bridge_schema
    SOURCES test_mcp_bridge_schema.c
            ${SRC_ROOT}/src/tools/mcp_bridge_schema.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -358,6 +361,16 @@ dawn_add_unit_test(test_text_input_dispatch
    SOURCES test_text_input_dispatch.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# A turn's attached documents built into its text (bodies defused, boundaries kept).
+dawn_add_unit_test(test_webui_attachments
+   SOURCES test_webui_attachments.c
+           ${SRC_ROOT}/src/webui/webui_attachments.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/blob_store_util.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # A text turn's client_ref: validation and the per-thread turn ref.
@@ -576,6 +589,8 @@ dawn_add_unit_test(test_llm_context_text
 dawn_add_unit_test(test_session_prefix
    SOURCES test_session_prefix.c
            ${SRC_ROOT}/src/core/session_prefix.c
+           ${SRC_ROOT}/src/core/session_focus.c
+           ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/session_compaction.c
            ${SRC_ROOT}/src/llm/llm_compaction.c
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
@@ -900,6 +915,8 @@ dawn_add_unit_test(test_prompt_cache_layout
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/core/hash_util.c
+           ${SRC_ROOT}/src/core/focus/focus_incremental.c
+           ${SRC_ROOT}/src/core/strbuf.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
@@ -1075,24 +1092,35 @@ dawn_add_unit_test(test_memory_focus_adapters
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
-# build_focus_block and its focus dedup state, without the full session-
-# manager runtime: focus_compose / memory_embeddings are programmable stubs.
+# build_focus_block (the turn's retrieved items, as data) without the full
+# session-manager runtime: focus_compose / memory_embeddings are programmable
+# stubs.
 dawn_add_unit_test(test_prompt_builder
    SOURCES test_prompt_builder.c test_prompt_builder_stub.c
            ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/prompt_sections.c
-           ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/core/strbuf.c
-   # session_dedup primitives + build_focus_block's dispatch-session lookup
-   # are gated #ifdef ENABLE_MULTI_CLIENT in the daemon (the root CMakeLists
-   # sets it only when ENABLE_WEBUI=ON).  The ci preset turns WEBUI off but
-   # this test target needs the dedup primitives compiled in regardless —
-   # force the define here so the ci preset doesn't silently strip the dedup
-   # tests' subject under test.
+   # build_focus_block's session reads are gated #ifdef ENABLE_MULTI_CLIENT
+   # in the daemon (the root CMakeLists sets it only when ENABLE_WEBUI=ON);
+   # the ci preset turns WEBUI off, so force the define here.
    DEFINES ENABLE_MULTI_CLIENT
-   LIBS    dawn_common unity pthread
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Incremental focus: which items a history already shows, which a turn sends,
+# and how it says so.  Pure (json-c and the LLM text helpers).
+dawn_add_unit_test(test_focus_incremental
+   SOURCES test_focus_incremental.c
+           ${SRC_ROOT}/src/core/focus/focus_incremental.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Phase 1i.B: focus-injection probe (Components 4 + 5).  Probe-style
@@ -1110,13 +1138,14 @@ dawn_add_unit_test(test_focus_probe
            ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
            ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
            ${SRC_ROOT}/src/core/memory_filter.c
-           ${SRC_ROOT}/src/core/session_dedup.c
+           ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
    # See test_prompt_builder above — same ENABLE_MULTI_CLIENT requirement.
    DEFINES ENABLE_MULTI_CLIENT
-   LIBS    dawn_common unity pthread m
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Phase 1d: external focus-source adapters (document chunks + calendar
@@ -2150,10 +2179,11 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
            ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
            ${SRC_ROOT}/src/core/memory_filter.c
-           ${SRC_ROOT}/src/core/session_dedup.c
+           ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
    # See test_prompt_builder — same ENABLE_MULTI_CLIENT requirement.
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common pthread m stemmer

@@ -9,7 +9,9 @@
 # must agree, across the C/JS boundary (so a single shared constant is not
 # possible):
 #
-#   1. PRODUCER  www/js/dawn.js          - builds " blob:${original_blob_id}"
+#   1. PRODUCER  src/webui/webui_attachments.c - builds " blob:<id>]" from a text
+#                frame's attachments (clients without the document_attachments
+#                flag still inline the same marker themselves)
 #   2. PARSER    www/js/ui/documents.js  - DOC_MARKER_RE regex captures it back
 #   3. SWEEP SQL src/auth/auth_db_statements.c - the orphan sweep's
 #                "NOT EXISTS (... messages.content LIKE '%blob:'||id||']%')"
@@ -38,7 +40,7 @@ cd "$REPO_ROOT"
 # site|file|expected-token (a fixed grep -F substring that anchors the marker in
 # that site's surrounding syntax — drift in any of them is what we want to catch).
 CHECKS=(
-   "producer|www/js/dawn.js|blob:\${d.original_blob_id}"
+   "producer|src/webui/webui_attachments.c| blob:%s]"
    "parser|www/js/ui/documents.js|blob:(blb_"
    "sweep-sql|src/auth/auth_db_statements.c|blob:' || b.id || ']"
 )

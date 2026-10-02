@@ -836,24 +836,11 @@ citation_reinforcement_boost = 0.05
 # recent_email = 0.5
 # dawn_background = 0.8               # Phase 2
 
-[memory.focus_injection.dedup]
-# Re-injection policy.  Active when [memory.focus_injection].enabled = true;
-# dedup is a correctness layer on top of focus injection (no separate enable
-# flag — the two knobs below ARE the tuning surface).
-#
-# An item is re-injected on a later turn only if EITHER:
-#   - turns_since_last_inject > recent_window_turns AND current_score >= min_score
-#       (strict greater-than: at recent_window_turns=8, turn 9+ admits)
-#   - current_score >= prior_score * score_uplift_factor
-#       (uplift path admits regardless of window)
-#
-# Tuning notes:
-#   - recent_window_turns = 0 effectively disables time-based dedup —
-#     turns_since=1 already passes, so only score_uplift can suppress.
-#   - High recent_window_turns (≤100) requires score-uplift for re-admission,
-#     useful for "only show this fact if it gets noticeably more relevant."
-# recent_window_turns = 8             # Range: 0 - 100
-# score_uplift_factor = 1.5           # Range: 1.0 - 5.0
+# Re-injection: a turn sends only the items its conversation doesn't already
+# show, read from the conversation itself; an item already shown is named on a
+# "[still relevant: ...]" line instead.  There is nothing to tune: the former
+# [memory.focus_injection.dedup] keys (recent_window_turns,
+# score_uplift_factor) are retired and ignored.
 
 # =============================================================================
 # [memory.focus_injection.dominant_token_heuristic]

@@ -34,6 +34,7 @@
 #include "auth/auth_db_internal.h"
 #include "core/message_kind.h"
 #include "image_store.h"
+#include "llm/llm_context_text.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -793,12 +794,23 @@ int conv_db_set_compaction_watermark(int64_t conv_id,
    if (conv_id <= 0 || watermark_msg_id <= 0) {
       return AUTH_DB_INVALID;
    }
+   /* Stored as it is sent (a summary is replayed verbatim,
+    * llm_history_summary_text): neutralized here, once. */
+   char *safe = summary ? llm_context_neutralize(summary) : NULL;
+   if (summary && !safe) {
+      return AUTH_DB_FAILURE;
+   }
 
-   AUTH_DB_LOCK_OR_FAIL();
+   pthread_mutex_lock(&s_db.mutex);
+   if (!s_db.initialized) {
+      pthread_mutex_unlock(&s_db.mutex);
+      free(safe);
+      return AUTH_DB_FAILURE;
+   }
 
    sqlite3_stmt *st = s_db.stmt_conv_set_watermark;
    sqlite3_reset(st);
-   bind_text_or_null(st, 1, summary);
+   bind_text_or_null(st, 1, safe);
    sqlite3_bind_int64(st, 2, watermark_msg_id);
    sqlite3_bind_int64(st, 3, conv_id);
    sqlite3_bind_int(st, 4, user_id);
@@ -809,6 +821,7 @@ int conv_db_set_compaction_watermark(int64_t conv_id,
    sqlite3_clear_bindings(st);
 
    AUTH_DB_UNLOCK();
+   free(safe);
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_set_compaction_watermark: update failed");

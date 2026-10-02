@@ -211,14 +211,29 @@ int focus_handles_assign(session_t *session,
    }
    pthread_mutex_lock(&session->history_mutex);
    focus_handles_t *t = table_locked(session);
+   /* The table numbered the history before it had a conversation, and the
+    * history is that conversation now (its binding's own flush may not have
+    * run yet): its handles are the conversation's, saved before any new one
+    * is given, or the next item could be given a handle the history already
+    * shows for another. */
+   const bool adopt = t && t->conv_id == 0 && conv_id > 0 &&
+                      atomic_load(&session->history_conversation_id) == conv_id;
    if (t) {
-      retarget_locked(t, conv_id > 0 ? conv_id : 0, false);
       t->user_id = user_id;
    }
    pthread_mutex_unlock(&session->history_mutex);
    if (!t) {
       return 1;
    }
+   if (adopt) {
+      (void)focus_handles_flush(session, conv_id, user_id);
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   t = session->focus_handles;
+   if (t) {
+      retarget_locked(t, conv_id > 0 ? conv_id : 0, false);
+   }
+   pthread_mutex_unlock(&session->history_mutex);
    if (conv_id > 0) {
       load(session, conv_id, user_id);
    }

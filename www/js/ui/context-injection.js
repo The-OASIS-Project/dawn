@@ -47,6 +47,10 @@
  *   @property {{semantic:number,recency:number,importance:number,source:number}}
  *            score_breakdown
  *   @property {number} applied_source_weight
+ *   @property {"new"|"changed"|"in_context"|"referenced"|"left_out"} [state]
+ *                                          -- sent this turn (new / changed), already
+ *                                             shown by an earlier turn (named again, or
+ *                                             not), or due to be sent but left out
  *   @property {number} [item_timestamp]    -- unix seconds the item was learned, saved or
  *                                             happens; omitted when it has none
  *   @property {{conversation_id:number,msg_id_start:number,msg_id_end:number}}
@@ -154,6 +158,25 @@
       }
    }
 
+   /** What happened to the item this turn: sent, or already in context.
+    *  Allowlisted — the wire value never reaches the DOM as-is. */
+   function stateLabel(state) {
+      switch (state) {
+         case 'new':
+            return 'Sent';
+         case 'changed':
+            return 'Sent again (changed)';
+         case 'referenced':
+            return 'Already in context, named';
+         case 'in_context':
+            return 'Already in context';
+         case 'left_out':
+            return 'Not sent (left out)';
+         default:
+            return '';
+      }
+   }
+
    function fmtScore(n) {
       const v = Number(n);
       if (!Number.isFinite(v)) return '0.00';
@@ -234,6 +257,14 @@
       trustLabel.className = 'dawn-context-injection-trust';
       trustLabel.textContent = trustTierLabel(trust);
       header.appendChild(trustLabel);
+
+      const state = stateLabel(item.state);
+      if (state) {
+         const stateEl = document.createElement('span');
+         stateEl.className = 'dawn-context-injection-trust';
+         stateEl.textContent = state;
+         header.appendChild(stateEl);
+      }
 
       /* H6: drop the per-row raw score number (no comparative context — score
        * breakdown moved entirely into the modal).  Tooltip remains on the

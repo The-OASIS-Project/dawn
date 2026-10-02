@@ -12,6 +12,51 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-01 — Retrieved memory is sent once per conversation; two focus settings retired
+
+**What changed.**
+- **Each turn now sends only the retrieved items (memories, document passages,
+  calendar events) the conversation hasn't already shown the model.** An item
+  that is still relevant on a later turn is named on a short `[still relevant:
+  M3, M7]` line instead of being sent again; an item whose text changed is sent
+  again under the same number. DAWN reads this from the conversation itself, so
+  it holds across a restart, a reload, a compaction and a forget (a forgotten or
+  summarized-away item counts as not shown). Long conversations on one topic
+  send far less, and the model's prompt cache holds more of each request.
+- **`recent_window_turns` and `score_uplift_factor` under
+  `[memory.focus_injection.dedup]` are retired.** They tuned the old "don't
+  re-send for N turns" rule, which this replaces. If your `dawn.toml` sets them,
+  DAWN logs once that they are ignored, and the next save from the WebUI
+  settings panel drops the section. The two controls are gone from the panel.
+- **The rules for retrieved items moved into the system prompt.** Each
+  existing conversation gets one "updated instructions" message on its next
+  turn, once.
+- **The database moves to schema v100**, automatically on start. The memory
+  citation audit records the items a turn named again apart from the ones it
+  sent, and each conversation's compaction summary is now stored exactly as it
+  is sent (cleaned once, when it is made, instead of at every reload). A
+  summary that DAWN's stricter cleaning changes is updated once; that
+  conversation's earlier turns then replay without the model's earlier
+  reasoning (its text and tool calls stay), the same as after any other
+  change that rewrites what a conversation was sent. The log line
+  `v100 stored N compaction summaries as sent` says how many.
+- **Text DAWN didn't write is cleaned more thoroughly.** Imitations of the new
+  item lines are defused in tool results, retrieved items, attached documents
+  and MCP tool descriptions. An MCP tool's description is now one line; a
+  conversation using that tool gets the new description as a tool change,
+  once, at its next turn (all of one server's tools together; if that server's
+  tools already changed four times in the past hour, within the hour). A
+  conversation whose tools have already changed 32 times keeps the
+  descriptions it has, as it does for any later tool change.
+
+**What you need to do.** Nothing. Optionally remove the
+`[memory.focus_injection.dedup]` section from `dawn.toml` to silence the notice.
+The WebUI Context panel now says, for each item, whether it was sent this turn
+or was already in the conversation (reload the page once to pick up the new
+script).
+
+---
+
 ## 2026-10-01 — Image messages attach images by id only (custom WebSocket clients)
 
 **What changed.** A `text` message's images now come only from its `image_ids`

@@ -2186,7 +2186,8 @@ int conv_db_update_context(int64_t conv_id, int user_id, int context_tokens, int
  *
  * @param conv_id Conversation id (> 0).
  * @param user_id Owner id (ownership-checked in the UPDATE).
- * @param summary Latest compaction summary (may be NULL).
+ * @param summary Latest compaction summary (may be NULL); stored neutralized
+ *        (llm_context_neutralize), as it will be sent.
  * @param watermark_msg_id Last compacted message id (> 0; <= 0 returns AUTH_DB_INVALID).
  * @return AUTH_DB_SUCCESS (incl. benign no-op), AUTH_DB_INVALID, or AUTH_DB_FAILURE.
  */

@@ -83,6 +83,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `document_attachments` | 2026-10-02 | A `text` frame may carry its documents as `attachments` (`[{filename, size, content, blob_id?}]`): the daemon defuses each body and filename and builds the `[ATTACHED DOCUMENT: …]…[END DOCUMENT]` text itself, so a document can't end its own span. Without it, inline the documents into `text` as before. Every daemon with it also has `turn_refs`. |
 | `turn_refs` | 2026-10-02 | A `text` frame may carry `client_ref`: the turn's own user `transcript` echo and every `error` raised for that turn (refused at receipt, refused or failed when it runs) carry it back unchanged, so a client knows which of its turns an error belongs to. Without it, refusals name no turn. |
 | `image_only_turns` | 2026-10-01 | A `text` turn with no words (empty, absent or whitespace `text`) but at least one `image_ids` entry runs with just the images; one with neither is refused with `EMPTY_MESSAGE` instead of being dropped silently. Without it, require text with an image: older daemons drop a turn with no text without a reply. |
 | `image_turns_by_id` | 2026-10-01 | A `text` turn takes images only through `image_ids`; `images[]` is ignored. A malformed, missing or foreign id, or too many, refuses the whole turn with `IMAGE_UNAVAILABLE` / `IMAGE_LIMIT` / `IMAGE_ERROR` and saves nothing (see `text`). Without it, send `images[]` with `image_ids` as before: older daemons send the model only `images[]`. |
@@ -123,10 +124,27 @@ Send a text message to the AI, with the images attached to it by id.
    "payload": {
       "text": "What is in this picture?",
       "image_ids": ["img_a1b2c3d4e5f6"],
-      "client_ref": "17"
+      "client_ref": "17",
+      "attachments": [{"filename": "report.pdf", "size": 52113,
+                       "content": "<extracted text>", "blob_id": "blb_a1b2c3d4e5f6"}]
    }
 }
 ```
+- `attachments` — optional (flag `document_attachments`); the documents the turn attaches,
+  from the `POST /api/documents` upload: `filename` (1–255 bytes, no line break), `size` (the
+  original file's bytes, a non-negative integer), `content` (the extracted text), and
+  `blob_id` (the upload's `original_blob_id`; omit it when there is none, never `null`). At
+  most `[documents] max_documents` (default 5) per turn, each `content` at most
+  `[documents] max_extracted_size_kb` KB (default 1024). The daemon defuses DAWN's markers in
+  each body and filename (they are someone else's text), quotes any document-marker line
+  inside a body, and builds the turn's text as clients used to inline it: one
+  `[ATTACHED DOCUMENT: <filename> (<size> bytes)[ blob:<blob_id>]]\n<content>\n[END DOCUMENT]`
+  block per document, separated by a blank line, then a blank line and the words. The echo,
+  the saved row and a reload carry that text. `text` holds only the words, and may be empty
+  when the turn has attachments. A malformed entry, too many or too large, or a `blob_id` that
+  is malformed or names no stored original of the user's refuses the turn with
+  `ATTACHMENT_INVALID`. A client without the flag inlines the documents into `text` itself;
+  the daemon still accepts that, defusing what it finds between the markers.
 - `client_ref` — optional (flag `turn_refs`); an opaque tag of 1 to 64 printable ASCII
   characters (0x20–0x7e). The turn's own user `transcript` echo carries it as
   `payload.client_ref`, and so does every `error` raised for the turn, whatever its code: on
@@ -154,13 +172,15 @@ Send a text message to the AI, with the images attached to it by id.
   still carries it is processed as if it didn't; its images reach the model only through
   `image_ids`.
 - `text` may be empty (or absent, or only whitespace) when `image_ids` has at least one id: the
-  turn is just the images (flag `image_only_turns`). With neither, the turn is refused with
-  `EMPTY_MESSAGE`. The sender's own `transcript` echo of an image-only turn has empty `text`,
-  like any echo it carries the words only: the client shows the images it attached. Other
+  turn is just the images (flag `image_only_turns`), or when `attachments` has at least one
+  document (the turn is the documents). With no words, images or attachments, the turn is
+  refused with `EMPTY_MESSAGE`. The sender's own `transcript` echo carries the text the daemon built (the words, after any
+  documents), never `[IMAGE:]` markers: for an image-only turn it is empty and the client shows
+  the images it attached. Other
   viewers and a reload get the images from the saved row.
 - A refused turn gets exactly one `error` frame: `TURN_QUEUE_FULL` when too many messages are
-  already queued for the session, `EMPTY_MESSAGE`, an `IMAGE_*` code, or `PROCESSING_ERROR`
-  for anything else.
+  already queued for the session, `EMPTY_MESSAGE`, `ATTACHMENT_INVALID`, an `IMAGE_*` code, or
+  `PROCESSING_ERROR` for anything else.
 - Requires authentication
 
 #### `cancel`
@@ -1290,6 +1310,11 @@ would watch a job run and never learn its answer.
 The answer reaches a client by **either** route: this frame (turn completes while
 attached) or the message batch on attach (already-finished job). `complete` carries
 `final_message_id` to correlate the two.
+
+A user message sent from the WebUI is fanned out the same way (`"role": "user"`, its saved
+text) to every browser of its user. The copy sent to the connection that sent it also carries
+`client_ref` when the `text` frame had one (flag `turn_refs`), so that connection can match it
+to its turn even if its `transcript` echo was dropped. Other connections' copies don't carry it.
 
 ### Background-Job List Frames (Phase 2)
 

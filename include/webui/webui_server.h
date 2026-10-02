@@ -714,7 +714,8 @@ typedef struct focus_compose_result_s focus_compose_result_t;
 
 /**
  * @brief Broadcast a `context_injection` event to every WebUI session
- *        matching (user_id, conv_id) — Phase 1g-i.
+ *        matching (user_id, conv_id): the turn's retrieved items, each
+ *        with its place in the turn.
  *
  * Iterates `s_active_connections` under `s_conn_registry_mutex`,
  * matching `auth_user_id == user_id` AND
@@ -725,7 +726,8 @@ typedef struct focus_compose_result_s focus_compose_result_t;
  * user) does NOT.
  *
  * Fires unconditionally when called — the feature-flag gate lives in
- * the caller (`build_focus_block`).  Empty `result->candidate_count`
+ * the caller (the turn's seam, through session_focus_client_notice, once
+ * it has decided each item's place).  Empty `result->candidate_count`
  * is valid input: the empty `items[]` payload is the empty-state UX
  * signal "DAWN looked, found nothing" — clients still render the
  * (collapsed) frame.  When `candidate_count == 0`, `score_breakdowns`
@@ -735,7 +737,8 @@ typedef struct focus_compose_result_s focus_compose_result_t;
  * format: top-level `{type, user_id, conversation_id, turn_id,
  * items[], filter_rejections[]}`.  Each `items[i]` has the candidate's
  * source_id / source_type / text / score / score_breakdown /
- * applied_source_weight; `provenance` is omitted (not zero-stub) when
+ * applied_source_weight, and `state` (new / changed / in_context /
+ * referenced: sent this turn, or already shown); `provenance` is omitted (not zero-stub) when
  * `provenance.conversation_id == 0`.  Per-text size cap of
  * `FOCUS_TEXT_MAX_BYTES` (4096) is applied defensively before
  * serialization.
@@ -756,11 +759,14 @@ typedef struct focus_compose_result_s focus_compose_result_t;
  *                   "turn id unavailable")
  * @param result     Caller-owned compose result; this helper reads
  *                   from it and never frees it
+ * @param states     Each item's place by name, parallel to
+ *                   result->candidates; NULL: every item "new"
  */
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result);
+                                       const focus_compose_result_t *result,
+                                       const char *const *states);
 
 /**
  * @brief Push the validated cited item_ids for a turn to the browser.

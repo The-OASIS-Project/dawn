@@ -59,6 +59,7 @@ typedef struct {
    bool last_had_query_embedding;
    size_t last_embed_dim;
    char last_query_text[256];
+   int last_per_source_max;
 } pb_focus_compose_mock_t;
 
 static pb_focus_compose_mock_t s_focus = { 0 };
@@ -106,9 +107,9 @@ int focus_compose(int user_id,
                   focus_compose_result_t *out_result) {
    (void)include_private;
    (void)now;
-   (void)per_source_max_candidates;
 
    s_focus.call_count++;
+   s_focus.last_per_source_max = per_source_max_candidates;
    s_focus.last_user_id = user_id;
    s_focus.last_had_query_embedding = (query_embedding != NULL);
    s_focus.last_embed_dim = embed_dim;
@@ -272,7 +273,8 @@ float pb_focus_seed_final_score_for(int idx) {
 
 /* ----- webui_broadcast_context_injection stub ----------------------------
  *
- * build_focus_block calls this when conv_id > 0; in unit tests we
+ * The panel hook (session_focus_client_notice) calls this when the turn has a
+ * conversation; in unit tests we
  * record the last-call args + a per-test counter so tests can assert
  * "broadcast fired" / "broadcast skipped" / "args match expectation"
  * without linking the full webui_server.c (which pulls auth_db, conv_db,
@@ -289,6 +291,7 @@ typedef struct {
    int last_candidate_count;
    float last_first_final_score; /* 0 when last call had zero candidates */
    bool last_had_breakdowns;
+   char last_states[8][16]; /* the first items' states, as sent */
 } pb_broadcast_mock_t;
 
 static pb_broadcast_mock_t s_broadcast = { 0 };
@@ -303,12 +306,6 @@ pb_broadcast_mock_t *pb_broadcast_state(void) {
 
 /* The session's stable citation handles (core/focus/focus_handles.c needs the
  * database): each call numbers its items 1, 2, 3, the old per-turn numbering. */
-/* No conversation here: no tag secret to mask. */
-char *session_prefix_mask_secret(struct session *session, char *text) {
-   (void)session;
-   return text;
-}
-
 int focus_handles_assign(struct session *session,
                          int64_t conv_id,
                          int user_id,
@@ -324,11 +321,9 @@ int focus_handles_assign(struct session *session,
    return 0;
 }
 
-/* session_turn_conversation stub — build_focus_block calls this just before
- * the broadcast to re-read the dispatching turn's conversation (first-turn race
- * fix).  Tests do not publish a dispatch session, so
- * no session is passed (NULL) and this stub never fires — but
- * the symbol must resolve at link time. */
+/* session_turn_conversation stub — the panel hook re-reads the turn's
+ * conversation (first-turn race fix); no conversation here, so the one the
+ * prompt was built with stands. */
 /* The previous question session_previous_question_dup gives, or NULL. */
 const char *pb_previous_question = NULL;
 
@@ -345,8 +340,14 @@ int64_t session_turn_conversation(struct session *session) {
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result) {
+                                       const focus_compose_result_t *result,
+                                       const char *const *states) {
    s_broadcast.call_count++;
+   for (int i = 0; i < 8; i++) {
+      const bool have = states && result && i < result->candidate_count && states[i];
+      snprintf(s_broadcast.last_states[i], sizeof(s_broadcast.last_states[i]), "%s",
+               have ? states[i] : "");
+   }
    s_broadcast.last_user_id = user_id;
    s_broadcast.last_conv_id = conv_id;
    s_broadcast.last_turn_id = turn_id;
@@ -365,9 +366,8 @@ void webui_broadcast_context_injection(int user_id,
 
 /* ----- session_t test fixtures -------------------------------------------
  *
- * Phase 1f+: tests need a real session_t with at least history_mutex
- * inited (session_dedup.c locks it via session_injected_set_clear).
- * Other session_t fields are zeroed and unused by build_focus_block. */
+ * Tests need a real session_t with history_mutex inited; other session_t
+ * fields are zeroed and unused by build_focus_block. */
 
 void pb_session_init(session_t *s, uint32_t session_id) {
    memset(s, 0, sizeof(*s));

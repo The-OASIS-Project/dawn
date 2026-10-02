@@ -883,10 +883,10 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
       }
    }
    atomic_store(&session->history_conversation_id, 0);
-   /* The new context has none of the old one's visual guidelines or focus
-    * items, nor its unsaved exchange or waiting facts. */
+   /* The new context has none of the old one's visual guidelines, nor its
+    * unsaved exchange or waiting facts.  (Which retrieved items it shows is
+    * read from the history itself, at each turn's seam.) */
    session->visual_modules_loaded[0] = '\0';
-   memset(&session->injected_set, 0, sizeof(session->injected_set));
    notices_untold_locked(session);
    /* Its items' handles were the old context's (a saved conversation's come
     * back from the database when it is loaded). */
@@ -926,10 +926,8 @@ void session_replace_history(session_t *session, struct json_object *history, in
    session->conversation_history = history;
    drop_unclaimed_locked(session); /* a new context: that exchange isn't this one's */
    drop_fact_sources_locked(session);
-   /* The new context has none of the visual guidelines the old one loaded, nor
-    * the focus items injected into it. */
+   /* The new context has none of the visual guidelines the old one loaded. */
    session->visual_modules_loaded[0] = '\0';
-   memset(&session->injected_set, 0, sizeof(session->injected_set));
    notices_untold_locked(session);
    focus_handles_reset_locked(session);
    session_prefix_release_locked(session);
@@ -1821,7 +1819,6 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          json_object_put(session->conversation_history);
          session->conversation_history = json_object_get(own);
          session->visual_modules_loaded[0] = '\0';
-         memset(&session->injected_set, 0, sizeof(session->injected_set));
          /* No re-telling of device events: the copy was told them. */
          atomic_store(&session->history_conversation_id, viewed_conv);
          OLOG_INFO("Session %u: adopted conversation %lld's history as the session history",
@@ -1843,7 +1840,6 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          json_object_put(session->conversation_history);
          session->conversation_history = json_object_get(own);
          session->visual_modules_loaded[0] = '\0';
-         memset(&session->injected_set, 0, sizeof(session->injected_set));
          /* No re-telling of device events: the copy was told them. */
       } else if (reply && !history_holds_reply(live, reply, session->turn_reply_mirror)) {
          struct json_object *copy = NULL;

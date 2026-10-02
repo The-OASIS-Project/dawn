@@ -1652,13 +1652,6 @@ json_object *config_to_json(const dawn_config_t *config) {
                              json_object_new_double(fi->source_weights.dawn_background));
       json_object_object_add(focus, "source_weights", src);
 
-      json_object *dedup = json_object_new_object();
-      json_object_object_add(dedup, "recent_window_turns",
-                             json_object_new_int(fi->dedup.recent_window_turns));
-      json_object_object_add(dedup, "score_uplift_factor",
-                             json_object_new_double(fi->dedup.score_uplift_factor));
-      json_object_object_add(focus, "dedup", dedup);
-
       json_object *dth = json_object_new_object();
       json_object_object_add(dth, "enabled",
                              json_object_new_boolean(fi->dominant_token_heuristic.enabled));
@@ -2594,10 +2587,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "calendar_event = %.2f\n", fi->source_weights.calendar_event);
       fprintf(fp, "recent_email = %.2f\n", fi->source_weights.recent_email);
       fprintf(fp, "dawn_background = %.2f\n", fi->source_weights.dawn_background);
-
-      fprintf(fp, "\n[memory.focus_injection.dedup]\n");
-      fprintf(fp, "recent_window_turns = %d\n", fi->dedup.recent_window_turns);
-      fprintf(fp, "score_uplift_factor = %.2f\n", fi->dedup.score_uplift_factor);
 
       fprintf(fp, "\n[memory.focus_injection.dominant_token_heuristic]\n");
       fprintf(fp, "enabled = %s\n", fi->dominant_token_heuristic.enabled ? "true" : "false");

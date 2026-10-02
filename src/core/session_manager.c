@@ -34,7 +34,9 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/focus/focus_handles.h"
+#include "core/focus/focus_incremental.h"
 #include "core/session_compaction.h"
+#include "core/session_focus.h"
 #include "core/session_prefix.h"
 #include "core/session_reaper.h"
 #include "core/tool_result_store.h"
@@ -288,6 +290,9 @@ static void session_free(session_t *session) {
    }
    focus_handles_free(session->focus_handles);
    session->focus_handles = NULL;
+   free(session->citation.prior);
+   session->citation.prior = NULL;
+   session->citation.prior_count = 0;
    tool_result_store_free(session);
    session_prefix_turn_free(session->prefix_turn);
    session->prefix_turn = NULL;
@@ -1445,8 +1450,8 @@ void session_init_system_prompt(session_t *session, const char *system_prompt) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   /* A fresh system prompt is a SESSION_START boundary: a new context (the
-    * focus dedup set clears with it, so the next turn admits all candidates). */
+   /* A fresh system prompt is a SESSION_START boundary: a new context (it
+    * shows no retrieved items, so the next turn sends every relevant one). */
    session_new_context_locked(session, system_prompt);
    pthread_mutex_unlock(&session->history_mutex);
 
@@ -1603,9 +1608,9 @@ int session_dispatch_user_turn_ex(session_t *session,
       return SUCCESS;
 
    /* Memory citation signal: clear the per-turn [M#]->item_id stash at the start
-    * of every dispatch.  build_focus_block repopulates it below iff citation is
-    * enabled and this turn surfaces memories; clearing here means a turn whose
-    * focus block short-circuits cannot inherit the previous turn's map. */
+    * of every dispatch.  The turn's seam sets it below iff citation is enabled
+    * and this turn has memory items; clearing here means a turn without them
+    * cannot inherit the previous turn's map. */
    session_citation_stash_clear(session);
 
    /* Reset the live <cited> stream-strip filter at the same turn boundary.  It
@@ -1647,7 +1652,9 @@ int session_dispatch_user_turn_ex(session_t *session,
 
    /* A history this turn would take past its window is compacted at this
     * seam, sized with what the turn adds (session_compaction.h). */
-   const size_t adds = (cp.volatile_block ? strlen(cp.volatile_block) : 0) +
+   const size_t adds = (cp.context_head ? strlen(cp.context_head) : 0) +
+                       focus_incremental_items_bytes(cp.focus_items, cp.n_focus_items) +
+                       (cp.context_tail ? strlen(cp.context_tail) : 0) +
                        (cp.memory_body ? strlen(cp.memory_body) : 0) +
                        (cp.directives ? strlen(cp.directives) : 0) +
                        (turn_note ? strlen(turn_note) : 0);

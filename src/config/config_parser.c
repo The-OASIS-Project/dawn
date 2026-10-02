@@ -1511,14 +1511,25 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
          PARSE_DOUBLE(src, "dawn_background", fi->source_weights.dawn_background);
       }
 
+      /* Retired: a turn now sends only the items its conversation doesn't
+       * already show (read from the history itself), so there is no window
+       * of turns to re-send after, and no score boost that re-sends.  Known
+       * so an existing file doesn't warn as a typo; said once, then ignored
+       * (and dropped from the file at the next settings save). */
       toml_table_t *dedup = toml_table_in(focus, "dedup");
       if (dedup) {
          static const char *const dedup_keys[] = { "recent_window_turns", "score_uplift_factor",
                                                    NULL };
          warn_unknown_keys(dedup, "memory.focus_injection.dedup", dedup_keys);
-
-         PARSE_INT(dedup, "recent_window_turns", fi->dedup.recent_window_turns);
-         PARSE_DOUBLE(dedup, "score_uplift_factor", fi->dedup.score_uplift_factor);
+         static bool s_dedup_retired_told;
+         if (!s_dedup_retired_told && (toml_int_in(dedup, "recent_window_turns").ok ||
+                                       toml_double_in(dedup, "score_uplift_factor").ok ||
+                                       toml_int_in(dedup, "score_uplift_factor").ok)) {
+            s_dedup_retired_told = true;
+            OLOG_WARNING("[memory.focus_injection.dedup] recent_window_turns and "
+                         "score_uplift_factor are retired and ignored: a turn sends only the "
+                         "items its conversation doesn't already show");
+         }
       }
 
       toml_table_t *dth = toml_table_in(focus, "dominant_token_heuristic");

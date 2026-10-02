@@ -308,6 +308,125 @@ int image_marker_collect_ids(const char *content,
    return SUCCESS;
 }
 
+/* The image types a legacy inline marker may carry. */
+static const char *const k_inline_types[] = { "data:image/jpeg;base64,", "data:image/png;base64,",
+                                              "data:image/gif;base64,", "data:image/webp;base64," };
+
+/* The value of a base64 character, or -1. */
+static int b64_value(char c) {
+   if (c >= 'A' && c <= 'Z')
+      return c - 'A';
+   if (c >= 'a' && c <= 'z')
+      return c - 'a' + 26;
+   if (c >= '0' && c <= '9')
+      return c - '0' + 52;
+   if (c == '+')
+      return 62;
+   if (c == '/')
+      return 63;
+   return -1;
+}
+
+/* Whether @p b64 (@p len bytes) is well-formed base64 whose decoded bytes
+ * open with the file signature of k_inline_types[@p type]: a provider is sent
+ * only what it can read as that image. */
+static bool inline_image_valid(size_t type, const char *b64, size_t len) {
+   if (len < 16 || len % 4 != 0) {
+      return false;
+   }
+   size_t pad = 0;
+   for (size_t i = 0; i < len; i++) {
+      if (b64[i] == '=') {
+         pad++;
+         if (i < len - 2) {
+            return false; /* padding only at the end */
+         }
+      } else if (pad > 0 || b64_value(b64[i]) < 0) {
+         return false;
+      }
+   }
+   unsigned char head[12];
+   for (size_t g = 0; g < 4; g++) { /* the first 16 characters: 12 bytes */
+      const int v0 = b64_value(b64[g * 4]), v1 = b64_value(b64[g * 4 + 1]);
+      const int v2 = b64_value(b64[g * 4 + 2]), v3 = b64_value(b64[g * 4 + 3]);
+      if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) {
+         return false;
+      }
+      head[g * 3] = (unsigned char)((v0 << 2) | (v1 >> 4));
+      head[g * 3 + 1] = (unsigned char)(((v1 & 0xF) << 4) | (v2 >> 2));
+      head[g * 3 + 2] = (unsigned char)(((v2 & 0x3) << 6) | v3);
+   }
+   switch (type) {
+      case 0: /* jpeg */
+         return head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF;
+      case 1: /* png */
+         return memcmp(head, "\x89PNG\r\n\x1a\n", 8) == 0;
+      case 2: /* gif */
+         return memcmp(head, "GIF8", 4) == 0;
+      case 3: /* webp */
+         return memcmp(head, "RIFF", 4) == 0 && memcmp(head + 8, "WEBP", 4) == 0;
+      default:
+         return false;
+   }
+}
+
+/* Whether a marker's body (@p len bytes) is one a row's images are named by:
+ * a stored image's id, or a legacy inline image of a known type in base64. */
+static bool marker_body_valid(const char *body, size_t len) {
+   if (len == IMAGE_ID_LEN - 1) {
+      char id[IMAGE_ID_LEN];
+      memcpy(id, body, len);
+      id[len] = '\0';
+      if (image_store_validate_id(id)) {
+         return true;
+      }
+   }
+   for (size_t k = 0; k < sizeof(k_inline_types) / sizeof(k_inline_types[0]); k++) {
+      const size_t n = strlen(k_inline_types[k]);
+      if (len <= n || strncmp(body, k_inline_types[k], n) != 0) {
+         continue;
+      }
+      return inline_image_valid(k, body + n, len - n);
+   }
+   return false;
+}
+
+/* Where the trailing block of image markers in @p content starts: the markers
+ * a question's images are written as (image_marker_build_content, and the
+ * browser before it), after its words, each at the start of a line and each
+ * valid.  A marker anywhere else (in the words, or in a document they carry)
+ * is text.  strlen(@p content) when there is none. */
+static size_t marker_block_start(const char *content) {
+   /* One line at a time from the end: linear in the block, however much text
+    * comes before it. */
+   size_t end = strlen(content);
+   size_t from = end;
+   while (end > 0) {
+      size_t start = end;
+      while (start > 0 && content[start - 1] != '\n') {
+         start--;
+      }
+      const char *line = content + start;
+      const size_t len = end - start;
+      if (len <= IMAGE_MARKER_PREFIX_LEN ||
+          strncmp(line, IMAGE_MARKER_PREFIX, IMAGE_MARKER_PREFIX_LEN) != 0 ||
+          line[len - 1] != ']') {
+         break;
+      }
+      const char *body = line + IMAGE_MARKER_PREFIX_LEN;
+      const size_t body_len = len - IMAGE_MARKER_PREFIX_LEN - 1;
+      if (memchr(body, ']', body_len) || !marker_body_valid(body, body_len)) {
+         break;
+      }
+      from = start;
+      if (start == 0) {
+         break;
+      }
+      end = start - 1; /* the line break before it */
+   }
+   return from;
+}
+
 /* {role, content} text message; NULL on OOM. */
 static struct json_object *text_message(const char *role, const char *content) {
    struct json_object *m = json_object_new_object();
@@ -379,9 +498,11 @@ static struct json_object *rehydrate_build(int user_id,
 
    int fail = SUCCESS; /* strict: the first reason the build fails */
    size_t total_bytes = 0;
+   /* Only the trailing block names images; a marker before it is text. */
+   const char *block = content + marker_block_start(content);
    const char *p = content;
    while (*p && fail == SUCCESS) {
-      const char *marker = strstr(p, IMAGE_MARKER_PREFIX);
+      const char *marker = strstr(p < block ? block : p, IMAGE_MARKER_PREFIX);
       if (!marker) {
          strbuf_append(&prose, p); /* trailing literal text */
          break;

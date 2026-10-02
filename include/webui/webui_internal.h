@@ -934,6 +934,24 @@ void send_error_impl_ex(struct lws *wsi,
                         ws_error_severity_t severity);
 
 /**
+ * @brief A persisted message fanned out to every browser of its user, the
+ *        sender's own connection getting a copy that names its turn
+ * @param origin     The session whose turn wrote it (its connection gets
+ *                   payload.client_ref); NULL: every connection gets the same
+ * @param client_ref That turn's client_ref; NULL or "" sends none
+ * Otherwise as webui_broadcast_message_appended (conv_event.h).
+ */
+void webui_broadcast_message_appended_origin(int user_id,
+                                             int64_t conv_id,
+                                             int64_t msg_id,
+                                             const char *role,
+                                             const char *text,
+                                             const char *reasoning,
+                                             unsigned stream_id,
+                                             const session_t *origin,
+                                             const char *client_ref);
+
+/**
  * @brief Send an error frame naming the text turn it refuses.
  * @param client_ref The turn's client_ref, echoed as payload.client_ref; NULL or
  *                   "" sends none (send_error_impl_ex uses the calling thread's

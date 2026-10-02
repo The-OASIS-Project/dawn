@@ -187,7 +187,7 @@ void memory_citation_resolve_cited(const char *text,
             }
             /* This turn's item, else one an earlier turn of the conversation
              * showed.  item_id[64] is contractually NUL-terminated by its
-             * producer (build_focus_block memsets the stash + writes <=63 chars). */
+             * producer (session_focus.c clears the stash + writes <=63 chars). */
             const char *id = NULL;
             bool this_turn = false;
             for (int k = 0; !repeat && k < stash_count && !id; k++) {
@@ -282,4 +282,39 @@ int memory_citation_extract_fact_ids(const char *cited_all, int64_t *out_ids, in
       }
    }
    return n;
+}
+
+void memory_citation_stash_csvs(const citation_stash_t *stash,
+                                char *injected,
+                                size_t injected_sz,
+                                char *scores,
+                                size_t scores_sz,
+                                char *referenced,
+                                size_t referenced_sz) {
+   size_t inj_len = 0;
+   size_t scores_len = 0;
+   size_t ref_len = 0;
+   if (injected_sz > 0) {
+      injected[0] = '\0';
+   }
+   if (scores_sz > 0) {
+      scores[0] = '\0';
+   }
+   if (referenced_sz > 0) {
+      referenced[0] = '\0';
+   }
+   const int count = stash == NULL                       ? 0
+                     : stash->count > MAX_CITATION_STASH ? MAX_CITATION_STASH
+                                                         : stash->count;
+   for (int i = 0; i < count; i++) {
+      const citation_stash_entry_t *e = &stash->entries[i];
+      if (e->referenced) {
+         memory_citation_csv_append(referenced, referenced_sz, &ref_len, e->item_id);
+         continue;
+      }
+      memory_citation_csv_append(injected, injected_sz, &inj_len, e->item_id);
+      char score[16];
+      snprintf(score, sizeof(score), "%.4f", e->final_score);
+      memory_citation_csv_append(scores, scores_sz, &scores_len, score);
+   }
 }

@@ -411,7 +411,6 @@ static void test_all_writer_owned_sections_present(void) {
       "[memory.embeddings]",
       "[memory.entity_merge]",
       "[memory.focus_injection]",
-      "[memory.focus_injection.dedup]",
       "[memory.focus_injection.dominant_token_heuristic]",
       "[memory.focus_injection.source_weights]",
       "[memory.graph_retrieval]",

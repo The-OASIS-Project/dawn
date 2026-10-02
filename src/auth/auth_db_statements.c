@@ -788,7 +788,7 @@ int auth_db_prepare_statements(void) {
         * marker is "...bytes) blob:<id>]", so anchor the match with the trailing
         * ']' — blob ids are fixed-length validated tokens, so this can't match a
         * different blob, and the anchor avoids pinning a blob on stray prose.
-        * This "blob:<id>]" marker is mirrored by the JS producer (dawn.js) and
+        * This "blob:<id>]" marker is mirrored by the producer (src/webui/webui_attachments.c) and
         * parser (documents.js); kept in sync by scripts/check_blob_marker_sync.sh
         * — a drift here silently reclaims still-attached files (data loss).
         * Oldest first past the sweep's cursor (blob_store.h, get_orphan_ids). */

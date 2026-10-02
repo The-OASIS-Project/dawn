@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +44,38 @@ extern "C" {
 
 /** Longest section title, with its NUL. */
 #define PROMPT_SECTION_TITLE_MAX 64
+
+/** The name of the block a turn's context is framed as ("--- TURN CONTEXT
+ *  (<tag>) ---"): the frame's producer (session_prefix.c) and its readers
+ *  (focus_incremental.c) share it. */
+#define PROMPT_TURN_CONTEXT_NAME "TURN CONTEXT"
+/** How a turn context's head line opens: always its first line, so what
+ *  follows it is where the turn's items are declared. */
+#define PROMPT_TIME_LINE "[system_time]"
+
+struct focus_panel;
+
+/** Longest focus source name, with its NUL. */
+#define PROMPT_FOCUS_SOURCE_LEN 32
+/** Longest focus item id, with its NUL. */
+#define PROMPT_FOCUS_ITEM_ID_LEN 64
+/** An item's date as its line shows it (" YYYY-MM-DD"), with its NUL. */
+#define PROMPT_FOCUS_DATE_LEN 16
+
+/**
+ * One item retrieved for a turn, ranked.  The turn's seam decides whether it
+ * is sent (focus_incremental.h): an item the conversation already shows, as it
+ * is now, is named rather than sent again.
+ */
+typedef struct {
+   int handle;                             /**< its [M<handle>], stable per conversation;
+                                                0 when it has none (sent unnumbered) */
+   char source[PROMPT_FOCUS_SOURCE_LEN];   /**< focus source ("memory_fact") */
+   char item_id[PROMPT_FOCUS_ITEM_ID_LEN]; /**< opaque key ("fact:12"); "" when none */
+   char date[PROMPT_FOCUS_DATE_LEN];       /**< " YYYY-MM-DD" or "" */
+   char *text;  /**< one line, DAWN's markers defused; masked at the seam (owned) */
+   float score; /**< the ranker's composite score */
+} prompt_focus_item_t;
 
 /** One named part of the system prompt (persona, rules, user context, ...). */
 typedef struct {
@@ -63,9 +96,20 @@ typedef struct {
     *  sections joined (prompt_sections_join).  A conversation already running
     *  keeps its own; a change reaches it as an appended instruction change. */
    char *stable_prefix;
-   /** This turn's context: [system_time], retrieved items, and per-turn notes,
-    *  sent in front of the question. */
-   char *volatile_block;
+   /** The head of this turn's context: the [system_time] line.  The turn's
+    *  context is sent in front of its question: head, the retrieved items
+    *  the conversation doesn't show yet, then tail. */
+   char *context_head;
+   /** The items retrieved for this turn, ranked (owned, n_focus_items long). */
+   prompt_focus_item_t *focus_items;
+   int n_focus_items;
+   /** The tail of this turn's context: per-turn notes (a spoken turn's
+    *  transcription hint). */
+   char *context_tail;
+   /** What the client's context panel shows of the retrieval (the
+    *  builder's type), and its free; NULL when retrieval didn't run. */
+   struct focus_panel *focus_panel;
+   void (*focus_panel_free)(struct focus_panel *panel);
    /** What DAWN knows about the user (preferences, recent conversations), sent
     *  in front of the question when it changed since the conversation last
     *  had it. */
@@ -118,6 +162,34 @@ int prompt_sections_add(composed_prompt_t *cp,
  *  allocation failure or when there are none. */
 char *prompt_sections_join(const composed_prompt_t *cp);
 
+/**
+ * @brief The head of a turn's context: its PROMPT_TIME_LINE line for @p now
+ *        (local time, human-readable and ISO 8601, with the nudge that makes
+ *        the model trust it over a `time` tool call)
+ *
+ * Never empty: when the time can't be formatted the line still opens with
+ * PROMPT_TIME_LINE and says so, so a turn context's first line is always its
+ * head.
+ *
+ * @return Heap text ending in a newline (caller frees), or NULL on allocation
+ *         failure
+ */
+char *prompt_turn_head(time_t now);
+
+/** The pieces of a block DAWN frames, at most. */
+#define PROMPT_FRAMED_PIECES 5
+
+/**
+ * @brief A block DAWN frames: its @p pieces (NULL or empty for none), in
+ *        order, each ending in a newline, between its open and close lines
+ *        ("--- <name> (<tag>) ---", "--- END <name> (<tag>) ---"; no
+ *        parentheses with no @p tag)
+ * @return Heap text (caller frees), or NULL on allocation failure
+ */
+char *prompt_framed(const char *name,
+                    const char *tag,
+                    const char *const pieces[PROMPT_FRAMED_PIECES]);
+
 /** Free every part and zero them (the struct is then safe to reuse). NULL-safe. */
 static inline void composed_prompt_free(composed_prompt_t *p) {
    if (p == NULL) {
@@ -131,7 +203,21 @@ static inline void composed_prompt_free(composed_prompt_t *p) {
    }
    p->n_sections = 0;
    free(p->stable_prefix);
-   free(p->volatile_block);
+   free(p->context_head);
+   free(p->context_tail);
+   for (int i = 0; p->focus_items != NULL && i < p->n_focus_items; i++) {
+      free(p->focus_items[i].text);
+   }
+   free(p->focus_items);
+   if (p->focus_panel != NULL && p->focus_panel_free != NULL) {
+      p->focus_panel_free(p->focus_panel);
+   }
+   p->focus_panel = NULL;
+   p->focus_panel_free = NULL;
+   p->focus_items = NULL;
+   p->n_focus_items = 0;
+   p->context_head = NULL;
+   p->context_tail = NULL;
    free(p->memory_body);
    free(p->directives);
    free(p->tool_defs);
@@ -143,7 +229,6 @@ static inline void composed_prompt_free(composed_prompt_t *p) {
    p->tool_schemas = NULL;
    p->inline_tools = false;
    p->stable_prefix = NULL;
-   p->volatile_block = NULL;
    p->memory_body = NULL;
    p->directives = NULL;
 }

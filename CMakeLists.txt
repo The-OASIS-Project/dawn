@@ -727,6 +727,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
         src/webui/webui_turn_ref.c
+        src/webui/webui_attachments.c
         src/webui/build_focus_block.c
         src/webui/webui_http.c
         src/webui/webui_admin.c
@@ -803,13 +804,14 @@ if(ENABLE_WEBUI)
         src/core/prompt_sections.c
         src/core/prefix_in_force.c
         src/core/prefix_tools.c
-        src/core/session_dedup.c
+        src/core/session_focus.c
         src/core/session_prefix.c
         src/core/tool_result_store.c
         src/tools/result_read_tool.c
         src/tools/result_read_ops.c
         src/core/session_compaction.c
         src/core/focus/focus_handles.c
+        src/core/focus/focus_incremental.c
         src/core/worker_pool.c
         src/core/text_filter.c
         src/core/rate_limiter.c
@@ -941,6 +943,8 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v96.c
     src/auth/auth_db_migrations_v97.c
     src/auth/auth_db_migrations_v98.c
+    src/auth/auth_db_migrations_v99.c
+    src/auth/auth_db_migrations_v100.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c

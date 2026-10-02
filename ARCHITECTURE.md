@@ -211,9 +211,19 @@ Layer 2 (Services)
 ├── src/core/session_voice_save.c  - Saves a voice session's conversation as rows (deps: Layer 0-1, llm, memory)
 ├── src/core/session_prefix.c      - Append-only conversation request: freezes the prefix, appends changes + turn context, saves each turn's record, withdraws forgotten items live (deps: Layer 0-1, llm, auth)
 │                                    session_manager.c (the dispatch), session_history.c (history lifecycle) and session_compaction.c call into it
-│                                    and it back into them: read the four as one Layer-2 session unit
+│                                    and it back into them (session_focus.c with them): read these as one Layer-2 session unit
 │                                    (session_image_hold.c joins it: the image store reaches it only through a weak
 │                                    symbol, never an include)
+├── src/core/session_focus.c       - A turn's retrieved items at its seam: which the history already shows, the items part of
+│                                    its context, the per-turn citation map; the client's context panel told after the history
+│                                    lock is released (a weak hook the WebUI replaces).  Part of the session unit
+│                                    (deps: Layer 0-1, focus_incremental)
+├── src/core/focus/                - The focus framework: retrieval adapters' registry and ranker (focus_source.c), the
+│                                    conversation's item handles (focus_handles.c), incremental focus (below); uses the
+│                                    llm/ text helpers and memory's embeddings (deps: Layer 0-2)
+├── src/core/focus/focus_incremental.c - Incremental focus (pure): reads which items a history's turn contexts show (through
+│                                    llm_history_for_each_context_part, the walk withdrawal uses), chooses what a turn sends,
+│                                    renders the declared item lines, reference line and citation reminder (deps: llm text helpers)
 ├── src/core/session_compaction.c  - Compaction: a range summarized ahead on a worker, applied at a turn seam, saved with the turn
 │                                    (deps: Layer 0-1, llm, auth, tts; its client marker is a weak hook the WebUI replaces)
 ├── src/core/prefix_in_force.c     - What a conversation has in force (section/directive/tool-schema hashes) and the deltas to append (deps: llm)

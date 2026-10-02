@@ -239,11 +239,23 @@ def conversation_rows(db, conv_id):
 
 
 def audit_rows(db, conv_id):
+    # referenced_ids: items already in context the turn named as still relevant
+    # (newer daemons); read as empty where the column doesn't exist.
+    have = {r[1] for r in db.execute("PRAGMA table_info(memory_citation_audit)")}
+    ref = "referenced_ids" if "referenced_ids" in have else "NULL AS referenced_ids"
     cur = db.execute("SELECT id, message_id, ts, injected_ids, cited_ids, dropped_count, "
-                     "tool_surfaced_ids, dropped_tool_count FROM memory_citation_audit "
+                     f"tool_surfaced_ids, dropped_tool_count, {ref} FROM memory_citation_audit "
                      "WHERE conversation_id = ? ORDER BY id", (conv_id,))
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def context_rows(db, conv_id):
+    """The per-turn context rows (kind-marked user rows) and their sizes."""
+    cur = db.execute("SELECT id, kind, length(content) AS chars FROM messages "
+                     "WHERE conversation_id = ? AND kind IN ('turn_context', 'memory') ORDER BY id",
+                     (conv_id,))
+    return [{"id": r[0], "kind": r[1], "chars": r[2] or 0} for r in cur.fetchall()]
 
 
 def conversation_meta(db, conv_id):
@@ -320,6 +332,9 @@ class LogTail:
 
 # ----------------------------------------------------------------------------- memory seed
 
+EMBED_WAIT_S = 120
+
+
 def reseed_memory(client, db_path, user_id, fixture_path, force=False):
     with db_connect_ro(db_path) as db:
         foreign = non_import_memory_count(db, user_id)
@@ -338,8 +353,15 @@ def reseed_memory(client, db_path, user_id, fixture_path, force=False):
                        "import_memories_response", timeout=60)
     if not p.get("success"):
         sys.exit(f"memory import failed: {p.get('error')}")
-    with db_connect_ro(db_path) as db:
-        total, embedded = fact_embedding_coverage(db, user_id)
+    # Imports are embedded in the background; wait for them so the first turns
+    # retrieve the same way as the rest (keyword-only recall otherwise).
+    deadline = time.time() + EMBED_WAIT_S
+    while True:
+        with db_connect_ro(db_path) as db:
+            total, embedded = fact_embedding_coverage(db, user_id)
+        if embedded >= total or time.time() >= deadline:
+            break
+        time.sleep(1)
     return {"facts": total, "facts_embedded": embedded}
 
 
@@ -397,14 +419,27 @@ def run_scenario(client, db_path, log, provider, model, scen, args):
     if not priv.get("success"):
         raise RuntimeError(f"set_private failed (refusing to run unprivate): {priv}")
 
-    live = []
+    live, current = [], f"{provider}:{model}"
     for i, turn in enumerate(scen["turns"]):
+        switched = None
+        if turn.get("switch_to_alternate"):
+            # Mid-conversation model switch: the first alternate that isn't the
+            # model in use, so every --models entry exercises a real switch.
+            alt = next((a for a in args.alternates if a != current), None)
+            if alt is None:
+                raise RuntimeError("switch_to_alternate: no --alternates entry differs")
+            ap_, am_ = alt.split(":", 1)
+            sw = dict(llm, provider=ap_, model=am_)
+            sw_resp = client.request("set_session_llm", sw, "set_session_llm_response")
+            if not sw_resp.get("success", True):
+                raise RuntimeError(f"set_session_llm (switch) rejected: {sw_resp}")
+            switched, current = alt, alt
         log.mark()
         wall = datetime.now().astimezone()
         ts0 = int(time.time())
         res = client.run_turn(turn["text"], conv_id)
         time.sleep(args.settle)
-        res.update({"index": i, "sent_at": wall.isoformat(timespec="seconds"),
+        res.update({"index": i, "model": current, "switched_to": switched, "sent_at": wall.isoformat(timespec="seconds"),
                     "sent_weekday": wall.strftime("%A"), "ts_start": ts0,
                     "ts_end": int(time.time()), "daemon_log": log.take()})
         live.append(res)
@@ -415,9 +450,16 @@ def run_scenario(client, db_path, log, provider, model, scen, args):
     with db_connect_ro(db_path) as db:
         persisted = split_turns(conversation_rows(db, conv_id))
         audits = audit_rows(db, conv_id)
+        ctx = context_rows(db, conv_id)
         meta = conversation_meta(db, conv_id)
 
     for i, t in enumerate(persisted):
+        # Context rows belong to the turn whose user row precedes them.
+        lo = t["user_msg_id"]
+        hi = persisted[i + 1]["user_msg_id"] if i + 1 < len(persisted) else float("inf")
+        mine = [c for c in ctx if lo < c["id"] < hi]
+        t["context_chars"] = {k: sum(c["chars"] for c in mine if c["kind"] == k)
+                              for k in ("turn_context", "memory")}
         # Audit rows belong to a turn by message id (preferred) or by time window.
         t["citation_audit"] = [a for a in audits
                                if a["message_id"] in t["msg_ids"]
@@ -451,10 +493,14 @@ def main():
     ap.add_argument("--thinking-mode", choices=["disabled", "auto", "enabled"])
     ap.add_argument("--effort", help="reasoning effort passed to set_session_llm")
     ap.add_argument("--daemon-log", default="auto", help="daemon log path, 'auto', or 'none'")
+    ap.add_argument("--alternates", default="claude:claude-sonnet-5,claude:claude-opus-5-5",
+                    help="comma list of provider:model a switch_to_alternate turn switches to "
+                         "(the first that isn't the model in use)")
     ap.add_argument("--turn-timeout", type=float, default=300)
     ap.add_argument("--settle", type=float, default=1.5, help="seconds after idle before reading DB")
     ap.add_argument("--gap", type=float, default=1.0, help="seconds between turns")
     args = ap.parse_args()
+    args.alternates = [a.strip() for a in args.alternates.split(",") if a.strip()]
 
     user, password = load_credentials()
     if not user or not password:

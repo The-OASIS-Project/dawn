@@ -36,9 +36,9 @@
 #include "core/prefix_message.h"
 #include "core/prefix_tools.h"
 #include "core/session_compaction.h"
+#include "core/session_focus.h"
 #include "core/session_history.h"
 #include "core/session_manager.h"
-#include "core/strbuf.h"
 #include "dawn_error.h"
 #include "llm/llm_context.h"
 #include "llm/llm_context_text.h"
@@ -94,6 +94,14 @@ static const char *row_field(struct json_object *row, const char *key) {
 static int64_t id_of(struct json_object *msg) {
    struct json_object *id = NULL;
    return json_object_object_get_ex(msg, "id", &id) ? json_object_get_int64(id) : 0;
+}
+
+/* Caller holds history_mutex.  The conversation @p hist holds: the turn's own
+ * when the user has since opened another, else the live one's. */
+static int64_t hist_conv_locked(const session_t *session, struct json_object *hist) {
+   return hist == session->turn_history && hist != session->conversation_history
+              ? session->turn_history_conv
+              : atomic_load(&session->history_conversation_id);
 }
 
 /* At most this many records wait for their questions; an older one is given
@@ -232,7 +240,7 @@ static bool ready_locked(const struct session_prefix_turn *turn) {
 }
 
 static void save_turn(session_t *session, struct session_prefix_turn *turn);
-static bool withdraw_pending_locked(session_t *session);
+static bool withdraw_pending_locked(session_t *session, struct json_object **ids_out);
 
 static bool in_list(struct json_object *list, struct json_object *msg) {
    const size_t n = list ? json_object_array_length(list) : 0;
@@ -298,9 +306,7 @@ void session_prefix_inline_tools_rejected(session_t *session) {
          queued = true;
       }
    }
-   const int64_t conv = hist == session->turn_history && hist != session->conversation_history
-                            ? session->turn_history_conv
-                            : atomic_load(&session->history_conversation_id);
+   const int64_t conv = hist_conv_locked(session, hist);
    const bool whole = session_saved_whole(session);
    pthread_mutex_unlock(&session->history_mutex);
    OLOG_INFO("Session %u: prefix boundary (tool_set_changed): tools defined in a message were "
@@ -524,39 +530,6 @@ static bool set_context_parts(struct json_object *question, struct json_object *
    return true;
 }
 
-/* A block DAWN frames: @p body between its tagged open and close lines. */
-static char *framed(const char *name,
-                    const char *tag,
-                    const char *body,
-                    const char *more1,
-                    const char *more2) {
-   strbuf_t sb;
-   strbuf_init(&sb, 512);
-   if (tag) {
-      strbuf_appendf(&sb, "--- %s (%s) ---\n", name, tag);
-   } else {
-      strbuf_appendf(&sb, "--- %s ---\n", name);
-   }
-   const char *pieces[] = { body, more1, more2 };
-   for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]); i++) {
-      const char *piece = pieces[i];
-      if (piece && *piece) {
-         strbuf_append(&sb, piece);
-         if (piece[strlen(piece) - 1] != '\n') {
-            strbuf_append(&sb, "\n");
-         }
-      }
-   }
-   if (tag) {
-      strbuf_appendf(&sb, "--- END %s (%s) ---\n", name, tag);
-   } else {
-      strbuf_appendf(&sb, "--- END %s ---\n", name);
-   }
-   char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);
-   strbuf_free(&sb);
-   return out;
-}
-
 /* Caller holds history_mutex.  An envelope's context (@p parts, taken) in a
  * message of its own just before it: DAWN's framing never shares a message
  * with untrusted text.  A failed earlier attempt's context there is replaced.
@@ -578,8 +551,7 @@ static struct json_object *envelope_context_locked(struct json_object *hist,
    /* An earlier attempt's own context (never saved as a message: no id), not
     * another turn's (a question-less turn's context, saved). */
    struct json_object *before = at > 0 ? json_object_array_get_idx(hist, at - 1) : NULL;
-   if (before && llm_history_role_is(before, "user") && id_of(before) == 0 &&
-       llm_history_kind_of(before) == MESSAGE_KIND_NONE && llm_history_is_context(before)) {
+   if (llm_history_is_unsaved_context(before)) {
       json_object_object_add(before, "content", parts);
       return before;
    }
@@ -587,22 +559,21 @@ static struct json_object *envelope_context_locked(struct json_object *hist,
    return (msg && llm_history_insert(hist, (size_t)at, msg)) ? msg : NULL;
 }
 
-/* The turn's context: the builder's body (the time, retrieved items), this
- * turn's note and new device events, framed with the conversation's tag.
- * NULL when there is nothing. */
-static char *turn_context_text(const char *tag,
-                               const char *body,
-                               const char *note,
-                               const char *notices) {
-   if ((!body || !*body) && (!note || !*note) && (!notices || !*notices)) {
-      return NULL;
+/* The turn's context, framed with the conversation's tag: its pieces in
+ * order (the time, the items the conversation doesn't show yet, per-turn
+ * notes, this turn's note, new device events).  NULL when there is nothing. */
+static char *turn_context_text(const char *tag, const char *const pieces[PROMPT_FRAMED_PIECES]) {
+   bool any = false;
+   for (int i = 0; i < PROMPT_FRAMED_PIECES; i++) {
+      any = any || (pieces[i] && *pieces[i]);
    }
-   return framed("TURN CONTEXT", tag, body, note, notices);
+   return any ? prompt_framed(PROMPT_TURN_CONTEXT_NAME, tag, pieces) : NULL;
 }
 
 /* What DAWN knows about the user, framed with the conversation's tag. */
 static char *memory_text(const char *tag, const char *body) {
-   return (body && *body) ? framed("USER MEMORY", tag, body, NULL, NULL) : NULL;
+   const char *const pieces[PROMPT_FRAMED_PIECES] = { body };
+   return (body && *body) ? prompt_framed("USER MEMORY", tag, pieces) : NULL;
 }
 
 void session_prefix_apply_turn(session_t *session,
@@ -617,6 +588,7 @@ void session_prefix_apply_turn(session_t *session,
    struct json_object **slot = target_locked(session, &pinned_live);
    if (!*slot) {
       pthread_mutex_unlock(&session->history_mutex);
+      session_focus_notify(session, cp, NULL);
       return;
    }
    /* This turn's record.  Records of a history the session no longer runs
@@ -670,8 +642,10 @@ void session_prefix_apply_turn(session_t *session,
    }
    char *in_force_before = prefix_in_force_json(*slot);
    bool boundary = turn && turn->boundary;
-   /* A withdrawal that came while the last turn was reading: applied now. */
-   if (withdraw_pending_locked(session)) {
+   /* A withdrawal that came while the last turn was reading: applied now
+    * (the items it names are not this turn's either). */
+   struct json_object *withdrawn_ids = NULL;
+   if (withdraw_pending_locked(session, &withdrawn_ids)) {
       boundary = true;
    }
    bool bind = false;
@@ -710,9 +684,7 @@ void session_prefix_apply_turn(session_t *session,
       notice.count = compacted.count;
       notice.tokens_before = compacted.tokens_before;
       notice.tokens_after = compacted.tokens_after;
-      notice_conv = hist == session->turn_history && hist != session->conversation_history
-                        ? session->turn_history_conv
-                        : atomic_load(&session->history_conversation_id);
+      notice_conv = hist_conv_locked(session, hist);
       boundary = true;
       if (turn && !whole) {
          /* An earlier compaction not yet saved (its question wasn't): this
@@ -805,27 +777,42 @@ void session_prefix_apply_turn(session_t *session,
     * turn's context. */
    struct json_object *question = question_locked(session, hist);
    char *notices = session_take_new_notices_locked(session, viewer);
-   char *context = turn_context_text(tag, cp ? cp->volatile_block : NULL, turn_note, notices);
+   /* The retrieved items this history doesn't show yet (after the compaction
+    * and withdrawals above: what they removed is no longer shown). */
+   session_focus_turn_t focus = { 0 };
+   char *items = session_focus_items_locked(session, hist, hist_conv_locked(session, hist),
+                                            question, tag, cp, withdrawn_ids, &focus);
+   json_object_put(withdrawn_ids);
+   const char *const pieces[PROMPT_FRAMED_PIECES] = { cp ? cp->context_head : NULL, items,
+                                                      cp ? cp->context_tail : NULL, turn_note,
+                                                      notices };
+   char *context = turn_context_text(tag, pieces);
+   free(items);
    char *memory = memory_text(tag, cp ? cp->memory_body : NULL);
    struct json_object *parts = json_object_new_array();
    if (parts && memory) {
       const char *had = llm_history_memory_in_force(hist);
-      if (!had || strcmp(had, memory) != 0) {
-         json_object_array_add(parts, llm_history_context_part(memory, MESSAGE_KIND_MEMORY));
+      struct json_object *memory_part = (!had || strcmp(had, memory) != 0)
+                                            ? llm_history_context_part(memory, MESSAGE_KIND_MEMORY)
+                                            : NULL;
+      if (memory_part && json_object_array_add(parts, memory_part) != 0) {
+         json_object_put(memory_part);
       }
    }
-   if (parts && context) {
-      json_object_array_add(parts, llm_history_context_part(context, MESSAGE_KIND_TURN_CONTEXT));
+   struct json_object *context_part = (parts && context)
+                                          ? llm_history_context_part(context,
+                                                                     MESSAGE_KIND_TURN_CONTEXT)
+                                          : NULL;
+   bool attached = context_part && json_object_array_add(parts, context_part) == 0;
+   if (context_part && !attached) {
+      json_object_put(context_part);
    }
    if (turn && question) {
       /* The question the turn's rows are saved with, context or not; saved
        * already when its writer ran first (session_prefix_question_saved). */
       turn->question = json_object_get(question);
       const int64_t row = id_of(question);
-      const int64_t hist_conv = hist == session->turn_history &&
-                                        hist != session->conversation_history
-                                    ? session->turn_history_conv
-                                    : atomic_load(&session->history_conversation_id);
+      const int64_t hist_conv = hist_conv_locked(session, hist);
       if (row > 0 && session->prefix_saved.row_id == row) {
          turn->saved = true;
          turn->question_id = row;
@@ -840,34 +827,40 @@ void session_prefix_apply_turn(session_t *session,
       }
    } else if (turn) {
       /* No question: the rows go with the conversation as they are. */
-      turn->conv_id = hist == session->turn_history && hist != session->conversation_history
-                          ? session->turn_history_conv
-                          : atomic_load(&session->history_conversation_id);
+      turn->conv_id = hist_conv_locked(session, hist);
       turn->user_id = viewer;
    }
    if (parts && json_object_array_length(parts) > 0) {
       if (question && llm_history_kind_of(question) == MESSAGE_KIND_ENVELOPE) {
          struct json_object *own = envelope_context_locked(hist, question, json_object_get(parts));
+         attached = attached && own;
          if (turn && own) {
             json_object_put(turn->context_msg);
             turn->context_msg = json_object_get(own);
          }
       } else if (question) {
-         (void)set_context_parts(question, parts);
+         attached = set_context_parts(question, parts) && attached;
       } else {
          /* No question (a turn DAWN started without one): the context on its own. */
          struct json_object *alone = json_object_new_object();
+         bool added = false;
          if (alone) {
             json_object_object_add(alone, "role", json_object_new_string("user"));
             json_object_object_add(alone, "content", json_object_get(parts));
-            json_object_array_add(hist, alone);
-            if (turn && turn->appended) {
-               json_object_array_add(turn->appended, json_object_get(alone));
+            added = json_object_array_add(hist, alone) == 0;
+            if (!added) {
+               json_object_put(alone);
             }
+         }
+         attached = attached && added;
+         if (added && turn && turn->appended) {
+            json_object_array_add(turn->appended, json_object_get(alone));
          }
       }
    }
    json_object_put(parts);
+   /* What the turn's items part showed, recorded once it is in. */
+   session_focus_commit_locked(session, &focus, attached);
    free(context);
    free(memory);
    free(notices);
@@ -891,6 +884,7 @@ void session_prefix_apply_turn(session_t *session,
       session_compaction_notify(session, notice_conv, &notice);
       session_compaction_commit_free(&notice);
    }
+   session_focus_notify(session, cp, &focus);
    if (ready) {
       save_turn(session, ready);
    }
@@ -1090,10 +1084,7 @@ struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
    session_release_ref_locked(session, turn->context_msg);
    turn->question = turn->context_msg = NULL;
    if (turn->conv_id <= 0) {
-      turn->conv_id = turn->hist == session->turn_history &&
-                              turn->hist != session->conversation_history
-                          ? session->turn_history_conv
-                          : atomic_load(&session->history_conversation_id);
+      turn->conv_id = hist_conv_locked(session, turn->hist);
       turn->user_id = session_effective_user_id(session);
    }
    /* Not ready (never applied, or its conversation not known yet): it stays
@@ -1236,6 +1227,30 @@ static char *withdrawn_text(const session_t *session,
    return now;
 }
 
+/* One history's withdrawal, as the context-part walk applies it. */
+typedef struct {
+   const session_t *session;
+   const withdraw_ctx_t *wc;
+   const int *handles;
+   int nh;
+   bool any;
+} withdraw_walk_t;
+
+static void withdraw_part(struct json_object *msg,
+                          struct json_object *part,
+                          message_kind_t kind,
+                          const char *text,
+                          void *ctx) {
+   (void)msg;
+   withdraw_walk_t *w = ctx;
+   char *now = withdrawn_text(w->session, kind, text, w->handles, w->nh, w->wc);
+   if (now) {
+      json_object_object_add(part, "text", json_object_new_string(now));
+      w->any = true;
+      free(now);
+   }
+}
+
 /* Caller holds history_mutex.  Withdraw from @p hist (conversation @p conv)
  * its item lines the withdrawal names and, with it, its memory blocks.
  * Returns whether anything changed. */
@@ -1253,35 +1268,14 @@ static bool withdraw_hist_locked(const session_t *session,
       free(handles);
       return false;
    }
-   bool any = false;
-   const size_t n = hist ? json_object_array_length(hist) : 0;
-   for (size_t i = 0; i < n; i++) {
-      struct json_object *content = NULL;
-      json_object_object_get_ex(json_object_array_get_idx(hist, i), "content", &content);
-      const size_t np = json_object_is_type(content, json_type_array)
-                            ? json_object_array_length(content)
-                            : 0;
-      for (size_t k = 0; k < np; k++) {
-         struct json_object *part = json_object_array_get_idx(content, k);
-         struct json_object *text = NULL;
-         if (!json_object_object_get_ex(part, "text", &text)) {
-            continue;
-         }
-         char *now = withdrawn_text(session, llm_history_kind_of(part),
-                                    json_object_get_string(text), handles, nh, wc);
-         if (now) {
-            json_object_object_add(part, "text", json_object_new_string(now));
-            any = true;
-            free(now);
-         }
-      }
-   }
+   withdraw_walk_t walk = { .session = session, .wc = wc, .handles = handles, .nh = nh };
+   llm_history_for_each_context_part(hist, withdraw_part, &walk);
    free(handles);
-   if (any) {
+   if (walk.any) {
       /* It no longer reads as its turns were sent: their reasoning stays behind. */
       (void)llm_history_drop_turn_blocks(hist);
    }
-   return any;
+   return walk.any;
 }
 
 /* The rows a voice surface's compaction kept for its save (of the live
@@ -1360,10 +1354,11 @@ static void withdraw_in_session(session_t *session, void *ctx) {
 }
 
 /* Caller holds history_mutex, as the turn's owner (or with no turn running).
- * Apply a withdrawal kept for this turn.  Returns whether anything changed
- * (its rows saved since the withdrawal then replay without their reasoning: a
+ * Apply a withdrawal kept for this turn; *@p ids_out (when given) gets the
+ * item ids it named (a reference).  Returns whether anything changed (its
+ * rows saved since the withdrawal then replay without their reasoning: a
  * boundary). */
-static bool withdraw_pending_locked(session_t *session) {
+static bool withdraw_pending_locked(session_t *session, struct json_object **ids_out) {
    struct json_object *p = session->withdraw_pending;
    if (!p) {
       return false;
@@ -1383,6 +1378,9 @@ static bool withdraw_pending_locked(session_t *session) {
       return false;
    }
    session->withdraw_pending = NULL;
+   if (ids_out && ids) {
+      *ids_out = json_object_get(ids);
+   }
    for (int i = 0; i < n; i++) {
       struct json_object *pair = json_object_array_get_idx(items, i);
       list[i].conv_id = json_object_get_int64(json_object_array_get_idx(pair, 0));
@@ -1411,7 +1409,7 @@ static bool withdraw_pending_locked(session_t *session) {
 
 void session_prefix_voice_save_locked(session_t *session) {
    if (session) {
-      (void)withdraw_pending_locked(session);
+      (void)withdraw_pending_locked(session, NULL);
    }
 }
 

@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_incremental.h"
 #include "llm/llm_capabilities.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_history_kind.h"
@@ -721,6 +722,99 @@ static void test_no_vision_gets_a_fixed_placeholder(void) {
    json_object_put(h);
 }
 
+/* ---- (m) stable [M#] handles; each item sent once ---- */
+
+#define M_TAG "dawn-ctx-00c0ffee"
+
+/* One turn: its items chosen against the history so far (as the seam does),
+ * framed in front of its question; then the reply. */
+static void m_turn(struct json_object *h, const prompt_focus_item_t *items, int n, int t) {
+   focus_scan_t scan;
+   TEST_ASSERT_EQUAL_INT(0, focus_incremental_scan(h, M_TAG, NULL, 0, &scan));
+   focus_selection_t sel;
+   TEST_ASSERT_EQUAL_INT(0, focus_incremental_select(items, n, M_TAG, &scan, &sel));
+   char *body = focus_incremental_render(items, &sel, true);
+   char frame[2048];
+   snprintf(frame, sizeof(frame),
+            "--- TURN CONTEXT (" M_TAG ") ---\n[system_time] 09:0%d\n%s--- END TURN CONTEXT (" M_TAG
+            ") ---\n",
+            t, body ? body : "");
+   free(body);
+   focus_selection_free(&sel);
+   focus_scan_free(&scan);
+   struct json_object *parts = json_object_new_array();
+   json_object_array_add(parts, llm_history_context_part(frame, MESSAGE_KIND_TURN_CONTEXT));
+   char q[32];
+   snprintf(q, sizeof(q), "Question %d", t);
+   json_object_array_add(parts, llm_history_context_part(q, MESSAGE_KIND_NONE));
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "role", json_object_new_string("user"));
+   json_object_object_add(msg, "content", parts);
+   json_object_array_add(h, msg);
+   json_object_array_add(h, parse("{\"role\":\"assistant\",\"content\":\"Answer.\"}"));
+}
+
+static int m_count(const char *hay, const char *needle) {
+   int n = 0;
+   for (const char *p = strstr(hay, needle); p; p = strstr(p + 1, needle)) {
+      n++;
+   }
+   return n;
+}
+
+/* Each request's messages are a prefix of the next one's while an item stays
+ * relevant turn after turn: it is sent once, under the handle it keeps, and
+ * later turns name it; a changed item comes again under its handle.  A reload
+ * of the history renders the same bytes and still reads it as shown. */
+static void test_stable_handles_items_sent_once(void) {
+   struct json_object *h = json_object_new_array();
+   json_object_array_add(h, parse(PREFIX));
+   prompt_focus_item_t its[2] = { { .handle = 3, .source = "memory_fact", .text = "Ash is a dog." },
+                                  { .handle = 5, .source = "memory_fact", .text = "Likes tea." } };
+   char *prev = NULL;
+   for (int t = 1; t <= 4; t++) {
+      if (t == 3) {
+         its[1].text = "Likes green tea.";
+      }
+      m_turn(h, its, 2, t);
+      struct json_object *req = render(h, MID_SYSTEM_MODEL);
+      struct json_object *messages = field(req, "messages");
+      drop_breakpoints(messages);
+      char *now = strdup(str(messages));
+      if (prev) {
+         /* The earlier request's messages, all but its closing bracket. */
+         TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(now, prev, strlen(prev) - 1),
+                                       "a turn rewrote what an earlier one sent");
+      }
+      free(prev);
+      prev = now;
+      json_object_put(req);
+   }
+   TEST_ASSERT_EQUAL_INT(1, m_count(prev, "[M3 memory_fact] Ash is a dog."));
+   TEST_ASSERT_EQUAL_INT(1, m_count(prev, "[M5 memory_fact] Likes tea."));
+   TEST_ASSERT_EQUAL_INT(1, m_count(prev, "[M5 memory_fact] Likes green tea."));
+   TEST_ASSERT_EQUAL_INT(3, m_count(prev, "[still relevant: M3"));
+
+   /* A reload (the history as stored and read back) renders the same, and
+    * the next turn still sends nothing it shows. */
+   struct json_object *reloaded = parse(json_object_to_json_string(h));
+   struct json_object *a = render(h, MID_SYSTEM_MODEL);
+   struct json_object *b = render(reloaded, MID_SYSTEM_MODEL);
+   TEST_ASSERT_EQUAL_STRING(str(a), str(b));
+   focus_scan_t scan;
+   TEST_ASSERT_EQUAL_INT(0, focus_incremental_scan(reloaded, M_TAG, NULL, 0, &scan));
+   focus_selection_t sel;
+   TEST_ASSERT_EQUAL_INT(0, focus_incremental_select(its, 2, M_TAG, &scan, &sel));
+   TEST_ASSERT_EQUAL_INT(0, sel.n_sent);
+   focus_selection_free(&sel);
+   focus_scan_free(&scan);
+   json_object_put(a);
+   json_object_put(b);
+   json_object_put(reloaded);
+   free(prev);
+   json_object_put(h);
+}
+
 int main(void) {
    char err[256];
    FILE *f = fopen(MODELS_TOML_PATH, "r");
@@ -751,6 +845,7 @@ int main(void) {
    RUN_TEST(test_chat_image_message_follows_all_tool_messages);
    RUN_TEST(test_responses_output_carries_the_image);
    RUN_TEST(test_no_vision_gets_a_fixed_placeholder);
+   RUN_TEST(test_stable_handles_items_sent_once);
    const int rc = UNITY_END();
    llm_capabilities_free_registry();
    toml_free(s_models);

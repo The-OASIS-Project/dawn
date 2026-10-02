@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 98
+#define AUTH_DB_SCHEMA_VERSION 100
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -979,6 +979,23 @@ int auth_db_migrations_v97(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (the table as it was).
  */
 int auth_db_migrations_v98(sqlite3 *db, const char *db_path);
+
+/**
+ * @brief v99: memory_citation_audit.referenced_ids, the items a turn named
+ *        again as still relevant rather than sent.  Idempotent (probe-guarded
+ *        ALTER; the base schema carries the column).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v99(sqlite3 *db);
+
+/**
+ * @brief v100: each stored compaction summary brought to the neutralizer's
+ *        current rules, once (it is replayed verbatim from now on); a
+ *        conversation whose summary that changes gets a declared boundary
+ *        (its reasoning floor raised to its newest row).  Idempotent.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (nothing changed).
+ */
+int auth_db_migrations_v100(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

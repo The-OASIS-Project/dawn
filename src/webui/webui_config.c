@@ -969,12 +969,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
             JSON_TO_CONFIG_DOUBLE(src_obj, "dawn_background", fi->source_weights.dawn_background);
          }
 
-         json_object *dedup_obj = NULL;
-         if (json_object_object_get_ex(focus_obj, "dedup", &dedup_obj)) {
-            JSON_TO_CONFIG_INT(dedup_obj, "recent_window_turns", fi->dedup.recent_window_turns);
-            JSON_TO_CONFIG_DOUBLE(dedup_obj, "score_uplift_factor", fi->dedup.score_uplift_factor);
-         }
-
          json_object *dth_obj = NULL;
          if (json_object_object_get_ex(focus_obj, "dominant_token_heuristic", &dth_obj)) {
             JSON_TO_CONFIG_BOOL(dth_obj, "enabled", fi->dominant_token_heuristic.enabled);
@@ -1002,8 +996,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          CONFIG_CLAMP(fi->source_weights.calendar_event, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->source_weights.recent_email, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->source_weights.dawn_background, 0.0f, 5.0f);
-         CONFIG_CLAMP(fi->dedup.recent_window_turns, 0, 100);
-         CONFIG_CLAMP(fi->dedup.score_uplift_factor, 1.0f, 5.0f);
          /* Lower bound at 0.01 mirrors config_validate.c — runtime
           * self-guard silently no-ops at ≤ 0.0; disable via the
           * `enabled` flag instead so the slider can't lie. */

@@ -1411,23 +1411,19 @@
          return false;
       }
 
-      // Prepend any attached document content
-      let messageText = text;
+      // Attached documents go as their own field: the daemon defuses each body
+      // (someone else's text) and builds the inlined form the transcript shows.
+      const messageText = text;
+      let attachments = null;
       if (typeof DawnDocuments !== 'undefined') {
          const docs = DawnDocuments.getAndClearDocuments();
          if (docs.length > 0) {
-            const docText = docs
-               .map((d) => {
-                  // v68: link the stored original file so a reloaded chip can
-                  // offer the real PDF/DOCX (older messages just omit it).
-                  // Marker "blob:<id>]" format is mirrored by the parser
-                  // (documents.js DOC_MARKER_RE) and the orphan-sweep SQL; kept in
-                  // sync by scripts/check_blob_marker_sync.sh — change all together.
-                  const blobSuffix = d.original_blob_id ? ` blob:${d.original_blob_id}` : '';
-                  return `[ATTACHED DOCUMENT: ${d.filename} (${d.size} bytes)${blobSuffix}]\n${d.content}\n[END DOCUMENT]`;
-               })
-               .join('\n\n');
-            messageText = docText + '\n\n' + messageText;
+            attachments = docs.map((d) => {
+               const a = { filename: d.filename, size: d.size, content: d.content };
+               // The stored original, so a reloaded chip can offer the real file.
+               if (d.original_blob_id) a.blob_id = d.original_blob_id;
+               return a;
+            });
          }
       }
 
@@ -1447,6 +1443,9 @@
          type: 'text',
          payload: { text: messageText },
       };
+      if (attachments) {
+         msg.payload.attachments = attachments;
+      }
 
       // Tell the server which conversation this message belongs to, so it tags
       // this turn's frames explicitly instead of inferring from the live view

@@ -3352,8 +3352,8 @@ void handle_text_message(ws_connection_t *conn,
       }
    }
 
-   OLOG_INFO("WebUI: Text input from session %u: %s (%d image(s))", conn->session->session_id, text,
-             image_id_count);
+   OLOG_INFO("WebUI: Text input from session %u: %zu bytes (%d image(s))",
+             conn->session->session_id, strlen(text), image_id_count);
 
    /* Typed input (not ASR): pass input_was_voice=false so the worker stamps the
     * flag right before dispatch and the prompt builder omits the ASR hint. */

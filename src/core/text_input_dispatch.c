@@ -36,6 +36,7 @@
 #include "auth/auth_db_messages.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
+#include "core/session_focus.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "llm/llm_history_kind.h"

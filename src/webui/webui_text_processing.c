@@ -50,6 +50,7 @@
 #include "dawn.h"
 #include "image_store.h"
 #include "llm/llm_context.h"
+#include "llm/llm_context_text.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -313,9 +314,11 @@ static void webui_text_dispatch_on_user_msg(void *ctx,
    if (message_id > 0) {
       ws_connection_t *conn = (ws_connection_t *)session->client_data;
       int64_t conv_id = atomic_load(&session->stream_conversation_id);
-      if (conn && conn->auth_user_id > 0 && conv_id > 0) {
-         conv_event_notify_message_appended(conv_id, conn->auth_user_id, message_id, "user",
-                                            persist_text ? persist_text : text, NULL, 0);
+      const char *body = persist_text ? persist_text : text;
+      if (conn && conn->auth_user_id > 0 && conv_id > 0 && body[0]) {
+         /* The sender's copy names its turn too, in case its echo was dropped. */
+         webui_broadcast_message_appended_origin(conn->auth_user_id, conv_id, message_id, "user",
+                                                 body, NULL, 0, session, webui_turn_ref_get());
       }
    }
 }
@@ -434,14 +437,38 @@ static void *text_worker_thread(void *arg) {
       return NULL;
    }
 
+   /* An attached document's contents came from anywhere: DAWN's markers in
+    * them are defused here, on the turn's thread (the user's own words are
+    * kept as written).  The text and its persisted form get the same
+    * treatment, so the question, the saved row and a reload agree. */
+   char *defused = llm_context_neutralize_attachments(text);
+   char *defused_persist = work->persist_content
+                               ? llm_context_neutralize_attachments(work->persist_content)
+                               : NULL;
+   if (!defused || (work->persist_content && !defused_persist)) {
+      OLOG_ERROR("WebUI: out of memory preparing a turn's attached documents");
+      free(defused);
+      free(defused_persist);
+      webui_send_error(session, "PROCESSING_ERROR", "Your message couldn't be prepared.");
+      finish_turn(session);
+      text_worker_cleanup(work, session, text);
+      return NULL;
+   }
+   free(text);
+   work->text = text = defused;
+   if (defused_persist) {
+      free(work->persist_content);
+      work->persist_content = defused_persist;
+   }
+
    /* Mark a turn in flight so session_cleanup_expired won't reap this session
     * out from under us while it generates (a disconnected client no longer
     * aborts the turn — background-jobs Phase 1).  Cleared by text_worker_end()
     * at every subsequent exit. */
    atomic_fetch_add(&session->turn_in_flight, 1);
 
-   OLOG_INFO("WebUI: Processing text input for session %u: %s (%d image(s))", session->session_id,
-             text, work->image_id_count);
+   OLOG_INFO("WebUI: Processing text input for session %u: %zu bytes (%d image(s))",
+             session->session_id, strlen(text), work->image_id_count);
 
    /* Clear stale pending_visual from a previous turn that may not have
     * been consumed (e.g., LLM response interrupted or error). Prevents
@@ -808,6 +835,8 @@ int webui_process_text_input_with_images(session_t *session,
    }
 
    work->session = session;
+   /* Attached documents are defused when the turn runs, on its own thread
+    * (text_worker_thread), not on this one: a turn's documents can be MBs. */
    work->text = strdup(text);
    work->conv_id = turn_conv_id;
    work->request_gen = new_gen; /* current gen; supersede is disabled under the queue */

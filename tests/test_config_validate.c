@@ -83,8 +83,6 @@ static void set_valid_defaults(void) {
    s_config.memory.focus_injection.source_weights.calendar_event = 0.6f;
    s_config.memory.focus_injection.source_weights.recent_email = 0.5f;
    s_config.memory.focus_injection.source_weights.dawn_background = 0.8f;
-   s_config.memory.focus_injection.dedup.recent_window_turns = 8;
-   s_config.memory.focus_injection.dedup.score_uplift_factor = 1.5f;
    /* graph_retrieval.* added in Phase 1A — needs valid defaults so
     * config_validate doesn't short-circuit on these fields before
     * reaching the field the individual test is exercising. */

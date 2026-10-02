@@ -36,6 +36,7 @@
 
 #include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
+#include "llm/llm_context_text.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -396,17 +397,14 @@ void conv_free(conversation_t *conv) {
    }
 }
 
-int conv_db_create_continuation(int user_id,
-                                int64_t parent_id,
-                                const char *compaction_summary,
-                                int64_t *conv_id_out) {
+static int create_continuation(int user_id,
+                               int64_t parent_id,
+                               const char *compaction_summary,
+                               int64_t *conv_id_out) {
    if (user_id <= 0 || parent_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
    }
-
    AUTH_DB_LOCK_OR_FAIL();
-
-   /* Verify parent exists and belongs to user, then archive it */
    const char *sql_archive = "UPDATE conversations SET is_archived = 1, updated_at = ? "
                              "WHERE id = ? AND user_id = ?";
    sqlite3_stmt *stmt = NULL;
@@ -547,6 +545,21 @@ int conv_db_create_continuation(int user_id,
              (long long)*conv_id_out, (long long)parent_id, user_id);
    conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
    return AUTH_DB_SUCCESS;
+}
+
+int conv_db_create_continuation(int user_id,
+                                int64_t parent_id,
+                                const char *compaction_summary,
+                                int64_t *conv_id_out) {
+   /* Stored as it would be sent (a compaction summary is replayed verbatim,
+    * llm_history_summary_text): neutralized here, once. */
+   char *safe = compaction_summary ? llm_context_neutralize(compaction_summary) : NULL;
+   if (compaction_summary && !safe) {
+      return AUTH_DB_FAILURE;
+   }
+   const int rc = create_continuation(user_id, parent_id, safe, conv_id_out);
+   free(safe);
+   return rc;
 }
 
 /* =============================================================================

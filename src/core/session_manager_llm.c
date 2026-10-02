@@ -370,15 +370,12 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
             session->cancelled_final_response = fin.text; /* caller takes + frees */
             keep_cancelled_reply_blocks(session, fin.text);
          } else {
-            /* Degraded (llm_response_finalize alloc-failed): strip the tag grammar in
-             * place — the strips need no allocation — so residual <cited>/<command>/
-             * <end_of_turn> markers can never reach the persisted row or the browser,
-             * then stash the response itself (caller takes + frees). */
-            text_filter_cited_normalize(response);
-            text_filter_command_strip(response, false);
-            text_filter_cited_strip(response);
-            session->cancelled_final_response = response;
-            keep_cancelled_reply_blocks(session, response);
+            /* It couldn't be made safe (out of memory): dropped, never kept
+             * as it came (a reply is neutralized before it is kept). */
+            OLOG_ERROR("Session %u: out of memory finalizing a stopped turn's reply; "
+                       "dropped",
+                       session->session_id);
+            free(response);
          }
       } else {
          free(response);
@@ -405,11 +402,20 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    // (Phase 1 will thread `session` here for citation resolution.)
    if (*response) {
       response_final_t fin;
-      if (llm_response_finalize(session, response, &fin) == SUCCESS) {
+      if (llm_response_finalize(session, response, &fin) != SUCCESS) {
+         /* It couldn't be made safe (out of memory): the turn fails rather than
+          * keep the reply as it came, unneutralized, in the history and the
+          * saved row. */
+         OLOG_ERROR("Session %u: out of memory finalizing the reply; the turn fails",
+                    session->session_id);
          free(response);
-         response = fin.text;  // take ownership of the clean buffer
+#ifdef ENABLE_WEBUI
+         webui_send_error(session, "PROCESSING_ERROR", "The reply couldn't be prepared.");
+#endif
+         return NULL;
       }
-      // else: finalize alloc failure — keep the raw response (degraded, not fatal)
+      free(response);
+      response = fin.text;  // take ownership of the clean buffer
    }
 
    // Add assistant response to history (only if non-empty to avoid Claude API errors),

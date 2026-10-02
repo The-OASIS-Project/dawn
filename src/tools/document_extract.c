@@ -46,6 +46,15 @@
 #include <libxml/tree.h>
 #endif
 
+/* @p len cut back to a UTF-8 character boundary of @p s (s[len] is the first
+ * byte left out): a character split at a size cap would come back from a
+ * browser as U+FFFD, longer than the cap. */
+static size_t utf8_boundary(const char *s, size_t len) {
+   while (len > 0 && ((unsigned char)s[len] & 0xC0) == 0x80)
+      len--;
+   return len;
+}
+
 /* =============================================================================
  * Allowed Extensions
  * ============================================================================= */
@@ -157,7 +166,7 @@ static int extract_pdf_text(const char *data,
       unsigned char *text_data;
       size_t len = fz_buffer_storage(ctx, buf, &text_data);
       if (len > max_extracted)
-         len = max_extracted;
+         len = utf8_boundary((const char *)text_data, max_extracted);
 
       result = malloc(len + 1);
       if (result) {
@@ -403,8 +412,8 @@ static int extract_html_text(const char *data,
    if (rc == HTML_PARSE_SUCCESS && extracted) {
       size_t len = strlen(extracted);
       if (len > max_extracted) {
-         extracted[max_extracted] = '\0';
-         len = max_extracted;
+         len = utf8_boundary(extracted, max_extracted);
+         extracted[len] = '\0';
       }
       if (len == 0) {
          free(extracted);

@@ -2781,10 +2781,12 @@ mqtt_disabled:
             // never sees stray tags on the next turn.  (Phase 1 will thread the
             // local session here for citation resolution.)
             response_final_t fin;
+            /* A reply that couldn't be finalized is never stored raw (its
+             * markers undefused): nothing goes into the history. */
             const char *history_text = (llm_response_finalize(session_get_local(), response_text,
                                                               &fin) == SUCCESS)
                                            ? fin.text
-                                           : response_text;
+                                           : "";
 
             // Skip empty content (an all-tags or whitespace-only response finalizes
             // to "") — an empty assistant message makes Claude reject the next turn.

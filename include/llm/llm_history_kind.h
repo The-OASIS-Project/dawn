@@ -108,6 +108,26 @@ bool llm_history_is_question(struct json_object *msg);
  */
 const char *llm_history_question_text(struct json_object *msg);
 
+/** Called for one context part: its message, the part, its kind and text. */
+typedef void (*llm_history_part_fn)(struct json_object *msg,
+                                    struct json_object *part,
+                                    message_kind_t kind,
+                                    const char *text,
+                                    void *ctx);
+
+/**
+ * @brief Call @p fn for every text content part carrying a kind (a turn's
+ *        context, a memory block, a summary), oldest first
+ *
+ * The one walk over what DAWN put in a history's messages: withdrawing what
+ * the user forgot and reading which items a history already shows both go
+ * through it, so the two can't see different parts.  @p fn may replace the
+ * part's text; it must not add or remove messages or parts.
+ */
+void llm_history_for_each_context_part(struct json_object *history,
+                                       llm_history_part_fn fn,
+                                       void *ctx);
+
 /** The USER MEMORY block @p history was last sent (borrowed), or NULL. */
 const char *llm_history_memory_in_force(struct json_object *history);
 
@@ -124,6 +144,14 @@ struct json_object *llm_history_context_part(const char *text, message_kind_t ki
  * @return false on allocation failure (@p msg released, history unchanged)
  */
 bool llm_history_insert(struct json_object *history, size_t index, struct json_object *msg);
+
+/**
+ * @brief Whether @p msg is a turn's context that was never saved: a user
+ *        message of context parts alone, with no row id.  An envelope's
+ *        earlier attempt leaves one just before it, which the next attempt
+ *        replaces.
+ */
+bool llm_history_is_unsaved_context(struct json_object *msg);
 
 /**
  * @brief A message of @p parts alone (taken): a turn's context in a user
@@ -167,7 +195,9 @@ void llm_history_drop_context(struct json_object *history);
  *
  * Framed as the conversation's CONVERSATION SUMMARY block, with @p tag when the
  * history has one.  No database ids: a conversation-less history has none, and
- * the same bytes must come back on reload.
+ * the same bytes must come back on reload.  @p summary is rendered verbatim
+ * (its tag masked): it must be what was stored, neutralized once when it was
+ * made, so a change of the neutralizer's rules never re-renders it.
  *
  * @return Heap text (caller frees), or NULL on allocation failure
  */

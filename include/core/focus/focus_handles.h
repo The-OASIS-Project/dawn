@@ -64,7 +64,9 @@ typedef struct focus_handles {
  * history belongs to no saved conversation yet): the one it already has there,
  * or the next.  A saved conversation's handles are read from the database the
  * first time and new ones stored there; the history mutex is never held across
- * the database.
+ * the database.  Handles numbered before the history had a conversation, once
+ * it is @p conv_id, are saved there first (focus_handles_flush), so a handle
+ * its history already shows never names a second item.
  *
  * @param items In: source and item_id; out: handle (0 when it couldn't be
  *              given) and is_new

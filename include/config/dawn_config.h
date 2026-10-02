@@ -589,13 +589,6 @@ typedef struct {
    float dawn_background;
 } focus_source_weights_t;
 
-/* Dedup bookkeeping for per-turn focus.  Read by the parser into the
- * struct in Phase 1b — actual per-session enforcement lives in 1f. */
-typedef struct {
-   int recent_window_turns;   /* Re-inject only if not seen in last N turns */
-   float score_uplift_factor; /* Re-inject if current score > previous * factor */
-} focus_dedup_config_t;
-
 typedef struct {
    bool enabled;                 /* Master enable (default off) */
    int focus_budget_bytes;       /* Byte cap on the assembled focus block (per turn) */
@@ -627,7 +620,6 @@ typedef struct {
                             Bump above 4096 only if a user's corpus
                             grows past that and the cliff causes drops. */
    focus_source_weights_t source_weights;
-   focus_dedup_config_t dedup;
    /* Dominant-token over-inclusion heuristic (Phase 1j re-bench + Phase B
     * reranker workstream).  Mitigates the failure mode where a query has
     * a low-IDF dominant token (e.g. "favorite restaurant", "doctor blood

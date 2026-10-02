@@ -51,6 +51,7 @@
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "dawn.h"
+#include "document_original_store.h"
 #include "image_store.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
@@ -60,6 +61,7 @@
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_always_on.h"
+#include "webui/webui_attachments.h"
 #include "webui/webui_attention.h"
 #include "webui/webui_contacts.h"
 #include "webui/webui_doc_library.h"
@@ -84,6 +86,67 @@ static void handle_ping(ws_connection_t *conn, struct json_object *payload);
 /* handle_always_on_enable / handle_always_on_disable moved to
  * webui_always_on.c (next to always_on_create / always_on_destroy);
  * declarations in webui_always_on.h. */
+
+/* An attachment's blob_id is an original the turn's user may read (or one
+ * that's gone, which the document goes without). */
+static int attachment_owner(const char *blob_id, int user_id) {
+   char name[WEBUI_ATTACHMENT_FILENAME_MAX + 1];
+   const int rc = document_original_get_filename(blob_id, user_id, name, sizeof(name));
+   if (rc == BLOB_STORE_SUCCESS) {
+      return SUCCESS;
+   }
+   return rc == BLOB_STORE_NOT_FOUND ? WEBUI_ATTACHMENT_BLOB_GONE : FAILURE;
+}
+
+/* The text a turn carries: its attached documents (built from the frame's
+ * `attachments`, markers inside them quoted here and the bodies defused when
+ * the turn runs), then its words.
+ * Sets *built to the new text (caller frees), or leaves it NULL when the frame
+ * has none.  False when the turn was refused (the error is sent). */
+static bool turn_text_with_attachments(ws_connection_t *conn,
+                                       struct json_object *payload,
+                                       const char *words,
+                                       char **built) {
+   *built = NULL;
+   struct json_object *arr = NULL;
+   if (!json_object_object_get_ex(payload, "attachments", &arr)) {
+      return true;
+   }
+   /* Ownership of a blob_id is the user's: refused here like any turn of an
+    * unauthenticated connection. */
+   if (!conn_require_auth(conn)) {
+      return false;
+   }
+   const int max_docs = g_config.documents.max_documents;
+   const size_t max_content = (size_t)g_config.documents.max_extracted_size_kb * 1024;
+   char *docs = NULL;
+   const int rc = webui_attachments_build(arr, conn->auth_user_id, max_docs, max_content,
+                                          attachment_owner, &docs);
+   if (rc == WEBUI_ATTACHMENTS_INVALID) {
+      send_error_impl(conn->wsi, "ATTACHMENT_INVALID",
+                      "An attached document is malformed, too large, too many, or not yours");
+      return false;
+   }
+   if (rc != SUCCESS || !docs) {
+      send_error_impl(conn->wsi, "PROCESSING_ERROR", "The attached documents couldn't be read");
+      return false;
+   }
+   /* Documents first, then the words, as clients inlined them. */
+   if (words[strspn(words, " \t\r\n")] == '\0') {
+      *built = docs;
+      return true;
+   }
+   const size_t need = strlen(docs) + 2 + strlen(words) + 1;
+   *built = malloc(need);
+   if (!*built) {
+      free(docs);
+      send_error_impl(conn->wsi, "PROCESSING_ERROR", "The attached documents couldn't be read");
+      return false;
+   }
+   snprintf(*built, need, "%s\n\n%s", docs, words);
+   free(docs);
+   return true;
+}
 
 /* A text turn's frame, @p payload its payload (non-NULL): validated, then
  * handed to handle_text_message.  Every refusal here is one error frame. */
@@ -138,6 +201,16 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
       return;
    }
 
+   /* Attached documents sent as their own field are framed into the text
+    * here (their bodies are defused when the turn runs). */
+   char *built = NULL;
+   if (!turn_text_with_attachments(conn, payload, text, &built)) {
+      return;
+   }
+   if (built) {
+      text = built;
+   }
+
    /* Nothing to say and nothing to show is refused, never dropped
     * silently (the client is waiting for its echo).  Words that are
     * only whitespace count as none. */
@@ -163,6 +236,7 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
          const char *message = NULL;
          webui_image_error_describe(IMAGE_REHYDRATE_ERR_NOMEM, &code, &message);
          send_error_impl(conn->wsi, code, message);
+         free(built);
          return;
       }
    }
@@ -170,6 +244,7 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
    handle_text_message(conn, text, strlen(text), (const char(*)[IMAGE_ID_LEN])image_ids,
                        image_id_count, persist_content);
    free(persist_content);
+   free(built);
 }
 
 /* A `text` frame.  Its client_ref, when it has one, is this thread's turn ref
@@ -209,7 +284,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 
    struct json_object *root = json_tokener_parse(json_str);
    if (!root) {
-      OLOG_WARNING("WebUI: Invalid JSON received: %.*s", (int)len, data);
+      /* The length only: a frame can carry MBs of a user's documents. */
+      OLOG_WARNING("WebUI: Invalid JSON received (%zu bytes)", len);
       free(json_str);
       return;
    }

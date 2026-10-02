@@ -70,6 +70,8 @@ static const char *json_text(struct json_object *obj) {
    return json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
 }
 
+static int images_of(struct json_object *msg);
+
 /* The question is the message a reload of its saved row rebuilds. */
 static void test_question_matches_reload(void) {
    char ids[2][IMAGE_ID_LEN];
@@ -171,34 +173,128 @@ static void test_deleted_image_refused(void) {
    free(content);
 }
 
-/* The question's images come only from its ids: an inline data: image in its
- * text fails it. */
+/* The question's images come only from its ids: an inline data: image among
+ * its markers fails it; one in its words is text. */
 static void test_inline_data_image_refused(void) {
    char ids[1][IMAGE_ID_LEN];
    upload(1, "ok", ids[0]);
    char *content = image_marker_build_content(
-       "Look [IMAGE:data:image/png;base64,iVBORw0KGgo=] here", ids, 1);
+       "Look\n[IMAGE:data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==]", ids, 1);
    struct json_object *q = NULL;
    TEST_ASSERT_EQUAL_INT(IMAGE_REHYDRATE_ERR_NOT_FOUND,
                          image_rehydrate_question(1, content, ids, 1, &q));
    TEST_ASSERT_NULL(q);
    free(content);
+   content = image_marker_build_content(
+       "Look [IMAGE:data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==] here", ids, 1);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, image_rehydrate_question(1, content, ids, 1, &q));
+   TEST_ASSERT_EQUAL_INT(1, images_of(q));
+   json_object_put(q);
+   free(content);
 }
 
-/* A marker the user typed that names no image is text the question carries
- * as a reload does: the question still goes, byte for byte the reload. */
+/* A marker the user typed (or a document they attached carries) is text,
+ * not an image: only the trailing block of markers names the question's
+ * images.  The question still goes, byte for byte what a reload sends. */
 static void test_typed_marker_reads_as_reload(void) {
-   char ids[1][IMAGE_ID_LEN];
+   char ids[2][IMAGE_ID_LEN];
    upload(1, "ok", ids[0]);
-   char *content = image_marker_build_content("Was [IMAGE:" UNKNOWN_ID "] it?", ids, 1);
+   upload(1, "own", ids[1]);
+   char text[128];
+   snprintf(text, sizeof(text), "Was [IMAGE:" UNKNOWN_ID "] it, or\n[IMAGE:%s]\nthis?", ids[1]);
+   char *content = image_marker_build_content(text, ids, 1);
    struct json_object *q = NULL;
    TEST_ASSERT_EQUAL_INT(SUCCESS, image_rehydrate_question(1, content, ids, 1, &q));
    struct json_object *reload = image_rehydrate_message(1, "user", content);
    TEST_ASSERT_EQUAL_STRING(json_text(reload), json_text(q));
-   TEST_ASSERT_NOT_NULL(strstr(json_text(q), IMAGE_REHYDRATE_MISSING_TEXT));
+   TEST_ASSERT_NULL(strstr(json_text(q), IMAGE_REHYDRATE_MISSING_TEXT));
+   TEST_ASSERT_NOT_NULL(strstr(json_text(q), "Was [IMAGE:" UNKNOWN_ID "] it"));
+   struct json_object *parts = NULL;
+   json_object_object_get_ex(q, "content", &parts);
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(parts)); /* its words, one image */
    json_object_put(reload);
    json_object_put(q);
    free(content);
+}
+
+/* The text part of @p msg, or "" (a message with none). */
+static const char *text_of(struct json_object *msg) {
+   struct json_object *content = NULL;
+   json_object_object_get_ex(msg, "content", &content);
+   if (json_object_is_type(content, json_type_string)) {
+      return json_object_get_string(content);
+   }
+   for (size_t i = 0; i < json_object_array_length(content); i++) {
+      struct json_object *part = json_object_array_get_idx(content, i);
+      struct json_object *t = NULL;
+      if (json_object_object_get_ex(part, "text", &t)) {
+         return json_object_get_string(t);
+      }
+   }
+   return "";
+}
+
+static int images_of(struct json_object *msg) {
+   struct json_object *content = NULL;
+   json_object_object_get_ex(msg, "content", &content);
+   int n = 0;
+   for (size_t i = 0;
+        json_object_is_type(content, json_type_array) && i < json_object_array_length(content);
+        i++) {
+      struct json_object *t = NULL;
+      json_object_object_get_ex(json_object_array_get_idx(content, i), "type", &t);
+      n += t && strcmp(json_object_get_string(t), "image_url") == 0;
+   }
+   return n;
+}
+
+/* Rows saved before (the browser's markers, each "\n[IMAGE:...]" after the
+ * words; the daemon's; legacy inline images) rebuild as they did: the words
+ * with every line break kept, then the images.  A marker that isn't one a
+ * row's images were written as, or an inline one of no image type, stays
+ * text (and can't break the conversation's requests). */
+static void test_saved_rows_rebuild_as_before(void) {
+   char ids[2][IMAGE_ID_LEN];
+   upload(1, "a", ids[0]);
+   upload(1, "b", ids[1]);
+   char row[256];
+   snprintf(row, sizeof(row), "Two\n[IMAGE:%s]\n[IMAGE:%s]", ids[0], ids[1]);
+   struct json_object *m = image_rehydrate_message(1, "user", row);
+   TEST_ASSERT_EQUAL_STRING("Two\n\n", text_of(m));
+   TEST_ASSERT_EQUAL_INT(2, images_of(m));
+   json_object_put(m);
+
+   snprintf(row, sizeof(row), "\n[IMAGE:%s]", ids[0]); /* the browser's image-only row */
+   m = image_rehydrate_message(1, "user", row);
+   TEST_ASSERT_EQUAL_INT(1, images_of(m));
+   json_object_put(m);
+
+   m = image_rehydrate_message(1, "user",
+                               "Old\n[IMAGE:data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==]");
+   TEST_ASSERT_EQUAL_INT(1, images_of(m));
+   TEST_ASSERT_EQUAL_STRING("Old\n", text_of(m));
+   json_object_put(m);
+
+   snprintf(row, sizeof(row), "Gone\n[IMAGE:%s]", UNKNOWN_ID); /* an id no image has */
+   m = image_rehydrate_message(1, "user", row);
+   TEST_ASSERT_NOT_NULL(strstr(text_of(m), IMAGE_REHYDRATE_MISSING_TEXT));
+   json_object_put(m);
+
+   const char *text_only[] = {
+      "Bad\n[IMAGE:data:text/plain;base64,eA==]",
+      "Bad\n[IMAGE:data:image/png;base64,not base64!]",
+      "[IMAGE:data:image/png;base64,iVBO] then words",
+      /* well-formed base64 of a JPEG declared as a PNG, and one too short to be an image */
+      "Mismatch\n[IMAGE:data:image/png;base64,/9j/4AAQSkZJRgABAQA=]",
+      "Short\n[IMAGE:data:image/png;base64,A]",
+      "words [IMAGE:data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==]",
+   };
+   for (size_t i = 0; i < sizeof(text_only) / sizeof(text_only[0]); i++) {
+      m = image_rehydrate_message(1, "user", text_only[i]);
+      TEST_ASSERT_EQUAL_INT_MESSAGE(0, images_of(m), text_only[i]);
+      TEST_ASSERT_EQUAL_STRING(text_only[i], text_of(m));
+      json_object_put(m);
+   }
 }
 
 /* Ids with no marker of theirs, a repeated id, and more ids than a message
@@ -278,6 +374,7 @@ int main(void) {
    RUN_TEST(test_deleted_image_refused);
    RUN_TEST(test_inline_data_image_refused);
    RUN_TEST(test_typed_marker_reads_as_reload);
+   RUN_TEST(test_saved_rows_rebuild_as_before);
    RUN_TEST(test_ids_and_markers_agree);
    RUN_TEST(test_turn_ids_from_image_ids_only);
    return UNITY_END();

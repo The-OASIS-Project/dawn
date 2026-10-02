@@ -28,11 +28,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define AUTH_DB_INTERNAL_ALLOWED      /* this module owns a memory-table writer */
-#include "auth/auth_db_internal.h"    /* s_db, AUTH_DB_LOCK_* */
-#include "config/dawn_config.h"       /* g_config */
-#include "core/focus/focus_handles.h" /* the conversation's earlier handles */
-#include "core/session_manager.h"     /* session_t, citation_stash_t, tool_cited_set_t */
+#define AUTH_DB_INTERNAL_ALLOWED   /* this module owns a memory-table writer */
+#include "auth/auth_db_internal.h" /* s_db, AUTH_DB_LOCK_* */
+#include "config/dawn_config.h"    /* g_config */
+#include "core/session_manager.h"  /* session_t, citation_stash_t, tool_cited_set_t */
 #include "logging.h"
 #include "memory/memory_citation_internal.h" /* memory_citation_csv_append + resolve_cited */
 #include "memory/memory_db.h"                /* memory_db_fact_reinforce_citation (Phase 2) */
@@ -65,6 +64,7 @@ static void audit_insert(int64_t conv_id,
                          int64_t msg_id,
                          int user_id,
                          const char *injected,
+                         const char *referenced,
                          const char *cited,
                          const char *injected_scores,
                          const char *tool_surfaced,
@@ -75,8 +75,8 @@ static void audit_insert(int64_t conv_id,
    const char *sql =
        "INSERT INTO memory_citation_audit "
        "(conversation_id, message_id, user_id, ts, injected_ids, cited_ids, injected_scores, "
-       "tool_surfaced_ids, dropped_count, dropped_tool_count) "
-       "VALUES (?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?, ?)";
+       "tool_surfaced_ids, dropped_count, dropped_tool_count, referenced_ids) "
+       "VALUES (?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?, ?, ?)";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       OLOG_ERROR("memory_citation: audit insert prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
@@ -91,6 +91,7 @@ static void audit_insert(int64_t conv_id,
    sqlite3_bind_text(stmt, 7, tool_surfaced ? tool_surfaced : "", -1, SQLITE_TRANSIENT);
    sqlite3_bind_int(stmt, 8, dropped);
    sqlite3_bind_int(stmt, 9, dropped_tool);
+   sqlite3_bind_text(stmt, 10, referenced ? referenced : "", -1, SQLITE_TRANSIENT);
    if (sqlite3_step(stmt) != SQLITE_DONE) {
       OLOG_WARNING("memory_citation: audit insert failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -104,7 +105,7 @@ void memory_citation_record_tool_fact(session_t *session, int64_t fact_id) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   tool_cited_set_t *set = &session->tool_cited_set;
+   tool_cited_set_t *set = &session->citation.tool;
    for (int i = 0; i < set->count; i++) {
       if (set->entries[i].fact_id == fact_id) {
          pthread_mutex_unlock(&session->history_mutex); /* already recorded this turn */
@@ -149,18 +150,15 @@ void memory_citation_capture(session_t *session, const char *response_text) {
    citation_prior_t *prior = NULL; /* the conversation's items from earlier turns */
    int prior_count = 0;
    pthread_mutex_lock(&session->history_mutex);
-   stash = session->citation_stash;
-   tool_set = session->tool_cited_set;
-   /* The earlier items are this turn's conversation's only: a table of
-    * another (the user moved on) names other items by the same handles. */
-   const focus_handles_t *handles = session->focus_handles;
-   if (handles && handles->count > 0 &&
-       handles->conv_id == atomic_load(&session->stream_conversation_id)) {
-      prior = calloc((size_t)handles->count, sizeof(*prior));
-      for (int i = 0; prior && i < handles->count; i++) {
-         prior[prior_count].handle = handles->items[i].handle;
-         safe_strscpy(prior[prior_count].item_id, handles->items[i].item_id);
-         prior_count++;
+   stash = session->citation.stash;
+   tool_set = session->citation.tool;
+   /* The earlier items its history still shows (the seam listed them): a
+    * withdrawn or summarized-away item isn't citable. */
+   if (session->citation.prior_count > 0) {
+      prior = calloc((size_t)session->citation.prior_count, sizeof(*prior));
+      if (prior) {
+         prior_count = session->citation.prior_count;
+         memcpy(prior, session->citation.prior, (size_t)prior_count * sizeof(*prior));
       }
    }
    pthread_mutex_unlock(&session->history_mutex);
@@ -181,22 +179,16 @@ void memory_citation_capture(session_t *session, const char *response_text) {
       tool_set.count = MAX_TOOL_CITED_FACTS; /* defensive */
    }
 
-   /* Focus-injected item_ids -> injected CSV + a parallel per-item final_score CSV
-    * (same order) — unchanged from Phase 1 (focus injection precision).  Both share
-    * the CITE_CSV_MAX bound; the analyzer attributes scores only when the two
+   /* The items this turn sent -> injected CSV + a parallel per-item final_score
+    * CSV (same order); the ones it named again as still relevant -> referenced
+    * CSV, so the cite rate of each is measured apart.  All share the
+    * CITE_CSV_MAX bound; the analyzer attributes scores only when the two
     * lengths match, so a truncation loses analytics but never mis-pairs. */
    char injected[CITE_CSV_MAX];
    char inj_scores[CITE_CSV_MAX];
-   size_t inj_len = 0;
-   size_t inj_scores_len = 0;
-   injected[0] = '\0';
-   inj_scores[0] = '\0';
-   for (int i = 0; i < stash.count; i++) {
-      memory_citation_csv_append(injected, sizeof(injected), &inj_len, stash.entries[i].item_id);
-      char score_str[16];
-      snprintf(score_str, sizeof(score_str), "%.4f", stash.entries[i].final_score);
-      memory_citation_csv_append(inj_scores, sizeof(inj_scores), &inj_scores_len, score_str);
-   }
+   char referenced[CITE_CSV_MAX];
+   memory_citation_stash_csvs(&stash, injected, sizeof(injected), inj_scores, sizeof(inj_scores),
+                              referenced, sizeof(referenced));
 
    /* Tool-surfaced facts -> the tool universe CSV, canonical "fact:<id>" (the
     * analyzer derives tool-cite precision from cited ∩ this; summaries would slot
@@ -232,8 +224,8 @@ void memory_citation_capture(session_t *session, const char *response_text) {
    /* Whose memory the reply cited: the local mic's is the default voice user's. */
    const int user_id = session_effective_user_id(session);
 
-   audit_insert(conv_id, msg_id, user_id, injected, cited_all, inj_scores, tool_surfaced, dropped,
-                dropped_tool);
+   audit_insert(conv_id, msg_id, user_id, injected, referenced, cited_all, inj_scores,
+                tool_surfaced, dropped, dropped_tool);
 
    /* Phase 2 — citation-driven confidence reinforcement.  Bump every FACT the model
     * actually cited (facts only in v1; cited summaries/relations are audited above but

@@ -514,8 +514,6 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.source_weights.calendar_event = 0.6f;
    config->memory.focus_injection.source_weights.recent_email = 0.5f;
    config->memory.focus_injection.source_weights.dawn_background = 0.8f;
-   config->memory.focus_injection.dedup.recent_window_turns = 8;
-   config->memory.focus_injection.dedup.score_uplift_factor = 1.5f;
 
    /* Dominant-token over-inclusion heuristic (Phase B reranker workstream,
     * 2026-05-13).  Bench-validated at canonical params on focus_probe_cases.json

@@ -370,9 +370,30 @@ static void test_stable_and_earlier_handles(void) {
    g_prior_count = 0;
 }
 
+/* An item named again this turn ([still relevant: ...]) resolves as this
+ * turn's, and the audit lists it apart from the items sent. */
+static void test_named_items_resolve_and_audit_apart(void) {
+   const char *ids[] = { "fact:10", "fact:20", "fact:30" };
+   set_stash(ids, 3);
+   g_stash.entries[1].referenced = true;
+   g_stash.entries[0].final_score = 0.5f;
+   g_stash.entries[2].final_score = 0.25f;
+   set_tool(NULL, 0);
+   run("answer <cited>M2</cited>");
+   TEST_ASSERT_EQUAL_STRING("fact:20", g_all);
+   TEST_ASSERT_EQUAL_STRING("fact:20", g_focus);
+   char injected[128], scores[128], referenced[128];
+   memory_citation_stash_csvs(&g_stash, injected, sizeof(injected), scores, sizeof(scores),
+                              referenced, sizeof(referenced));
+   TEST_ASSERT_EQUAL_STRING("fact:10,fact:30", injected);
+   TEST_ASSERT_EQUAL_STRING("0.5000,0.2500", scores);
+   TEST_ASSERT_EQUAL_STRING("fact:20", referenced);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_stable_and_earlier_handles);
+   RUN_TEST(test_named_items_resolve_and_audit_apart);
    RUN_TEST(test_focus_ordinals);
    RUN_TEST(test_bare_numbers_are_ordinals);
    RUN_TEST(test_ordinal_out_of_range_dropped);

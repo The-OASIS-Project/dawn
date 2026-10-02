@@ -218,6 +218,14 @@ def grade_turn(art, i, judge):
         if prior:
             prompt.append(f"Earlier conversation:\n{prior}")
         prompt.append(f"LATEST USER MESSAGE: {script['text']}")
+        results = pers.get("tool_results") or []
+        if called:
+            # The answer is judged against what its tools returned, so a
+            # grounded answer isn't mistaken for an invented one.
+            lines = [f"- {n or '(unparsed call)'}" for n in called]
+            lines += [f"  result: {(r.get('content') or '')[:800]}" for r in results]
+            prompt.append("TOOLS THE ASSISTANT CALLED THIS TURN (results truncated):\n"
+                          + "\n".join(lines))
         prompt.append(f"ASSISTANT ANSWER: {answer}")
         prompt.append(f"RUBRIC: {script['rubric']}")
         verdict = judge.verdict("\n\n".join(prompt))
@@ -233,6 +241,12 @@ def grade_turn(art, i, judge):
     injected_memory = any(i.startswith(mem_kinds) for i in inj_ids)
     cited_memory = any(i.startswith(mem_kinds) for i in cit_ids)
     dropped = sum((a.get("dropped_count") or 0) for a in audits)
+    # Items sent this turn (new) vs items already in context the turn named as
+    # still relevant (referenced). Older daemons have no referenced ids, and
+    # re-send an item each time, so it counts as new there.
+    ref_ids = [i for a in audits for i in (a.get("referenced_ids") or "").split(",") if i]
+    inj_set, ref_set, cit_set = set(inj_ids), set(ref_ids), set(cit_ids)
+    ctx = pers.get("context_chars") or {}
     calls = parse_claude_calls(live.get("daemon_log"))
     return {"scenario": art["scenario"], "rep": art.get("rep", 1), "turn": i + 1,
             "tool_ok": tool_ok, "called": called, "expect_tools": expect,
@@ -242,6 +256,11 @@ def grade_turn(art, i, judge):
             "injected": injected, "cited": cited, "dropped": dropped,
             "injected_memory": injected_memory, "cited_memory": cited_memory,
             "memory_tool_calls": sum(1 for n in called if n in ("memory", "recall")),
+            "available": bool(inj_set or ref_set),
+            "new_ids": len(inj_set), "new_cited": len(inj_set & cit_set),
+            "ref_ids": len(ref_set), "ref_cited": len(ref_set & cit_set),
+            "context_chars": sum(ctx.values()) if ctx else None,
+            "model_used": live.get("model"), "switched_to": live.get("switched_to"),
             "claude_calls": calls}
 
 
@@ -256,6 +275,9 @@ def summarize(rows):
     calls = [c for r in rows for c in r["claude_calls"]]
     prompt = sum(c["prompt"] for c in calls)
     lat = sorted(r["elapsed_s"] for r in rows if r["elapsed_s"] is not None)
+    ctx_sizes = [r["context_chars"] for r in rows if r.get("context_chars") is not None]
+    late = [r["context_chars"] for r in rows
+            if r.get("context_chars") is not None and r["turn"] > 2]
     return {
         "turns": n,
         "errored": sum(r["errored"] for r in rows),
@@ -272,6 +294,14 @@ def summarize(rows):
         "recall_memory_tool_calls": sum(r["memory_tool_calls"] for r in cite_rows),
         "cite_rate_all_injected_pct": pct(sum(r["cited"] for r in rows if r["injected"]),
                                           sum(r["injected"] for r in rows)),
+        "recall_available_pct": pct(sum(r.get("available", r["injected"]) for r in cite_rows),
+                                    len(cite_rows)),
+        "cite_rate_new_pct": pct(sum(r.get("new_cited", 0) for r in rows),
+                                 sum(r.get("new_ids", 0) for r in rows)),
+        "cite_rate_referenced_pct": pct(sum(r.get("ref_cited", 0) for r in rows),
+                                        sum(r.get("ref_ids", 0) for r in rows)),
+        "context_chars_per_turn": (round(sum(ctx_sizes) / len(ctx_sizes)) if ctx_sizes else None),
+        "context_chars_after_turn2": (round(sum(late) / len(late)) if late else None),
         "dropped_citations": sum(r["dropped"] for r in rows),
         "latency_median_s": lat[len(lat) // 2] if lat else None,
         "claude_calls_logged": len(calls),
@@ -314,6 +344,11 @@ METRICS = [("turns", "turns"), ("errored", "errored turns"),
            ("recall_memory_injected_pct", "recall: memory injected %"),
            ("recall_memory_cited_pct", "recall: memory cited %"),
            ("recall_memory_tool_calls", "recall: memory tool calls"), ("cite_rate_all_injected_pct", "cite-rate %"),
+           ("recall_available_pct", "recall: memory available %"),
+           ("cite_rate_new_pct", "cite-rate: new items %"),
+           ("cite_rate_referenced_pct", "cite-rate: referenced items %"),
+           ("context_chars_per_turn", "context chars / turn"),
+           ("context_chars_after_turn2", "context chars / turn (3+)"),
            ("dropped_citations", "dropped citations"), ("latency_median_s", "median turn s"),
            ("claude_calls_logged", "claude calls (log)"),
            ("cache_read_pct_of_prompt", "cache read % prompt"),

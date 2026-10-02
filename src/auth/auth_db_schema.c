@@ -579,9 +579,11 @@ static const char *SCHEMA_SQL =
                                   */
     "   tool_surfaced_ids TEXT," /* v79: CSV of facts shown via a memory tool this turn,
                                     canonical "fact:x" — the tool-cite universe (Option B) */
-    "   dropped_count INTEGER DEFAULT 0,"     /* cited ordinals rejected (out-of-range/dup) */
-    "   dropped_tool_count INTEGER DEFAULT 0" /* v79: cited ID:x not in the surfaced set
-                                                 (mis-copied / hallucinated tool id) */
+    "   dropped_count INTEGER DEFAULT 0,"      /* cited ordinals rejected (out-of-range/dup) */
+    "   dropped_tool_count INTEGER DEFAULT 0," /* v79: cited ID:x not in the surfaced set
+                                                  (mis-copied / hallucinated tool id) */
+    "   referenced_ids TEXT" /* v99: CSV of items named again as still relevant (not sent);
+                                injected_ids holds only the ones sent */
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_citation_audit_user_ts ON "
     "memory_citation_audit(user_id, ts);"

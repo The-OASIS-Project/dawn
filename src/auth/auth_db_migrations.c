@@ -3395,6 +3395,29 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
+   /* v99: memory_citation_audit.referenced_ids (the items a turn named again
+    * rather than sent).  Idempotent (probe-guarded ALTER). */
+   bool v99_ok = (current_version >= 99);
+   if (current_version < 99) {
+      if (auth_db_migrations_v99(s_db.db) == AUTH_DB_SUCCESS) {
+         v99_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v99 migration (memory_citation_audit.referenced_ids) failed");
+      }
+   }
+
+   /* v100: compaction summaries stored as they are sent (neutralized once,
+    * replayed verbatim); one whose rendering that changes is a declared
+    * boundary for its conversation. */
+   bool v100_ok = (current_version >= 100);
+   if (current_version < 100) {
+      if (auth_db_migrations_v100(s_db.db) == AUTH_DB_SUCCESS) {
+         v100_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v100 migration (compaction summaries stored as sent) failed");
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3420,7 +3443,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
                               v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
                               v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
-                              v97_ok && v98_ok;
+                              v97_ok && v98_ok && v99_ok && v100_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

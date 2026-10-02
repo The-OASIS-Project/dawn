@@ -533,7 +533,7 @@
     * Regex to match [ATTACHED DOCUMENT: filename (N bytes)]...content...[END DOCUMENT].
     * The optional " blob:blb_xxxxxxxxxxxx" suffix (v68) links the stored original
     * file; older messages without it still match (the group is optional).
-    * The "blob:<id>]" marker is mirrored by the producer (dawn.js) and the
+    * The "blob:<id>]" marker is mirrored by the producer (src/webui/webui_attachments.c) and the
     * orphan-sweep SQL; kept in sync by scripts/check_blob_marker_sync.sh.
     */
    const DOC_MARKER_RE =

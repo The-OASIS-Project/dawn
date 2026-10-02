@@ -11,7 +11,7 @@ the request is built by the real code under test.
 
 | File | Role |
 |---|---|
-| `scenarios.json` | Scripted multi-turn conversations. Each turn has `expect_tools`, a judge `rubric`, and optional `needs_date` / `expect_citation` / `forbid_tools`. |
+| `scenarios.json` | Scripted multi-turn conversations. Each turn has `expect_tools`, a judge `rubric`, and optional `needs_date` / `expect_citation` / `forbid_tools` / `switch_to_alternate` (switch the conversation's model before this turn, to the first `--alternates` entry that isn't the model in use). |
 | `memory_fixture.json` | Fixed, fictional memory set loaded into the eval account before a run. |
 | `run_ab.py` | Drives the conversations; writes one JSON artifact per (model, scenario). |
 | `grade_ab.py` | Offline grading (tool check, LLM judge, citation audit, cache lines) and run-vs-run comparison. |
@@ -41,7 +41,12 @@ cd benchmarks/dawn_ab
 ```
 
 Useful flags: `--only memory_recall,tool_followup`, `--repeat 3` (LLM variance), `--thinking-mode`,
-`--effort`, `--no-judge` (deterministic checks only, no API spend).
+`--effort`, `--alternates` (models a `switch_to_alternate` turn switches to), `--no-judge`
+(deterministic checks only, no API spend).
+
+`long_single_topic` is one topic over 12 turns, with the same remembered facts relevant early, in the
+middle and late, and a model switch at turn 10. It measures what remembered context costs per turn
+over a long conversation, and whether answers still use a fact that was shown many turns back.
 
 ## What each metric means
 
@@ -51,6 +56,14 @@ Useful flags: `--only memory_recall,tool_followup`, `--repeat 3` (LLM variance),
   when both used the same judge model.
 - **recall: injected / cited %** — on `expect_citation` turns, from `memory_citation_audit`: was
   memory injected, and did the answer cite it. **cite-rate %** is cited ÷ injected over all turns.
+- **memory available %** — on `expect_citation` turns, memory was either sent with the turn or
+  named as still relevant from earlier in the conversation.
+- **cite-rate: new / referenced items %** — cited ÷ offered, separately for items sent with the turn
+  and items the turn named as already in context (`referenced_ids`; daemons that re-send every item
+  each turn have none, so everything counts as new there).
+- **context chars / turn** — the size of the per-turn context rows the daemon saved (turn context
+  plus memory), averaged over all turns and over turns 3 and later. On a long single-topic
+  conversation it shows whether items already in context are sent again.
 - **dropped citations** — cited ordinals the daemon rejected as invalid. It should stay 0.
 - **cache read / write / uncached % prompt** — Anthropic calls parsed from daemon-log lines written
   during each turn. **Best-effort:** other traffic on the same daemon interleaves into those lines.
@@ -63,9 +76,10 @@ Useful flags: `--only memory_recall,tool_followup`, `--repeat 3` (LLM variance),
 
 - Conversations are **private**, so no memory extraction happens and runs don't change the account's
   memory. The fixture is reloaded on every `--reseed-memory`.
-- Imported memories are embedded in the background right after `--reseed-memory`, so the first
-  turns of a run can start before they all are. `memory reseeded: N facts (M embedded)` counts them at
-  reseed time. Runs from before 2026-09-26 had no embedded imports (fixture recall was keyword-only),
-  so compare them only with runs from that time.
+- Imported memories are embedded in the background right after `--reseed-memory`; the run waits
+  (up to two minutes) until they all are, and `memory reseeded: N facts (M embedded)` says if it
+  gave up early. Runs from before 2026-09-26 had no embedded imports (fixture recall was
+  keyword-only), and runs before 2026-10-01 could start before embedding finished, so compare
+  them only with runs from that time.
 - Weather turns depend on live data. The rubric checks grounding, not specific values.
 - LLM output varies. Use `--repeat` before reading much into a one-turn difference.

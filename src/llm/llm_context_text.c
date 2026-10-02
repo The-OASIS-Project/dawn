@@ -120,6 +120,17 @@ static size_t utf8_at(const unsigned char *s, unsigned *cp) {
 /* What the shadow makes of code point @p cp: 0 to leave it out, an ASCII
  * byte to show it as, or -1 to show it as it is. */
 static int shadowed(unsigned cp) {
+   /* Line breaks first: U+0085 is a C1 code point, but a reader breaks the
+    * line there. */
+   if (cp == 0x2028 || cp == 0x2029 || cp == 0x0085) {
+      return '\n';
+   }
+   /* Control characters a reader doesn't see (all but the whitespace ones),
+    * DEL and the C1 controls read as nothing, like zero-width characters. */
+   if ((cp < 0x20 && cp != '\t' && cp != '\n' && cp != '\r' && cp != '\v' && cp != '\f') ||
+       (cp >= 0x7F && cp <= 0x9F)) {
+      return 0;
+   }
    if ((cp >= 0x200B && cp <= 0x200F) || (cp >= 0x202A && cp <= 0x202E) ||
        (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0x2066 && cp <= 0x2069) || cp == 0xFEFF ||
        cp == 0x00AD || cp == 0x180E || cp == 0x034F || (cp >= 0x0300 && cp <= 0x036F) ||
@@ -137,18 +148,21 @@ static int shadowed(unsigned cp) {
       return (int)(cp - 0xFEE0); /* fullwidth ASCII */
    }
    if (cp == 0xFE5D || cp == 0x3010 || cp == 0x3008 || cp == 0x27E8 || cp == 0x300C ||
-       cp == 0x27E6 || cp == 0x3014 || cp == 0x00AB || cp == 0x2039 || cp == 0x300A) {
+       cp == 0x27E6 || cp == 0x3014 || cp == 0x00AB || cp == 0x2039 || cp == 0x300A ||
+       cp == 0x3016 || cp == 0x2045 || cp == 0xFF62 || cp == 0x301A || cp == 0x2308 ||
+       cp == 0x230A || cp == 0x298B || cp == 0x298D || cp == 0x298F || cp == 0xFE47 ||
+       cp == 0x2768 || cp == 0x276A) {
       return '[';
    }
    if (cp == 0xFE5E || cp == 0x3011 || cp == 0x3009 || cp == 0x27E9 || cp == 0x300D ||
-       cp == 0x27E7 || cp == 0x3015 || cp == 0x00BB || cp == 0x203A || cp == 0x300B) {
+       cp == 0x27E7 || cp == 0x3015 || cp == 0x00BB || cp == 0x203A || cp == 0x300B ||
+       cp == 0x3017 || cp == 0x2046 || cp == 0xFF63 || cp == 0x301B || cp == 0x2309 ||
+       cp == 0x230B || cp == 0x298C || cp == 0x298E || cp == 0x2990 || cp == 0xFE48 ||
+       cp == 0x2769 || cp == 0x276B) {
       return ']';
    }
    if (cp == 0x00B7 || cp == 0x2022 || cp == 0x2027 || cp == 0x30FB) {
       return '.';
-   }
-   if (cp == 0x2028 || cp == 0x2029 || cp == 0x0085) {
-      return '\n';
    }
    if (cp == 0x00A0 || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x202F || cp == 0x205F ||
        cp == 0x3000 || cp == '\t') {
@@ -281,6 +295,23 @@ static char folded(unsigned cp) {
       { 0x0274, 'n' },
       { 0x1D1B, 't' },
       { 0x1D1C, 'u' },
+      /* Letters that read as M */
+      { 0x216F, 'm' },
+      { 0x217F, 'm' },
+      { 0x1D0D, 'm' },
+      { 0x13B7, 'm' },
+      { 0x03FA, 'm' },
+      { 0x2133, 'm' },
+      { 0x1E3E, 'm' },
+      { 0x1E3F, 'm' },
+      { 0x1E40, 'm' },
+      { 0x1E41, 'm' },
+      { 0x1E42, 'm' },
+      { 0x1E43, 'm' },
+      { 0x04CD, 'm' },
+      { 0x1F13C, 'm' },
+      { 0x1F15C, 'm' },
+      { 0x1F17C, 'm' },
    };
    for (size_t i = 0; i < sizeof(k_confusable) / sizeof(k_confusable[0]); i++) {
       if (k_confusable[i].cp == cp) {
@@ -501,12 +532,12 @@ static size_t shadow_escape(const unsigned char *p, char out[4], size_t *out_len
    if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
       return 0;
    }
-   if (cp < 0x80) {
-      if (cp < 0x20 && cp != '\n' && cp != '\r' && cp != '\t' && cp != '\v' && cp != '\f') {
-         return 0;
+   if (cp < 0x7F) {
+      /* An escaped control character reads as nothing, as a raw one does. */
+      if (cp >= 0x20 || cp == '\n' || cp == '\r' || cp == '\t' || cp == '\v' || cp == '\f') {
+         out[0] = (char)cp;
+         *out_len = 1;
       }
-      out[0] = (char)cp;
-      *out_len = 1;
       return n;
    }
    const int r = shadowed(cp);
@@ -554,7 +585,7 @@ static bool shadow_make(const char *text, bool line, shadow_t *sh) {
       unsigned cp = *p;
       size_t n = 1;
       int r = -1;
-      if (*p >= 0x80 || *p == '\t') {
+      if (*p >= 0x7F || *p < 0x20) {
          n = utf8_at(p, &cp);
          r = shadowed(cp);
       }
@@ -670,6 +701,188 @@ static size_t tag_at(const shadow_t *sh, size_t i) {
 /* What a defused tag reads as: the shape kept, the digits withheld. */
 #define TAG_DEFUSED "dawn_ctx_(withheld)"
 
+/* The ASCII letter or digit at shadow position @p i (folded), with the
+ * position after it in *@p next; 0 at the end or for anything else. */
+static char letter_at(const shadow_t *sh, size_t i, size_t *next) {
+   unsigned cp;
+   const size_t n = utf8_at((const unsigned char *)sh->s + i, &cp);
+   *next = i + n;
+   return cp ? folded(cp) : 0;
+}
+
+/* The largest handle an item line names: nine digits. */
+#define LLM_CONTEXT_HANDLE_MAX 999999999L
+
+/* A digit at shadow position @p i, as many digits as it reads as (a circled
+ * 10 to 20 is two): their value, with how many in *@p count and the position
+ * after it in *@p next; -1 when there is none. */
+static int digits_at(const shadow_t *sh, size_t i, int *count, size_t *next) {
+   unsigned cp;
+   const size_t n = utf8_at((const unsigned char *)sh->s + i, &cp);
+   *next = i + n;
+   if (cp >= 0x2469 && cp <= 0x2473) {
+      *count = 2;
+      return (int)(cp - 0x2469) + 10;
+   }
+   const char d = cp ? folded(cp) : 0;
+   *count = 1;
+   return (d >= '0' && d <= '9') ? d - '0' : -1;
+}
+
+/* The sources DAWN's item lines name, as words: a known one reads as a
+ * source however its words are joined ("memory fact", "Memory-Fact"). */
+static const char *const k_sources[][3] = {
+   { "memory", "fact", NULL },     { "memory", "summary", NULL }, { "memory", "entity", NULL },
+   { "memory", "relation", NULL }, { "calendar", "event", NULL }, { "document", "chunk", NULL },
+};
+
+/* A known source at @p i, its words apart or run together: where it ends (a
+ * letter or digit right after it is another word), or 0. */
+static size_t known_source_at(const shadow_t *sh, size_t i) {
+   for (size_t k = 0; k < sizeof(k_sources) / sizeof(k_sources[0]); k++) {
+      size_t e = words_at(sh, i, k_sources[k]);
+      if (e == 0) {
+         const size_t first = word_at(sh, i, k_sources[k][0]);
+         e = first ? word_at(sh, first, k_sources[k][1]) : 0;
+      }
+      size_t next;
+      if (e > 0 && letter_at(sh, e, &next) == 0) {
+         return e;
+      }
+   }
+   return 0;
+}
+
+/* A source token at shadow position @p i, as DAWN's item lines name one
+ * ("memory_fact", "calendar_event": letters and digits joined by '_'), or a
+ * known source in any joining: where it ends, or 0. */
+static size_t source_at(const shadow_t *sh, size_t i) {
+   const size_t start = i;
+   bool joined = false;
+   bool letter = false;
+   size_t next;
+   for (;;) {
+      if (sh->s[i] == '_' && letter) {
+         joined = true;
+         i++;
+         continue;
+      }
+      const char c = letter_at(sh, i, &next);
+      if (!c) {
+         break;
+      }
+      letter = true;
+      i = next;
+   }
+   return joined ? i : known_source_at(sh, start);
+}
+
+/* After an opening '[' at @p i: an item line's handle ("[M12 memory_fact"),
+ * spelled in any way that reads as one: separators after the bracket, spaces
+ * or "-", "_", "." between the M and its digits (leading zeros read as
+ * nothing), then spaces and a source token.  A bare citation ("[M12]",
+ * "[M3, M7]"), a handle past nine digits, or ordinary words after the digits
+ * ("[M3 Max]") aren't one.  Returns the position after the M (0: none), with
+ * the handle in *@p handle. */
+static size_t item_handle_at(const shadow_t *sh, size_t i, int *handle) {
+   const size_t w = seps_at(sh, i + 1, false);
+   size_t at;
+   if (letter_at(sh, w, &at) != 'm') {
+      return 0;
+   }
+   const size_t after_m = at;
+   while (sh->s[at] == ' ' || sh->s[at] == '-' || sh->s[at] == '_' || sh->s[at] == '.') {
+      at++;
+   }
+   long h = 0;
+   bool any = false;
+   size_t next;
+   int count;
+   int v;
+   while ((v = digits_at(sh, at, &count, &next)) >= 0) {
+      any = true;
+      h = h * (count == 2 ? 100 : 10) + v;
+      if (h > LLM_CONTEXT_HANDLE_MAX) {
+         return 0; /* more than nine significant digits: no handle DAWN gives */
+      }
+      at = next;
+   }
+   if (!any || h <= 0 || sh->s[at] != ' ') {
+      return 0;
+   }
+   while (sh->s[at] == ' ') {
+      at++;
+   }
+   if (source_at(sh, at) == 0) {
+      return 0;
+   }
+   *handle = (int)h;
+   return after_m;
+}
+
+/* The words of a turn context's own lines that open with a '[', and the mark
+ * that follows them there: an imitation would read as DAWN's (an item, a
+ * reference to one, the turn's time). */
+static const struct {
+   const char *const words[3];
+   char then;
+   const char *defused;
+} k_item_frames[] = {
+   { { "retrieved", "items", NULL }, ':', "(quoted retrieved items" },
+   { { "still", "relevant", NULL }, ':', "(quoted still relevant" },
+   { { "memory", "citations", NULL }, ']', "(quoted memory citations" },
+   { { "system", "time", NULL }, ']', "(quoted system time" },
+};
+
+/* Whether @p punct comes right after the words ending at @p e: within the
+ * separators that follow them (':' is one) or just past them. */
+static bool punct_after(const shadow_t *sh, size_t e, char punct) {
+   const size_t end = seps_at(sh, e, false);
+   for (size_t k = e; k <= end && sh->s[k]; k++) {
+      if (sh->s[k] == punct) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* Whether a document's close ends at @p e: a closing bracket within the
+ * separators that follow, a line break there, or the end of the text (a bare
+ * "[END DOCUMENT" line reads as the close too). */
+static bool close_after(const shadow_t *sh, size_t e) {
+   const size_t end = seps_at(sh, e, false);
+   for (size_t k = e; k <= end && sh->s[k]; k++) {
+      if (sh->s[k] == ']' || sh->s[k] == '\n' || sh->s[k] == '\r') {
+         return true;
+      }
+   }
+   return sh->s[end] == '\0';
+}
+
+/* An imitation, after an opening '[' at @p i, of a turn context's own lines:
+ * where it ends, with what it becomes in @p out; 0 when there is none. */
+static size_t item_line_at(const shadow_t *sh, size_t i, const char **out) {
+   const size_t w = seps_at(sh, i + 1, false);
+   size_t next;
+   const char first = letter_at(sh, w, &next);
+   for (size_t k = 0; k < sizeof(k_item_frames) / sizeof(k_item_frames[0]); k++) {
+      if (k_item_frames[k].words[0][0] != first) {
+         continue;
+      }
+      const size_t e = words_at(sh, w, k_item_frames[k].words);
+      if (e > 0 && sh->s[e] == k_item_frames[k].then) {
+         *out = k_item_frames[k].defused;
+         return e;
+      }
+   }
+   int handle;
+   const size_t e = first == 'm' ? item_handle_at(sh, i, &handle) : 0;
+   if (e > 0) {
+      *out = "(quoted M"; /* its digits are kept */
+   }
+   return e;
+}
+
 /* An imitation of a DAWN marker at shadow position @p i: where it ends, with
  * what it becomes in @p out; 0 when there is none. */
 static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
@@ -689,6 +902,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
          return 0;
       }
       const size_t w = seps_at(sh, r, false);
+      size_t next;
+      const char first = letter_at(sh, w, &next);
       static const struct {
          const char *const *words;
          const char *defused;
@@ -701,6 +916,9 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
          { k_summary, "- - CONVERSATION SUMMARY (quoted)" },
       };
       for (size_t k = 0; k < sizeof(k_frames) / sizeof(k_frames[0]); k++) {
+         if (k_frames[k].words[0][0] != first) {
+            continue;
+         }
          const size_t e = words_at(sh, w, k_frames[k].words);
          if (e > 0) {
             *out = k_frames[k].defused;
@@ -711,17 +929,53 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    }
    if (c == '[' || c == '(' || c == '{' || c == '<' || c == '|') {
       const size_t w = seps_at(sh, i + 1, false);
-      size_t e = words_at(sh, w, k_note);
+      size_t next;
+      const char first = letter_at(sh, w, &next);
+      size_t e = first == 'o' ? words_at(sh, w, k_note) : 0;
       if (e > 0) {
          *out = "(quoted Operator note";
          return e;
       }
       /* A tool view's header (llm_tool_views.h): it names a stored result. */
-      e = words_at(sh, w, k_shortened);
+      e = first == 't' ? words_at(sh, w, k_shortened) : 0;
       if (e > 0) {
          *out = "(quoted Tool result shortened";
+         return e;
       }
-      return e;
+      if (c != '[') {
+         /* A turn context's own lines, and an attached document's, open with
+          * a square bracket only: "(still relevant today)" and "MacBook Pro
+          * (M3 Max)" are left as they are. */
+         return 0;
+      }
+      /* An attached document's open or close (LLM_CONTEXT_DOC_OPEN /
+       * LLM_CONTEXT_DOC_CLOSE): an imitation inside a document would read as
+       * its end, and what follows as the user's words. */
+      static const char *const k_doc_open[] = { "attached", "document", NULL };
+      static const char *const k_doc_close[] = { "end", "document", NULL };
+      /* Only in the markers' own shape (a colon after the open's words; a
+       * closing bracket, a line break or the end after the close's), so prose
+       * like "[attached document](url)" or "[end documentation]" is left as
+       * it is. */
+      e = first == 'a' ? words_at(sh, w, k_doc_open) : 0;
+      if (e > 0 && punct_after(sh, e, ':')) {
+         *out = "(quoted ATTACHED DOCUMENT";
+         return e;
+      }
+      e = first == 'e' ? words_at(sh, w, k_doc_close) : 0;
+      if (e > 0 && close_after(sh, e)) {
+         *out = "(quoted END DOCUMENT";
+         return e;
+      }
+      /* An image marker ("[IMAGE:<id>]", what a stored question's images
+       * are named by): one in text DAWN didn't write is never an image. */
+      static const char *const k_image[] = { "image", NULL };
+      e = first == 'i' ? words_at(sh, w, k_image) : 0;
+      if (e > 0 && punct_after(sh, e, ':')) {
+         *out = "(quoted IMAGE";
+         return e;
+      }
+      return item_line_at(sh, i, out);
    }
    if ((unsigned char)c < 0x80 && c != 'u' && c != 'U' && c != 'd' && c != 'D') {
       return 0;
@@ -738,24 +992,48 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    return e;
 }
 
-/* @p text rewritten where its shadow @p sh holds imitations into @p out
- * (NULL: only measure).  Returns the length written. */
-static size_t defuse(const char *text, const shadow_t *sh, char *out) {
-   size_t off = 0;
+/* An output buffer that grows as the rewrite needs. */
+typedef struct {
+   char *b;
+   size_t len;
+   size_t cap;
+} grow_t;
+
+static bool grow_put(grow_t *g, const char *p, size_t n) {
+   if (g->len + n + 1 > g->cap) {
+      size_t cap = g->cap * 2;
+      while (cap < g->len + n + 1) {
+         cap *= 2;
+      }
+      char *b = realloc(g->b, cap);
+      if (!b) {
+         return false;
+      }
+      g->b = b;
+      g->cap = cap;
+   }
+   memcpy(g->b + g->len, p, n);
+   g->len += n;
+   return true;
+}
+
+/* @p text rewritten where its shadow @p sh holds imitations, in one pass.
+ * Returns the new text (heap), or NULL on allocation failure. */
+static char *defuse(const char *text, const shadow_t *sh) {
+   const size_t len = strlen(text);
+   grow_t g = { .b = malloc(len + 64), .len = 0, .cap = len + 64 };
+   if (!g.b) {
+      return NULL;
+   }
+   bool ok = true;
    size_t copied = 0; /* original bytes before this are written */
-   for (size_t i = 0; i < sh->len;) {
+   for (size_t i = 0; ok && i < sh->len;) {
       const char *defused = NULL;
       const size_t e = imitation_at(sh, i, &defused);
       if (e > 0) {
          const size_t from = sh->src[i];
-         const size_t to = sh->src[e];
-         const size_t d = strlen(defused);
-         if (out) {
-            memcpy(out + off, text + copied, from - copied);
-            memcpy(out + off + (from - copied), defused, d);
-         }
-         off += (from - copied) + d;
-         copied = to;
+         ok = grow_put(&g, text + copied, from - copied) && grow_put(&g, defused, strlen(defused));
+         copied = sh->src[e];
          i = e;
          continue;
       }
@@ -768,47 +1046,58 @@ static size_t defuse(const char *text, const shadow_t *sh, char *out) {
          i += utf8_at((const unsigned char *)sh->s + i, &cp);
       }
    }
-   const size_t rest = strlen(text + copied);
-   if (out) {
-      memcpy(out + off, text + copied, rest);
+   ok = ok && grow_put(&g, text + copied, len - copied);
+   if (!ok) {
+      free(g.b);
+      return NULL;
    }
-   return off + rest;
+   g.b[g.len] = '\0';
+   return g.b;
+}
+
+/* @p text with its line breaks (U+2028, U+2029 and U+0085 among them) each a
+ * space.  Caller frees; NULL on allocation failure. */
+static char *one_line(const char *text) {
+   char *out = malloc(strlen(text) + 1);
+   if (!out) {
+      return NULL;
+   }
+   size_t w = 0;
+   for (size_t r = 0; text[r];) {
+      const unsigned char *u = (const unsigned char *)text + r;
+      if (*u == '\n' || *u == '\r' || *u == '\v' || *u == '\f') {
+         out[w++] = ' ';
+         r++;
+      } else if (u[0] == 0xE2 && u[1] == 0x80 && (u[2] == 0xA8 || u[2] == 0xA9)) {
+         out[w++] = ' ';
+         r += 3;
+      } else if (u[0] == 0xC2 && u[1] == 0x85) {
+         out[w++] = ' ';
+         r += 2;
+      } else {
+         out[w++] = text[r++];
+      }
+   }
+   out[w] = '\0';
+   return out;
 }
 
 static char *neutralize(const char *text, bool line) {
    if (!text) {
       return NULL;
    }
-   shadow_t sh;
-   if (!shadow_make(text, line, &sh)) {
+   /* One line: its breaks become spaces first, so what is checked is what is
+    * sent (a break that became a space after the check could complete a
+    * marker the check didn't see). */
+   char *flat = line ? one_line(text) : NULL;
+   if (line && !flat) {
       return NULL;
    }
-   char *out = malloc(defuse(text, &sh, NULL) + 1);
-   if (out) {
-      out[defuse(text, &sh, out)] = '\0';
-   }
+   const char *in = flat ? flat : text;
+   shadow_t sh;
+   char *out = shadow_make(in, line, &sh) ? defuse(in, &sh) : NULL;
    shadow_free(&sh);
-   if (out && line) {
-      /* One line: the original's own breaks go too (U+2028, U+2029 and
-       * U+0085 among them, each a space now). */
-      size_t w = 0;
-      for (size_t r = 0; out[r];) {
-         const unsigned char *u = (const unsigned char *)out + r;
-         if (*u == '\n' || *u == '\r' || *u == '\v' || *u == '\f') {
-            out[w++] = ' ';
-            r++;
-         } else if (u[0] == 0xE2 && u[1] == 0x80 && (u[2] == 0xA8 || u[2] == 0xA9)) {
-            out[w++] = ' ';
-            r += 3;
-         } else if (u[0] == 0xC2 && u[1] == 0x85) {
-            out[w++] = ' ';
-            r += 2;
-         } else {
-            out[w++] = out[r++];
-         }
-      }
-      out[w] = '\0';
-   }
+   free(flat);
    return out;
 }
 
@@ -824,6 +1113,125 @@ char *llm_context_neutralize_owned(char *text) {
 
 char *llm_context_neutralize_line(const char *text) {
    return neutralize(text, true);
+}
+
+/* Whether @p text may hold an item line's handle: a non-ASCII character, an
+ * escape or a control character anywhere (each may stand for, or hide between,
+ * a bracket and an M), or an ASCII '[' with an M after its separators.  Plain text with neither
+ * (most text) needs no shadow. */
+static bool may_open(const char *text) {
+   for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+      if (*p >= 0x7F || *p == '&' || *p == '%' || *p == '\\' ||
+          (*p < 0x20 && *p != '\n' && *p != '\r' && *p != '\t')) {
+         return true;
+      }
+      if (*p == '[') {
+         const unsigned char *q = p + 1;
+         while (*q && is_sep((char)*q)) {
+            q++;
+         }
+         if (*q == 'm' || *q == 'M') {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+int llm_context_item_imitations(const char *text, void (*fn)(int handle, void *ctx), void *ctx) {
+   if (!text || !fn || !may_open(text)) {
+      return 0;
+   }
+   shadow_t sh;
+   if (!shadow_make(text, false, &sh)) {
+      return 1;
+   }
+   for (size_t i = 0; i < sh.len;) {
+      int handle = 0;
+      if (sh.s[i] == '[' && item_handle_at(&sh, i, &handle) > 0 && handle > 0) {
+         fn(handle, ctx);
+      }
+      unsigned cp;
+      i += utf8_at((const unsigned char *)sh.s + i, &cp);
+   }
+   shadow_free(&sh);
+   return 0;
+}
+
+/* Where an attachment header's size part starts ("(123 bytes)" and an
+ * optional " blob:blb_<12>" then "]", to the line's end at @p end): the
+ * filename ends just before it.  NULL when the line isn't shaped so. */
+static const char *header_tail(const char *name, const char *end) {
+   for (const char *p = end; p > name; p--) {
+      if (p[-1] != ' ' || p[0] != '(') {
+         continue;
+      }
+      const char *q = p + 1;
+      while (q < end && *q >= '0' && *q <= '9') {
+         q++;
+      }
+      if (q == p + 1 || (size_t)(end - q) < 7 || strncmp(q, " bytes)", 7) != 0) {
+         continue;
+      }
+      q += 7;
+      if ((size_t)(end - q) == 10 + 12 + 1 && strncmp(q, " blob:blb_", 10) == 0) {
+         q += 10 + 12;
+      }
+      if (q + 1 == end && *q == ']') {
+         return p - 1;
+      }
+   }
+   return NULL;
+}
+
+char *llm_context_neutralize_attachments(const char *text) {
+   if (!text) {
+      return NULL;
+   }
+   static const char k_open[] = LLM_CONTEXT_DOC_OPEN;
+   static const char k_close[] = "\n" LLM_CONTEXT_DOC_CLOSE;
+   grow_t g = { .b = malloc(strlen(text) + 64), .len = 0, .cap = strlen(text) + 64 };
+   if (!g.b) {
+      return NULL;
+   }
+   bool ok = true;
+   const char *at = text;
+   for (;;) {
+      const char *open = strstr(at, k_open);
+      const char *body = open ? strchr(open, '\n') : NULL;
+      const char *close = body ? strstr(body, k_close) : NULL;
+      if (!close) {
+         break;
+      }
+      /* The header: its filename (the user's file's name: from anywhere)
+       * defused as one line; its size and stored-original suffix kept as
+       * they are (what reads them back depends on them). */
+      const char *name = open + sizeof(k_open) - 1;
+      const char *tail = header_tail(name, body);
+      const char *name_end = tail ? tail : body;
+      char *raw_name = strndup(name, (size_t)(name_end - name));
+      char *safe_name = raw_name ? llm_context_neutralize_line(raw_name) : NULL;
+      ok = ok && safe_name && grow_put(&g, at, (size_t)(name - at)) &&
+           grow_put(&g, safe_name, strlen(safe_name)) &&
+           grow_put(&g, name_end, (size_t)(body + 1 - name_end));
+      free(raw_name);
+      free(safe_name);
+      /* Its contents, defused. */
+      body++;
+      char *span = strndup(body, (size_t)(close - body));
+      char *safe = span ? llm_context_neutralize(span) : NULL;
+      ok = ok && safe && grow_put(&g, safe, strlen(safe));
+      free(span);
+      free(safe);
+      at = close;
+   }
+   ok = ok && grow_put(&g, at, strlen(at));
+   if (!ok) {
+      free(g.b);
+      return NULL;
+   }
+   g.b[g.len] = '\0';
+   return g.b;
 }
 
 bool llm_context_tag_secret(const char *tag, char hex[9]) {
@@ -1016,9 +1424,8 @@ char *llm_context_mask_secret(const char *text, const char *hex) {
    "(withdrawn: this changed or was forgotten since; the current one comes with a " \
    "later turn)"
 
-/* The handle a turn-context item line names ("[M7 source] ..."), or 0. */
-static int line_handle(const char *line, size_t len) {
-   if (len < 4 || line[0] != '[' || line[1] != 'M') {
+int llm_context_item_handle(const char *line, size_t len) {
+   if (!line || len < 4 || line[0] != '[' || line[1] != 'M') {
       return 0;
    }
    int h = 0;
@@ -1028,6 +1435,20 @@ static int line_handle(const char *line, size_t len) {
       i++;
    }
    return (i > 2 && i < len && line[i] == ' ') ? h : 0;
+}
+
+/* The length of an item line's "[M7 " prefix (its handle checked first). */
+static size_t item_prefix_len(const char *line) {
+   return (size_t)(strchr(line, ' ') - line) + 1;
+}
+
+bool llm_context_item_withdrawn(const char *line, size_t len) {
+   if (llm_context_item_handle(line, len) <= 0) {
+      return false;
+   }
+   const size_t plen = item_prefix_len(line);
+   return len == plen + sizeof(WITHDRAWN_ITEM) - 1 &&
+          strncmp(line + plen, WITHDRAWN_ITEM, len - plen) == 0;
 }
 
 int llm_context_withdraw_items(const char *text, const int *handles, int count, char **out) {
@@ -1053,18 +1474,14 @@ int llm_context_withdraw_items(const char *text, const int *handles, int count, 
    while (*line) {
       const char *nl = strchr(line, '\n');
       const size_t len = nl ? (size_t)(nl - line) : strlen(line);
-      const int h = line_handle(line, len);
+      const int h = llm_context_item_handle(line, len);
       bool hit = false;
       for (int i = 0; h > 0 && !hit && i < count; i++) {
          hit = handles[i] == h;
       }
-      size_t plen = 0;
+      hit = hit && !llm_context_item_withdrawn(line, len);
       if (hit) {
-         plen = (size_t)(strchr(line, ' ') - line) + 1; /* "[M7 " */
-         hit = !(len == plen + sizeof(WITHDRAWN_ITEM) - 1 &&
-                 strncmp(line + plen, WITHDRAWN_ITEM, len - plen) == 0);
-      }
-      if (hit) {
+         const size_t plen = item_prefix_len(line); /* "[M7 " */
          memcpy(buf + off, line, plen);
          off += plen;
          memcpy(buf + off, WITHDRAWN_ITEM, sizeof(WITHDRAWN_ITEM) - 1);

@@ -73,6 +73,21 @@ char *llm_context_neutralize_owned(char *text);
  *  allocation failure. */
 char *llm_context_neutralize_line(const char *text);
 
+/** How the WebUI inlines an attached document in a user's text: this line
+ *  (then the file's name and size), its contents, and the closing line. */
+#define LLM_CONTEXT_DOC_OPEN "[ATTACHED DOCUMENT: "
+#define LLM_CONTEXT_DOC_CLOSE "[END DOCUMENT]"
+
+/**
+ * @brief @p text with each attached document in it neutralized: its
+ *        contents (llm_context_neutralize) and its header's filename (as one
+ *        line); a file came from anywhere.  The header's size and
+ *        stored-original suffix (" blob:blb_<12>"), and the user's own words
+ *        around the documents, are kept as written.  Caller frees; NULL on
+ *        allocation failure.
+ */
+char *llm_context_neutralize_attachments(const char *text);
+
 /** The secret part of @p tag (its 8 hex digits, lowercase) in @p hex.
  *  Returns false when @p tag isn't a conversation tag. */
 bool llm_context_tag_secret(const char *tag, char hex[9]);
@@ -101,6 +116,28 @@ char *llm_context_mask_tag(char *text, const char *tag);
  * that comes in is).  True on allocation failure.
  */
 bool llm_context_carries_secret(const char *text, const char *hex);
+
+/**
+ * @brief The handle a turn context's item line names: "[M7 source date] text"
+ *        (and a withdrawn one, "[M7 (withdrawn: ...)") gives 7
+ * @param line A line, not NUL-terminated at @p len
+ * @return The handle, or 0 when the line doesn't open with one
+ */
+int llm_context_item_handle(const char *line, size_t len);
+
+/**
+ * @brief Call @p fn with the handle of every imitation of a turn context's
+ *        item line in @p text ("[M12 memory_fact ...", in any spelling the
+ *        neutralizer reads as one: lookalike letters and brackets, escapes,
+ *        spaces between the M and its digits).  A bare citation ("[M12]") isn't
+ *        one.  For text DAWN doesn't neutralize (the user's own words).
+ * @return 0, or 1 on allocation failure (nothing reported)
+ */
+int llm_context_item_imitations(const char *text, void (*fn)(int handle, void *ctx), void *ctx);
+
+/** Whether @p line (of @p len bytes) is an item line llm_context_withdraw_items
+ *  withdrew: its handle, then only the note that the user forgot it. */
+bool llm_context_item_withdrawn(const char *line, size_t len);
 
 /**
  * @brief A turn context's item lines withdrawn: each line naming one of

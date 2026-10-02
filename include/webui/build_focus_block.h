@@ -16,11 +16,14 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Per-turn focus-block builder — Phase 1e of Dynamic Context Injection.
+ * Per-turn focus builder: the items retrieved for a turn, ranked and
+ * numbered for the conversation.  Which of them the turn sends is decided at
+ * its seam (core/session_focus.h), against what the conversation already
+ * shows.
  *
- * Sole consumer: src/webui/webui_server.c::dawn_build_prompt(), called
- * once per refresh.  Layer 4 (webui) — pulls in the L2 focus framework
- * via core/focus/focus_source.h and the L2 embedding engine via
+ * Sole consumer: dawn_build_prompt (webui_auth_helpers.c), once per turn.
+ * Layer 4 (webui) — pulls in the L2 focus framework via
+ * core/focus/focus_source.h and the L2 embedding engine via
  * memory/memory_embeddings.h.
  */
 
@@ -29,6 +32,8 @@
 
 #include <stdint.h>
 
+#include "core/prompt_parts.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,54 +41,39 @@ extern "C" {
 struct session;
 
 /**
- * @brief Build the per-turn focus-injection block.
+ * @brief Retrieve the turn's items into @p out (focus_items, focus_panel).
  *
  * Pipeline (when enabled):
- *   1. Embed `user_turn_text` via memory_embeddings_embed.
- *   2. Call focus_compose with config-driven top_k.
- *   3. Render surviving candidates as multi-line "[<source_id>] <text>".
- *   4. (Phase 1g-i) Broadcast `context_injection` WebSocket event to
- *      every WebUI session matching (user_id, conv_id) — even on empty
- *      result, even on filter-only-rejected turns.  Skipped only when
- *      the feature gate is off.
+ *   1. Embed `user_turn_text` (with the previous question, for a short
+ *      follow-up) via memory_embeddings_embed.
+ *   2. focus_compose for the top_k most relevant items (no over-fetch).
+ *   3. Give each its handle for the conversation (focus_handles_assign),
+ *      defuse DAWN's markers in its text and make it one line.
+ *   4. Keep the ranked result as the context panel's (out->focus_panel):
+ *      the seam tells the panel each item's place once it has decided it
+ *      (session_focus_client_notice, defined here for the WebUI).
  *
- * Short-circuits at the top with `*out_block = NULL, return SUCCESS`
- * when:
+ * Leaves @p out's focus fields empty, returning SUCCESS, when:
  *   - Feature gate (`config->memory.focus_injection.enabled`) is off
  *   - `user_turn_text` is NULL or empty
  *   - User is unauthenticated (`user_id <= 0`)
+ * A retrieval that finds nothing still sets the panel (it shows "looked,
+ * found nothing").  Returns FAILURE on hard errors (out-of-memory,
+ * focus_compose FAILURE), with @p out's focus fields empty.
  *
- * Returns SUCCESS with `*out_block = NULL` on any benign zero-result
- * (no candidates survive ranking, embedding unavailable, etc.).
- * Returns FAILURE on hard errors (out-of-memory, focus_compose
- * FAILURE).  Caller MUST treat NULL `*out_block` as "omit the focus
- * section entirely" — never as "use last turn's content."
+ * Logging: one OLOG_INFO per retrieval (candidate and rejection counts,
+ * elapsed time; never item text), and an OLOG_WARNING per source with
+ * filter rejections.
  *
- * The block returned does NOT include framing markers.  The composer
- * in session_manager wraps the block in
- * `--- TURN CONTEXT ---` ... `--- END TURN CONTEXT ---` so the framing
- * lives in one place.
- *
- * Logging:
- *   - LOG_INFO once per non-short-circuited call summarizing
- *     candidate count, rejection count, and elapsed time.  Candidate
- *     text content is NEVER logged (privacy).
- *   - LOG_WARNING per source with non-zero filter rejections.
- *
- * @param session        The session the turn runs on: its focus dedup state and
- *                       the conversation's item handles ([M7]); NULL for none
+ * @param session        The session the turn runs on: the conversation's item
+ *                       handles ([M7]); NULL for none (items numbered per turn)
  * @param user_id        Authenticated user (must be > 0)
- * @param conv_id        Active conversation id (used to scope the
- *                       context_injection broadcast).  0 disables the
- *                       broadcast for this call (SESSION_START path,
- *                       no conversation pinned yet).
+ * @param conv_id        The turn's conversation (0: none yet)
  * @param turn_id        DB id of the user message that triggered this
- *                       prompt rebuild (broadcast field).  0 when not
- *                       known — broadcast still fires; clients should
- *                       handle 0 as "turn id unavailable."
+ *                       prompt (the panel's turn); 0 when not known
  * @param user_turn_text Raw user message text
- * @param[out] out_block Caller-owned heap string, or NULL on
- *                       SUCCESS-with-no-candidates.  Caller frees.
+ * @param[in,out] out    The turn's prompt; its focus fields are set, and
+ *                       freed with it (composed_prompt_free)
  * @return SUCCESS or FAILURE.  See contract above.
  */
 int build_focus_block(struct session *session,
@@ -91,7 +81,7 @@ int build_focus_block(struct session *session,
                       int64_t conv_id,
                       int64_t turn_id,
                       const char *user_turn_text,
-                      char **out_block);
+                      composed_prompt_t *out);
 
 #ifdef __cplusplus
 }

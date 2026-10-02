@@ -50,6 +50,10 @@ static const char *const s_features[] = {
    /* A text frame may carry client_ref; that turn's user transcript echo and
     * every error raised for it carry it back unchanged. */
    "turn_refs",
+   /* A text frame may carry its documents as `attachments`; the daemon defuses
+    * each body and builds the inlined form itself, so a document can't end its
+    * own span. */
+   "document_attachments",
 };
 
 size_t webui_protocol_json_members(char *out, size_t size) {

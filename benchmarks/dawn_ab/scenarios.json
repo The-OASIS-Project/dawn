@@ -162,6 +162,85 @@
           "rubric": "Says 15 minutes (session_timeout_minutes = 15)."
         }
       ]
+    },
+    {
+      "id": "long_single_topic",
+      "why": "One topic over 12 turns with the same remembered facts relevant early, mid and late, and a model switch at turn 10. Measures what retained context costs per turn and whether the answers still use a fact shown many turns back (the incremental-context change sends an item once, not every turn).",
+      "turns": [
+        {
+          "text": "I'm thinking about visiting my sister next month. Remind me where she lives and what she does.",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Says the sister (Priya) lives in Denver, Colorado, and works as a veterinarian."
+        },
+        {
+          "text": "Roughly how long is a nonstop flight from Chicago to Denver?",
+          "expect_tools": [],
+          "rubric": "Gives a plausible nonstop duration of about 2.5 hours (anything from about 2 to 3 hours is fine)."
+        },
+        {
+          "text": "When I book that flight, what kind of seat should I pick for myself?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Recommends an aisle seat because the user prefers aisle seats."
+        },
+        {
+          "text": "Use the calculator: the fare is $289 each way and a checked bag is $35 each way. What's the round-trip total?",
+          "expect_tools": [
+            "calculator"
+          ],
+          "rubric": "States $648 (2 x 289 + 2 x 35)."
+        },
+        {
+          "text": "What's the weather in Denver right now?",
+          "expect_tools": [
+            "weather"
+          ],
+          "rubric": "Reports current Denver conditions grounded in a weather lookup; no invented specifics beyond the tool's data."
+        },
+        {
+          "text": "Given what you know about me, what should I pack for that, and is there anything about Denver weather I'd want to watch out for?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Packing advice ties to the user's dislike of cold, windy weather (e.g. a wind layer, warm layers); mentions wind or cold as something the user specifically dislikes."
+        },
+        {
+          "text": "Suggest a kind of restaurant for dinner with my sister one night.",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Suggests Thai food (the user's favorite cuisine) and flags avoiding shellfish because of the user's allergy."
+        },
+        {
+          "text": "Actually, could I drive instead and bring my dog? What would I be driving, and is that car a good fit for the trip?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Names the dog Biscuit (a beagle) and the user's blue 2019 Subaru Outback, and says it suits a long drive with a dog."
+        },
+        {
+          "text": "I don't want to lose ground on my training while I'm there. What should I plan for?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Ties the advice to the user's half-marathon training (e.g. keep long runs, adjust for Denver's altitude)."
+        },
+        {
+          "text": "Give me a three-bullet recap of the plan so far.",
+          "expect_tools": [],
+          "switch_to_alternate": true,
+          "rubric": "Three bullets consistent with the conversation: visiting Priya in Denver, travel (flight with an aisle seat or driving the Subaru with Biscuit), and at least one of: Thai dinner without shellfish, packing for cold/wind, keeping up half-marathon training."
+        },
+        {
+          "text": "Remind me what my sister does for work; I want to bring her a useful gift.",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Says she is a veterinarian and suggests a gift that fits that work."
+        },
+        {
+          "text": "If she wants to take us on a windy hike and then cook seafood for dinner, what should I tell her?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Mentions both: the user dislikes cold, windy weather, and the user is allergic to shellfish (so seafood dinners need to avoid shellfish)."
+        }
+      ]
     }
   ]
 }

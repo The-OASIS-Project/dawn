@@ -206,62 +206,6 @@ typedef enum {
    COMPACTION_READY = 2,
 } compaction_state_t;
 
-/* =============================================================================
- * Phase 1f: per-turn focus-injection dedup state
- *
- * Tracks (source_id, item_id) tuples that have already been injected during
- * this session so build_focus_block can suppress repeats.  Lives in
- * session_t and shares the session's existing `history_mutex` — no new
- * lock, no new lock-ordering rule.
- *
- * Persistence policy: acceptable to lose on crash.  Sessions don't survive
- * crashes anyway, so a fresh in-memory state on the next start is correct.
- *
- * Hard cap with LRU eviction by `last_injected_turn` — entries[] is a
- * fixed-size array iterated linearly (N=256 is small enough that a hash
- * is premature optimization here).
- * ============================================================================= */
-
-#define MAX_INJECTED_SET_SIZE 256
-
-/**
- * @brief One tracked injection in the dedup set.
- *
- * `source_id` and `item_id` together form the dedup key.  `item_id` is
- * opaque server-generated content (per the focus-source framework's
- * contract — never user-controlled).
- */
-typedef struct {
-   char source_id[32]; /* Adapter-registered source string (memory_fact, ...) */
-   char item_id[64];   /* Opaque server-generated item key — matches FOCUS_ITEM_ID_BUFLEN
-                          from focus_candidate_helpers.h.  Static literal here
-                          because session_manager.h cannot include L2 headers. */
-   int first_injected_turn;
-   int last_injected_turn;
-   float last_score; /* Final ranked score from focus_compose; float to
-                        match focus_candidate_t scoring fields and avoid
-                        implicit double-conversion in uplift compare. */
-} injected_set_entry_t;
-
-/**
- * @brief Per-session dedup set + monotonic turn counter.
- *
- * Zeroed on session create (calloc) and with each new context (a new or
- * replaced history).
- * The two `*_logged_once` flags gate per-session OLOG_INFO / OLOG_WARNING
- * lines so a long conversation produces exactly one such line per
- * condition rather than a stream.
- */
-typedef struct {
-   injected_set_entry_t entries[MAX_INJECTED_SET_SIZE];
-   int count;
-   int turn_counter;                /* Monotonic; advances per PER_TURN; resets on clear */
-   bool eviction_logged_once;       /* Gate: first LRU eviction in this session */
-   bool all_suppressed_logged_once; /* Gate: first all-candidates-suppressed
-                                       turn in this session (observability for
-                                       runaway suppression) */
-} injected_set_t;
-
 /* Maximum [M#] ordinals stashed per turn.  Sized to the focus-injection top_k
  * validation ceiling (memory.focus_injection.top_k is clamped to [1,64] in
  * config_validate.c), so every surfaced-and-numbered candidate can be stashed —
@@ -270,14 +214,15 @@ typedef struct {
 #define MAX_CITATION_STASH 64
 
 /**
- * @brief Per-turn map from each rendered [M#] handle to the surfaced item_id.
+ * @brief Per-turn map from each of this turn's [M#] handles to its item_id.
  *
- * Populated in build_focus_block() when memory citation is enabled, in render
- * order (a handle is the item's for the conversation's life, so they need not
- * run 1, 2, 3), read by the response finalizer to resolve a `<cited>M#</cited>`
- * back to its memory item (e.g. "fact:123").  CLEARED at dispatch entry so a
- * turn whose focus block is short-circuited can never inherit a stale map and
- * false-validate a citation.  Guarded by session->history_mutex.
+ * Set at the turn's seam (session_focus.c) when memory citation is enabled:
+ * the items the turn sent, in render order, then the ones it named again as
+ * still relevant (a handle is the item's for the conversation's life, so they
+ * need not run 1, 2, 3).  Read by the response finalizer to resolve a
+ * `<cited>M#</cited>` back to its memory item (e.g. "fact:123").  CLEARED at
+ * dispatch entry so a turn whose context has no items can never inherit a
+ * stale map and false-validate a citation.  Guarded by session->history_mutex.
  */
 typedef struct {
    int handle;        /* The [M<handle>] it was rendered as (stable per conversation) */
@@ -286,12 +231,25 @@ typedef struct {
    float final_score; /* Ranker composite (focus_score_breakdown_t.final_score) this item
                          was injected at — audited to measure used-vs-unused score
                          distributions for a data-driven injection floor. */
+   bool referenced;   /* Not sent this turn: an earlier turn shows it as it is now, and
+                         this turn named it again ([still relevant: ...]) */
 } citation_stash_entry_t;
 
 typedef struct {
    citation_stash_entry_t entries[MAX_CITATION_STASH]; /* in render order */
    int count;                                          /* number of [M#] tags rendered this turn */
 } citation_stash_t;
+
+/**
+ * @brief An item an earlier turn of the conversation showed that the history
+ *        still shows: its handle and id, citable this turn.  The list is set
+ *        at the turn's seam (session_focus.c) beside citation_stash and
+ *        cleared with it.
+ */
+typedef struct {
+   int handle;
+   char item_id[64]; /* Opaque item key; matches FOCUS_ITEM_ID_BUFLEN */
+} citation_prior_t;
 
 /* Kind of a tool-surfaced citeable item.  A seam: fact is the only value today
  * (memory tool results are facts); summaries/entities are a future additive value
@@ -323,6 +281,18 @@ typedef struct {
    tool_cited_entry_t entries[MAX_TOOL_CITED_FACTS];
    int count;
 } tool_cited_set_t;
+
+/**
+ * @brief A turn's memory-citation state: what its reply may cite.  One seam
+ *        clears all of it at dispatch entry (session_citation_stash_clear);
+ *        guarded by session->history_mutex.
+ */
+typedef struct {
+   citation_stash_t stash;  /* this turn's items, sent or named again */
+   tool_cited_set_t tool;   /* facts a memory tool result showed this turn */
+   citation_prior_t *prior; /* earlier items the history still shows (heap) */
+   int prior_count;
+} session_citation_t;
 
 /** Facts a session holds for a conversation not created yet (see session_defer_fact_source). */
 #define SESSION_PENDING_FACT_SOURCES_MAX 64
@@ -818,16 +788,11 @@ typedef struct session {
    int64_t active_project_id;
    char active_project_name[64];
 
-   // Phase 1f: per-turn focus-injection dedup state.  Shares history_mutex —
-   // dedup state is conceptually attached to conversation history (lives or
-   // dies with it) and the never-hold-two-L4-locks rule keeps us out of a
-   // dedicated lock here.  See injected_set_t above for the full contract.
-   injected_set_t injected_set;
-
-   // Memory citation signal (Phase 1): per-turn [M#] ordinal -> item_id map,
-   // populated in build_focus_block when citation is enabled and read by the
-   // response finalizer.  Shares history_mutex (same rationale as injected_set).
-   citation_stash_t citation_stash;
+   // Memory citation signal: what this turn's reply may cite (its items, the
+   // facts a memory tool showed, earlier items still shown), set at the
+   // turn's seam and by the tools, read by the response finalizer.  Shares
+   // history_mutex (it describes the history the turn runs on).
+   session_citation_t citation;
 
    // Stable memory citation handles of the conversation this history holds
    // (core/focus/focus_handles.h); NULL until first used.  Shares history_mutex.
@@ -868,11 +833,6 @@ typedef struct session {
    // it stay, rather than the pool session's own (headless) being appended.
    _Atomic bool keeps_directions;
 
-   // Memory citation — tool-sourced facts (Option B): per-turn set of fact ids the
-   // model was shown via a memory search/recall tool result, eligible to be cited
-   // by <cited>ID:x</cited>.  Multi-writer (parallel tool workers) — every record
-   // via history_mutex.  Cleared at dispatch entry beside citation_stash.
-   tool_cited_set_t tool_cited_set;
 
    // Phase 1g-i: most-recently-stamped user-message DB id.  Set by
    // session_stamp_last_message_id when role == "user"; read as `turn_id`
@@ -1079,74 +1039,6 @@ typedef int (*session_prompt_builder_t)(session_t *session,
                                         const char *user_turn_text,
                                         composed_prompt_t *out);
 
-/* =============================================================================
- * Phase 1f: dedup state APIs
- *
- * Asymmetric naming — every function with `_locked` suffix REQUIRES the
- * caller to hold `session->history_mutex`; the unsuffixed `_clear` is
- * self-locking and must NOT be called while history_mutex is held.  The
- * naming makes the contract loud (per architecture review on
- * asymmetric-mutex footgun pattern).
- * ============================================================================= */
-
-#ifdef ENABLE_MULTI_CLIENT
-/**
- * @brief Look up a (source_id, item_id) entry in the session's dedup set.
- *
- * Caller MUST hold `session->history_mutex`.  Returns SUCCESS with `*out`
- * populated on hit; FAILURE with `*out` untouched on miss.  NULL inputs
- * return FAILURE without dereferencing.
- *
- * @param session Session whose dedup set to query
- * @param source_id Adapter source id (NUL-terminated, ≤31 chars)
- * @param item_id Opaque item id (NUL-terminated, ≤63 chars)
- * @param[out] out Populated on hit; untouched on miss
- * @return SUCCESS on hit, FAILURE on miss / NULL input
- */
-int session_injected_set_lookup_locked(const session_t *session,
-                                       const char *source_id,
-                                       const char *item_id,
-                                       injected_set_entry_t *out);
-
-/**
- * @brief Insert-or-update a (source_id, item_id) entry in the dedup set.
- *
- * Caller MUST hold `session->history_mutex`.  Updates `last_injected_turn`
- * to the session's current turn counter and `last_score` to the supplied
- * value.  If the entry is new and the set is at capacity, the oldest
- * entry by `last_injected_turn` is evicted (LRU).
- *
- * Logs OLOG_INFO once-per-session on the first eviction so long-
- * conversation behavior is visible without spamming the log.
- *
- * @return Always SUCCESS unless the inputs are malformed (NULL session /
- *         source_id / item_id), in which case FAILURE.
- */
-int session_injected_set_record_locked(session_t *session,
-                                       const char *source_id,
-                                       const char *item_id,
-                                       float score);
-
-/**
- * @brief Pre-increment-and-return the session's monotonic turn counter.
- *
- * Caller MUST hold `session->history_mutex`.  Returns the new counter
- * value (post-increment).  Wraps at INT_MAX (cosmetic — would take ~68
- * billion turns at one per second; embedded boxes never reach this).
- */
-int session_injected_set_advance_turn_locked(session_t *session);
-
-
-/**
- * @brief Clear the per-turn citation stash (memory citation signal).
- *
- * SELF-LOCKING — acquires `session->history_mutex` internally.  Called at
- * dispatch entry so a turn whose focus block is short-circuited cannot inherit
- * the previous turn's [M#]→item_id map and false-validate a stale `<cited>`.
- */
-void session_citation_stash_clear(session_t *session);
-
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Lifecycle Functions
@@ -2323,38 +2215,6 @@ static inline char *session_get_full_system_prompt(session_t *session) {
    return NULL;
 }
 
-/* Phase 1f stubs — local-only build never has multi-session dedup state. */
-static inline int session_injected_set_lookup_locked(const session_t *session,
-                                                     const char *source_id,
-                                                     const char *item_id,
-                                                     injected_set_entry_t *out) {
-   (void)session;
-   (void)source_id;
-   (void)item_id;
-   (void)out;
-   return 1; /* FAILURE — never a hit in stub mode */
-}
-
-static inline int session_injected_set_record_locked(session_t *session,
-                                                     const char *source_id,
-                                                     const char *item_id,
-                                                     float score) {
-   (void)session;
-   (void)source_id;
-   (void)item_id;
-   (void)score;
-   return 0;
-}
-
-static inline int session_injected_set_advance_turn_locked(session_t *session) {
-   (void)session;
-   return 0;
-}
-
-
-static inline void session_citation_stash_clear(session_t *session) {
-   (void)session;
-}
 
 static inline int64_t session_get_last_user_msg_id(session_t *session) {
    (void)session;

@@ -82,7 +82,7 @@ int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
 /* =============================================================================
  * WebSocket broadcast stub
  *
- * build_focus_block calls this when conv_id > 0.  Real implementation
+ * The context panel's hook calls this.  Real implementation
  * lives in webui_server.c which pulls in libwebsockets, json-c, the
  * full ws connection registry — none of which the unit test cares about.
  * No-op stub.
@@ -91,21 +91,17 @@ int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result) {
+                                       const focus_compose_result_t *result,
+                                       const char *const *states) {
    (void)user_id;
    (void)conv_id;
    (void)turn_id;
    (void)result;
+   (void)states;
 }
 
 /* The session's stable citation handles (core/focus/focus_handles.c needs the
  * database): each call numbers its items 1, 2, 3, the old per-turn numbering. */
-/* No conversation here: no tag secret to mask. */
-char *session_prefix_mask_secret(struct session *session, char *text) {
-   (void)session;
-   return text;
-}
-
 int focus_handles_assign(struct session *session,
                          int64_t conv_id,
                          int user_id,

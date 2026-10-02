@@ -67,6 +67,12 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
     * trailing <cited> tag from the parser. */
    memory_citation_capture(session, clean);
 
+   /* The tags DAWN reads out of a reply come out next, before the reply is
+    * defused: what stripping removes can't join a marker back together after
+    * it was checked. */
+   text_filter_command_strip(clean, false); /* complete response: leave an orphan <command> */
+   text_filter_cited_strip(clean);          /* <cited>…</cited> (always removed) */
+
    /* What the model was led to write that imitates DAWN's framing, or carries
     * the conversation's tag, doesn't stay in the conversation to pass for
     * DAWN's on a later turn (the text is kept otherwise, byte for byte). */
@@ -80,9 +86,6 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
    }
    free(clean);
    clean = safe;
-
-   text_filter_command_strip(clean, false); /* complete response: leave an orphan <command> */
-   text_filter_cited_strip(clean);          /* <cited>…</cited> (always removed) */
    rtrim(clean);
 
    out->text = clean;

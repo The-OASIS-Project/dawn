@@ -425,13 +425,18 @@ int scheduler_route_tts_to_user(int user_id,
  * unlock). All conv_db_* callers reach this only after AUTH_DB_UNLOCK and hold no
  * registry lock.
  * ============================================================================= */
-static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browsers_only) {
+/* Like broadcast_json_to_user_ex, with @p origin's connection given @p origin_json
+ * instead (a copy naming its turn); takes ownership of @p root, not of the strings. */
+static int broadcast_json_to_user_origin(int user_id,
+                                         json_object *root,
+                                         bool browsers_only,
+                                         const session_t *origin,
+                                         const char *origin_json) {
    if (!root)
       return 0;
-
    const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *json_cached = json_str ? strdup(json_str) : NULL;
-   json_object_put(root); /* drop the tree before the walk */
+   json_object_put(root);
    if (!json_cached)
       return 0;
 
@@ -445,11 +450,10 @@ static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browse
          continue;
       if (browsers_only && conn->is_satellite)
          continue;
-
-      char *json_copy = strdup(json_cached);
+      const bool is_origin = origin_json && conn->session == origin;
+      char *json_copy = strdup(is_origin ? origin_json : json_cached);
       if (!json_copy)
          continue;
-
       ws_response_t resp = { .session = conn->session,
                              .type = WS_RESP_JSON,
                              .generic_json = { .json = json_copy } };
@@ -457,9 +461,12 @@ static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browse
       sent++;
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
-
    free(json_cached);
    return sent;
+}
+
+static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browsers_only) {
+   return broadcast_json_to_user_origin(user_id, root, browsers_only, NULL, NULL);
 }
 
 /* Public export of the user-scoped fan-out so other webui modules (HA control
@@ -732,6 +739,19 @@ void webui_broadcast_message_appended(int user_id,
                                       const char *text,
                                       const char *reasoning,
                                       unsigned stream_id) {
+   webui_broadcast_message_appended_origin(user_id, conv_id, msg_id, role, text, reasoning,
+                                           stream_id, NULL, NULL);
+}
+
+void webui_broadcast_message_appended_origin(int user_id,
+                                             int64_t conv_id,
+                                             int64_t msg_id,
+                                             const char *role,
+                                             const char *text,
+                                             const char *reasoning,
+                                             unsigned stream_id,
+                                             const session_t *origin,
+                                             const char *client_ref) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
       return;
    }
@@ -761,7 +781,19 @@ void webui_broadcast_message_appended(int user_id,
    /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame
     * a satellite renders nothing for — keep it strictly WEBUI, matching the
     * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP. */
-   broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+   if (!origin || !client_ref || !client_ref[0]) {
+      broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+      return;
+   }
+   /* The sender's own connection gets a copy naming its turn (client_ref): if
+    * its transcript echo is dropped, this copy still tells it which turn was
+    * saved.  Other connections, whose refs are their own, get the plain frame. */
+   json_object_object_add(p, "client_ref", json_object_new_string(client_ref));
+   const char *with_ref = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *origin_json = with_ref ? strdup(with_ref) : NULL;
+   json_object_object_del(p, "client_ref");
+   broadcast_json_to_user_origin(user_id, root, /*browsers_only=*/true, origin, origin_json);
+   free(origin_json);
 }
 
 /* Strong override of the Layer-2 weak seam (conv_event.h): the ONE server-authoritative
@@ -1259,7 +1291,8 @@ static const char *capped_text_view(const char *text, char **owned, bool *out_ow
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result) {
+                                       const focus_compose_result_t *result,
+                                       const char *const *states) {
    if (result == NULL || user_id <= 0 || conv_id <= 0) {
       OLOG_DEBUG("WebUI: context_injection broadcast skipped (user=%d conv=%lld result=%p)",
                  user_id, (long long)conv_id, (const void *)result);
@@ -1301,6 +1334,9 @@ void webui_broadcast_context_injection(int user_id,
       json_object_object_add(item, "item_id", json_object_new_string(c->item_id ? c->item_id : ""));
       json_object_object_add(item, "source_type",
                              json_object_new_string(focus_source_type_str(c->source_type)));
+      /* Sent this turn, or already shown to the model by an earlier one. */
+      json_object_object_add(item, "state",
+                             json_object_new_string(states && states[i] ? states[i] : "new"));
 
       char *owned_text = NULL;
       bool owned = false;
