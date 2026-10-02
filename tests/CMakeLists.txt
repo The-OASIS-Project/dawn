@@ -516,6 +516,12 @@ if(DAWN_ENABLE_EMAIL_TOOL)
       LABEL    ci)
 endif()
 
+# The send/trash confirm rule: the same session, a later turn.
+dawn_add_unit_test(test_email_origin
+   SOURCES test_email_origin.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_email_parse
    SOURCES test_email_parse.c
            ${SRC_ROOT}/src/tools/email_parse.c

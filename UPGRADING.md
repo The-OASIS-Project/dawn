@@ -12,6 +12,29 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-02 — Sending and trashing email need your yes in a new message
+
+**What changed.**
+- **The assistant can no longer prepare an email and confirm it in the same
+  reply.** It drafts, reads it back, and sends only if your very next message
+  says yes. If the conversation moves on first, it prepares the email again.
+  Trash works the same way. Voice is unchanged: it asks, you say yes.
+- **A confirm counts only in the session where the draft was made**: the same
+  browser tab, device or channel. A draft prepared in the WebUI can't be
+  confirmed from a satellite, or from another tab.
+- **Background jobs, re-engaged background turns, scheduled tasks and MQTT
+  messages can't send, trash or archive email.** The assistant says what it
+  would do and leaves it to you. A build without the WebUI (no multi-client
+  support) can't send, trash or archive email at all, since it can't tell your
+  voice from an MQTT message.
+- **The read-back now ends with a fixed line**, "Sending to <address>, from
+  <account>, subject: ...". The assistant is asked to say it as written, so you
+  hear where the mail really goes.
+
+**What you need to do.** Nothing.
+
+---
+
 ## 2026-10-02 — Email reading uses GMime: install `libgmime-3.0-dev` before rebuilding
 
 **What you need to do.** If you build DAWN from source with email enabled (the default), install

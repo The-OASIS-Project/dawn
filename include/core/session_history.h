@@ -340,6 +340,13 @@ bool session_turn_active(session_t *session);
 bool session_turn_user_originated(session_t *session);
 
 /**
+ * @brief The number of turns begun on @p session (the running turn's number)
+ *
+ * Consecutive per session: "the next turn" of a turn numbered n is n + 1.
+ */
+uint32_t session_turn_number(session_t *session);
+
+/**
  * @brief Keep a message the turn could not save: its conversation doesn't exist yet
  *
  * @p role "user" (the persisted form, [IMAGE:] markers included) or "assistant"
@@ -541,6 +548,11 @@ static inline bool session_turn_active(session_t *session) {
 static inline bool session_turn_user_originated(session_t *session) {
    (void)session;
    return false;
+}
+
+static inline uint32_t session_turn_number(session_t *session) {
+   (void)session;
+   return 0;
 }
 
 #endif /* ENABLE_MULTI_CLIENT */

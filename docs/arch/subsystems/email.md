@@ -127,3 +127,53 @@ namespace.
   that one UID. A bare `EXPUNGE` is never sent.
 - **Before it.** A read-only `UID FETCH` first confirms the message exists.
 - **No folder for the role.** The move is refused, never guessed.
+
+## Confirming a send or a trash
+
+Sending and trashing are two steps: the tool prepares a draft or a pending
+trash, and a second call confirms it. The approval is conversational by
+design: on voice, the model reads the action back and the user says yes. So
+the confirm comes from the model, and the risk to design against is the model
+confirming without a person's yes. That can happen when text it read (an email,
+a web page, a tool result) tells it to.
+
+**What makes a confirm count:**
+- **The same session.** A draft records the session and the turn that prepared
+  it (`email_origin_t`). A confirm from another session (another browser tab,
+  device or channel) is refused, even by the same user. The binding is the
+  session, not the conversation.
+- **The next turn.** The confirm must run in the session's very next turn
+  after the draft, and in a turn the user started. The model can't prepare
+  and confirm in one turn, and can't confirm later once the user has moved on.
+  Only the user's reply to the read-back counts. If a background turn runs in
+  between, the confirm is refused (the safe direction), and the model prepares
+  the action again.
+- **The user's own turn.** The tool's actions that send, delete or move mail
+  (`send`, `confirm_send`, `trash`, `confirm_trash`, `archive`) need a running
+  turn the user started, and are refused anywhere else: in a background job, in
+  a background (re-engaged) turn, in a scheduled run (the scheduler refuses
+  them too), and from an MQTT message, with or without a session named. A
+  build without multi-client support has no turns to check, and it can't tell
+  the local mic from MQTT, so it refuses these actions altogether.
+
+A refused confirm leaves the draft in place, and it doesn't count toward the
+wrong-id throttle.
+
+**The read-back.** A draft's result gives the model one fixed line to say as
+written, "Sending to <address>, from <account>, subject: <subject>", so the
+user hears where the mail really goes.
+
+**What remains:**
+- Any turn begun in the session between the read-back and the yes (a finished
+  background job's reply in that tab, a voice clip that heard nothing) makes the
+  yes too late. The model is told to prepare the action again. This fails safe.
+- The user's next message satisfies the rule whatever it says, not just "yes".
+  Text the model read could still lead it to confirm after an unrelated reply,
+  or after a message the user typed before the read-back arrived.
+- The model relays the read-back, so it could misstate it.
+- Drafts expire after five minutes.
+- Accounts can be read-only in DAWN, and the tool can't send from them.
+- Trash is recoverable (it moves; it never expunges).
+- Send is not recoverable. It is the case these rules are for.
+- On messaging channels, "the user" is whoever controls the linked address:
+  an SMS sender's number, or any member of a linked Telegram group.

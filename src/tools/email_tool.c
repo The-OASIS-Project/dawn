@@ -33,12 +33,14 @@
 #include <time.h>
 
 #include "core/scheduled_context.h"
+#include "core/session_history.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "tools/email_digest.h"
+#include "tools/email_display.h"
 #include "tools/email_service.h"
 #include "tools/oauth_client.h"
 #include "tools/toml.h"
@@ -611,7 +613,7 @@ static char *handle_search(struct json_object *details, int user_id) {
    return buf;
 }
 
-static char *handle_send(struct json_object *details, int user_id) {
+static char *handle_send(struct json_object *details, int user_id, const email_origin_t *origin) {
    const char *account = json_get_str(details, "account");
    const char *to = json_get_str(details, "to");
    const char *subject = json_get_str(details, "subject");
@@ -692,7 +694,7 @@ static char *handle_send(struct json_object *details, int user_id) {
    char from_account[128] = "";
    int rc = email_service_create_draft(user_id, account, resolved_addr, resolved_name, subject,
                                        body, draft_id, sizeof(draft_id), from_account,
-                                       sizeof(from_account));
+                                       sizeof(from_account), origin);
    if (rc == EMAIL_ACCT_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: that account is read-only and cannot send. Choose a writable "
@@ -707,29 +709,58 @@ static char *handle_send(struct json_object *details, int user_id) {
    if (!buf)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
+   /* The line the model says as written: one line, nothing in it that could
+    * read as another line or an instruction. */
+   char say_to[256];
+   char say_subject[256];
+   email_display_sanitize(resolved_addr, strlen(resolved_addr), say_to, sizeof(say_to), 0);
+   email_display_sanitize(subject, strlen(subject), say_subject, sizeof(say_subject), 0);
+
    snprintf(buf, RESULT_BUF_SIZE,
             "Draft email prepared:\n"
             "  From account: %s\n"
             "  To: %s%s%s%s\n"
             "  Subject: %s\n"
             "  Body: %s\n\n"
-            "Read this back to the user (including which account it will send FROM) and ask for "
-            "confirmation. If confirmed, call confirm_send with draft_id '%s'.",
+            "Read this back to the user (including which account it will send FROM), and say this "
+            "line exactly as written, so the user hears where it really goes:\n"
+            "  Sending to %s, from %s, subject: %s\n"
+            "Then ask for confirmation, and call confirm_send with draft_id '%s' only if the "
+            "user's very next message says yes; a confirm in this turn, or any later one, "
+            "is refused.",
             from_account, resolved_name[0] ? resolved_name : "", resolved_name[0] ? " <" : "",
-            resolved_addr, resolved_name[0] ? ">" : "", subject, body, draft_id);
+            resolved_addr, resolved_name[0] ? ">" : "", subject, body, say_to, from_account,
+            say_subject, draft_id);
 
    return buf;
 }
 
-static char *handle_confirm_send(struct json_object *details, int user_id) {
+static char *handle_confirm_send(struct json_object *details,
+                                 int user_id,
+                                 const email_origin_t *origin) {
    const char *draft_id = json_get_str(details, "draft_id");
    if (!draft_id || !draft_id[0])
       return strdup("Error: 'draft_id' is required");
 
-   int rc = email_service_confirm_send(user_id, draft_id);
+   int rc = email_service_confirm_send(user_id, draft_id, origin);
    switch (rc) {
       case EMAIL_RC_OK:
          return strdup("Email sent successfully.");
+      case EMAIL_CONFIRM_RC_SAME_TURN:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. The user has to answer yes in a new message after "
+                       "seeing what this does; a confirm in the same turn that prepared it is "
+                       "refused. Ask the user, and confirm when they reply.");
+      case EMAIL_CONFIRM_RC_NOT_NEXT:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. A confirm counts only in the user's reply right "
+                       "after the read-back; the conversation has moved on since. Prepare it "
+                       "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_OTHER_SESSION:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. This was prepared in another session (another "
+                       "browser tab, device or channel), and only that one can confirm it. "
+                       "Prepare it again here if the user wants it.");
       case EMAIL_CONFIRM_RC_NOT_FOUND:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: draft not found or expired. The draft may have timed out "
@@ -776,7 +807,7 @@ static char *handle_folders(struct json_object *details, int user_id) {
  * Trash / Archive Handlers
  * ============================================================================= */
 
-static char *handle_trash(struct json_object *details, int user_id) {
+static char *handle_trash(struct json_object *details, int user_id, const email_origin_t *origin) {
    const char *mid = json_get_str(details, "message_id");
    if (!mid || !mid[0])
       return strdup("Error: 'message_id' is required (get IDs from 'recent' or 'search' results)");
@@ -788,7 +819,7 @@ static char *handle_trash(struct json_object *details, int user_id) {
    char from[128] = { 0 };
    int rc = email_service_create_pending_trash(user_id, account, mid, pending_id,
                                                sizeof(pending_id), subject, sizeof(subject), from,
-                                               sizeof(from));
+                                               sizeof(from), origin);
    if (rc == EMAIL_ACCT_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: email account is read-only. Cannot trash emails. Tell the user "
@@ -807,22 +838,40 @@ static char *handle_trash(struct json_object *details, int user_id) {
             "Pending trash:\n"
             "  From: %s\n"
             "  Subject: %s\n\n"
-            "Confirm with the user before proceeding. "
-            "If confirmed, call confirm_trash with pending_id '%s'.",
+            "Confirm with the user before proceeding, and call confirm_trash with pending_id "
+            "'%s' only if the user's very next message says yes; a confirm in this turn, or "
+            "any later one, is refused.",
             from, subject, pending_id);
 
    return buf;
 }
 
-static char *handle_confirm_trash(struct json_object *details, int user_id) {
+static char *handle_confirm_trash(struct json_object *details,
+                                  int user_id,
+                                  const email_origin_t *origin) {
    const char *pending_id = json_get_str(details, "pending_id");
    if (!pending_id || !pending_id[0])
       return strdup("Error: 'pending_id' is required");
 
-   int rc = email_service_confirm_trash(user_id, pending_id);
+   int rc = email_service_confirm_trash(user_id, pending_id, origin);
    switch (rc) {
       case EMAIL_RC_OK:
          return strdup("Email moved to Trash.");
+      case EMAIL_CONFIRM_RC_SAME_TURN:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. The user has to answer yes in a new message after "
+                       "seeing what this does; a confirm in the same turn that prepared it is "
+                       "refused. Ask the user, and confirm when they reply.");
+      case EMAIL_CONFIRM_RC_NOT_NEXT:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. A confirm counts only in the user's reply right "
+                       "after the read-back; the conversation has moved on since. Prepare it "
+                       "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_OTHER_SESSION:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. This was prepared in another session (another "
+                       "browser tab, device or channel), and only that one can confirm it. "
+                       "Prepare it again here if the user wants it.");
       case EMAIL_RC_ALREADY_THERE:
          return strdup("That email is already in Trash; nothing changed (DAWN never deletes "
                        "mail permanently).");
@@ -997,6 +1046,37 @@ static int email_validate_schedulable_action(const char *action,
    return FAILURE;
 }
 
+/* The actions that send, delete or move mail. */
+static bool email_action_acts(const char *action) {
+   static const char *const k_acts[] = { "send",          "confirm_send", "trash",
+                                         "confirm_trash", "archive",      NULL };
+   for (int i = 0; k_acts[i]; i++) {
+      if (strcmp(action, k_acts[i]) == 0)
+         return true;
+   }
+   return false;
+}
+
+/* Where this call comes from, when it may act: a running turn the user started
+ * (session_turn_user_originated: the turn's own code, not background, not a
+ * job's session).  false otherwise: no session, a job, a background turn, or a
+ * session with no turn running (an MQTT message naming a session gets that
+ * session as its context, but no turn).  A build without turn tracking (no
+ * multi-client support) can't tell the local mic from an MQTT message, so it
+ * refuses too. */
+static bool live_origin(email_origin_t *out) {
+   session_t *ctx = session_get_command_context();
+   if (!ctx || !session_turn_user_originated(ctx))
+      return false;
+   const uint64_t token = session_turn_token();
+   if (token == 0)
+      return false;
+   out->session_id = ctx->session_id;
+   out->turn_token = token;
+   out->turn_number = session_turn_number(ctx);
+   return true;
+}
+
 static char *email_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
 
@@ -1025,6 +1105,20 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
       return strdup(TOOL_GUEST_REFUSAL);
    }
 
+   /* What changes or sends mail needs a person in a live conversation: not a
+    * background job, a re-engaged background turn or an MQTT message, where
+    * the request may come from content the model read rather than from the
+    * user.  And a confirm must come from the same session, in a later turn
+    * (email_origin_t): the user's answer, not the model's own next step. */
+   email_origin_t origin = { 0 };
+   if (email_action_acts(action) && !live_origin(&origin)) {
+      json_object_put(details);
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: sending, trashing and archiving email need the user in a live "
+                    "conversation, and this request came from a background job or an automated "
+                    "turn. Tell the user what you would do, and let them ask for it.");
+   }
+
    char *result = NULL;
 
    if (strcmp(action, "accounts") == 0) {
@@ -1038,13 +1132,13 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
    } else if (strcmp(action, "folders") == 0) {
       result = handle_folders(details, user_id);
    } else if (strcmp(action, "send") == 0) {
-      result = handle_send(details, user_id);
+      result = handle_send(details, user_id, &origin);
    } else if (strcmp(action, "confirm_send") == 0) {
-      result = handle_confirm_send(details, user_id);
+      result = handle_confirm_send(details, user_id, &origin);
    } else if (strcmp(action, "trash") == 0) {
-      result = handle_trash(details, user_id);
+      result = handle_trash(details, user_id, &origin);
    } else if (strcmp(action, "confirm_trash") == 0) {
-      result = handle_confirm_trash(details, user_id);
+      result = handle_confirm_trash(details, user_id, &origin);
    } else if (strcmp(action, "archive") == 0) {
       result = handle_archive(details, user_id);
    } else if (strcmp(action, "digest") == 0) {
@@ -1185,11 +1279,15 @@ static const tool_metadata_t email_metadata = {
                   "'send' REQUIRES an 'account' argument naming which configured account to "
                   "send FROM (call 'accounts' to list them; when replying, use the account the "
                   "original message arrived on). "
-                  "Use 'confirm_send' with the draft_id to actually send after user confirms. "
+                  "Use 'confirm_send' with the draft_id to actually send, only if the user's "
+                  "very next message says yes (a confirm in the turn that drafted it, or any "
+                  "later one, is refused). "
                   "Use 'trash' to move an email to trash (two-step: creates pending action, "
-                  "then 'confirm_trash' executes after user confirms). "
-                  "Use 'archive' to remove an email from inbox (keeps in All Mail, no "
-                  "confirmation needed). "
+                  "then 'confirm_trash' if the user's very next message says yes). "
+                  "Use 'archive' to move an email out of its folder to the account's archive "
+                  "(no confirmation needed). "
+                  "send, trash and archive work only in a live conversation with the user, "
+                  "not from a background job. "
                   "For 'send', the 'to' field can be a contact name (resolved via contacts) "
                   "or a direct email address.",
    .params = email_params,

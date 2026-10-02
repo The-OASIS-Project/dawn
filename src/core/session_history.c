@@ -1145,6 +1145,7 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
       OLOG_ERROR("Session %u: a turn began while another was still running", session->session_id);
    }
    session->turn_active = true;
+   session->turn_number++;
    session->turn_owner_token = token;
    session->turn_outer_token = outer;
    session->turn_user_id = user_id;
@@ -1418,6 +1419,16 @@ bool session_turn_active(session_t *session) {
    const bool active = session->turn_active;
    pthread_mutex_unlock(&session->history_mutex);
    return active;
+}
+
+uint32_t session_turn_number(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   const uint32_t n = session->turn_number;
+   pthread_mutex_unlock(&session->history_mutex);
+   return n;
 }
 
 bool session_turn_user_originated(session_t *session) {
