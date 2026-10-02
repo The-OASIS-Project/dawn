@@ -83,6 +83,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `turn_refs` | 2026-10-02 | A `text` frame may carry `client_ref`: the turn's own user `transcript` echo and every `error` raised for that turn (refused at receipt, refused or failed when it runs) carry it back unchanged, so a client knows which of its turns an error belongs to. Without it, refusals name no turn. |
 | `image_only_turns` | 2026-10-01 | A `text` turn with no words (empty, absent or whitespace `text`) but at least one `image_ids` entry runs with just the images; one with neither is refused with `EMPTY_MESSAGE` instead of being dropped silently. Without it, require text with an image: older daemons drop a turn with no text without a reply. |
 | `image_turns_by_id` | 2026-10-01 | A `text` turn takes images only through `image_ids`; `images[]` is ignored. A malformed, missing or foreign id, or too many, refuses the whole turn with `IMAGE_UNAVAILABLE` / `IMAGE_LIMIT` / `IMAGE_ERROR` and saves nothing (see `text`). Without it, send `images[]` with `image_ids` as before: older daemons send the model only `images[]`. |
 | `app_logins` | 2026-09-30 | One login per app: `"app"` on login, `?app=` on every other request, a cookie per app (see Connection Lifecycle). Without it, all front-ends in a browser share one login. |
@@ -121,10 +122,21 @@ Send a text message to the AI, with the images attached to it by id.
    "type": "text",
    "payload": {
       "text": "What is in this picture?",
-      "image_ids": ["img_a1b2c3d4e5f6"]
+      "image_ids": ["img_a1b2c3d4e5f6"],
+      "client_ref": "17"
    }
 }
 ```
+- `client_ref` — optional (flag `turn_refs`); an opaque tag of 1 to 64 printable ASCII
+  characters (0x20–0x7e). The turn's own user `transcript` echo carries it as
+  `payload.client_ref`, and so does every `error` raised for the turn, whatever its code: on
+  receipt (e.g. `EMPTY_MESSAGE`, `IMAGE_*`, `TURN_QUEUE_FULL`, `UNAUTHORIZED`, `SESSION_LIMIT`)
+  and while it runs (e.g. `IMAGE_*`, `LLM_ERROR`, `PERSIST_ERROR`). An error with the ref
+  isn't always a failed turn: `PERSIST_ERROR` comes after the reply was shown (it wasn't
+  saved), so read the code, and `severity`, not just the ref. Other frames of the turn (stream
+  deltas, the reply, other viewers' copies) don't carry it. A `client_ref` that isn't a
+  string of that shape (`null`, a number, empty, too long, or with other characters) refuses
+  the frame with `INVALID_CLIENT_REF` (that error carries no ref).
 - `image_ids` — optional; the ids the `POST /api/images` HTTP upload returned (see
   `docs/arch/subsystems/vision-documents.md`), at most `[vision] max_images` (default 5).
   **The only way to attach an image:** the daemon reads the stored files, sends them to the
@@ -1485,6 +1497,8 @@ Error or informational notification.
   `IMAGE_ERROR`; one with neither text nor images, `EMPTY_MESSAGE`; one refused because too
   many are queued, `TURN_QUEUE_FULL` (see `text`). The turn did not run and nothing was saved;
   each refusal is one frame.
+- `client_ref`: on an error raised for a `text` turn that carried one (flag `turn_refs`), the
+  same string, unchanged; absent otherwise.
 
 #### `force_logout`
 This connection's login ended: a logout (from this or another tab), a login over it
@@ -1528,6 +1542,8 @@ Complete message (non-streaming, or replayed history).
   the row (the normal case — the daemon owns user-turn persistence). The client uses it to
   skip its own save. The echo `text` is the clean user text; any `[IMAGE:<id>]` markers were
   persisted server-side, not sent here.
+- `client_ref`: on the user-turn echo of a `text` frame that carried one (flag `turn_refs`),
+  the same string, unchanged.
 
 #### `stream_start`
 Start of LLM token stream.

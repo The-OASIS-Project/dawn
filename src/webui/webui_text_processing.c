@@ -79,6 +79,8 @@ typedef struct {
    int image_id_count;
    char *persist_content; /* Server-authoritative persisted form (text + [IMAGE:<id>] markers)
                            * for an image turn; NULL persists plain text. Owned/freed here. */
+   char client_ref[WEBUI_CLIENT_REF_MAX + 1]; /* the frame's client_ref ("" = none): the
+                                               * worker's turn ref while the turn runs */
 } text_work_t;
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
@@ -721,7 +723,10 @@ static void *text_turn_thread_entry(void *arg) {
       }
       session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
    }
-   text_worker_thread(work);  /* existing turn body — frees work, releases session */
+   /* The turn's errors and its user echo, raised on this thread, name it. */
+   webui_turn_ref_set(work != NULL ? work->client_ref : NULL);
+   text_worker_thread(work); /* existing turn body — frees work, releases session */
+   webui_turn_ref_set(NULL);
    turn_queue_turn_done(sid); /* chain the next queued turn for this session */
    return NULL;
 }
@@ -739,6 +744,15 @@ static void webui_text_turn_spawn(void *work) {
       text_work_t *w = (text_work_t *)work;
       uint32_t sid = (w != NULL && w->session != NULL) ? w->session->session_id : 0;
       OLOG_ERROR("WebUI: failed to spawn queued text turn worker; dropping it");
+      if (w != NULL && w->session != NULL) {
+         /* The client is told which turn didn't run (spawned from any thread:
+          * this thread's own ref is put back after). */
+         char prev[WEBUI_CLIENT_REF_MAX + 1];
+         snprintf(prev, sizeof(prev), "%s", webui_turn_ref_get() ? webui_turn_ref_get() : "");
+         webui_turn_ref_set(w->client_ref);
+         webui_send_error(w->session, "PROCESSING_ERROR", "Your message couldn't be started.");
+         webui_turn_ref_set(prev);
+      }
       webui_text_turn_free(work);
       turn_queue_turn_done(sid);
    }
@@ -817,6 +831,11 @@ int webui_process_text_input_with_images(session_t *session,
       safe_strscpy(work->image_ids[i], image_ids[i]);
    }
    work->image_id_count = image_id_count;
+   /* The frame's ref (held by this thread while it handles the frame) goes with
+    * the turn to its worker. */
+   if (webui_turn_ref_get()) {
+      snprintf(work->client_ref, sizeof(work->client_ref), "%s", webui_turn_ref_get());
+   }
 
    /* Retain the session for the queued turn (released by the worker when it runs,
     * or by webui_text_turn_free on purge/reject). */

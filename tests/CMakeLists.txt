@@ -360,6 +360,13 @@ dawn_add_unit_test(test_text_input_dispatch
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# A text turn's client_ref: validation and the per-thread turn ref.
+dawn_add_unit_test(test_webui_turn_ref
+   SOURCES test_webui_turn_ref.c
+           ${SRC_ROOT}/src/webui/webui_turn_ref.c
+   LIBS    unity pthread
+   LABEL   ci)
+
 # Document-original store + blob engine dedup/orphan/caps + v68 stmt_blob_*.
 dawn_add_unit_test(test_document_original_store
    SOURCES test_document_original_store.c

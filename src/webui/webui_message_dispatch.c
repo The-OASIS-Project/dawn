@@ -85,6 +85,120 @@ static void handle_ping(ws_connection_t *conn, struct json_object *payload);
  * webui_always_on.c (next to always_on_create / always_on_destroy);
  * declarations in webui_always_on.h. */
 
+/* A text turn's frame, @p payload its payload (non-NULL): validated, then
+ * handed to handle_text_message.  Every refusal here is one error frame. */
+static void text_turn_from_payload(ws_connection_t *conn, struct json_object *payload) {
+   /* A turn is its words, its images, or both; absent text is no words. */
+   struct json_object *text_obj = NULL;
+   const char *text = NULL;
+   if (json_object_object_get_ex(payload, "text", &text_obj)) {
+      text = json_object_get_string(text_obj);
+   }
+   if (!text) {
+      text = "";
+   }
+
+   /* Explicit target conversation (background-jobs delta routing): the
+    * client sends the conversation this message belongs to, so the
+    * server never has to infer it from the live view — robust across
+    * reconnect and multi-tab, where server-side active_conversation_id
+    * can be stale or 0.  conn_reanchor_conversation validates ownership
+    * (a client must not tag/persist into another user's conversation)
+    * then heals both the active id and its privacy flag together; a
+    * bad/foreign id is a no-op heal (the turn keeps the prior anchor). */
+   struct json_object *conv_id_obj;
+   if (json_object_object_get_ex(payload, "conversation_id", &conv_id_obj)) {
+      conn_reanchor_conversation(conn, json_object_get_int64(conv_id_obj));
+   }
+
+   /* The turn's images come only from image_ids[] (/api/images ids;
+    * the worker reads the stored files).  Base64 images[] from an
+    * older client are neither read nor validated: ignored, not
+    * rejected, so its turn still arrives as text. */
+   if (json_object_object_get_ex(payload, "images", NULL)) {
+      static atomic_bool s_images_ignored_logged = false;
+      if (!atomic_exchange(&s_images_ignored_logged, true)) {
+         OLOG_DEBUG("WebUI: ignoring a text frame's base64 images[] (only "
+                    "image_ids are read); logged once");
+      }
+   }
+
+   char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+   int image_id_count = 0;
+   int max_images = g_config.vision.max_images;
+   if (max_images > WEBUI_MAX_VISION_IMAGES_CAP) {
+      max_images = WEBUI_MAX_VISION_IMAGES_CAP;
+   }
+   const int rc = image_turn_ids_parse(payload, max_images, image_ids, &image_id_count);
+   if (rc != SUCCESS) {
+      const char *code = NULL;
+      const char *message = NULL;
+      webui_image_error_describe(rc, &code, &message);
+      send_error_impl(conn->wsi, code, message);
+      return;
+   }
+
+   /* Nothing to say and nothing to show is refused, never dropped
+    * silently (the client is waiting for its echo).  Words that are
+    * only whitespace count as none. */
+   if (text[strspn(text, " \t\r\n")] == '\0') {
+      if (image_id_count == 0) {
+         send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
+         return;
+      }
+      text = "";
+   }
+
+   /* Server-authoritative persisted form for an image turn: clean text
+    * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
+    * text).  Freed after the call — the worker strdup's what it needs.
+    * Retention promotion happens post-persist in the worker, so images
+    * are pinned only for turns that actually persisted. */
+   char *persist_content = NULL;
+   if (image_id_count > 0) {
+      persist_content = image_marker_build_content(text, (const char(*)[IMAGE_ID_LEN])image_ids,
+                                                   image_id_count);
+      if (!persist_content) {
+         const char *code = NULL;
+         const char *message = NULL;
+         webui_image_error_describe(IMAGE_REHYDRATE_ERR_NOMEM, &code, &message);
+         send_error_impl(conn->wsi, code, message);
+         return;
+      }
+   }
+
+   handle_text_message(conn, text, strlen(text), (const char(*)[IMAGE_ID_LEN])image_ids,
+                       image_id_count, persist_content);
+   free(persist_content);
+}
+
+/* A `text` frame.  Its client_ref, when it has one, is this thread's turn ref
+ * while the frame is handled, so every error the handling raises (here, the
+ * auth gate, a full queue) and the user echo name the turn. */
+static void dispatch_text_frame(ws_connection_t *conn, struct json_object *payload) {
+   if (!payload) {
+      /* No payload: no words and no images, refused like any empty turn. */
+      send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
+      return;
+   }
+   struct json_object *ref_obj = NULL;
+   if (json_object_object_get_ex(payload, "client_ref", &ref_obj)) {
+      /* Anything but a string of the allowed shape is refused, null included;
+       * a string with an embedded NUL too (it couldn't be echoed unchanged). */
+      const bool is_string = json_object_is_type(ref_obj, json_type_string);
+      const char *ref = is_string ? json_object_get_string(ref_obj) : NULL;
+      if (!webui_client_ref_valid(ref) ||
+          (size_t)json_object_get_string_len(ref_obj) != strlen(ref)) {
+         send_error_impl(conn->wsi, "INVALID_CLIENT_REF",
+                         "client_ref must be 1 to 64 printable ASCII characters");
+         return;
+      }
+      webui_turn_ref_set(ref);
+   }
+   text_turn_from_payload(conn, payload);
+   webui_turn_ref_set(NULL);
+}
+
 void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* Null-terminate for JSON parsing */
    char *json_str = strndup(data, len);
@@ -115,103 +229,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 
    if (strcmp(type, "text") == 0) {
       /* Text input from user, with the images attached to it by id */
-      if (payload) {
-         /* A turn is its words, its images, or both; absent text is no words. */
-         struct json_object *text_obj = NULL;
-         {
-            const char *text = NULL;
-            if (json_object_object_get_ex(payload, "text", &text_obj)) {
-               text = json_object_get_string(text_obj);
-            }
-            if (!text) {
-               text = "";
-            }
-            {
-               /* Explicit target conversation (background-jobs delta routing): the
-                * client sends the conversation this message belongs to, so the
-                * server never has to infer it from the live view — robust across
-                * reconnect and multi-tab, where server-side active_conversation_id
-                * can be stale or 0.  conn_reanchor_conversation validates ownership
-                * (a client must not tag/persist into another user's conversation)
-                * then heals both the active id and its privacy flag together; a
-                * bad/foreign id is a no-op heal (the turn keeps the prior anchor). */
-               struct json_object *conv_id_obj;
-               if (json_object_object_get_ex(payload, "conversation_id", &conv_id_obj)) {
-                  conn_reanchor_conversation(conn, json_object_get_int64(conv_id_obj));
-               }
-
-               /* The turn's images come only from image_ids[] (/api/images ids;
-                * the worker reads the stored files).  Base64 images[] from an
-                * older client are neither read nor validated: ignored, not
-                * rejected, so its turn still arrives as text. */
-               if (json_object_object_get_ex(payload, "images", NULL)) {
-                  static atomic_bool s_images_ignored_logged = false;
-                  if (!atomic_exchange(&s_images_ignored_logged, true)) {
-                     OLOG_DEBUG("WebUI: ignoring a text frame's base64 images[] (only "
-                                "image_ids are read); logged once");
-                  }
-               }
-
-               char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
-               int image_id_count = 0;
-               int max_images = g_config.vision.max_images;
-               if (max_images > WEBUI_MAX_VISION_IMAGES_CAP) {
-                  max_images = WEBUI_MAX_VISION_IMAGES_CAP;
-               }
-               const int rc = image_turn_ids_parse(payload, max_images, image_ids, &image_id_count);
-               if (rc != SUCCESS) {
-                  const char *code = NULL;
-                  const char *message = NULL;
-                  webui_image_error_describe(rc, &code, &message);
-                  send_error_impl(conn->wsi, code, message);
-                  json_object_put(root);
-                  free(json_str);
-                  return;
-               }
-
-               /* Nothing to say and nothing to show is refused, never dropped
-                * silently (the client is waiting for its echo).  Words that are
-                * only whitespace count as none. */
-               if (text[strspn(text, " \t\r\n")] == '\0') {
-                  if (image_id_count == 0) {
-                     send_error_impl(conn->wsi, "EMPTY_MESSAGE",
-                                     "A message needs text or at least one image");
-                     json_object_put(root);
-                     free(json_str);
-                     return;
-                  }
-                  text = "";
-               }
-
-               /* Server-authoritative persisted form for an image turn: clean text
-                * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
-                * text).  Freed after the call — the worker strdup's what it needs.
-                * Retention promotion happens post-persist in the worker, so images
-                * are pinned only for turns that actually persisted. */
-               char *persist_content = NULL;
-               if (image_id_count > 0) {
-                  persist_content = image_marker_build_content(
-                      text, (const char(*)[IMAGE_ID_LEN])image_ids, image_id_count);
-                  if (!persist_content) {
-                     const char *code = NULL;
-                     const char *message = NULL;
-                     webui_image_error_describe(IMAGE_REHYDRATE_ERR_NOMEM, &code, &message);
-                     send_error_impl(conn->wsi, code, message);
-                     json_object_put(root);
-                     free(json_str);
-                     return;
-                  }
-               }
-
-               handle_text_message(conn, text, strlen(text), (const char(*)[IMAGE_ID_LEN])image_ids,
-                                   image_id_count, persist_content);
-               free(persist_content);
-            }
-         }
-      } else {
-         /* No payload: no words and no images, refused like any empty turn. */
-         send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
-      }
+      dispatch_text_frame(conn, payload);
    } else if (strcmp(type, "cancel") == 0) {
       /* Cancel current operation */
       handle_cancel_message(conn);

@@ -43,6 +43,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "webui/webui_server.h"
+#include "webui/webui_turn_ref.h"
 
 /* =============================================================================
  * lws Return Convention
@@ -296,11 +297,13 @@ typedef struct {
          int64_t conversation_id; /* Live-turn conversation (0 = none); routes tool/visual frames */
          int64_t message_id; /* DB row id (0 = none); lets the client stamp data-message-id so a
                               * fanned-out message_appended dedups (server-authoritative §12c) */
+         char client_ref[WEBUI_CLIENT_REF_MAX + 1]; /* the turn's client_ref ("" = none) */
       } transcript;
       struct {
          char *code;
          char *message;
-         ws_error_severity_t severity; /* Default 0 = WS_SEVERITY_ERROR */
+         ws_error_severity_t severity;              /* Default 0 = WS_SEVERITY_ERROR */
+         char client_ref[WEBUI_CLIENT_REF_MAX + 1]; /* the refused turn's client_ref ("" = none) */
       } error;
       struct {
          char *token;
@@ -929,6 +932,19 @@ void send_error_impl_ex(struct lws *wsi,
                         const char *code,
                         const char *message,
                         ws_error_severity_t severity);
+
+/**
+ * @brief Send an error frame naming the text turn it refuses.
+ * @param client_ref The turn's client_ref, echoed as payload.client_ref; NULL or
+ *                   "" sends none (send_error_impl_ex uses the calling thread's
+ *                   turn ref, webui_turn_ref_get()).
+ */
+void send_error_frame(struct lws *wsi,
+                      const char *code,
+                      const char *message,
+                      ws_error_severity_t severity,
+                      const char *client_ref);
+
 
 /**
  * @brief Handle a phone_action WS message (answer / reject / hangup a call).

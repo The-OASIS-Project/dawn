@@ -162,7 +162,8 @@ void send_transcript_impl_ex(struct lws *wsi,
                              bool replay,
                              bool server_saved,
                              int64_t conversation_id,
-                             int64_t message_id);
+                             int64_t message_id,
+                             const char *client_ref);
 
 /* =============================================================================
  * Audio Send (used by webui_audio.c)

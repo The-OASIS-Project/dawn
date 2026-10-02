@@ -47,6 +47,9 @@ static const char *const s_features[] = {
    /* A text turn with no words but image_ids runs with just the images; one
     * with neither is refused with EMPTY_MESSAGE instead of dropped. */
    "image_only_turns",
+   /* A text frame may carry client_ref; that turn's user transcript echo and
+    * every error raised for it carry it back unchanged. */
+   "turn_refs",
 };
 
 size_t webui_protocol_json_members(char *out, size_t size) {

@@ -400,7 +400,8 @@ void send_transcript_impl_ex(struct lws *wsi,
                              bool replay,
                              bool server_saved,
                              int64_t conversation_id,
-                             int64_t message_id) {
+                             int64_t message_id,
+                             const char *client_ref) {
    /* Escape JSON special characters in text */
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
@@ -421,6 +422,9 @@ void send_transcript_impl_ex(struct lws *wsi,
    if (server_saved) {
       json_object_object_add(payload, "server_saved", json_object_new_boolean(true));
    }
+   if (client_ref && client_ref[0]) {
+      json_object_object_add(payload, "client_ref", json_object_new_string(client_ref));
+   }
    json_object_object_add(obj, "type", json_object_new_string("transcript"));
    json_object_object_add(obj, "payload", payload);
 
@@ -437,6 +441,14 @@ void send_error_impl_ex(struct lws *wsi,
                         const char *code,
                         const char *message,
                         ws_error_severity_t severity) {
+   send_error_frame(wsi, code, message, severity, webui_turn_ref_get());
+}
+
+void send_error_frame(struct lws *wsi,
+                      const char *code,
+                      const char *message,
+                      ws_error_severity_t severity,
+                      const char *client_ref) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
@@ -449,6 +461,9 @@ void send_error_impl_ex(struct lws *wsi,
    json_object_object_add(payload, "severity", json_object_new_string(severity_str));
    /* Kept for backward compat; `severity` is the field new clients should read. */
    json_object_object_add(payload, "recoverable", json_object_new_boolean(1));
+   if (client_ref && client_ref[0]) {
+      json_object_object_add(payload, "client_ref", json_object_new_string(client_ref));
+   }
    json_object_object_add(obj, "type", json_object_new_string("error"));
    json_object_object_add(obj, "payload", payload);
 
@@ -933,12 +948,14 @@ void process_one_response(void) {
       case WS_RESP_TRANSCRIPT:
          send_transcript_impl_ex(conn->wsi, resp.transcript.role, resp.transcript.text, false,
                                  resp.transcript.server_saved, resp.transcript.conversation_id,
-                                 resp.transcript.message_id);
+                                 resp.transcript.message_id, resp.transcript.client_ref);
          free(resp.transcript.role);
          free(resp.transcript.text);
          break;
       case WS_RESP_ERROR:
-         send_error_impl_ex(conn->wsi, resp.error.code, resp.error.message, resp.error.severity);
+         /* The ref the frame was built with, never this thread's. */
+         send_error_frame(conn->wsi, resp.error.code, resp.error.message, resp.error.severity,
+                          resp.error.client_ref);
          free(resp.error.code);
          free(resp.error.message);
          break;

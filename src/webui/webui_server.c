@@ -2209,6 +2209,11 @@ void webui_send_transcript_ex(session_t *session,
                               .conversation_id = session->stream_conversation_id,
                               .message_id = message_id,
                           } };
+   /* The user's own echo names the turn it echoes (its client_ref). */
+   if (role && strcmp(role, "user") == 0 && webui_turn_ref_get()) {
+      snprintf(resp.transcript.client_ref, sizeof(resp.transcript.client_ref), "%s",
+               webui_turn_ref_get());
+   }
 
    if (!resp.transcript.role || !resp.transcript.text) {
       free(resp.transcript.role);
@@ -2332,6 +2337,10 @@ void webui_send_error_ex(session_t *session,
                               .message = strdup(message),
                               .severity = severity,
                           } };
+   /* An error raised while a text turn is handled belongs to it. */
+   if (webui_turn_ref_get()) {
+      snprintf(resp.error.client_ref, sizeof(resp.error.client_ref), "%s", webui_turn_ref_get());
+   }
 
    if (!resp.error.code || !resp.error.message) {
       free(resp.error.code);
