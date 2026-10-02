@@ -1457,7 +1457,7 @@ static int execute_trash(email_account_t *acct, const char *message_id) {
       return 1;
    }
 
-   rc = email_trash_message(&conn, imap_folder, (uint32_t)uid_val, is_gmail_imap_server(acct));
+   rc = email_trash_message(&conn, imap_folder, (uint32_t)uid_val);
    sodium_memzero(&conn, sizeof(conn));
    return rc;
 }
@@ -1583,7 +1583,7 @@ int email_service_archive(int user_id, const char *account_name, const char *mes
       return 1;
    }
 
-   rc = email_archive_message(&conn, imap_folder, (uint32_t)uid_val, is_gmail_imap_server(&acct));
+   rc = email_archive_message(&conn, imap_folder, (uint32_t)uid_val);
    sodium_memzero(&conn, sizeof(conn));
    return rc;
 }

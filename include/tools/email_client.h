@@ -136,25 +136,44 @@ int email_send(const email_conn_t *conn,
  */
 int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok);
 
-/**
- * @brief Trash a message via IMAP (COPY to Trash + delete from source).
- * @param folder         Source folder (e.g. "INBOX")
- * @param uid            Message UID
- * @param is_gmail       True if Gmail IMAP server (uses [Gmail]/Trash)
- * @return 0 on success, 1 on failure
- */
-int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid, bool is_gmail);
+/* Trash / archive results (0 = done).  The values match the service's
+ * EMAIL_RC_* codes of the same names so they pass through. */
+#define EMAIL_CLIENT_RC_FAILURE 1         /* network, server, or bad input */
+#define EMAIL_CLIENT_RC_NOT_FOUND 13      /* no message with that UID in the folder */
+#define EMAIL_CLIENT_RC_NO_TRASH 16       /* the account has no Trash folder */
+#define EMAIL_CLIENT_RC_FOLDER_MISSING 17 /* the account has no Archive folder */
+#define EMAIL_CLIENT_RC_ALREADY_THERE 18  /* the message is already in that folder */
+#define EMAIL_CLIENT_RC_LEFT_FLAGGED 19   /* copied + \Deleted; no MOVE or UIDPLUS to remove it */
+#define EMAIL_CLIENT_RC_NOT_REMOVED 20    /* copied; removing the original failed */
 
 /**
- * @brief Archive a message via IMAP (COPY to Archive + delete from source).
- * @param folder         Source folder (e.g. "INBOX")
- * @param uid            Message UID
- * @param is_gmail       True if Gmail IMAP server (uses [Gmail]/All Mail)
- * @return 0 on success, 1 on failure
+ * @brief Move a message to the account's Trash folder (email_imap_move.c)
+ *
+ * The Trash is the user's own folder the server marks \Trash, else one with
+ * a known name at the top of their folders; with none the message stays
+ * where it is (EMAIL_CLIENT_RC_NO_TRASH), never deleted.  Only this message
+ * is touched: UID MOVE, or UID COPY + UID STORE \Deleted + UID EXPUNGE of its
+ * UID; never a bare EXPUNGE.  A server with neither MOVE nor UIDPLUS gets the
+ * copy and the \Deleted flag only (EMAIL_CLIENT_RC_LEFT_FLAGGED); a copy whose
+ * original couldn't then be removed is EMAIL_CLIENT_RC_NOT_REMOVED.
+ *
+ * @param folder Source folder (e.g. "INBOX")
+ * @param uid    Message UID
+ * @return 0, EMAIL_CLIENT_RC_NOT_FOUND, _NO_TRASH, _ALREADY_THERE,
+ *         _LEFT_FLAGGED, _NOT_REMOVED, or _FAILURE
  */
-int email_archive_message(const email_conn_t *conn,
-                          const char *folder,
-                          uint32_t uid,
-                          bool is_gmail);
+int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid);
+
+/**
+ * @brief Move a message to the account's Archive folder (email_imap_move.c)
+ *
+ * The Archive is the user's own folder the server marks \Archive, else on
+ * Gmail \All (All Mail), else one with a known name.  Moves as
+ * email_trash_message does.
+ *
+ * @return 0, EMAIL_CLIENT_RC_NOT_FOUND, _FOLDER_MISSING, _ALREADY_THERE,
+ *         _LEFT_FLAGGED, _NOT_REMOVED, or _FAILURE
+ */
+int email_archive_message(const email_conn_t *conn, const char *folder, uint32_t uid);
 
 #endif /* EMAIL_CLIENT_H */

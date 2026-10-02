@@ -495,6 +495,13 @@ dawn_add_unit_test(test_briefing_prompt
    LIBS    dawn_common unity
    LABEL   ci)
 
+# An IMAP account's capabilities and Trash/Archive folders, from its replies.
+dawn_add_unit_test(test_email_imap_roles
+   SOURCES test_email_imap_roles.c
+           ${SRC_ROOT}/src/tools/email_imap_roles.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_email_parse
    SOURCES test_email_parse.c
            ${SRC_ROOT}/src/tools/email_parse.c

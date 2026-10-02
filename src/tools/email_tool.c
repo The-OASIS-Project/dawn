@@ -751,7 +751,23 @@ static char *handle_confirm_trash(struct json_object *details, int user_id) {
    int rc = email_service_confirm_trash(user_id, pending_id);
    switch (rc) {
       case EMAIL_RC_OK:
-         return strdup("Email moved to Trash successfully.");
+         return strdup("Email moved to Trash.");
+      case EMAIL_RC_ALREADY_THERE:
+         return strdup("That email is already in Trash; nothing changed (DAWN never deletes "
+                       "mail permanently).");
+      case EMAIL_RC_LEFT_FLAGGED:
+         return strdup("Email copied to Trash and marked deleted, but it is still in its folder: "
+                       "this server can't remove one message without also purging others. Tell "
+                       "the user their mail app can remove it there.");
+      case EMAIL_RC_NOT_REMOVED:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: the email was copied to Trash, but removing the original failed "
+                       "(network or server error), so it is still in its folder too. Nothing was "
+                       "lost. Tell the user; a retry may leave a second copy in Trash.");
+      case EMAIL_RC_NOT_FOUND:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: that message is no longer in its folder (moved or deleted "
+                       "elsewhere). Nothing was changed.");
       case EMAIL_CONFIRM_RC_NOT_FOUND:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: pending trash not found or expired. The request may have timed out "
@@ -765,6 +781,11 @@ static char *handle_confirm_trash(struct json_object *details, int user_id) {
                        "Error: the account this message belongs to is no longer available or "
                        "has become read-only. Nothing was deleted. Call action='accounts' to "
                        "check, then retry from a writable account.");
+      case EMAIL_RC_NO_TRASH:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: this account has no Trash folder, so the message was left where "
+                       "it is (DAWN never deletes mail permanently). Tell the user; they can "
+                       "create a Trash folder in their mail app.");
       default:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to trash email (network or upstream error). Retry "
@@ -782,12 +803,32 @@ static char *handle_archive(struct json_object *details, int user_id) {
    int rc = email_service_archive(user_id, account, mid);
    switch (rc) {
       case EMAIL_RC_OK:
-         return strdup("Email archived successfully (removed from Inbox, kept in All Mail).");
+         return strdup("Email archived (moved out of its folder to the account's archive).");
+      case EMAIL_RC_ALREADY_THERE:
+         return strdup("That email is already in the archive; nothing changed.");
+      case EMAIL_RC_LEFT_FLAGGED:
+         return strdup("Email copied to the archive and marked deleted, but it is still in its "
+                       "folder: this server can't remove one message without also purging "
+                       "others. Tell the user their mail app can remove it there.");
+      case EMAIL_RC_NOT_REMOVED:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: the email was copied to the archive, but removing the original "
+                       "failed (network or server error), so it is still in its folder too. "
+                       "Nothing was lost. Tell the user; a retry may leave a second copy.");
+      case EMAIL_RC_NOT_FOUND:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: that message is no longer in its folder (moved or deleted "
+                       "elsewhere). Get fresh IDs from 'recent'.");
       case EMAIL_ACCT_RC_READONLY:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: email account is read-only. Cannot archive emails. Tell the "
                        "user to enable write access for this account in WebUI Settings -> "
                        "Email.");
+      case EMAIL_RC_FOLDER_MISSING:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: this account has no Archive folder, so the message was left "
+                       "where it is. Tell the user; they can create an Archive folder in their "
+                       "mail app.");
       default:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to archive email (network or upstream error). The "

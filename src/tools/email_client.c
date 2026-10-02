@@ -43,6 +43,7 @@
 #include "core/buf_printf.h"
 #include "core/curl_buffer.h"
 #include "logging.h"
+#include "tools/email_client_internal.h"
 #include "tools/email_instrument.h"
 #include "tools/email_parse.h"
 #include "tools/html_parser.h"
@@ -121,7 +122,7 @@ static void setup_auth(CURL *curl, const email_conn_t *conn) {
  * UIDs: ~45 KB). */
 #define IMAP_RECV_BUFFER_SIZE (128 * 1024)
 
-static CURL *create_imap_handle(const email_conn_t *conn) {
+CURL *email_imap_handle_create(const email_conn_t *conn) {
    CURL *curl = curl_easy_init();
    if (!curl)
       return NULL;
@@ -730,13 +731,13 @@ static void url_encode_folder(const char *folder, char *out, size_t out_len) {
 /* One custom command on the already-configured handle, reply into @p buf
  * (caller frees).  Uses the breaker-aware perform only for the op's first,
  * auth-bearing command. */
-static CURLcode imap_run_command(CURL *curl,
-                                 email_instrument_ctx_t *dctx,
-                                 const email_conn_t *conn,
-                                 const char *op,
-                                 const char *cmd,
-                                 bool first,
-                                 curl_buffer_t *buf) {
+CURLcode email_imap_run_command(CURL *curl,
+                                email_instrument_ctx_t *dctx,
+                                const email_conn_t *conn,
+                                const char *op,
+                                const char *cmd,
+                                bool first,
+                                curl_buffer_t *buf) {
    curl_buffer_init_with_max(buf, EMAIL_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, buf);
@@ -777,7 +778,7 @@ static int imap_search_unwindowed(CURL *curl,
    }
 
    curl_buffer_t buf;
-   CURLcode res = imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
+   CURLcode res = email_imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
    if (res != CURLE_OK) {
       *res_out = res;
       OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
@@ -810,7 +811,7 @@ static bool imap_lookup_one(CURL *curl,
                             const char *cmd,
                             uint32_t *out) {
    curl_buffer_t buf;
-   CURLcode res = imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
+   CURLcode res = email_imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
    uint32_t v[1];
    int total = 0;
    int n = (res == CURLE_OK) ? email_imap_select_newest_uids(buf.data, v, 1, &total) : 0;
@@ -859,7 +860,7 @@ static int imap_windowed_search(CURL *curl,
     * carries EXISTS + UIDVALIDITY, captured by the instrument's debug callback.
     * A pinned cursor whose epoch changed fails right here. */
    curl_buffer_t buf;
-   CURLcode res = imap_run_command(curl, dctx, conn, op, "NOOP", true, &buf);
+   CURLcode res = email_imap_run_command(curl, dctx, conn, op, "NOOP", true, &buf);
    curl_buffer_free(&buf);
    if (res != CURLE_OK) {
       *res_out = res;
@@ -925,7 +926,7 @@ static int imap_windowed_search(CURL *curl,
       }
 
       long long window_start_ms = monotonic_ms();
-      res = imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
+      res = email_imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
       if (res == CURLE_OPERATION_TIMEDOUT && windows > 0) {
          /* Out of time mid-walk: keep what earlier windows found and hand back a
           * resume cursor (this window counts as unscanned; seq_hi is unchanged). */
@@ -1040,7 +1041,7 @@ int email_fetch_recent(const email_conn_t *conn,
    char encoded_folder[256];
    url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
 
-   CURL *curl = create_imap_handle(conn);
+   CURL *curl = email_imap_handle_create(conn);
    if (!curl)
       return 1;
 
@@ -1093,7 +1094,7 @@ int email_read_message(const email_conn_t *conn,
    char encoded_folder[256];
    url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
 
-   CURL *curl = create_imap_handle(conn);
+   CURL *curl = email_imap_handle_create(conn);
    if (!curl)
       return 1;
 
@@ -1228,7 +1229,7 @@ int email_search(const email_conn_t *conn,
    char encoded_folder[256];
    url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
 
-   CURL *curl = create_imap_handle(conn);
+   CURL *curl = email_imap_handle_create(conn);
    if (!curl)
       return 1;
 
@@ -1407,7 +1408,7 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
    *smtp_ok = false;
 
    /* Test IMAP: connect to INBOX */
-   CURL *curl = create_imap_handle(conn);
+   CURL *curl = email_imap_handle_create(conn);
    if (curl) {
       /* Instrument for the same on-wire-login count + rejection capture as the
        * real ops, so a passing test contrasts directly with a failing search in
@@ -1553,7 +1554,7 @@ int email_list_folders(const email_conn_t *conn, char *out, size_t out_len) {
       return 1;
    out[0] = '\0';
 
-   CURL *curl = create_imap_handle(conn);
+   CURL *curl = email_imap_handle_create(conn);
    if (!curl)
       return 1;
 
@@ -1649,110 +1650,4 @@ void email_message_free(email_message_t *msg) {
       msg->body = NULL;
       msg->body_len = 0;
    }
-}
-
-/* =============================================================================
- * Trash / Archive via IMAP
- *
- * Pattern: COPY to destination folder → STORE \Deleted → EXPUNGE.
- * Each IMAP command requires a separate curl_easy_perform().
- * ============================================================================= */
-
-/**
- * @brief Move a message by UID from one folder to another via IMAP.
- * Steps: SELECT source → COPY to dest → STORE \Deleted → EXPUNGE.
- */
-static int imap_move_message(const email_conn_t *conn,
-                             const char *folder,
-                             uint32_t uid,
-                             const char *dest_folder) {
-   if (!conn || !folder || !folder[0] || !dest_folder || !dest_folder[0] || uid == 0)
-      return 1;
-
-   CURL *curl = create_imap_handle(conn);
-   if (!curl)
-      return 1;
-
-   /* URL-encode the source folder */
-   char *encoded_folder = curl_easy_escape(curl, folder, 0);
-   if (!encoded_folder) {
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-
-   char url[768];
-   snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
-   curl_easy_setopt(curl, CURLOPT_URL, url);
-
-   curl_buffer_t buf;
-   int rc = 1;
-
-   /* Step 1: COPY to destination */
-   char copy_cmd[384];
-   snprintf(copy_cmd, sizeof(copy_cmd), "UID COPY %u \"%s\"", uid, dest_folder);
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, copy_cmd);
-
-   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-   CURLcode res = curl_easy_perform(curl);
-   curl_buffer_free(&buf);
-
-   if (res != CURLE_OK) {
-      OLOG_ERROR("email_imap: COPY failed for UID %u: %s", uid, curl_easy_strerror(res));
-      goto cleanup;
-   }
-
-   /* Step 2: STORE \Deleted flag */
-   char store_cmd[64];
-   snprintf(store_cmd, sizeof(store_cmd), "UID STORE %u +FLAGS (\\Deleted)", uid);
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, store_cmd);
-
-   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-   res = curl_easy_perform(curl);
-   curl_buffer_free(&buf);
-
-   if (res != CURLE_OK) {
-      OLOG_WARNING("email_imap: STORE \\Deleted failed for UID %u (message copied to %s): %s", uid,
-                   dest_folder, curl_easy_strerror(res));
-      /* COPY succeeded, so this is a partial success — message exists in both folders */
-      rc = 0;
-      goto cleanup;
-   }
-
-   /* Step 3: EXPUNGE to remove from source */
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "EXPUNGE");
-
-   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-   res = curl_easy_perform(curl);
-   curl_buffer_free(&buf);
-
-   if (res != CURLE_OK) {
-      OLOG_WARNING("email_imap: EXPUNGE failed for UID %u (flagged but not removed): %s", uid,
-                   curl_easy_strerror(res));
-   }
-
-   rc = 0;
-
-cleanup:
-   curl_free(encoded_folder);
-   curl_easy_cleanup(curl);
-   return rc;
-}
-
-int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid, bool is_gmail) {
-   const char *trash_folder = is_gmail ? "[Gmail]/Trash" : "Trash";
-   OLOG_INFO("email_imap: trashing UID %u from %s to %s", uid, folder, trash_folder);
-   return imap_move_message(conn, folder, uid, trash_folder);
-}
-
-int email_archive_message(const email_conn_t *conn,
-                          const char *folder,
-                          uint32_t uid,
-                          bool is_gmail) {
-   const char *archive_folder = is_gmail ? "[Gmail]/All Mail" : "Archive";
-   OLOG_INFO("email_imap: archiving UID %u from %s to %s", uid, folder, archive_folder);
-   return imap_move_message(conn, folder, uid, archive_folder);
 }

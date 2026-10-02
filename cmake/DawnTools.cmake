@@ -339,6 +339,8 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c
+        src/tools/email_imap_move.c
+        src/tools/email_imap_roles.c
         src/tools/email_instrument.c
         src/tools/email_parse.c
         src/tools/gmail_client.c

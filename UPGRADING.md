@@ -12,6 +12,28 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-02 — Email trash and archive over IMAP no longer purge other deleted mail
+
+**What changed.**
+- **Trashing or archiving a message on an IMAP account now touches only that
+  message.** Before, DAWN finished the move with a plain `EXPUNGE`, which
+  permanently erased *every* message marked deleted in that folder, including
+  ones another mail app had only marked. DAWN now uses `MOVE`, or removes just
+  the one message. On a server that supports neither, the message is copied and
+  marked deleted, and DAWN says it is still in the folder for your mail app to
+  remove.
+- **DAWN finds Trash and Archive by asking the server**, not by guessing names
+  like "Trash" or "[Gmail]/Trash". It uses the folder your server marks for
+  that purpose, or a folder named Trash, Deleted Items, Archive (and similar)
+  at the top of your folders. It never uses a folder shared by other people.
+- **If an account has no Trash folder, trash is refused** and the message stays
+  where it is. Archive is refused the same way when there is no archive folder.
+  Create the folder in your mail app if you want DAWN to use it.
+
+**What you need to do.** Nothing. Gmail API accounts are unaffected.
+
+---
+
 ## 2026-10-01 — Retrieved memory is sent once per conversation; two focus settings retired
 
 **What changed.**

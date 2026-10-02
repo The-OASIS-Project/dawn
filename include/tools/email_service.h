@@ -82,6 +82,15 @@ typedef struct {
 #define EMAIL_RC_NOT_FOUND 13       /* message id not found in the mailbox (stale/wrong/deleted) */
 #define EMAIL_RC_TIMEOUT 14 /* op timed out (large mailbox / slow server); hint to bound it */
 #define EMAIL_RC_INVALID_PAGE_TOKEN 15 /* page_token malformed, from another account, or stale */
+#define EMAIL_RC_NO_TRASH 16 /* the account has no Trash folder: nothing was moved or deleted */
+#define EMAIL_RC_FOLDER_MISSING 17 /* the account has no Archive folder: nothing was moved */
+#define EMAIL_RC_ALREADY_THERE 18  /* trash/archive: the message is already in that folder */
+/* trash/archive: copied and marked \Deleted, left in its folder (the server has
+ * neither MOVE nor UIDPLUS, so removing it would purge other mail too) */
+#define EMAIL_RC_LEFT_FLAGGED 19
+/* trash/archive: copied, but removing the original failed (a transient error;
+ * the original is still in its folder, and a retry may copy it again) */
+#define EMAIL_RC_NOT_REMOVED 20
 
 /* Two-step action codes (compose/send + trash prep/confirm; archive shares the
  * account-resolution set).  0/1 reuse EMAIL_RC_OK / EMAIL_RC_FAILURE above, and
@@ -314,6 +323,9 @@ int email_service_create_pending_trash(int user_id,
 /**
  * @brief Confirm and execute a pending trash action.
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
+ *         EMAIL_RC_NOT_FOUND (the message is gone), EMAIL_RC_NO_TRASH,
+ *         EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED, EMAIL_RC_NOT_REMOVED
+ *         (IMAP; see email_trash_message),
  *         EMAIL_CONFIRM_RC_NOT_FOUND if not found/expired,
  *         EMAIL_CONFIRM_RC_THROTTLED if throttled,
  *         EMAIL_CONFIRM_RC_ACCOUNT_GONE if the account is no longer available or
@@ -322,10 +334,12 @@ int email_service_create_pending_trash(int user_id,
 int email_service_confirm_trash(int user_id, const char *pending_id);
 
 /**
- * @brief Archive a message (remove from inbox, keep in All Mail/Archive).
- * Single-step operation — no confirmation needed.
+ * @brief Archive a message: move it to the account's archive folder (Gmail
+ * API: remove the INBOX label).  Single-step operation — no confirmation needed.
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
- *         EMAIL_ACCT_RC_READONLY if the account is read-only
+ *         EMAIL_ACCT_RC_READONLY if the account is read-only, EMAIL_RC_NOT_FOUND,
+ *         EMAIL_RC_FOLDER_MISSING, EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED,
+ *         EMAIL_RC_NOT_REMOVED (IMAP; see email_archive_message)
  */
 int email_service_archive(int user_id, const char *account_name, const char *message_id);
 
