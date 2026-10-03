@@ -33,6 +33,7 @@
 #include <time.h>
 
 #include "core/pending_slots.h"
+#include "core/tool_call_policy.h"
 #include "core/turn_origin.h"
 #include "logging.h"
 #include "tools/phone_audio_config.h"
@@ -411,6 +412,18 @@ static char *phone_service_result_dup(int rc, const char *result) {
    return out;
 }
 
+/* Whether a call or text previews (and waits for its confirm) rather than
+ * going at once: as the call was classified at the gate, so a settings save
+ * between the two can't turn a preview into a dial.  confirm_outbound outside
+ * the gate. */
+static bool phone_previews(void) {
+   tool_action_kind_t kind = TOOL_KIND_ACT;
+   if (tool_call_policy_decided(&kind)) {
+      return kind == TOOL_KIND_PREPARE;
+   }
+   return s_config.confirm_outbound;
+}
+
 static char *handle_call(struct json_object *details, int user_id, const turn_origin_t *origin) {
    const char *target = json_get_str(details, "target");
    if (!target || target[0] == '\0') {
@@ -418,7 +431,7 @@ static char *handle_call(struct json_object *details, int user_id, const turn_or
                     "Error: 'target' is required (phone number or contact name)");
    }
 
-   if (s_config.confirm_outbound) {
+   if (phone_previews()) {
       /* Resolve the contact NOW (at preview) so the user confirms a real,
        * verified number — not a name we haven't checked.  Ambiguous or
        * fuzzy-only matches surface candidates instead of arming a call. */
@@ -498,14 +511,15 @@ static char *handle_send_sms(struct json_object *details,
    if (!body || body[0] == '\0') {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: 'body' is required (message text)");
    }
-   if (s_config.confirm_outbound && strlen(body) >= sizeof(((phone_pending_t *)0)->body)) {
+   const bool previews = phone_previews();
+   if (previews && strlen(body) >= sizeof(((phone_pending_t *)0)->body)) {
       /* Stored cut short, the text sent wouldn't be the one previewed. */
       return strdup(TOOL_RESULT_ERROR_MARK "Error: the message is too long to preview; keep it "
                                            "under about 1000 bytes (fewer with emoji or "
                                            "non-Latin text), or send it as two messages.");
    }
 
-   if (s_config.confirm_outbound) {
+   if (previews) {
       /* Resolve the recipient NOW (at preview) — same guard as calls, so the
        * user confirms a verified number rather than an unchecked name. */
       phone_resolve_t rez;
@@ -1385,8 +1399,8 @@ static const treg_param_t phone_params[] = {
 
 
 /* A call or a text is a preview only while confirm_outbound is on; with it off,
- * it dials or sends at once.  (A settings save may flip the flag between this
- * and the call: one bool, read again by the handler.) */
+ * it dials or sends at once.  Read once, here: the handler follows the kind
+ * decided at the gate (phone_previews), not the flag. */
 static tool_action_kind_t phone_classify_call(const char *device,
                                               const char *action,
                                               const char *value,

@@ -94,6 +94,23 @@ session_t *session_get_command_context(void) {
 void session_set_command_context(session_t *session) {
    (void)session;
 }
+/* With a command context set, the harness's tool calls run as the user's
+ * turn (core/tool_call_policy.h); with none, as an unattended one. */
+bool session_turn_user_originated(session_t *session) {
+   (void)session;
+   return true;
+}
+bool session_turn_is_background(session_t *session) {
+   (void)session;
+   return false;
+}
+static __thread bool s_stub_code_redeemed;
+bool session_call_code_redeemed(void) {
+   return s_stub_code_redeemed;
+}
+void session_set_call_code_redeemed(bool redeemed) {
+   s_stub_code_redeemed = redeemed;
+}
 /* The session layer's user rule (session_effective_user_id): its user, the
  * default voice user for the local mic, else a guest (0). */
 int session_default_voice_user_id(void) {

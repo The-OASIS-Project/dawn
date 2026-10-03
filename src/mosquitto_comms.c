@@ -38,6 +38,7 @@
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/tool_call_policy.h"
 #include "dawn.h"
 #include "input_queue.h"
 #include "llm/llm_command_parser.h"
@@ -497,11 +498,10 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
       OLOG_INFO("Viewing response using file path: %s", value ? value : "(null)");
    }
 
-   // Get session_id if present (for per-session LLM config)
+   // Get session_id if present: the command runs in that session as its user,
+   // unattended (reads and session state only; see the gate below).
    // Note: session_get() returns NULL for disconnected sessions, which means
-   // commands from disconnected clients fall back to global config. This is
-   // intentional - there's no value in changing config for a disconnected client,
-   // and they can't see the result anyway.
+   // the command runs with no session, as one that names none.
    struct json_object *session_id_obj = NULL;
    session_t *session = NULL;
    if (json_object_object_get_ex(parsed_json, "session_id", &session_id_obj)) {
@@ -514,8 +514,32 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
 
    // Look up and execute callback for this device type
    device_callback_fn dev_callback = get_device_callback(deviceName);
-   if (dev_callback) {
-      callback_result = dev_callback(actionName, (char *)value, &should_respond);
+   /* A message naming a session acts in it as its user, but with no turn
+    * running: unattended, whatever the session (core/tool_call_policy.h).  It
+    * may read, not act, and the callback gets the action that was checked. */
+   tool_call_verdict_t verdict = { 0 };
+   const char *run_action = actionName;
+   if (dev_callback && session) {
+      if (tool_call_policy_check(tool_registry_find(deviceName), deviceName, actionName, value,
+                                 TOOL_CALLER_UNATTENDED, &verdict) != TOOL_CALL_ALLOW) {
+         OLOG_WARNING("MQTT: refused '%s' action '%s' (%s) naming session %u", deviceName,
+                      actionName ? actionName : "", tool_action_kind_name(verdict.kind),
+                      session->session_id);
+         callback_result = strdup(verdict.message);
+         should_respond = 1;
+         dev_callback = NULL;
+      } else {
+         run_action = verdict.action;
+      }
+   }
+   if (dev_callback && session) {
+      const tool_call_scope_t outer = tool_call_policy_enter(verdict.kind, TOOL_CALLER_UNATTENDED,
+                                                             false);
+      callback_result = dev_callback(run_action, (char *)value, &should_respond);
+      tool_call_policy_leave(outer);
+      tool_result_strip_error_mark(callback_result);
+   } else if (dev_callback) {
+      callback_result = dev_callback(run_action, (char *)value, &should_respond);
       /* Strip the opt-in tool error-marker before the result reaches the AI. */
       tool_result_strip_error_mark(callback_result);
    }

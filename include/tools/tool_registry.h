@@ -752,6 +752,27 @@ tool_action_kind_t tool_action_kind(const tool_metadata_t *meta,
                                     const char *value);
 
 /**
+ * @brief The tool's own spelling of @p action: the value of its ENUM action
+ *        parameter it matches, ignoring case (a tool without one takes any
+ *        action, as given)
+ *
+ * @param out     Receives the spelling (NUL-terminated; may be cut to fit)
+ * @param out_len Size of @p out
+ * @return false when the tool has an ENUM action parameter and @p action is
+ *         none of its values
+ */
+bool tool_action_canonical(const tool_metadata_t *meta,
+                           const char *action,
+                           char *out,
+                           size_t out_len);
+
+/**
+ * @brief The tool's actions, comma-separated, for a message ("" for a tool
+ *        without an ENUM action parameter)
+ */
+void tool_action_list(const tool_metadata_t *meta, char *out, size_t out_len);
+
+/**
  * @brief Check a tool's action_kinds table: every action is one of its ENUM
  *        action parameter's values, listed once; a tool without such a
  *        parameter lists none; a PREPARE entry names a confirm the table

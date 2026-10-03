@@ -813,7 +813,10 @@ static void *briefing_thread_func(void *arg) {
          int should_respond = 0;
          /* Called directly, not through llm_tools_execute: its result is
           * neutralized here the same way (text from anywhere, headed for an
-          * LLM and a conversation). */
+          * LLM and a conversation).  Not through the tool-call gate either
+          * (core/tool_call_policy.h): the user chose this step when they
+          * scheduled it, and scheduling is itself an action only a live user
+          * turn may take.  A tool that needs a live turn refuses here. */
          char *step_result = llm_context_neutralize_owned(
              step_meta->callback(steps[i].tool_action, value_buf, &should_respond));
          if (!step_result) {
@@ -898,6 +901,7 @@ static void *briefing_thread_func(void *arg) {
       char value_buf[SCHED_TOOL_VALUE_MAX];
       snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
       int should_respond = 0;
+      /* Called directly, as a briefing step is (see above). */
       tool_result = llm_context_neutralize_owned(
           meta->callback(event->tool_action, value_buf, &should_respond));
 

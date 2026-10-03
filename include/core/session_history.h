@@ -348,6 +348,12 @@ bool session_turn_user_originated(session_t *session);
 uint32_t session_turn_number(session_t *session);
 
 /**
+ * @brief Whether the caller is the session's running turn and that turn is a
+ *        background one (a job's follow-up, run in the session it reports to)
+ */
+bool session_turn_is_background(session_t *session);
+
+/**
  * @brief Mark the calling thread's tool call as approved by the user's reply
  *        code (true), or clear it (false)
  *
@@ -568,6 +574,11 @@ static inline bool session_turn_user_originated(session_t *session) {
 static inline uint32_t session_turn_number(session_t *session) {
    (void)session;
    return 0;
+}
+
+static inline bool session_turn_is_background(session_t *session) {
+   (void)session;
+   return false;
 }
 
 static inline void session_set_call_code_redeemed(bool redeemed) {

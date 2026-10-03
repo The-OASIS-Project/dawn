@@ -1438,6 +1438,16 @@ static bool turn_user_originated_locked(session_t *session) {
           !session->turn_background;
 }
 
+bool session_turn_is_background(session_t *session) {
+   if (!session) {
+      return false;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   const bool background = turn_is_caller_locked(session) && session->turn_background;
+   pthread_mutex_unlock(&session->history_mutex);
+   return background;
+}
+
 bool session_turn_user_originated(session_t *session) {
    if (!session) {
       return false;

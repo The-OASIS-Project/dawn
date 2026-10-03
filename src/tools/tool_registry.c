@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "config/dawn_config.h"
 #include "core/device_types.h"
@@ -652,7 +653,7 @@ const char *tool_registry_resolve_device(const tool_metadata_t *metadata, const 
    }
 
    for (int i = 0; i < metadata->device_map_count; i++) {
-      if (metadata->device_map[i].key && strcmp(metadata->device_map[i].key, key) == 0) {
+      if (metadata->device_map[i].key && strcasecmp(metadata->device_map[i].key, key) == 0) {
          return metadata->device_map[i].device;
       }
    }
@@ -1397,6 +1398,48 @@ static bool param_has_value(const treg_param_t *p, const char *value) {
       }
    }
    return false;
+}
+
+bool tool_action_canonical(const tool_metadata_t *meta,
+                           const char *action,
+                           char *out,
+                           size_t out_len) {
+   if (!meta || !action || !out || out_len == 0) {
+      return false;
+   }
+   const treg_param_t *param = enum_action_param(meta);
+   if (!param) {
+      snprintf(out, out_len, "%s", action);
+      return true;
+   }
+   for (int i = 0; i < param->enum_count && i < TOOL_PARAM_ENUM_MAX; i++) {
+      if (param->enum_values[i] && strcasecmp(param->enum_values[i], action) == 0) {
+         snprintf(out, out_len, "%s", param->enum_values[i]);
+         return true;
+      }
+   }
+   out[0] = '\0';
+   return false;
+}
+
+void tool_action_list(const tool_metadata_t *meta, char *out, size_t out_len) {
+   if (!out || out_len == 0) {
+      return;
+   }
+   out[0] = '\0';
+   const treg_param_t *param = meta ? enum_action_param(meta) : NULL;
+   size_t used = 0;
+   for (int i = 0; param && i < param->enum_count && i < TOOL_PARAM_ENUM_MAX; i++) {
+      if (!param->enum_values[i]) {
+         continue;
+      }
+      const int n = snprintf(out + used, out_len - used, "%s%s", used ? ", " : "",
+                             param->enum_values[i]);
+      if (n < 0 || (size_t)n >= out_len - used) {
+         break;
+      }
+      used += (size_t)n;
+   }
 }
 
 int tool_action_kinds_validate(const tool_metadata_t *meta, char *why, size_t why_len) {

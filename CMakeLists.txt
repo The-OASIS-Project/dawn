@@ -583,6 +583,7 @@ set(DAWN_SOURCES
     src/core/wake_word.c
     src/core/utterance_dedup.c
     src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
+    src/core/tool_call_policy.c       # who may make a tool call (sessions only with multi-client)
 
     # ASR subsystem
     src/asr/asr_interface.c

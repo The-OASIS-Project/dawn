@@ -523,6 +523,15 @@ dawn_add_unit_test(test_turn_origin
    LIBS    unity
    LABEL   ci)
 
+# Who may make a tool call: the caller's kind of turn against the action's kind.
+dawn_add_unit_test(test_tool_call_policy
+   SOURCES test_tool_call_policy.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/core/tool_call_policy.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   DEFINES ENABLE_MULTI_CLIENT
+   LABEL   ci)
+
 # What a tool staged for the user's confirm: one item per session and kind.
 dawn_add_unit_test(test_pending_slots
    SOURCES test_pending_slots.c
@@ -1001,7 +1010,7 @@ dawn_add_unit_test(test_openrouter_cache
 # stub TU that provides its wide dep surface (the dup-check path reaches almost
 # none of it).
 dawn_add_unit_test(test_llm_dup_check
-   SOURCES test_llm_dup_check.c test_llm_dup_check_stub.c
+   SOURCES test_llm_dup_check.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1018,7 +1027,7 @@ dawn_add_unit_test(test_llm_dup_check
 # The batch finish contract: results reach the finish step raw and leave
 # finished (neutralized, announced).  Same link as test_llm_dup_check.
 dawn_add_unit_test(test_llm_tools_finish
-   SOURCES test_llm_tools_finish.c test_llm_dup_check_stub.c
+   SOURCES test_llm_tools_finish.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1035,7 +1044,7 @@ dawn_add_unit_test(test_llm_tools_finish
 # A conversation's tools are decided by registration, not enable flags; a
 # tool a session may not use is never offered to it, frozen or added later.
 dawn_add_unit_test(test_llm_tools_frozen
-   SOURCES test_llm_tools_frozen.c test_llm_dup_check_stub.c
+   SOURCES test_llm_tools_frozen.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1054,7 +1063,7 @@ dawn_add_unit_test(test_llm_tools_frozen
 # and stripped for a model without vision, on every history shape.  Links the
 # real llm_tools.c against the dup-check stub, as test_llm_dup_check does.
 dawn_add_unit_test(test_tool_images_render
-   SOURCES test_tool_images_render.c test_llm_dup_check_stub.c
+   SOURCES test_tool_images_render.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -2066,6 +2075,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_streaming.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/core/tool_call_policy.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tool_images.c
@@ -2175,6 +2185,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_streaming.c
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/core/tool_call_policy.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tool_images.c

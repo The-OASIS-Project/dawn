@@ -47,6 +47,7 @@
 #include "core/research_allowlist.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/tool_call_policy.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "dawn_error.h"
@@ -1329,6 +1330,152 @@ static int pack_param(const tool_metadata_t *meta,
    return SUCCESS;
 }
 
+/* Run a resolved, permitted call on its tool's path: the viewing sync call,
+ * an MQTT publish, the tool's callback, or command_execute. */
+static int run_resolved_call(const tool_call_t *call,
+                             const tool_metadata_t *meta,
+                             const char *effective_device,
+                             const char *action,
+                             char *value_buf,
+                             tool_result_t *result) {
+   /* Notify callback that tool execution is starting */
+   notify_tool_execution(call->name, call->arguments, NULL, false);
+
+   /* Special handling for sync_wait tools (e.g., viewing) */
+   if (meta->sync_wait && strcmp(meta->name, "viewing") == 0) {
+      result->success = execute_viewing_sync(action, value_buf, result);
+      notify_tool_execution(call->name, call->arguments, result->result, result->success);
+      return result->success ? 0 : 1;
+   }
+
+   /* MQTT-only tools publish directly using the already-resolved outer tool's
+    * metadata. We deliberately skip command_execute()'s device-name registry
+    * lookup here because effective_device can be a pass-through value (e.g.,
+    * "altitude" for hud_control, "record" for recording) that is not itself
+    * a registered tool — MIRAGE's topic-hud handler parses the device field
+    * directly to route to display elements or recording modes. */
+   if (meta->mqtt_only) {
+      struct mosquitto *mosq = worker_pool_get_mosq();
+      cmd_exec_result_t exec_result;
+
+      int rc = command_execute_mqtt_direct(meta, effective_device, action, value_buf, mosq,
+                                           &exec_result);
+
+      if (rc == 0 && exec_result.success) {
+         if (exec_result.result) {
+            safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
+         } else {
+            snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Command sent to %s", effective_device);
+         }
+         result->success = true;
+      } else {
+         if (exec_result.result) {
+            safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
+         } else {
+            snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error executing '%s'", call->name);
+         }
+         result->success = false;
+      }
+
+      result->skip_followup = meta->skip_followup || exec_result.skip_followup;
+      result->should_respond = exec_result.should_respond;
+      notify_tool_execution(call->name, call->arguments, result->result, result->success);
+      cmd_exec_result_free(&exec_result);
+      return result->success ? 0 : 1;
+   }
+
+   /* Call the tool's callback directly */
+   if (meta->callback) {
+      int should_respond = 0;
+      /* Expose the raw LLM args to the callback (thread-local) so bridged tools
+       * can recover the original typed JSON that (action, value) packing flattens
+       * lossily. Cleared immediately after the call. */
+      s_current_raw_args = call->arguments;
+      char *cb_result = meta->callback(action, value_buf[0] ? value_buf : NULL, &should_respond);
+      s_current_raw_args = NULL;
+
+      /* Capture the tool's self-reported hard-failure mark BEFORE stripping it: `success` stays
+       * true (the marked text still flows to the LLM as description), but the pill must red. This
+       * is the ONE site where a structurally-fine call is still a confirmed failure.
+       *
+       * ASSUMPTION (currently holds; document so it isn't silently load-bearing): marker capture
+       * lives ONLY here on the direct-callback path. The other dispatch paths — command_execute
+       * fallback (below), mqtt_only, viewing — do NOT capture the mark, and command_execute
+       * additionally strips it and forces success=true (command_executor.c), so a marker returned
+       * through those paths is unrecoverable and renders NEUTRAL, not red. Safe (a MISSED red,
+       * never a false one) and unreachable today: every marker-emitting tool
+       * (attention/stat/suit/search/ weather) is a modular direct-callback tool that hits THIS
+       * site. If a legacy MQTT/command device ever adopts TOOL_RESULT_ERROR_MARK, surface the
+       * verdict in cmd_exec_result_t and OR it in on those paths too. */
+      bool marked = tool_result_is_error(cb_result);
+
+      /* Strip the opt-in tool error-marker (this native-tool path invokes the
+       * callback directly, bypassing command_execute's strip). */
+      tool_result_strip_error_mark(cb_result);
+
+      if (cb_result) {
+         size_t cb_len = strlen(cb_result);
+         if (cb_len >= LLM_TOOLS_RESULT_LEN) {
+            /* Large result — store in result_extended, copy truncated preview to result[] */
+            result->result_extended = cb_result; /* Transfer ownership */
+            safe_strncpy(result->result, cb_result, LLM_TOOLS_RESULT_LEN);
+            OLOG_INFO("Tool '%s' result stored in result_extended (%zu bytes)", call->name, cb_len);
+         } else {
+            safe_strncpy(result->result, cb_result, LLM_TOOLS_RESULT_LEN);
+            free(cb_result);
+         }
+      } else {
+         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Tool '%s' completed", call->name);
+      }
+      result->success = true;
+      result->is_error = marked; /* structurally OK, but the tool flagged a hard failure */
+      result->skip_followup = meta->skip_followup;
+      result->should_respond = (should_respond != 0);
+
+      notify_tool_execution(call->name, call->arguments, tool_result_content(result),
+                            result->success);
+      return 0;
+   }
+
+   /* No callback - fallback to command_execute.  It resolves the device by
+    * name: only for this tool's own device, the one the gate decided for. */
+   if (tool_registry_find(effective_device) != meta) {
+      snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error: '%s' can't run '%s'.", call->name,
+               effective_device);
+      result->success = false;
+      result->is_error = true;
+      result->should_respond = true;
+      notify_tool_execution(call->name, call->arguments, result->result, false);
+      return 1;
+   }
+   struct mosquitto *mosq = worker_pool_get_mosq();
+   cmd_exec_result_t exec_result;
+
+   int rc = command_execute(effective_device, action, value_buf, mosq, &exec_result);
+
+   if (rc == 0 && exec_result.success) {
+      if (exec_result.result) {
+         safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
+      } else {
+         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Tool '%s' completed", call->name);
+      }
+      result->success = true;
+      result->skip_followup = meta->skip_followup || exec_result.skip_followup;
+      result->should_respond = exec_result.should_respond;
+   } else {
+      if (exec_result.result) {
+         safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
+      } else {
+         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error executing '%s'", call->name);
+      }
+      result->success = false;
+   }
+
+   notify_tool_execution(call->name, call->arguments, result->result, result->success);
+   cmd_exec_result_free(&exec_result);
+   return result->success ? 0 : 1;
+}
+
 /**
  * @brief Execute a tool from tool_registry (new modular system)
  *
@@ -1457,14 +1604,56 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       if (meta->device_map && meta->device_map_count > 0) {
          /* Use device_map to resolve the device name */
          const char *mapped = tool_registry_resolve_device(meta, device_name);
-         if (mapped) {
-            effective_device = mapped;
+         if (!mapped) {
+            /* Not one of the tool's devices: refused rather than run on its
+             * default device, which isn't what the call asked for. */
+            char keys[160] = "";
+            size_t used = 0;
+            for (int i = 0; i < meta->device_map_count && meta->device_map[i].key; i++) {
+               const int n = snprintf(keys + used, sizeof(keys) - used, "%s%s", used ? ", " : "",
+                                      meta->device_map[i].key);
+               if (n < 0 || (size_t)n >= sizeof(keys) - used) {
+                  break;
+               }
+               used += (size_t)n;
+            }
+            snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error: '%s' has no '%s' (it has: %s).",
+                     call->name, device_name, keys);
+            result->success = false;
+            result->is_error = true;
+            result->should_respond = true;
+            OLOG_WARNING("Refused tool '%s': unknown device '%s'", call->name, device_name);
+            notify_tool_execution(call->name, call->arguments, result->result, false);
+            return 1;
          }
+         effective_device = mapped;
       } else {
-         /* No device_map - use device_name directly */
+         /* No device_map - use device_name directly (a passthrough tool,
+          * such as the HUD's elements, checks it itself and stays an act). */
          effective_device = device_name;
       }
    }
+
+   /* Who may make this call, and what it runs: decided once, here
+    * (core/tool_call_policy.h).  The action is the tool's own spelling of the
+    * one named, or its default when none. */
+   tool_call_verdict_t verdict;
+   if (tool_call_policy_check(meta, effective_device, action_name, value_buf[0] ? value_buf : NULL,
+                              tool_call_policy_caller(), &verdict) != TOOL_CALL_ALLOW) {
+      safe_strncpy(result->result, verdict.message, LLM_TOOLS_RESULT_LEN);
+      result->success = false;
+      result->is_error = true;
+      result->should_respond = true;
+      OLOG_WARNING("Refused tool '%s' action '%s' (%s) for a %s: %s", call->name,
+                   verdict.action[0] ? verdict.action : action_name,
+                   tool_action_kind_name(verdict.kind),
+                   tool_call_policy_caller_name(verdict.caller),
+                   verdict.refusal ? verdict.refusal : "");
+      notify_tool_execution(call->name, call->arguments, result->result, false);
+      return 1;
+   }
+   const char *action = verdict.action;
+   const tool_action_kind_t kind = verdict.kind;
 
    /* Values that change at runtime aren't in the schema: checked here. */
    if (meta->validate_call) {
@@ -1482,140 +1671,15 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       }
    }
 
-   /* What runs is what is classified (tool_effective_action). */
-   const char *action = tool_effective_action(meta, action_name);
-   const tool_action_kind_t kind = tool_action_kind(meta, effective_device, action,
-                                                    value_buf[0] ? value_buf : NULL);
-
    OLOG_INFO("Executing tool '%s' (treg) -> device='%s', action='%s' (%s), value='%s'", call->name,
              effective_device, action, tool_action_kind_name(kind), value_buf);
 
-   /* Notify callback that tool execution is starting */
-   notify_tool_execution(call->name, call->arguments, NULL, false);
-
-   /* Special handling for sync_wait tools (e.g., viewing) */
-   if (meta->sync_wait && strcmp(meta->name, "viewing") == 0) {
-      result->success = execute_viewing_sync(action, value_buf, result);
-      notify_tool_execution(call->name, call->arguments, result->result, result->success);
-      return result->success ? 0 : 1;
-   }
-
-   /* MQTT-only tools publish directly using the already-resolved outer tool's
-    * metadata. We deliberately skip command_execute()'s device-name registry
-    * lookup here because effective_device can be a pass-through value (e.g.,
-    * "altitude" for hud_control, "record" for recording) that is not itself
-    * a registered tool — MIRAGE's topic-hud handler parses the device field
-    * directly to route to display elements or recording modes. */
-   if (meta->mqtt_only) {
-      struct mosquitto *mosq = worker_pool_get_mosq();
-      cmd_exec_result_t exec_result;
-
-      int rc = command_execute_mqtt_direct(meta, effective_device, action, value_buf, mosq,
-                                           &exec_result);
-
-      if (rc == 0 && exec_result.success) {
-         if (exec_result.result) {
-            safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
-         } else {
-            snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Command sent to %s", effective_device);
-         }
-         result->success = true;
-      } else {
-         if (exec_result.result) {
-            safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
-         } else {
-            snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error executing '%s'", call->name);
-         }
-         result->success = false;
-      }
-
-      result->skip_followup = meta->skip_followup || exec_result.skip_followup;
-      result->should_respond = exec_result.should_respond;
-      notify_tool_execution(call->name, call->arguments, result->result, result->success);
-      cmd_exec_result_free(&exec_result);
-      return result->success ? 0 : 1;
-   }
-
-   /* Call the tool's callback directly */
-   if (meta->callback) {
-      int should_respond = 0;
-      /* Expose the raw LLM args to the callback (thread-local) so bridged tools
-       * can recover the original typed JSON that (action, value) packing flattens
-       * lossily. Cleared immediately after the call. */
-      s_current_raw_args = call->arguments;
-      char *cb_result = meta->callback(action, value_buf[0] ? value_buf : NULL, &should_respond);
-      s_current_raw_args = NULL;
-
-      /* Capture the tool's self-reported hard-failure mark BEFORE stripping it: `success` stays
-       * true (the marked text still flows to the LLM as description), but the pill must red. This
-       * is the ONE site where a structurally-fine call is still a confirmed failure.
-       *
-       * ASSUMPTION (currently holds; document so it isn't silently load-bearing): marker capture
-       * lives ONLY here on the direct-callback path. The other dispatch paths — command_execute
-       * fallback (below), mqtt_only, viewing — do NOT capture the mark, and command_execute
-       * additionally strips it and forces success=true (command_executor.c), so a marker returned
-       * through those paths is unrecoverable and renders NEUTRAL, not red. Safe (a MISSED red,
-       * never a false one) and unreachable today: every marker-emitting tool
-       * (attention/stat/suit/search/ weather) is a modular direct-callback tool that hits THIS
-       * site. If a legacy MQTT/command device ever adopts TOOL_RESULT_ERROR_MARK, surface the
-       * verdict in cmd_exec_result_t and OR it in on those paths too. */
-      bool marked = tool_result_is_error(cb_result);
-
-      /* Strip the opt-in tool error-marker (this native-tool path invokes the
-       * callback directly, bypassing command_execute's strip). */
-      tool_result_strip_error_mark(cb_result);
-
-      if (cb_result) {
-         size_t cb_len = strlen(cb_result);
-         if (cb_len >= LLM_TOOLS_RESULT_LEN) {
-            /* Large result — store in result_extended, copy truncated preview to result[] */
-            result->result_extended = cb_result; /* Transfer ownership */
-            safe_strncpy(result->result, cb_result, LLM_TOOLS_RESULT_LEN);
-            OLOG_INFO("Tool '%s' result stored in result_extended (%zu bytes)", call->name, cb_len);
-         } else {
-            safe_strncpy(result->result, cb_result, LLM_TOOLS_RESULT_LEN);
-            free(cb_result);
-         }
-      } else {
-         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Tool '%s' completed", call->name);
-      }
-      result->success = true;
-      result->is_error = marked; /* structurally OK, but the tool flagged a hard failure */
-      result->skip_followup = meta->skip_followup;
-      result->should_respond = (should_respond != 0);
-
-      notify_tool_execution(call->name, call->arguments, tool_result_content(result),
-                            result->success);
-      return 0;
-   }
-
-   /* No callback - fallback to command_execute */
-   struct mosquitto *mosq = worker_pool_get_mosq();
-   cmd_exec_result_t exec_result;
-
-   int rc = command_execute(effective_device, action, value_buf, mosq, &exec_result);
-
-   if (rc == 0 && exec_result.success) {
-      if (exec_result.result) {
-         safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
-      } else {
-         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Tool '%s' completed", call->name);
-      }
-      result->success = true;
-      result->skip_followup = meta->skip_followup || exec_result.skip_followup;
-      result->should_respond = exec_result.should_respond;
-   } else {
-      if (exec_result.result) {
-         safe_strncpy(result->result, exec_result.result, LLM_TOOLS_RESULT_LEN);
-      } else {
-         snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error executing '%s'", call->name);
-      }
-      result->success = false;
-   }
-
-   notify_tool_execution(call->name, call->arguments, result->result, result->success);
-   cmd_exec_result_free(&exec_result);
-   return result->success ? 0 : 1;
+   /* The call's scope: the tool reads back the kind decided here
+    * (tool_call_policy_decided); a call made inside it gets its own. */
+   const tool_call_scope_t outer = tool_call_policy_enter(kind, verdict.caller, false);
+   const int rc = run_resolved_call(call, meta, effective_device, action, value_buf, result);
+   tool_call_policy_leave(outer);
+   return rc;
 }
 
 /* Whether a string in @p obj (its keys too) carries @p hex. */
@@ -1738,20 +1802,31 @@ static int execute_one(const tool_call_t *call, tool_result_t *result) {
     * a descriptive error so the LLM can tell the user instead of silently
     * MQTT-publishing into a dead endpoint.
     *
-    * When session context is absent (e.g., internal / system-driven tool
-    * calls) we allow execution — those paths aren't gated by session flags. */
+    * Looked up by the tool's own name: a call by one of its aliases is the
+    * same tool, so the session's rules (the research allowlist, a turn with
+    * no tools, remote/local enablement) hold for it too.
+    *
+    * With no session context this guard doesn't apply; who may make the call
+    * is still decided below (core/tool_call_policy.h). */
    session_t *ctx = session_get_command_context();
    if (ctx) {
       bool is_remote = (ctx->type != SESSION_TYPE_LOCAL);
       bool enabled = true;
       pthread_mutex_lock(&llm_tools_mutex);
+      bool listed = false;
       for (int i = 0; i < llm_tools_count; i++) {
-         if (strcmp(llm_tools_table[i].name, call->name) == 0) {
+         if (strcmp(llm_tools_table[i].name, treg_meta->name) == 0) {
             enabled = llm_tools_enabled_for_session(&llm_tools_table[i], is_remote);
+            listed = true;
             break;
          }
       }
       pthread_mutex_unlock(&llm_tools_mutex);
+      /* A tool the model was never offered: never in a research run or a
+       * turn with no tools. */
+      if (!listed && (session_tools_suppressed(ctx) || atomic_load(&ctx->research_run_id) > 0)) {
+         enabled = false;
+      }
 
       if (!enabled) {
          snprintf(result->result, LLM_TOOLS_RESULT_LEN,

@@ -221,6 +221,10 @@ Layer 2 (Services)
 │                                    and it back into them (session_focus.c with them): read these as one Layer-2 session unit
 │                                    (session_image_hold.c joins it: the image store reaches it only through a weak
 │                                    symbol, never an include)
+├── src/core/tool_call_policy.c/h  - Who may make a tool call: the caller's kind of turn (user, unverified sender,
+│                                    background job, unattended) against the action's kind; decided once per call
+│                                    in llm_tools and at the MQTT entry that names a session (deps: session unit,
+│                                    tool registry)
 ├── src/core/session_focus.c       - A turn's retrieved items at its seam: which the history already shows, the items part of
 │                                    its context, the per-turn citation map; the client's context panel told after the history
 │                                    lock is released (a weak hook the WebUI replaces).  Part of the session unit

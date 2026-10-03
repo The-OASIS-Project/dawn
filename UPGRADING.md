@@ -12,7 +12,7 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
-## 2026-10-03 — Phone, document-delete and research confirms need your reply
+## 2026-10-03 — Background work and text messages read but don't act; confirms need your reply
 
 **What changed.**
 - **A call, text or delete Friday previews is carried out only on your reply
@@ -26,8 +26,18 @@ This is not a full changelog (see git history for that) — it is the short list
   and cost; it starts only when your next message says yes.
 - **Background work can't make calls, send texts or delete.** A background job,
   a follow-up after a job finishes, a scheduled briefing step, or an MQTT
-  message asking for one is refused; Friday tells you what it would have done instead. This holds even
-  with `[phone] confirm_outbound = false`.
+  message asking for one is refused; Friday tells you what it would have done
+  instead. This holds even with `[phone] confirm_outbound = false`.
+- **Background jobs read and look things up, but don't act.** A job asked to
+  send email, save a note, remember something, schedule, play music or
+  render a chart refuses and reports what it would do; ask for it yourself.
+  A job's follow-up in your conversation can't reach the web either.
+- **A request by text message (SMS) reads and prepares, but doesn't act.**
+  Anyone can put your number on a text, so Friday answers questions and can
+  prepare an email or call from a text, but sending, calling, searching the
+  web, playing music and the like need the app or your voice.
+- **An action a tool doesn't have is refused** rather than passed on to it;
+  Friday is told the tool's actions and tries again.
 
 **What you need to do.** Nothing.
 
