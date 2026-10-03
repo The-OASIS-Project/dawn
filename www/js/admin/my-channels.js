@@ -16,6 +16,20 @@
    let channels = [];
    let refreshInterval = null;
    let codeCountdownTimer = null;
+   // SMS verification, per channel id: the request in flight ('verify' or
+   // 'resend') and its safety timer, and the refusal shown on the code box
+   // ({ message, invalid }).  Kept here, not only in the DOM, so a re-render
+   // (a refresh, a server push) keeps them.  Plus the element to focus after
+   // the next render and the per-second expiry tick.
+   const verifyInFlight = new Map();
+   const verifyTimers = new Map();
+   const verifyErrors = new Map();
+   // { sel, until }: the element to focus once a render shows it (kept until
+   // then, briefly, since an older list response may render first).
+   let focusAfterRender = null;
+   const FOCUS_WAIT_MS = 5000;
+   let verifyTtlTimer = null;
+   const VERIFY_IN_FLIGHT_MS = 10000;
 
    const REFRESH_INTERVAL_MS = 30000;
 
@@ -27,8 +41,13 @@
       return typeof DawnWS !== 'undefined' && DawnWS.isConnected();
    }
 
-   function requestList() {
+   let forceNextRender = false;
+
+   // force: re-render even if a control in the list has focus (the user's own
+   // action asked for the fresh list).
+   function requestList(force) {
       if (!wsReady()) return;
+      if (force === true) forceNextRender = true;
       const list = document.getElementById('channel-list');
       if (list && channels.length === 0) {
          list.innerHTML = '<div class="loading-indicator">Loading channels...</div>';
@@ -54,6 +73,18 @@
    function requestReenable(id) {
       if (!wsReady()) return;
       DawnWS.send({ type: 'reenable_channel', payload: { id } });
+   }
+
+   function requestVerify(id, code) {
+      if (!wsReady()) return false;
+      DawnWS.send({ type: 'verify_channel', payload: { id, code } });
+      return true;
+   }
+
+   function requestResend(id) {
+      if (!wsReady()) return false;
+      DawnWS.send({ type: 'resend_channel_code', payload: { id } });
+      return true;
    }
 
    /* Persist a per-channel LLM change to the channel's conversation row.  The
@@ -235,22 +266,31 @@
       );
    }
 
-   function renderList() {
+   function renderList(force) {
       const list = document.getElementById('channel-list');
       if (!list) return;
 
-      // Don't tear down a dropdown the user is actively using — the 30s
-      // auto-refresh would otherwise close it and drop focus mid-interaction.
-      // Defer; the user's own change (or the next refresh) re-renders.
+      // Don't tear down a dropdown, code box or name field the user is actively
+      // using — a refresh or server push would otherwise close it and drop
+      // focus (and a half-typed code or name) mid-interaction. Defer; the
+      // user's own change (or the next refresh) re-renders.  Code boxes are
+      // still brought up to date in place (a new or voided code's countdown).
       const active = document.activeElement;
       if (
+         !force &&
          active &&
          active.matches &&
-         active.matches('.channel-llm-field select') &&
+         active.matches('.channel-llm-field select, .channel-verify-input, .channel-name') &&
          list.contains(active)
       ) {
+         refreshVerifyInPlace();
          return;
       }
+      // A forced render keeps digits typed into any code box.
+      const typed = {};
+      list.querySelectorAll('.channel-verify-input').forEach((el) => {
+         if (el.value) typed[el.dataset.id] = el.value;
+      });
 
       if (channels.length === 0) {
          list.innerHTML =
@@ -262,16 +302,27 @@
       }
 
       let html = '';
-      for (const ch of channels) {
+      // A channel waiting for its SMS code needs the user, so it comes first.
+      const ordered = channels
+         .filter((c) => c.enabled !== false && c.verified === false)
+         .concat(channels.filter((c) => !(c.enabled !== false && c.verified === false)));
+      for (const ch of ordered) {
          const enabled = ch.enabled !== false;
          // provider_available: the provider's driver is loaded (false when e.g.
          // its bot token isn't configured). Absent → assume available (back-compat).
          const available = ch.provider_available !== false;
+         // verified false: an SMS link waiting for the code DAWN texted to the
+         // number. Absent → verified (back-compat).
+         const pending = enabled && ch.verified === false;
          let dotClass, textClass, statusLabel;
          if (!enabled) {
             dotClass = '';
             textClass = 'offline';
             statusLabel = 'Unlinked';
+         } else if (pending) {
+            dotClass = 'warning';
+            textClass = 'offline';
+            statusLabel = 'Waiting for code';
          } else if (!available) {
             dotClass = 'warning';
             textClass = 'offline';
@@ -284,6 +335,7 @@
          html +=
             '<div class="channel-card' +
             (enabled ? '' : ' channel-disabled') +
+            (pending ? ' channel-pending' : '') +
             '" data-id="' +
             ch.id +
             '">' +
@@ -315,13 +367,14 @@
             '<div class="channel-meta">Last active: ' +
             formatLastUsed(ch.last_used_at) +
             '</div>' +
-            (enabled && !available
+            (pending ? renderVerify(ch) : '') +
+            (enabled && !pending && !available
                ? '<div class="channel-warning">This channel’s ' +
                  escapeHtml(ch.provider) +
                  ' driver isn’t running — add its bot token in Settings → Secrets and restart ' +
                  'the daemon. Messages won’t be received until then.</div>'
                : '') +
-            (enabled && ch.conversation_id ? renderLlmControls(ch) : '') +
+            (enabled && !pending && ch.conversation_id ? renderLlmControls(ch) : '') +
             '<div class="channel-controls">' +
             (enabled
                ? '<button class="btn btn-secondary channel-unlink-btn" data-id="' +
@@ -337,7 +390,212 @@
       }
 
       list.innerHTML = html;
+      Object.keys(typed).forEach((id) => {
+         const el = document.getElementById('channel-verify-' + id);
+         if (el) el.value = typed[id];
+      });
       attachListeners();
+      startVerifyTtlTicker();
+      if (focusAfterRender !== null) {
+         const el = list.querySelector(focusAfterRender.sel);
+         if (el) {
+            focusAfterRender = null;
+            el.focus();
+            el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+         } else if (Date.now() > focusAfterRender.until) {
+            focusAfterRender = null;
+         }
+      }
+   }
+
+   // Labels of the code box's buttons for its current state (visible text and
+   // accessible name kept in step).
+   function verifyLabels(id, name) {
+      const busy = verifyInFlight.get(id);
+      return {
+         verify: busy === 'verify' ? 'Verifying…' : 'Verify',
+         verifyAria: (busy === 'verify' ? 'Verifying code for ' : 'Verify code for ') + name,
+         resend: busy === 'resend' ? 'Sending…' : 'Send a new code',
+         resendAria: (busy === 'resend' ? 'Sending a new code to ' : 'Send a new code to ') + name,
+      };
+   }
+
+   // The code box of an SMS channel waiting for the code DAWN texted to it.
+   function renderVerify(ch) {
+      const id = Number(ch.id) | 0;
+      const busy = verifyInFlight.has(id);
+      const error = verifyErrors.get(id);
+      const l = verifyLabels(id, ch.name);
+      return (
+         '<div class="channel-verify" data-id="' +
+         id +
+         '" data-name="' +
+         escapeAttr(ch.name) +
+         '">' +
+         '<label class="channel-verify-label" for="channel-verify-' +
+         id +
+         '">Enter the 6-digit code DAWN texted to this number.</label>' +
+         '<div class="channel-code-row">' +
+         '<input class="dawn-input channel-verify-input" id="channel-verify-' +
+         id +
+         '" data-id="' +
+         id +
+         '" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="7" ' +
+         'placeholder="123456" aria-describedby="channel-verify-ttl-' +
+         id +
+         ' channel-verify-err-' +
+         id +
+         '"' +
+         (busy ? ' readonly' : '') +
+         (error && error.invalid ? ' aria-invalid="true"' : '') +
+         '>' +
+         '<button type="button" class="btn btn-primary channel-verify-btn" data-id="' +
+         id +
+         '" aria-label="' +
+         escapeAttr(l.verifyAria) +
+         '"' +
+         (busy ? ' disabled' : '') +
+         '>' +
+         escapeHtml(l.verify) +
+         '</button>' +
+         '<button type="button" class="btn btn-secondary channel-resend-btn" data-id="' +
+         id +
+         '" aria-label="' +
+         escapeAttr(l.resendAria) +
+         '"' +
+         (busy ? ' disabled' : '') +
+         '>' +
+         escapeHtml(l.resend) +
+         '</button>' +
+         '</div>' +
+         '<span class="channel-code-ttl channel-verify-ttl" id="channel-verify-ttl-' +
+         id +
+         '" data-expires="' +
+         (Number(ch.verify_expires_local) || 0) +
+         '"></span>' +
+         '<div class="channel-verify-error" id="channel-verify-err-' +
+         id +
+         '" role="alert"' +
+         (error ? '>' + escapeHtml(error.message) : ' hidden>') +
+         '</div>' +
+         '</div>'
+      );
+   }
+
+   // Bring one code box in line with its state, in place (a full re-render
+   // would take focus from whatever the user is doing elsewhere).
+   // @return false when the box isn't on screen.
+   function paintVerify(id) {
+      const box = document.querySelector('.channel-verify[data-id="' + id + '"]');
+      if (!box) return false;
+      const busy = verifyInFlight.has(id);
+      const error = verifyErrors.get(id);
+      const l = verifyLabels(id, box.dataset.name || '');
+      const input = box.querySelector('.channel-verify-input');
+      const vbtn = box.querySelector('.channel-verify-btn');
+      const rbtn = box.querySelector('.channel-resend-btn');
+      const err = box.querySelector('.channel-verify-error');
+      if (input) {
+         input.readOnly = busy;
+         if (error && error.invalid) input.setAttribute('aria-invalid', 'true');
+         else input.removeAttribute('aria-invalid');
+      }
+      if (vbtn) {
+         vbtn.disabled = busy;
+         vbtn.textContent = l.verify;
+         vbtn.setAttribute('aria-label', l.verifyAria);
+      }
+      if (rbtn) {
+         rbtn.disabled = busy;
+         rbtn.textContent = l.resend;
+         rbtn.setAttribute('aria-label', l.resendAria);
+      }
+      if (err) {
+         err.textContent = error ? error.message : ''; // server text: textContent only
+         err.hidden = !error;
+      }
+      return true;
+   }
+
+   // Without a full render: each shown code box takes its channel's current
+   // code deadline and state.
+   function refreshVerifyInPlace() {
+      channels.forEach((c) => {
+         const id = Number(c.id) | 0;
+         const ttl = document.getElementById('channel-verify-ttl-' + id);
+         if (ttl) ttl.dataset.expires = String(Number(c.verify_expires_local) || 0);
+         paintVerify(id);
+      });
+      updateVerifyTtls();
+   }
+
+   // Expiry countdown on every code box, ticking once a second while any is shown.
+   function updateVerifyTtls() {
+      const els = document.querySelectorAll('.channel-verify-ttl');
+      if (els.length === 0) {
+         clearInterval(verifyTtlTimer);
+         verifyTtlTimer = null;
+         return;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      els.forEach((el) => {
+         const expires = parseInt(el.dataset.expires, 10) || 0;
+         const left = expires - now;
+         if (expires === 0) {
+            el.textContent = 'No code sent yet. Use “Send a new code”.';
+         } else if (left <= 0) {
+            el.textContent = 'This code has expired. Use “Send a new code”.';
+         } else {
+            const m = Math.floor(left / 60);
+            const sec = left % 60;
+            el.textContent = 'Expires in ' + m + ':' + (sec < 10 ? '0' : '') + sec;
+         }
+      });
+   }
+
+   function startVerifyTtlTicker() {
+      updateVerifyTtls();
+      if (!verifyTtlTimer && document.querySelector('.channel-verify-ttl')) {
+         verifyTtlTimer = setInterval(updateVerifyTtls, 1000);
+      }
+   }
+
+   function startVerifyRequest(id, kind) {
+      verifyInFlight.set(id, kind);
+      verifyErrors.delete(id);
+      clearTimeout(verifyTimers.get(id));
+      // Safety: a lost response (socket dropped) must not leave the box locked,
+      // nor leave the user thinking the code was checked.
+      verifyTimers.set(
+         id,
+         setTimeout(function () {
+            finishVerifyRequest(id);
+            showVerifyError(id, 'No answer from DAWN. Try again.', false);
+         }, VERIFY_IN_FLIGHT_MS)
+      );
+      paintVerify(id);
+   }
+
+   function finishVerifyRequest(id) {
+      verifyInFlight.delete(id);
+      clearTimeout(verifyTimers.get(id));
+      verifyTimers.delete(id);
+   }
+
+   // Show a refusal on the channel's code box; `invalid` marks the digits as
+   // the problem (and selects them to retype).  With no box on screen the
+   // refusal still reaches the user, as a toast.
+   function showVerifyError(id, message, invalid) {
+      verifyErrors.set(id, { message: message, invalid: invalid });
+      if (!paintVerify(id)) {
+         if (typeof DawnToast !== 'undefined') DawnToast.show(message, 'error');
+         return;
+      }
+      const input = document.getElementById('channel-verify-' + id);
+      if (input && invalid) {
+         input.focus();
+         input.select();
+      }
    }
 
    function attachListeners() {
@@ -385,6 +643,39 @@
          });
       });
 
+      function submitVerify(id) {
+         if (verifyInFlight.has(id)) return;
+         const input = document.getElementById('channel-verify-' + id);
+         const digits = input ? input.value.replace(/[\s-]/g, '') : '';
+         if (!/^\d{6}$/.test(digits)) {
+            showVerifyError(id, 'Enter the 6 digits from the text.', true);
+            return;
+         }
+         if (requestVerify(id, digits)) startVerifyRequest(id, 'verify');
+      }
+      document.querySelectorAll('.channel-verify-btn').forEach((btn) => {
+         btn.addEventListener('click', function () {
+            submitVerify(parseInt(this.dataset.id, 10));
+         });
+      });
+      document.querySelectorAll('.channel-verify-input').forEach((el) => {
+         el.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') submitVerify(parseInt(this.dataset.id, 10));
+         });
+         // Retyping clears the refusal.
+         el.addEventListener('input', function () {
+            const id = parseInt(this.dataset.id, 10);
+            if (verifyErrors.delete(id)) paintVerify(id);
+         });
+      });
+      document.querySelectorAll('.channel-resend-btn').forEach((btn) => {
+         btn.addEventListener('click', function () {
+            const id = parseInt(this.dataset.id, 10);
+            if (verifyInFlight.has(id)) return;
+            if (requestResend(id)) startVerifyRequest(id, 'resend');
+         });
+      });
+
       document.querySelectorAll('.channel-llm-thinking').forEach((sel) => {
          sel.addEventListener('change', function () {
             const ch = channels.find((c) => c.id === parseInt(this.dataset.id, 10));
@@ -409,6 +700,7 @@
       if (!box) return;
       const code = payload.code || '';
       const provider = payload.provider || '';
+      box.dataset.code = code;
       let ttl = payload.ttl_seconds || 0;
       const sendForm = (provider === 'slack' ? 'link ' : '/link ') + code;
       const instr = provider
@@ -416,14 +708,16 @@
            escapeHtml(sendForm) +
            '</code> ' +
            (provider === 'sms'
-              ? 'as a text to the DAWN number'
+              ? 'as a text to the DAWN number. DAWN replies with a 6-digit code — enter it on ' +
+                'the new SMS channel below'
               : 'to the bot on ' + escapeHtml(provider)) +
            '.'
          : 'Send <code>/link ' +
            escapeHtml(code) +
            '</code> from the chat client (use "link ' +
            escapeHtml(code) +
-           '" on Slack).';
+           '" on Slack), or text it to the DAWN number: DAWN then replies with a 6-digit ' +
+           'code to enter on the new SMS channel below.';
 
       box.innerHTML =
          '<div class="channel-code-row">' +
@@ -478,19 +772,119 @@
    function handleListResponse(payload) {
       if (payload && Array.isArray(payload.channels)) {
          channels = payload.channels;
+         // The server says how long each texted code has left; turn that into
+         // a local deadline for the countdown.
+         const now = Math.floor(Date.now() / 1000);
+         channels.forEach((c) => {
+            const left = Number(c.verify_ttl_seconds);
+            c.verify_expires_local = left > 0 ? now + left : left === 0 ? now : 0;
+         });
       }
-      renderList();
+      const force = forceNextRender;
+      forceNextRender = false;
+      renderList(force);
    }
 
    function handleCreateCodeResponse(payload) {
       if (payload) showLinkCode(payload);
    }
 
-   /* Unlink / rename / re-enable success → re-fetch the authoritative list.
-    * On failure the daemon sends a generic error toast and the list is left
-    * unchanged, so there is no stuck UI to reset. */
-   function handleMutationResponse() {
+   /* Unlink / rename / re-enable: show a refusal, and re-fetch the
+    * authoritative list either way (a refused rename puts the old name back;
+    * a refusal can also mean the list on screen was out of date). */
+   function handleMutationResponse(payload) {
+      if (payload && payload.success === false && typeof DawnToast !== 'undefined') {
+         DawnToast.show(payload.message || 'That didn’t work.', 'error');
+      }
       requestList();
+   }
+
+   /* The server says the channel list changed (a /link arrived from a chat, a
+    * code was verified, another tab unlinked one): re-read it if the panel is
+    * open, else on next open. */
+   function handleChannelsChanged(payload) {
+      const change = (payload && payload.change) || '';
+      const id = Number(payload && payload.channel_id) | 0;
+      // The link code on screen was just used (a chat sent /link with it, and
+      // the push names it): close it and take the user to the channel it made —
+      // to its code box when an SMS number is waiting for its code.
+      const box = document.getElementById('channel-link-code');
+      const shown = box && !box.classList.contains('hidden') ? box.dataset.code || '' : '';
+      const used = String((payload && payload.link_code) || '');
+      if (
+         (change === 'pending' || change === 'linked') &&
+         shown &&
+         used.toUpperCase() === shown.toUpperCase()
+      ) {
+         hideLinkCode();
+         if (id > 0) {
+            focusAfterRender = {
+               sel:
+                  change === 'pending'
+                     ? '#channel-verify-' + id
+                     : '.channel-name[data-id="' + id + '"]',
+               until: Date.now() + FOCUS_WAIT_MS,
+            };
+         }
+         requestList(true);
+         return;
+      }
+      const section = document.getElementById('messaging-channels-section');
+      if (section && !section.classList.contains('collapsed')) {
+         requestList();
+      } else {
+         channels = [];
+      }
+   }
+
+   function hideLinkCode() {
+      const box = document.getElementById('channel-link-code');
+      if (box) {
+         box.classList.add('hidden');
+         box.textContent = '';
+         delete box.dataset.code;
+      }
+      if (codeCountdownTimer) {
+         clearInterval(codeCountdownTimer);
+         codeCountdownTimer = null;
+      }
+   }
+
+   /* An SMS code entered: on success the channel is live (re-render, focus its
+    * name); on a refusal the message shows on its code box. */
+   function handleVerifyResponse(payload) {
+      if (!payload) return;
+      const id = Number(payload.id) | 0;
+      finishVerifyRequest(id);
+      if (payload.success) {
+         verifyErrors.delete(id);
+         if (typeof DawnToast !== 'undefined') DawnToast.show('Number linked', 'success');
+         focusAfterRender = {
+            sel: '.channel-name[data-id="' + id + '"]',
+            until: Date.now() + FOCUS_WAIT_MS,
+         };
+         requestList(true);
+         return;
+      }
+      showVerifyError(id, payload.message || 'That code didn’t work.', payload.code === 'BAD_CODE');
+      if (payload.code === 'NOT_FOUND' || payload.code === 'ALREADY_LINKED') requestList();
+   }
+
+   /* A new code asked for: re-render so the countdown restarts, with focus in
+    * the code box for the next step. */
+   function handleResendResponse(payload) {
+      if (!payload) return;
+      const id = Number(payload.id) | 0;
+      finishVerifyRequest(id);
+      if (payload.success) {
+         verifyErrors.delete(id);
+         if (typeof DawnToast !== 'undefined') DawnToast.show('Sending a new code', 'success');
+         focusAfterRender = { sel: '#channel-verify-' + id, until: Date.now() + FOCUS_WAIT_MS };
+         requestList(true);
+         return;
+      }
+      showVerifyError(id, payload.message || 'Couldn’t send a code.', false);
+      if (payload.code === 'NOT_FOUND') requestList();
    }
 
    /* Per-channel LLM change: the select already shows the new value optimistically,
@@ -533,7 +927,8 @@
             // Run after the generic settings toggle flips 'collapsed'.
             setTimeout(function () {
                if (!section.classList.contains('collapsed')) {
-                  if (channels.length === 0) requestList();
+                  // Always re-read: a change may have been missed while closed.
+                  requestList();
                   startAutoRefresh();
                } else {
                   stopAutoRefresh();
@@ -569,6 +964,9 @@
       handleCreateCodeResponse: handleCreateCodeResponse,
       handleMutationResponse: handleMutationResponse,
       handleSetChannelLlmResponse: handleSetChannelLlmResponse,
+      handleVerifyResponse: handleVerifyResponse,
+      handleResendResponse: handleResendResponse,
+      handleChannelsChanged: handleChannelsChanged,
       handleReconnect: function () {
          stopAutoRefresh();
          renderList();

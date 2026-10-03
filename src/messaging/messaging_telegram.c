@@ -45,6 +45,7 @@
 #include "logging.h"
 #include "messaging/messaging_driver.h"
 #include "messaging/messaging_engine.h"
+#include "messaging/messaging_telegram_parse.h"
 
 /* =============================================================================
  * Driver state
@@ -343,49 +344,35 @@ static void tg_handle_update(struct json_object *update) {
    }
 
    if (!json_object_object_get_ex(update, "message", &msg_obj) || !msg_obj) {
-      return; /* edits, channel posts, etc. — ignored in v1 */
+      return; /* edits, channel posts, button presses: only new messages are answered */
    }
 
-   /* Required fields: chat.id, text */
+   /* A group upgraded to a supergroup gets a new chat id, so a link to the
+    * old one stops answering.  Telegram says so in a service message; name
+    * both ids so the user knows to re-link. */
+   struct json_object *migrate_obj = NULL;
    struct json_object *chat_obj = NULL;
-   struct json_object *text_obj = NULL;
-   struct json_object *from_obj = NULL;
-   struct json_object *date_obj = NULL;
-
-   if (!json_object_object_get_ex(msg_obj, "chat", &chat_obj) ||
-       !json_object_object_get_ex(msg_obj, "text", &text_obj)) {
-      return;
-   }
-   json_object_object_get_ex(msg_obj, "from", &from_obj);
-   json_object_object_get_ex(msg_obj, "date", &date_obj);
-
-   struct json_object *chat_id_obj = NULL;
-   if (!json_object_object_get_ex(chat_obj, "id", &chat_id_obj)) {
+   struct json_object *old_id_obj = NULL;
+   if (json_object_object_get_ex(msg_obj, "migrate_to_chat_id", &migrate_obj) && migrate_obj &&
+       json_object_object_get_ex(msg_obj, "chat", &chat_obj) && chat_obj &&
+       json_object_object_get_ex(chat_obj, "id", &old_id_obj) && old_id_obj) {
+      OLOG_WARNING("telegram: group %" PRId64 " became supergroup %" PRId64
+                   "; a channel linked to the group must be re-linked (send /link CODE there)",
+                   json_object_get_int64(old_id_obj), json_object_get_int64(migrate_obj));
       return;
    }
 
-   char chat_id_str[64];
-   snprintf(chat_id_str, sizeof(chat_id_str), "%" PRId64, json_object_get_int64(chat_id_obj));
-
-   const char *body = json_object_get_string(text_obj);
-   if (!body) {
+   tg_message_t m;
+   const char *why = NULL;
+   if (!tg_parse_message(msg_obj, &m, &why)) {
+      if (why) {
+         OLOG_DEBUG("telegram: dropped update %" PRId64 " (%s)", upd_id, why);
+      }
       return;
    }
-
-   /* Sender display: prefer first_name from "from", else "chat". */
-   const char *sender_display = NULL;
-   struct json_object *fn_obj = NULL;
-   if (from_obj && json_object_object_get_ex(from_obj, "first_name", &fn_obj) && fn_obj) {
-      sender_display = json_object_get_string(fn_obj);
+   if (why) {
+      OLOG_DEBUG("telegram: update %" PRId64 " has no single sender (%s)", upd_id, why);
    }
-   if (!sender_display && json_object_object_get_ex(chat_obj, "first_name", &fn_obj) && fn_obj) {
-      sender_display = json_object_get_string(fn_obj);
-   }
-   if (!sender_display) {
-      sender_display = "telegram_user";
-   }
-
-   int64_t timestamp = date_obj ? json_object_get_int64(date_obj) : 0;
 
    /* Dispatch to engine. */
    messaging_inbound_fn cb = NULL;
@@ -393,7 +380,16 @@ static void tg_handle_update(struct json_object *update) {
    cb = s_inbound_cb;
    pthread_mutex_unlock(&s_inbound_cb_mutex);
    if (cb) {
-      cb("telegram", chat_id_str, sender_display, body, timestamp);
+      messaging_inbound_t in = {
+         .provider = "telegram",
+         .provider_address = m.chat_id,
+         .sender_id = m.sender_id[0] ? m.sender_id : NULL,
+         .sender_display = m.sender_display,
+         .body = m.body,
+         .timestamp = m.timestamp,
+         .chat_kind = m.chat_kind,
+      };
+      cb(&in);
    }
 }
 
@@ -653,6 +649,7 @@ static int tg_reconnect(void) {
 
 static const messaging_driver_t s_telegram_driver = {
    .name = "telegram",
+   .authenticates_sender = true,
    .out_format = MSG_FMT_TELEGRAM_HTML,
    .init = tg_init,
    .shutdown = tg_shutdown,

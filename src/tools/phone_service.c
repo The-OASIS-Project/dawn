@@ -31,6 +31,7 @@
 #include <openssl/buffer.h>
 #include <openssl/evp.h>
 #include <pthread.h>
+#include <sodium.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -824,9 +825,17 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       int64_t sms_entity_id = -1;
       reverse_lookup(s_config.user_id, sender, contact_name, sizeof(contact_name), &sms_entity_id);
 
-      /* Insert SMS log — prefix body for LLM safety */
+      /* Insert SMS log — prefix body for LLM safety.  A messaging /link code
+       * is a credential (it links a chat to the DAWN account that made it),
+       * and this log is readable through the phone tool, so it isn't kept. */
       char safe_body[1024];
-      snprintf(safe_body, sizeof(safe_body), "[Incoming SMS - external content] %s", body);
+#ifdef ENABLE_WEBUI
+      const bool is_link = messaging_link_command_args(body) != NULL;
+#else
+      const bool is_link = false; /* no messaging channels in this build: no link codes */
+#endif
+      snprintf(safe_body, sizeof(safe_body), "[Incoming SMS - external content] %s",
+               is_link ? "/link (code not kept)" : body);
 
       int64_t sms_id = 0;
       phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender, contact_name, safe_body,
@@ -1251,6 +1260,16 @@ int phone_service_send_sms(int user_id,
                            const char *body,
                            char *result_buf,
                            size_t buf_size) {
+   return phone_service_send_sms_logged_as(user_id, name_or_number, body, body, result_buf,
+                                           buf_size);
+}
+
+int phone_service_send_sms_logged_as(int user_id,
+                                     const char *name_or_number,
+                                     const char *body,
+                                     const char *log_body,
+                                     char *result_buf,
+                                     size_t buf_size) {
    pthread_mutex_lock(&s_state_mutex);
    bool online = s_echo_online;
    pthread_mutex_unlock(&s_state_mutex);
@@ -1307,7 +1326,11 @@ int phone_service_send_sms(int user_id,
       return 1;
    }
 
-   if (publish_echo_cmd("send_sms", number, command_router_get_id(req), data) != 0) {
+   int pub = publish_echo_cmd("send_sms", number, command_router_get_id(req), data);
+   if (log_body != body) {
+      sodium_memzero(data, sizeof(data)); /* a text not to be kept (a code) */
+   }
+   if (pub != 0) {
       command_router_cancel(req);
       snprintf(result_buf, buf_size, "Error: failed to send SMS command");
       return 1;
@@ -1341,7 +1364,8 @@ int phone_service_send_sms(int user_id,
    }
 
    /* Log outbound SMS */
-   phone_db_sms_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, body, time(NULL), NULL);
+   phone_db_sms_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, log_body ? log_body : body,
+                           time(NULL), NULL);
 
    snprintf(result_buf, buf_size, "SMS sent to %s%s%s", name[0] ? name : number,
             name[0] ? " at " : "", name[0] ? number : "");

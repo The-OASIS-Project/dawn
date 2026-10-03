@@ -1059,6 +1059,18 @@ static const char *SCHEMA_SQL =
                                    * recovery worker extracts memory incrementally via
                                    * last_extracted_msg_id. */
                                   "  conversation_id INTEGER DEFAULT NULL,"
+                                  /* v101: owner_sender = the provider's id of the person who
+                                   * linked the channel (only they speak for it; NULL until
+                                   * known).  verified_at NULL = an SMS link waiting for the code
+                                   * DAWN texted to the number (verify_*).  The unique index on
+                                   * (provider, address, owner) is created by the v101 migration. */
+                                  "  owner_sender TEXT,"
+                                  "  verified_at INTEGER,"
+                                  "  verify_code_hash TEXT,"
+                                  "  verify_expires_at INTEGER,"
+                                  "  verify_attempts INTEGER NOT NULL DEFAULT 0,"
+                                  "  verify_sends INTEGER NOT NULL DEFAULT 0,"
+                                  "  verify_window_start INTEGER,"
                                   "  UNIQUE(user_id, provider, provider_address),"
                                   "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
                                   "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON "

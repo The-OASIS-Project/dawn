@@ -96,6 +96,10 @@ int handle_messaging_generate_link_code(int client_fd, const char *payload, uint
    char code[MESSAGING_LINK_CODE_BUF_SIZE];
    const char *hint_arg = (hint_len > 0) ? hint : NULL;
    int rc = messaging_engine_generate_link_code(user.id, hint_arg, code, sizeof(code));
+   if (rc == MESSAGING_RATE_LIMITED) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "The user holds several unused link codes; wait 10 minutes");
+   }
    if (rc != MESSAGING_SUCCESS) {
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
                                 "messaging_engine_generate_link_code failed");
@@ -281,6 +285,14 @@ int handle_messaging_reenable_channel(int client_fd, const char *payload, uint16
    if (rc == MESSAGING_NAME_TAKEN) {
       return send_text_response(client_fd, ADMIN_RESP_FAILURE,
                                 "An enabled channel with that name already exists");
+   }
+   if (rc == MESSAGING_ALREADY_LINKED) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "That chat is linked to another DAWN account for the same person");
+   }
+   if (rc == MESSAGING_NOT_VERIFIED) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "This number needs linking again (/link with a new code)");
    }
    if (rc != MESSAGING_SUCCESS) {
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "reenable failed");

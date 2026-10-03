@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 100
+#define AUTH_DB_SCHEMA_VERSION 101
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -996,6 +996,16 @@ int auth_db_migrations_v99(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (nothing changed).
  */
 int auth_db_migrations_v100(sqlite3 *db);
+
+/**
+ * @brief v101: messaging_channels.owner_sender (who may speak for a channel)
+ *        and the SMS verification columns; backfills existing rows (verified,
+ *        Telegram private chats owned by their id) and adds the unique
+ *        (provider, address, owner) index, disabling rows that would break it.
+ *        Idempotent.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (rolled back).
+ */
+int auth_db_migrations_v101(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

@@ -127,6 +127,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v98.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v99.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v100.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v101.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -892,6 +893,40 @@ dawn_add_unit_test(test_messaging_split
    SOURCES test_messaging_split.c
            ${SRC_ROOT}/src/messaging/messaging_split.c
    LIBS    dawn_common unity
+   LABEL   ci)
+
+# Who may speak for a messaging channel: the sender rule + Telegram message
+# reading.  Pure; links only the two .c files under test.
+dawn_add_unit_test(test_messaging_sender
+   SOURCES test_messaging_sender.c
+           ${SRC_ROOT}/src/messaging/messaging_sender_gate.c
+           ${SRC_ROOT}/src/messaging/messaging_telegram_parse.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Schema v101: messaging channel owners + SMS verification backfill on an
+# existing database (the migration re-run over rows shaped like before it).
+dawn_add_unit_test(test_messaging_channels_v101
+   SOURCES test_messaging_channels_v101.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Messaging channels on a real database: resolve by sender, /link, SMS
+# verification.  The engine's channel + link files as they are; the driver
+# registry and session slots are stand-ins in the test.
+dawn_add_unit_test(test_messaging_channels_db
+   SOURCES test_messaging_channels_db.c
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/messaging/messaging_engine_channels.c
+           ${SRC_ROOT}/src/messaging/messaging_engine_link.c
+           ${SRC_ROOT}/src/messaging/messaging_sender_gate.c
+           ${SRC_ROOT}/src/messaging/messaging_format.c
+           ${SRC_ROOT}/src/messaging/messaging_format_telegram.c
+           ${SRC_ROOT}/src/messaging/messaging_split.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/core/rate_limiter.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer sodium ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_messaging_format

@@ -1072,6 +1072,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_rename_channel(conn, payload);
    } else if (strcmp(type, "reenable_channel") == 0) {
       handle_reenable_channel(conn, payload);
+   } else if (strcmp(type, "verify_channel") == 0) {
+      handle_verify_channel(conn, payload);
+   } else if (strcmp(type, "resend_channel_code") == 0) {
+      handle_resend_channel_code(conn, payload);
    } else if (strcmp(type, "set_channel_llm") == 0) {
       handle_set_channel_llm(conn, payload);
    }

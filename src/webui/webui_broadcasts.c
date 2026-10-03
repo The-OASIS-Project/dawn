@@ -1783,6 +1783,28 @@ void calendar_broadcast_events_changed(int user_id) {
    }
 }
 
+/* Strong override of the messaging engine's weak no-op: tell the user's
+ * browsers their channel list changed so the settings panel re-reads it. */
+void webui_broadcast_messaging_channels_changed(int user_id,
+                                                int64_t channel_id,
+                                                const char *change,
+                                                const char *link_code) {
+   if (user_id <= 0) {
+      return;
+   }
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("messaging_channels_changed"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "channel_id", json_object_new_int64(channel_id));
+   json_object_object_add(payload, "change", json_object_new_string(change ? change : ""));
+   if (link_code && link_code[0]) {
+      json_object_object_add(payload, "link_code", json_object_new_string(link_code));
+   }
+   json_object_object_add(root, "payload", payload);
+   /* broadcast_json_to_user_ex takes ownership of root. */
+   (void)broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+}
+
 /*
  * Strong symbol that overrides the weak stub in auth_db_conv.c.
  * Emits a per-user `conversation_list_changed` frame so every browser this user has

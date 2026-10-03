@@ -693,6 +693,12 @@ void handle_rename_channel(ws_connection_t *conn, struct json_object *payload);
 /** @brief Re-enable one of the user's soft-deleted channels by row id. */
 void handle_reenable_channel(ws_connection_t *conn, struct json_object *payload);
 
+/** @brief Finish an SMS link with the code DAWN texted to the number. */
+void handle_verify_channel(ws_connection_t *conn, struct json_object *payload);
+
+/** @brief Text a fresh verification code to an SMS channel waiting for one. */
+void handle_resend_channel_code(ws_connection_t *conn, struct json_object *payload);
+
 /** @brief Set the per-channel LLM settings (writes the channel's conversation row). */
 void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload);
 

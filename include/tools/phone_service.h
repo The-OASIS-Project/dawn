@@ -191,6 +191,19 @@ int phone_service_send_sms(int user_id,
                            size_t buf_size);
 
 /**
+ * @brief Send an SMS, recording `log_body` in the user's SMS log instead of
+ *        `body`.  For texts whose content must not be kept or shown back,
+ *        such as a verification code (the log is readable through the phone
+ *        tool).
+ */
+int phone_service_send_sms_logged_as(int user_id,
+                                     const char *name_or_number,
+                                     const char *body,
+                                     const char *log_body,
+                                     char *result_buf,
+                                     size_t buf_size);
+
+/**
  * @brief Get the current phone state.
  */
 phone_state_t phone_service_get_state(void);

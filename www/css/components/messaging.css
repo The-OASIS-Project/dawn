@@ -189,6 +189,57 @@
    border-radius: var(--border-radius-sm);
 }
 
+/* An SMS link waiting for the code DAWN texted to the number: a card that
+ * needs the user stands out from one that works. */
+.channel-card.channel-pending {
+   border-color: var(--warning-border);
+}
+
+.channel-card.channel-pending .channel-status-text {
+   color: var(--warning);
+}
+
+.channel-verify {
+   margin-bottom: 0.5rem;
+}
+
+.channel-verify-label {
+   display: block;
+   margin-bottom: 0.35rem;
+   font-size: 0.8rem;
+   color: var(--text-secondary);
+}
+
+/* Over .dawn-input: a short, spaced, monospace box sized for six digits;
+ * 1rem so iOS doesn't zoom on focus. */
+.channel-verify-input {
+   width: 8em;
+   font-family: var(--font-mono);
+   font-size: 1rem;
+   letter-spacing: 0.15em;
+}
+
+.channel-verify-input:focus-visible {
+   border-color: var(--accent);
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.channel-verify-input[aria-invalid='true'] {
+   border-color: var(--error);
+}
+
+.channel-verify-ttl {
+   display: block;
+   margin-top: 0.35rem;
+}
+
+.channel-verify-error {
+   margin-top: 0.35rem;
+   font-size: 0.8rem;
+   color: var(--error-text);
+}
+
 /* Per-channel LLM controls: model shown read-only (changed in chat via the
  * switch-model tool), reasoning + effort editable here. */
 .channel-llm {
@@ -236,6 +287,8 @@
    }
 
    .channel-controls .btn,
+   .channel-verify .btn,
+   .channel-verify-input,
    .channel-provider-select,
    .channel-llm-field select,
    #channel-generate-code-btn,

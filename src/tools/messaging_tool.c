@@ -58,13 +58,16 @@ static char *handle_list_channels(int user_id) {
       return make_response(TOOL_RESULT_ERROR_MARK "Error: could not list channels.");
    }
    /* Wrap the JSON in a brief sentence so the LLM has natural framing. */
-   size_t needed = strlen(json) + 64;
+   static const char prefix[] =
+       "Linked channels (one with \"verified\": false is an SMS number waiting for its code: "
+       "it can't send or receive yet): ";
+   size_t needed = strlen(json) + sizeof(prefix);
    char *result = malloc(needed);
    if (!result) {
       free(json);
       return NULL;
    }
-   snprintf(result, needed, "Linked channels: %s", json);
+   snprintf(result, needed, "%s%s", prefix, json);
    free(json);
    return result;
 }
@@ -352,7 +355,9 @@ static char *handle_link_status(struct json_object *details) {
       case MESSAGING_LINK_STATE_PENDING:
          return make_response("Link code is pending — user has not yet sent /link to a bot.");
       case MESSAGING_LINK_STATE_CLAIMED:
-         return make_response("Link code has been claimed. Channel is now active.");
+         return make_response("Link code has been claimed. The channel is active, except an "
+                              "SMS number: it waits for the 6-digit code DAWN texted to it, "
+                              "which the user enters in WebUI Settings → Messaging Channels.");
       case MESSAGING_LINK_STATE_EXPIRED:
          return make_response(
              "Link code has expired. Generate a new one in WebUI Settings → Messaging.");

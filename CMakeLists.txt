@@ -828,6 +828,8 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_engine_link.c
         src/messaging/messaging_engine_inbound.c
         src/messaging/messaging_telegram.c
+        src/messaging/messaging_telegram_parse.c
+        src/messaging/messaging_sender_gate.c
         src/messaging/messaging_sms.c
         src/messaging/messaging_discord.c
         src/messaging/messaging_discord_read.c
@@ -945,6 +947,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v98.c
     src/auth/auth_db_migrations_v99.c
     src/auth/auth_db_migrations_v100.c
+    src/auth/auth_db_migrations_v101.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c

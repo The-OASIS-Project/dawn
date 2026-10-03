@@ -12,6 +12,43 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-02 — Messaging channels answer only the person who linked them; SMS links need a code
+
+**What changed.**
+- **A linked chat answers only the person who sent `/link`.** Before, a linked
+  Telegram group answered everyone in it as you. Now other members are ignored,
+  and each of them can link their own DAWN account from the same group. Posts
+  by anonymous group admins, posts in a channel's or group's name, bots and
+  forwarded messages are ignored too.
+- **Several DAWN users in one chat no longer share a conversation.** Each
+  linked account gets its own.
+- **Linking a new SMS number needs one more step.** After you text
+  `/link CODE`, DAWN texts back a 6-digit code; enter it in the WebUI
+  (Settings → Messaging Channels). Anyone can put any number on a text, so
+  this shows the number is really yours.
+- **Codes made for one app only link that app**, if you picked an app when
+  making the code. You can hold up to 5 unused codes at a time.
+- **Unlinking an SMS number drops its verification**: linking it again needs a
+  new code texted to it.
+- **A text that is only a greeting ("Hi Friday") now gets an answer.** Before,
+  it was dropped as having nothing to act on.
+- **SMS verification relies on your MQTT broker.** If it accepts anyone, a
+  `/link` text can be forged and the code read back; run it with
+  authentication and ACLs on `echo/#`.
+
+**What you need to do.**
+- **Telegram groups you linked before this update stop answering until you
+  re-link them**: send `/link CODE` in the group again. Your private Telegram
+  chats, Discord and Slack keep working with nothing to do; numbers already
+  linked over SMS keep working too.
+- **If two DAWN users had linked the same chat**, the one used less recently
+  is switched off (the daemon log names it). Each person re-links from their
+  own account.
+- **Remember that the assistant's replies in a group are seen by everyone in
+  it.**
+
+---
+
 ## 2026-10-02 — Sending and trashing email need your yes in a new message
 
 **What changed.**

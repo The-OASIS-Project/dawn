@@ -677,6 +677,21 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
  */
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
 
+/**
+ * @brief Tell a user's open WebUI browsers their messaging channel list
+ *        changed (a /link from a chat, a verified code, an unlink elsewhere),
+ *        so the settings panel re-reads it.  Overrides a weak no-op in the
+ *        messaging engine.
+ * @param channel_id  The channel that changed (0 = several).
+ * @param change      What happened ("linked", "pending", "verified", ...; see
+ *                    messaging_engine_internal.h).
+ * @param link_code   The used link code behind a "linked"/"pending" change, else NULL.
+ */
+void webui_broadcast_messaging_channels_changed(int user_id,
+                                                int64_t channel_id,
+                                                const char *change,
+                                                const char *link_code);
+
 /* The background-job frames take a ws_connection_t and are declared alongside
  * the other per-connection senders in webui_handlers.h. */
 

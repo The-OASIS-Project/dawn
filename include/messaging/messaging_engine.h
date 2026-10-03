@@ -46,7 +46,11 @@ extern "C" {
 #define MESSAGING_PROVIDER_RATE_LIMITED 5
 #define MESSAGING_DRIVER_NOT_REGISTERED 6
 #define MESSAGING_INVALID_ADDRESS 7
-#define MESSAGING_NAME_TAKEN 8 /* rename target collides with an existing channel */
+#define MESSAGING_NAME_TAKEN 8     /* rename target collides with an existing channel */
+#define MESSAGING_ALREADY_LINKED 9 /* this chat is already linked for this person */
+#define MESSAGING_BAD_CODE 10      /* SMS verification code wrong, expired or used up */
+#define MESSAGING_NOT_VERIFIED 11  /* an SMS link not proven by its code: /link it again */
+#define MESSAGING_INVALID_NAME 12  /* a display name too long or with unsafe characters */
 
 /* Maximum channel display_name length (bytes, excluding NUL).  The admin
  * protocol's ADMIN_MESSAGING_DISPLAY_NAME_MAX must match this. */
@@ -253,12 +257,13 @@ int messaging_engine_list_channels_text(int user_id, char *buf, size_t buflen);
  * expired codes opportunistically.
  *
  * @param user_id       Owner of the code (must exist in users).
- * @param provider_hint Optional ("telegram"/"discord"/"slack"/"sms") for
- *                      WebUI display purposes; NULL/empty for no hint.
+ * @param provider_hint Optional ("telegram"/"discord"/"slack"/"sms"): the
+ *                      code then links only that app.  NULL/empty for any.
  * @param code_out      Caller-allocated buffer.
  * @param code_buf_size Must be >= MESSAGING_LINK_CODE_BUF_SIZE.
  *
- * @return MESSAGING_SUCCESS / MESSAGING_FAILURE.
+ * @return MESSAGING_SUCCESS / MESSAGING_RATE_LIMITED (the user already holds
+ *         several live codes) / MESSAGING_FAILURE.
  */
 int messaging_engine_generate_link_code(int user_id,
                                         const char *provider_hint,
@@ -274,39 +279,62 @@ int messaging_engine_generate_link_code(int user_id,
 messaging_link_state_t messaging_engine_link_status(const char *code);
 
 /**
- * @brief Reset a channel's forever-conversation binding.
+ * @brief Finish linking an SMS number with the code DAWN texted to it.
+ *
+ * `/link CODE` from a number only proves someone can put that number on a
+ * text (the sender can be forged); entering the code DAWN texted back proves
+ * the user receives texts there.  Until then the channel is pending: listed,
+ * but it reaches nothing.  Call from an authenticated surface (the WebUI).
+ *
+ * @return MESSAGING_SUCCESS; MESSAGING_BAD_CODE (wrong, expired, or too many
+ *         tries — ask for a new code with messaging_engine_resend_verify_code);
+ *         MESSAGING_UNKNOWN_CHANNEL (no pending channel by that id for the
+ *         user); MESSAGING_ALREADY_LINKED (another account verified the
+ *         number); MESSAGING_FAILURE.
+ */
+int messaging_engine_verify_channel(int user_id, int64_t channel_id, const char *code);
+
+/**
+ * @brief Text a fresh verification code to a channel waiting for one.
+ *
+ * Codes sent are limited per channel and per user over a day (each resets
+ * the attempt count, so the limit is what bounds guessing).
+ *
+ * @return MESSAGING_SUCCESS; MESSAGING_RATE_LIMITED (today's codes are used
+ *         up); MESSAGING_UNKNOWN_CHANNEL (no channel waiting for a code);
+ *         MESSAGING_FAILURE.
+ */
+int messaging_engine_resend_verify_code(int user_id, int64_t channel_id);
+
+/**
+ * @brief The code part of a `/link CODE` message, or NULL if the text isn't
+ *        one.
+ *
+ * Accepts "/link CODE" in any letter case, after leading spaces, Telegram's
+ * "/link@BotName CODE", and "link CODE" (Slack reserves '/') when CODE has a
+ * link code's shape.  One matcher for every place that must recognize a link
+ * code (the engine, and the phone service keeping it out of the SMS log).
+ */
+const char *messaging_link_command_args(const char *body);
+
+/**
+ * @brief Reset a channel by its display_name for a specific user.
  *
  * Clears messaging_channels.conversation_id back to NULL so the next
  * inbound for this channel starts a fresh conversations row.  Evicts
  * the in-memory session slot for the channel (if any), which triggers
  * memory extraction on the closing conversation's tail via the
  * existing session_destroy → memory_trigger_extraction path.  Used by
- * both the engine-internal `/new` slash command and the LLM-facing
- * `messaging.reset_conversation` action.
- *
- * @param provider          "telegram" / "discord" / "slack" / "sms"
- * @param provider_address  The channel's typed primary key (chat_id /
- *                          E.164 / etc.).
- *
- * @return MESSAGING_SUCCESS          channel found, reset succeeded.
- *         MESSAGING_UNKNOWN_CHANNEL  no channel exists for that
- *                                    (provider, provider_address).
- *         MESSAGING_FAILURE          internal error (DB lock, etc.).
- */
-int messaging_engine_reset_channel(const char *provider, const char *provider_address);
-
-/**
- * @brief Reset a channel by its display_name for a specific user.
- *
- * Convenience wrapper around `messaging_engine_reset_channel` for the
- * LLM tool surface.  Looks up the channel by (user_id, channel_name)
- * to find its provider + provider_address, then delegates.  Enforces
- * the same ownership boundary as `messaging_engine_send`.
+ * the LLM-facing `messaging.reset_conversation` action (the `/new`
+ * command resets the same way, inside the engine).  Looks up the
+ * channel by (user_id, channel_name) and enforces the same ownership
+ * boundary as `messaging_engine_send`.
  *
  * @param user_id       The DAWN user the LLM tool is acting on behalf of.
  * @param channel_name  Display name as registered.  Case-insensitive.
  *
- * @return Same codes as `messaging_engine_reset_channel`.
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (no enabled channel by
+ *         that name), MESSAGING_FAILURE.
  */
 int messaging_engine_reset_by_name(int user_id, const char *channel_name);
 
@@ -370,7 +398,8 @@ int messaging_engine_unlink_channel_by_id(int user_id, int64_t channel_id);
  * the row id under the (id, user_id) ownership boundary.
  *
  * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL, MESSAGING_NAME_TAKEN,
- *         MESSAGING_FAILURE.
+ *         MESSAGING_INVALID_NAME (too long, or quotes, angle brackets,
+ *         backslashes or control characters), MESSAGING_FAILURE.
  */
 int messaging_engine_rename_channel_by_id(int user_id, int64_t channel_id, const char *new_name);
 
@@ -378,18 +407,21 @@ int messaging_engine_rename_channel_by_id(int user_id, int64_t channel_id, const
  * @brief Re-enable a previously unlinked (soft-deleted) channel.
  *
  * The inverse of unlink: flips `is_enabled` back to 1 on a row that was
- * soft-deleted, restoring inbound dispatch.  No `/link` proof-of-control
- * round-trip is needed — control was proven when the row was first
- * created, and unlink preserved the row (provider_address, address_json,
- * conversation_id, display_name).  Rejects re-enable when it would
- * collide with an existing ENABLED channel of the same display_name
- * (name-based lookups use LIMIT 1).  No session eviction — re-enabling
- * touches no live session.
+ * soft-deleted, restoring inbound dispatch.  For a chat app no `/link`
+ * round-trip is needed — the row still names its owner, and unlink
+ * preserved it (provider_address, address_json, conversation_id,
+ * display_name).  An SMS number loses its verification when unlinked (the
+ * number may have changed hands), so it comes back only through a new
+ * `/link` and code.  Rejects re-enable when it would collide with an
+ * existing ENABLED channel of the same display_name (name-based lookups use
+ * LIMIT 1).  No session eviction — re-enabling touches no live session.
  *
  * Keys on the row id (preferred for the WebUI).
  *
  * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (no disabled
  *         channel matches), MESSAGING_NAME_TAKEN (name now collides),
+ *         MESSAGING_NOT_VERIFIED (link it again), MESSAGING_ALREADY_LINKED
+ *         (the same person's chat is live in another account),
  *         MESSAGING_FAILURE.
  */
 int messaging_engine_reenable_channel_by_id(int user_id, int64_t channel_id);

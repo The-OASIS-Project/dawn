@@ -266,8 +266,10 @@
                   setTimeout(() => {
                      window.location.href = '/login.html';
                   }, 1500);
-               } else if (msg.payload.code === 'FORBIDDEN') {
-                  // Permission error (e.g., not admin) - just show toast
+               } else if (['FORBIDDEN', 'RATE_LIMITED'].includes(msg.payload.code)) {
+                  // Refusals of a settings-panel action (permission, too many
+                  // link codes): a toast, where the user is looking, not the
+                  // transcript behind the overlay.
                   DawnToast.show(msg.payload.message, 'error');
                } else if (msg.payload.code && msg.payload.code.startsWith('LLM_')) {
                   // LLM errors - show toast and add to transcript
@@ -768,6 +770,18 @@
             case 'set_channel_llm_response':
                if (typeof DawnMessaging !== 'undefined')
                   DawnMessaging.handleSetChannelLlmResponse(msg.payload);
+               break;
+            case 'verify_channel_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleVerifyResponse(msg.payload);
+               break;
+            case 'messaging_channels_changed':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleChannelsChanged(msg.payload);
+               break;
+            case 'resend_channel_code_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleResendResponse(msg.payload);
                break;
             case 'get_my_settings_response':
                DawnMySettings.handleGetResponse(msg.payload);

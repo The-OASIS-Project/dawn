@@ -175,5 +175,7 @@ user hears where the mail really goes.
 - Accounts can be read-only in DAWN, and the tool can't send from them.
 - Trash is recoverable (it moves; it never expunges).
 - Send is not recoverable. It is the case these rules are for.
-- On messaging channels, "the user" is whoever controls the linked address:
-  an SMS sender's number, or any member of a linked Telegram group.
+- On messaging channels, "the user" is the person who linked the channel
+  (a group chat answers only them, though everyone in it reads the replies).
+  An SMS sender's number can be forged, though, so over SMS "the user" is
+  whoever can put that number on a text.

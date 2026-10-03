@@ -60,7 +60,7 @@
 
 #define MESSAGING_MAX_BODY_LEN 4096
 #define MESSAGING_LINK_BODY_CAP 256
-#define MESSAGING_RL_KEY_SIZE 96 /* "provider:address" composite */
+#define MESSAGING_RL_KEY_SIZE 40 /* "provider:<16 hex>" — under RATE_LIMIT_IP_SIZE */
 
 /* Per-turn channel-hint buffer (the SMS system-prompt augmentation).
  * Holds the base hint plus an optional truncation-feedback append
@@ -76,59 +76,92 @@ static int enqueue_inbound(const char *provider,
                            const char *sender_display,
                            const char *body,
                            int64_t timestamp,
-                           int user_id);
+                           const channel_ref_t *ref);
+
+/* Rate-limit keys: the provider plus a 64-bit FNV-1a of the chat (and, for
+ * the per-sender key, the sender).  Fixed length whatever the ids look like,
+ * so a key never reaches the limiter's size cap (which refuses longer keys as
+ * rate-limited). */
+static void rl_key_for(char out[MESSAGING_RL_KEY_SIZE],
+                       const char *provider,
+                       const char *address,
+                       const char *sender) {
+   uint64_t h = 1469598103934665603ULL;
+   for (const char *p = address; p && *p; p++) {
+      h = (h ^ (unsigned char)*p) * 1099511628211ULL;
+   }
+   if (sender) {
+      h = (h ^ 0x1f) * 1099511628211ULL; /* separator: "ab"+"c" != "a"+"bc" */
+      for (const char *p = sender; *p; p++) {
+         h = (h ^ (unsigned char)*p) * 1099511628211ULL;
+      }
+   }
+   snprintf(out, MESSAGING_RL_KEY_SIZE, "%.15s:%016llx", provider, (unsigned long long)h);
+}
 
 /* =============================================================================
  * Inbound dispatch (called from driver listener threads)
  * ============================================================================= */
 
-int engine_inbound_dispatch(const char *provider,
-                            const char *provider_address,
-                            const char *sender_display,
-                            const char *body,
-                            int64_t timestamp) {
-   if (!provider || !provider_address || !body) {
+int engine_inbound_dispatch(const messaging_inbound_t *msg) {
+   if (!msg || !msg->provider || !msg->provider_address || !msg->body) {
       return MESSAGING_FAILURE;
    }
+   const char *provider = msg->provider;
+   const char *provider_address = msg->provider_address;
+   const char *body = msg->body;
    if (!atomic_load(&s_initialized)) {
       return MESSAGING_FAILURE;
    }
 
    size_t body_len = strlen(body);
 
-   /* Pre-DB general rate limit (per-sender).  Prevents DB-lookup DoS
-    * from a stranger-flood. */
-   char rl_key[MESSAGING_RL_KEY_SIZE];
-   snprintf(rl_key, sizeof(rl_key), "%s:%s", provider, provider_address);
-   if (rate_limiter_check(&s_inbound_general_limiter, rl_key)) {
-      OLOG_DEBUG("messaging: inbound rate limit hit for %s", rl_key);
+   /* Pre-DB rate limits, before any lookup (a stranger-flood can't load the
+    * DB): one budget per sender, so in a group others' chatter can't use up
+    * the owner's, and a larger one for the chat as a whole. */
+   /* /link (see messaging_link_command_args for the forms).  In a group
+    * everyone sees the code, so a code refused there, for any reason, is used
+    * up: another member must not be able to claim it after. */
+   const char *link_args = messaging_link_command_args(body);
+   const bool shared = msg->chat_kind == MESSAGING_CHAT_SHARED;
+
+   char chat_key[MESSAGING_RL_KEY_SIZE];
+   char sender_key[MESSAGING_RL_KEY_SIZE];
+   rl_key_for(chat_key, provider, provider_address, NULL);
+   rl_key_for(sender_key, provider, provider_address, msg->sender_id ? msg->sender_id : "");
+   if (rate_limiter_check(&s_inbound_general_limiter, sender_key) ||
+       rate_limiter_check(&s_inbound_chat_limiter, chat_key)) {
+      OLOG_DEBUG("messaging: inbound rate limit hit for %s:%s", provider, provider_address);
+      if (link_args && shared) {
+         link_code_burn(link_args);
+      }
       return MESSAGING_RATE_LIMITED;
    }
 
-   /* /link short-circuit (own stricter rate limit, body cap).  Accept
-    * both "/link CODE" and "link CODE" — Slack intercepts any '/' as a
-    * slash command and rejects unregistered ones, so users on that
-    * provider need the slashless form.  Telegram/Discord users see
-    * either form work; the slashed form stays the documented default. */
-   const char *link_args = NULL;
-   if (body_len >= 6 && strncmp(body, "/link ", 6) == 0) {
-      link_args = body + 6;
-   } else if (body_len >= 5 && strncmp(body, "link ", 5) == 0) {
-      link_args = body + 5;
-   }
    if (link_args) {
       if (body_len > MESSAGING_LINK_BODY_CAP) {
          OLOG_WARNING("messaging: oversized /link body from %s:%s (%zu bytes)", provider,
                       provider_address, body_len);
          link_attempt_log(provider, provider_address, NULL, "invalid");
+         if (shared) {
+            link_code_burn(link_args);
+         }
          return MESSAGING_FAILURE;
       }
-      if (rate_limiter_check(&s_inbound_link_limiter, rl_key)) {
+      /* A /link budget per chat; in a group, per sender, so another member's
+       * attempts can't use up the owner's.  Only a well-formed code counts
+       * against it. */
+      if (link_code_well_formed(link_args) &&
+          rate_limiter_check(&s_inbound_link_limiter, shared ? sender_key : chat_key)) {
          OLOG_WARNING("messaging: /link rate limit hit for %s:%s", provider, provider_address);
          link_attempt_log(provider, provider_address, NULL, "rate_limited");
+         if (shared) {
+            link_code_burn(link_args);
+         }
          return MESSAGING_RATE_LIMITED;
       }
-      return handle_link_command(provider, provider_address, link_args);
+      return handle_link_command(provider, provider_address, msg->sender_id, msg->chat_kind,
+                                 link_args);
    }
 
    /* Body length cap — protects the worker queue and the LLM from
@@ -150,13 +183,18 @@ int engine_inbound_dispatch(const char *provider,
       return MESSAGING_FAILURE;
    }
 
-   /* Channel lookup.  No match → silently drop (don't reply to
-    * strangers; bot would be a free spam amplifier). */
-   int user_id = lookup_channel_user(provider, provider_address, NULL, 0);
-   if (user_id <= 0) {
-      OLOG_DEBUG("messaging: inbound from unlinked %s:%s — dropping", provider, provider_address);
+   /* Channel lookup: the channel this sender speaks for.  No match (an
+    * unlinked chat, or someone other than the person who linked it) →
+    * silently drop (don't reply to strangers; bot would be a free spam
+    * amplifier). */
+   channel_ref_t ref;
+   if (resolve_inbound_channel(provider, provider_address, msg->sender_id, msg->chat_kind, &ref) !=
+       CHANNEL_RESOLVED) {
+      OLOG_DEBUG("messaging: inbound from %s:%s has no channel for its sender — dropping", provider,
+                 provider_address);
       return MESSAGING_UNKNOWN_CHANNEL;
    }
+   const int user_id = ref.user_id;
 
    /* /new short-circuit — resets the channel's forever-conversation
     * binding.  Only honored from sender-in-channels (gated above);
@@ -172,22 +210,22 @@ int engine_inbound_dispatch(const char *provider,
    if (body_len >= 4 && (body[0] == '/') && (body[1] == 'n' || body[1] == 'N') &&
        (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
        (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {
-      int rc = messaging_engine_reset_channel(provider, provider_address);
+      int rc = messaging_engine_reset_channel(ref.user_id, ref.channel_id);
       /* Send confirmation through engine_send_async so callers running
        * on the mosquitto callback thread (SMS) don't deadlock waiting
        * for the echo/response that mosquitto can't deliver while the
        * callback is blocked.  Same pattern as handle_link_command.
-       * user_id was resolved above by lookup_channel_user. */
+       * user_id was resolved above by resolve_inbound_channel. */
       const messaging_driver_t *drv = find_driver(provider);
       if (drv && drv->send_text) {
          char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
          build_address_json_for(provider, provider_address, address_json, sizeof(address_json));
-         const char *msg =
+         const char *reply =
              (rc == MESSAGING_SUCCESS)
                  ? "Started a new conversation. Previous context is preserved in the WebUI."
                  : "Couldn't reset the conversation (internal error). Try again or check the "
                    "WebUI.";
-         engine_send_async(drv, user_id, provider_address, address_json, msg);
+         engine_send_async(drv, user_id, provider_address, address_json, reply);
       }
       OLOG_INFO("messaging: /new from %s:%s (rc=%d)", provider, provider_address, rc);
       return rc;
@@ -196,7 +234,8 @@ int engine_inbound_dispatch(const char *provider,
    /* Enqueue for the worker drain.  user_id is already resolved by
     * the channel lookup above — pass it through so the worker
     * doesn't have to re-query. */
-   return enqueue_inbound(provider, provider_address, sender_display, body, timestamp, user_id);
+   return enqueue_inbound(provider, provider_address, msg->sender_display, body, msg->timestamp,
+                          &ref);
 }
 
 static int enqueue_inbound(const char *provider,
@@ -204,7 +243,7 @@ static int enqueue_inbound(const char *provider,
                            const char *sender_display,
                            const char *body,
                            int64_t timestamp,
-                           int user_id) {
+                           const channel_ref_t *ref) {
    pthread_mutex_lock(&s_inbound_mutex);
    if (s_inbound_count >= MESSAGING_INBOUND_QUEUE_DEPTH) {
       pthread_mutex_unlock(&s_inbound_mutex);
@@ -224,7 +263,7 @@ static int enqueue_inbound(const char *provider,
             sender_display ? sender_display : "");
    item->body = strdup(body);
    item->timestamp = timestamp;
-   item->user_id = user_id;
+   item->ref = *ref;
    if (!item->body) {
       free(item);
       pthread_mutex_unlock(&s_inbound_mutex);
@@ -416,7 +455,8 @@ static void *typing_keepalive_thread(void *arg) {
 
 static void process_inbound(inbound_item_t *item) {
    /* Forever-binding: every messaging-backed exchange persists into one
-    * conversations row per (provider, provider_address).  First inbound
+    * conversations row per channel row (several DAWN users may each link
+    * one chat).  First inbound
     * for a channel creates the conv; subsequent inbound reuses it.
     * /new clears the binding and the next inbound starts a fresh conv.
     * LCM handles in-place context compaction; the recovery worker
@@ -431,11 +471,18 @@ static void process_inbound(inbound_item_t *item) {
     * session is freshly created (e.g., daemon just restarted), the
     * conv's full history is restored into session->conversation_history
     * so the LLM picks up where the user left off. */
-   int64_t conv_id = resolve_channel_conversation_id(item->provider, item->provider_address,
-                                                     item->user_id);
+   /* The sender was checked at enqueue (resolve_inbound_channel), but the
+    * message may have waited behind other turns: a channel unlinked (or no
+    * longer verified) since then gets no answer. */
+   bool gone = false;
+   int64_t conv_id = resolve_channel_conversation_id(&item->ref, item->provider,
+                                                     item->provider_address, &gone);
+   if (gone) {
+      return;
+   }
 
-   session_t *session = get_or_create_messaging_session(item->provider, item->provider_address,
-                                                        item->user_id, conv_id);
+   session_t *session = get_or_create_messaging_session(&item->ref, item->provider,
+                                                        item->provider_address, conv_id);
    if (!session) {
       OLOG_ERROR("messaging: failed to acquire session for %s:%s", item->provider,
                  item->provider_address);
@@ -454,7 +501,7 @@ static void process_inbound(inbound_item_t *item) {
     * channel funnels through here.  Skipped when conv_id <= 0 (DB
     * persistence failed for this turn; degraded mode). */
    reload_session_history_if_stale(session, item->provider, item->provider_address, conv_id,
-                                   item->user_id);
+                                   item->ref.user_id);
 
    /* Build the per-turn channel hint, including a truncation-feedback
     * note when the prior assistant reply was cut.  The truncation
@@ -496,7 +543,7 @@ static void process_inbound(inbound_item_t *item) {
 
    text_input_dispatch_opts_t opts = {
       .conversation_id = conv_id,
-      .auth_user_id = item->user_id,
+      .auth_user_id = item->ref.user_id,
       .sentence_cb = NULL,
       .sentence_userdata = NULL,
       .on_user_msg_added = NULL,
@@ -518,7 +565,7 @@ static void process_inbound(inbound_item_t *item) {
       ka_ctx = (typing_keepalive_ctx_t *)calloc(1, sizeof(*ka_ctx));
       if (ka_ctx) {
          ka_ctx->drv = typing_drv;
-         ka_ctx->user_id = item->user_id;
+         ka_ctx->user_id = item->ref.user_id;
          snprintf(ka_ctx->provider_address, sizeof(ka_ctx->provider_address), "%s",
                   item->provider_address);
          build_address_json_for(item->provider, item->provider_address, ka_ctx->address_json,
@@ -540,12 +587,12 @@ static void process_inbound(inbound_item_t *item) {
     * viewer reloading the channel conversation loses the tool interaction (the chat
     * platform only ever receives the final answer, which persists inline below).  pctx is
     * stack-scoped and the hook fires on THIS thread during dispatch; cleared right after. */
-   job_persist_ctx_t pctx = { conv_id, item->user_id };
+   job_persist_ctx_t pctx = { conv_id, item->ref.user_id };
    if (conv_id > 0) {
       session_set_tool_persist_hook(session, job_dispatch_tool_persist_cb, &pctx);
    }
    /* The turn belongs to the channel's conversation (see session_turn_begin). */
-   session_turn_begin(session, conv_id, item->user_id);
+   session_turn_begin(session, conv_id, item->ref.user_id);
    char *response = core_text_input_dispatch(session, item->body, &opts);
    /* The reply's own blocks.  The turn stays open until the reply is saved, so
     * the row, its id and any truncation land on this turn's history. */
@@ -622,7 +669,7 @@ static void process_inbound(inbound_item_t *item) {
       const conv_message_row_t row = { .role = "assistant",
                                        .content = response,
                                        .llm_blocks = stored };
-      int rc = conv_db_add_row(conv_id, item->user_id, &row, &assistant_msg_id);
+      int rc = conv_db_add_row(conv_id, item->ref.user_id, &row, &assistant_msg_id);
       free(stored);
       if (rc == AUTH_DB_SUCCESS && assistant_msg_id > 0) {
          session_stamp_last_message_id(session, "assistant", assistant_msg_id);
@@ -644,7 +691,7 @@ static void process_inbound(inbound_item_t *item) {
           * reload picks up both in one fetch).  Universal across
           * SMS / Telegram / future Discord/Slack since every
           * channel funnels through process_inbound. */
-         webui_broadcast_conversation_messages_appended(item->user_id, conv_id);
+         webui_broadcast_conversation_messages_appended(item->ref.user_id, conv_id);
       } else if (rc != AUTH_DB_SUCCESS) {
          OLOG_WARNING("messaging: failed to persist assistant message to conv %lld (rc=%d)",
                       (long long)conv_id, rc);
@@ -659,7 +706,7 @@ static void process_inbound(inbound_item_t *item) {
     * forward.  Also drives outbound rate-limit accounting and the
     * "most-recent channel" sort in any future WebUI surfacing.  Cheap
     * UPDATE; failure is silent (not enough signal to log). */
-   touch_channel_last_used(item->provider, item->provider_address);
+   touch_channel_last_used(item->ref.channel_id);
 
    session_release(session);
 
@@ -695,11 +742,11 @@ static void process_inbound(inbound_item_t *item) {
           * WebUI.  No raw-length pre-gate: an expanding conversion (e.g.
           * Discord table→fence, Slack &→&amp;) could cross the cap only after
           * conversion, so the decision lives inside the formatter. */
-         messaging_deliver(drv, item->user_id, item->provider_address, address_json, response);
+         messaging_deliver(drv, item->ref.user_id, item->provider_address, address_json, response);
       } else {
          /* Hard-truncate providers (none in v1): `response` was already
           * truncated in place above; send it as a single raw message. */
-         drv->send_text(item->user_id, item->provider_address, address_json, response);
+         drv->send_text(item->ref.user_id, item->provider_address, address_json, response);
       }
    }
    free(response);
@@ -716,8 +763,7 @@ static void process_inbound(inbound_item_t *item) {
    bool do_deferred_reset = false;
    pthread_mutex_lock(&s_session_slots_mutex);
    for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
-      if (s_session_slots[i].session && strcmp(s_session_slots[i].provider, item->provider) == 0 &&
-          strcmp(s_session_slots[i].provider_address, item->provider_address) == 0 &&
+      if (s_session_slots[i].session && s_session_slots[i].channel_id == item->ref.channel_id &&
           s_session_slots[i].pending_reset) {
          s_session_slots[i].pending_reset = false;
          do_deferred_reset = true;
@@ -727,10 +773,10 @@ static void process_inbound(inbound_item_t *item) {
    pthread_mutex_unlock(&s_session_slots_mutex);
 
    if (do_deferred_reset) {
-      OLOG_INFO("messaging: processing deferred self-reset for %s:%s", item->provider,
-                item->provider_address);
-      evict_session_slot(item->provider, item->provider_address);
-      clear_channel_conversation_id(item->provider, item->provider_address);
+      OLOG_INFO("messaging: processing deferred self-reset for channel %lld (%s:%s)",
+                (long long)item->ref.channel_id, item->provider, item->provider_address);
+      evict_session_slot(item->ref.channel_id);
+      clear_channel_conversation_id(item->ref.channel_id);
    }
 }
 
@@ -784,9 +830,15 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
    /* Pre-DB general inbound rate limit, same shape as the Telegram
     * dispatcher.  Prevents a flood of texts to the modem from
     * hammering the DB lookup path. */
+   /* A text passes through the phone service and its MQTT broker in the
+    * clear, so a /link code refused here, for any reason, is used up. */
+   const char *sms_link_args = messaging_link_command_args(body);
    char rl_key[MESSAGING_RL_KEY_SIZE];
-   snprintf(rl_key, sizeof(rl_key), "sms:%s", sender_e164);
+   rl_key_for(rl_key, "sms", sender_e164, NULL);
    if (rate_limiter_check(&s_inbound_general_limiter, rl_key)) {
+      if (sms_link_args) {
+         link_code_burn(sms_link_args);
+      }
       OLOG_DEBUG("messaging: SMS inbound rate limit hit for %s", sender_e164);
       return MESSAGING_RATE_LIMITED;
    }
@@ -795,19 +847,23 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
     * because the linking flow is the only way a sender's E.164 ever
     * gets into messaging_channels in the first place — gating /link
     * on "must be linked already" would lock everyone out. */
-   if (body_len >= 6 && strncmp(body, "/link ", 6) == 0) {
+   if (sms_link_args) {
       if (body_len > MESSAGING_LINK_BODY_CAP) {
          OLOG_WARNING("messaging: oversized SMS /link body from %s (%zu bytes)", sender_e164,
                       body_len);
          link_attempt_log("sms", sender_e164, NULL, "invalid");
+         link_code_burn(sms_link_args);
          return MESSAGING_FAILURE;
       }
-      if (rate_limiter_check(&s_inbound_link_limiter, rl_key)) {
+      if (link_code_well_formed(sms_link_args) &&
+          rate_limiter_check(&s_inbound_link_limiter, rl_key)) {
          OLOG_WARNING("messaging: SMS /link rate limit hit for %s", sender_e164);
          link_attempt_log("sms", sender_e164, NULL, "rate_limited");
+         link_code_burn(sms_link_args);
          return MESSAGING_RATE_LIMITED;
       }
-      return handle_link_command("sms", sender_e164, body + 6);
+      return handle_link_command("sms", sender_e164, NULL, MESSAGING_CHAT_ONE_TO_ONE,
+                                 sms_link_args);
    }
 
    /* Body length cap (same shape as Telegram path). */
@@ -825,6 +881,16 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
+   /* The linked channel for this number.  An unlinked (or not yet
+    * verified) number falls through to the normal phone path: it can't
+    * reset a channel or reach the LLM.  Resolved once, before the gates
+    * below, which all need it. */
+   channel_ref_t ref;
+   if (resolve_inbound_channel("sms", sender_e164, NULL, MESSAGING_CHAT_ONE_TO_ONE, &ref) !=
+       CHANNEL_RESOLVED) {
+      return MESSAGING_UNKNOWN_CHANNEL;
+   }
+
    /* /new short-circuit — runs BEFORE the wake-word gate so users
     * don't have to say "Hey Friday /new", but AFTER the injection
     * filter and channel-lookup so unlinked senders can't trigger
@@ -834,16 +900,7 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
    if (body_len >= 4 && (body[0] == '/') && (body[1] == 'n' || body[1] == 'N') &&
        (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
        (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {
-      /* Sender-in-channels guard.  Unlinked phones can't reset
-       * someone else's binding.  Capture user_id for the
-       * confirmation-send so the driver scopes its audit + rate
-       * buckets against the right user. */
-      int reset_user_id = lookup_channel_user("sms", sender_e164, NULL, 0);
-      if (reset_user_id <= 0) {
-         OLOG_DEBUG("messaging: SMS /new from unlinked %s — dropping", sender_e164);
-         return MESSAGING_UNKNOWN_CHANNEL;
-      }
-      int rc = messaging_engine_reset_channel("sms", sender_e164);
+      int rc = messaging_engine_reset_channel(ref.user_id, ref.channel_id);
       const messaging_driver_t *drv = find_driver("sms");
       if (drv && drv->send_text) {
          char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
@@ -853,26 +910,23 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
                  ? "Started a new conversation. Previous context is preserved in the WebUI."
                  : "Couldn't reset the conversation (internal error). Try again or check the "
                    "WebUI.";
-         engine_send_async(drv, reset_user_id, sender_e164, address_json, msg);
+         engine_send_async(drv, ref.user_id, sender_e164, address_json, msg);
       }
       OLOG_INFO("messaging: /new from sms:%s (rc=%d)", sender_e164, rc);
       return MESSAGING_SUCCESS;
    }
 
    /* Active-conversation window — skip the wake-word gate when this
-    * sender's channel had an LLM-bound exchange recently.  Mirrors the
+    * channel had an LLM-bound exchange recently.  Mirrors the
     * iMessage thread metaphor: once you're in a back-and-forth with
     * Friday, you don't need to re-announce her name on every reply.
     * The window slides forward on each successful exchange (see
     * touch_channel_last_used in process_inbound).  Telegram/Discord/
     * Slack don't need this (LLM-exclusive — every linked-sender
     * message routes to LLM unconditionally). */
-   bool active_window = sms_within_active_window(sender_e164);
    const char *cmd = NULL;
-   if (active_window) {
-      /* No wake-word required — route the full body as the user
-       * command.  Sender-in-channels was implicitly verified by the
-       * window check (window only returns true for linked channels). */
+   if (sms_within_active_window(&ref)) {
+      /* No wake-word required — route the full body as the user command. */
       cmd = body;
    } else {
       /* Wake-word prefix gate.  Use the start-anchored matcher
@@ -883,20 +937,11 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
       if (!wr.detected) {
          return MESSAGING_UNKNOWN_CHANNEL; /* caller falls through */
       }
-      /* Pass just the command remainder to the LLM, not the wake
-       * word.  If the user only said the wake word with no command
-       * ("hey friday"), there's nothing for the LLM to act on. */
-      cmd = (wr.has_command && wr.command) ? wr.command : "";
-   }
-
-   /* Sender-in-channels check.  Even with a perfect wake-word prefix
-    * (or an open active-window match), an unlinked phone number
-    * can't reach the LLM. */
-   int user_id = lookup_channel_user("sms", sender_e164, NULL, 0);
-   if (user_id <= 0) {
-      OLOG_DEBUG("messaging: SMS from unlinked %s passed wake-word but no channel — dropping",
-                 sender_e164);
-      return MESSAGING_UNKNOWN_CHANNEL;
+      /* Pass just the command remainder to the LLM, not the wake word.  A
+       * text that is only the greeting ("Hi Friday") is a hello: it goes to
+       * the LLM as written, so the user gets an answer and the conversation
+       * window opens, rather than silence. */
+      cmd = (wr.has_command && wr.command && wr.command[0]) ? wr.command : body;
    }
 
    if (cmd[0] == '\0') {
@@ -904,5 +949,5 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
    }
 
    return enqueue_inbound("sms", sender_e164, sender_display ? sender_display : "", cmd, timestamp,
-                          user_id);
+                          &ref);
 }
