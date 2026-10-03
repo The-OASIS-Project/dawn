@@ -1482,15 +1482,20 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       }
    }
 
-   OLOG_INFO("Executing tool '%s' (treg) -> device='%s', action='%s', value='%s'", call->name,
-             effective_device, action_name, value_buf);
+   /* What runs is what is classified (tool_effective_action). */
+   const char *action = tool_effective_action(meta, action_name);
+   const tool_action_kind_t kind = tool_action_kind(meta, effective_device, action,
+                                                    value_buf[0] ? value_buf : NULL);
+
+   OLOG_INFO("Executing tool '%s' (treg) -> device='%s', action='%s' (%s), value='%s'", call->name,
+             effective_device, action, tool_action_kind_name(kind), value_buf);
 
    /* Notify callback that tool execution is starting */
    notify_tool_execution(call->name, call->arguments, NULL, false);
 
    /* Special handling for sync_wait tools (e.g., viewing) */
    if (meta->sync_wait && strcmp(meta->name, "viewing") == 0) {
-      result->success = execute_viewing_sync(action_name, value_buf, result);
+      result->success = execute_viewing_sync(action, value_buf, result);
       notify_tool_execution(call->name, call->arguments, result->result, result->success);
       return result->success ? 0 : 1;
    }
@@ -1505,12 +1510,7 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       struct mosquitto *mosq = worker_pool_get_mosq();
       cmd_exec_result_t exec_result;
 
-      /* Default action for ANALOG mqtt_only tools without explicit action */
-      if (action_name[0] == '\0' && meta->device_type == TOOL_DEVICE_TYPE_ANALOG) {
-         safe_strncpy(action_name, "set", sizeof(action_name));
-      }
-
-      int rc = command_execute_mqtt_direct(meta, effective_device, action_name, value_buf, mosq,
+      int rc = command_execute_mqtt_direct(meta, effective_device, action, value_buf, mosq,
                                            &exec_result);
 
       if (rc == 0 && exec_result.success) {
@@ -1543,8 +1543,7 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
        * can recover the original typed JSON that (action, value) packing flattens
        * lossily. Cleared immediately after the call. */
       s_current_raw_args = call->arguments;
-      char *cb_result = meta->callback(action_name[0] ? action_name : "get",
-                                       value_buf[0] ? value_buf : NULL, &should_respond);
+      char *cb_result = meta->callback(action, value_buf[0] ? value_buf : NULL, &should_respond);
       s_current_raw_args = NULL;
 
       /* Capture the tool's self-reported hard-failure mark BEFORE stripping it: `success` stays
@@ -1594,7 +1593,7 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
    struct mosquitto *mosq = worker_pool_get_mosq();
    cmd_exec_result_t exec_result;
 
-   int rc = command_execute(effective_device, action_name, value_buf, mosq, &exec_result);
+   int rc = command_execute(effective_device, action, value_buf, mosq, &exec_result);
 
    if (rc == 0 && exec_result.success) {
       if (exec_result.result) {

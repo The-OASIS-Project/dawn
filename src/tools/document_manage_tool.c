@@ -310,8 +310,17 @@ static const treg_param_t doc_manage_params[] = {
    },
 };
 
+static const tool_action_kind_entry_t s_doc_manage_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "list_deleted", TOOL_KIND_READ, NULL },
+   { "delete", TOOL_KIND_PREPARE, "confirm_delete" },
+   { "confirm_delete", TOOL_KIND_ACT, NULL },
+};
+
 static const tool_metadata_t doc_manage_metadata = {
    .name = "document_manage",
+   .action_kinds = s_doc_manage_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_doc_manage_action_kinds),
    .device_string = "document manager",
    .description =
        "Save, edit, list, and delete the user's stored documents and notes. Use 'save_note' to "

@@ -150,6 +150,7 @@ static const treg_param_t context_expand_params[] = {
 
 static const tool_metadata_t context_expand_metadata = {
    .name = "context_expand",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "context_expand",
    .topic = "dawn",
    .aliases = { NULL },

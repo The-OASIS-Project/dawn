@@ -46,35 +46,6 @@
 #define EXECUTOR_WORKER_ID 99
 
 /**
- * @brief Get default action based on tool's device_type
- *
- * Provides consistent default action derivation for both mqtt_only
- * and callback execution paths.
- *
- * @param tool Tool metadata
- * @return Default action string (static, do not free)
- */
-static const char *get_default_action(const tool_metadata_t *tool) {
-   if (!tool)
-      return "get";
-
-   switch (tool->device_type) {
-      case TOOL_DEVICE_TYPE_BOOLEAN:
-         return "toggle";
-      case TOOL_DEVICE_TYPE_ANALOG:
-         return "set";
-      case TOOL_DEVICE_TYPE_GETTER:
-         return "get";
-      case TOOL_DEVICE_TYPE_TRIGGER:
-         return "trigger";
-      case TOOL_DEVICE_TYPE_MUSIC:
-         return "play";
-      default:
-         return "get";
-   }
-}
-
-/**
  * @brief Deep-research read-only boundary (DEEP_RESEARCH_DESIGN.md §11 HIGH-1).
  *
  * A research fetch loop processes UNTRUSTED web content and must reach only the
@@ -258,7 +229,7 @@ int command_execute(const char *device,
       char value_buf[4096];
       safe_strncpy(value_buf, value ? value : "", sizeof(value_buf));
       const char *effective_action = (action && action[0] != '\0') ? action
-                                                                   : get_default_action(tool);
+                                                                   : tool_default_action(tool);
       char *cb_result = tool->callback(effective_action, value_buf, &should_respond);
 
       /* Strip the opt-in tool error-marker so it never reaches the LLM.
@@ -325,7 +296,8 @@ int command_execute_mqtt_direct(const tool_metadata_t *tool,
    result->skip_followup = tool->skip_followup;
 
    /* Default action based on device_type when none supplied */
-   const char *effective_action = (action && action[0] != '\0') ? action : get_default_action(tool);
+   const char *effective_action = (action && action[0] != '\0') ? action
+                                                                : tool_default_action(tool);
 
    struct json_object *cmd_json = json_object_new_object();
    json_object_object_add(cmd_json, "device", json_object_new_string(device));

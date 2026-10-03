@@ -167,8 +167,14 @@ static treg_param_t attention_params[] = {
 };
 
 /* ========== Metadata ========== */
+static const tool_action_kind_entry_t s_attention_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t attention_metadata = {
    .name = "attention",
+   .action_kinds = s_attention_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_attention_action_kinds),
    .device_string = "attention",
    .topic = "dawn",
    .aliases = { "watch", "watches" },

@@ -130,6 +130,7 @@ static const treg_param_t image_search_params[] = {
 
 static const tool_metadata_t image_search_metadata = {
    .name = "image_search",
+   .default_kind = TOOL_KIND_FETCH,
    .device_string = "image_search",
    .topic = "dawn",
    .aliases = { NULL },

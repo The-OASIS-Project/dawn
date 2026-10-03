@@ -174,8 +174,15 @@ static const treg_param_t ha_params[] = {
 
 /* ========== Tool Metadata ========== */
 
+static const tool_action_kind_entry_t s_ha_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "status", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t ha_metadata = {
    .name = "home_assistant",
+   .action_kinds = s_ha_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_ha_action_kinds),
    .device_string = "home assistant",
    .topic = "dawn",
    .aliases = { "hass", "smarthome", "iot" },

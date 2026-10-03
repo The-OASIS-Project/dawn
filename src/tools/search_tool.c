@@ -104,6 +104,7 @@ static const treg_param_t search_params[] = {
 
 static const tool_metadata_t search_metadata = {
    .name = "search",
+   .default_kind = TOOL_KIND_FETCH,
    .device_string = "search",
    .topic = "dawn",
    .aliases = { NULL },

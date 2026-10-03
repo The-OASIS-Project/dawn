@@ -512,8 +512,15 @@ static const treg_param_t job_params[] = {
    },
 };
 
+static const tool_action_kind_entry_t s_job_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "status", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t job_metadata = {
    .name = "job",
+   .action_kinds = s_job_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_job_action_kinds),
    .device_string = "job",
    .topic = "dawn",
    .aliases = { "background_job", "jobs" },

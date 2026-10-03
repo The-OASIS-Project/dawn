@@ -163,11 +163,15 @@ Layer 0 (Foundation)
 └── include/config/dawn_config.h   - Config struct definitions
 
 Layer 1 (Core Infrastructure)
-├── src/tools/tool_registry.c/h    - Tool registration and lookup (deps: logging, config)
+├── src/tools/tool_registry.c/h    - Tool registration and lookup, and each action's kind (read, fetch, state,
+│                                    device, prepare, act: what a call does, checked at registration and at
+│                                    build time by scripts/check_tool_action_kinds.sh) (deps: logging, config)
 ├── src/core/command_router.c/h    - Request/response routing (deps: logging)
 ├── src/core/command_executor.c/h  - Unified command executor (deps: tool_registry)
 ├── src/core/session_manager.c/h   - Session lifecycle (deps: logging, config); with session_history.c and
 │                                    session_prefix.c it forms one session unit that reaches Layer 2 (see Layer 2)
+├── include/core/turn_origin.h     - Where a pending action was made and whether a confirm may carry it out (the
+│                                    same session, the next turn); captured by session_history.c
 ├── src/core/session_reaper.c/h    - Finishes destroyed sessions: session_destroy() only ends one (never waits), the
 │                                    reaper joins its compaction worker, waits for its last reference, then frees it
 ├── src/core/worker_pool.c/h       - Concurrent tool execution (deps: logging)

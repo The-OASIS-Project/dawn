@@ -613,7 +613,7 @@ static char *handle_search(struct json_object *details, int user_id) {
    return buf;
 }
 
-static char *handle_send(struct json_object *details, int user_id, const email_origin_t *origin) {
+static char *handle_send(struct json_object *details, int user_id, const turn_origin_t *origin) {
    const char *account = json_get_str(details, "account");
    const char *to = json_get_str(details, "to");
    const char *subject = json_get_str(details, "subject");
@@ -737,7 +737,7 @@ static char *handle_send(struct json_object *details, int user_id, const email_o
 
 static char *handle_confirm_send(struct json_object *details,
                                  int user_id,
-                                 const email_origin_t *origin) {
+                                 const turn_origin_t *origin) {
    const char *draft_id = json_get_str(details, "draft_id");
    if (!draft_id || !draft_id[0])
       return strdup("Error: 'draft_id' is required");
@@ -807,7 +807,7 @@ static char *handle_folders(struct json_object *details, int user_id) {
  * Trash / Archive Handlers
  * ============================================================================= */
 
-static char *handle_trash(struct json_object *details, int user_id, const email_origin_t *origin) {
+static char *handle_trash(struct json_object *details, int user_id, const turn_origin_t *origin) {
    const char *mid = json_get_str(details, "message_id");
    if (!mid || !mid[0])
       return strdup("Error: 'message_id' is required (get IDs from 'recent' or 'search' results)");
@@ -848,7 +848,7 @@ static char *handle_trash(struct json_object *details, int user_id, const email_
 
 static char *handle_confirm_trash(struct json_object *details,
                                   int user_id,
-                                  const email_origin_t *origin) {
+                                  const turn_origin_t *origin) {
    const char *pending_id = json_get_str(details, "pending_id");
    if (!pending_id || !pending_id[0])
       return strdup("Error: 'pending_id' is required");
@@ -1046,35 +1046,27 @@ static int email_validate_schedulable_action(const char *action,
    return FAILURE;
 }
 
-/* The actions that send, delete or move mail. */
-static bool email_action_acts(const char *action) {
-   static const char *const k_acts[] = { "send",          "confirm_send", "trash",
-                                         "confirm_trash", "archive",      NULL };
-   for (int i = 0; k_acts[i]; i++) {
-      if (strcmp(action, k_acts[i]) == 0)
-         return true;
-   }
-   return false;
-}
+static const tool_action_kind_entry_t s_email_action_kinds[] = {
+   { "recent", TOOL_KIND_READ, NULL },
+   { "read", TOOL_KIND_READ, NULL },
+   { "search", TOOL_KIND_READ, NULL },
+   { "folders", TOOL_KIND_READ, NULL },
+   { "digest", TOOL_KIND_READ, NULL },
+   { "accounts", TOOL_KIND_READ, NULL },
+   { "send", TOOL_KIND_PREPARE, "confirm_send" },
+   { "trash", TOOL_KIND_PREPARE, "confirm_trash" },
+   { "confirm_send", TOOL_KIND_ACT, NULL },
+   { "confirm_trash", TOOL_KIND_ACT, NULL },
+};
 
-/* Where this call comes from, when it may act: a running turn the user started
- * (session_turn_user_originated: the turn's own code, not background, not a
- * job's session).  false otherwise: no session, a job, a background turn, or a
- * session with no turn running (an MQTT message naming a session gets that
- * session as its context, but no turn).  A build without turn tracking (no
- * multi-client support) can't tell the local mic from an MQTT message, so it
- * refuses too. */
-static bool live_origin(email_origin_t *out) {
-   session_t *ctx = session_get_command_context();
-   if (!ctx || !session_turn_user_originated(ctx))
-      return false;
-   const uint64_t token = session_turn_token();
-   if (token == 0)
-      return false;
-   out->session_id = ctx->session_id;
-   out->turn_token = token;
-   out->turn_number = session_turn_number(ctx);
-   return true;
+/* The actions that send, delete or move mail: every listed action that isn't
+ * a read, and archive (unlisted, so it acts). */
+static bool email_action_acts(const char *action) {
+   for (int i = 0; i < TOOL_KIND_COUNT(s_email_action_kinds); i++) {
+      if (strcmp(action, s_email_action_kinds[i].action) == 0)
+         return s_email_action_kinds[i].kind != TOOL_KIND_READ;
+   }
+   return strcmp(action, "archive") == 0;
 }
 
 static char *email_tool_callback(const char *action, char *value, int *should_respond) {
@@ -1109,9 +1101,9 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
     * background job, a re-engaged background turn or an MQTT message, where
     * the request may come from content the model read rather than from the
     * user.  And a confirm must come from the same session, in a later turn
-    * (email_origin_t): the user's answer, not the model's own next step. */
-   email_origin_t origin = { 0 };
-   if (email_action_acts(action) && !live_origin(&origin)) {
+    * (turn_origin_t): the user's answer, not the model's own next step. */
+   turn_origin_t origin = { 0 };
+   if (email_action_acts(action) && !turn_origin_capture(&origin)) {
       json_object_put(details);
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: sending, trashing and archiving email need the user in a live "
@@ -1259,6 +1251,8 @@ static const treg_param_t email_params[] = {
 
 static const tool_metadata_t email_metadata = {
    .name = "email",
+   .action_kinds = s_email_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_email_action_kinds),
    .device_string = "email",
    .topic = "dawn",
    .aliases = { "mail", "inbox", "gmail" },

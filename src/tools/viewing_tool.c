@@ -55,6 +55,7 @@ static const treg_param_t viewing_params[] = {
 
 static const tool_metadata_t viewing_metadata = {
    .name = "viewing",
+   /* Kind of action: act (the default): takes a camera image. */
    .device_string = "viewing",
    .topic = "hud",
    .aliases = { "looking at", "seeing" },

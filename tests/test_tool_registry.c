@@ -641,10 +641,139 @@ static void test_extract_zero_out_len_safe(void) {
  * Main
  * ============================================================================ */
 
+/* ============================================================================
+ * Kinds of action
+ * ============================================================================ */
+
+#define KINDS_TOOL(table) kinds_tool((table), TOOL_KIND_COUNT(table))
+
+static tool_metadata_t kinds_tool(const tool_action_kind_entry_t *table, int count) {
+   tool_metadata_t meta = mock_tool;
+   meta.name = "kinds_tool";
+   meta.device_string = "kinds device";
+   meta.action_kinds = table;
+   meta.action_kind_count = count;
+   return meta;
+}
+
+/* An action not listed takes the tool's default, ACT unless set; a tool that
+ * declares nothing acts. */
+static void test_kind_lookup_and_default(void) {
+   static const tool_action_kind_entry_t table[] = {
+      { "play", TOOL_KIND_DEVICE, NULL },
+      { "pause", TOOL_KIND_READ, NULL },
+   };
+   tool_metadata_t meta = KINDS_TOOL(table);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, tool_action_kinds_validate(&meta, NULL, 0));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_DEVICE, tool_action_kind(&meta, NULL, "play", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, tool_action_kind(&meta, NULL, "pause", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "stop", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&mock_tool, NULL, "play", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(NULL, NULL, "play", NULL));
+   meta.default_kind = TOOL_KIND_READ;
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, tool_action_kind(&meta, NULL, "stop", NULL));
+   TEST_ASSERT_EQUAL_STRING("device", tool_action_kind_name(TOOL_KIND_DEVICE));
+   TEST_ASSERT_EQUAL_STRING("act", tool_action_kind_name(TOOL_KIND_ACT));
+}
+
+static tool_action_kind_t kinds_classify(const char *device,
+                                         const char *action,
+                                         const char *value,
+                                         tool_action_kind_t listed) {
+   (void)device;
+   (void)action;
+   return (value && strcmp(value, "now") == 0) ? TOOL_KIND_ACT : listed;
+}
+
+static tool_action_kind_t kinds_read_all(const char *device,
+                                         const char *action,
+                                         const char *value,
+                                         tool_action_kind_t listed) {
+   (void)device;
+   (void)action;
+   (void)value;
+   (void)listed;
+   return TOOL_KIND_READ;
+}
+
+/* classify_call sees the table's kind and may change it; a confirm stays ACT
+ * whatever it says. */
+static void test_kind_classify_call(void) {
+   static const tool_action_kind_entry_t table[] = {
+      { "play", TOOL_KIND_PREPARE, "stop" },
+      { "stop", TOOL_KIND_ACT, NULL },
+   };
+   tool_metadata_t meta = KINDS_TOOL(table);
+   meta.classify_call = kinds_classify;
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_PREPARE, tool_action_kind(&meta, NULL, "play", "later"));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "play", "now"));
+   meta.classify_call = kinds_read_all;
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, tool_action_kind(&meta, NULL, "play", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "stop", NULL));
+}
+
+/* Registration refuses a table naming an action the tool doesn't have, an
+ * action listed twice, a prepare without a listed confirm that acts, a confirm
+ * on a non-prepare entry, and a table on a tool with no ENUM action. */
+static void test_kind_table_validation(void) {
+   char why[160];
+   static const tool_action_kind_entry_t unknown[] = { { "rewind", TOOL_KIND_READ, NULL } };
+   tool_metadata_t meta = KINDS_TOOL(unknown);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+   TEST_ASSERT_NOT_EQUAL(SUCCESS, tool_registry_register(&meta));
+   TEST_ASSERT_NULL(tool_registry_lookup("kinds_tool"));
+
+   static const tool_action_kind_entry_t twice[] = {
+      { "play", TOOL_KIND_READ, NULL },
+      { "play", TOOL_KIND_ACT, NULL },
+   };
+   meta = KINDS_TOOL(twice);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t no_confirm[] = { { "play", TOOL_KIND_PREPARE, NULL } };
+   meta = KINDS_TOOL(no_confirm);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t read_confirm[] = {
+      { "play", TOOL_KIND_PREPARE, "pause" },
+      { "pause", TOOL_KIND_DEVICE, NULL },
+   };
+   meta = KINDS_TOOL(read_confirm);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t stray_confirm[] = {
+      { "play", TOOL_KIND_ACT, "pause" },
+      { "pause", TOOL_KIND_ACT, NULL },
+   };
+   meta = KINDS_TOOL(stray_confirm);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t ok[] = {
+      { "play", TOOL_KIND_PREPARE, "stop" },
+      { "stop", TOOL_KIND_ACT, NULL },
+   };
+   meta = KINDS_TOOL(ok);
+   meta.param_count = 0;
+   meta.params = NULL;
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   meta = KINDS_TOOL(ok);
+   meta.default_kind = TOOL_KIND_PREPARE;
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   meta = KINDS_TOOL(ok);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, tool_action_kinds_validate(&meta, why, sizeof(why)));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, tool_registry_register(&meta));
+}
+
 int main(void) {
    UNITY_BEGIN();
 
    RUN_TEST(test_init_returns_success);
+   RUN_TEST(test_kind_lookup_and_default);
+   RUN_TEST(test_kind_classify_call);
+   RUN_TEST(test_kind_table_validation);
    RUN_TEST(test_register_returns_success);
    RUN_TEST(test_lookup_by_name);
    RUN_TEST(test_lookup_not_found);

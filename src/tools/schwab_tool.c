@@ -135,8 +135,17 @@ static const treg_param_t schwab_params[] = {
 
 /* ========== Metadata ========== */
 
+static const tool_action_kind_entry_t s_schwab_action_kinds[] = {
+   { "quote", TOOL_KIND_READ, NULL },        { "portfolio", TOOL_KIND_READ, NULL },
+   { "accounts", TOOL_KIND_READ, NULL },     { "history", TOOL_KIND_READ, NULL },
+   { "fundamentals", TOOL_KIND_READ, NULL }, { "transactions", TOOL_KIND_READ, NULL },
+   { "watch_list", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t schwab_metadata = {
    .name = "stocks",
+   .action_kinds = s_schwab_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_schwab_action_kinds),
    .device_string = "stocks",
    .topic = "dawn",
    .aliases = { "stock" },

@@ -74,6 +74,7 @@ static const treg_param_t doc_search_params[] = {
 
 static const tool_metadata_t doc_search_metadata = {
    .name = "document_search",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "document search",
    .description = "Search ONLY the user's saved documents and notes (hybrid keyword + semantic). "
                   "This is a TARGETED follow-up: use it when you already know the answer lives in "

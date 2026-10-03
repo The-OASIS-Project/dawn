@@ -127,6 +127,8 @@ static bool hud_control_is_available(void) {
 
 static const tool_metadata_t hud_control_metadata = {
    .name = "hud_control",
+   /* Kind of action: act (the default): it passes any element name through to
+    * the HUD, so what it changes isn't known here. */
    .device_string = "hud_control",
    .topic = "hud",
    .aliases = { NULL },
@@ -219,6 +221,7 @@ static bool hud_mode_is_available(void) {
 
 static const tool_metadata_t hud_mode_metadata = {
    .name = "hud_mode",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "hud",
    .topic = "hud",
    .aliases = { "display", "screen" },
@@ -271,6 +274,7 @@ static const treg_param_t faceplate_params[] = {
 
 static const tool_metadata_t faceplate_metadata = {
    .name = "faceplate",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "faceplate",
    .topic = "helmet",
    .aliases = { "face plate", "mask", "helmet", "visor" },
@@ -334,6 +338,7 @@ static const tool_device_map_t recording_device_map[] = {
 
 static const tool_metadata_t recording_metadata = {
    .name = "recording",
+   /* Kind of action: act (the default): it records and streams video. */
    .device_string = "recording",
    .topic = "hud",
    .aliases = { NULL },
@@ -384,6 +389,7 @@ static const treg_param_t visual_offset_params[] = {
 
 static const tool_metadata_t visual_offset_metadata = {
    .name = "visual_offset",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "visual offset",
    .topic = "hud",
    .aliases = { "3d offset", "eye offset" },

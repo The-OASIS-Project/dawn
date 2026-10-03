@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 #include "core/session_manager.h" /* session_t (no-op when included from it) */
+#include "core/turn_origin.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -347,6 +348,20 @@ bool session_turn_user_originated(session_t *session);
 uint32_t session_turn_number(session_t *session);
 
 /**
+ * @brief Mark the calling thread's tool call as approved by the user's reply
+ *        code (true), or clear it (false)
+ *
+ * Set only around the one execution of a call the user approved by code;
+ * turn_origin_capture() copies it, so a confirm run that way may come in any
+ * later turn of its session.  Thread-local, like session_turn_token().
+ */
+void session_set_call_code_redeemed(bool redeemed);
+
+/** Whether the calling thread's tool call was approved by reply code. */
+bool session_call_code_redeemed(void);
+
+
+/**
  * @brief Keep a message the turn could not save: its conversation doesn't exist yet
  *
  * @p role "user" (the persisted form, [IMAGE:] markers included) or "assistant"
@@ -553,6 +568,14 @@ static inline bool session_turn_user_originated(session_t *session) {
 static inline uint32_t session_turn_number(session_t *session) {
    (void)session;
    return 0;
+}
+
+static inline void session_set_call_code_redeemed(bool redeemed) {
+   (void)redeemed;
+}
+
+static inline bool session_call_code_redeemed(void) {
+   return false;
 }
 
 #endif /* ENABLE_MULTI_CLIENT */

@@ -158,6 +158,50 @@ typedef enum {
 } tool_capability_t;
 
 /* =============================================================================
+ * Kinds of Action
+ *
+ * What a call does, by its action: who may make it depends on this (a text
+ * from an unverified sender may read; a background job may read and fetch; an
+ * action needs the user).  Deny by default: an action a tool doesn't list is
+ * TOOL_KIND_ACT, the zero value, so a tool that declares nothing acts.
+ * ============================================================================= */
+
+typedef enum {
+   TOOL_KIND_ACT = 0, /**< changes, sends or starts something (the default) */
+   /** no effect the user or anyone outside would notice (known, benign
+    *  writes: a mailbox's \Seen flag, an SMS marked read, recall
+    *  statistics) */
+   TOOL_KIND_READ,
+   /** an outward read: the request (a query, a URL) reaches a host the caller
+    *  picks, so it can carry data out */
+   TOOL_KIND_FETCH,
+   /** state scoped to the session or the run, nothing in the home or outside
+    *  (a research ledger, the active code project) */
+   TOOL_KIND_STATE,
+   /** an effect someone in the home hears or sees (music, volume, speech) */
+   TOOL_KIND_DEVICE,
+   /** stages a pending item that does nothing until its confirm runs (an
+    *  email draft, a call preview, a delete awaiting its confirm) */
+   TOOL_KIND_PREPARE,
+} tool_action_kind_t;
+
+/**
+ * @brief One action's kind.  A PREPARE entry names its confirm: the action
+ *        that carries out what it staged, itself listed in the same table.
+ */
+typedef struct {
+   const char *action;
+   tool_action_kind_t kind;
+   const char *confirm; /**< TOOL_KIND_PREPARE only: the action that confirms it (listed ACT) */
+} tool_action_kind_entry_t;
+
+/** Entries in an action_kinds table: .action_kind_count = TOOL_KIND_COUNT(t) */
+#define TOOL_KIND_COUNT(table) ((int)(sizeof(table) / sizeof((table)[0])))
+
+/** The kind's name, for logs and messages ("read", "fetch", ...). */
+const char *tool_action_kind_name(tool_action_kind_t kind);
+
+/* =============================================================================
  * Parameter Definition
  * ============================================================================= */
 
@@ -425,6 +469,22 @@ typedef struct {
                         char *err_buf,
                         size_t err_buf_size);
 
+   /* Kinds of action (see tool_action_kind_t).  action_kinds lists the
+    * actions of the tool's ENUM action parameter (checked at registration),
+    * each with its kind; any other action, and every call of a tool without
+    * an action parameter, is default_kind (TOOL_KIND_ACT unless set). */
+   const tool_action_kind_entry_t *action_kinds;
+   int action_kind_count;
+   tool_action_kind_t default_kind;
+   /** Optional: a call's kind when it depends on more than its action, or
+    *  on configuration (NULL = the table's).  Gets the resolved device, the
+    *  effective action, the packed value (NULL when empty) and the kind the
+    *  table gives; returns the call's kind. */
+   tool_action_kind_t (*classify_call)(const char *device,
+                                       const char *action,
+                                       const char *value,
+                                       tool_action_kind_t listed);
+
    /* Config (optional - NULL if tool has no config) */
    void *config;                        /**< Pointer to tool's config struct */
    size_t config_size;                  /**< sizeof() the config struct */
@@ -651,6 +711,60 @@ const char *tool_registry_get_action_param_name(const char *tool_name);
  * @return true if the tool declares @p action repeatable, false otherwise
  */
 bool tool_registry_action_is_repeatable(const char *tool_name, const char *action);
+
+/**
+ * @brief The action a tool runs when a call names none: by its device type
+ *        (boolean "toggle", analog "set", trigger "trigger", music "play",
+ *        otherwise "get").  What command_execute and an MQTT publish use.
+ */
+const char *tool_default_action(const tool_metadata_t *meta);
+
+/**
+ * @brief The action a native tool call runs, as the tool receives it: the
+ *        call's own when it names one; else "get" for a callback tool (the
+ *        native path's rule), the device default (tool_default_action) for
+ *        an MQTT tool, and none ("") for the viewing sync path and a tool
+ *        with no callback (command_execute defaults it by the tool it
+ *        resolves the device to).
+ *        What is classified must be what runs: the gate and the dispatch
+ *        both take it from here.
+ *
+ * @param meta   The tool
+ * @param action The action the call named ("" or NULL when none)
+ * @return A static or borrowed string (never NULL)
+ */
+const char *tool_effective_action(const tool_metadata_t *meta, const char *action);
+
+/**
+ * @brief A call's kind of action: the action's entry in the tool's table, else
+ *        its default_kind, passed through its classify_call when it has one;
+ *        a confirm a PREPARE names is always ACT
+ *
+ * @param meta   The tool (not an alias lookup: the metadata that runs)
+ * @param device The resolved device (a meta-tool's target; may be NULL)
+ * @param action The effective action (tool_effective_action; may be NULL)
+ * @param value  The packed value, as the callback receives it (NULL when empty)
+ * @return The kind; TOOL_KIND_ACT when @p meta is NULL
+ */
+tool_action_kind_t tool_action_kind(const tool_metadata_t *meta,
+                                    const char *device,
+                                    const char *action,
+                                    const char *value);
+
+/**
+ * @brief Check a tool's action_kinds table: every action is one of its ENUM
+ *        action parameter's values, listed once; a tool without such a
+ *        parameter lists none; a PREPARE entry names a confirm the table
+ *        lists as ACT, and no other entry names one.
+ *        Registration refuses a tool that fails (scripts/
+ *        check_tool_action_kinds.sh catches it at build time).
+ *
+ * @param meta    The tool
+ * @param why     Receives the reason on failure (may be NULL)
+ * @param why_len Size of @p why
+ * @return SUCCESS, or FAILURE with @p why set
+ */
+int tool_action_kinds_validate(const tool_metadata_t *meta, char *why, size_t why_len);
 
 /* =============================================================================
  * Config Integration

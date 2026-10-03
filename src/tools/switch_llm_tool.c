@@ -93,6 +93,7 @@ static const treg_param_t switch_llm_params[] = {
 
 static const tool_metadata_t switch_llm_metadata = {
    .name = "switch_llm",
+   /* Kind of action: act (the default): changes the model the conversation runs on. */
    .device_string = "switch_llm",
    .topic = "dawn",
    .aliases = { "llm", "ai", "model", "provider", "cloud provider", "local llm", "cloud llm" },

@@ -40,6 +40,7 @@ static char *reset_conversation_tool_callback(const char *action, char *value, i
 
 static const tool_metadata_t reset_conversation_metadata = {
    .name = "reset_conversation",
+   /* Kind of action: act (the default): clears the conversation. */
    .device_string = "reset conversation",
    .topic = "dawn",
    .aliases = { "reset context", "clear conversation", "clear context", "new conversation" },

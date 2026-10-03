@@ -120,6 +120,7 @@ static const treg_param_t plan_params[] = {
 
 static const tool_metadata_t plan_executor_metadata = {
    .name = "execute_plan",
+   /* Kind of action: act (the default): a container: each of its steps is classified on its own. */
    .device_string = "plan executor",
    .description = "Execute a multi-step tool plan locally. Use this when a task "
                   "requires multiple tool calls with conditional logic or data "

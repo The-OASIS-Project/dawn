@@ -1239,8 +1239,42 @@ static const treg_param_t phone_params[] = {
    },
 };
 
+static const tool_action_kind_entry_t s_phone_action_kinds[] = {
+   { "read_sms", TOOL_KIND_READ, NULL },
+   { "call_log", TOOL_KIND_READ, NULL },
+   { "sms_log", TOOL_KIND_READ, NULL },
+   { "status", TOOL_KIND_READ, NULL },
+   { "call", TOOL_KIND_PREPARE, "confirm_call" },
+   { "send_sms", TOOL_KIND_PREPARE, "confirm_sms" },
+   { "delete_sms", TOOL_KIND_PREPARE, "confirm_delete_sms" },
+   { "delete_call", TOOL_KIND_PREPARE, "confirm_delete_call" },
+   { "confirm_call", TOOL_KIND_ACT, NULL },
+   { "confirm_sms", TOOL_KIND_ACT, NULL },
+   { "confirm_delete_sms", TOOL_KIND_ACT, NULL },
+   { "confirm_delete_call", TOOL_KIND_ACT, NULL },
+};
+
+/* A call or a text is a preview only while confirm_outbound is on; with it off,
+ * it dials or sends at once.  (A settings save may flip the flag between this
+ * and the call: one bool, read again by the handler.) */
+static tool_action_kind_t phone_classify_call(const char *device,
+                                              const char *action,
+                                              const char *value,
+                                              tool_action_kind_t listed) {
+   (void)device;
+   (void)value;
+   if (listed == TOOL_KIND_PREPARE && !s_config.confirm_outbound && action &&
+       (strcmp(action, "call") == 0 || strcmp(action, "send_sms") == 0)) {
+      return TOOL_KIND_ACT;
+   }
+   return listed;
+}
+
 static const tool_metadata_t phone_metadata = {
    .name = "phone",
+   .action_kinds = s_phone_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_phone_action_kinds),
+   .classify_call = phone_classify_call,
    .device_string = "phone",
    .topic = "dawn",
    .aliases = { "telephone", "call", "sms", "text" },

@@ -49,6 +49,7 @@ static const treg_param_t tts_tool_params[] = {
 
 static const tool_metadata_t tts_tool_metadata = {
    .name = "tts",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "text to speech",
    .topic = "dawn",
    .aliases = { "tts", "speak" },

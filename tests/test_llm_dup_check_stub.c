@@ -143,6 +143,21 @@ const void *tool_registry_get_effective_param(const char *tool_name, int idx) {
    (void)idx;
    return NULL;
 }
+int tool_action_kind(const void *meta, const char *device, const char *action, const char *value) {
+   (void)meta;
+   (void)device;
+   (void)action;
+   (void)value;
+   return 0;
+}
+const char *tool_effective_action(const void *meta, const char *action) {
+   (void)meta;
+   return (action && action[0]) ? action : "get";
+}
+const char *tool_action_kind_name(int kind) {
+   (void)kind;
+   return "act";
+}
 const char *tool_registry_resolve_device(const void *meta, const char *key) {
    (void)meta;
    (void)key;

@@ -468,6 +468,14 @@ int tool_registry_register(const tool_metadata_t *metadata) {
       return 1;
    }
 
+   /* Its kinds of action name real actions */
+   char why[160];
+   if (tool_action_kinds_validate(metadata, why, sizeof(why)) != SUCCESS) {
+      OLOG_ERROR("tool_registry: Tool '%s' action kinds: %s", metadata->name, why);
+      pthread_mutex_unlock(&s_registry_mutex);
+      return 1;
+   }
+
    /* Register the tool */
    int idx = s_tool_count;
    tool_entry_t *entry = &s_tools[idx];
@@ -1260,4 +1268,192 @@ int tool_registry_count_variations(void) {
 
    pthread_mutex_unlock(&s_registry_mutex);
    return total;
+}
+
+/* =============================================================================
+ * Kinds of Action
+ * ============================================================================= */
+
+const char *tool_action_kind_name(tool_action_kind_t kind) {
+   switch (kind) {
+      case TOOL_KIND_READ:
+         return "read";
+      case TOOL_KIND_FETCH:
+         return "fetch";
+      case TOOL_KIND_STATE:
+         return "state";
+      case TOOL_KIND_DEVICE:
+         return "device";
+      case TOOL_KIND_PREPARE:
+         return "prepare";
+      case TOOL_KIND_ACT:
+         break;
+   }
+   return "act";
+}
+
+static const tool_action_kind_entry_t *find_action_kind(const tool_metadata_t *meta,
+                                                        const char *action) {
+   for (int i = 0; i < meta->action_kind_count; i++) {
+      if (strcmp(meta->action_kinds[i].action, action) == 0) {
+         return &meta->action_kinds[i];
+      }
+   }
+   return NULL;
+}
+
+const char *tool_default_action(const tool_metadata_t *meta) {
+   if (!meta) {
+      return "get";
+   }
+   switch (meta->device_type) {
+      case TOOL_DEVICE_TYPE_BOOLEAN:
+         return "toggle";
+      case TOOL_DEVICE_TYPE_ANALOG:
+         return "set";
+      case TOOL_DEVICE_TYPE_GETTER:
+         return "get";
+      case TOOL_DEVICE_TYPE_TRIGGER:
+         return "trigger";
+      case TOOL_DEVICE_TYPE_MUSIC:
+         return "play";
+      default:
+         return "get";
+   }
+}
+
+const char *tool_effective_action(const tool_metadata_t *meta, const char *action) {
+   if (action && action[0] != '\0') {
+      return action;
+   }
+   if (!meta) {
+      return "get";
+   }
+   if (meta->sync_wait && strcmp(meta->name, "viewing") == 0) {
+      return ""; /* the viewing sync path sends none */
+   }
+   if (meta->mqtt_only) {
+      return tool_default_action(meta);
+   }
+   /* No callback: command_execute picks the default of the tool it resolves
+    * the device to. */
+   return meta->callback ? "get" : "";
+}
+
+/* Whether @p action is the confirm some PREPARE entry names. */
+static bool is_a_confirm(const tool_metadata_t *meta, const char *action) {
+   for (int i = 0; i < meta->action_kind_count; i++) {
+      const char *c = meta->action_kinds[i].confirm;
+      if (c && strcmp(c, action) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+tool_action_kind_t tool_action_kind(const tool_metadata_t *meta,
+                                    const char *device,
+                                    const char *action,
+                                    const char *value) {
+   if (!meta) {
+      return TOOL_KIND_ACT;
+   }
+   tool_action_kind_t kind = meta->default_kind;
+   if (action && action[0]) {
+      const tool_action_kind_entry_t *e = find_action_kind(meta, action);
+      if (e) {
+         kind = e->kind;
+      }
+   }
+   if (meta->classify_call) {
+      kind = meta->classify_call(device, action, value, kind);
+      if ((unsigned)kind > (unsigned)TOOL_KIND_PREPARE) {
+         kind = TOOL_KIND_ACT; /* not a kind: deny by default */
+      }
+   }
+   /* A confirm acts, whatever a classifier says: it carries out what its
+    * prepare staged. */
+   if (action && action[0] && kind != TOOL_KIND_ACT && is_a_confirm(meta, action)) {
+      kind = TOOL_KIND_ACT;
+   }
+   return kind;
+}
+
+/* The tool's ENUM action parameter, or NULL. */
+static const treg_param_t *enum_action_param(const tool_metadata_t *meta) {
+   for (int i = 0; i < meta->param_count; i++) {
+      const treg_param_t *p = &meta->params[i];
+      if (p->maps_to == TOOL_MAPS_TO_ACTION && p->type == TOOL_PARAM_TYPE_ENUM) {
+         return p;
+      }
+   }
+   return NULL;
+}
+
+static bool param_has_value(const treg_param_t *p, const char *value) {
+   for (int i = 0; i < p->enum_count && i < TOOL_PARAM_ENUM_MAX; i++) {
+      if (p->enum_values[i] && strcmp(p->enum_values[i], value) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+int tool_action_kinds_validate(const tool_metadata_t *meta, char *why, size_t why_len) {
+   char scratch[1];
+   if (!why || why_len == 0) {
+      why = scratch;
+      why_len = sizeof(scratch);
+   }
+   why[0] = '\0';
+   if (!meta) {
+      snprintf(why, why_len, "no tool");
+      return FAILURE;
+   }
+   if ((unsigned)meta->default_kind >= (unsigned)TOOL_KIND_PREPARE) {
+      snprintf(why, why_len, "default_kind must be a kind other than prepare");
+      return FAILURE;
+   }
+   if (meta->action_kind_count == 0) {
+      return SUCCESS;
+   }
+   if (meta->action_kind_count < 0 || !meta->action_kinds) {
+      snprintf(why, why_len, "action_kinds table missing");
+      return FAILURE;
+   }
+   const treg_param_t *param = enum_action_param(meta);
+   if (!param) {
+      snprintf(why, why_len, "lists actions but has no ENUM action parameter");
+      return FAILURE;
+   }
+   for (int i = 0; i < meta->action_kind_count; i++) {
+      const tool_action_kind_entry_t *e = &meta->action_kinds[i];
+      if (!e->action || !param_has_value(param, e->action)) {
+         snprintf(why, why_len, "'%s' is not one of its actions", e->action ? e->action : "");
+         return FAILURE;
+      }
+      if ((unsigned)e->kind > (unsigned)TOOL_KIND_PREPARE) {
+         snprintf(why, why_len, "'%s' has no valid kind", e->action);
+         return FAILURE;
+      }
+      for (int j = 0; j < i; j++) {
+         if (strcmp(meta->action_kinds[j].action, e->action) == 0) {
+            snprintf(why, why_len, "'%s' is listed twice", e->action);
+            return FAILURE;
+         }
+      }
+      if (e->kind != TOOL_KIND_PREPARE) {
+         if (e->confirm) {
+            snprintf(why, why_len, "'%s' names a confirm but isn't prepare", e->action);
+            return FAILURE;
+         }
+         continue;
+      }
+      const tool_action_kind_entry_t *c = e->confirm ? find_action_kind(meta, e->confirm) : NULL;
+      if (!c || c->kind != TOOL_KIND_ACT) {
+         snprintf(why, why_len, "prepare '%s' needs a listed confirm that acts", e->action);
+         return FAILURE;
+      }
+   }
+   return SUCCESS;
 }

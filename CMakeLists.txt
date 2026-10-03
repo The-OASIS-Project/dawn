@@ -1141,6 +1141,16 @@ add_custom_target(user_removal_marked_check
     COMMENT "Checking user removals are marked for withdrawal")
 add_dependencies(dawn user_removal_marked_check)
 
+# Tool kinds-of-action CI invariant: every action_kinds table names its tool's
+# own actions and a PREPARE names a listed confirm.  A tool whose table fails is
+# refused registration, so the daemon would quietly start without it.  See
+# scripts/check_tool_action_kinds.sh.
+add_custom_target(tool_action_kinds_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_tool_action_kinds.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking tool kinds-of-action tables")
+add_dependencies(dawn tool_action_kinds_check)
+
 # Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
 # in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or
 # the maintenance sweep silently reclaims still-attached original files (data

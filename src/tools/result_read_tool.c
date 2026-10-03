@@ -115,6 +115,7 @@ static const treg_param_t result_read_params[] = {
 
 static const tool_metadata_t result_read_metadata = {
    .name = "result_read",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "result_read",
    .topic = "dawn",
    .aliases = { NULL },

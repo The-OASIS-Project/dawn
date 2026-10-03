@@ -139,9 +139,10 @@ a web page, a tool result) tells it to.
 
 **What makes a confirm count:**
 - **The same session.** A draft records the session and the turn that prepared
-  it (`email_origin_t`). A confirm from another session (another browser tab,
-  device or channel) is refused, even by the same user. The binding is the
-  session, not the conversation.
+  it (`turn_origin_t` in `include/core/turn_origin.h`, the rule every confirm
+  shares). A confirm from another session (another browser tab, device or
+  channel) is refused, even by the same user. The binding is the session, not
+  the conversation.
 - **The next turn.** The confirm must run in the session's very next turn
   after the draft, and in a turn the user started. The model can't prepare
   and confirm in one turn, and can't confirm later once the user has moved on.

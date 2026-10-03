@@ -599,8 +599,15 @@ static const treg_param_t sfx_params[] = {
    },
 };
 
+static const tool_action_kind_entry_t s_sfx_tool_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t sfx_tool_metadata = {
    .name = "sfx",
+   .action_kinds = s_sfx_tool_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_sfx_tool_action_kinds),
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "sound effect",
    .topic = "dawn",
    .description = "Play, stop, or list available sound effects",

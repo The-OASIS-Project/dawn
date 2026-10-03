@@ -299,8 +299,16 @@ static const treg_param_t memory_params[] = {
 
 /* ========== Tool Metadata ========== */
 
+static const tool_action_kind_entry_t s_memory_action_kinds[] = {
+   { "search", TOOL_KIND_READ, NULL },       { "get", TOOL_KIND_READ, NULL },
+   { "recent", TOOL_KIND_READ, NULL },       { "find_duplicates", TOOL_KIND_READ, NULL },
+   { "find_contact", TOOL_KIND_READ, NULL }, { "list_contacts", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t memory_metadata = {
    .name = "memory",
+   .action_kinds = s_memory_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_memory_action_kinds),
    .device_string = "memory",
    .topic = "dawn",
    /* 'recall' was an alias here; it is now the dedicated unified cross-source

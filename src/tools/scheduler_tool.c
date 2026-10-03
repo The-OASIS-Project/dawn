@@ -1422,8 +1422,15 @@ static const treg_param_t scheduler_params[] = {
  * Tool Metadata
  * ============================================================================= */
 
+static const tool_action_kind_entry_t s_scheduler_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "query", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t scheduler_metadata = {
    .name = "scheduler",
+   .action_kinds = s_scheduler_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_scheduler_action_kinds),
    .device_string = "scheduler",
    .topic = "dawn",
    .aliases = { "timer", "alarm", "reminder", "schedule" },

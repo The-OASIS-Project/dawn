@@ -796,8 +796,14 @@ static void deep_research_cleanup(void) {
    pthread_mutex_unlock(&s_dr_confirm.mutex);
 }
 
+static const tool_action_kind_entry_t s_deep_research_action_kinds[] = {
+   { "status", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t deep_research_metadata = {
    .name = "deep_research",
+   .action_kinds = s_deep_research_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_deep_research_action_kinds),
    .device_string = "deep_research",
    .topic = "dawn",
    .aliases = { "research", "deep_dive" },

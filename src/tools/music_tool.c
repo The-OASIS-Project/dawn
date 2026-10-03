@@ -227,8 +227,17 @@ static const treg_param_t music_params[] = {
 
 /* ========== Tool Metadata ========== */
 
+static const tool_action_kind_entry_t s_music_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "search", TOOL_KIND_READ, NULL },
+   { "library", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t music_metadata = {
    .name = "music",
+   .action_kinds = s_music_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_music_action_kinds),
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "music",
    .topic = "dawn",
    .aliases = { "audio", "player" },

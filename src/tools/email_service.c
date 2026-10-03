@@ -973,7 +973,7 @@ int email_service_create_draft(int user_id,
                                size_t draft_id_len,
                                char *from_account_out,
                                size_t from_account_len,
-                               const email_origin_t *origin) {
+                               const turn_origin_t *origin) {
    if (!origin || origin->turn_token == 0)
       return EMAIL_RC_FAILURE; /* only a user's running turn prepares a draft */
    if (from_account_out && from_account_len > 0)
@@ -1102,7 +1102,7 @@ static void record_confirm_failure(int user_id) {
 }
 
 
-int email_service_confirm_send(int user_id, const char *draft_id, const email_origin_t *origin) {
+int email_service_confirm_send(int user_id, const char *draft_id, const turn_origin_t *origin) {
    if (!draft_id || !draft_id[0])
       return EMAIL_CONFIRM_RC_NOT_FOUND;
 
@@ -1143,11 +1143,11 @@ int email_service_confirm_send(int user_id, const char *draft_id, const email_or
    /* The person's yes comes in a later turn of the session that drafted it.
     * Refused here, the draft stays (and the throttle isn't charged): the right
     * turn can still confirm it. */
-   const int orc = email_origin_check(&found->origin, origin);
-   if (orc != EMAIL_RC_OK) {
+   const turn_origin_rc_t orc = turn_origin_check(&found->origin, origin);
+   if (orc != TURN_ORIGIN_OK) {
       pthread_mutex_unlock(&s_email.draft_mutex);
-      OLOG_WARNING("email: confirm_send refused (%s)", email_confirm_refusal(orc));
-      return orc;
+      OLOG_WARNING("email: confirm_send refused (%s)", turn_origin_refusal(orc));
+      return email_confirm_rc(orc);
    }
 
    /* Mark as used before releasing mutex */
@@ -1263,7 +1263,7 @@ int email_service_create_pending_trash(int user_id,
                                        size_t subject_len,
                                        char *from_out,
                                        size_t from_len,
-                                       const email_origin_t *origin) {
+                                       const turn_origin_t *origin) {
    if (!origin || origin->turn_token == 0)
       return EMAIL_RC_FAILURE; /* only a user's running turn prepares a trash */
    if (!message_id || !message_id[0])
@@ -1397,7 +1397,7 @@ static int execute_trash(email_account_t *acct, const char *message_id) {
    return rc;
 }
 
-int email_service_confirm_trash(int user_id, const char *pending_id, const email_origin_t *origin) {
+int email_service_confirm_trash(int user_id, const char *pending_id, const turn_origin_t *origin) {
    if (!pending_id || !pending_id[0])
       return EMAIL_CONFIRM_RC_NOT_FOUND;
 
@@ -1434,11 +1434,11 @@ int email_service_confirm_trash(int user_id, const char *pending_id, const email
    }
 
    /* As for a draft: a later turn of the session that asked. */
-   const int orc = email_origin_check(&found->origin, origin);
-   if (orc != EMAIL_RC_OK) {
+   const turn_origin_rc_t orc = turn_origin_check(&found->origin, origin);
+   if (orc != TURN_ORIGIN_OK) {
       pthread_mutex_unlock(&s_email.pending_trash_mutex);
-      OLOG_WARNING("email: confirm_trash refused (%s)", email_confirm_refusal(orc));
-      return orc;
+      OLOG_WARNING("email: confirm_trash refused (%s)", turn_origin_refusal(orc));
+      return email_confirm_rc(orc);
    }
 
    found->used = true;

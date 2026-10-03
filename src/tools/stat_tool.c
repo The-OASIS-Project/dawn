@@ -184,6 +184,7 @@ static const treg_param_t stat_params[] = {
 
 static const tool_metadata_t stat_metadata = {
    .name = "system_status",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "system_status",
    .topic = "dawn",
    .aliases = { "telemetry", "diagnostics" },

@@ -1431,14 +1431,56 @@ uint32_t session_turn_number(session_t *session) {
    return n;
 }
 
+/* Caller holds history_mutex.  The caller is a running turn the user started:
+ * the turn's own code, not background, not a job's session. */
+static bool turn_user_originated_locked(session_t *session) {
+   return session->type != SESSION_TYPE_JOB && turn_is_caller_locked(session) &&
+          !session->turn_background;
+}
+
 bool session_turn_user_originated(session_t *session) {
-   if (!session || session->type == SESSION_TYPE_JOB) {
+   if (!session) {
       return false;
    }
    pthread_mutex_lock(&session->history_mutex);
-   const bool user = turn_is_caller_locked(session) && !session->turn_background;
+   const bool user = turn_user_originated_locked(session);
    pthread_mutex_unlock(&session->history_mutex);
    return user;
+}
+
+/* Set around one execution of a call the user approved by reply code. */
+static __thread bool s_call_code_redeemed = false;
+
+void session_set_call_code_redeemed(bool redeemed) {
+   s_call_code_redeemed = redeemed;
+}
+
+bool session_call_code_redeemed(void) {
+   return s_call_code_redeemed;
+}
+
+bool turn_origin_capture(turn_origin_t *out) {
+   if (!out) {
+      return false;
+   }
+   *out = (turn_origin_t){ 0 };
+   session_t *ctx = session_get_command_context();
+   const uint64_t token = session_turn_token();
+   if (!ctx || token == 0) {
+      return false;
+   }
+   pthread_mutex_lock(&ctx->history_mutex);
+   const bool user = turn_user_originated_locked(ctx);
+   const uint32_t number = ctx->turn_number;
+   pthread_mutex_unlock(&ctx->history_mutex);
+   if (!user) {
+      return false;
+   }
+   out->session_id = ctx->session_id;
+   out->turn_token = token;
+   out->turn_number = number;
+   out->code_redeemed = s_call_code_redeemed;
+   return true;
 }
 
 /* Caller holds history_mutex.  The running turn's pending slot for @p role. */

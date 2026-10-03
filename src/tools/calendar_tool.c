@@ -616,8 +616,16 @@ static const treg_param_t calendar_params[] = {
  * Tool Metadata
  * ============================================================================= */
 
+static const tool_action_kind_entry_t s_calendar_action_kinds[] = {
+   { "calendars", TOOL_KIND_READ, NULL }, { "today", TOOL_KIND_READ, NULL },
+   { "range", TOOL_KIND_READ, NULL },     { "next", TOOL_KIND_READ, NULL },
+   { "search", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t calendar_metadata = {
    .name = "calendar",
+   .action_kinds = s_calendar_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_calendar_action_kinds),
    .device_string = "calendar",
    .topic = "dawn",
    .aliases = { "cal", "schedule", "events", "appointment" },

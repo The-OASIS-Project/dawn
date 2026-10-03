@@ -130,6 +130,7 @@ static const treg_param_t suit_params[] = {
 
 static const tool_metadata_t suit_metadata = {
    .name = "suit_status",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "suit_status",
    .topic = "dawn",
    .aliases = { "helmet_status", "armor_status" },

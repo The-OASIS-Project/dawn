@@ -161,8 +161,16 @@ static const treg_param_t s_params[] = {
    },
 };
 
+static const tool_action_kind_entry_t s_meta_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "status", TOOL_KIND_READ, NULL },
+   { "set_active", TOOL_KIND_STATE, NULL },
+};
+
 static const tool_metadata_t s_meta = {
    .name = "code_project",
+   .action_kinds = s_meta_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_meta_action_kinds),
    .description = "Manage code projects: list available repos, set the active project for code "
                   "questions, or check indexing status.",
    .params = s_params,

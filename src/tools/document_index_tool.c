@@ -386,6 +386,7 @@ static const treg_param_t doc_index_params[] = {
 
 static const tool_metadata_t doc_index_metadata = {
    .name = "document_index",
+   /* Kind of action: act (the default): fetches a URL and keeps what it finds. */
    .device_string = "document indexer",
    .description = "Download a document from a URL and index it for later search. "
                   "Supports PDF, DOCX, HTML, plain text, Markdown, code files, and more. "

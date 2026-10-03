@@ -68,6 +68,7 @@ static const treg_param_t calculator_params[] = {
 
 static const tool_metadata_t calculator_metadata = {
    .name = "calculator",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "calculator",
    .topic = "dawn",
    .aliases = { "calc", "math" },

@@ -99,6 +99,7 @@ static const treg_param_t doc_read_params[] = {
 
 static const tool_metadata_t doc_read_metadata = {
    .name = "document_read",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "document reader",
    .description = "Read the contents of a specific saved document or note, page by page. "
                   "Use this when you need an entire document, OR the EXACT verbatim text of a "

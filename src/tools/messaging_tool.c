@@ -634,8 +634,16 @@ static void messaging_tool_cleanup(void) {
    messaging_engine_shutdown();
 }
 
+static const tool_action_kind_entry_t s_messaging_action_kinds[] = {
+   { "list_channels", TOOL_KIND_READ, NULL }, { "read_channel", TOOL_KIND_READ, NULL },
+   { "read_server", TOOL_KIND_READ, NULL },   { "list_discord_channels", TOOL_KIND_READ, NULL },
+   { "link_status", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t messaging_metadata = {
    .name = "messaging",
+   .action_kinds = s_messaging_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_messaging_action_kinds),
    .device_string = "messaging",
    .topic = "dawn",
    .aliases = { "message", "send_message", "chat" },

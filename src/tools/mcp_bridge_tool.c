@@ -373,6 +373,8 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    meta.params = slot->params.params;
    meta.param_count = slot->params.param_count;
    meta.device_type = TOOL_DEVICE_TYPE_GETTER;
+   /* default_kind stays TOOL_KIND_ACT: what an upstream tool does is the
+    * server's claim, not something DAWN can check. */
    meta.capabilities = TOOL_CAP_NETWORK | (dangerous ? TOOL_CAP_DANGEROUS : TOOL_CAP_NONE);
    meta.default_local = true;
    meta.default_remote = true;
