@@ -582,6 +582,7 @@ set(DAWN_SOURCES
     src/core/strbuf.c
     src/core/wake_word.c
     src/core/utterance_dedup.c
+    src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
 
     # ASR subsystem
     src/asr/asr_interface.c

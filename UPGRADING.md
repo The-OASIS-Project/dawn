@@ -12,6 +12,27 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-03 — Phone, document-delete and research confirms need your reply
+
+**What changed.**
+- **A call, text or delete Friday previews is carried out only on your reply
+  to the preview,** in the same conversation (device, chat or login) — the way
+  email send already worked. Saying "yes" later, after talking about something
+  else, or from another device no longer confirms it: ask again. If Friday
+  prepares a second call (or a second text, or deletion) before you answer,
+  only the newest one can be confirmed, and she prepares only one of each per
+  message.
+- **Deep research starts the same way.** Friday proposes the run with its plan
+  and cost; it starts only when your next message says yes.
+- **Background work can't make calls, send texts or delete.** A background job,
+  a follow-up after a job finishes, a scheduled briefing step, or an MQTT
+  message asking for one is refused; Friday tells you what it would have done instead. This holds even
+  with `[phone] confirm_outbound = false`.
+
+**What you need to do.** Nothing.
+
+---
+
 ## 2026-10-02 — Messaging channels answer only the person who linked them; SMS links need a code
 
 **What changed.**

@@ -18,17 +18,14 @@
  *
  * Deep-research tool (DEEP_RESEARCH_DESIGN.md §7/§7a/§15 Step 7).  See header.
  *
- * start is CONFIRMATION-GATED (§7a, locked): the first call with confirm=false
- * (the default) proposes the run + its cost envelope, mints a random single-use
- * user-bound pending token, and writes NOTHING else; only a follow-up confirm=true
- * carrying THAT token — which the model can only get by relaying the proposal
- * round-trip, and which spawns the STORED brief, not the confirm-call's — creates
- * the job + run and spawns the controller.  This is the same mechanism as email
- * send/trash (random draft_id + user match + single-use + TTL + failed-claim
- * throttle) — a cost guardrail so a lone self-asserted confirm=true (incl. after a
- * prompt injection) can't spin up a paid run.  It is NOT proof-of-human-consent
- * (the token is relayed through the model; see §11 + the capability-mask work); the
- * hard kill switch is `[research] enabled`.  Completion is notify + report link,
+ * A run is CONFIRMATION-GATED (§7a, locked): 'start' proposes the run + its
+ * cost envelope, mints a random single-use pending token bound to the user and
+ * the session, and writes NOTHING else; only 'confirm_start' carrying THAT token,
+ * in the user's next turn in that session (turn_origin_t, as for email send),
+ * creates the job + run and spawns the controller — and it spawns the STORED
+ * brief, not anything the confirm call says.  So a model can't start a paid run
+ * in the turn it proposed it, nor after the user moved on, nor from another
+ * session.  The hard kill switch is `[research] enabled`.  Completion is notify + report link,
  * NOT reinvoke_parent (§11 HIGH-2 — re-injecting web-derived report text into a
  * full-tool session is the injection vector).  Layer 3.
  */
@@ -49,8 +46,10 @@
 #include "core/job_dispatch.h"
 #include "core/job_manager.h"
 #include "core/memory_filter.h"
+#include "core/pending_slots.h"
 #include "core/research_worker.h"
 #include "core/session_manager.h"
+#include "core/turn_origin.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/research_run.h"
@@ -62,37 +61,26 @@
 
 /* --- start: propose (unconfirmed) or spawn (confirmed) --------------------- */
 
-/* Confirmation pending-proposal store — email-parity two-step.
- *
- * A `start confirm=false` mints a random, single-use, user-bound, expiring token
- * and stashes the EXACT proposed run here; `confirm=true` must present that token,
- * which the model can only obtain by relaying the proposal round-trip (it cannot
- * forge a randombytes_buf id, nor swap in a different brief — confirm spawns the
- * STORED brief, not the confirm-call's).  This brings deep-research start to the
- * same bar as email send/trash (random draft_id + user match + single-use + TTL +
- * failed-claim throttle; email_service.c) — deliberately the same trust model.
- *
- * NOTE (honest scope): this is NOT a proof-of-human-consent control — like email's,
- * the token is relayed through the model, so it does not by itself force an
- * intervening human turn (see DEEP_RESEARCH_DESIGN.md §11 + the capability-mask
- * work for that).  It is a cost guardrail: it stops a single self-asserted
- * `confirm=true` (incl. after a prompt injection) from spawning a paid run without
- * the propose round-trip.  The real kill switch is `[research] enabled`. */
-#define DR_PENDING_MAX 8
+/* Confirmation pending-proposal store: one proposal per session
+ * (core/pending_slots.h), so a proposal made elsewhere can't replace the one
+ * the user is answering, and its confirm must come from that session in the
+ * user's next turn.  The random token ties the confirm to the exact proposal
+ * the model relayed (it cannot forge it, nor swap in a different brief —
+ * confirm spawns the STORED brief).  Failed claims are throttled per user. */
+#define DR_PENDING_MAX 16
 #define DR_PENDING_TTL_SEC 600 /* an unconfirmed proposal expires after 10 min */
 #define DR_CONFIRM_MAX_FAILURES 3
 #define DR_CONFIRM_LOCKOUT_SEC 60
 #define DR_TOKEN_HEX_LEN 15 /* 7 random bytes -> 14 hex + NUL */
 #define DR_DELIVER_MAX 128
+#define DR_PENDING_PROPOSAL 1
 
 typedef struct {
+   pending_slot_t hdr;
    char token[DR_TOKEN_HEX_LEN];
-   int user_id;
    char brief[RESEARCH_BRIEF_MAX]; /* the EXACT proposed brief — confirm spawns THIS */
    char deliver_to[DR_DELIVER_MAX];
    int64_t parent_conv;
-   time_t created_at;
-   bool used;
 } dr_pending_t;
 
 typedef struct {
@@ -101,19 +89,21 @@ typedef struct {
    time_t first_fail;
 } dr_throttle_t;
 
-/* Single global store shared across users (mirrors the email draft/throttle arrays).
- * Both tables are bounded to DR_PENDING_MAX and are MONOTONIC: `throttle` slots are
- * reset (fail_count=0) on lockout expiry but never freed, so past the 8th distinct
- * failing user new users aren't rate-limited, and a chatty user can evict another's
- * un-confirmed proposal (a denial of *confirmation* — they just re-propose, no spawn
- * or data risk). Accepted at the current single-primary-user trust model + 56-bit
- * random tokens; a genuinely multi-tenant deployment would want per-user budgets. */
+/* The throttle table is bounded to DR_PENDING_MAX and MONOTONIC: slots are reset
+ * (fail_count=0) on lockout expiry but never freed, so past DR_PENDING_MAX
+ * distinct failing users new users aren't rate-limited.  Accepted at the current trust
+ * model + 56-bit random tokens. */
 static struct {
    pthread_mutex_t mutex;
    dr_pending_t pending[DR_PENDING_MAX];
    dr_throttle_t throttle[DR_PENDING_MAX];
    int throttle_count;
 } s_dr_confirm = { .mutex = PTHREAD_MUTEX_INITIALIZER };
+
+PENDING_ITEM_CHECK(dr_pending_t);
+PENDING_ARRAY_CHECK(s_dr_confirm.pending);
+static const pending_slots_t s_dr_slots = PENDING_SLOTS_TABLE(s_dr_confirm.pending,
+                                                              DR_PENDING_TTL_SEC);
 
 static void dr_gen_token(char *out, size_t out_len) {
    unsigned char bytes[7];
@@ -127,49 +117,30 @@ static void dr_gen_token(char *out, size_t out_len) {
    out[i * 2] = '\0';
 }
 
-/* Wipe used/expired slots. Caller holds s_dr_confirm.mutex. */
-static void dr_pending_expire_locked(time_t now) {
-   for (int i = 0; i < DR_PENDING_MAX; i++) {
-      if (s_dr_confirm.pending[i].token[0] &&
-          (s_dr_confirm.pending[i].used ||
-           now - s_dr_confirm.pending[i].created_at > DR_PENDING_TTL_SEC)) {
-         sodium_memzero(&s_dr_confirm.pending[i], sizeof(s_dr_confirm.pending[i]));
-      }
-   }
-}
-
-/* Mint + store a pending proposal; writes the token to @p out_token (>= DR_TOKEN_HEX_LEN). */
-static void dr_pending_store(int user_id,
+/* Mint + store this session's proposal; writes the token to @p out_token
+ * (>= DR_TOKEN_HEX_LEN).  false when it wasn't staged (@p rc says why;
+ * nothing is evicted). */
+static bool dr_pending_store(const turn_origin_t *origin,
+                             int user_id,
                              const char *brief,
                              const char *deliver_to,
                              int64_t parent_conv,
                              char *out_token,
-                             size_t out_len) {
+                             size_t out_len,
+                             pending_stage_rc_t *rc) {
    pthread_mutex_lock(&s_dr_confirm.mutex);
-   time_t now = time(NULL);
-   dr_pending_expire_locked(now);
-   /* Free slot, else evict the oldest (bounded store — a flood of un-confirmed
-    * proposals can't grow memory; newest wins). */
-   int slot = 0;
-   for (int i = 0; i < DR_PENDING_MAX; i++) {
-      if (!s_dr_confirm.pending[i].token[0]) {
-         slot = i;
-         break;
-      }
-      if (s_dr_confirm.pending[i].created_at < s_dr_confirm.pending[slot].created_at) {
-         slot = i;
-      }
+   dr_pending_t *p = (dr_pending_t *)pending_slots_stage(&s_dr_slots, origin, user_id,
+                                                         DR_PENDING_PROPOSAL, pending_slots_now(),
+                                                         rc);
+   if (p) {
+      dr_gen_token(p->token, sizeof(p->token));
+      snprintf(p->brief, sizeof(p->brief), "%s", brief);
+      snprintf(p->deliver_to, sizeof(p->deliver_to), "%s", deliver_to ? deliver_to : "");
+      p->parent_conv = parent_conv;
+      snprintf(out_token, out_len, "%s", p->token);
    }
-   dr_pending_t *p = &s_dr_confirm.pending[slot];
-   sodium_memzero(p, sizeof(*p));
-   dr_gen_token(p->token, sizeof(p->token));
-   p->user_id = user_id;
-   snprintf(p->brief, sizeof(p->brief), "%s", brief);
-   snprintf(p->deliver_to, sizeof(p->deliver_to), "%s", deliver_to ? deliver_to : "");
-   p->parent_conv = parent_conv;
-   p->created_at = now;
-   snprintf(out_token, out_len, "%s", p->token);
    pthread_mutex_unlock(&s_dr_confirm.mutex);
+   return p != NULL;
 }
 
 static bool dr_confirm_throttled_locked(int user_id, time_t now) {
@@ -208,13 +179,19 @@ static void dr_confirm_record_failure_locked(int user_id, time_t now) {
 /* dr_pending_claim() return codes (0 = success; 1 reserved as the generic
  * failure slot per the codebase SUCCESS/FAILURE convention, unused here). */
 #define DR_CLAIM_RC_OK 0
-#define DR_CLAIM_RC_NOT_FOUND 2 /* no matching pending proposal: missing / expired / wrong user */
+#define DR_CLAIM_RC_NOT_FOUND \
+   2 /* no matching proposal in this session: missing / expired / wrong token */
 #define DR_CLAIM_RC_THROTTLED 3 /* too many failed confirmations */
+#define DR_CLAIM_RC_NOT_NOW 4   /* not the user's reply to the proposal (turn_origin_check) */
 
-/* Claim a pending proposal by token: validate (exists, user-owned, unused, unexpired,
- * not throttled), copy the STORED brief/deliver_to/parent_conv out, mark single-use.
- * Returns DR_CLAIM_RC_OK / DR_CLAIM_RC_NOT_FOUND / DR_CLAIM_RC_THROTTLED. */
-static int dr_pending_claim(int user_id,
+/* Claim this session's proposal by token: validate (exists, unexpired, the
+ * token matches, the user's next turn, not throttled), copy the STORED
+ * brief/deliver_to/parent_conv out, and consume it.  A confirm in the wrong
+ * turn leaves the proposal (the right turn can still confirm it).  Returns a
+ * DR_CLAIM_RC_*. */
+static int dr_pending_claim(const turn_origin_t *origin,
+                            turn_origin_rc_t *orc_out,
+                            int user_id,
                             const char *token,
                             char *brief_out,
                             size_t brief_len,
@@ -222,29 +199,33 @@ static int dr_pending_claim(int user_id,
                             size_t deliver_len,
                             int64_t *parent_out) {
    pthread_mutex_lock(&s_dr_confirm.mutex);
-   time_t now = time(NULL);
+   const time_t now = pending_slots_now(); /* the throttle's clock never steps back */
    if (dr_confirm_throttled_locked(user_id, now)) {
       pthread_mutex_unlock(&s_dr_confirm.mutex);
       return DR_CLAIM_RC_THROTTLED;
    }
-   dr_pending_expire_locked(now);
-   dr_pending_t *found = NULL;
-   if (token && token[0]) {
-      for (int i = 0; i < DR_PENDING_MAX; i++) {
-         if (s_dr_confirm.pending[i].token[0] && !s_dr_confirm.pending[i].used &&
-             s_dr_confirm.pending[i].user_id == user_id &&
-             strcmp(s_dr_confirm.pending[i].token, token) == 0) {
-            found = &s_dr_confirm.pending[i];
-            break;
-         }
-      }
+   pending_slot_t *slot = NULL;
+   if (pending_slots_find(&s_dr_slots, origin, user_id, DR_PENDING_PROPOSAL, 0, pending_slots_now(),
+                          &slot) != PENDING_FOUND) {
+      pthread_mutex_unlock(&s_dr_confirm.mutex);
+      return DR_CLAIM_RC_NOT_FOUND; /* nothing in this session to guess at */
    }
-   if (!found) {
+   dr_pending_t *found = (dr_pending_t *)slot;
+   const size_t len = strlen(found->token);
+   if (!token || strlen(token) != len || sodium_memcmp(found->token, token, len) != 0) {
+      /* Only a wrong token for this session's proposal counts toward the
+       * throttle: guesses from elsewhere can't lock the user out. */
       dr_confirm_record_failure_locked(user_id, now);
       pthread_mutex_unlock(&s_dr_confirm.mutex);
       return DR_CLAIM_RC_NOT_FOUND;
    }
-   found->used = true;
+   const turn_origin_rc_t orc = turn_origin_check(&found->hdr.origin, origin);
+   *orc_out = orc;
+   if (orc != TURN_ORIGIN_OK) {
+      pthread_mutex_unlock(&s_dr_confirm.mutex);
+      OLOG_WARNING("deep_research: confirm_start refused (%s)", turn_origin_refusal(orc));
+      return DR_CLAIM_RC_NOT_NOW;
+   }
    snprintf(brief_out, brief_len, "%s", found->brief);
    snprintf(deliver_out, deliver_len, "%s", found->deliver_to);
    *parent_out = found->parent_conv;
@@ -254,11 +235,10 @@ static int dr_pending_claim(int user_id,
 }
 
 /* Build the pre-spawn proposal + cost envelope (§7a step 2).  Addressed to the
- * model: it relays this to the user and, on a yes, calls start again with
- * confirm=true.  We state the honest budget (rounds + provider) rather than a
- * fabricated dollar figure — and it MUST reflect the budget the run will actually
- * use, so read the runtime config (research_budgets_load) rather than the compile-
- * time defaults: an operator who raised [research] max_input_tokens/max_rounds would
+ * model: it relays this to the user and, on a yes, calls confirm_start.  We state the honest budget
+ * (rounds + provider) rather than a fabricated dollar figure — and it MUST reflect the budget the
+ * run will actually use, so read the runtime config (research_budgets_load) rather than the
+ * compile-time defaults: an operator who raised [research] max_input_tokens/max_rounds would
  * otherwise be shown, and relay to the user, the wrong (default) envelope. */
 static char *research_build_proposal(const char *brief, bool private_requested, const char *token) {
    research_budgets_t b;
@@ -275,10 +255,10 @@ static char *research_build_proposal(const char *brief, bool private_requested, 
        "written report with citations. Budget ~%lldk input tokens.\n"
        "Cost: %s\n"
        "%s"
-       "This will run in the background and can take a while. Confirm with the user first; if they "
-       "say yes, call deep_research start again with confirm=true and pending_token \"%s\" (do NOT "
-       "re-send the brief — the confirmed run uses the exact brief proposed here). Do NOT start it "
-       "without their go-ahead. The token expires in 10 minutes.",
+       "This will run in the background and can take a while. Ask the user first; if they say "
+       "yes in their reply, call deep_research confirm_start with pending_token \"%s\" (the "
+       "confirmed run uses the exact brief proposed here). Do NOT start it without their "
+       "go-ahead. The token expires in 10 minutes.",
        brief, b.max_rounds, (long long)(b.max_input_tokens / 1000),
        local ? "runs on the local model — no API cost, but slower."
              : "runs on the cloud model — this spends paid API tokens.",
@@ -293,7 +273,7 @@ static char *research_build_proposal(const char *brief, bool private_requested, 
    return strdup(out);
 }
 
-/* Shared spawn path (§16.3) — called by handle_start (after its confirm gate)
+/* Shared spawn path (§16.3) — called by handle_confirm_start
  * and the headless admin verb.  Preserves the exact ordering that carries the
  * safety invariants (fail-closed job_kind stamp; run row created BEFORE spawn);
  * do NOT reorder.  Writes the specific failure reason into `err` so both callers
@@ -419,68 +399,74 @@ int research_spawn_run(int user_id,
    return SUCCESS;
 }
 
-static char *handle_start(struct json_object *details, int user_id, int64_t parent_conv) {
-   struct json_object *jbrief = NULL, *jmode = NULL, *jdt = NULL, *jconfirm = NULL, *jtok = NULL;
-
-   /* Strict boolean (matches the dispatch gate): a coerced "false" string must
-    * NOT start a run. */
-   const bool confirm = json_object_object_get_ex(details, "confirm", &jconfirm) && jconfirm &&
-                        json_object_is_type(jconfirm, json_type_boolean) &&
-                        json_object_get_boolean(jconfirm);
-
-   /* ── Confirmed: claim the pending token, spawn the EXACT proposed run ──
-    * The confirm call carries only confirm=true + pending_token; the brief/deliver/
-    * parent all come from the stored proposal, so a `confirm=true` cannot spawn an
-    * arbitrary or swapped-in brief (email-parity) — it can only ratify what was
-    * proposed and shown to the user.  A bare self-asserted confirm=true with no
-    * valid token spawns nothing. */
-   if (confirm) {
-      const char *token = (json_object_object_get_ex(details, "pending_token", &jtok) && jtok)
-                              ? json_object_get_string(jtok)
-                              : NULL;
-      char brief_buf[RESEARCH_BRIEF_MAX];
-      char deliver_buf[DR_DELIVER_MAX];
-      int64_t stored_parent = 0;
-      int crc = dr_pending_claim(user_id, token, brief_buf, sizeof(brief_buf), deliver_buf,
-                                 sizeof(deliver_buf), &stored_parent);
-      if (crc == DR_CLAIM_RC_THROTTLED) {
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "Error: too many failed confirmations — wait a minute and try again.");
-      }
-      if (crc != DR_CLAIM_RC_OK) {
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "Error: no matching research proposal to confirm (it may have expired, "
-                       "already started, or was never proposed). Call deep_research start with "
-                       "confirm=false first to propose the run, then confirm with the token it "
-                       "returns.");
-      }
-      const char *deliver_to = deliver_buf[0] ? deliver_buf : NULL;
-
-      /* All the ordering-sensitive spawn work (search-backend check, capacity, job
-       * creation, fail-closed research stamp, run row before spawn, spawn) lives in
-       * the shared research_spawn_run so the headless admin verb runs the identical
-       * sequence (§16.3). */
-      int64_t run_id = 0, conv_id = 0;
-      char err[256];
-      if (research_spawn_run(user_id, stored_parent, brief_buf, deliver_to, &run_id, &conv_id, err,
-                             sizeof(err)) != SUCCESS) {
-         char marked[sizeof(err) + 1];
-         snprintf(marked, sizeof(marked), TOOL_RESULT_ERROR_MARK "%s", err);
-         return strdup(marked);
-      }
-
-      char title[CONV_TITLE_MAX];
-      conv_generate_title(brief_buf, title, sizeof(title));
-      char buf[CONV_TITLE_MAX + 224];
-      snprintf(
-          buf, sizeof(buf),
-          "Started deep-research run #%lld: \"%s\". I'll research this in the background and "
-          "let you know when the report is ready — check on it with deep_research status %lld.",
-          (long long)run_id, title, (long long)run_id);
+/* confirm_start: claim this session's proposal by its token and spawn the
+ * EXACT proposed run.  The call carries only the pending_token; the
+ * brief/deliver/parent all come from the stored proposal, so it cannot spawn an
+ * arbitrary or swapped-in brief — it can only ratify what was proposed and shown
+ * to the user, in their reply. */
+static char *handle_confirm_start(struct json_object *details,
+                                  int user_id,
+                                  const turn_origin_t *origin) {
+   struct json_object *jtok = NULL;
+   const char *token = (json_object_object_get_ex(details, "pending_token", &jtok) && jtok)
+                           ? json_object_get_string(jtok)
+                           : NULL;
+   char brief_buf[RESEARCH_BRIEF_MAX];
+   char deliver_buf[DR_DELIVER_MAX];
+   int64_t stored_parent = 0;
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   int crc = dr_pending_claim(origin, &orc, user_id, token, brief_buf, sizeof(brief_buf),
+                              deliver_buf, sizeof(deliver_buf), &stored_parent);
+   if (crc == DR_CLAIM_RC_THROTTLED) {
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: too many failed confirmations — wait a minute and try again.");
+   }
+   if (crc == DR_CLAIM_RC_NOT_NOW) {
+      char buf[256];
+      snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: the run wasn't started: %s",
+               turn_origin_retry_hint(orc));
       return strdup(buf);
    }
+   if (crc != DR_CLAIM_RC_OK) {
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: no matching research proposal to confirm (it may have expired, "
+                    "already started, been replaced by a newer proposal in this conversation, or "
+                    "was never proposed). Call deep_research start first to propose the run, "
+                    "then confirm with the token it returns.");
+   }
+   const char *deliver_to = deliver_buf[0] ? deliver_buf : NULL;
 
-   /* ── Unconfirmed: validate the brief, mint a pending token, propose only ── */
+   /* All the ordering-sensitive spawn work (search-backend check, capacity, job
+    * creation, fail-closed research stamp, run row before spawn, spawn) lives in
+    * the shared research_spawn_run so the headless admin verb runs the identical
+    * sequence (§16.3). */
+   int64_t run_id = 0, conv_id = 0;
+   char err[256];
+   if (research_spawn_run(user_id, stored_parent, brief_buf, deliver_to, &run_id, &conv_id, err,
+                          sizeof(err)) != SUCCESS) {
+      char marked[sizeof(err) + 1];
+      snprintf(marked, sizeof(marked), TOOL_RESULT_ERROR_MARK "%s", err);
+      return strdup(marked);
+   }
+
+   char title[CONV_TITLE_MAX];
+   conv_generate_title(brief_buf, title, sizeof(title));
+   char buf[CONV_TITLE_MAX + 224];
+   snprintf(buf, sizeof(buf),
+            "Started deep-research run #%lld: \"%s\". I'll research this in the background and "
+            "let you know when the report is ready — check on it with deep_research status %lld.",
+            (long long)run_id, title, (long long)run_id);
+   return strdup(buf);
+}
+
+/* start: propose a run (never starts one). */
+static char *handle_start(struct json_object *details,
+                          int user_id,
+                          int64_t parent_conv,
+                          const turn_origin_t *origin) {
+   struct json_object *jbrief = NULL, *jmode = NULL, *jdt = NULL;
+
+   /* Validate the brief, mint a pending token, propose only. */
    const char *brief = (json_object_object_get_ex(details, "brief", &jbrief) && jbrief)
                            ? json_object_get_string(jbrief)
                            : NULL;
@@ -511,9 +497,20 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
    }
 
    /* Mint + stash the proposed run (write nothing else, §7a); the model must relay
-    * the returned token back on confirm=true, which it cannot forge. */
+    * the returned token back on confirm_start, which it cannot forge. */
    char token[DR_TOKEN_HEX_LEN];
-   dr_pending_store(user_id, brief, deliver_to, parent_conv, token, sizeof(token));
+   pending_stage_rc_t src = PENDING_STAGED;
+   if (!dr_pending_store(origin, user_id, brief, deliver_to, parent_conv, token, sizeof(token),
+                         &src)) {
+      if (src == PENDING_TWICE_IN_TURN) {
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: a research proposal from this turn is already waiting for the "
+                       "user's yes. Ask about that one first.");
+      }
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: too many research proposals are waiting for a confirm. Try again in "
+                    "a few minutes.");
+   }
    return research_build_proposal(brief, private_requested, token);
 }
 
@@ -651,7 +648,8 @@ static char *deep_research_callback(const char *action, char *value, int *should
       *should_respond = 1; /* results feed back to the LLM */
    }
    if (action == NULL || action[0] == '\0') {
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: action is required (start, status, cancel).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: action is required (start, confirm_start, status, cancel).");
    }
 
    /* Execution backstop for the runtime master switch: the native schema already
@@ -687,15 +685,8 @@ static char *deep_research_callback(const char *action, char *value, int *should
       return strdup(TOOL_GUEST_REFUSAL);
    }
 
-   /* Only a CONFIRMED start begins work (takes a pool slot + LLM budget).  Require
-    * a real JSON boolean true — json_object_get_boolean() would coerce a non-empty
-    * string like "false" to true, and a confirmed start spends real budget. */
-   bool starts_work = false;
-   if (strcmp(action, "start") == 0) {
-      struct json_object *jc = NULL;
-      starts_work = (json_object_object_get_ex(details, "confirm", &jc) && jc &&
-                     json_object_is_type(jc, json_type_boolean) && json_object_get_boolean(jc));
-   }
+   /* Only confirm_start begins work (takes a pool slot + LLM budget). */
+   const bool starts_work = strcmp(action, "confirm_start") == 0;
 
    /* No session context means an unauthenticated caller — an MQTT publish on a
     * broker without auth/TLS would otherwise run as user_id 1.  There is no
@@ -719,9 +710,24 @@ static char *deep_research_callback(const char *action, char *value, int *should
                     "Error: a background task can't start a deep-research run.");
    }
 
+   /* Proposing and confirming a run need the user in a live conversation (not
+    * a re-engaged turn or an MQTT message); the confirm, their next turn in the
+    * session that proposed it (turn_origin_t). */
+   turn_origin_t origin = { 0 };
+   const bool proposes = strcmp(action, "start") == 0 || starts_work;
+   if (proposes && !turn_origin_capture(&origin)) {
+      json_object_put(details);
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: a research run needs the user in a live conversation, and this "
+                    "request came from an automated turn. Tell the user what you would research, "
+                    "and let them ask for it.");
+   }
+
    char *result = NULL;
    if (strcmp(action, "start") == 0) {
-      result = handle_start(details, user_id, parent_conv);
+      result = handle_start(details, user_id, parent_conv, &origin);
+   } else if (starts_work) {
+      result = handle_confirm_start(details, user_id, &origin);
    } else if (strcmp(action, "status") == 0) {
       result = handle_status(details, user_id);
    } else if (strcmp(action, "cancel") == 0) {
@@ -729,7 +735,8 @@ static char *deep_research_callback(const char *action, char *value, int *should
    } else {
       char buf[160];
       snprintf(buf, sizeof(buf),
-               TOOL_RESULT_ERROR_MARK "Error: unknown action '%s'. Valid: start, status, cancel.",
+               TOOL_RESULT_ERROR_MARK
+               "Error: unknown action '%s'. Valid: start, confirm_start, status, cancel.",
                action);
       result = strdup(buf);
    }
@@ -745,13 +752,14 @@ static char *deep_research_callback(const char *action, char *value, int *should
 static const treg_param_t deep_research_params[] = {
    {
        .name = "action",
-       .description = "The action: 'start' (propose/begin a research run), 'status' (check a run's "
-                      "progress / find its report), 'cancel' (stop a run).",
+       .description = "The action: 'start' (propose a research run), 'confirm_start' (begin the "
+                      "proposed run once the user agrees), 'status' (check a run's progress / "
+                      "find its report), 'cancel' (stop a run).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "start", "status", "cancel" },
-       .enum_count = 3,
+       .enum_values = { "start", "confirm_start", "status", "cancel" },
+       .enum_count = 4,
    },
    {
        .name = "arguments",
@@ -759,15 +767,14 @@ static const treg_param_t deep_research_params[] = {
            "JSON object of the action's arguments, passed as a JSON-encoded string.  "
            "Omit entirely for an action that takes no arguments; never fill it with a "
            "description or rationale.\n"
-           "start: {brief (required for the proposal — the question/topic to research), mode "
-           "('web' (default), 'private', or 'both'; private/both are not available yet and run "
-           "web-only), deliver_to (optional messaging channel display_name for the completion "
-           "notice), confirm (boolean, default false), pending_token (REQUIRED when confirm=true — "
-           "the token returned by the proposal)}. Call start with confirm=false FIRST to get the "
-           "plan + cost envelope and a pending_token; show the plan to the user, and ONLY after "
-           "they agree call start again with confirm=true and that pending_token (do NOT re-send "
-           "the brief — the confirmed run uses the exact brief from the proposal). The token is "
-           "single-use and expires in 10 minutes.\n"
+           "start: {brief (required — the question/topic to research), mode ('web' (default), "
+           "'private', or 'both'; private/both are not available yet and run web-only), deliver_to "
+           "(optional messaging channel display_name for the completion notice)}. start only "
+           "proposes: it returns the plan + cost envelope and a pending_token; show the plan to "
+           "the user.\n"
+           "confirm_start: {pending_token (required — the token start returned)}. Call it only "
+           "after the user agrees, in their reply to the proposal; the run uses the exact brief "
+           "proposed. The token is single-use and expires in 10 minutes.\n"
            "status: {run_id (the number from start)}.\n"
            "cancel: {run_id (required)}.",
        .type = TOOL_PARAM_TYPE_STRING,
@@ -798,6 +805,8 @@ static void deep_research_cleanup(void) {
 
 static const tool_action_kind_entry_t s_deep_research_action_kinds[] = {
    { "status", TOOL_KIND_READ, NULL },
+   { "start", TOOL_KIND_PREPARE, "confirm_start" },
+   { "confirm_start", TOOL_KIND_ACT, NULL },
 };
 
 static const tool_metadata_t deep_research_metadata = {
@@ -826,9 +835,9 @@ static const tool_metadata_t deep_research_metadata = {
        "do "
        "that instead — do not force a background run on a quick question.  For a single background "
        "task that is not multi-source research, use the 'job' tool.\n\n"
-       "start is CONFIRMATION-GATED, so reaching for it is low-risk: call it with confirm=false "
-       "FIRST to get the plan + cost envelope, show that to the user, and only start the run "
-       "(confirm=true) after they say yes.  The run works on its own; on completion the user is "
+       "A run is CONFIRMATION-GATED, so reaching for start is low-risk: start returns the plan + "
+       "cost envelope, show that to the user, and only begin the run (confirm_start) after they "
+       "say yes.  The run works on its own; on completion the user is "
        "notified, a cited report is saved to their notes, and a summary lands back in this "
        "conversation.  Check progress with status.",
 

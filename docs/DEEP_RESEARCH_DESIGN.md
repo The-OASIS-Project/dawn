@@ -791,21 +791,25 @@ routes a request to `deep_research`, the `start` action's first step is a **pre-
    yes, so it is load-bearing, not decoration.
 3. **Spawn only on confirmation.**
 
-**Mechanism — a real two-call handshake at email-parity, not a model-authored boolean** (hardened 2026-08-18
-after a code-review flagged that a bare `confirm=true` is model-self-asserted). The unconfirmed `start` mints a
-random, single-use, user-bound, 10-minute-TTL **pending token** (7-byte `randombytes_buf`, byte-identical to
-email's `generate_draft_id`), stashes the *exact* proposed run (brief / deliver_to / parent), and returns the
-token in the proposal; the confirmed `start` must present that token and spawns the **stored** brief — never the
-confirm-call's args, so there's no propose-innocuous-then-confirm-malicious — with a 3-fail/60s throttle. A lone
-self-asserted `confirm=true` with no valid token (including one produced by a prompt injection) spawns nothing.
-This is the same mechanism as email send/trash (`email_service.c`).
+**Mechanism — a two-call handshake at email parity, not a model-authored boolean** (hardened 2026-08-18
+after a code-review flagged that a bare `confirm=true` is model-self-asserted; split into two actions
+2026-10-03). `start` only proposes: it mints a random, single-use, 10-minute-TTL **pending token** (7-byte
+`randombytes_buf`), stashes the *exact* proposed run (brief / deliver_to / parent) as the session's one
+pending proposal, and returns the token in the proposal. `confirm_start` must present that token and spawns
+the **stored** brief — never the confirm call's args, so there's no propose-innocuous-then-confirm-malicious —
+with a 3-fail/60s throttle.
 
-**Honest scope.** Like email's, the token is *relayed through the model*, so this is a **cost guardrail** (it
-stops an un-proposed paid run), **not** proof-of-human-consent — a compromised model that also sees the proposal
-could relay the token. The durable consent control for outward/irreversible tools is the per-session
-**capability mask** ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)); deep_research's actual
-security boundary is the §11 sandbox (read-only allowlist + no `reinvoke_parent`), and the hard kill switch is
-`[research] enabled`.
+**The user's reply, not the model's next step.** Like email send, the proposal records the turn that made
+it (`turn_origin_t`, `include/core/turn_origin.h`), and `confirm_start` counts only from the same session in
+the user's very next turn. A model can't start a run in the turn it proposed it, nor after the user moved
+on, nor from another session (another tab, device or channel), and a proposal made elsewhere can't replace
+the one the user is answering (`core/pending_slots.h`). Both actions need the user in a live turn: a
+re-engaged turn, a background job or an MQTT message can't propose or start one. This proves timing, not
+consent: the token is relayed through the model, so in the user's next turn a compromised model could still
+call `confirm_start` whatever the user said — it is a cost guardrail. The durable consent control is the
+per-session capability mask ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)). The hard kill switch is
+`[research] enabled`; deep_research's other security boundary is the §11 sandbox (read-only allowlist + no
+`reinvoke_parent`).
 
 The one exception is a **P4 SAGE-triggered** run, which is governed by the watch's own configured policy rather
 than an interactive confirm.
@@ -1230,7 +1234,8 @@ work — not the subcommands.
 ```
 
 **The real daemon touchpoint is a spawn-path extraction, not the verb (arch HIGH-1).** The existing spawn entry
-`handle_start()` (`deep_research_tool.c:~96–225`) is **static, `confirm`-gated, and returns human prose**, so the
+`handle_start()` (`deep_research_tool.c:~96–225`, as built then) was **static, `confirm`-gated, and returned
+human prose** — since 2026-10-03 `handle_start()` only proposes and the spawn is `handle_confirm_start()` — so the
 admin verb *cannot* call it — and it must **not** re-implement the sequence, because that sequence carries the
 feature's most safety-critical ordering: the search-backend availability refusal, the `[jobs]` capacity gate,
 `conv_db_create_job_ex`, the **fail-closed `conv_db_job_set_kind("research")`** (the stamp that blocks
@@ -1240,7 +1245,8 @@ row it does *not* create). Duplicating that in the admin module silently breaks 
 
 So P0 of this feature extracts the post-confirm body into a shared non-static
 **`research_spawn_run(user_id, parent_conv, brief, mode, deliver_to, &run_id, &conv_id, &err)`**, called by
-**both** `handle_start` (after its confirm gate) and the admin handler. Only then is "changes nothing about the
+**both** `handle_start` (after its confirm gate; since 2026-10-03 the separate `confirm_start` action,
+`handle_confirm_start`) and the admin handler. Only then is "changes nothing about the
 loop / allowlist / gates" literally true rather than aspirational. `memory_filter_check(brief)` lives inside the
 shared function, so it fires on both paths by construction.
 
@@ -1364,7 +1370,7 @@ touches C and a re-score never re-runs research.
 
 1. **Extract `research_spawn_run()`** (the load-bearing step, arch HIGH-1) — pull the post-confirm body of
    `handle_start` (`deep_research_tool.c`) into a shared non-static function called by both `handle_start` (after
-   its confirm gate) and the new admin handler, preserving the exact ordering (fail-closed `job_kind` stamp,
+   its confirm gate; now `handle_confirm_start`) and the new admin handler, preserving the exact ordering (fail-closed `job_kind` stamp,
    `research_db_run_create` before spawn). `memory_filter_check(brief)` lives inside it. Zero behaviour change to
    the conversational path.
 2. **`admin_socket_research.c`** (GPL header) — the `research start`/`status`/`cancel` verb, wired into the admin

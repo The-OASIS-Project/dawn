@@ -32,7 +32,7 @@
 #include "tools/email_db.h"
 
 /* Draft / pending action limits */
-#define EMAIL_MAX_DRAFTS 4
+#define EMAIL_MAX_DRAFTS 16
 #define EMAIL_DRAFT_EXPIRY_SEC 300
 /* Outbound (send/draft) body cap — bounded by the fixed email_draft_t.body[4096]
  * buffer; must stay well under 4096 to avoid silent truncation on send.
@@ -41,7 +41,7 @@
 #define EMAIL_MAX_SUBJECT_LEN 250
 #define EMAIL_CONFIRM_MAX_FAILURES 3
 #define EMAIL_CONFIRM_LOCKOUT_SEC 60
-#define EMAIL_MAX_PENDING_TRASH 10
+#define EMAIL_MAX_PENDING_TRASH 16
 #define EMAIL_PENDING_TRASH_EXPIRY_SEC 300
 
 
@@ -54,7 +54,7 @@ typedef struct {
    char subject[256];
    char body[4096];
    turn_origin_t origin; /* where it was made (turn_origin_check) */
-   time_t created_at;
+   time_t created_at;    /* pending_slots_now(), not wall time */
    bool used;
 } email_draft_t;
 
@@ -66,7 +66,7 @@ typedef struct {
    char subject[256];      /* For confirmation display */
    char from[128];         /* For confirmation display */
    turn_origin_t origin;   /* where it was made (turn_origin_check) */
-   time_t created_at;
+   time_t created_at;      /* pending_slots_now(), not wall time */
    bool used;
 } email_pending_trash_t;
 
@@ -95,6 +95,8 @@ typedef struct {
 /* trash/archive: copied, but removing the original failed (a transient error;
  * the original is still in its folder, and a retry may copy it again) */
 #define EMAIL_RC_NOT_REMOVED 20
+/* send / trash: every slot holds another session's live item (none is pushed out) */
+#define EMAIL_RC_PENDING_FULL 22
 
 /* Two-step action codes (compose/send + trash prep/confirm; archive shares the
  * account-resolution set).  0/1 reuse EMAIL_RC_OK / EMAIL_RC_FAILURE above, and

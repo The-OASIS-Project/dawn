@@ -523,6 +523,13 @@ dawn_add_unit_test(test_turn_origin
    LIBS    unity
    LABEL   ci)
 
+# What a tool staged for the user's confirm: one item per session and kind.
+dawn_add_unit_test(test_pending_slots
+   SOURCES test_pending_slots.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_email_parse
    SOURCES test_email_parse.c
            ${SRC_ROOT}/src/tools/email_parse.c

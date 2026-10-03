@@ -613,6 +613,10 @@ static char *handle_search(struct json_object *details, int user_id) {
    return buf;
 }
 
+#define EMAIL_PENDING_FULL_ERR                                                                 \
+   TOOL_RESULT_ERROR_MARK "Error: too many emails are waiting for a confirm. Confirm one, or " \
+                          "try again in a few minutes."
+
 static char *handle_send(struct json_object *details, int user_id, const turn_origin_t *origin) {
    const char *account = json_get_str(details, "account");
    const char *to = json_get_str(details, "to");
@@ -702,6 +706,8 @@ static char *handle_send(struct json_object *details, int user_id, const turn_or
                     "Settings -> Email.");
    /* Unknown-account / no-accounts are forwarded from find_account — reuse the
     * shared account-error messages instead of restating them here. */
+   if (rc == EMAIL_RC_PENDING_FULL)
+      return strdup(EMAIL_PENDING_FULL_ERR);
    if (rc != EMAIL_RC_OK)
       return email_rc_to_error(rc, "send draft", account, NULL);
 
@@ -824,6 +830,8 @@ static char *handle_trash(struct json_object *details, int user_id, const turn_o
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: email account is read-only. Cannot trash emails. Tell the user "
                     "to enable write access for this account in WebUI Settings -> Email.");
+   if (rc == EMAIL_RC_PENDING_FULL)
+      return strdup(EMAIL_PENDING_FULL_ERR);
    if (rc != EMAIL_RC_OK)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: failed to prepare trash action. The message_id may be invalid "

@@ -77,6 +77,14 @@ static inline turn_origin_rc_t turn_origin_check(const turn_origin_t *made,
    return TURN_ORIGIN_OK;
 }
 
+/** An origin as a pending item stores it: approval by code belongs to the
+ *  confirming call, never to what was staged. */
+static inline turn_origin_t turn_origin_stored(const turn_origin_t *origin) {
+   turn_origin_t stored = *origin;
+   stored.code_redeemed = false;
+   return stored;
+}
+
 /** Why a confirm was refused, for the log. */
 static inline const char *turn_origin_refusal(turn_origin_rc_t rc) {
    switch (rc) {
@@ -86,6 +94,21 @@ static inline const char *turn_origin_refusal(turn_origin_rc_t rc) {
          return "later than the turn right after it";
       default:
          return "from another session";
+   }
+}
+
+/** What the model should do after a refused confirm (a sentence for its
+ *  tool result). */
+static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
+   switch (rc) {
+      case TURN_ORIGIN_SAME_TURN:
+         return "only the user's reply to its preview can confirm it. Ask them, and confirm "
+                "when they say yes.";
+      case TURN_ORIGIN_NOT_NEXT:
+         return "the conversation moved on since its preview. Prepare it again and read it "
+                "back to the user.";
+      default:
+         return "it was prepared in another conversation. Prepare it again here.";
    }
 }
 

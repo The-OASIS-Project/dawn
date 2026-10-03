@@ -18,9 +18,10 @@
  *
  * Deep-research tool (DEEP_RESEARCH_DESIGN.md §7/§7a/§15 Step 7).
  *
- * The conversational surface for deep research: a confirmation-gated `start`
- * (propose-then-spawn), an ownership-validated + injection-gated `status`, and an
- * ownership-validated `cancel`.  `start` reuses the background-job substrate
+ * The conversational surface for deep research: `start` (propose) and
+ * `confirm_start` (spawn the proposed run, on the user's reply), an
+ * ownership-validated + injection-gated `status`, and an ownership-validated
+ * `cancel`.  `confirm_start` reuses the background-job substrate
  * (conv_db_create_job + job_manager caps) but spawns the research controller via
  * research_worker_spawn(), not job_worker.  Layer 3.
  */
@@ -40,7 +41,7 @@ int deep_research_tool_register(void);
 
 /**
  * @brief Spawn a research run — the shared, ordering-sensitive spawn path used by
- *        BOTH the confirmation-gated deep_research tool (after its confirm gate)
+ *        BOTH the deep_research tool's confirm_start
  *        and the headless admin benchmark verb (DEEP_RESEARCH_DESIGN.md §16.3).
  *
  * Runs the full sequence whose ORDERING carries the feature's safety invariants:

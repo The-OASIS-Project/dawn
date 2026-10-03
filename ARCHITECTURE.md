@@ -172,6 +172,9 @@ Layer 1 (Core Infrastructure)
 │                                    session_prefix.c it forms one session unit that reaches Layer 2 (see Layer 2)
 ├── include/core/turn_origin.h     - Where a pending action was made and whether a confirm may carry it out (the
 │                                    same session, the next turn); captured by session_history.c
+├── src/core/pending_slots.c/h     - What a tool staged for the user's confirm: one item per session and kind, each
+│                                    with a new id its confirm must name; never evicts another session's item.
+│                                    Callers lock (deps: turn_origin.h)
 ├── src/core/session_reaper.c/h    - Finishes destroyed sessions: session_destroy() only ends one (never waits), the
 │                                    reaper joins its compaction worker, waits for its last reference, then frees it
 ├── src/core/worker_pool.c/h       - Concurrent tool execution (deps: logging)

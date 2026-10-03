@@ -30,6 +30,7 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <sodium.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,7 @@
 #include <time.h>
 
 #include "core/crypto_store.h"
+#include "core/pending_slots.h" /* pending_slots_now: expiry on a clock that never steps back */
 #include "logging.h"
 #include "tools/calendar_db.h"
 #include "tools/email_client.h"
@@ -954,13 +956,54 @@ static void generate_draft_id(char *out, size_t out_len) {
 
 /** Expire old drafts (must hold draft_mutex) */
 static void expire_drafts_locked(void) {
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    for (int i = 0; i < EMAIL_MAX_DRAFTS; i++) {
       if (s_email.drafts[i].draft_id[0] && !s_email.drafts[i].used &&
           now - s_email.drafts[i].created_at > EMAIL_DRAFT_EXPIRY_SEC) {
          sodium_memzero(&s_email.drafts[i], sizeof(email_draft_t));
       }
    }
+}
+
+/* The slot to replace when a table of pending email items is full, or -1:
+ * the caller's own session's oldest item when it holds one, else the oldest
+ * item of a session that holds more than one.  A session's only item is never
+ * pushed out (it may be what that user is about to confirm), and a session
+ * that holds several gives one up to a session that holds none.  @p base points at items @p stride
+ * bytes apart, each with its origin at @p origin_off, its user id at @p user_off and its time at @p
+ * time_off. */
+static int pick_victim(const void *base,
+                       size_t stride,
+                       int count,
+                       size_t origin_off,
+                       size_t user_off,
+                       size_t time_off,
+                       int user_id,
+                       uint32_t session_id) {
+#define ITEM(i) ((const char *)base + (size_t)(i)*stride)
+#define SESSION(i) (((const turn_origin_t *)(ITEM(i) + origin_off))->session_id)
+#define USER(i) (*(const int *)(ITEM(i) + user_off))
+#define MADE(i) (*(const time_t *)(ITEM(i) + time_off))
+   int own = -1, shared = -1;
+   for (int i = 0; i < count; i++) {
+      if (USER(i) == user_id && SESSION(i) == session_id) {
+         if (own < 0 || MADE(i) < MADE(own))
+            own = i;
+         continue;
+      }
+      int same = 0;
+      for (int j = 0; j < count; j++) {
+         if (SESSION(j) == SESSION(i) && USER(j) == USER(i))
+            same++;
+      }
+      if (same > 1 && (shared < 0 || MADE(i) < MADE(shared)))
+         shared = i;
+   }
+#undef ITEM
+#undef SESSION
+#undef USER
+#undef MADE
+   return own >= 0 ? own : shared;
 }
 
 int email_service_create_draft(int user_id,
@@ -1020,21 +1063,21 @@ int email_service_create_draft(int user_id,
    }
 
    if (slot < 0) {
-      /* Evict oldest */
-      time_t oldest = 0;
-      for (int i = 0; i < EMAIL_MAX_DRAFTS; i++) {
-         if (oldest == 0 || s_email.drafts[i].created_at < oldest) {
-            oldest = s_email.drafts[i].created_at;
-            slot = i;
-         }
+      slot = pick_victim(s_email.drafts, sizeof(email_draft_t), EMAIL_MAX_DRAFTS,
+                         offsetof(email_draft_t, origin), offsetof(email_draft_t, user_id),
+                         offsetof(email_draft_t, created_at), user_id, origin->session_id);
+      if (slot < 0) {
+         pthread_mutex_unlock(&s_email.draft_mutex);
+         sodium_memzero(&acct, sizeof(acct));
+         return EMAIL_RC_PENDING_FULL;
       }
       sodium_memzero(&s_email.drafts[slot], sizeof(email_draft_t));
    }
 
    email_draft_t *d = &s_email.drafts[slot];
    d->user_id = user_id;
-   d->origin = *origin;
-   d->created_at = time(NULL);
+   d->origin = turn_origin_stored(origin);
+   d->created_at = pending_slots_now();
    d->used = false;
    generate_draft_id(d->draft_id, sizeof(d->draft_id));
 
@@ -1059,7 +1102,7 @@ int email_service_create_draft(int user_id,
 
 static bool is_throttled(int user_id) {
    pthread_mutex_lock(&s_email.draft_mutex);
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    bool throttled = false;
    for (int i = 0; i < s_email.throttle_count; i++) {
       if (s_email.throttle[i].user_id == user_id) {
@@ -1078,7 +1121,7 @@ static bool is_throttled(int user_id) {
 
 static void record_confirm_failure(int user_id) {
    pthread_mutex_lock(&s_email.draft_mutex);
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    for (int i = 0; i < s_email.throttle_count; i++) {
       if (s_email.throttle[i].user_id == user_id) {
          if (now - s_email.throttle[i].first_fail > EMAIL_CONFIRM_LOCKOUT_SEC) {
@@ -1245,7 +1288,7 @@ int email_service_list_folders(int user_id, const char *account_name, char *out,
  * ============================================================================= */
 
 static void expire_pending_trash_locked(void) {
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    for (int i = 0; i < EMAIL_MAX_PENDING_TRASH; i++) {
       if (s_email.pending_trash[i].pending_id[0] && !s_email.pending_trash[i].used &&
           now - s_email.pending_trash[i].created_at > EMAIL_PENDING_TRASH_EXPIRY_SEC) {
@@ -1272,15 +1315,21 @@ int email_service_create_pending_trash(int user_id,
    /* Find account — must not be read-only */
    email_account_t acct;
    if (account_name && account_name[0]) {
-      if (email_svc_find_account(user_id, account_name, &acct) != 0)
+      if (email_svc_find_account(user_id, account_name, &acct) != 0) {
+         sodium_memzero(&acct, sizeof(acct));
          return 1;
+      }
    } else {
       /* Try to find account that can access this message */
-      if (email_svc_find_account(user_id, NULL, &acct) != 0)
+      if (email_svc_find_account(user_id, NULL, &acct) != 0) {
+         sodium_memzero(&acct, sizeof(acct));
          return 1;
+      }
    }
-   if (acct.read_only)
+   if (acct.read_only) {
+      sodium_memzero(&acct, sizeof(acct));
       return EMAIL_ACCT_RC_READONLY;
+   }
 
    /* From and Subject for the confirmation: headers only, no body fetched (and
     * on IMAP the message isn't marked read). */
@@ -1320,21 +1369,22 @@ int email_service_create_pending_trash(int user_id,
    }
 
    if (slot < 0) {
-      /* Evict oldest */
-      time_t oldest = 0;
-      for (int i = 0; i < EMAIL_MAX_PENDING_TRASH; i++) {
-         if (oldest == 0 || s_email.pending_trash[i].created_at < oldest) {
-            oldest = s_email.pending_trash[i].created_at;
-            slot = i;
-         }
+      slot = pick_victim(s_email.pending_trash, sizeof(email_pending_trash_t),
+                         EMAIL_MAX_PENDING_TRASH, offsetof(email_pending_trash_t, origin),
+                         offsetof(email_pending_trash_t, user_id),
+                         offsetof(email_pending_trash_t, created_at), user_id, origin->session_id);
+      if (slot < 0) {
+         pthread_mutex_unlock(&s_email.pending_trash_mutex);
+         sodium_memzero(&acct, sizeof(acct));
+         return EMAIL_RC_PENDING_FULL;
       }
       sodium_memzero(&s_email.pending_trash[slot], sizeof(email_pending_trash_t));
    }
 
    email_pending_trash_t *pt = &s_email.pending_trash[slot];
    pt->user_id = user_id;
-   pt->origin = *origin;
-   pt->created_at = time(NULL);
+   pt->origin = turn_origin_stored(origin);
+   pt->created_at = pending_slots_now();
    pt->used = false;
    generate_draft_id(pt->pending_id, sizeof(pt->pending_id));
 
@@ -1346,6 +1396,7 @@ int email_service_create_pending_trash(int user_id,
    snprintf(pending_id_out, pending_id_len, "%s", pt->pending_id);
 
    pthread_mutex_unlock(&s_email.pending_trash_mutex);
+   sodium_memzero(&acct, sizeof(acct));
    return 0;
 }
 
