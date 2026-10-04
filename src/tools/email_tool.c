@@ -45,6 +45,7 @@
 #include "tools/oauth_client.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants
@@ -1077,6 +1078,55 @@ static bool email_action_acts(const char *action) {
    return strcmp(action, "archive") == 0;
 }
 
+/* What a call that waits for the user's reply code does (tool_metadata_t
+ * describe_call): from the draft or pending item itself, never the model's
+ * words. */
+static int email_describe_call(const char *action,
+                               const char *value,
+                               char *out,
+                               size_t out_len,
+                               int *valid_for_sec) {
+   struct json_object *details = tool_parse_details(value, false);
+   if (!details)
+      return FAILURE;
+   const int user_id = tool_get_current_user_id();
+   int rc = FAILURE;
+   /* Only this session's draft or pending trash: its confirm is refused
+    * anywhere else. */
+   turn_origin_t origin;
+   const bool live = turn_origin_capture(&origin);
+   if (strcmp(action, "confirm_send") == 0) {
+      rc = live && email_service_describe_draft(user_id, origin.session_id,
+                                                json_get_str(details, "draft_id"), out, out_len,
+                                                valid_for_sec) == EMAIL_RC_OK
+               ? SUCCESS
+               : FAILURE;
+   } else if (strcmp(action, "confirm_trash") == 0) {
+      rc = live && email_service_describe_pending_trash(user_id, origin.session_id,
+                                                        json_get_str(details, "pending_id"), out,
+                                                        out_len, valid_for_sec) == EMAIL_RC_OK
+               ? SUCCESS
+               : FAILURE;
+   } else if (strcmp(action, "archive") == 0) {
+      const char *mid = json_get_str(details, "message_id");
+      const char *account = json_get_str(details, "account");
+      if (!mid || !mid[0]) {
+         snprintf(out, out_len, "it doesn't name the email to archive");
+      } else {
+         char shown_mid[160], shown_account[160];
+         str_excerpt_line(mid, 100, shown_mid, sizeof(shown_mid));
+         str_excerpt_line(account ? account : "", 100, shown_account, sizeof(shown_account));
+         const int n = snprintf(out, out_len, "archive email %s%s%s", shown_mid,
+                                shown_account[0] ? " in " : "", shown_account);
+         rc = (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+      }
+   } else {
+      rc = TOOL_DESCRIBE_DEFAULT;
+   }
+   json_object_put(details);
+   return rc;
+}
+
 static char *email_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
 
@@ -1261,6 +1311,7 @@ static const tool_metadata_t email_metadata = {
    .name = "email",
    .action_kinds = s_email_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_email_action_kinds),
+   .describe_call = email_describe_call,
    .device_string = "email",
    .topic = "dawn",
    .aliases = { "mail", "inbox", "gmail" },

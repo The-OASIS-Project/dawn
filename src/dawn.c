@@ -2302,6 +2302,24 @@ int main(int argc, char *argv[]) {
          OLOG_WARNING("========================================");
       }
 
+      /* Without TLS, what crosses the network to a broker on another machine
+       * is readable on the way: commands, texts and the codes that approve
+       * actions asked for by text, and the broker password. */
+      if (!g_config.mqtt.tls) {
+         const char *b = g_config.mqtt.broker;
+         const bool local = strcmp(b, "localhost") == 0 ||
+                            strcmp(b, "localhost.localdomain") == 0 || strncmp(b, "127.", 4) == 0 ||
+                            strcmp(b, "::1") == 0 || strcmp(b, "[::1]") == 0 ||
+                            strcmp(b, "0.0.0.0") == 0;
+         if (!local) {
+            OLOG_WARNING(
+                "MQTT SECURITY WARNING: TLS is off and broker %s isn't localhost; if it is "
+                "another machine, commands, texts and credentials cross the network "
+                "unencrypted. Set tls = true in dawn.toml [mqtt].",
+                b);
+         }
+      }
+
       /* Configure MQTT TLS if enabled */
       if (g_config.mqtt.tls) {
          const char *ca = g_config.mqtt.tls_ca_cert[0] ? g_config.mqtt.tls_ca_cert : NULL;

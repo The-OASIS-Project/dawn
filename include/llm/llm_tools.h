@@ -520,6 +520,26 @@ bool llm_tools_executing(void);
 int llm_tools_execute(const tool_call_t *call, tool_result_t *result);
 
 /**
+ * @brief Run a call the user approved by reply code (core/tool_call_challenge.h):
+ *        through the same path as any call, decided again, once, as approved
+ *        (a call inside it is not); defined in llm_tools_reply_code.c
+ *
+ * Runs on the thread of the turn the code arrived in (its command context and
+ * turn token set), so a confirm it carries out checks that turn.
+ *
+ * @param tool    The tool's name, as stored
+ * @param args    Its arguments, as the model sent them
+ * @param binding The call as resolved when held: it runs only if it resolves
+ *                the same now (else it is refused: what was approved changed)
+ * @param result  Receives the result
+ * @return 0 on success, non-zero on error
+ */
+int llm_tools_execute_stored(const char *tool,
+                             const char *args,
+                             const char *binding,
+                             tool_result_t *result);
+
+/**
  * @brief Execute multiple tool calls with parallel optimization
  *
  * Executes tool calls with automatic parallelization for independent tools.

@@ -12,7 +12,7 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
-## 2026-10-03 — Background work and text messages read but don't act; confirms need your reply
+## 2026-10-03 — Actions by text need a reply code; background work reads but doesn't act; confirms need your reply
 
 **What changed.**
 - **A call, text or delete Friday previews is carried out only on your reply
@@ -21,7 +21,7 @@ This is not a full changelog (see git history for that) — it is the short list
   else, or from another device no longer confirms it: ask again. If Friday
   prepares a second call (or a second text, or deletion) before you answer,
   only the newest one can be confirmed, and she prepares only one of each per
-  message.
+  message. A call, text or delete preview now lasts 5 minutes, as email's does.
 - **Deep research starts the same way.** Friday proposes the run with its plan
   and cost; it starts only when your next message says yes.
 - **Background work can't make calls, send texts or delete.** A background job,
@@ -32,14 +32,24 @@ This is not a full changelog (see git history for that) — it is the short list
   send email, save a note, remember something, schedule, play music or
   render a chart refuses and reports what it would do; ask for it yourself.
   A job's follow-up in your conversation can't reach the web either.
-- **A request by text message (SMS) reads and prepares, but doesn't act.**
-  Anyone can put your number on a text, so Friday answers questions and can
-  prepare an email or call from a text, but sending, calling, searching the
-  web, playing music and the like need the app or your voice.
+- **A request by text message (SMS) acts only after you reply with a code.**
+  Anyone can put your number on a text. Friday still answers questions and
+  prepares things from a text, but sending, calling, deleting, searching the
+  web or playing music now waits: DAWN texts your number what was asked and a
+  6-digit code; reply with the code within 5 minutes to go ahead, or STOP to
+  cancel (both are read that way only while a code waits). For something
+  Friday previews first (an email, a call, a text), the code is your
+  confirmation: no separate "yes" by text. Plans of several actions can't be approved by text; ask for them one
+  at a time.
 - **An action a tool doesn't have is refused** rather than passed on to it;
   Friday is told the tool's actions and tries again.
 
-**What you need to do.** Nothing.
+- **The phone sends up to 10 texts a minute** (was 5), and confirmation
+  codes no longer count against that limit or the daily one.
+
+**What you need to do.** Nothing. If your MQTT broker runs on another
+machine, turn on TLS (`[mqtt] tls = true`): the codes cross it. DAWN now warns
+at startup when it doesn't.
 
 ---
 

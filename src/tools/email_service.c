@@ -1145,6 +1145,79 @@ static void record_confirm_failure(int user_id) {
 }
 
 
+static void expire_pending_trash_locked(void);
+
+int email_service_describe_draft(int user_id,
+                                 uint32_t session_id,
+                                 const char *draft_id,
+                                 char *out,
+                                 size_t out_len,
+                                 int *valid_for_sec) {
+   if (!draft_id || !out || out_len == 0) {
+      return EMAIL_RC_FAILURE;
+   }
+   int rc = EMAIL_RC_FAILURE;
+   pthread_mutex_lock(&s_email.draft_mutex);
+   expire_drafts_locked();
+   for (int i = 0; i < EMAIL_MAX_DRAFTS; i++) {
+      const email_draft_t *d = &s_email.drafts[i];
+      if (d->draft_id[0] && !d->used && d->user_id == user_id &&
+          d->origin.session_id == session_id && strcmp(d->draft_id, draft_id) == 0) {
+         char subject[160], body[320], name[96];
+         str_excerpt_line(d->subject, 100, subject, sizeof(subject));
+         str_excerpt_line(d->body, 200, body, sizeof(body));
+         str_excerpt_line(d->to_name, 48, name, sizeof(name));
+         /* The address first: a display name is the model's to choose. */
+         const int n = snprintf(out, out_len,
+                                "send email to %s%s%s%s from %s, subject \"%s\": "
+                                "\"%s\"",
+                                d->to_address, name[0] ? " (" : "", name, name[0] ? ")" : "",
+                                d->from_account, subject, body);
+         if (valid_for_sec) {
+            *valid_for_sec = (int)(EMAIL_DRAFT_EXPIRY_SEC - (pending_slots_now() - d->created_at));
+         }
+         rc = (n > 0 && (size_t)n < out_len) ? EMAIL_RC_OK : EMAIL_RC_FAILURE;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_email.draft_mutex);
+   return rc;
+}
+
+int email_service_describe_pending_trash(int user_id,
+                                         uint32_t session_id,
+                                         const char *pending_id,
+                                         char *out,
+                                         size_t out_len,
+                                         int *valid_for_sec) {
+   if (!pending_id || !out || out_len == 0) {
+      return EMAIL_RC_FAILURE;
+   }
+   int rc = EMAIL_RC_FAILURE;
+   pthread_mutex_lock(&s_email.pending_trash_mutex);
+   expire_pending_trash_locked();
+   for (int i = 0; i < EMAIL_MAX_PENDING_TRASH; i++) {
+      const email_pending_trash_t *t = &s_email.pending_trash[i];
+      if (t->pending_id[0] && !t->used && t->user_id == user_id &&
+          t->origin.session_id == session_id && strcmp(t->pending_id, pending_id) == 0) {
+         char subject[160], from[160];
+         str_excerpt_line(t->subject, 100, subject, sizeof(subject));
+         str_excerpt_line(t->from, 100, from, sizeof(from));
+         if (valid_for_sec) {
+            *valid_for_sec = (int)(EMAIL_PENDING_TRASH_EXPIRY_SEC -
+                                   (pending_slots_now() - t->created_at));
+         }
+         const int n = snprintf(out, out_len,
+                                "move to Trash the email from %s, subject \"%s\" (account %s)",
+                                from, subject, t->account_name);
+         rc = (n > 0 && (size_t)n < out_len) ? EMAIL_RC_OK : EMAIL_RC_FAILURE;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_email.pending_trash_mutex);
+   return rc;
+}
+
 int email_service_confirm_send(int user_id, const char *draft_id, const turn_origin_t *origin) {
    if (!draft_id || !draft_id[0])
       return EMAIL_CONFIRM_RC_NOT_FOUND;

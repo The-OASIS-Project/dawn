@@ -468,6 +468,7 @@ int messaging_engine_reset_channel(int user_id, int64_t channel_id) {
     * would still fire but on a session whose conv_id was already
     * un-stamped — extraction works either way (it copies history) but
     * the audit log makes more sense in eviction-then-clear order. */
+   tool_call_challenge_cancel(channel_id); /* what waited belonged to the old conversation */
    evict_session_slot(channel_id);
 
    int rc = clear_channel_conversation_id(channel_id);
@@ -657,6 +658,7 @@ int messaging_engine_unlink_channel_by_id(int user_id, int64_t channel_id) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
+   tool_call_challenge_cancel(channel_id); /* a code for an unlinked channel never runs */
    evict_session_slot(channel_id);
 
    /* An SMS number can change hands while unlinked (carriers recycle

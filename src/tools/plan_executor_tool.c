@@ -238,6 +238,9 @@ static const tool_metadata_t plan_executor_metadata = {
    /* Kind of action: by its steps (plan_classify_call), each step also decided
     * on its own as it runs. */
    .classify_call = plan_classify_call,
+   /* A plan from a text can't be approved by one code: its steps would each
+    * need their own.  Ask for actions one at a time. */
+   .no_reply_code = true,
    .device_string = "plan executor",
    .description = "Execute a multi-step tool plan locally. Use this when a task "
                   "requires multiple tool calls with conditional logic or data "

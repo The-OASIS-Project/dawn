@@ -47,6 +47,7 @@
 #include "core/research_allowlist.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/tool_call_challenge.h"
 #include "core/tool_call_policy.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
@@ -180,10 +181,10 @@ static __thread bool tl_defer_current;
 /**
  * @brief Notify registered callback about tool execution
  */
-static void notify_tool_execution(const char *tool_name,
-                                  const char *tool_args,
-                                  const char *result,
-                                  bool success) {
+void llm_tools_notify_execution(const char *tool_name,
+                                const char *tool_args,
+                                const char *result,
+                                bool success) {
    if (result != NULL && tl_defer_current) {
       return; /* the tool loop's batch: sent when the result is finished */
    }
@@ -1339,12 +1340,12 @@ static int run_resolved_call(const tool_call_t *call,
                              char *value_buf,
                              tool_result_t *result) {
    /* Notify callback that tool execution is starting */
-   notify_tool_execution(call->name, call->arguments, NULL, false);
+   llm_tools_notify_execution(call->name, call->arguments, NULL, false);
 
    /* Special handling for sync_wait tools (e.g., viewing) */
    if (meta->sync_wait && strcmp(meta->name, "viewing") == 0) {
       result->success = execute_viewing_sync(action, value_buf, result);
-      notify_tool_execution(call->name, call->arguments, result->result, result->success);
+      llm_tools_notify_execution(call->name, call->arguments, result->result, result->success);
       return result->success ? 0 : 1;
    }
 
@@ -1379,7 +1380,7 @@ static int run_resolved_call(const tool_call_t *call,
 
       result->skip_followup = meta->skip_followup || exec_result.skip_followup;
       result->should_respond = exec_result.should_respond;
-      notify_tool_execution(call->name, call->arguments, result->result, result->success);
+      llm_tools_notify_execution(call->name, call->arguments, result->result, result->success);
       cmd_exec_result_free(&exec_result);
       return result->success ? 0 : 1;
    }
@@ -1432,8 +1433,8 @@ static int run_resolved_call(const tool_call_t *call,
       result->skip_followup = meta->skip_followup;
       result->should_respond = (should_respond != 0);
 
-      notify_tool_execution(call->name, call->arguments, tool_result_content(result),
-                            result->success);
+      llm_tools_notify_execution(call->name, call->arguments, tool_result_content(result),
+                                 result->success);
       return 0;
    }
 
@@ -1445,7 +1446,7 @@ static int run_resolved_call(const tool_call_t *call,
       result->success = false;
       result->is_error = true;
       result->should_respond = true;
-      notify_tool_execution(call->name, call->arguments, result->result, false);
+      llm_tools_notify_execution(call->name, call->arguments, result->result, false);
       return 1;
    }
    struct mosquitto *mosq = worker_pool_get_mosq();
@@ -1471,7 +1472,7 @@ static int run_resolved_call(const tool_call_t *call,
       result->success = false;
    }
 
-   notify_tool_execution(call->name, call->arguments, result->result, result->success);
+   llm_tools_notify_execution(call->name, call->arguments, result->result, result->success);
    cmd_exec_result_free(&exec_result);
    return result->success ? 0 : 1;
 }
@@ -1484,7 +1485,11 @@ static int run_resolved_call(const tool_call_t *call,
  */
 static int llm_tools_execute_from_treg(const tool_call_t *call,
                                        const tool_metadata_t *meta,
-                                       tool_result_t *result) {
+                                       tool_result_t *result,
+                                       const char *approved_binding) {
+   /* Approved by reply code: this one call, as it was held. */
+   const bool redeemed = approved_binding != NULL;
+
    /* Refuse to execute on truncated arguments: the provider's tool-call args
     * exceeded LLM_TOOLS_ARGS_LEN and were clipped, so any field could be cut
     * mid-value (e.g. a document_manage save_text body).  Acting on partial args
@@ -1623,7 +1628,7 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
             result->is_error = true;
             result->should_respond = true;
             OLOG_WARNING("Refused tool '%s': unknown device '%s'", call->name, device_name);
-            notify_tool_execution(call->name, call->arguments, result->result, false);
+            llm_tools_notify_execution(call->name, call->arguments, result->result, false);
             return 1;
          }
          effective_device = mapped;
@@ -1638,8 +1643,31 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
     * (core/tool_call_policy.h).  The action is the tool's own spelling of the
     * one named, or its default when none. */
    tool_call_verdict_t verdict;
-   if (tool_call_policy_check(meta, effective_device, action_name, value_buf[0] ? value_buf : NULL,
-                              tool_call_policy_caller(), &verdict) != TOOL_CALL_ALLOW) {
+   const tool_call_decision_t decision = tool_call_policy_check(meta, effective_device, action_name,
+                                                                value_buf[0] ? value_buf : NULL,
+                                                                tool_call_policy_caller(), redeemed,
+                                                                &verdict);
+   if (decision == TOOL_CALL_CHALLENGE) {
+      return llm_tools_hold_for_reply_code(call, meta, &verdict, effective_device, value_buf,
+                                           result);
+   }
+   /* Approved by code: only the call the user was shown, resolved and
+    * described the same way now as when it was held. */
+   if (decision == TOOL_CALL_ALLOW && approved_binding) {
+      char binding[LLM_TOOLS_BINDING_HEX];
+      char why[160];
+      if (llm_tools_approved_binding(call, meta, &verdict, effective_device, value_buf, binding,
+                                     why, sizeof(why)) != SUCCESS) {
+         snprintf(verdict.message, sizeof(verdict.message), "Not done: %s. Ask again.",
+                  why[0] ? why : "what the user approved by code is gone");
+         verdict.refusal = "the approved call can't be described now";
+      } else if (strcmp(binding, approved_binding) != 0) {
+         snprintf(verdict.message, sizeof(verdict.message),
+                  "Not done: what the user approved by code has changed since. Ask again.");
+         verdict.refusal = "the approved call changed";
+      }
+   }
+   if (decision != TOOL_CALL_ALLOW || verdict.refusal) {
       safe_strncpy(result->result, verdict.message, LLM_TOOLS_RESULT_LEN);
       result->success = false;
       result->is_error = true;
@@ -1649,7 +1677,7 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
                    tool_action_kind_name(verdict.kind),
                    tool_call_policy_caller_name(verdict.caller),
                    verdict.refusal ? verdict.refusal : "");
-      notify_tool_execution(call->name, call->arguments, result->result, false);
+      llm_tools_notify_execution(call->name, call->arguments, result->result, false);
       return 1;
    }
    const char *action = verdict.action;
@@ -1666,7 +1694,7 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
          result->is_error = true;
          result->should_respond = true;
          OLOG_WARNING("Refused tool '%s': %s", call->name, result->result);
-         notify_tool_execution(call->name, call->arguments, result->result, false);
+         llm_tools_notify_execution(call->name, call->arguments, result->result, false);
          return 1;
       }
    }
@@ -1676,9 +1704,16 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
 
    /* The call's scope: the tool reads back the kind decided here
     * (tool_call_policy_decided); a call made inside it gets its own. */
-   const tool_call_scope_t outer = tool_call_policy_enter(kind, verdict.caller, false);
+   const tool_call_scope_t outer = tool_call_policy_enter(kind, verdict.caller, redeemed);
+   /* A new request by text: whatever an earlier message left waiting for its
+    * code gives way (its item may be the one being prepared again). */
+   const bool text_prepare = verdict.caller == TOOL_CALLER_UNVERIFIED && kind == TOOL_KIND_PREPARE;
+   const bool dropped = text_prepare && llm_tools_drop_earlier_code();
    const int rc = run_resolved_call(call, meta, effective_device, action, value_buf, result);
    tool_call_policy_leave(outer);
+   if (text_prepare) {
+      llm_tools_note_text_preview(meta, action, dropped, result);
+   }
    return rc;
 }
 
@@ -1759,7 +1794,9 @@ static void neutralize_result(const char *tool, tool_result_t *result) {
    }
 }
 
-static int execute_one(const tool_call_t *call, tool_result_t *result) {
+static int execute_one(const tool_call_t *call,
+                       tool_result_t *result,
+                       const char *approved_binding) {
    if (!call || !result) {
       return 1;
    }
@@ -1788,8 +1825,8 @@ static int execute_one(const tool_call_t *call, tool_result_t *result) {
       result->success = false;
       result->is_error = true;
       OLOG_WARNING("Refused tool '%s': its arguments carry the conversation tag", call->name);
-      notify_tool_execution(call->name, "(withheld: carried the conversation tag)", result->result,
-                            false);
+      llm_tools_notify_execution(call->name, "(withheld: carried the conversation tag)",
+                                 result->result, false);
       return 1;
    }
 
@@ -1842,12 +1879,12 @@ static int execute_one(const tool_call_t *call, tool_result_t *result) {
          result->should_respond = true;
          OLOG_WARNING("Refused tool '%s' — not enabled for %s session", call->name,
                       is_remote ? "remote" : "local");
-         notify_tool_execution(call->name, call->arguments, result->result, false);
+         llm_tools_notify_execution(call->name, call->arguments, result->result, false);
          return 1;
       }
    }
 
-   int rc = llm_tools_execute_from_treg(call, treg_meta, result);
+   int rc = llm_tools_execute_from_treg(call, treg_meta, result, approved_binding);
    /* Backstop: every from_treg path sets `success` explicitly, so folding `!success` in here
     * retroactively covers ALL of them (structural failures — bad args, invalid JSON, encode
     * overflow, command-exec failure) with one line. The direct-callback site sets `is_error`
@@ -1857,11 +1894,15 @@ static int execute_one(const tool_call_t *call, tool_result_t *result) {
    return rc;
 }
 
-int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
+/* A call (approved by reply code when @p approved_binding is given), its
+ * result neutralized unless the tool loop finishes it later. */
+static int execute_and_finish(const tool_call_t *call,
+                              tool_result_t *result,
+                              const char *approved_binding) {
    const bool outer = tl_defer_current;
    tl_defer_current = tl_defer_request;
    tl_defer_request = false;
-   const int rc = execute_one(call, result);
+   const int rc = execute_one(call, result, approved_binding);
    /* A result is text from anywhere (a page, a message, a document, an MCP
     * server, the call's own name in an error): what imitates DAWN's framing
     * or carries a tag is defused, on every path.  A batch's result is
@@ -1873,6 +1914,16 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    }
    tl_defer_current = outer;
    return rc;
+}
+
+int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
+   return execute_and_finish(call, result, NULL);
+}
+
+int llm_tools_execute_approved(const tool_call_t *call,
+                               tool_result_t *result,
+                               const char *binding) {
+   return execute_and_finish(call, result, binding ? binding : "");
 }
 
 /* The loop's own call: finished later (llm_tools_finish_result). */
@@ -1937,10 +1988,10 @@ void llm_tools_finish_result(const tool_call_t *call, tool_result_t *result, con
    }
    const bool outer = tl_defer_current;
    tl_defer_current = false;
-   notify_tool_execution(call->name,
-                         call_carries_tag(call) ? "(withheld: carried the conversation tag)"
-                                                : call->arguments,
-                         tool_result_content(result), result->success);
+   llm_tools_notify_execution(call->name,
+                              call_carries_tag(call) ? "(withheld: carried the conversation tag)"
+                                                     : call->arguments,
+                              tool_result_content(result), result->success);
    tl_defer_current = outer;
 }
 

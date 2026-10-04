@@ -527,8 +527,31 @@ dawn_add_unit_test(test_turn_origin
 dawn_add_unit_test(test_tool_call_policy
    SOURCES test_tool_call_policy.c test_tool_registry_stub.c
            ${SRC_ROOT}/src/core/tool_call_policy.c
+           ${SRC_ROOT}/src/core/tool_call_challenge.c
+           ${SRC_ROOT}/src/core/reply_code.c
+           ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/tools/tool_registry.c
-   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${SODIUM_LIBRARIES}
+   DEFINES ENABLE_MULTI_CLIENT
+   LABEL   ci)
+
+# Reply codes and the actions from a text that wait for them.
+dawn_add_unit_test(test_tool_call_challenge
+   SOURCES test_tool_call_challenge.c
+           ${SRC_ROOT}/src/core/tool_call_challenge.c
+           ${SRC_ROOT}/src/core/reply_code.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+   LIBS    dawn_common unity pthread ${SODIUM_LIBRARIES}
+   LABEL   ci)
+
+# A call held for a reply code: its description, and the binding that covers it.
+dawn_add_unit_test(test_llm_tools_reply_code
+   SOURCES test_llm_tools_reply_code.c
+           ${SRC_ROOT}/src/llm/llm_tools_reply_code.c
+           ${SRC_ROOT}/src/core/tool_call_challenge.c
+           ${SRC_ROOT}/src/core/reply_code.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${SODIUM_LIBRARIES}
    DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
 
@@ -936,6 +959,9 @@ dawn_add_unit_test(test_messaging_channels_db
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/messaging/messaging_engine_channels.c
            ${SRC_ROOT}/src/messaging/messaging_engine_link.c
+           ${SRC_ROOT}/src/core/reply_code.c
+           ${SRC_ROOT}/src/core/tool_call_challenge.c
+           ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/messaging/messaging_sender_gate.c
            ${SRC_ROOT}/src/messaging/messaging_format.c
            ${SRC_ROOT}/src/messaging/messaging_format_telegram.c
@@ -2076,6 +2102,10 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/tool_call_policy.c
+           ${SRC_ROOT}/src/core/tool_call_challenge.c
+           ${SRC_ROOT}/src/llm/llm_tools_reply_code.c
+           ${SRC_ROOT}/src/core/reply_code.c
+           ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tool_images.c
@@ -2186,6 +2216,10 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/tool_call_policy.c
+           ${SRC_ROOT}/src/core/tool_call_challenge.c
+           ${SRC_ROOT}/src/llm/llm_tools_reply_code.c
+           ${SRC_ROOT}/src/core/reply_code.c
+           ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/llm/llm_tools_filter.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tool_images.c

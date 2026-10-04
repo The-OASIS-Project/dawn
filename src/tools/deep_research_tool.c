@@ -54,6 +54,7 @@
 #include "logging.h"
 #include "tools/research_run.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* Cap on ledger questions we tally for the status digest (matches the core's
  * per-pass ceiling). */
@@ -809,9 +810,50 @@ static const tool_action_kind_entry_t s_deep_research_action_kinds[] = {
    { "confirm_start", TOOL_KIND_ACT, NULL },
 };
 
+/* What confirm_start, waiting for the user's reply code, would start
+ * (tool_metadata_t describe_call): the proposal its token names, in this
+ * session.  Other actions take the default description. */
+static int deep_research_describe_call(const char *action,
+                                       const char *value,
+                                       char *out,
+                                       size_t out_len,
+                                       int *valid_for_sec) {
+   if (strcmp(action, "confirm_start") != 0) {
+      return TOOL_DESCRIBE_DEFAULT; /* cancel: its run id, as given */
+   }
+   struct json_object *details = tool_parse_details(value, false);
+   struct json_object *jtok = NULL;
+   const char *token = (details && json_object_object_get_ex(details, "pending_token", &jtok) &&
+                        jtok)
+                           ? json_object_get_string(jtok)
+                           : NULL;
+   turn_origin_t origin;
+   int n = -1;
+   if (token && turn_origin_capture(&origin)) {
+      pthread_mutex_lock(&s_dr_confirm.mutex);
+      pending_slot_t *slot = NULL;
+      if (pending_slots_find(&s_dr_slots, &origin, tool_get_current_user_id(), DR_PENDING_PROPOSAL,
+                             0, pending_slots_now(), &slot) == PENDING_FOUND) {
+         const dr_pending_t *p = (const dr_pending_t *)slot;
+         const size_t len = strlen(p->token);
+         if (strlen(token) == len && sodium_memcmp(p->token, token, len) == 0) {
+            char brief[320];
+            str_excerpt_line(p->brief, 200, brief, sizeof(brief));
+            n = snprintf(out, out_len, "start a deep-research run on \"%s\"%s%s", brief,
+                         p->deliver_to[0] ? ", reporting to " : "", p->deliver_to);
+            *valid_for_sec = (int)(DR_PENDING_TTL_SEC - (pending_slots_now() - slot->made_at));
+         }
+      }
+      pthread_mutex_unlock(&s_dr_confirm.mutex);
+   }
+   json_object_put(details);
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
 static const tool_metadata_t deep_research_metadata = {
    .name = "deep_research",
    .action_kinds = s_deep_research_action_kinds,
+   .describe_call = deep_research_describe_call,
    .action_kind_count = TOOL_KIND_COUNT(s_deep_research_action_kinds),
    .device_string = "deep_research",
    .topic = "dawn",

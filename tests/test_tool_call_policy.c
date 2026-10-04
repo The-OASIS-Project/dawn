@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "core/session_manager.h"
+#include "core/tool_call_challenge.h"
 #include "core/tool_call_policy.h"
 #include "unity.h"
 
@@ -44,6 +45,11 @@ bool session_turn_is_background(session_t *session) {
    return session == s_ctx && s_background_turn;
 }
 
+static uint64_t s_turn_token = 7;
+uint64_t session_turn_token(void) {
+   return s_turn_token;
+}
+
 bool session_call_code_redeemed(void) {
    return s_code_redeemed;
 }
@@ -61,6 +67,7 @@ void setUp(void) {
    s_user_turn = true;
    s_background_turn = false;
    s_code_redeemed = false;
+   s_turn_token = 7;
 }
 
 void tearDown(void) {
@@ -100,7 +107,7 @@ static void test_allows(void) {
       bool read, fetch, state, device, prepare, act;
    } rows[] = {
       { TOOL_CALLER_USER, true, true, true, true, true, true },
-      { TOOL_CALLER_UNVERIFIED, true, false, true, false, true, false },
+      { TOOL_CALLER_UNVERIFIED, true, false, true, false, true, false }, /* the rest wait */
       { TOOL_CALLER_JOB, true, true, true, false, false, false },
       { TOOL_CALLER_UNATTENDED, true, false, true, false, false, false },
    };
@@ -189,42 +196,122 @@ static const tool_metadata_t s_tool = {
  * the kind against the caller. */
 static void test_check(void) {
    tool_call_verdict_t v;
-   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW,
-                         tool_call_policy_check(&s_tool, NULL, "LIST", NULL, TOOL_CALLER_JOB, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&s_tool, NULL, "LIST", NULL,
+                                                                 TOOL_CALLER_JOB, false, &v));
    TEST_ASSERT_EQUAL_STRING("list", v.action);
    TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, v.kind);
 
-   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
-                         tool_call_policy_check(&s_tool, NULL, "send", NULL, TOOL_CALLER_JOB, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(&s_tool, NULL, "send", NULL,
+                                                                  TOOL_CALLER_JOB, false, &v));
    TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, v.kind);
    TEST_ASSERT_TRUE(strlen(v.message) > 0);
-   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW,
-                         tool_call_policy_check(&s_tool, NULL, "send", NULL, TOOL_CALLER_USER, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&s_tool, NULL, "send", NULL,
+                                                                 TOOL_CALLER_USER, false, &v));
 
    TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(&s_tool, NULL, "rewind", NULL,
-                                                                  TOOL_CALLER_USER, &v));
+                                                                  TOOL_CALLER_USER, false, &v));
    TEST_ASSERT_NOT_NULL(strstr(v.message, "list, send"));
 
-   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(&s_tool, NULL, "", NULL,
-                                                                  TOOL_CALLER_UNATTENDED, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
+                         tool_call_policy_check(&s_tool, NULL, "", NULL, TOOL_CALLER_UNATTENDED,
+                                                false, &v));
    TEST_ASSERT_EQUAL_STRING("get", v.action); /* the callback default; not listed, so it acts */
 
-   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
-                         tool_call_policy_check(NULL, NULL, "list", NULL, TOOL_CALLER_USER, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(NULL, NULL, "list", NULL,
+                                                                  TOOL_CALLER_USER, false, &v));
 
    /* Inside an unattended call (an MQTT message's plan), a step its own
     * session would let a job fetch is refused. */
    static const tool_action_kind_entry_t fetch_kinds[] = { { "list", TOOL_KIND_FETCH, NULL } };
    tool_metadata_t fetcher = s_tool;
    fetcher.action_kinds = fetch_kinds;
-   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW,
-                         tool_call_policy_check(&fetcher, NULL, "list", NULL, TOOL_CALLER_JOB, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&fetcher, NULL, "list", NULL,
+                                                                 TOOL_CALLER_JOB, false, &v));
    const tool_call_scope_t outer = tool_call_policy_enter(TOOL_KIND_READ, TOOL_CALLER_UNATTENDED,
                                                           false);
-   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
-                         tool_call_policy_check(&fetcher, NULL, "list", NULL, TOOL_CALLER_JOB, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(&fetcher, NULL, "list", NULL,
+                                                                  TOOL_CALLER_JOB, false, &v));
    TEST_ASSERT_EQUAL_INT(TOOL_CALLER_UNATTENDED, v.caller);
    tool_call_policy_leave(outer);
+}
+
+/* A text's action waits for its code; approved by code it runs; a tool that
+ * can't take one, and a call inside another, are refused instead. */
+static void test_challenge(void) {
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_CHALLENGE,
+                         tool_call_policy_decide(TOOL_CALLER_UNVERIFIED, TOOL_KIND_ACT));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_CHALLENGE,
+                         tool_call_policy_decide(TOOL_CALLER_UNVERIFIED, TOOL_KIND_FETCH));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_CHALLENGE,
+                         tool_call_policy_decide(TOOL_CALLER_UNVERIFIED, TOOL_KIND_DEVICE));
+
+   tool_call_verdict_t v;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_CHALLENGE,
+                         tool_call_policy_check(&s_tool, NULL, "send", NULL, TOOL_CALLER_UNVERIFIED,
+                                                false, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&s_tool, NULL, "send", NULL,
+                                                                 TOOL_CALLER_UNVERIFIED, true, &v));
+   /* Approval by code never reaches a job's or an unattended call. */
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(&s_tool, NULL, "send", NULL,
+                                                                  TOOL_CALLER_JOB, true, &v));
+
+   tool_metadata_t plan = s_tool;
+   plan.no_reply_code = true;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
+                         tool_call_policy_check(&plan, NULL, "send", NULL, TOOL_CALLER_UNVERIFIED,
+                                                false, &v));
+   TEST_ASSERT_TRUE(strlen(v.message) > 0);
+
+   const tool_call_scope_t outer = tool_call_policy_enter(TOOL_KIND_READ, TOOL_CALLER_UNVERIFIED,
+                                                          false);
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
+                         tool_call_policy_check(&s_tool, NULL, "send", NULL, TOOL_CALLER_UNVERIFIED,
+                                                true, &v));
+   tool_call_policy_leave(outer);
+}
+
+/* Once this turn holds an action for its code, the turn can't prepare more
+ * (the code's text describes things as they were); a later turn, other
+ * channels, and the approved call itself are unaffected. */
+static void test_prepare_while_code_waits(void) {
+   static const tool_action_kind_entry_t prep_kinds[] = { { "list", TOOL_KIND_PREPARE, NULL } };
+   tool_metadata_t preparer = s_tool;
+   preparer.action_kinds = prep_kinds;
+   s_session.messaging_identity.channel_id = 42;
+   tool_call_challenge_clear_all();
+
+   tool_call_verdict_t v;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW,
+                         tool_call_policy_check(&preparer, NULL, "list", NULL,
+                                                TOOL_CALLER_UNVERIFIED, false, &v));
+   const tool_challenge_t c = {
+      .channel_id = 42,
+      .user_id = 1,
+      .turn_token = 7,
+      .tool = "widget",
+      .args = "{}",
+      .binding = "b",
+      .description = "widget send",
+   };
+   TEST_ASSERT_EQUAL_INT(TOOL_CHALLENGE_OK, tool_call_challenge_create(&c));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
+                         tool_call_policy_check(&preparer, NULL, "list", NULL,
+                                                TOOL_CALLER_UNVERIFIED, false, &v));
+   TEST_ASSERT_NOT_NULL(strstr(v.message, "reply code"));
+   s_turn_token = 8; /* the user's next message */
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW,
+                         tool_call_policy_check(&preparer, NULL, "list", NULL,
+                                                TOOL_CALLER_UNVERIFIED, false, &v));
+   s_turn_token = 7;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&preparer, NULL, "list", NULL,
+                                                                 TOOL_CALLER_USER, false, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&preparer, NULL, "list", NULL,
+                                                                 TOOL_CALLER_UNVERIFIED, true, &v));
+   s_session.messaging_identity.channel_id = 43;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW,
+                         tool_call_policy_check(&preparer, NULL, "list", NULL,
+                                                TOOL_CALLER_UNVERIFIED, false, &v));
+   tool_call_challenge_clear_all();
 }
 
 int main(void) {
@@ -233,5 +320,7 @@ int main(void) {
    RUN_TEST(test_allows);
    RUN_TEST(test_scope);
    RUN_TEST(test_check);
+   RUN_TEST(test_challenge);
+   RUN_TEST(test_prepare_while_code_waits);
    return UNITY_END();
 }

@@ -521,7 +521,7 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
    const char *run_action = actionName;
    if (dev_callback && session) {
       if (tool_call_policy_check(tool_registry_find(deviceName), deviceName, actionName, value,
-                                 TOOL_CALLER_UNATTENDED, &verdict) != TOOL_CALL_ALLOW) {
+                                 TOOL_CALLER_UNATTENDED, false, &verdict) != TOOL_CALL_ALLOW) {
          OLOG_WARNING("MQTT: refused '%s' action '%s' (%s) naming session %u", deviceName,
                       actionName ? actionName : "", tool_action_kind_name(verdict.kind),
                       session->session_id);
@@ -584,7 +584,13 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
    }
 #endif
 
-   OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
+   /* The phone's topics carry texts (a reply code received or sent, a /link
+    * code, anyone's message): the phone service logs what may be kept. */
+   if (strncmp(msg->topic, "echo/", 5) == 0) {
+      OLOG_INFO("%s %d (%d bytes)", msg->topic, msg->qos, msg->payloadlen);
+   } else {
+      OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
+   }
 
    /* Check for component status messages (hud/status) */
    if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0) {

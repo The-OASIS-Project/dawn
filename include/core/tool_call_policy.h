@@ -21,16 +21,17 @@
  *
  *   caller                           read  fetch  state  device  prepare  act
  *   user, live turn                  yes   yes    yes    yes     yes      yes
- *   unverified sender (SMS)          yes   no     yes    no      yes      no
+ *   unverified sender (SMS)          yes   code   yes    code    yes      code
  *   background job, research worker  yes   yes    yes    no      no       no
  *   unattended: a background turn,
  *   no running turn, no context      yes   no     yes    no      no       no
  *
  * A text can claim any number as its sender, so an unverified turn reads and
- * prepares but doesn't act.  Background work reads, looks things up and
- * reports; it never acts: what it read may be steering it.  An unattended
- * turn (a job's follow-up, in whatever session it runs) and a call with no
- * running turn (an MQTT message naming a session) can't reach out either.
+ * prepares, and an action waits for the user's reply code (DAWN texts the
+ * user what was asked and a code; core/tool_call_challenge.h).  Background work reads, looks things
+ * up and reports; it never acts: what it read may be steering it.  An unattended turn (a job's
+ * follow-up, in whatever session it runs) and a call with no running turn (an MQTT message naming a
+ * session) can't reach out either.
  *
  * Decided once per call, at the one place every model tool call runs
  * (llm_tools_execute_from_treg; plan steps come back through it), and at the
@@ -66,7 +67,7 @@ typedef enum {
 typedef enum {
    TOOL_CALL_ALLOW = 0,
    TOOL_CALL_REFUSE,
-   TOOL_CALL_CHALLENGE, /* allowed once the user proves it's them (a reply code) */
+   TOOL_CALL_CHALLENGE, /* waits for the user's reply code (core/tool_call_challenge.h) */
 } tool_call_decision_t;
 
 #ifdef ENABLE_MULTI_CLIENT
@@ -106,15 +107,19 @@ typedef struct {
  * @param caller       Who calls (tool_call_policy_caller(), or what an entry
  *                     knows it is); inside another call's scope, that call's
  *                     caller must allow it too
+ * @param redeemed     The user approved this call by reply code: a CHALLENGE
+ *                     is allowed (for a top-level call only)
  * @param out          Receives the effective action, kind and any message
  * @return ALLOW (run out->action), REFUSE (out->message says why), or
- *         CHALLENGE
+ *         CHALLENGE (hold it for the user's reply code; never for a call
+ *         inside another or a tool with no_reply_code, which are refused)
  */
 tool_call_decision_t tool_call_policy_check(const tool_metadata_t *meta,
                                             const char *device,
                                             const char *named_action,
                                             const char *value,
                                             tool_caller_t caller,
+                                            bool redeemed,
                                             tool_call_verdict_t *out);
 
 /**

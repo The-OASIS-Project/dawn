@@ -44,7 +44,8 @@ typedef enum {
    MESSAGE_KIND_NONE = 0,     /**< an ordinary message */
    MESSAGE_KIND_TURN_CONTEXT, /**< a turn's context: time, retrievals, notices (user) */
    MESSAGE_KIND_MEMORY,       /**< what DAWN knows about the user (user) */
-   MESSAGE_KIND_ENVELOPE,     /**< input DAWN wrote for a turn it started itself (user) */
+   MESSAGE_KIND_ENVELOPE,     /**< input DAWN wrote for a turn: one it started itself, or what a
+                                   reply code approved (user) */
    MESSAGE_KIND_LOOP_NOTE,    /**< a tool-loop hint or closing message (user/assistant) */
    MESSAGE_KIND_DIRECTIVE,    /**< the surface's standing directions (system) */
    MESSAGE_KIND_INSTRUCTION,  /**< a change to the frozen instructions (system) */

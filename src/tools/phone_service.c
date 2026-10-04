@@ -67,7 +67,7 @@ static phone_service_config_t s_config = {
    .user_id = 1,
    .sms_retention_days = 90,
    .call_log_retention_days = 90,
-   .rate_limit_sms_per_min = 5,
+   .rate_limit_sms_per_min = 10,
    .rate_limit_calls_per_min = 3,
    .rate_limit_sms_per_day = 30,
 };
@@ -831,11 +831,17 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       char safe_body[1024];
 #ifdef ENABLE_WEBUI
       const bool is_link = messaging_link_command_args(body) != NULL;
+      /* A reply code approving an action on the sender's channel: not kept
+       * either.  (Codes from other numbers, a bank's, are ordinary texts.) */
+      const bool is_code = messaging_engine_sms_is_code_reply(sender, body);
 #else
       const bool is_link = false; /* no messaging channels in this build: no link codes */
+      const bool is_code = false;
 #endif
       snprintf(safe_body, sizeof(safe_body), "[Incoming SMS - external content] %s",
-               is_link ? "/link (code not kept)" : body);
+               is_link   ? "/link (code not kept)"
+               : is_code ? "[confirmation code]"
+                         : body);
 
       int64_t sms_id = 0;
       phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender, contact_name, safe_body,
@@ -1255,21 +1261,41 @@ int phone_service_hangup(int user_id, char *result_buf, size_t buf_size) {
    return 0;
 }
 
+static int send_sms(int user_id,
+                    const char *name_or_number,
+                    const char *body,
+                    const char *log_body,
+                    bool counted,
+                    char *result_buf,
+                    size_t buf_size);
+
 int phone_service_send_sms(int user_id,
                            const char *name_or_number,
                            const char *body,
                            char *result_buf,
                            size_t buf_size) {
-   return phone_service_send_sms_logged_as(user_id, name_or_number, body, body, result_buf,
-                                           buf_size);
+   return send_sms(user_id, name_or_number, body, body, true, result_buf, buf_size);
 }
 
-int phone_service_send_sms_logged_as(int user_id,
-                                     const char *name_or_number,
-                                     const char *body,
-                                     const char *log_body,
-                                     char *result_buf,
-                                     size_t buf_size) {
+int phone_service_send_code_sms(int user_id,
+                                const char *name_or_number,
+                                const char *body,
+                                const char *log_body,
+                                char *result_buf,
+                                size_t buf_size) {
+   return send_sms(user_id, name_or_number, body, log_body, false, result_buf, buf_size);
+}
+
+/* Send @p body, logging @p log_body.  A @p counted text is held to the per-minute
+ * and per-day limits; a code text isn't (its senders cap codes themselves, and a
+ * dropped code would strand what waits for it). */
+static int send_sms(int user_id,
+                    const char *name_or_number,
+                    const char *body,
+                    const char *log_body,
+                    bool counted,
+                    char *result_buf,
+                    size_t buf_size) {
    pthread_mutex_lock(&s_state_mutex);
    bool online = s_echo_online;
    pthread_mutex_unlock(&s_state_mutex);
@@ -1280,11 +1306,11 @@ int phone_service_send_sms_logged_as(int user_id,
 
    /* Rate limit — per minute and per day (under mutex for thread safety) */
    pthread_mutex_lock(&s_state_mutex);
-   bool min_ok = check_rate_limit(s_sms_timestamps, &s_sms_count, s_config.rate_limit_sms_per_min,
-                                  60, 64);
-   bool day_ok = min_ok ? check_rate_limit(s_sms_day_timestamps, &s_sms_day_count,
-                                           s_config.rate_limit_sms_per_day, 86400, 64)
-                        : false;
+   bool min_ok = !counted || check_rate_limit(s_sms_timestamps, &s_sms_count,
+                                              s_config.rate_limit_sms_per_min, 60, 64);
+   bool day_ok = !counted ||
+                 (min_ok && check_rate_limit(s_sms_day_timestamps, &s_sms_day_count,
+                                             s_config.rate_limit_sms_per_day, 86400, 64));
    pthread_mutex_unlock(&s_state_mutex);
 
    if (!min_ok) {

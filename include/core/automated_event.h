@@ -29,4 +29,9 @@
  * something the user said, so memory extraction skips it. */
 #define AUTOMATED_EVENT_JOB_UPDATE "[automated background-job update]"
 
+/* First line of the envelope that reports an action the user approved by
+ * reply code (an SMS request: messaging_engine_codes.c).  The action's
+ * description and result are data, not something the user said. */
+#define AUTOMATED_EVENT_CODE_APPROVED "[automated update: an action approved by reply code]"
+
 #endif /* AUTOMATED_EVENT_H */

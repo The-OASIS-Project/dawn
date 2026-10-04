@@ -318,6 +318,14 @@ int messaging_engine_resend_verify_code(int user_id, int64_t channel_id);
 const char *messaging_link_command_args(const char *body);
 
 /**
+ * @brief Whether an incoming SMS is a reply code for an action waiting on
+ *        the sender's linked channel (the engine will take it as one): the
+ *        phone service keeps it out of the SMS log.  A code from any other
+ *        number (a bank's, an app's) is an ordinary text.
+ */
+bool messaging_engine_sms_is_code_reply(const char *sender_e164, const char *body);
+
+/**
  * @brief Reset a channel by its display_name for a specific user.
  *
  * Clears messaging_channels.conversation_id back to NULL so the next

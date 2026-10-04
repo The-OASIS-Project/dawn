@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/tool_call_policy.h"
 #include "llm/llm_tools.h"
 
 #ifdef __cplusplus
@@ -49,6 +50,64 @@ extern pthread_mutex_t llm_tools_mutex;
 /** Rises when the table's tools change (llm_tools_init / cleanup): with
  *  tool_registry_generation(), what cached schema work is keyed on. */
 extern _Atomic uint64_t llm_tools_generation;
+
+/** Tell the registered observer (the WebUI) a tool call started or ended. */
+void llm_tools_notify_execution(const char *tool_name,
+                                const char *tool_args,
+                                const char *result,
+                                bool success);
+
+/* --- Reply codes (llm_tools_reply_code.c): a call from a text that waits for
+ *     the user's code, and running it once approved --- */
+
+/** A call as resolved, for checking an approved call is the one held. */
+#define LLM_TOOLS_BINDING_HEX 65
+
+/**
+ * @brief The fingerprint of a resolved call as the user is shown it: tool,
+ *        device, action, kind, value and DAWN's description of it
+ *
+ * Made when the call is held and again when the approved call runs; they
+ * must match.
+ * @param why Receives the tool's reason when it can't be described (may be
+ *            NULL; "" when it gave none)
+ * @return SUCCESS, or FAILURE when it can't be described now (out is "")
+ */
+/** A new request by text prepares something: an action an earlier message
+ *  held for its code is dropped.  @return whether one was. */
+bool llm_tools_drop_earlier_code(void);
+
+/**
+ * @brief After a request by text prepared something: its confirm is asked for
+ *        now, not after a "yes" (it waits for the user's reply code, and the
+ *        code text is the confirmation); and the model is told when an
+ *        earlier waiting request was dropped for it.  Appended to @p result.
+ */
+void llm_tools_note_text_preview(const tool_metadata_t *meta,
+                                 const char *action,
+                                 bool dropped_earlier,
+                                 tool_result_t *result);
+
+int llm_tools_approved_binding(const tool_call_t *call,
+                               const tool_metadata_t *meta,
+                               const tool_call_verdict_t *verdict,
+                               const char *device,
+                               const char *value_buf,
+                               char out[LLM_TOOLS_BINDING_HEX],
+                               char *why,
+                               size_t why_len);
+
+/** Hold a call the gate decided waits for the user's reply code; fills
+ *  @p result with what the model is told.  @return 1 (it didn't run). */
+int llm_tools_hold_for_reply_code(const tool_call_t *call,
+                                  const tool_metadata_t *meta,
+                                  const tool_call_verdict_t *verdict,
+                                  const char *device,
+                                  const char *value_buf,
+                                  tool_result_t *result);
+
+/** Run @p call approved by code: allowed only if it resolves to @p binding. */
+int llm_tools_execute_approved(const tool_call_t *call, tool_result_t *result, const char *binding);
 
 /** Free what llm_tools_filter.c caches (llm_tools_cleanup). */
 void llm_tools_filter_release(void);

@@ -29,6 +29,7 @@
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED
 
 #include <pthread.h>
+#include <sodium.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -44,8 +45,10 @@
 #include "core/job_dispatch.h"
 #include "core/memory_filter.h"
 #include "core/rate_limiter.h"
+#include "core/reply_code.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
+#include "core/tool_call_challenge.h"
 #include "core/wake_word.h"
 #include "dawn_error.h"
 #include "llm/llm_turn_blocks.h"
@@ -238,12 +241,13 @@ int engine_inbound_dispatch(const messaging_inbound_t *msg) {
                           &ref);
 }
 
-static int enqueue_inbound(const char *provider,
-                           const char *provider_address,
-                           const char *sender_display,
-                           const char *body,
-                           int64_t timestamp,
-                           const channel_ref_t *ref) {
+static int enqueue_inbound_as(const char *provider,
+                              const char *provider_address,
+                              const char *sender_display,
+                              const char *body,
+                              int64_t timestamp,
+                              const channel_ref_t *ref,
+                              inbound_kind_t kind) {
    pthread_mutex_lock(&s_inbound_mutex);
    if (s_inbound_count >= MESSAGING_INBOUND_QUEUE_DEPTH) {
       pthread_mutex_unlock(&s_inbound_mutex);
@@ -264,6 +268,7 @@ static int enqueue_inbound(const char *provider,
    item->body = strdup(body);
    item->timestamp = timestamp;
    item->ref = *ref;
+   item->kind = kind;
    if (!item->body) {
       free(item);
       pthread_mutex_unlock(&s_inbound_mutex);
@@ -276,6 +281,16 @@ static int enqueue_inbound(const char *provider,
    pthread_cond_signal(&s_inbound_cond);
    pthread_mutex_unlock(&s_inbound_mutex);
    return MESSAGING_SUCCESS;
+}
+
+static int enqueue_inbound(const char *provider,
+                           const char *provider_address,
+                           const char *sender_display,
+                           const char *body,
+                           int64_t timestamp,
+                           const channel_ref_t *ref) {
+   return enqueue_inbound_as(provider, provider_address, sender_display, body, timestamp, ref,
+                             INBOUND_MESSAGE);
 }
 
 /* =============================================================================
@@ -481,11 +496,28 @@ static void process_inbound(inbound_item_t *item) {
       return;
    }
 
+   /* STOP drops the channel's waiting action (messaging_engine_codes.c). */
+   if (item->kind == INBOUND_STOP) {
+      engine_cancel_reply_code(item);
+      return;
+   }
+
    session_t *session = get_or_create_messaging_session(&item->ref, item->provider,
                                                         item->provider_address, conv_id);
    if (!session) {
       OLOG_ERROR("messaging: failed to acquire session for %s:%s", item->provider,
                  item->provider_address);
+      if (item->kind == INBOUND_CODE) {
+         /* The code stays good: it wasn't taken. */
+         engine_reply_busy(item);
+      }
+      return;
+   }
+   /* A reply code is taken once there's a session to run it in, before any
+    * turn: a wrong one opens none. */
+   tool_redeemed_t taken = { 0 };
+   if (item->kind == INBOUND_CODE && !engine_take_reply_code(item, &taken)) {
+      session_release(session);
       return;
    }
 
@@ -593,7 +625,33 @@ static void process_inbound(inbound_item_t *item) {
    }
    /* The turn belongs to the channel's conversation (see session_turn_begin). */
    session_turn_begin(session, conv_id, item->ref.user_id);
-   char *response = core_text_input_dispatch(session, item->body, &opts);
+   /* A reply code runs the action it approves in this turn; the model is
+    * handed the outcome (DAWN's words, saved as request context), not the
+    * code, and only reports it: no tools in that turn. */
+   char *envelope = NULL;
+   if (item->kind == INBOUND_CODE) {
+      envelope = engine_run_reply_code(item, session, &taken);
+      if (!envelope) {
+         session_set_tool_persist_hook(session, NULL, NULL);
+         if (ka_started) {
+            atomic_store(&ka_ctx->stop, true);
+            pthread_join(ka_thread, NULL);
+            free(ka_ctx);
+         }
+         session_turn_end(session);
+         session_release(session);
+         return;
+      }
+      opts.question_kind = MESSAGE_KIND_ENVELOPE;
+   }
+   if (envelope) {
+      session_set_tools_suppressed(session, true);
+   }
+   char *response = core_text_input_dispatch(session, envelope ? envelope : item->body, &opts);
+   if (envelope) {
+      session_set_tools_suppressed(session, false);
+   }
+   free(envelope);
    /* The reply's own blocks.  The turn stays open until the reply is saved, so
     * the row, its id and any truncation land on this turn's history. */
    struct json_object *reply_blocks = session_take_reply_blocks(session);
@@ -615,6 +673,7 @@ static void process_inbound(inbound_item_t *item) {
       session_turn_end(session);
       session_release(session);
       free(response);
+      engine_send_reply_code(item);
       return;
    }
 
@@ -775,9 +834,13 @@ static void process_inbound(inbound_item_t *item) {
    if (do_deferred_reset) {
       OLOG_INFO("messaging: processing deferred self-reset for channel %lld (%s:%s)",
                 (long long)item->ref.channel_id, item->provider, item->provider_address);
+      engine_drop_reply_code_for_reset(item); /* it belonged to the old conversation */
       evict_session_slot(item->ref.channel_id);
       clear_channel_conversation_id(item->ref.channel_id);
    }
+
+   /* The code for an action this turn held, after the reply that explains it. */
+   engine_send_reply_code(item);
 }
 
 void *messaging_worker_thread(void *arg) {
@@ -801,6 +864,9 @@ void *messaging_worker_thread(void *arg) {
 
       if (item) {
          process_inbound(item);
+         if (item->kind == INBOUND_CODE && item->body) {
+            sodium_memzero(item->body, strlen(item->body)); /* a reply code */
+         }
          free(item->body);
          free(item);
       }
@@ -813,6 +879,17 @@ void *messaging_worker_thread(void *arg) {
 /* =============================================================================
  * SMS inbound entry point (called by phone_service.c on echo/events)
  * ============================================================================= */
+
+bool messaging_engine_sms_is_code_reply(const char *sender_e164, const char *body) {
+   if (!sender_e164 || !reply_code_in_text(body, NULL) || !atomic_load(&s_initialized)) {
+      return false;
+   }
+   channel_ref_t ref;
+   return resolve_inbound_channel("sms", sender_e164, NULL, MESSAGING_CHAT_ONE_TO_ONE, &ref) ==
+              CHANNEL_RESOLVED &&
+          (tool_call_challenge_live(ref.channel_id) ||
+           tool_call_challenge_ended_recently(ref.channel_id));
+}
 
 int messaging_engine_handle_sms_inbound(const char *sender_e164,
                                         const char *sender_display,
@@ -914,6 +991,35 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
       }
       OLOG_INFO("messaging: /new from sms:%s (rc=%d)", sender_e164, rc);
       return MESSAGING_SUCCESS;
+   }
+
+   /* While an action waits for its code: a reply with the code, or STOP /
+    * CANCEL, answers the text DAWN sent about it (messaging_engine_codes.c),
+    * with no wake word.  A code shortly after one stopped working gets DAWN's
+    * answer too (expired, replaced, ...).  Otherwise such a text is an
+    * ordinary one. */
+   if (!tool_call_challenge_live(ref.channel_id) &&
+       tool_call_challenge_ended_recently(ref.channel_id)) {
+      char reply_code[REPLY_CODE_LEN];
+      if (reply_code_in_text(body, reply_code)) {
+         const int rc = enqueue_inbound_as("sms", sender_e164, sender_display ? sender_display : "",
+                                           reply_code, timestamp, &ref, INBOUND_CODE);
+         sodium_memzero(reply_code, sizeof(reply_code));
+         return rc;
+      }
+   }
+   if (tool_call_challenge_live(ref.channel_id)) {
+      char reply_code[REPLY_CODE_LEN];
+      if (reply_code_in_text(body, reply_code)) {
+         const int rc = enqueue_inbound_as("sms", sender_e164, sender_display ? sender_display : "",
+                                           reply_code, timestamp, &ref, INBOUND_CODE);
+         sodium_memzero(reply_code, sizeof(reply_code));
+         return rc;
+      }
+      if (engine_is_stop_word(body)) {
+         return enqueue_inbound_as("sms", sender_e164, sender_display ? sender_display : "", body,
+                                   timestamp, &ref, INBOUND_STOP);
+      }
    }
 
    /* Active-conversation window — skip the wake-word gate when this

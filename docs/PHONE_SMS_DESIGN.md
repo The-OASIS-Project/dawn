@@ -487,7 +487,7 @@ confirm_outbound = true
 pcm_port = "/dev/ttyUSB4"          # modem USB audio port (raw 16k S16LE PCM); no USB sound card
 sms_retention_days = 90
 call_log_retention_days = 90
-rate_limit_sms_per_min = 5
+rate_limit_sms_per_min = 10
 rate_limit_calls_per_min = 3
 rate_limit_sms_per_day = 30
 ```

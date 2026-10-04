@@ -93,6 +93,8 @@ static void sms_shutdown_impl(void) {
     * down. */
 }
 
+/* Send @p text: an ordinary text when @p log_text is NULL, else a code text
+ * logged as @p log_text. */
 static int sms_send_text_logged_as(int user_id,
                                    const char *provider_address,
                                    const char *address_json,
@@ -130,8 +132,10 @@ static int sms_send_text_logged_as(int user_id,
       effective_user_id = SMS_FALLBACK_USER_ID;
    }
    char result[256] = { 0 };
-   int rc = phone_service_send_sms_logged_as(effective_user_id, e164, text, log_text, result,
-                                             sizeof(result));
+   int rc = log_text
+                ? phone_service_send_code_sms(effective_user_id, e164, text, log_text, result,
+                                              sizeof(result))
+                : phone_service_send_sms(effective_user_id, e164, text, result, sizeof(result));
    if (rc != SUCCESS) {
       OLOG_WARNING("sms: phone_service_send_sms failed (rc=%d): %s", rc, result);
       return FAILURE;
@@ -143,11 +147,12 @@ static int sms_send_text(int user_id,
                          const char *provider_address,
                          const char *address_json,
                          const char *text) {
-   return sms_send_text_logged_as(user_id, provider_address, address_json, text, text);
+   return sms_send_text_logged_as(user_id, provider_address, address_json, text, NULL);
 }
 
-/* Texts whose content must not be kept: the user's SMS log (readable through
- * the phone tool) gets `log_text` instead. */
+/* Code texts (link and reply codes): their content isn't kept (the user's SMS
+ * log, readable through the phone tool, gets `log_text`), and they aren't held
+ * to the SMS rate limits (phone_service_send_code_sms). */
 static int sms_send_text_unlogged(int user_id,
                                   const char *provider_address,
                                   const char *address_json,

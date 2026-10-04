@@ -99,6 +99,10 @@ void *session_get_command_context(void) {
 void session_set_command_context(void *session) {
    (void)session;
 }
+int session_effective_user_id(void *session) {
+   (void)session;
+   return 1;
+}
 uint64_t session_turn_token(void) {
    return 0;
 }

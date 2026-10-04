@@ -154,6 +154,35 @@ the messaging engine is running.
    [messaging.sms]
    active_window_sec = 600   # 0 disables (every SMS then needs a wake word); range 0-86400
    ```
+5. **Actions by text need a reply code.** Anyone can put your number on a
+   text, so a text can read things (your calendar, email, weather) and
+   prepare them (an email draft, a call preview), but anything that acts —
+   sending, calling, deleting, searching the web, playing music — waits for
+   you. DAWN texts your number what was asked and a 6-digit code:
+
+   > Code 482193: reply with it within 5 minutes ONLY if you sent this request:
+   > "send email to Bob <bob@example.com> from you@example.com, subject "Lunch":
+   > Can we move it to 1?"
+   > Reply STOP to cancel.
+
+   For something Friday previews first (an email, a call), the code is your
+   confirmation: there's no separate "yes" step by text, and asking again
+   for the same thing while its code waits doesn't send another code. To
+   change it, just say what to change: the new version replaces the one
+   waiting, and the old code stops working.
+
+   Reply with the code to go ahead, or STOP to drop it; neither needs the wake
+   word, and while a code waits, a text that starts with six digits or says
+   STOP is read as the answer. A forger can put your number on a text but can't
+   read what DAWN texts back. One action waits at a time: a newer request
+   replaces the older one (its code stops working). Three wrong codes drop the
+   action. A code you reply with doesn't count against any limit; a number can
+   have at most 10 unused codes an hour and 30 a day (expired, replaced or
+   stopped), which is what bounds a forger. `/new` also drops a waiting action.
+   Codes and code replies aren't kept in DAWN's SMS log. A
+   plan of several actions can't be approved by one code: ask for them one at
+   a time. (Telegram, Slack and Discord vouch for who sent each message, so
+   they need no code.)
 
 ---
 

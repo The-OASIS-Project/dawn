@@ -44,6 +44,7 @@
 
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
+#include "core/tool_call_challenge.h"
 #include "messaging/messaging_engine.h"
 
 struct json_object;
@@ -83,6 +84,13 @@ typedef struct {
  * (schema v101) is defined over exactly these rows. */
 #define MESSAGING_LIVE_SQL "is_enabled = 1 AND verified_at IS NOT NULL"
 
+/* What an inbound message is to the engine. */
+typedef enum {
+   INBOUND_MESSAGE = 0, /* something said: an LLM turn */
+   INBOUND_CODE,        /* a reply code while one waits (core/reply_code.h): body is the code */
+   INBOUND_STOP,        /* STOP / CANCEL while a code waits: drops the waiting action */
+} inbound_kind_t;
+
 typedef struct {
    char provider[16];
    char provider_address[128];
@@ -90,6 +98,7 @@ typedef struct {
    char *body; /* heap-allocated */
    int64_t timestamp;
    channel_ref_t ref; /* resolved at enqueue time */
+   inbound_kind_t kind;
 } inbound_item_t;
 
 typedef struct {
@@ -262,6 +271,43 @@ void build_address_json_for(const char *provider,
                             const char *sender_address,
                             char *buf,
                             size_t buf_size);
+
+/* codes (messaging_engine_codes.c): an action from a text waits for the
+ * user's reply code (core/tool_call_challenge.h) */
+struct session;
+/** Whether a text is STOP or CANCEL (alone, any case). */
+bool engine_is_stop_word(const char *body);
+/**
+ * @brief A reply code, checked once its session exists and before any turn:
+ *        on the right one, the waiting action is handed over to run in the
+ *        turn about to begin
+ * @return true with @p out filled; false when the user was answered by text
+ *         instead (a wrong code only once per action)
+ */
+bool engine_take_reply_code(const inbound_item_t *item, tool_redeemed_t *out);
+/** A code that couldn't be taken yet (no session): the user is asked to
+ *  send it again; it stays good. */
+void engine_reply_busy(const inbound_item_t *item);
+/**
+ * @brief Run an action taken by engine_take_reply_code in the turn begun on
+ *        @p session, and word the envelope that tells the model its outcome
+ * @return The envelope (malloc'd); NULL on allocation failure, the user then
+ *         told the outcome by text
+ */
+char *engine_run_reply_code(const inbound_item_t *item,
+                            struct session *session,
+                            tool_redeemed_t *taken);
+/** STOP: drop the channel's waiting action, telling the user.  A STOP that
+ *  finds nothing (a repeat that queued behind the first) gets no reply.
+ *  @return whether one was dropped. */
+bool engine_cancel_reply_code(const inbound_item_t *item);
+/** A conversation reset by its own turn: drop what waits for a code, telling
+ *  the user (the turn may have promised one). */
+void engine_drop_reply_code_for_reset(const inbound_item_t *item);
+/** After a turn (its reply sent): text the user the code for an action it
+ *  held on the item's channel, if any, or that it expired before it could
+ *  be. */
+void engine_send_reply_code(const inbound_item_t *item);
 
 /* link (async send + link-code claim) */
 void engine_send_async(const messaging_driver_t *drv,

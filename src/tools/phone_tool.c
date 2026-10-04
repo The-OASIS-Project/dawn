@@ -33,6 +33,7 @@
 #include <time.h>
 
 #include "core/pending_slots.h"
+#include "core/tool_call_challenge.h"
 #include "core/tool_call_policy.h"
 #include "core/turn_origin.h"
 #include "logging.h"
@@ -42,6 +43,7 @@
 #include "tools/phone_service.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants
@@ -166,8 +168,8 @@ static bool check_delete_rate_limit(int user_id) {
  * come from the session that staged it, in the user's next turn
  * (turn_origin_check).  The TTL bounds the replay window if the user walks
  * away after the preview. */
-#define PHONE_TOOL_PENDING_TTL_SEC 120
-#define PHONE_PENDING_MAX 32 /* 4 kinds for each of 8 sessions */
+#define PHONE_TOOL_PENDING_TTL_SEC 300 /* as long as a reply code, when one confirms it */
+#define PHONE_PENDING_MAX 32           /* 4 kinds for each of 8 sessions */
 
 enum {
    PHONE_PENDING_CALL = 1,
@@ -1374,7 +1376,7 @@ static const treg_param_t phone_params[] = {
            "sms_log {count?} (default 10; rows show [id=N] for delete_sms),\n"
            "delete_sms {id?, number?, older_than_days?} (exactly one; returns preview — "
            "call confirm_delete_sms on the NEXT user turn after they agree),\n"
-           "confirm_delete_sms {pending_id} (expires 120s after preview),\n"
+           "confirm_delete_sms {pending_id} (expires 5 minutes after preview),\n"
            "delete_call {id?, older_than_days?} (exactly one; returns preview),\n"
            "confirm_delete_call {pending_id},\n"
            "status {}.\n"
@@ -1414,11 +1416,154 @@ static tool_action_kind_t phone_classify_call(const char *device,
    return listed;
 }
 
+/* A staged item, described from the item itself (the slot the confirm names). */
+static int describe_pending(struct json_object *details,
+                            int kind,
+                            char *out,
+                            size_t out_len,
+                            int *valid_for_sec) {
+   turn_origin_t origin;
+   if (!turn_origin_capture(&origin)) {
+      return FAILURE;
+   }
+   const int user_id = tool_get_current_user_id();
+   int n = -1;
+   pthread_mutex_lock(&s_phone_tool_mutex);
+   pending_slot_t *slot = NULL;
+   if (pending_slots_find(&s_pending_slots, &origin, user_id, kind, pending_id_arg(details),
+                          pending_slots_now(), &slot) == PENDING_FOUND &&
+       pending_id_arg(details) != 0) {
+      const phone_pending_t *p = (const phone_pending_t *)slot;
+      char text[320];
+      if (valid_for_sec) {
+         *valid_for_sec = (int)(PHONE_TOOL_PENDING_TTL_SEC - (pending_slots_now() - slot->made_at));
+      }
+      char date[32];
+      switch (kind) {
+         case PHONE_PENDING_CALL:
+            n = snprintf(out, out_len, "call %s", p->number);
+            break;
+         case PHONE_PENDING_SMS:
+            str_excerpt_line(p->body, 200, text, sizeof(text));
+            n = snprintf(out, out_len, "text %s: \"%s\"", p->number, text);
+            break;
+         default: {
+            const char *what = kind == PHONE_PENDING_DELETE_SMS ? "text message" : "call";
+            if (p->id >= 0) {
+               n = snprintf(out, out_len, "delete %s record #%lld", what, (long long)p->id);
+            } else if (p->number[0]) {
+               n = snprintf(out, out_len, "delete %d %s records with %s", p->preview_count, what,
+                            p->number);
+            } else {
+               format_short_date(p->cutoff, date, sizeof(date));
+               n = snprintf(out, out_len, "delete %d %s records from before %s", p->preview_count,
+                            what, date);
+            }
+            break;
+         }
+      }
+   }
+   pthread_mutex_unlock(&s_phone_tool_mutex);
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
+/* What a call that waits for the user's reply code does (tool_metadata_t
+ * describe_call): a confirm from the item it carries out; a call or text
+ * that goes at once (confirm_outbound off) from its target and body. */
+static int phone_describe_call(const char *action,
+                               const char *value,
+                               char *out,
+                               size_t out_len,
+                               int *valid_for_sec) {
+   struct json_object *details = value && value[0] ? json_tokener_parse(value) : NULL;
+   int rc = FAILURE;
+   int n = -1;
+   bool handled = true;
+   char text[320];
+   if (strcmp(action, "confirm_call") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_CALL, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "confirm_sms") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_SMS, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "confirm_delete_sms") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_DELETE_SMS, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "confirm_delete_call") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_DELETE_CALL, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "answer") == 0 || strcmp(action, "hang_up") == 0) {
+      /* The call it acts on, so a code can't answer or end another one. */
+      phone_call_notif_status_t status;
+      char number[64] = "";
+      char name[128] = "";
+      int64_t call_id = 0;
+      if (phone_service_get_call_snapshot(&status, number, sizeof(number), name, sizeof(name),
+                                          &call_id, NULL) &&
+          (strcmp(action, "hang_up") == 0 || status == PHONE_CALL_NOTIF_RINGING)) {
+         /* A ring doesn't last: the code goes with it. */
+         if (strcmp(action, "answer") == 0) {
+            *valid_for_sec = TOOL_CALL_CHALLENGE_MIN_SEC;
+         }
+         n = snprintf(out, out_len, "%s the call %s %s%s%s%s (#%lld)",
+                      strcmp(action, "answer") == 0 ? "answer" : "hang up",
+                      strcmp(action, "answer") == 0 ? "from" : "with", name[0] ? name : "",
+                      name[0] ? " (" : "", number[0] ? number : "an unknown number",
+                      name[0] ? ")" : "", (long long)call_id);
+      } else if (strcmp(action, "hang_up") == 0 &&
+                 phone_service_get_state() == PHONE_STATE_DIALING) {
+         n = snprintf(out, out_len, "hang up the call being dialed");
+      } else {
+         snprintf(out, out_len, "there's no %s call",
+                  strcmp(action, "answer") == 0 ? "ringing" : "current");
+      }
+   } else if ((strcmp(action, "call") == 0 || strcmp(action, "send_sms") == 0) && details) {
+      /* Going at once (confirm_outbound off): the number the target resolves
+       * to, as the handler will dial or text it.  An ambiguous name can't be
+       * approved. */
+      const char *target = json_get_str(details, "target");
+      phone_resolve_t rez;
+      memset(&rez, 0, sizeof(rez));
+      if (target && target[0]) {
+         phone_contacts_resolve(tool_get_current_user_id(), target, &rez);
+      }
+      if (target && target[0] &&
+          (rez.kind == PHONE_RESOLVE_NUMBER || rez.kind == PHONE_RESOLVE_UNIQUE)) {
+         char who[160];
+         snprintf(who, sizeof(who), "%s%s%s%s", rez.name[0] ? rez.name : "",
+                  rez.name[0] ? " (" : "", rez.number, rez.name[0] ? ")" : "");
+         if (strcmp(action, "call") == 0) {
+            n = snprintf(out, out_len, "call %s", who);
+         } else {
+            str_excerpt_line(json_get_str(details, "body"), 200, text, sizeof(text));
+            n = snprintf(out, out_len, "text %s: \"%s\"", who, text);
+         }
+      } else {
+         /* What the voice path says too: which contacts it could be, or that
+          * none is. */
+         if (target && target[0]) {
+            phone_contacts_format_disambiguation(target, &rez, out, out_len);
+         } else {
+            snprintf(out, out_len, "it doesn't say who to %s",
+                     strcmp(action, "call") == 0 ? "call" : "text");
+         }
+      }
+   } else {
+      handled = false;
+   }
+   if (n >= 0) {
+      rc = ((size_t)n < out_len) ? SUCCESS : FAILURE;
+   } else if (!handled) {
+      rc = TOOL_DESCRIBE_DEFAULT;
+   }
+   if (details) {
+      json_object_put(details);
+   }
+   return rc;
+}
+
 static const tool_metadata_t phone_metadata = {
    .name = "phone",
    .action_kinds = s_phone_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_phone_action_kinds),
    .classify_call = phone_classify_call,
+   .describe_call = phone_describe_call,
    .device_string = "phone",
    .topic = "dawn",
    .aliases = { "telephone", "call", "sms", "text" },
@@ -1434,7 +1579,7 @@ static const tool_metadata_t phone_metadata = {
        "Use 'call_log' or 'sms_log' to view recent history. "
        "Use 'delete_sms' or 'delete_call' to remove records — these return a preview. "
        "Call confirm_delete_sms/confirm_delete_call on the next turn if the user agrees. "
-       "Pending state expires after 120 seconds. "
+       "Pending state expires after 5 minutes. "
        "To delete multiple messages from one sender, use delete_sms with 'number' "
        "(e.g. {number: '+14045550142'}) — it's one call that deletes them all. "
        "Do NOT loop over individual ids; do NOT wrap deletes in execute_plan — "

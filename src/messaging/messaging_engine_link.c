@@ -46,6 +46,7 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
+#include "core/reply_code.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "messaging/messaging_engine.h"
@@ -463,6 +464,7 @@ void link_attempt_log(const char *provider,
  * forged /link nor resends can buy unlimited guesses or text a number (or
  * spend the daemon's SMS budget) at will. */
 #define MESSAGING_VERIFY_CODE_LEN 6
+_Static_assert(MESSAGING_VERIFY_CODE_LEN == REPLY_CODE_DIGITS, "a link code is a reply code");
 #define MESSAGING_VERIFY_TTL_SECONDS (10 * 60)
 /* Tries per channel per day, across every code sent in that day: resending
  * doesn't buy more guesses. */
@@ -470,27 +472,7 @@ void link_attempt_log(const char *provider,
 #define MESSAGING_VERIFY_WINDOW_SECONDS (24 * 60 * 60)
 #define MESSAGING_VERIFY_SENDS_PER_NUMBER 3 /* across every account linking it */
 #define MESSAGING_VERIFY_SENDS_PER_USER 5
-#define MESSAGING_VERIFY_HASH_HEX (crypto_generichash_BYTES * 2 + 1)
-
-/* The stored digest is keyed with a secret made at start-up, so a database
- * copy doesn't give the code away (6 digits are trivial to brute-force
- * unkeyed).  A restart forgets the key: a code sent before it no longer
- * matches, and the user asks for a new one. */
-static unsigned char s_verify_key[crypto_generichash_KEYBYTES];
-static pthread_once_t s_verify_key_once = PTHREAD_ONCE_INIT;
-
-static void verify_key_init(void) {
-   randombytes_buf(s_verify_key, sizeof(s_verify_key));
-}
-
-static void verify_code_digest(const char *code, char hex[MESSAGING_VERIFY_HASH_HEX]) {
-   pthread_once(&s_verify_key_once, verify_key_init);
-   unsigned char digest[crypto_generichash_BYTES];
-   crypto_generichash(digest, sizeof(digest), (const unsigned char *)code, strlen(code),
-                      s_verify_key, sizeof(s_verify_key));
-   sodium_bin2hex(hex, MESSAGING_VERIFY_HASH_HEX, digest, sizeof(digest));
-   sodium_memzero(digest, sizeof(digest));
-}
+#define MESSAGING_VERIFY_HASH_HEX REPLY_CODE_DIGEST_HEX /* keyed: core/reply_code.h */
 
 /* Read the single link-code token after "/link " (whitespace-trimmed,
  * uppercased).  @return its length. */
@@ -795,9 +777,9 @@ static int issue_verify_code_locked(int user_id,
    }
 
    char code[MESSAGING_VERIFY_CODE_LEN + 1];
-   snprintf(code, sizeof(code), "%06u", (unsigned)randombytes_uniform(1000000));
+   reply_code_new(code);
    char hash_hex[MESSAGING_VERIFY_HASH_HEX];
-   verify_code_digest(code, hash_hex);
+   reply_code_digest(code, hash_hex);
 
    int rc = MESSAGING_FAILURE;
    if (sqlite3_prepare_v2(s_db.db,
@@ -1154,7 +1136,7 @@ int messaging_engine_verify_channel(int user_id, int64_t channel_id, const char 
 
    char want[MESSAGING_VERIFY_HASH_HEX] = { 0 };
    char got[MESSAGING_VERIFY_HASH_HEX];
-   verify_code_digest(digits, got);
+   reply_code_digest(digits, got);
    sodium_memzero(digits, sizeof(digits));
 
    char provider[16] = { 0 };
@@ -1214,7 +1196,7 @@ int messaging_engine_verify_channel(int user_id, int64_t channel_id, const char 
    }
 
    if (counted) {
-      if (strlen(want) != strlen(got) || sodium_memcmp(want, got, strlen(got)) != 0) {
+      if (!reply_code_digest_equal(want, got)) {
          rc = MESSAGING_BAD_CODE;
       } else if (sqlite3_prepare_v2(s_db.db,
                                     "UPDATE messaging_channels SET verified_at = ?1, "

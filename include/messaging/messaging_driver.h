@@ -172,9 +172,13 @@ typedef struct messaging_driver_s {
                     const char *text);
 
    /**
-    * OPTIONAL — send a text whose content must not be kept (a verification
-    * code).  A driver that records what it sends records `log_text` instead.
-    * Drivers that keep no copy may leave this NULL; send_text is used.
+    * OPTIONAL — send a code text (a link or reply code), whose content must
+    * not be kept.  A driver that records what it sends records `log_text`
+    * instead.  It must not be dropped by the driver's own send limits (its
+    * callers cap codes themselves): a dropped code strands what waits for it.
+    * Drivers that keep no copy may leave this NULL; send_text is used for a
+    * link code.  A reply code is sent only through this hook (it fails closed
+    * without it): a driver whose senders it can't verify must provide it.
     */
    int (*send_text_unlogged)(int user_id,
                              const char *provider_address,

@@ -190,6 +190,7 @@ typedef struct {
    char provider[16];        // "slack" / "telegram" / "discord" / "sms"
    char channel_name[65];    // current display_name (up to 64 bytes + NUL), refreshed per turn
    bool sender_unverified;   // the provider can't vouch for who sent (SMS): set at creation
+   int64_t channel_id;       // the messaging_channels row: set at creation, never changes
    int64_t conversation_id;  // forever-conversation row backing this channel (0 = none).
                              // Lets switch_llm persist a per-conversation LLM change to the
                              // conversations.llm_* columns, since session_t doesn't otherwise

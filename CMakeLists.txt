@@ -584,6 +584,8 @@ set(DAWN_SOURCES
     src/core/utterance_dedup.c
     src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
     src/core/tool_call_policy.c       # who may make a tool call (sessions only with multi-client)
+    src/core/tool_call_challenge.c    # actions from a text waiting for the user's reply code
+    src/core/reply_code.c             # codes texted to a number and texted back
 
     # ASR subsystem
     src/asr/asr_interface.c
@@ -607,6 +609,7 @@ set(DAWN_SOURCES
     src/llm/llm_streaming.c
     src/llm/llm_command_parser.c
     src/llm/llm_tools.c
+    src/llm/llm_tools_reply_code.c
     src/llm/llm_tools_filter.c
     src/llm/llm_tools_results.c
     src/llm/llm_tool_images.c
@@ -829,6 +832,7 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_engine_read.c
         src/messaging/messaging_engine_link.c
         src/messaging/messaging_engine_inbound.c
+        src/messaging/messaging_engine_codes.c
         src/messaging/messaging_telegram.c
         src/messaging/messaging_telegram_parse.c
         src/messaging/messaging_sender_gate.c

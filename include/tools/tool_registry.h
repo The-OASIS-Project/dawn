@@ -47,8 +47,9 @@ extern "C" {
  * Constants
  * ============================================================================= */
 
-#define TOOL_MAX_REGISTERED 64 /* Max tools in registry */
-#define TOOL_NAME_MAX 64       /* Max length of tool name */
+#define TOOL_MAX_REGISTERED 64  /* Max tools in registry */
+#define TOOL_NAME_MAX 64        /* Max length of tool name */
+#define TOOL_DESCRIBE_DEFAULT 2 /* describe_call: this action takes the default description */
 #define TOOL_DESC_MAX                                                            \
    2048                   /* Max length of an MCP-sourced tool/param description \
                            * (wrapped + sanitized at ingest in                   \
@@ -476,6 +477,33 @@ typedef struct {
    const tool_action_kind_entry_t *action_kinds;
    int action_kind_count;
    tool_action_kind_t default_kind;
+   /** A call of this tool can't be approved by reply code (a plan: its
+    *  steps would each need their own): a call that would need one is refused. */
+   bool no_reply_code;
+   /** Optional: what a call does, in DAWN's words, for the text that asks the
+    *  user for its reply code (NULL = the tool, its action and its declared
+    *  parameters).  Names what the call acts on as it will resolve it (the
+    *  item, call, recipient or number), with addresses and accounts in full;
+    *  what it writes or sends, its start at least.  Gets the effective action
+    *  and the packed value; runs on the turn's thread (its user and session).
+    *  Sets *valid_for_sec when what it confirms expires sooner than a code
+    *  would (the code then expires with it).
+    *
+    *  The description is part of what the code approves: it is made again
+    *  when the approved call runs, and a call whose description changed is
+    *  refused.  So it must depend only on what the call will act on, and what
+    *  a confirm carries out must not change under the id it names.
+    *
+    *  @return SUCCESS; FAILURE when it can't say, or what it says doesn't
+    *          fit @p out (the call is refused; a reason written to @p out is
+    *          given to the model); or
+    *          TOOL_DESCRIBE_DEFAULT for an action it leaves to the default
+    *          description. */
+   int (*describe_call)(const char *action,
+                        const char *value,
+                        char *out,
+                        size_t out_len,
+                        int *valid_for_sec);
    /** Optional: a call's kind when it depends on more than its action, or
     *  on configuration (NULL = the table's).  Gets the resolved device, the
     *  effective action, the packed value (NULL when empty) and the kind the

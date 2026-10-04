@@ -50,6 +50,7 @@
 #include "tools/document_manage.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Config — TOOL_CAP_DANGEROUS tools must supply a config struct + parser, and
@@ -80,7 +81,7 @@ static void doc_manage_parse_config(toml_table_t *table, void *config) {
  * ============================================================================= */
 
 #define DOCMGMT_MAX_PENDING 16
-#define DOCMGMT_PENDING_EXPIRY_SEC 120
+#define DOCMGMT_PENDING_EXPIRY_SEC 300 /* as long as a reply code, when one confirms it */
 /* Upper bound on the save_text overwrite sweep — how many same-named duplicate
  * documents we'll delete before re-indexing.  A backstop against a delete that
  * keeps reporting success without removing the row; in practice 1-2. */
@@ -232,6 +233,120 @@ static char *take_pending(const turn_origin_t *origin,
    }
 }
 
+static int resolve_owned_doc(int user_id, const char *label, int64_t id, document_t *out);
+
+/* The note or document a write acts on, named as execution resolves it (an
+ * id first, else the exact label): "the note 'X' (#42)", and whether a save
+ * replaces one.  Refused (with why in @p out) when nothing resolves. */
+static int describe_write_target(int user_id,
+                                 const char *action,
+                                 const char *label,
+                                 int64_t id,
+                                 char *out,
+                                 size_t out_len) {
+   int n;
+   if (strcmp(action, "save_note") == 0 || strcmp(action, "save_text") == 0) {
+      if (!label[0]) {
+         snprintf(out, out_len, "it doesn't name the note or document to save");
+         return FAILURE;
+      }
+      /* As do_save_note / do_save_text decide: a save over the user's own
+       * item of that name (a note; a document that isn't one) replaces it. */
+      const bool note = strcmp(action, "save_note") == 0;
+      document_t existing;
+      const bool overwrite = document_db_find_by_label_exact(user_id, label, note, &existing) ==
+                                 SUCCESS &&
+                             existing.user_id == user_id &&
+                             (note || strcmp(existing.filetype, "note") != 0);
+      n = snprintf(out, out_len, "%s %s '%s'", overwrite ? "overwrite the" : "save a new",
+                   note ? "note" : "document", label);
+      return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+   }
+   /* The item it acts on, shown by its own name: an id wins over a label, as
+    * in execution. */
+   document_t doc;
+   if (resolve_owned_doc(user_id, label, id, &doc) == SUCCESS) {
+      const bool is_note = strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1;
+      /* recover on a live item undoes its last change (do_recover). */
+      n = snprintf(out, out_len, "%s the %s '%s' (#%lld)",
+                   strcmp(action, "recover") == 0 ? "undo the last change to" : action,
+                   is_note ? "note" : "document", doc.filename, (long long)doc.id);
+   } else if (strcmp(action, "recover") == 0 && label[0]) {
+      n = snprintf(out, out_len, "recover the deleted note or document '%s'", label);
+   } else {
+      snprintf(out, out_len, "no note or document of the user's matches it");
+      return FAILURE;
+   }
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
+/* What a call that waits for the user's reply code does (tool_metadata_t
+ * describe_call): a confirm_delete from the deletion it carries out; a write
+ * with the item it acts on and what it writes (its text, the change, the new
+ * name). */
+static int doc_manage_describe_call(const char *action,
+                                    const char *value,
+                                    char *out,
+                                    size_t out_len,
+                                    int *valid_for_sec) {
+   const int user_id = tool_get_current_user_id();
+   int n = -1;
+   if (strcmp(action, "confirm_delete") == 0) {
+      char id_str[16] = "";
+      long long id = 0;
+      if (tool_param_extract_custom(value, "pending_id", id_str, sizeof(id_str)) && id_str[0]) {
+         id = strtoll(id_str, NULL, 10);
+      }
+      turn_origin_t origin;
+      if (id <= 0 || id > UINT32_MAX || !turn_origin_capture(&origin)) {
+         return FAILURE;
+      }
+      pthread_mutex_lock(&s_pending_mutex);
+      pending_slot_t *slot = NULL;
+      if (pending_slots_find(&s_pending_slots, &origin, user_id, DOCMGMT_PENDING_DELETE,
+                             (uint32_t)id, pending_slots_now(), &slot) == PENDING_FOUND) {
+         const docmgmt_pending_t *p = (const docmgmt_pending_t *)slot;
+         n = snprintf(out, out_len, "delete the %s '%s' (#%lld)", p->is_note ? "note" : "document",
+                      p->label, (long long)p->doc_id);
+         *valid_for_sec = (int)(DOCMGMT_PENDING_EXPIRY_SEC - (pending_slots_now() - slot->made_at));
+      }
+      pthread_mutex_unlock(&s_pending_mutex);
+   } else {
+      char label[DOC_FILENAME_MAX] = "";
+      tool_param_extract_base(value, label, sizeof(label));
+      char id_str[24] = "";
+      int64_t id = 0;
+      if (tool_param_extract_custom(value, "id", id_str, sizeof(id_str)) && id_str[0]) {
+         id = (int64_t)strtoll(id_str, NULL, 10);
+      }
+      char target[DOC_FILENAME_MAX + 128];
+      if (describe_write_target(user_id, action, label, id, target, sizeof(target)) != SUCCESS) {
+         snprintf(out, out_len, "%s", target);
+         return FAILURE;
+      }
+      /* What it writes: the one field its action reads (a decoy in another
+       * field never shows). */
+      const char *field_name = strcmp(action, "edit") == 0      ? "change"
+                               : strcmp(action, "rename") == 0  ? "new_name"
+                               : strcmp(action, "recover") == 0 ? NULL
+                                                                : "text";
+      char what[320] = "";
+      if (field_name) {
+         char *field = malloc(LLM_TOOLS_ARGS_LEN);
+         if (!field) {
+            return FAILURE;
+         }
+         if (tool_param_extract_custom(value, field_name, field, LLM_TOOLS_ARGS_LEN) && field[0]) {
+            str_excerpt_line(field, 200, what, sizeof(what));
+         }
+         free(field);
+      }
+      n = snprintf(out, out_len, "%s%s%s%s", target, what[0] ? ": \"" : "", what,
+                   what[0] ? "\"" : "");
+   }
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
 /* =============================================================================
  * Tool metadata
  * ============================================================================= */
@@ -339,6 +454,7 @@ static const tool_action_kind_entry_t s_doc_manage_action_kinds[] = {
 
 static const tool_metadata_t doc_manage_metadata = {
    .name = "document_manage",
+   .describe_call = doc_manage_describe_call,
    .action_kinds = s_doc_manage_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_doc_manage_action_kinds),
    .device_string = "document manager",
@@ -861,7 +977,7 @@ static char *do_confirm_delete(int user_id, const turn_origin_t *origin, const c
    const bool is_note = pending.is_note;
 
    /* Re-validate ownership at confirm time: the staged doc could have been
-    * deleted and its rowid reused by a DIFFERENT doc in the up-to-120s window
+    * deleted and its rowid reused by a DIFFERENT doc in the up-to-5-minute window
     * (documents.id is not AUTOINCREMENT).  Confirm we still own this exact id
     * before deleting (TOCTOU / CWE-367 guard). */
    document_t doc;

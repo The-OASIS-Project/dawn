@@ -324,6 +324,34 @@ int email_service_create_draft(int user_id,
 int email_service_confirm_send(int user_id, const char *draft_id, const turn_origin_t *origin);
 
 /**
+ * @brief What confirming a draft sends, in one line for a text asking the
+ *        user to approve it: the recipient's address, the account, the
+ *        subject and the start of the body; @p valid_for_sec receives how
+ *        long the draft has left (may be NULL)
+ * @param session_id The session asking: only a draft made in it is described
+ *                   (its confirm is refused anywhere else)
+ * @return EMAIL_RC_OK, or EMAIL_RC_FAILURE when the session has no such draft
+ */
+int email_service_describe_draft(int user_id,
+                                 uint32_t session_id,
+                                 const char *draft_id,
+                                 char *out,
+                                 size_t out_len,
+                                 int *valid_for_sec);
+
+/**
+ * @brief What confirming a pending trash moves, in one line (only one made
+ *        in @p session_id)
+ * @return EMAIL_RC_OK, or EMAIL_RC_FAILURE when the session has no such pending trash
+ */
+int email_service_describe_pending_trash(int user_id,
+                                         uint32_t session_id,
+                                         const char *pending_id,
+                                         char *out,
+                                         size_t out_len,
+                                         int *valid_for_sec);
+
+/**
  * @brief Get access summary for read-only indication.
  * @return EMAIL_ACCESS_HAS_READONLY if any read-only accounts exist,
  *         EMAIL_ACCESS_ALL_WRITABLE if all writable, EMAIL_ACCESS_RC_ERROR on error

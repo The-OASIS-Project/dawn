@@ -26,23 +26,26 @@
 #include <string.h>
 
 #include "core/session_manager.h"
+#include "core/tool_call_challenge.h"
 #include "utils/string_utils.h" /* utf8_trim_incomplete */
 
 #define A TOOL_CALL_ALLOW
 #define R TOOL_CALL_REFUSE
+#define C TOOL_CALL_CHALLENGE
 
 /* [caller][kind]: the header's table.  Kinds in tool_action_kind_t order:
  * act, read, fetch, state, device, prepare. */
 static const tool_call_decision_t s_policy[4][6] = {
    /*                          act read fetch state device prepare */
    [TOOL_CALLER_USER] = { A, A, A, A, A, A },
-   [TOOL_CALLER_UNVERIFIED] = { R, A, R, A, R, A },
+   [TOOL_CALLER_UNVERIFIED] = { C, A, C, A, C, A },
    [TOOL_CALLER_JOB] = { R, A, A, A, R, R },
    [TOOL_CALLER_UNATTENDED] = { R, A, R, A, R, R },
 };
 
 #undef A
 #undef R
+#undef C
 
 /* The call running on this thread, as decided. */
 static __thread tool_call_scope_t s_scope;
@@ -70,6 +73,20 @@ tool_caller_t tool_call_policy_caller(void) {
 }
 #endif
 
+/* Whether this turn already holds an action for its code on the calling
+ * session's channel.  (One an earlier turn held is dropped when a new request
+ * prepares something: llm_tools_drop_earlier_code.) */
+static bool channel_code_waiting(void) {
+#ifdef ENABLE_MULTI_CLIENT
+   session_t *ctx = session_get_command_context();
+   return ctx && ctx->messaging_identity.channel_id > 0 &&
+          tool_call_challenge_live_in_turn(ctx->messaging_identity.channel_id,
+                                           session_turn_token());
+#else
+   return false;
+#endif
+}
+
 const char *tool_call_policy_caller_name(tool_caller_t caller) {
    switch (caller) {
       case TOOL_CALLER_USER:
@@ -92,14 +109,19 @@ tool_call_decision_t tool_call_policy_decide(tool_caller_t caller, tool_action_k
    return s_policy[caller][kind];
 }
 
+/* How much a decision holds back: allow < wait for a code < refuse. */
+static int strictness(tool_call_decision_t d) {
+   return d == TOOL_CALL_ALLOW ? 0 : d == TOOL_CALL_CHALLENGE ? 1 : 2;
+}
+
 /* Why @p caller may not make a call of @p kind, for the model. */
 static const char *refusal_text(tool_caller_t caller, tool_action_kind_t kind) {
    switch (caller) {
       case TOOL_CALLER_UNVERIFIED:
          return "Not done: this request came by text message, and a text can claim any "
-                "sender, so from a text you can read and prepare things but not act or look "
-                "things up on the web. Tell the user, and suggest asking from the app or by "
-                "voice.";
+                "sender, so an action from a text needs the user's reply code, and this one "
+                "can't take one (a plan, or a step inside one). Ask for actions one at a "
+                "time, or from the app or by voice.";
       case TOOL_CALLER_JOB:
          return "Not done: background work can read and look things up, but not act (send, "
                 "save, change, play or start anything). Report what you would do, and the "
@@ -122,6 +144,7 @@ tool_call_decision_t tool_call_policy_check(const tool_metadata_t *meta,
                                             const char *named_action,
                                             const char *value,
                                             tool_caller_t caller,
+                                            bool redeemed,
                                             tool_call_verdict_t *out) {
    memset(out, 0, sizeof(*out));
    out->caller = caller;
@@ -153,13 +176,33 @@ tool_call_decision_t tool_call_policy_check(const tool_metadata_t *meta,
    /* Inside another call (a plan's step): no freer than that call's caller. */
    if (s_scope.active && s_scope.caller != caller) {
       const tool_call_decision_t outer = tool_call_policy_decide(s_scope.caller, out->kind);
-      if (outer > decision) {
+      if (strictness(outer) > strictness(decision)) {
          decision = outer;
          out->caller = s_scope.caller;
          caller = s_scope.caller;
       }
    }
-   if (decision != TOOL_CALL_ALLOW) {
+   /* A text may prepare things, but not after this turn held an action for
+    * its code: the code's text describes things as they were. */
+   if (decision == TOOL_CALL_ALLOW && caller == TOOL_CALLER_UNVERIFIED &&
+       out->kind == TOOL_KIND_PREPARE && !redeemed && channel_code_waiting()) {
+      out->refusal = "an action is waiting for its code";
+      snprintf(out->message, sizeof(out->message),
+               "Not done: this message already holds an action for the user's reply code. "
+               "Prepare anything else in a later message.");
+      return TOOL_CALL_REFUSE;
+   }
+   if (decision == TOOL_CALL_CHALLENGE) {
+      if (redeemed && !s_scope.active) {
+         return TOOL_CALL_ALLOW; /* the user approved this one call by code */
+      }
+      /* A code approves one call the user is shown: never a call inside
+       * another (a plan's step), nor a tool that can't be described. */
+      if (s_scope.active || meta->no_reply_code) {
+         decision = TOOL_CALL_REFUSE;
+      }
+   }
+   if (decision == TOOL_CALL_REFUSE) {
       out->refusal = refusal_text(caller, out->kind);
       snprintf(out->message, sizeof(out->message), "%s", out->refusal);
    }
