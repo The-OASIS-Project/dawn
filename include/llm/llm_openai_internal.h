@@ -67,6 +67,16 @@ const char *llm_openai_parse_error_message(const char *response_body, long http_
  */
 bool llm_openai_model_prefers_responses_api(const char *model_name);
 
+/**
+ * @brief Add the prompt-cache routing key: the calling thread's conversation
+ *        ("dawn-conv-<id>"), else its session ("dawn-sess-<id>"), else nothing
+ *
+ * Pins a conversation's requests to one cache shard, so its long prefix stays
+ * warm across turns.  A content-neutral hint: a collision costs a miss, never
+ * another request's content.  For OpenAI and OpenRouter (which passes it on).
+ */
+void llm_openai_add_prompt_cache_key(struct json_object *root);
+
 /* ── History conversion (llm_openai_history.c) ──────────────────────────── */
 
 /**

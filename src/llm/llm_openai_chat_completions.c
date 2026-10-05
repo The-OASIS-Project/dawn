@@ -90,6 +90,16 @@ static cloud_provider_t provider_for_endpoint(const char *base_url) {
    return CLOUD_PROVIDER_OPENAI;
 }
 
+/* The prompt-cache routing key, only where it is known to be taken: OpenAI and
+ * OpenRouter (which passes it on).  A strict compatible endpoint (Gemini's, a
+ * custom one) can reject a field it doesn't know. */
+static void add_prompt_cache_key(json_object *root, const char *api_key, const char *base_url) {
+   if (api_key && base_url &&
+       (strstr(base_url, "api.openai.com") || strstr(base_url, "openrouter.ai"))) {
+      llm_openai_add_prompt_cache_key(root);
+   }
+}
+
 static bool llm_openai_is_deterministic_template_error(const char *body) {
    if (body == NULL) {
       return false;
@@ -145,6 +155,19 @@ static void openai_sse_event_handler(const char *event_type,
 
 /* ── Local LLM thinking parameters ─────────────────────────────────────── */
 
+/* chat_template_kwargs for llama.cpp.  preserve_thinking keeps a template from
+ * rendering an assistant message one way while it follows the latest question
+ * (with a <think> block) and another once a newer question comes (without):
+ * the Qwen 3.6 template does that unless asked not to, so every turn after a
+ * tool call re-processed the previous turn instead of reusing its KV cache.
+ * A template without the variable ignores it. */
+static json_object *local_template_kwargs(bool thinking) {
+   json_object *kwargs = json_object_new_object();
+   json_object_object_add(kwargs, "enable_thinking", json_object_new_boolean(thinking));
+   json_object_object_add(kwargs, "preserve_thinking", json_object_new_boolean(1));
+   return kwargs;
+}
+
 static void add_local_thinking_params(json_object *root) {
    /* The session's mode and effort, resolved for the local provider in use
     * (llama.cpp: off or a fixed budget; Ollama: think on or off).  A utility
@@ -171,9 +194,7 @@ static void add_local_thinking_params(json_object *root) {
 
       json_object_object_add(root, "thinking_forced_open", json_object_new_boolean(1));
 
-      json_object *template_kwargs = json_object_new_object();
-      json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(1));
-      json_object_object_add(root, "chat_template_kwargs", template_kwargs);
+      json_object_object_add(root, "chat_template_kwargs", local_template_kwargs(true));
 
       OLOG_INFO("Local LLM (llama.cpp): Extended thinking enabled (budget: %d tokens, "
                 "forced_open: true, chat_template_kwargs.enable_thinking: true)",
@@ -181,9 +202,7 @@ static void add_local_thinking_params(json_object *root) {
    } else {
       json_object_object_add(root, "reasoning_budget", json_object_new_int(0));
 
-      json_object *template_kwargs = json_object_new_object();
-      json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(0));
-      json_object_object_add(root, "chat_template_kwargs", template_kwargs);
+      json_object_object_add(root, "chat_template_kwargs", local_template_kwargs(false));
 
       OLOG_INFO("Local LLM (llama.cpp): Reasoning explicitly disabled (reasoning_budget: 0)");
    }
@@ -280,6 +299,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
    }
 
    json_object_object_add(root, "messages", converted_history);
+   add_prompt_cache_key(root, api_key, base_url);
 
    if (api_key == NULL) {
       json_object_object_add(root, "max_tokens", json_object_new_int(g_config.llm.max_tokens));
@@ -591,6 +611,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    }
 
    json_object_object_add(root, "messages", converted_history);
+   add_prompt_cache_key(root, api_key, base_url);
 
    if (api_key == NULL) {
       json_object_object_add(root, "max_tokens", json_object_new_int(g_config.llm.max_tokens));

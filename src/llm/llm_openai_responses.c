@@ -242,26 +242,9 @@ static struct json_object *build_responses_request(struct json_object *history,
    const bool cache_explicit_supported = (cache_major > 5) ||
                                          (cache_major == 5 && cache_minor >= 6);
 
-   /* Prompt-cache routing key. Pins same-conversation turns to the same OpenAI cache
-    * shard so the large `input` prefix (conversation history) stays warm cross-turn.
-    * Without it, live measurement shows only the static instructions+tools header
-    * caches; the dynamic conversation prefix never re-hits (see
-    * docs/RESPONSES_CACHE_REORDER_PLAN.md). Stable per conversation, falling back to
-    * per-session, then omitted when no session context is on this thread. Content-
-    * neutral hint scoped to our org — a key collision only costs a cache miss on a
-    * differing prefix, it never returns another request's content. */
-   {
-      session_t *cache_sess = session_get_command_context();
-      if (cache_sess != NULL) {
-         char cache_key[64];
-         int64_t conv = atomic_load(&cache_sess->stream_conversation_id);
-         if (conv > 0)
-            snprintf(cache_key, sizeof(cache_key), "dawn-conv-%lld", (long long)conv);
-         else
-            snprintf(cache_key, sizeof(cache_key), "dawn-sess-%u", cache_sess->session_id);
-         json_object_object_add(root, "prompt_cache_key", json_object_new_string(cache_key));
-      }
-   }
+   /* Without the routing key, live measurement showed only the static
+    * instructions+tools header caching across turns. */
+   llm_openai_add_prompt_cache_key(root);
 
    /* Prompt-cache mode (GPT-5.6+ only — see cache_explicit_supported). "implicit" keeps
     * OpenAI's automatic end-of-messages breakpoint (preserves the within-turn tool-loop

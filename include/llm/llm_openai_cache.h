@@ -34,13 +34,12 @@ extern "C" {
  * @brief Collapse the contiguous run of leading plain-string system messages
  *        into a single system message.
  *
- * DAWN emits the system prompt as TWO consecutive system messages (stable prefix
- * + volatile tail) purely as an Anthropic explicit-cache boundary marker.  The
- * real OpenAI API tolerates multiple system messages, but a strict local Jinja
- * chat template (Qwen 3.5/3.6) hard-raises "System message must be at the
- * beginning" on the second one → HTTP 500.  For providers that do NOT use the
- * Anthropic breakpoint (native OpenAI implicit caching, llama.cpp/Ollama KV
- * prefix reuse) the split is inert, so merging is safe and fixes the rejection.
+ * A conversation's request leads with one system message, its frozen prefix
+ * (per-turn context goes in front of each question), so this is normally a
+ * no-op.  It stays as a guard: a strict local Jinja chat template (Qwen 3.5/3.6)
+ * hard-raises "System message must be at the beginning" on a second leading
+ * system message → HTTP 500, while the OpenAI API and llama.cpp/Ollama prefix
+ * reuse are unaffected by the merge.
  *
  * Merges only the leading run whose messages carry plain-string content; a
  * non-string (e.g. already cache-wrapped) system message ends the run.  No-op if

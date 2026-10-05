@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
@@ -224,4 +225,19 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
    return llm_openai_cc_streaming_single_shot(conversation_history, input_text, base_url, api_key,
                                               model, chunk_callback, callback_userdata, iteration,
                                               result);
+}
+
+void llm_openai_add_prompt_cache_key(json_object *root) {
+   session_t *session = session_get_command_context();
+   if (!root || !session) {
+      return;
+   }
+   char key[64];
+   const int64_t conv = atomic_load(&session->stream_conversation_id);
+   if (conv > 0) {
+      snprintf(key, sizeof(key), "dawn-conv-%lld", (long long)conv);
+   } else {
+      snprintf(key, sizeof(key), "dawn-sess-%u", session->session_id);
+   }
+   json_object_object_add(root, "prompt_cache_key", json_object_new_string(key));
 }
