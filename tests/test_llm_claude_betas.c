@@ -31,7 +31,9 @@
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude_betas.h"
+#include "llm/llm_claude_route.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_model_family.h"
 #include "unity.h"
 
 /* ---- stubs ---- */
@@ -104,9 +106,9 @@ static const char *error_body(const char *type, const char *message) {
    return body;
 }
 
-static void test_only_first_party_gets_betas(void) {
-   const char *hosts[] = { "https://openrouter.ai/api", "https://api.anthropic.com.evil.test",
-                           "http://localhost:8080", NULL };
+static void test_other_hosts_get_no_betas(void) {
+   const char *hosts[] = { "https://openrouter.ai.evil.test/api",
+                           "https://api.anthropic.com.evil.test", "http://localhost:8080", NULL };
    for (int i = 0; hosts[i]; i++) {
       json_object *req = request_with_thinking("adaptive");
       claude_betas_t b;
@@ -118,6 +120,59 @@ static void test_only_first_party_gets_betas(void) {
       TEST_ASSERT_EQUAL_STRING("", header_of(&b));
       json_object_put(req);
    }
+}
+
+/* OpenRouter's Messages endpoint passes the binding controls through, but sends
+ * no diagnostics back. */
+static void test_openrouter_gets_binding_only(void) {
+   json_object *req = request_with_thinking("adaptive");
+   claude_betas_t b;
+   claude_betas_add(req, "https://openrouter.ai/api", &b);
+   TEST_ASSERT_TRUE(b.binding);
+   TEST_ASSERT_TRUE(has_binding(req));
+   TEST_ASSERT_FALSE(b.diagnostics);
+   TEST_ASSERT_FALSE(json_object_object_get_ex(req, "diagnostics", NULL));
+   TEST_ASSERT_EQUAL_STRING("anthropic-beta: thinking-binding-controls-2026-08-01", header_of(&b));
+   json_object_put(req);
+}
+
+/* Which calls take the Messages format, and what each host is booked as. */
+static void test_route(void) {
+   const char *or_url = "https://openrouter.ai/api";
+   TEST_ASSERT_TRUE(llm_uses_anthropic_messages(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5",
+                                                FIRST_PARTY));
+   TEST_ASSERT_TRUE(llm_uses_anthropic_messages(LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER,
+                                                "anthropic/claude-opus-5.5", or_url));
+   TEST_ASSERT_TRUE(llm_uses_anthropic_messages(LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER,
+                                                "anthropic/claude-opus-5.5:nitro", or_url));
+   /* Another vendor, a custom endpoint, no model, a local call */
+   TEST_ASSERT_FALSE(
+       llm_uses_anthropic_messages(LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, "openai/gpt-5.5", or_url));
+   TEST_ASSERT_FALSE(llm_uses_anthropic_messages(LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER,
+                                                 "anthropic/claude-opus-5.5",
+                                                 "https://gateway.example/api"));
+   TEST_ASSERT_FALSE(
+       llm_uses_anthropic_messages(LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, NULL, or_url));
+   TEST_ASSERT_FALSE(llm_uses_anthropic_messages(LLM_LOCAL, CLOUD_PROVIDER_CLAUDE,
+                                                 "claude-opus-5-5", FIRST_PARTY));
+
+   llm_claude_route_t r = llm_claude_route(or_url);
+   TEST_ASSERT_FALSE(r.first_party);
+   TEST_ASSERT_EQUAL_INT(CLOUD_PROVIDER_OPENROUTER, r.provider);
+   r = llm_claude_route(FIRST_PARTY);
+   TEST_ASSERT_TRUE(r.first_party);
+   TEST_ASSERT_EQUAL_INT(CLOUD_PROVIDER_CLAUDE, r.provider);
+   r = llm_claude_route("http://localhost:8080");
+   TEST_ASSERT_FALSE(r.first_party);
+   TEST_ASSERT_EQUAL_INT(CLOUD_PROVIDER_CLAUDE, r.provider);
+
+   char id[64];
+   TEST_ASSERT_EQUAL_INT(CLOUD_PROVIDER_OPENROUTER,
+                         llm_model_anthropic_id("anthropic/claude-opus-5.5", id, sizeof(id)));
+   TEST_ASSERT_EQUAL_STRING("claude-opus-5-5", id);
+   TEST_ASSERT_EQUAL_INT(CLOUD_PROVIDER_CLAUDE,
+                         llm_model_anthropic_id("claude-opus-5-5", id, sizeof(id)));
+   TEST_ASSERT_EQUAL_STRING("claude-opus-5-5", id);
 }
 
 static void test_binding_field_only_on_types_that_accept_it(void) {
@@ -369,7 +424,9 @@ static void test_another_conversations_rejection_doesnt_change_this_render(void)
 
 int main(void) {
    UNITY_BEGIN();
-   RUN_TEST(test_only_first_party_gets_betas);
+   RUN_TEST(test_other_hosts_get_no_betas);
+   RUN_TEST(test_openrouter_gets_binding_only);
+   RUN_TEST(test_route);
    RUN_TEST(test_binding_field_only_on_types_that_accept_it);
    RUN_TEST(test_header_names_what_the_body_carries);
    RUN_TEST(test_other_errors_are_not_rejections);

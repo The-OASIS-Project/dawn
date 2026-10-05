@@ -36,6 +36,7 @@
 #include "llm/llm_claude_betas.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_claude_parts.h"
+#include "llm/llm_claude_route.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_key_tag.h"
 #include "llm/llm_openai.h"
@@ -60,29 +61,64 @@ extern int llm_curl_progress_callback(void *clientp,
 /**
  * @brief Build HTTP headers for Claude API request
  *
- * @param api_key Anthropic API key (required)
+ * @param api_key The route's API key (required)
+ * @param route Where the request goes (OpenRouter takes a Bearer key)
  * @param betas The betas the body carries (claude_betas_add)
  * @return CURL header list (caller must free with curl_slist_free_all)
  */
-static struct curl_slist *build_claude_headers(const char *api_key, const claude_betas_t *betas) {
+static struct curl_slist *build_claude_headers(const char *api_key,
+                                               const llm_claude_route_t *route,
+                                               const claude_betas_t *betas) {
    struct curl_slist *headers = NULL;
    char api_key_header[512];
    char version_header[128];
 
    headers = curl_slist_append(headers, "Content-Type: application/json");
 
-   // Claude uses x-api-key instead of Authorization
-   snprintf(api_key_header, sizeof(api_key_header), "x-api-key: %s", api_key);
+   // Claude uses x-api-key instead of Authorization; OpenRouter its own Bearer key
+   snprintf(api_key_header, sizeof(api_key_header),
+            route->provider == CLOUD_PROVIDER_OPENROUTER ? "Authorization: Bearer %s"
+                                                         : "x-api-key: %s",
+            api_key);
    headers = curl_slist_append(headers, api_key_header);
 
    // Claude requires API version header
    snprintf(version_header, sizeof(version_header), "anthropic-version: %s", CLAUDE_API_VERSION);
    headers = curl_slist_append(headers, version_header);
+   if (route->provider == CLOUD_PROVIDER_OPENROUTER) {
+      /* OpenRouter's app attribution, as on its Chat Completions route */
+      headers = curl_slist_append(headers,
+                                  "HTTP-Referer: https://github.com/The-OASIS-Project/dawn");
+      headers = curl_slist_append(headers, "X-Title: DAWN");
+   }
    headers = claude_betas_header(headers, betas);
 
    return headers;
 }
 
+
+/* OpenRouter's own fields: served by Anthropic only (a conversation's cache and
+ * its reasoning's binding are per platform, so a Bedrock or Vertex fallback
+ * would be a silent full miss), and the conversation as its sticky-routing
+ * key. */
+static void add_route_fields(json_object *request, const llm_claude_route_t *route) {
+   if (route->provider != CLOUD_PROVIDER_OPENROUTER) {
+      return;
+   }
+   json_object *provider = json_object_new_object();
+   json_object *order = json_object_new_array();
+   json_object_array_add(order, json_object_new_string("anthropic"));
+   json_object_object_add(provider, "order", order);
+   json_object_object_add(provider, "allow_fallbacks", json_object_new_boolean(0));
+   json_object_object_add(request, "provider", provider);
+   session_t *session = llm_cache_monitor_in_side_call() ? NULL : session_get_command_context();
+   const int64_t conv = session ? atomic_load(&session->stream_conversation_id) : 0;
+   if (conv > 0) {
+      char key[64];
+      snprintf(key, sizeof(key), "dawn-conv-%lld", (long long)conv);
+      json_object_object_add(request, "session_id", json_object_new_string(key));
+   }
+}
 
 static char *claude_chat_completion_once(struct json_object *conversation_history,
                                          const char *input_text,
@@ -108,6 +144,8 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
       return NULL;
    }
 
+   const llm_claude_route_t route = llm_claude_route(base_url);
+   add_route_fields(request, &route);
    claude_betas_t betas;
    claude_betas_add(request, base_url, &betas);
    llm_cache_monitor_note_request(request); /* for this call's "LLM cache:" line */
@@ -133,7 +171,7 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
       return NULL;
    }
 
-   headers = build_claude_headers(api_key, &betas);
+   headers = build_claude_headers(api_key, &route, &betas);
    snprintf(full_url, sizeof(full_url), "%s%s", base_url, CLAUDE_MESSAGES_ENDPOINT);
 
    curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
@@ -256,8 +294,8 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
          }
       }
 
-      // Record metrics - Claude is always cloud
-      metrics_record_llm_tokens(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, input_tokens, output_tokens,
+      // Record metrics under the route's provider (Claude, or OpenRouter)
+      metrics_record_llm_tokens(LLM_CLOUD, route.provider, input_tokens, output_tokens,
                                 cached_tokens);
 
       /* Usage tracking + the per-call cache record, as the streaming path does.
@@ -291,7 +329,7 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
          .cached_tokens = cached_tokens,
          .cache_write_tokens = cache_created,
          .type = LLM_CLOUD,
-         .provider = CLOUD_PROVIDER_CLAUDE,
+         .provider = route.provider,
          .message_id = message_id,
          .cache_miss_reason = miss_reason,
          .cache_missed_tokens = missed_tokens,
@@ -418,6 +456,21 @@ static const char *parse_claude_error_message(const char *response_body, long ht
    if (json_object_object_get_ex(error_obj, "message", &message_obj)) {
       message = json_object_get_string(message_obj);
    }
+   /* OpenRouter wraps the upstream error ("Provider returned error") and keeps
+    * Anthropic's own body in error.metadata.raw: say what Anthropic said. */
+   struct json_object *metadata = NULL;
+   struct json_object *raw = NULL;
+   struct json_object *upstream = NULL;
+   struct json_object *up_error = NULL;
+   if (json_object_object_get_ex(error_obj, "metadata", &metadata) &&
+       json_object_object_get_ex(metadata, "raw", &raw) &&
+       json_object_is_type(raw, json_type_string) &&
+       (upstream = json_tokener_parse(json_object_get_string(raw))) != NULL &&
+       json_object_object_get_ex(upstream, "error", &up_error) &&
+       json_object_object_get_ex(up_error, "message", &message_obj) &&
+       json_object_is_type(message_obj, json_type_string)) {
+      message = json_object_get_string(message_obj);
+   }
 
    if (message && message[0] != '\0') {
       snprintf(error_msg, sizeof(error_msg), "%s", message);
@@ -425,6 +478,7 @@ static const char *parse_claude_error_message(const char *response_body, long ht
       snprintf(error_msg, sizeof(error_msg), "API request failed (HTTP %ld)", http_code);
    }
 
+   json_object_put(upstream);
    json_object_put(root);
    return error_msg;
 }
@@ -481,6 +535,8 @@ static int claude_single_shot_once(struct json_object *conversation_history,
 
    json_object_object_add(request, "stream", json_object_new_boolean(1));
 
+   const llm_claude_route_t route = llm_claude_route(base_url);
+   add_route_fields(request, &route);
    claude_betas_t betas;
    claude_betas_add(request, base_url, &betas);
    llm_cache_monitor_note_request(request); /* for this call's "LLM cache:" line */
@@ -490,8 +546,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    OLOG_INFO("Claude single-shot iter %d: url=%s", iteration, base_url);
 
    /* Create streaming context */
-   stream_ctx = llm_stream_create(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, chunk_callback,
-                                  callback_userdata);
+   stream_ctx = llm_stream_create_messages(route.provider, chunk_callback, callback_userdata);
    if (!stream_ctx) {
       OLOG_ERROR("Failed to create LLM stream context");
       json_object_put(request);
@@ -523,7 +578,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
          return 1;
       }
 
-      headers = build_claude_headers(api_key, &betas);
+      headers = build_claude_headers(api_key, &route, &betas);
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, CLAUDE_MESSAGES_ENDPOINT);
 
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);

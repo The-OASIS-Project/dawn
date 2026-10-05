@@ -41,6 +41,7 @@
 #include "core/tool_result_store.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
+#include "llm/llm_claude_route.h"
 #include "llm/llm_compaction.h"
 #include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
@@ -708,29 +709,27 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
    llm_history_format_t new_format = params->history_format;
    bool switched = false;
 
-   if (current_config.type == LLM_LOCAL || current_config.cloud_provider == CLOUD_PROVIDER_OPENAI ||
-       current_config.cloud_provider == CLOUD_PROVIDER_GEMINI ||
-       current_config.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-      if (params->history_format == LLM_HISTORY_CLAUDE) {
-         /* Switched from Claude to OpenAI/local/Gemini/OpenRouter */
-         new_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
-         new_format = LLM_HISTORY_OPENAI;
-         switched = true;
-         OLOG_INFO("Tool loop: Provider switched to OpenAI/local");
-      }
-   } else if (current_config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-      if (params->history_format == LLM_HISTORY_OPENAI) {
-         /* Switched from OpenAI/local/Gemini to Claude */
-         new_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
-         new_format = LLM_HISTORY_CLAUDE;
-         switched = true;
-         OLOG_INFO("Tool loop: Provider switched to Claude");
-      }
+   /* The wire format follows the route, not the provider: OpenRouter's
+    * anthropic/ models take the Messages format too. */
+   const char *endpoint = current_config.endpoint ? current_config.endpoint : params->base_url;
+   const bool messages = llm_uses_anthropic_messages(current_config.type,
+                                                     current_config.cloud_provider, params->model,
+                                                     endpoint);
+   if (!messages && params->history_format == LLM_HISTORY_CLAUDE) {
+      new_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
+      new_format = LLM_HISTORY_OPENAI;
+      switched = true;
+      OLOG_INFO("Tool loop: Provider switched to the OpenAI-compatible API");
+   } else if (messages && params->history_format == LLM_HISTORY_OPENAI) {
+      new_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
+      new_format = LLM_HISTORY_CLAUDE;
+      switched = true;
+      OLOG_INFO("Tool loop: Provider switched to the Anthropic Messages API");
    }
 
    /* Always update credentials (even if provider didn't change,
     * config may have changed model/endpoint) */
-   params->base_url = current_config.endpoint ? current_config.endpoint : params->base_url;
+   params->base_url = endpoint;
    params->api_key = current_config.api_key;
    params->llm_type = current_config.type;
    params->cloud_provider = current_config.cloud_provider;

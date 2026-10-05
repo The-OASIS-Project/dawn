@@ -61,6 +61,14 @@ llm_model_family_t llm_model_route(llm_type_t type,
                                    char *id_out,
                                    size_t id_len);
 
+/**
+ * @brief A model a Messages request names, as Anthropic spells it
+ * An OpenRouter slug ("anthropic/claude-opus-5.5") becomes "claude-opus-5-5";
+ * a first-party id is unchanged.  Anthropic's own ids never hold a '/'.
+ * @return The provider the id was read under (OPENROUTER for a slug)
+ */
+cloud_provider_t llm_model_anthropic_id(const char *model, char *id_out, size_t id_len);
+
 #ifdef __cplusplus
 }
 #endif

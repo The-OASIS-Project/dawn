@@ -319,6 +319,22 @@ static void test_adaptive_carries_the_session_effort(void) {
    json_object_put(req);
 }
 
+/* An OpenRouter slug gets its model's rules (models.toml knows Anthropic's id):
+ * "disabled" is sent where the model takes it, and on a model that can't turn
+ * thinking off is its lowest adaptive.  It goes out as the slug. */
+static void test_openrouter_slug_gets_its_models_rules(void) {
+   json_object *req = request_for("anthropic/claude-sonnet-5");
+   TEST_ASSERT_EQUAL_STRING("disabled", thinking_type(req));
+   json_object_put(req);
+   req = request_for("anthropic/claude-opus-5.5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("low", effort_of(req));
+   json_object *model = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "model", &model));
+   TEST_ASSERT_EQUAL_STRING("anthropic/claude-opus-5.5", json_object_get_string(model));
+   json_object_put(req);
+}
+
 static void test_budget_model_gets_enabled_with_budget(void) {
    s_mode = "enabled";
    s_effort = "low";
@@ -557,6 +573,7 @@ int main(void) {
    RUN_TEST(test_disabled_on_adaptive_only_model_is_lowest_adaptive);
    RUN_TEST(test_disabled_is_sent_where_accepted);
    RUN_TEST(test_adaptive_carries_the_session_effort);
+   RUN_TEST(test_openrouter_slug_gets_its_models_rules);
    RUN_TEST(test_budget_model_gets_enabled_with_budget);
    RUN_TEST(test_utility_call_gets_the_cheapest_legal_setting);
    RUN_TEST(test_tool_use_without_thinking_keeps_reasoning);

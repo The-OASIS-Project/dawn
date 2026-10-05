@@ -1026,9 +1026,9 @@ dawn_add_unit_test(test_prompt_cache_layout
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
-# OpenRouter→Anthropic prompt-cache injector — copy-on-write invariant guard.
-dawn_add_unit_test(test_openrouter_cache
-   SOURCES test_openrouter_cache.c
+# A chat-completions request's leading system messages merged (copy-on-write).
+dawn_add_unit_test(test_openai_system_merge
+   SOURCES test_openai_system_merge.c
            ${SRC_ROOT}/src/llm/llm_openai_cache.c
    LIBS    unity ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -1398,6 +1398,8 @@ dawn_add_unit_test(test_hud_tools
 dawn_add_unit_test(test_llm_claude_betas
    SOURCES test_llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/src/llm/llm_claude_route.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
@@ -2112,6 +2114,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_claude_route.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
@@ -2226,6 +2229,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_claude_route.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_tools.c

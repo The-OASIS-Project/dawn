@@ -83,7 +83,8 @@ bool claude_betas_take_inline_rejected(void);
  * @brief Add the betas' request fields to a finished request body
  *
  * Call once the body is otherwise complete: the thinking config decides the
- * binding field.  Only the Anthropic API itself (api.anthropic.com) gets them.
+ * binding field.  The Anthropic API gets every beta, OpenRouter's Messages
+ * endpoint the binding controls (llm_claude_route), anything else none.
  *
  * @param request The Claude request body
  * @param base_url The endpoint it goes to

@@ -840,6 +840,11 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
  * - message_stop: {"type":"message_stop"}
  */
 static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data) {
+   /* OpenRouter ends its Messages stream with an OpenAI-style terminator, after
+    * message_stop. */
+   if (strcmp(event_data, "[DONE]") == 0) {
+      return;
+   }
    json_object *event = json_tokener_parse(event_data);
    if (!event) {
       OLOG_WARNING("Failed to parse Claude event JSON");
@@ -1127,7 +1132,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
             // so metrics + per-session usage tracking reflect the cache
             // discount (90% off on read tokens).
             int cached = ctx->provider.claude.cache_read_input_tokens;
-            metrics_record_llm_tokens(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE,
+            metrics_record_llm_tokens(LLM_CLOUD, ctx->cloud_provider,
                                       ctx->provider.claude.input_tokens, output_tokens, cached);
 
             // Update context usage tracking with actual session ID.
@@ -1145,7 +1150,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                .cached_tokens = cached,
                .cache_write_tokens = ctx->provider.claude.cache_creation_input_tokens,
                .type = LLM_CLOUD,
-               .provider = CLOUD_PROVIDER_CLAUDE,
+               .provider = ctx->cloud_provider, /* Claude, or OpenRouter's Messages route */
                .message_id = ctx->provider.claude.message_id,
                .cache_miss_reason = ctx->provider.claude.cache_miss_reason,
                .cache_missed_tokens = ctx->provider.claude.cache_missed_tokens,
@@ -1239,6 +1244,16 @@ llm_stream_context_t *llm_stream_create(llm_type_t llm_type,
    return ctx;
 }
 
+llm_stream_context_t *llm_stream_create_messages(cloud_provider_t cloud_provider,
+                                                 text_chunk_callback callback,
+                                                 void *userdata) {
+   llm_stream_context_t *ctx = llm_stream_create(LLM_CLOUD, cloud_provider, callback, userdata);
+   if (ctx) {
+      ctx->anthropic_wire = 1;
+   }
+   return ctx;
+}
+
 void llm_stream_free(llm_stream_context_t *ctx) {
    if (!ctx) {
       return;
@@ -1255,9 +1270,9 @@ void llm_stream_free(llm_stream_context_t *ctx) {
     * OpenAI/OpenRouter/Gemini/local streams the active union member is
     * openai.tool_args_buffer, whose bytes alias these pointers — freeing them
     * unconditionally hands free() a pointer made of JSON text → SIGSEGV.  Only
-    * free them for actual Claude streams (matches the parse-routing condition in
+    * free them for Messages streams (matches the parse-routing condition in
     * llm_stream_handle_event). */
-   if (ctx->llm_type != LLM_LOCAL && ctx->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+   if (ctx->anthropic_wire) {
       llm_claude_capture_reset(&ctx->provider.claude.capture);
    }
    free(ctx);
@@ -1268,16 +1283,13 @@ void llm_stream_handle_event(llm_stream_context_t *ctx, const char *event_data) 
       return;
    }
 
-   // Route to provider-specific parser
-   // Local LLM (llama.cpp) uses OpenAI-compatible format
-   // Gemini and OpenRouter also use OpenAI-compatible format
-   // Cloud can be OpenAI, Gemini, OpenRouter, or Claude
-   if (ctx->llm_type == LLM_LOCAL || ctx->cloud_provider == CLOUD_PROVIDER_OPENAI ||
-       ctx->cloud_provider == CLOUD_PROVIDER_GEMINI ||
-       ctx->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-      parse_openai_chunk(ctx, event_data);
-   } else if (ctx->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+   /* By wire format, not provider: OpenRouter's anthropic/ models stream in
+    * the Messages format; everything else (local, OpenAI, Gemini, OpenRouter's
+    * Chat Completions) in the OpenAI one. */
+   if (ctx->anthropic_wire) {
       parse_claude_event(ctx, event_data);
+   } else {
+      parse_openai_chunk(ctx, event_data);
    }
 }
 
@@ -1399,7 +1411,7 @@ char *llm_stream_get_thinking(llm_stream_context_t *ctx) {
 }
 
 struct json_object *llm_stream_take_claude_content(llm_stream_context_t *ctx) {
-   if (!ctx || ctx->llm_type == LLM_LOCAL || ctx->cloud_provider != CLOUD_PROVIDER_CLAUDE) {
+   if (!ctx || !ctx->anthropic_wire) {
       return NULL;
    }
    return llm_claude_capture_take(&ctx->provider.claude.capture);

@@ -302,10 +302,9 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
       }
    }
 
-   /* Finalize system-prompt shape for caching: keep the two-segment split for the
-    * OpenRouter→Anthropic cache path, else collapse it into one system message so
-    * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
-   llm_openai_apply_system_prompt_caching(root, model_name, base_url);
+   /* One leading system message: strict local chat templates (Qwen 3.5/3.6
+    * Jinja) reject a second. */
+   llm_openai_merge_leading_system_messages(root);
 
    llm_cache_monitor_note_request(root); /* for this call's "LLM cache:" line */
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
@@ -614,10 +613,9 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       }
    }
 
-   /* Finalize system-prompt shape for caching: keep the two-segment split for the
-    * OpenRouter→Anthropic cache path, else collapse it into one system message so
-    * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
-   llm_openai_apply_system_prompt_caching(root, model_name, base_url);
+   /* One leading system message: strict local chat templates (Qwen 3.5/3.6
+    * Jinja) reject a second. */
+   llm_openai_merge_leading_system_messages(root);
 
    llm_cache_monitor_note_request(root); /* for this call's "LLM cache:" line */
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |

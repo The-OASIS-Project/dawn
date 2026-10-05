@@ -234,17 +234,21 @@ static void test_context_goes_in_front_of_the_question(void) {
 }
 
 static void test_direction_is_a_system_message_where_taken(void) {
-   const char *msgs[] = { PREFIX, TURN1, DIRECTIVE, REPLY1 };
-   struct json_object *h = history(msgs, 4);
-   struct json_object *req = render(h, MID_SYSTEM_MODEL);
-   struct json_object *messages = field(req, "messages");
-   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(messages));
-   TEST_ASSERT_EQUAL_STRING("{\"role\":\"system\",\"content\":\"Answer briefly: voice.\"}",
-                            str(json_object_array_get_idx(messages, 1)));
-   /* Never in the top-level system prompt. */
-   TEST_ASSERT_NULL(strstr(str(field(req, "system")), "Answer briefly"));
-   json_object_put(req);
-   json_object_put(h);
+   /* The same model through OpenRouter's Messages endpoint, by its slug */
+   const char *models[] = { MID_SYSTEM_MODEL, "anthropic/claude-opus-5.5" };
+   for (size_t m = 0; m < sizeof(models) / sizeof(models[0]); m++) {
+      const char *msgs[] = { PREFIX, TURN1, DIRECTIVE, REPLY1 };
+      struct json_object *h = history(msgs, 4);
+      struct json_object *req = render(h, models[m]);
+      struct json_object *messages = field(req, "messages");
+      TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(messages));
+      TEST_ASSERT_EQUAL_STRING("{\"role\":\"system\",\"content\":\"Answer briefly: voice.\"}",
+                               str(json_object_array_get_idx(messages, 1)));
+      /* Never in the top-level system prompt. */
+      TEST_ASSERT_NULL(strstr(str(field(req, "system")), "Answer briefly"));
+      json_object_put(req);
+      json_object_put(h);
+   }
 }
 
 static void test_direction_is_a_note_elsewhere(void) {

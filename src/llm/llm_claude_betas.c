@@ -51,6 +51,7 @@
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_capabilities.h"
+#include "llm/llm_claude_route.h"
 #include "logging.h"
 
 #define BETA_CACHE_DIAGNOSIS "cache-diagnosis-2026-04-07"
@@ -140,24 +141,6 @@ static __thread bool t_retry = false;
  * once the turn's call returns (claude_betas_take_inline_rejected). */
 static __thread bool t_inline_rejected = false;
 
-/* The Anthropic API itself (exact host), where the betas exist; a gateway or
- * proxy in front of it may reject the unknown fields. */
-static bool is_first_party_endpoint(const char *base_url) {
-   if (!base_url) {
-      return false;
-   }
-   CURLU *url = curl_url();
-   char *host = NULL;
-   bool first_party = false;
-   if (url && curl_url_set(url, CURLUPART_URL, base_url, 0) == CURLUE_OK &&
-       curl_url_get(url, CURLUPART_HOST, &host, 0) == CURLUE_OK && host) {
-      first_party = strcasecmp(host, "api.anthropic.com") == 0;
-   }
-   curl_free(host);
-   curl_url_cleanup(url);
-   return first_party;
-}
-
 /* The diagnostics object: the previous response on this conversation, if any. */
 static void add_cache_diagnostics(struct json_object *request) {
    struct json_object *diagnostics = json_object_new_object();
@@ -199,12 +182,12 @@ static void add_binding_controls(struct json_object *request) {
 }
 
 bool claude_betas_inline_tools_ok(const char *base_url, const char *model) {
-   return model && is_first_party_endpoint(base_url) && llm_model_inline_tools(model) &&
+   return model && llm_claude_route(base_url).first_party && llm_model_inline_tools(model) &&
           !rejected_for(model).inline_tools;
 }
 
 bool claude_betas_render_inline(const char *base_url) {
-   return !t_inline_rejected && is_first_party_endpoint(base_url);
+   return !t_inline_rejected && llm_claude_route(base_url).first_party;
 }
 
 bool claude_betas_take_inline_rejected(void) {
@@ -249,7 +232,11 @@ void claude_betas_add(struct json_object *request, const char *base_url, claude_
    sent->inline_tools = false;
    sent->inline_rejected = false;
    sent->model[0] = '\0';
-   if (!request || !is_first_party_endpoint(base_url)) {
+   /* The Anthropic API takes every beta; OpenRouter's Messages endpoint passes
+    * the binding controls through, drops the diagnostics (none come back) and
+    * rejects a tool defined in a message.  Anything else (a proxy) gets none. */
+   const llm_claude_route_t route = llm_claude_route(base_url);
+   if (!request || (!route.first_party && route.provider != CLOUD_PROVIDER_OPENROUTER)) {
       return;
    }
    struct json_object *model = NULL;
@@ -257,7 +244,7 @@ void claude_betas_add(struct json_object *request, const char *base_url, claude_
       snprintf(sent->model, sizeof(sent->model), "%s", json_object_get_string(model));
    }
    const betas_off_t off = rejected_for(sent->model);
-   if (!off.diagnostics) {
+   if (route.first_party && !off.diagnostics) {
       add_cache_diagnostics(request);
       sent->diagnostics = true;
    }

@@ -127,9 +127,9 @@ Whether a stored inline row goes in place is the conversation's record, never th
 
 A tool's image (a camera capture) enters through `llm_tools.c` into `src/llm/llm_tool_images.c`: it must be a JPEG, PNG, GIF or WebP by its bytes. For a turn with a user it is stored owner-only (`IMAGE_SOURCE_CAPTURE`) and **unbound**; the tool row that names it (`messages.images`) binds it when saved, and the conversation records it (`conversation_images`). A guest's capture stays in memory. The result's content is `[text part, image parts]` on every history format, each part marked with the stored id, and a reload rebuilds the same bytes from the file. Each provider renders that one shape (`src/llm/llm_tool_images_render.c`):
 
-- **Claude**: image blocks inside the `tool_result`.
+- **Claude** (and OpenRouter's `anthropic/` models, on its Messages endpoint): image blocks inside the `tool_result`.
 - **OpenAI Responses**: a `function_call_output` of `input_text` and `input_image` items.
-- **Chat Completions** (OpenAI, Gemini, OpenRouter, local): the tool messages carry text, and one user message after a turn's tool messages carries their images.
+- **Chat Completions** (OpenAI, Gemini, OpenRouter's other models, local): the tool messages carry text, and one user message after a turn's tool messages carries their images.
 - **A model without vision**: fixed text in place of each image.
 
 **`models.toml [max_request_images]`** gives, per vendor, the images (`count`) and their base64 bytes (`bytes`) one request may carry (`anthropic_200k` for Claude models with a 200K window, `other` for other OpenRouter vendors, `local` for llama.cpp / Ollama). A capture that would take the next request past either is refused in its turn (a tool loop has no seam to compact at) and its stored image deleted. A history nearing either is compacted at the next seam, the turns holding its oldest images summarized away. When none can go (they are in what a compaction keeps, or past a row not saved yet), none is planned again for that conversation until a row of it is saved, and that is logged once.
@@ -138,9 +138,9 @@ An unbound capture no row binds is reclaimed after `IMAGE_UNBOUND_GRACE_SEC` (24
 
 ### Provider handling
 
-- **Claude** (`llm_claude_format.c`): the prefix is the top-level `system` with `cache_control`, plus a breakpoint on the last tool. Instructions and directives go as mid-conversation system messages for models listed under `models.toml [mid_system]`; otherwise as a user-turn note headed `[Operator note <tag>]`. The turn's context goes into the question's user message.
+- **Claude** (`llm_claude_format.c`, also OpenRouter's `anthropic/` models): the prefix is the top-level `system` with `cache_control`, plus a breakpoint on the last tool. Instructions and directives go as mid-conversation system messages for models listed under `models.toml [mid_system]`; otherwise as a user-turn note headed `[Operator note <tag>]`. The turn's context goes into the question's user message.
 - **OpenAI Responses** (`llm_openai_responses_input.c`): the prefix is `instructions` (byte-stable), notes are system items, and the context goes as an item before the question.
-- **Chat Completions** (`llm_openai_history.c`): the prefix is the first system message. Notes are system messages on native OpenAI (`api.openai.com`); on other carriers (OpenRouter, Gemini, local) they are tagged in-band notes. The context goes into the question's message.
+- **Chat Completions** (`llm_openai_history.c`): the prefix is the first system message. Notes are system messages on native OpenAI (`api.openai.com`); on other carriers (OpenRouter's other models, Gemini, local) they are tagged in-band notes. The context goes into the question's message.
 
 Cache-token accounting is unified across providers (Claude `cache_creation`/`cache_read`, the Responses usage struct). Gemini caching is unreliable upstream; see the Gemini native-API notes in `docs/TODO.md`.
 
@@ -156,14 +156,35 @@ Blocks are persisted with their row so a reloaded conversation replays each turn
 
 ## OpenRouter Provider
 
-OpenRouter (`https://openrouter.ai/api/v1`) is an OpenAI-wire-compatible endpoint fronting
-many vendors' models. DAWN treats it as a **first-class cloud provider**, not a mode: set
+OpenRouter (`https://openrouter.ai/api/v1`) fronts many vendors' models behind one key, with
+an OpenAI-compatible endpoint and an Anthropic Messages one. DAWN treats it as a **first-class cloud provider**, not a mode: set
 `[llm.cloud] provider = "openrouter"` (key `openrouter_api_key` in `secrets.toml`, or
 `OPENROUTER_API_KEY` env) and the main chat routes through OpenRouter with one key. Its model
 list (`openrouter_models`) uses `vendor/model` IDs (e.g. `anthropic/claude-sonnet-4`).
-Because OpenRouter is OpenAI-compatible for every model it serves (including Anthropic ones),
-all calls reuse the existing `llm_openai_*` request/SSE path (`CLOUD_PROVIDER_OPENROUTER`
-falls into the OpenAI-compatible branch everywhere, never the native Claude path).
+Most models go through its OpenAI-compatible Chat Completions endpoint, on the `llm_openai_*`
+request/SSE path. An **`anthropic/` model goes through OpenRouter's Anthropic Messages endpoint**
+(`/api/v1/messages`) on the Claude path instead, so it gets the same request as direct Claude: the
+cache breakpoints, the thinking-binding controls (`input_transformations` comes back only when
+something was dropped) and replayed thinking blocks.
+
+- **Which calls:** `llm_uses_anthropic_messages()` (`llm_claude_route.c`), used wherever a call's
+  wire format is chosen (`llm_interface.c` and the tool loop's provider switch): Claude, or
+  OpenRouter on `openrouter.ai` itself with an `anthropic/` slug (a `:variant` too). A custom
+  OpenRouter endpoint stays on Chat Completions.
+- **Route and provider are separate.** The Claude path reads its route from the endpoint
+  (`llm_claude_route()`): OpenRouter takes a Bearer key, its attribution headers, the binding
+  controls only (it drops the diagnostics object and rejects a tool defined in a message, so tool
+  changes fold), `provider: {order: ["anthropic"], allow_fallbacks: false}` (a conversation's cache
+  and its thinking's binding are per platform) and `session_id: "dawn-conv-<id>"`. The stream is
+  parsed as Messages events (`llm_stream_create_messages`) but usage books under
+  `CLOUD_PROVIDER_OPENROUTER`, so prices, the context window and metrics follow OpenRouter's vendor
+  routing. The cache monitor's expected read stays first-party only: a miss through OpenRouter's
+  own Anthropic accounts may be routing, not a defect.
+- **Capabilities by Anthropic's id:** the formatter resolves thinking and mid-conversation system
+  messages from `llm_model_anthropic_id()` (`anthropic/claude-opus-5.5` → `claude-opus-5-5`).
+- **Reasoning doesn't cross routes:** a turn's stored blocks are bound to their carrier (host + key
+  tag), so a conversation moving between OpenRouter and direct Claude thinks fresh; text and tool
+  calls carry over.
 
 **One authority — the provider enum.** `provider` (a `CLOUD_PROVIDER_*` enum resolved by the
 init/refresh ladder) is the single source of truth for the active provider; there is no

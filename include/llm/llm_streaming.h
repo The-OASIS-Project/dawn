@@ -136,6 +136,7 @@ typedef struct {
    /* Provider identification */
    llm_type_t llm_type;             /**< LLM type (LOCAL or CLOUD) */
    cloud_provider_t cloud_provider; /**< Cloud provider (if CLOUD) */
+   int anthropic_wire; /**< 1: an Anthropic Messages stream (llm_stream_create_messages) */
 
    /* Callback for streaming text to caller */
    text_chunk_callback callback; /**< User callback for text chunks */
@@ -203,6 +204,9 @@ typedef struct {
 /**
  * @brief Create a new LLM stream context
  *
+ * An OpenAI-format stream (Chat Completions, Responses, local); an Anthropic
+ * Messages stream is llm_stream_create_messages().
+ *
  * @param llm_type LLM type (LLM_LOCAL or LLM_CLOUD)
  * @param cloud_provider Cloud provider (if LLM_CLOUD)
  * @param callback Function to call for each text chunk
@@ -213,6 +217,16 @@ llm_stream_context_t *llm_stream_create(llm_type_t llm_type,
                                         cloud_provider_t cloud_provider,
                                         text_chunk_callback callback,
                                         void *userdata);
+
+/**
+ * @brief Create a stream context for an Anthropic Messages stream
+ *
+ * Parsed as Messages events whoever serves it; usage books under
+ * @p cloud_provider (Claude, or OpenRouter's Messages route).
+ */
+llm_stream_context_t *llm_stream_create_messages(cloud_provider_t cloud_provider,
+                                                 text_chunk_callback callback,
+                                                 void *userdata);
 
 /**
  * @brief Free an LLM stream context

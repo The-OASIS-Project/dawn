@@ -12,6 +12,20 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-05 — OpenRouter's Claude models use OpenRouter's Anthropic endpoint
+
+**What changed.** If you run Claude models through OpenRouter (`provider =
+"openrouter"` with an `anthropic/…` model), DAWN now sends them to OpenRouter's
+Anthropic Messages endpoint instead of its OpenAI-style one. They get the same
+prompt caching and thinking as direct Claude, and requests are pinned to
+Anthropic itself (OpenRouter won't fall back to Bedrock or Vertex).
+
+**What you need to do.** Nothing. Existing conversations continue; their first
+turn after the upgrade starts its thinking fresh. A custom OpenRouter endpoint
+(`[llm.cloud] endpoint`) keeps the old route.
+
+---
+
 ## 2026-10-05 — Friday doesn't learn from text messages
 
 **What changed.**

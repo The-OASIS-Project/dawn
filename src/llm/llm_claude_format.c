@@ -39,6 +39,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_model_family.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
@@ -774,13 +775,17 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       model_name = llm_get_default_claude_model();
    }
    json_object_object_add(claude_request, "model", json_object_new_string(model_name));
+   /* models.toml knows the model by Anthropic's id, not an OpenRouter slug. */
+   char model_id[LLM_MODEL_NAME_MAX];
+   const cloud_provider_t model_provider = llm_model_anthropic_id(model_name, model_id,
+                                                                  sizeof(model_id));
 
    /* Reasoning: the session's mode and effort, resolved against what this
     * model accepts (models.toml [thinking.anthropic]), sent explicitly.  Never
     * omitted: on current Claude models an omitted `thinking` runs adaptive at
     * the model's default effort, whatever the user picked. */
    llm_thinking_resolved_t thinking;
-   llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, model_name, &thinking);
+   llm_thinking_resolve_current(LLM_CLOUD, model_provider, model_name, &thinking);
    const int thinking_budget = (thinking.controllable && thinking.budget)
                                    ? llm_budget_tokens_for_effort(thinking.effort)
                                    : 0;
@@ -832,7 +837,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    json_object *last_message = NULL;
    char note_label[LLM_CONTEXT_TAG_MAX + 24];
    llm_operator_note_label(llm_history_tag(openai_conversation), note_label, sizeof(note_label));
-   const bool mid_system = llm_model_mid_system(model_name);
+   const bool mid_system = llm_model_mid_system(model_id);
 
    /* Tool calls and results are paired once, after every message is built
     * (repair_tool_pairs), not filtered here message by message. */

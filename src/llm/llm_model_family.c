@@ -87,3 +87,10 @@ llm_model_family_t llm_model_route(llm_type_t type,
    }
    return family;
 }
+
+cloud_provider_t llm_model_anthropic_id(const char *model, char *id_out, size_t id_len) {
+   const cloud_provider_t provider = model && strchr(model, '/') ? CLOUD_PROVIDER_OPENROUTER
+                                                                 : CLOUD_PROVIDER_CLAUDE;
+   llm_model_route(LLM_CLOUD, provider, model, id_out, id_len);
+   return provider;
+}

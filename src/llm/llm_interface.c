@@ -55,6 +55,7 @@
 // Provider implementations - include if compile-time keys exist OR if we might have runtime keys
 // Note: The actual provider files (llm_openai.c, llm_claude.c) are always compiled
 #include "llm/llm_claude.h"
+#include "llm/llm_claude_route.h"
 #include "llm/llm_openai.h"
 #include "llm/llm_rate_limit.h"
 
@@ -1026,6 +1027,15 @@ int llm_curl_progress_callback(void *clientp,
    return 0;  // Zero continues transfer
 }
 
+/* The model a call names: an OpenRouter call with none names the configured
+ * default, so its vendor (and so its wire format) is known. */
+static const char *call_model(cloud_provider_t provider, const char *model) {
+   if ((!model || !model[0]) && provider == CLOUD_PROVIDER_OPENROUTER) {
+      return llm_get_default_openrouter_model();
+   }
+   return model;
+}
+
 char *llm_chat_completion(struct json_object *conversation_history,
                           const char *input_text,
                           bool allow_fallback) {
@@ -1096,11 +1106,19 @@ char *llm_chat_completion(struct json_object *conversation_history,
             break;
 
          case CLOUD_PROVIDER_GEMINI:
-         case CLOUD_PROVIDER_OPENROUTER:
-            /* Gemini and OpenRouter both use the OpenAI-compatible API */
-            response = llm_openai_chat_completion(conversation_history, input_text, url, api_key,
-                                                  model);
+         case CLOUD_PROVIDER_OPENROUTER: {
+            /* The OpenAI-compatible API, but OpenRouter's anthropic/ models
+             * take its Anthropic Messages endpoint. */
+            const char *m = call_model(provider, model);
+            if (llm_uses_anthropic_messages(type, provider, m, url)) {
+               response = llm_claude_chat_completion(conversation_history, input_text, url, api_key,
+                                                     m);
+            } else {
+               response = llm_openai_chat_completion(conversation_history, input_text, url, api_key,
+                                                     model);
+            }
             break;
+         }
 
          default:
             OLOG_ERROR("No cloud provider configured");
@@ -1190,13 +1208,15 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
    llm_single_shot_fn provider_fn;
    llm_history_format_t history_format;
 
-   if (type == LLM_CLOUD && provider == CLOUD_PROVIDER_CLAUDE) {
+   const char *messages_model = call_model(provider, model);
+   if (llm_uses_anthropic_messages(type, provider, messages_model, url)) {
+      /* Claude, and OpenRouter's anthropic/ models (its Messages endpoint) */
       provider_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
       history_format = LLM_HISTORY_CLAUDE;
+      model = messages_model;
    } else {
-      /* OpenAI, Gemini, OpenRouter, and local all use the OpenAI-compatible API
-       * (including Anthropic models served via OpenRouter — they use OpenAI wire
-       * format, not the native Claude path). */
+      /* OpenAI, Gemini, OpenRouter's other vendors, and local use the
+       * OpenAI-compatible API. */
       provider_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
       history_format = LLM_HISTORY_OPENAI;
       if (type == LLM_LOCAL) {
@@ -1645,11 +1665,19 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
             break;
 
          case CLOUD_PROVIDER_GEMINI:
-         case CLOUD_PROVIDER_OPENROUTER:
-            /* Gemini and OpenRouter both use the OpenAI-compatible API */
-            response = llm_openai_chat_completion(conversation_history, input_text, endpoint,
-                                                  config->api_key, config->model);
+         case CLOUD_PROVIDER_OPENROUTER: {
+            /* The OpenAI-compatible API, but OpenRouter's anthropic/ models
+             * take its Anthropic Messages endpoint. */
+            const char *m = call_model(config->cloud_provider, config->model);
+            if (llm_uses_anthropic_messages(config->type, config->cloud_provider, m, endpoint)) {
+               response = llm_claude_chat_completion(conversation_history, input_text, endpoint,
+                                                     config->api_key, m);
+            } else {
+               response = llm_openai_chat_completion(conversation_history, input_text, endpoint,
+                                                     config->api_key, config->model);
+            }
             break;
+         }
 
          default:
             OLOG_ERROR("No cloud provider configured in session config");
@@ -1701,9 +1729,13 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    llm_single_shot_fn provider_fn;
    llm_history_format_t history_format;
 
-   if (config->type == LLM_CLOUD && config->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+   const char *model = config->model;
+   const char *messages_model = call_model(config->cloud_provider, model);
+   if (llm_uses_anthropic_messages(config->type, config->cloud_provider, messages_model,
+                                   config->endpoint)) {
       provider_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
       history_format = LLM_HISTORY_CLAUDE;
+      model = messages_model;
    } else {
       provider_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
       history_format = LLM_HISTORY_OPENAI;
@@ -1715,7 +1747,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       .input_text = input_text,
       .base_url = config->endpoint,
       .api_key = (config->type == LLM_LOCAL) ? NULL : config->api_key,
-      .model = config->model,
+      .model = model,
       .chunk_callback = (void *)chunk_callback,
       .callback_userdata = callback_userdata,
       .provider_fn = provider_fn,
