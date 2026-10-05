@@ -1911,7 +1911,9 @@ and the `ha_entities_response` per-domain `attributes` shape are documented cons
 
 #### `phone_call_notification`
 Inbound/outbound call state, for a transient call banner. Owner's browser sessions
-only (carries caller PII); also sent as a per-connection snapshot on connect.
+only (carries caller PII). Also sent in reply to `phone_status`, which a client sends
+after connecting to pick up a call already ringing or active; when no call is in
+progress, `phone_status` gets no reply.
 ```json
 {
    "type": "phone_call_notification",

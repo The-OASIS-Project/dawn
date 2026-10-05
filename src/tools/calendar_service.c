@@ -49,6 +49,7 @@
 #include "core/crypto_store.h"
 #include "core/iso8601.h"
 #include "core/path_utils.h"
+#include "core/str_fuzzy.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
 #include "tools/calendar_query_window.h"
@@ -1133,6 +1134,53 @@ static const char *ical_safe(const char *input, char *buf, size_t buf_len) {
  * Mutation Operations
  * ============================================================================= */
 
+/* The writable calendar an event goes to: @p name matched without case, or
+ * the one writable calendar whose name contains it; the first writable
+ * calendar when no name is given.  Never a calendar other than the one named. */
+static int pick_writable(const calendar_calendar_t *cals,
+                         int count,
+                         const char *name,
+                         int *target) {
+   if (!name || !name[0]) {
+      for (int i = 0; i < count; i++) {
+         if (!cals[i].account_read_only) {
+            *target = i;
+            return CALENDAR_RC_OK;
+         }
+      }
+      return CALENDAR_RC_READONLY; /* all calendars read-only */
+   }
+   bool named_read_only = false;
+   for (int i = 0; i < count; i++) {
+      if (strcasecmp(cals[i].display_name, name) == 0) {
+         if (cals[i].account_read_only) {
+            named_read_only = true; /* a writable one of that name may follow */
+            continue;
+         }
+         *target = i;
+         return CALENDAR_RC_OK;
+      }
+   }
+   if (named_read_only)
+      return CALENDAR_RC_READONLY; /* the user named a read-only calendar */
+   /* "family" for "Family Calendar": only when it picks one calendar. */
+   char needle[128], hay[128];
+   str_fuzzy_tolower(needle, name, sizeof(needle));
+   int found = -1;
+   for (int i = 0; i < count; i++) {
+      str_fuzzy_tolower(hay, cals[i].display_name, sizeof(hay));
+      if (!cals[i].account_read_only && strstr(hay, needle)) {
+         if (found >= 0)
+            return CALENDAR_RC_NOT_FOUND;
+         found = i;
+      }
+   }
+   if (found < 0)
+      return CALENDAR_RC_NOT_FOUND;
+   *target = found;
+   return CALENDAR_RC_OK;
+}
+
 int calendar_service_add(int user_id,
                          const char *summary,
                          time_t start,
@@ -1144,7 +1192,9 @@ int calendar_service_add(int user_id,
                          const char *rrule,
                          const char *tz_name,
                          char *uid_out,
-                         size_t uid_out_len) {
+                         size_t uid_out_len,
+                         char *calendar_out,
+                         size_t calendar_out_len) {
    /* Find target calendar */
    calendar_calendar_t cals[32];
    int cal_count = 0;
@@ -1153,30 +1203,12 @@ int calendar_service_add(int user_id,
       OLOG_ERROR("calendar: no active calendars for user %d", user_id);
       return CALENDAR_RC_FAILURE;
    }
-
-   /* Select target: match by name or use first writable */
    int target = -1;
-   if (calendar_name) {
-      for (int i = 0; i < cal_count; i++) {
-         if (strcasecmp(cals[i].display_name, calendar_name) == 0) {
-            if (cals[i].account_read_only)
-               return CALENDAR_RC_READONLY; /* user explicitly named a read-only calendar */
-            target = i;
-            break;
-         }
-      }
-   }
-   if (target < 0) {
-      /* No name given or name didn't match — find first writable calendar */
-      for (int i = 0; i < cal_count; i++) {
-         if (!cals[i].account_read_only) {
-            target = i;
-            break;
-         }
-      }
-   }
-   if (target < 0)
-      return CALENDAR_RC_READONLY; /* all calendars read-only */
+   int rc = pick_writable(cals, cal_count, calendar_name, &target);
+   if (rc != CALENDAR_RC_OK)
+      return rc;
+   if (calendar_out && calendar_out_len > 0)
+      snprintf(calendar_out, calendar_out_len, "%s", cals[target].display_name);
 
    /* Get account for auth */
    calendar_account_t acct;
@@ -1579,14 +1611,16 @@ int calendar_service_get_access_summary(int user_id,
    read_only_out[0] = '\0';
 
    for (int i = 0; i < count; i++) {
-      if (cals[i].account_read_only) {
-         has_read_only = true;
-         r_pos += snprintf(read_only_out + r_pos, r_len - r_pos, "%s%s", r_pos ? ", " : "",
-                           cals[i].display_name);
-      } else {
-         w_pos += snprintf(writable + w_pos, w_len - w_pos, "%s%s", w_pos ? ", " : "",
-                           cals[i].display_name);
-      }
+      char *dst = cals[i].account_read_only ? read_only_out : writable;
+      size_t dst_len = cals[i].account_read_only ? r_len : w_len;
+      int *pos = cals[i].account_read_only ? &r_pos : &w_pos;
+      has_read_only = has_read_only || cals[i].account_read_only;
+      if ((size_t)*pos >= dst_len)
+         continue; /* full: snprintf returns what it would have written */
+      int w = snprintf(dst + *pos, dst_len - (size_t)*pos, "%s%s", *pos ? ", " : "",
+                       cals[i].display_name);
+      if (w > 0)
+         *pos += w;
    }
    return has_read_only ? 1 : 0;
 }

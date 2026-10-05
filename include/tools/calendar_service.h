@@ -40,6 +40,7 @@
 #define CALENDAR_RC_FAILURE 1   /* generic — network, CalDAV, or unmapped */
 #define CALENDAR_RC_DUPLICATE 2 /* add_account: an account with this identity already exists */
 #define CALENDAR_RC_READONLY 3  /* target calendar/account is read-only (add / update / delete) */
+#define CALENDAR_RC_NOT_FOUND 4 /* add: no single writable calendar has that name */
 
 /* ============================================================================
  * Lifecycle
@@ -157,12 +158,15 @@ int calendar_service_search(int user_id,
  * @param location      Location (may be NULL)
  * @param description   Description (may be NULL)
  * @param all_day       True for all-day event
- * @param calendar_name Target calendar name (NULL = first active)
+ * @param calendar_name Target calendar: matched without case, or the one writable
+ *                      calendar whose name contains it (NULL = first writable)
  * @param rrule         Recurrence rule (NULL = non-recurring)
  * @param tz_name       User timezone for iCalendar DTSTART TZID
  * @param uid_out       Buffer for created UID (at least 256 bytes)
+ * @param calendar_out  Receives the calendar's name (may be NULL)
  * @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
- *         CALENDAR_RC_READONLY if the target calendar/account is read-only
+ *         CALENDAR_RC_READONLY if the target calendar/account is read-only,
+ *         CALENDAR_RC_NOT_FOUND if no single writable calendar has that name
  */
 int calendar_service_add(int user_id,
                          const char *summary,
@@ -175,7 +179,9 @@ int calendar_service_add(int user_id,
                          const char *rrule,
                          const char *tz_name,
                          char *uid_out,
-                         size_t uid_out_len);
+                         size_t uid_out_len,
+                         char *calendar_out,
+                         size_t calendar_out_len);
 
 /**
  * Update an existing event by UID. Write-through to server.

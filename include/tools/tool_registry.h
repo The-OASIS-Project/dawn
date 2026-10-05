@@ -62,7 +62,7 @@ extern "C" {
  * cap (also the MCP bridge's property limit). 20 admits real MCP tools like cbm's
  * search_graph (14 params) while still bounding an untrusted upstream schema. */
 #define TOOL_PARAM_MAX 20
-#define TOOL_PARAM_ENUM_MAX 16        /* Max enum values per parameter */
+#define TOOL_PARAM_ENUM_MAX 24        /* Max enum values per parameter */
 #define TOOL_ALIAS_MAX 8              /* Max aliases per tool */
 #define TOOL_DEVICE_MAP_MAX 8         /* Max device map entries for meta-tools */
 #define TOOL_REPEATABLE_ACTIONS_MAX 4 /* Max non-deterministic actions per tool */

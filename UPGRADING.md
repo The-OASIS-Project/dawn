@@ -12,6 +12,31 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-05 — Home Assistant and calendar ask instead of picking
+
+**What changed.**
+- **Two devices that match equally ask which.** "Turn on the lamp" with a desk
+  lamp and a floor lamp now lists both instead of switching on whichever came
+  first.
+- **Unlocking and opening ask first.** Unlock, open, and anything that opens a
+  door (a garage-door or gate cover, or a switch, scene, script or automation
+  whose name says garage, gate, door or unlock) shows a preview and waits for
+  your "yes". Lock, close and turning things off act right away. Blinds and
+  awnings don't ask. Because they need your yes at the time, unlock and open
+  can no longer be scheduled.
+- **Those devices also need their name.** Friday acts on them only when what you
+  said is the device's name or part of it ("front door", "garage"); a looser
+  match, such as "garage side door" for "Garage Main Door", is offered back to
+  you.
+- **Adding an event to a named calendar never lands elsewhere.** A calendar name
+  that matches nothing, or more than one writable calendar, gets the list of
+  your writable calendars instead of going to the first one. Every new event
+  says which calendar it went to.
+
+**What you need to do.** Nothing.
+
+---
+
 ## 2026-10-04 — Friday asks before calling, texting or emailing someone she isn't sure of
 
 **What changed.**

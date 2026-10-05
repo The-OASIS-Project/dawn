@@ -1458,6 +1458,13 @@ dawn_add_unit_test(test_str_fuzzy
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_homeassistant_match
+   SOURCES test_homeassistant_match.c
+           ${SRC_ROOT}/src/tools/homeassistant_match.c
+           ${SRC_ROOT}/src/core/str_fuzzy.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_scheduled_context
    SOURCES test_scheduled_context.c
            ${SRC_ROOT}/src/core/scheduled_context.c

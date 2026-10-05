@@ -145,7 +145,7 @@ endif()
 if(DAWN_ENABLE_HOMEASSISTANT_TOOL)
     add_definitions(-DDAWN_ENABLE_HOMEASSISTANT_TOOL)
     list(APPEND TOOL_SOURCES src/tools/homeassistant_tool.c src/tools/homeassistant_service.c
-                             src/tools/homeassistant_ws.c)
+                             src/tools/homeassistant_match.c src/tools/homeassistant_ws.c)
     message(STATUS "DAWN: Home Assistant tool ENABLED")
 else()
     message(STATUS "DAWN: Home Assistant tool DISABLED")

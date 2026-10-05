@@ -293,7 +293,9 @@ Layer 3 (Tools)
 │                                        email_display, GMime); email_transfer.c: failure codes
 │                                        and cancelling transfers (deps: libcurl)
 ├── src/tools/oauth_client.c           - OAuth 2.0 + PKCE (deps: Layer 0-1, crypto_store)
-├── src/tools/homeassistant_service.c  - HA REST API + entity cache (deps: Layer 0-1)
+├── src/tools/homeassistant_service.c  - HA REST API + entity cache (deps: Layer 0-1);
+│                                        homeassistant_match.c: which entity a name means, never
+│                                        picking among equals (pure)
 ├── src/tools/calendar_service.c       - CalDAV business logic (deps: Layer 0-2, oauth_client)
 ├── src/messaging/messaging_engine.c   - Channel engine: sessions, binding, dispatch (deps: Layer 0-2, session_manager, auth_db, scheduler);
 │                                        messaging_engine_codes.c: texting a reply code, and a code or STOP coming back

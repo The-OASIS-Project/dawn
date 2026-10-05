@@ -94,9 +94,9 @@ static void test_enum(void) {
 }
 
 static void test_reject_enum_too_large(void) {
-   /* 17 enum values exceeds TOOL_PARAM_ENUM_MAX (16). */
+   /* One more enum value than TOOL_PARAM_ENUM_MAX. */
    struct json_object *en = json_object_new_array();
-   for (int i = 0; i < 17; i++) {
+   for (int i = 0; i < TOOL_PARAM_ENUM_MAX + 1; i++) {
       char v[16];
       snprintf(v, sizeof(v), "v%d", i);
       json_object_array_add(en, json_object_new_string(v));

@@ -117,7 +117,7 @@ typedef struct {
 
 /*
  * Enum override storage for runtime-discovered values (e.g., HUD scene names).
- * Memory footprint: 32 slots × ~1KB each = ~32KB static allocation.
+ * Memory footprint: 32 slots × ~1.5KB each = ~49KB static allocation.
  * This is acceptable for Jetson/embedded Linux targets with 4GB+ RAM.
  * If memory-constrained, reduce MAX_ENUM_OVERRIDES or use dynamic allocation.
  */

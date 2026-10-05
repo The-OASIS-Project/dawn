@@ -34,7 +34,10 @@
 #include <strings.h>
 
 #include "core/buf_printf.h"
+#include "core/pending_slots.h"
+#include "core/turn_origin.h"
 #include "logging.h"
+#include "tools/homeassistant_match.h"
 #include "tools/homeassistant_service.h"
 #include "tools/homeassistant_ws.h"
 #include "tools/toml.h"
@@ -148,20 +151,25 @@ static const treg_param_t ha_params[] = {
                       "'on' (turn on), 'off' (turn off), 'toggle', 'brightness' (set level 0-100), "
                       "'color' (set color), 'color_temp' (set color temperature), "
                       "'temperature' (thermostat), 'lock', 'unlock', 'open' (cover), "
-                      "'close' (cover), 'scene', 'script', 'automation'",
+                      "'close' (cover), 'scene', 'script', 'automation', 'confirm'. 'unlock' "
+                      "and 'open' (and anything else that opens a door) return a preview and do "
+                      "nothing yet: call them directly, don't ask first. After the user says yes "
+                      "to the preview, call 'confirm' with device = the pending_id it gave.",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
        .enum_values = { "list", "status", "on", "off", "toggle", "brightness", "color",
                         "color_temp", "temperature", "lock", "unlock", "open", "close", "scene",
-                        "script", "automation" },
-       .enum_count = 16,
+                        "script", "automation", "confirm" },
+       .enum_count = 17,
    },
    {
        .name = "device",
        .description =
            "Entity friendly_name OR entity_id as registered in Home Assistant — call "
            "action='list' first to discover available entities; do not invent names. "
+           "When the user's words fit more than one entity (an area such as 'the foyer', or a "
+           "word several names share), ask which one; don't pick one for them. "
            "For brightness/color_temp/temperature: 'name value' (e.g., 'kitchen light 75' "
            "where brightness is 0-100%, color_temp is 1000-12000K, temperature is "
            "40-100°F). For color: 'name color' — color may be a name (red, blue, warm) or "
@@ -174,9 +182,29 @@ static const treg_param_t ha_params[] = {
 
 /* ========== Tool Metadata ========== */
 
+static int ha_describe_call(const char *action,
+                            const char *value,
+                            char *out,
+                            size_t out_len,
+                            int *valid_for_sec);
+
+/* Unlock and open wait for the user's yes, which a scheduled step can't get:
+ * refused when the schedule is made, not when it fires. */
+static int ha_validate_schedulable_action(const char *action, char *err_buf, size_t err_buf_size) {
+   if (strcmp(action, "unlock") != 0 && strcmp(action, "open") != 0 &&
+       strcmp(action, "confirm") != 0)
+      return SUCCESS;
+   if (err_buf && err_buf_size)
+      snprintf(err_buf, err_buf_size,
+               "Home Assistant '%s' can't be scheduled: it needs the user's yes at the time.",
+               action);
+   return FAILURE;
+}
+
 static const tool_action_kind_entry_t s_ha_action_kinds[] = {
-   { "list", TOOL_KIND_READ, NULL },
-   { "status", TOOL_KIND_READ, NULL },
+   { "list", TOOL_KIND_READ, NULL },           { "status", TOOL_KIND_READ, NULL },
+   { "unlock", TOOL_KIND_PREPARE, "confirm" }, { "open", TOOL_KIND_PREPARE, "confirm" },
+   { "confirm", TOOL_KIND_ACT, NULL },
 };
 
 static const tool_metadata_t ha_metadata = {
@@ -207,6 +235,8 @@ static const tool_metadata_t ha_metadata = {
    .config_section = "home_assistant",
 
    .secret_requirements = ha_secrets,
+   .describe_call = ha_describe_call,
+   .validate_schedulable_action = ha_validate_schedulable_action,
 
    .is_available = ha_tool_is_available,
    .init = ha_tool_init,
@@ -309,19 +339,6 @@ static const color_map_t color_names[] = {
 static const int color_count = sizeof(color_names) / sizeof(color_names[0]);
 
 /* ========== Helper Functions ========== */
-
-/* Copy entity fields to local buffers to avoid stale cache pointers.
- * The entity pointer from homeassistant_find_entity() points into the shared
- * cache which can be refreshed by another thread at any time. */
-#define ENTITY_LOCAL_COPY(entity)                               \
-   char entity_id_buf[HA_MAX_ENTITY_ID];                        \
-   char friendly_name_buf[HA_MAX_FRIENDLY_NAME];                \
-   do {                                                         \
-      safe_strscpy(entity_id_buf, (entity)->entity_id);         \
-      entity_id_buf[sizeof(entity_id_buf) - 1] = '\0';          \
-      safe_strscpy(friendly_name_buf, (entity)->friendly_name); \
-      friendly_name_buf[sizeof(friendly_name_buf) - 1] = '\0';  \
-   } while (0)
 
 /* Every make_error_msg() caller is a genuine failure (entity/lock not found, "Failed to <op>",
  * "Failed to list…"), so prepend TOOL_RESULT_ERROR_MARK here once to red the WebUI tool pill for
@@ -540,20 +557,177 @@ static char *handle_list(void) {
    return buf;
 }
 
+/* The entity @p name means (into @p out, NULL returned), else what to tell
+ * the model: not found (@p not_found, a "%s" format), or which one. */
+static char *find_or_ask(const char *name,
+                         ha_domain_t domain,
+                         const char *not_found,
+                         ha_entity_t *out) {
+   char candidates[HA_MATCH_CANDIDATES_MAX];
+   ha_error_t err = homeassistant_find_entity(name, domain, out, candidates, sizeof(candidates));
+   if (err == HA_OK)
+      return NULL;
+   if (err != HA_ERR_AMBIGUOUS)
+      return make_error_msg(not_found, name);
+   size_t len = strlen(name) + strlen(candidates) + 160;
+   char *msg = malloc(len);
+   if (!msg)
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed");
+   snprintf(msg, len,
+            "'%s' could be: %s. Ask the user which one, then pass its entity_id; don't pick "
+            "one for them.",
+            name, candidates);
+   return msg;
+}
+
+/* ========== Unlock / open: a preview, then the user's yes ========== */
+
+/* What opens a door waits for the user's yes (core/pending_slots.h): one per
+ * session, confirmed only in the user's reply to its preview. */
+#define HA_PENDING_DOOR 1
+#define HA_PENDING_EXPIRY_SEC 120
+#define HA_MAX_PENDING 8
+
+typedef struct {
+   pending_slot_t hdr;
+   char entity_id[HA_MAX_ENTITY_ID];
+   char friendly_name[HA_MAX_FRIENDLY_NAME];
+   char verb[16]; /* "unlock", "open", "turn on", "toggle", "activate", "run", "trigger" */
+} ha_pending_t;
+
+PENDING_ITEM_CHECK(ha_pending_t);
+static ha_pending_t s_pending[HA_MAX_PENDING];
+static pthread_mutex_t s_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
+PENDING_ARRAY_CHECK(s_pending);
+static const pending_slots_t s_pending_slots = PENDING_SLOTS_TABLE(s_pending,
+                                                                   HA_PENDING_EXPIRY_SEC);
+
+/* Stage @p verb on @p entity: the preview to return. */
+static char *stage_door(const ha_entity_t *entity, const char *verb) {
+   turn_origin_t origin;
+   if (!turn_origin_capture(&origin))
+      return strdup(TOOL_RESULT_ERROR_MARK "This works only in a conversation with the user, who "
+                                           "confirms it.");
+   pending_stage_rc_t rc = PENDING_STAGED;
+   pthread_mutex_lock(&s_pending_mutex);
+   ha_pending_t *p = (ha_pending_t *)pending_slots_stage(&s_pending_slots, &origin,
+                                                         tool_get_current_user_id(),
+                                                         HA_PENDING_DOOR, pending_slots_now(), &rc);
+   const uint32_t id = p ? p->hdr.item_id : 0;
+   if (p) {
+      snprintf(p->entity_id, sizeof(p->entity_id), "%s", entity->entity_id);
+      snprintf(p->friendly_name, sizeof(p->friendly_name), "%s", entity->friendly_name);
+      snprintf(p->verb, sizeof(p->verb), "%s", verb);
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (id == 0 && rc == PENDING_TWICE_IN_TURN)
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Another unlock or open from this turn is already waiting for the user's "
+                    "yes. Ask about that one first.");
+   if (id == 0)
+      return strdup(TOOL_RESULT_ERROR_MARK "Too many unlocks or opens are waiting for a confirm. "
+                                           "Try again in a couple of minutes.");
+   char buf[512];
+   snprintf(buf, sizeof(buf),
+            "About to %s '%s' (%s). Ask the user to confirm; if they say yes in their reply, "
+            "call home_assistant with action 'confirm' and device '%u' (this one only).",
+            verb, entity->friendly_name, entity->entity_id, (unsigned)id);
+   return strdup(buf);
+}
+
+static uint32_t parse_pending_id(const char *value) {
+   const long long n = value ? strtoll(value, NULL, 10) : 0;
+   return (n > 0 && n <= UINT32_MAX) ? (uint32_t)n : 0;
+}
+
+static char *handle_confirm(const char *value) {
+   const uint32_t id = parse_pending_id(value);
+   turn_origin_t origin;
+   if (id == 0 || !turn_origin_capture(&origin))
+      return strdup(TOOL_RESULT_ERROR_MARK "Name it with the pending_id its preview gave.");
+   ha_pending_t p;
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   pthread_mutex_lock(&s_pending_mutex);
+   const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, &origin,
+                                                   tool_get_current_user_id(), HA_PENDING_DOOR, id,
+                                                   pending_slots_now(), &p, sizeof(p), &orc);
+   pthread_mutex_unlock(&s_pending_mutex);
+   char buf[320];
+   switch (rc) {
+      case PENDING_FOUND:
+         break;
+      case PENDING_OTHER_ITEM:
+         return strdup(TOOL_RESULT_ERROR_MARK "That pending_id isn't the one waiting. Use the id "
+                                              "from the latest preview.");
+      case PENDING_NOT_NOW:
+         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Not done: %s",
+                  turn_origin_retry_hint(orc));
+         return strdup(buf);
+      default:
+         return strdup("Nothing is waiting to be confirmed (it may have expired). Ask again.");
+   }
+   ha_error_t err;
+   if (strcmp(p.verb, "unlock") == 0)
+      err = homeassistant_unlock(p.entity_id);
+   else if (strcmp(p.verb, "open") == 0)
+      err = homeassistant_open_cover(p.entity_id);
+   else if (strcmp(p.verb, "turn on") == 0)
+      err = homeassistant_turn_on(p.entity_id);
+   else if (strcmp(p.verb, "activate") == 0)
+      err = homeassistant_activate_scene(p.entity_id);
+   else if (strcmp(p.verb, "run") == 0)
+      err = homeassistant_run_script(p.entity_id);
+   else if (strcmp(p.verb, "trigger") == 0)
+      err = homeassistant_trigger_automation(p.entity_id);
+   else
+      err = homeassistant_toggle(p.entity_id);
+   if (err != HA_OK) {
+      snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Failed to %s '%s': %s", p.verb,
+               p.friendly_name, homeassistant_error_str(err));
+      return strdup(buf);
+   }
+   snprintf(buf, sizeof(buf), "Done: %s '%s'.", p.verb, p.friendly_name);
+   return strdup(buf);
+}
+
+/* What a confirm waiting for the user's reply code does (describe_call). */
+static int ha_describe_call(const char *action,
+                            const char *value,
+                            char *out,
+                            size_t out_len,
+                            int *valid_for_sec) {
+   if (strcmp(action, "confirm") != 0)
+      return TOOL_DESCRIBE_DEFAULT;
+   const uint32_t id = parse_pending_id(value);
+   turn_origin_t origin;
+   if (id == 0 || !turn_origin_capture(&origin))
+      return FAILURE;
+   int n = -1;
+   pthread_mutex_lock(&s_pending_mutex);
+   pending_slot_t *slot = NULL;
+   if (pending_slots_find(&s_pending_slots, &origin, tool_get_current_user_id(), HA_PENDING_DOOR,
+                          id, pending_slots_now(), &slot) == PENDING_FOUND) {
+      const ha_pending_t *p = (const ha_pending_t *)slot;
+      n = snprintf(out, out_len, "%s '%s'", p->verb, p->friendly_name);
+      *valid_for_sec = (int)(HA_PENDING_EXPIRY_SEC - (pending_slots_now() - slot->made_at));
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
 static char *handle_status(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify an entity name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_UNKNOWN, &entity);
-   if (err != HA_OK) {
-      return make_error_msg("Entity '%s' not found", value);
-   }
-   ENTITY_LOCAL_COPY(entity);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_UNKNOWN, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err;
 
    /* Get fresh state */
    ha_entity_t fresh;
-   err = homeassistant_get_entity_state(entity_id_buf, &fresh);
+   err = homeassistant_get_entity_state(entity.entity_id, &fresh);
    if (err != HA_OK) {
       return make_error_msg("Failed to get status: %s", homeassistant_error_str(err));
    }
@@ -601,51 +775,49 @@ static char *handle_on(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify an entity name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_UNKNOWN, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Entity '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_turn_on(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_UNKNOWN, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   if (homeassistant_opens_door(&entity))
+      return stage_door(&entity, "turn on");
+   ha_error_t err = homeassistant_turn_on(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to turn on: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Turned on '%s'", friendly_name_buf);
+   return make_success_msg("Turned on '%s'", entity.friendly_name);
 }
 
 static char *handle_off(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify an entity name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_UNKNOWN, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Entity '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_turn_off(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_UNKNOWN, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err = homeassistant_turn_off(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to turn off: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Turned off '%s'", friendly_name_buf);
+   return make_success_msg("Turned off '%s'", entity.friendly_name);
 }
 
 static char *handle_toggle(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify an entity name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_UNKNOWN, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Entity '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_toggle(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_UNKNOWN, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   if (homeassistant_opens_door(&entity))
+      return stage_door(&entity, "toggle");
+   ha_error_t err = homeassistant_toggle(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to toggle: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Toggled '%s'", friendly_name_buf);
+   return make_success_msg("Toggled '%s'", entity.friendly_name);
 }
 
 static char *handle_brightness(const char *value) {
@@ -663,17 +835,15 @@ static char *handle_brightness(const char *value) {
       return strdup("Brightness must be 0-100.");
    }
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(device_name, HA_DOMAIN_LIGHT, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Entity '%s' not found", device_name);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_set_brightness(entity_id_buf, level);
+   ha_entity_t entity;
+   char *ask = find_or_ask(device_name, HA_DOMAIN_LIGHT, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err = homeassistant_set_brightness(entity.entity_id, level);
    if (err != HA_OK)
       return make_error_msg("Failed to set brightness: %s", homeassistant_error_str(err));
 
-   return make_success_msg_int("Set '%s' brightness to %d%%", friendly_name_buf, level);
+   return make_success_msg_int("Set '%s' brightness to %d%%", entity.friendly_name, level);
 }
 
 static char *handle_color(const char *value) {
@@ -717,20 +887,20 @@ static char *handle_color(const char *value) {
           "blue, purple, pink, white, warm, cool");
    }
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(device_name, HA_DOMAIN_LIGHT, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Entity '%s' not found", device_name);
-   ENTITY_LOCAL_COPY(entity);
+   ha_entity_t entity;
+   char *ask = find_or_ask(device_name, HA_DOMAIN_LIGHT, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err;
 
    /* Convert RGB to HS with LED hue correction applied */
    double hue, sat;
    rgb_to_corrected_hs(r, g, b, s_config.led_hue_correction, &hue, &sat);
-   err = homeassistant_set_hs_color(entity_id_buf, hue, sat);
+   err = homeassistant_set_hs_color(entity.entity_id, hue, sat);
    if (err != HA_OK)
       return make_error_msg("Failed to set color: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Set '%s' color", friendly_name_buf);
+   return make_success_msg("Set '%s' color", entity.friendly_name);
 }
 
 static char *handle_color_temp(const char *value) {
@@ -748,17 +918,15 @@ static char *handle_color_temp(const char *value) {
       return strdup("Color temperature must be 1000-12000K.");
    }
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(device_name, HA_DOMAIN_LIGHT, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Entity '%s' not found", device_name);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_set_color_temp(entity_id_buf, kelvin);
+   ha_entity_t entity;
+   char *ask = find_or_ask(device_name, HA_DOMAIN_LIGHT, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err = homeassistant_set_color_temp(entity.entity_id, kelvin);
    if (err != HA_OK)
       return make_error_msg("Failed to set color temp: %s", homeassistant_error_str(err));
 
-   return make_success_msg_int("Set '%s' color temperature to %dK", friendly_name_buf, kelvin);
+   return make_success_msg_int("Set '%s' color temperature to %dK", entity.friendly_name, kelvin);
 }
 
 static char *handle_temperature(const char *value) {
@@ -776,138 +944,120 @@ static char *handle_temperature(const char *value) {
       return strdup("Please specify a valid temperature (40-100F).");
    }
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(device_name, HA_DOMAIN_CLIMATE, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Entity '%s' not found", device_name);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_set_temperature(entity_id_buf, temp);
+   ha_entity_t entity;
+   char *ask = find_or_ask(device_name, HA_DOMAIN_CLIMATE, "Entity '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err = homeassistant_set_temperature(entity.entity_id, temp);
    if (err != HA_OK)
       return make_error_msg("Failed to set temperature: %s", homeassistant_error_str(err));
 
    return make_success_msg_double("Set '%s' to %.0f\xC2\xB0"
                                   "F",
-                                  friendly_name_buf, temp);
+                                  entity.friendly_name, temp);
 }
 
 static char *handle_lock(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify a lock device name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_LOCK, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Lock '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_lock(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_LOCK, "Lock '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err = homeassistant_lock(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to lock: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Locked '%s'", friendly_name_buf);
+   return make_success_msg("Locked '%s'", entity.friendly_name);
 }
 
 static char *handle_unlock(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify a lock device name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_LOCK, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Lock '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_unlock(entity_id_buf);
-   if (err != HA_OK)
-      return make_error_msg("Failed to unlock: %s", homeassistant_error_str(err));
-
-   return make_success_msg("Unlocked '%s'", friendly_name_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_LOCK, "Lock '%s' not found", &entity);
+   if (ask)
+      return ask;
+   return stage_door(&entity, "unlock");
 }
 
 static char *handle_open(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify a cover device name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_COVER, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Cover '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_open_cover(entity_id_buf);
-   if (err != HA_OK)
-      return make_error_msg("Failed to open: %s", homeassistant_error_str(err));
-
-   return make_success_msg("Opened '%s'", friendly_name_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_COVER, "Cover '%s' not found", &entity);
+   if (ask)
+      return ask;
+   return stage_door(&entity, "open");
 }
 
 static char *handle_close(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify a cover device name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_COVER, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Cover '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_close_cover(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_COVER, "Cover '%s' not found", &entity);
+   if (ask)
+      return ask;
+   ha_error_t err = homeassistant_close_cover(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to close: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Closed '%s'", friendly_name_buf);
+   return make_success_msg("Closed '%s'", entity.friendly_name);
 }
 
 static char *handle_scene(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify a scene name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_SCENE, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Scene '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_activate_scene(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_SCENE, "Scene '%s' not found", &entity);
+   if (ask)
+      return ask;
+   if (homeassistant_opens_door(&entity))
+      return stage_door(&entity, "activate");
+   ha_error_t err = homeassistant_activate_scene(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to activate scene: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Activated scene '%s'", friendly_name_buf);
+   return make_success_msg("Activated scene '%s'", entity.friendly_name);
 }
 
 static char *handle_script(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify a script name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_SCRIPT, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Script '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_run_script(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_SCRIPT, "Script '%s' not found", &entity);
+   if (ask)
+      return ask;
+   if (homeassistant_opens_door(&entity))
+      return stage_door(&entity, "run");
+   ha_error_t err = homeassistant_run_script(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to run script: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Ran script '%s'", friendly_name_buf);
+   return make_success_msg("Ran script '%s'", entity.friendly_name);
 }
 
 static char *handle_automation(const char *value) {
    if (!value || !value[0])
       return strdup("Please specify an automation name.");
 
-   const ha_entity_t *entity;
-   ha_error_t err = homeassistant_find_entity(value, HA_DOMAIN_AUTOMATION, &entity);
-   if (err != HA_OK)
-      return make_error_msg("Automation '%s' not found", value);
-   ENTITY_LOCAL_COPY(entity);
-
-   err = homeassistant_trigger_automation(entity_id_buf);
+   ha_entity_t entity;
+   char *ask = find_or_ask(value, HA_DOMAIN_AUTOMATION, "Automation '%s' not found", &entity);
+   if (ask)
+      return ask;
+   if (homeassistant_opens_door(&entity))
+      return stage_door(&entity, "trigger");
+   ha_error_t err = homeassistant_trigger_automation(entity.entity_id);
    if (err != HA_OK)
       return make_error_msg("Failed to trigger automation: %s", homeassistant_error_str(err));
 
-   return make_success_msg("Triggered automation '%s'", friendly_name_buf);
+   return make_success_msg("Triggered automation '%s'", entity.friendly_name);
 }
 
 /* ========== Callback Implementation ========== */
@@ -959,6 +1109,8 @@ static char *ha_tool_callback(const char *action, char *value, int *should_respo
       return handle_script(value);
    if (strcmp(action, "automation") == 0)
       return handle_automation(value);
+   if (strcmp(action, "confirm") == 0)
+      return handle_confirm(value);
 
    char buf[256];
    snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Unknown Home Assistant action '%s'.", action);

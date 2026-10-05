@@ -40,6 +40,7 @@
 #include "core/curl_buffer.h"
 #include "core/str_fuzzy.h"
 #include "logging.h"
+#include "tools/homeassistant_match.h"
 #include "utils/string_utils.h"
 
 /* =============================================================================
@@ -199,6 +200,7 @@ static const char *const s_error_strings[] = {
    [HA_ERR_INVALID_PARAM] = "Invalid parameter",
    [HA_ERR_RATE_LIMITED] = "Rate limited",
    [HA_ERR_MEMORY] = "Memory allocation failed",
+   [HA_ERR_AMBIGUOUS] = "More than one entity matches",
 };
 
 const char *homeassistant_error_str(ha_error_t err) {
@@ -1216,74 +1218,49 @@ ha_error_t homeassistant_snapshot_entities(ha_entity_list_t *out, bool force_ref
 
 ha_error_t homeassistant_find_entity(const char *name,
                                      ha_domain_t domain_hint,
-                                     const ha_entity_t **entity) {
-   if (!name || !entity)
+                                     ha_entity_t *out,
+                                     char *candidates,
+                                     size_t candidates_len) {
+   if (!name || !out)
       return HA_ERR_INVALID_PARAM;
-
-   /* Direct entity_id lookup if input contains '.' */
-   if (strchr(name, '.')) {
-      const ha_entity_list_t *list;
-      ha_error_t err = homeassistant_list_entities(&list);
-      if (err != HA_OK)
-         return err;
-
-      pthread_rwlock_rdlock(&s_ha.rwlock);
-      for (int i = 0; i < list->count; i++) {
-         if (strcasecmp(list->entities[i].entity_id, name) == 0) {
-            *entity = &list->entities[i];
-            pthread_rwlock_unlock(&s_ha.rwlock);
-            return HA_OK;
-         }
-      }
-      pthread_rwlock_unlock(&s_ha.rwlock);
-      return HA_ERR_ENTITY_NOT_FOUND;
-   }
+   if (candidates && candidates_len > 0)
+      candidates[0] = '\0';
 
    const ha_entity_list_t *list;
    ha_error_t err = homeassistant_list_entities(&list);
    if (err != HA_OK)
       return err;
 
-   char needle_lower[256];
-   str_fuzzy_tolower(needle_lower, name, sizeof(needle_lower));
-
-   int best_score = 0;
-   const ha_entity_t *best_match = NULL;
-
+   /* Copied out under the lock: a refresh rewrites the cache in place. */
    pthread_rwlock_rdlock(&s_ha.rwlock);
-   for (int i = 0; i < list->count; i++) {
-      const ha_entity_t *ent = &list->entities[i];
-
-      /* Domain filtering */
-      if (domain_hint != HA_DOMAIN_UNKNOWN && ent->domain != domain_hint)
-         continue;
-
-      /* Score against friendly_name (pre-lowered) and entity_id */
-      int score = str_fuzzy_score(ent->friendly_name_lower, needle_lower);
-
-      char eid_lower[HA_MAX_ENTITY_ID];
-      str_fuzzy_tolower(eid_lower, ent->entity_id, sizeof(eid_lower));
-      int eid_score = str_fuzzy_score(eid_lower, needle_lower);
-      if (eid_score > score)
-         score = eid_score;
-
-      if (score > best_score) {
-         best_score = score;
-         best_match = ent;
+   int idx = -1;
+   if (strchr(name, '.')) { /* an entity_id */
+      err = HA_ERR_ENTITY_NOT_FOUND;
+      for (int i = 0; i < list->count; i++) {
+         if (strcasecmp(list->entities[i].entity_id, name) == 0) {
+            idx = i;
+            err = HA_OK;
+            break;
+         }
       }
+   } else {
+      err = homeassistant_match(list, name, domain_hint, &idx, candidates, candidates_len);
    }
+   if (err == HA_OK)
+      *out = list->entities[idx];
    pthread_rwlock_unlock(&s_ha.rwlock);
 
-   if (best_score < 40 || !best_match) {
-      OLOG_WARNING("Home Assistant: No entity matching '%s' (domain: %s, best score: %d)", name,
-                   homeassistant_domain_str(domain_hint), best_score);
-      return HA_ERR_ENTITY_NOT_FOUND;
+   if (err == HA_OK) {
+      OLOG_INFO("Home Assistant: Matched '%s' → '%s' (%s)", name, out->friendly_name,
+                out->entity_id);
+   } else if (err == HA_ERR_AMBIGUOUS) {
+      OLOG_INFO("Home Assistant: '%s' could be several entities: %s", name,
+                candidates ? candidates : "");
+   } else {
+      OLOG_WARNING("Home Assistant: No entity matching '%s' (domain: %s)", name,
+                   homeassistant_domain_str(domain_hint));
    }
-
-   OLOG_INFO("Home Assistant: Matched '%s' → '%s' (%s, score: %d)", name, best_match->friendly_name,
-             best_match->entity_id, best_score);
-   *entity = best_match;
-   return HA_OK;
+   return err;
 }
 
 ha_error_t homeassistant_get_entity_state(const char *entity_id, ha_entity_t *out) {
