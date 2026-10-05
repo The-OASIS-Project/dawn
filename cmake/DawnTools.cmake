@@ -411,6 +411,13 @@ else()
     message(STATUS "DAWN: Render Visual tool DISABLED")
 endif()
 
+# Who an action goes to (a contact, a number, an address): phone and email.
+if(DAWN_ENABLE_PHONE_TOOL OR DAWN_ENABLE_EMAIL_TOOL)
+    list(APPEND TOOL_SOURCES
+        src/tools/contact_resolve.c
+        src/tools/phone_number.c)
+endif()
+
 # Phone Tool (calls and SMS via ECHO modem daemon)
 if(DAWN_ENABLE_PHONE_TOOL)
     add_definitions(-DDAWN_ENABLE_PHONE_TOOL)

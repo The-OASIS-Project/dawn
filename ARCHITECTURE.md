@@ -285,6 +285,9 @@ Layer 3 (Tools)
 │                                        gmail_read.c: reading one message (deps: email_mime,
 │                                        email_display, email_transfer); gmail_parts.c: its MIME
 │                                        tree as the email_mime part list (pure)
+├── src/tools/contact_resolve.c        - Who a call, text or email goes to: a name, number or address
+│                                        resolved without guessing (partial, sound-alike or not-said names
+│                                        are a question) (deps: contacts_db, str_fuzzy, phone_number)
 ├── src/tools/email_mime.c             - Reading a message, both backends: GMime (only here), the
 │                                        part policy, bounded decode (deps: html_parser,
 │                                        email_display, GMime); email_transfer.c: failure codes

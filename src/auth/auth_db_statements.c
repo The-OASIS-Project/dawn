@@ -36,6 +36,7 @@
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_tool_results.h"
 #include "logging.h"
+#include "memory/contacts_db.h"
 
 /* =============================================================================
  * Prepared Statement Management
@@ -2526,13 +2527,7 @@ int auth_db_prepare_statements(void) {
    }
 
    /* === Contacts statements === */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label, "
-       "e.photo_id FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
-       "WHERE c.user_id = ? AND e.canonical_name LIKE ? ESCAPE '\\' "
-       "AND c.field_type LIKE ? ORDER BY e.name LIMIT ?",
-       -1, &s_db.stmt_contacts_find, NULL);
+   rc = sqlite3_prepare_v2(s_db.db, CONTACTS_FIND_SQL, -1, &s_db.stmt_contacts_find, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare contacts_find failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;

@@ -1189,12 +1189,8 @@ int email_send(const email_conn_t *conn,
    curl_easy_setopt(curl, CURLOPT_URL, conn->smtp_url);
 
    /* From address — use username if no display name */
-   char from_addr[320];
-   if (safe_display_name[0]) {
-      snprintf(from_addr, sizeof(from_addr), "%s <%s>", safe_display_name, conn->username);
-   } else {
-      snprintf(from_addr, sizeof(from_addr), "%s", conn->username);
-   }
+   char from_addr[512];
+   email_format_mailbox(safe_display_name, conn->username, from_addr, sizeof(from_addr));
    curl_easy_setopt(curl, CURLOPT_MAIL_FROM, conn->username);
 
    /* Recipients */
@@ -1203,12 +1199,8 @@ int email_send(const email_conn_t *conn,
    curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
 
    /* Build RFC 2822 message */
-   char to_header[384];
-   if (safe_to_name[0]) {
-      snprintf(to_header, sizeof(to_header), "%s <%s>", safe_to_name, safe_to_addr);
-   } else {
-      snprintf(to_header, sizeof(to_header), "%s", safe_to_addr);
-   }
+   char to_header[512];
+   email_format_mailbox(safe_to_name, safe_to_addr, to_header, sizeof(to_header));
 
    char date_str[64];
    time_t now = time(NULL);

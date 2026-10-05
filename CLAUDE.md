@@ -23,8 +23,21 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
 - **Verify, don't assume.** Check claims against the code and against authoritative vendor
   documentation or live behavior, and reproduce a bug before calling it fixed. If you haven't
   verified something, say so plainly.
+- **Right is not maximal.** The right fix is the *least code* that fully closes a real problem.
+  Simple beats clever; a smaller design that works beats a complete one that's harder to read, test
+  and change. Least code is still the real fix, never a band-aid at the symptom.
+- **Real, reachable, practical.** Fix what a real user, or a real attacker against a real install,
+  can hit today. Drop what needs a stack of unlikely conditions — don't fix it, and don't log it in
+  TODO either: a theoretical TODO row is debt that never closes and buries the real items. Reachable
+  includes anything an outsider can cause through content DAWN reads (email, web, SMS, documents),
+  and any silent, irreversible outcome (data loss, a wrong action) even when rare. Justify each fix
+  or drop in one sentence: who triggers it, and how, on a default install.
+- **A burden is a bug (WWFD).** DAWN should feel like FRIDAY: usable, versatile, faster than doing it
+  yourself. A safeguard that makes a common request ask or fail every time has failed. Weigh
+  usability and security together; neither wins by default.
 - **When a real tradeoff exists,** lay the options out honestly, say what each one actually fixes,
-  and recommend the proper one even when it's more work. Never quietly pick the easy option.
+  and recommend the proper one even when it's more work. Never quietly pick the easy option, and
+  never pick the heavy one just to look thorough.
 
 ## Critical Rules — Always Follow
 
@@ -161,7 +174,7 @@ still in `dawn.toml`.
 
 1. **Plan** (non-trivial only) — plan mode for features touching multiple subsystems. Explore agent to understand, Plan agent to design, architecture-reviewer / ui-design-architect on the plan before exiting.
 2. **Implement** — task tracking for multi-step work. Build + format + unit tests after each logical chunk.
-3. **Review** — run relevant review agents in parallel on the diff. Consolidate findings, triage (fix / skip / ask), apply fixes, re-verify.
+3. **Review** — run relevant review agents in parallel on the diff. Consolidate findings, triage (fix / skip / ask), apply fixes, re-verify. Reviewers report everything; we act only on what's reachable.
 4. **Test** — developer tests manually and reports. Fix issues found; adjacent bugs may warrant their own mini cycle.
 5. **Document** — update or create the atlas design doc (`~/code/The-OASIS-Project/atlas/dawn/`) for significant features. Memory-subsystem docs land under `atlas/dawn/memory/`; everything else flat under `atlas/dawn/archive/`. Have architecture-reviewer verify the doc against code.
 6. **Update planning docs** — cut the item's row from `docs/TODO.md` and paste it into `docs/DONE.md` under the matching section, with the `~~strikethrough~~` SHIPPED tag including the commit hash; remove any `§N` detail section from TODO.md.
@@ -176,9 +189,9 @@ Trigger phrases: "code review", "review my changes", "run the agents", "run the 
    - **Big three** (code review / run the big three): `architecture-reviewer`, `embedded-efficiency-reviewer`, `security-auditor` — **plus `correctness-reviewer` in every set** (the general-logic lens; it also checks non-literal format strings such as prompt templates, which `-Wformat` can't).
    - **All four** (run all four): above + `ui-design-architect` (when UI changes present).
    - **All five / all six** (full review / run all five / run all six): above + `coding-standards-auditor` — mandatory for large refactors, new modules, or pre-release audits.
-3. Synthesize into a consolidated table with severity and action (fix / skip / ask). **Fix pre-existing issues when found** — triage on merit (severity + fix effort), not on when introduced.
-4. Apply approved fixes; re-verify format and tests.
-5. **Re-review substantial post-review changes.** Code written *after* the agent pass — fixes, or new work added during a redirect — was seen by no reviewer. Re-run the relevant lens on it before commit (this is separate from tweaking already-reviewed code). A bug introduced while applying feedback is invisible to the original pass; that is exactly how the reconnect-state bug on the music branch reached the PR and was caught only by the bots.
+3. Synthesize into one table with severity and action. Triage on **reachability**, not the label (see the prime directive): **fix** what's reachable in practice, any severity, with the least code; **drop** what isn't — no TODO row — and say so in one line. Pre-existing issues the same way: fixed because they're real and reachable, not because they were found.
+4. Apply the fixes; re-verify format and tests.
+5. **One full review round per commit.** Post-review fixes get a self-check, or **one targeted reviewer** when they're substantial (a rewrite, new logic) — code written *after* the agent pass was seen by no reviewer, which is how the reconnect-state bug on the music branch reached the PR and was caught only by the bots. Never re-run the full set for polish.
 
 ## Benchmark Methodology — `recall_reach` ≠ leader entailment
 

@@ -88,6 +88,13 @@ char *llm_context_neutralize_line(const char *text);
  */
 char *llm_context_neutralize_attachments(const char *text);
 
+/**
+ * @brief @p text without its attached documents: the user's own words only
+ *        (a document's text came from anywhere).  A document left open runs
+ *        to the end.  Caller frees; NULL on allocation failure.
+ */
+char *llm_context_strip_attachments(const char *text);
+
 /** The secret part of @p tag (its 8 hex digits, lowercase) in @p hex.
  *  Returns false when @p tag isn't a conversation tag. */
 bool llm_context_tag_secret(const char *tag, char hex[9]);

@@ -37,6 +37,7 @@
 #include "core/session_prefix.h"
 #include "core/tool_result_store.h"
 #include "dawn_error.h"
+#include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
@@ -769,6 +770,56 @@ char *session_previous_question_dup(session_t *session) {
       break;
    }
    pthread_mutex_unlock(&session->history_mutex);
+   return text;
+}
+
+char *session_recent_questions_dup(session_t *session) {
+   if (!session) {
+      return NULL;
+   }
+   /* The question this turn answers, then the one before it: the user's own
+    * words (envelopes and DAWN's context rows are not questions of kind NONE). */
+   const char *found[2] = { NULL, NULL };
+   int got = 0;
+   char *text = NULL;
+   pthread_mutex_lock(&session->history_mutex);
+   struct json_object *history = turn_target_locked(session);
+   const int n = history ? (int)json_object_array_length(history) : 0;
+   int from = n - 1;
+   if (session->turn_user_msg) {
+      for (int i = n - 1; i >= 0; i--) {
+         if (json_object_array_get_idx(history, i) == session->turn_user_msg) {
+            from = i;
+            break;
+         }
+      }
+   }
+   for (int i = from; i >= 0 && got < 2; i--) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      if (llm_history_is_context(msg) || !llm_history_is_question(msg) ||
+          llm_history_kind_of(msg) != MESSAGE_KIND_NONE) {
+         continue;
+      }
+      const char *q = llm_history_question_text(msg);
+      if (q && q[0]) {
+         found[got++] = q;
+      }
+   }
+   /* Without attached documents: their text isn't the user's. */
+   char *own[2] = { NULL, NULL };
+   for (int i = 0; i < got; i++) {
+      own[i] = llm_context_strip_attachments(found[i]);
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+   if (got > 0 && own[0] && (got < 2 || own[1])) {
+      const size_t len = strlen(own[0]) + (got > 1 ? strlen(own[1]) + 1 : 0) + 1;
+      text = malloc(len);
+      if (text) {
+         snprintf(text, len, "%s%s%s", own[0], got > 1 ? "\n" : "", got > 1 ? own[1] : "");
+      }
+   }
+   free(own[0]);
+   free(own[1]);
    return text;
 }
 

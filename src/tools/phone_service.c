@@ -1045,10 +1045,11 @@ int phone_service_call(int user_id, const char *name_or_number, char *result_buf
 
    /* Resolve contact — only a number or a single unambiguous contact dials;
     * anything ambiguous or fuzzy comes back as a disambiguation prompt so we
-    * never place a call to a guessed contact. */
+    * never place a call to a guessed contact.  As given: the phone tool has
+    * already put an uncertain target to the user (its preview). */
    char number[24], name[64];
    phone_resolve_t rez;
-   phone_contacts_resolve(user_id, name_or_number, &rez);
+   phone_contacts_resolve_as_given(user_id, name_or_number, &rez);
    if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
       phone_contacts_format_disambiguation(name_or_number, &rez, result_buf, buf_size);
       return 1;
@@ -1328,7 +1329,7 @@ static int send_sms(int user_id,
     * contact sends; ambiguous/fuzzy comes back as a disambiguation prompt. */
    char number[24], name[64];
    phone_resolve_t rez;
-   phone_contacts_resolve(user_id, name_or_number, &rez);
+   phone_contacts_resolve_as_given(user_id, name_or_number, &rez);
    if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
       phone_contacts_format_disambiguation(name_or_number, &rez, result_buf, buf_size);
       return 1;

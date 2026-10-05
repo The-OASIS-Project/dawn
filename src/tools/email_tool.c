@@ -38,7 +38,7 @@
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "memory/contacts_db.h"
+#include "tools/contact_resolve.h"
 #include "tools/email_digest.h"
 #include "tools/email_display.h"
 #include "tools/email_service.h"
@@ -647,51 +647,33 @@ static char *handle_send(struct json_object *details, int user_id, const turn_or
       return strdup("Error: subject too long (max 250 characters)");
    }
 
-   /* Contact resolution: if no @, try looking up as a contact name */
+   /* Who it goes to, without guessing (contact_resolve.h): one address, or a
+    * contact certain enough to draft to.  One to confirm is still drafted,
+    * since a draft is itself a question to the user: its preview says why. */
    char resolved_addr[256] = "";
    char resolved_name[64] = "";
-
-   if (strchr(to, '@')) {
-      snprintf(resolved_addr, sizeof(resolved_addr), "%s", to);
-   } else {
-      contact_result_t contacts[5];
-      int found = 0;
-      contacts_find(user_id, to, "email", contacts, 5, &found);
-
-      if (found == 0) {
-         char err[256];
-         snprintf(err, sizeof(err),
-                  "Error: no email address found for '%s'. Ask the user for the email address "
-                  "or use save_contact to store it.",
-                  to);
-         return strdup(err);
-      } else if (found == 1) {
-         snprintf(resolved_addr, sizeof(resolved_addr), "%s", contacts[0].value);
-         snprintf(resolved_name, sizeof(resolved_name), "%s", contacts[0].entity_name);
-      } else {
-         /* Multiple matches — ask LLM to disambiguate */
-         char *buf = malloc(1024);
-         if (!buf)
-            return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
-         int pos = snprintf(buf, 1024, "Multiple email addresses found for '%s':\n", to);
-         if (pos > 1024)
-            pos = 1024;
-         for (int i = 0; i < found && pos < 900; i++) {
-            pos += snprintf(buf + pos, 1024 - pos, "- %s: %s%s%s\n", contacts[i].entity_name,
-                            contacts[i].value, contacts[i].label[0] ? " (" : "",
-                            contacts[i].label[0] ? contacts[i].label : "");
-            if (pos > 1024)
-               pos = 1024;
-            if (contacts[i].label[0] && pos < 1024) {
-               pos += snprintf(buf + pos, 1024 - pos, ")");
-               if (pos > 1024)
-                  pos = 1024;
-            }
-         }
-         if (pos < 1024)
-            snprintf(buf + pos, 1024 - pos, "\nPlease specify which email address to use.");
-         return buf;
+   char confirm_note[512] = "";
+   {
+      char *words = tool_user_words_dup();
+      const contact_resolve_opts_t ropts = {
+         .field = CONTACT_FIELD_EMAIL,
+         .spoken = tool_turn_spoken(),
+         .user_words = words,
+      };
+      contact_resolve_t r;
+      contact_resolve(user_id, to, &ropts, &r);
+      free(words);
+      if (r.kind != CONTACT_RESOLVE_LITERAL && r.kind != CONTACT_RESOLVE_UNIQUE &&
+          r.kind != CONTACT_RESOLVE_CONFIRM) {
+         char question[1024];
+         contact_resolve_question(to, CONTACT_FIELD_EMAIL, &r, question, sizeof(question));
+         return strdup(question);
       }
+      if (r.kind == CONTACT_RESOLVE_CONFIRM) {
+         contact_resolve_question(to, CONTACT_FIELD_EMAIL, &r, confirm_note, sizeof(confirm_note));
+      }
+      snprintf(resolved_addr, sizeof(resolved_addr), "%s", r.value);
+      snprintf(resolved_name, sizeof(resolved_name), "%s", r.name);
    }
 
    /* Create draft (two-step send) */
@@ -729,6 +711,7 @@ static char *handle_send(struct json_object *details, int user_id, const turn_or
             "  To: %s%s%s%s\n"
             "  Subject: %s\n"
             "  Body: %s\n\n"
+            "%s%s%s"
             "Read this back to the user (including which account it will send FROM), and say this "
             "line exactly as written, so the user hears where it really goes:\n"
             "  Sending to %s, from %s, subject: %s\n"
@@ -736,8 +719,9 @@ static char *handle_send(struct json_object *details, int user_id, const turn_or
             "user's very next message says yes; a confirm in this turn, or any later one, "
             "is refused.",
             from_account, resolved_name[0] ? resolved_name : "", resolved_name[0] ? " <" : "",
-            resolved_addr, resolved_name[0] ? ">" : "", subject, body, say_to, from_account,
-            say_subject, draft_id);
+            resolved_addr, resolved_name[0] ? ">" : "", subject, body,
+            confirm_note[0] ? "First check the recipient: " : "", confirm_note,
+            confirm_note[0] ? "\n" : "", say_to, from_account, say_subject, draft_id);
 
    return buf;
 }
@@ -1341,8 +1325,9 @@ static const tool_metadata_t email_metadata = {
                   "(no confirmation needed). "
                   "send, trash and archive work only in a live conversation with the user, "
                   "not from a background job. "
-                  "For 'send', the 'to' field can be a contact name (resolved via contacts) "
-                  "or a direct email address.",
+                  "For 'send', the 'to' field can be a contact name (resolved via contacts; "
+                  "pass the name as the user said it, never a guess; for a relationship such as "
+                  "'my wife', the name of the person you know it means) or one email address.",
    .params = email_params,
    .param_count = TOOL_PARAM_COUNT(email_params),
 

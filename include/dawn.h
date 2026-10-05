@@ -85,14 +85,17 @@
    "images for those - that content displays without being spoken."
 
 // ASR-disambiguation hint for any voice-input turn (input was speech-transcribed).
-#define DEFAULT_ASR_DISAMBIGUATION_HINT                                          \
-   "Your input was transcribed from speech, so it may contain recognition "      \
-   "errors - especially with homophones and similar-sounding words, names, and " \
-   "technical terms (a name may arrive misspelled or as a different word that "  \
-   "merely sounds alike). When a word seems out of place but resembles "         \
-   "something that fits the context, treat it as the most plausible intended "   \
-   "word rather than taking it literally. Ask for clarification only when the "  \
-   "meaning is genuinely unclear."
+#define DEFAULT_ASR_DISAMBIGUATION_HINT                                                \
+   "Your input was transcribed from speech, so it may contain recognition "            \
+   "errors - especially with homophones and similar-sounding words, names, and "       \
+   "technical terms (a name may arrive misspelled or as a different word that "        \
+   "merely sounds alike). When a word seems out of place but resembles "               \
+   "something that fits the context, treat it as the most plausible intended "         \
+   "word rather than taking it literally. Ask for clarification only when the "        \
+   "meaning is genuinely unclear. The exception is who an action goes to (a "          \
+   "call, a text, an email): pass the name exactly as heard, never a guess (a "        \
+   "relationship such as 'my wife' as the name of the person you know it means), and " \
+   "if the tool asks whether it's the right person, ask the user."
 
 // Vision support is now controlled via runtime config:
 // - g_config.llm.cloud.vision_enabled (for cloud LLMs)

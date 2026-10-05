@@ -12,6 +12,32 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-04 — Friday asks before calling, texting or emailing someone she isn't sure of
+
+**What changed.**
+- **A name that's only part of a contact's asks first.** "Call Chris" with a
+  Christine in your contacts used to call Christine; now Friday shows who she
+  found ("Christine Lee, for 'Chris'") and asks. The whole name, or a whole
+  word of it ("call Lee"), goes through as before.
+- **By voice, names that sound alike ask first.** With both a Cris and a Chris
+  in your contacts, a spoken "call Chris" asks which one.
+- **A recipient you didn't name asks first.** If Friday picks up a name or an
+  address from something she read (an email, a web page) rather than from you,
+  the call, text or email draft says so and waits for your yes.
+- **"My wife", "mom" and other names not in your contacts** are looked up in
+  Friday's memory of you, and the preview asks you to confirm the person she
+  found.
+- These always come as a preview you answer with "yes", even with
+  `[phone] confirm_outbound = false`.
+- **An email's "to" must be one address.** A list of addresses is refused
+  rather than sent to all of them.
+- If you set your own `[asr] disambiguation_hint`, it keeps your wording; the
+  built-in one now also says to pass names as heard.
+
+**What you need to do.** Nothing.
+
+---
+
 ## 2026-10-03 — Actions by text need a reply code; background work reads but doesn't act; confirms need your reply
 
 **What changed.**

@@ -115,6 +115,14 @@ void email_decode_rfc2047(const char *src, char *dst, size_t dst_len);
 void email_sanitize_header_value(const char *src, char *dst, size_t dst_len);
 
 /**
+ * "Name" <addr> (RFC 5322 quoted display name; " and \ escaped), or just the
+ * address with no name: a name with a comma ("Smith, Bob") can't split the
+ * header into two recipients.  Both are already free of CR/LF
+ * (email_sanitize_header_value).  Cut to fit on a whole character.
+ */
+void email_format_mailbox(const char *name, const char *addr, char *dst, size_t dst_len);
+
+/**
  * Find the ')' matching the '(' at @p open, honoring IMAP quoted strings (so a
  * '(' , ')' or '"' inside a quoted string does not affect nesting; a backslash
  * escapes the next char inside a quote).  Returns the matching ')' or NULL if

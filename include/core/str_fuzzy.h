@@ -92,6 +92,23 @@ int str_fuzzy_score(const char *haystack_lower, const char *needle_lower);
  */
 int str_fuzzy_ratio(const char *a_lower, const char *b_lower);
 
+/* Longest word str_phonetic_key() reads (the rest is ignored). */
+#define STR_PHONETIC_MAXLEN 64
+
+/**
+ * @brief A small English sound key for one word (up to a space): names that
+ *        sound alike get the same key ("Cris"/"Chris", "Jon"/"John",
+ *        "Sean"/"Shawn", "Stephen"/"Steven", "Katherine"/"Catherine")
+ *
+ * ph→f, sh→s, ch/ck/c(a,o,u,consonant)/q→k, c(e,i,y)→s, z→s, v→f,
+ * g(e,i)→j; h after the first letter, and w/y after a vowel, are silent; a
+ * leading kn-/wr- drops its first letter; vowels collapse to a leading 'a'
+ * and are otherwise dropped; doubled sounds collapse.  ASCII letters only
+ * (case ignored); UTF-8 bytes are kept as they are.  Coarse by design (Dan
+ * and Don share a key): it flags names a listener could confuse.
+ */
+void str_phonetic_key(const char *word, char *out, size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif

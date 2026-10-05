@@ -16,12 +16,10 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Phone contact resolver — turns a user-supplied "target" (a phone number or
- * a spoken/typed contact name) into a dialable number, and, when the name is
- * ambiguous or only a near-miss, into a list of candidates to confirm rather
- * than silently guessing.  This is the safety net for the DANGEROUS phone
- * tool: it never picks for the user when confidence is low — it surfaces the
- * options so the LLM/user can confirm.  Shared by the call and SMS paths.
+ * Phone contact resolver: the phone tool's view of contact_resolve.h.  Turns
+ * a call/SMS target (a number, or a spoken/typed contact name) into a number
+ * to dial, or into the question to ask when it isn't certain: never a silent
+ * guess.  Shared by the call and SMS paths.
  */
 
 #ifndef PHONE_CONTACTS_H
@@ -29,12 +27,12 @@
 
 #include <stddef.h>
 
-/* Max candidates surfaced in an ambiguous / did-you-mean list. */
-#define PHONE_CONTACTS_MAX_CANDIDATES 5
-
 typedef enum {
-   PHONE_RESOLVE_NUMBER = 0, /* input was a dialable phone number */
-   PHONE_RESOLVE_UNIQUE,     /* exactly one contact matched the name */
+   PHONE_RESOLVE_NUMBER = 0, /* input was a dialable phone number the user gave */
+   PHONE_RESOLVE_UNIQUE,     /* exactly one contact, certain */
+   PHONE_RESOLVE_CONFIRM,    /* one contact (or number) to confirm with the user first:
+                                only part of the name, sounds like another contact,
+                                or not something the user said */
    PHONE_RESOLVE_AMBIGUOUS,  /* multiple contacts matched the name */
    PHONE_RESOLVE_SUGGEST,    /* no direct match; fuzzy near-misses found */
    PHONE_RESOLVE_BAD_NUMBER, /* input looked numeric but is not a valid number,
@@ -43,31 +41,20 @@ typedef enum {
 } phone_resolve_kind_t;
 
 typedef struct {
-   char name[64];
-   char number[24];
-   char label[32]; /* "mobile", "work", ... or empty */
-} phone_candidate_t;
-
-typedef struct {
    phone_resolve_kind_t kind;
-   char number[24]; /* set for NUMBER and UNIQUE */
-   char name[64];   /* set for UNIQUE (empty for NUMBER) */
-   phone_candidate_t candidates[PHONE_CONTACTS_MAX_CANDIDATES]; /* AMBIGUOUS / SUGGEST */
-   int candidate_count;
+   char number[24];     /* set for NUMBER, UNIQUE and CONFIRM */
+   char name[64];       /* set for UNIQUE and CONFIRM (empty for a number) */
+   char question[1024]; /* for everything but NUMBER and UNIQUE: what to ask */
 } phone_resolve_t;
 
 /**
- * @brief Resolve a phone "target" (number or contact name) to a dial decision.
+ * @brief Resolve a phone "target" (number or contact name) for the calling
+ *        turn (contact_resolve.h): its spoken flag and the user's own words
+ *        come from the command context
  *
- * Tiered, confidence-ordered:
- *   1. Looks like a number  -> validate + normalize -> PHONE_RESOLVE_NUMBER.
- *   2. Exactly one contact name substring-match -> PHONE_RESOLVE_UNIQUE.
- *   3. Several contact name matches -> PHONE_RESOLVE_AMBIGUOUS (candidates).
- *   4. No substring match, but fuzzy (token + edit-distance) near-misses
- *      above threshold -> PHONE_RESOLVE_SUGGEST (candidates, best first).
- *   5. Nothing plausible -> PHONE_RESOLVE_NONE.
- *
- * Never returns a number for tiers 3-5: the caller must confirm/disambiguate.
+ * Only NUMBER and UNIQUE may be dialed or texted without asking; CONFIRM
+ * names one contact or number to put to the user first (a preview); the rest
+ * carry the question to ask instead.
  *
  * @param user_id User whose contacts are searched.
  * @param input   Target string (number or name); NULL/empty -> PHONE_RESOLVE_NONE.
@@ -76,17 +63,15 @@ typedef struct {
 void phone_contacts_resolve(int user_id, const char *input, phone_resolve_t *out);
 
 /**
- * @brief Format a user-facing disambiguation / not-found message.
- *
- * For AMBIGUOUS / SUGGEST / NONE results, builds the text the phone tool
- * returns to the LLM so it can ask the user to pick (identical wording whether
- * produced at preview time or at dial time).  A NUMBER/UNIQUE result yields a
- * generic fallback string (callers should not reach here for those).
- *
- * @param input    Original target string (for echoing in the message).
- * @param r        Resolve result to describe.
- * @param buf      Output buffer.
- * @param buf_size Size of @p buf.
+ * @brief Resolve a target with no turn checks (not spoken, no user words):
+ *        for the service layer, which dials or texts what the tool layer
+ *        already decided on (a confirmed preview's number)
+ */
+void phone_contacts_resolve_as_given(int user_id, const char *input, phone_resolve_t *out);
+
+/**
+ * @brief The question for a result the caller can't act on (r->question; a
+ *        generic line for NUMBER/UNIQUE, which callers shouldn't pass)
  */
 void phone_contacts_format_disambiguation(const char *input,
                                           const phone_resolve_t *r,

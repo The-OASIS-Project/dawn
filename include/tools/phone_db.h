@@ -29,6 +29,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "tools/phone_number.h"
+
 /* Call direction */
 typedef enum {
    PHONE_DIR_OUTGOING = 0,
@@ -97,21 +99,7 @@ void phone_number_redact(const char *in, char *out, size_t out_size);
  */
 void phone_number_format_for_tts(const char *in, char *out, size_t out_size);
 
-/**
- * @brief Normalize a phone number for DB matching.
- *
- * LLMs emit phone numbers in many formats ("+1-555-123-4567", "(555) 123-4567",
- * "1 555 123 4567"). Stored rows are E.164 without punctuation ("+15551234567").
- * Strip whitespace/dashes/parens/dots, keep digits and an optional leading '+',
- * prefix a bare 10-digit US number with "+1". Used on both ingestion (inbound
- * SMS sender, outbound contact resolution) and delete (by-number) paths so rows
- * match on any LLM-supplied format.
- *
- * @param in       Raw input (may be NULL/empty → out receives "").
- * @param out      Output buffer.
- * @param out_size Size of out buffer.
- */
-void phone_number_normalize(const char *in, char *out, size_t out_size);
+/* phone_number_normalize: tools/phone_number.h */
 
 /**
  * @brief Insert a call log entry.

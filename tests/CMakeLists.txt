@@ -1114,6 +1114,7 @@ dawn_add_unit_test(test_instruction_loader
 dawn_add_unit_test(test_phone_db
    SOURCES test_phone_db.c test_scheduler_stub.c
            ${SRC_ROOT}/src/tools/phone_db.c
+           ${SRC_ROOT}/src/tools/phone_number.c
    LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
@@ -1908,6 +1909,16 @@ dawn_add_unit_test(test_event_payload
            ${SRC_ROOT}/src/core/event_payload.c
            ${SRC_ROOT}/common/src/utils/string_utils.c
    LIBS    unity json-c m pthread
+   LABEL   ci)
+
+# Who an action goes to: names, numbers and addresses resolved without guessing.
+dawn_add_unit_test(test_contact_resolve
+   SOURCES test_contact_resolve.c test_contacts_db_stub.c
+           ${SRC_ROOT}/src/tools/contact_resolve.c
+           ${SRC_ROOT}/src/tools/phone_number.c
+           ${SRC_ROOT}/src/memory/contacts_db.c
+           ${SRC_ROOT}/src/core/str_fuzzy.c
+   LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
 dawn_add_unit_test(test_contacts_db

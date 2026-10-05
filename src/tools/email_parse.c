@@ -196,6 +196,42 @@ void email_sanitize_header_value(const char *src, char *dst, size_t dst_len) {
    dst[j] = '\0';
 }
 
+void email_format_mailbox(const char *name, const char *addr, char *dst, size_t dst_len) {
+   if (!dst || dst_len == 0)
+      return;
+   if (!name || !name[0]) {
+      snprintf(dst, dst_len, "%s", addr ? addr : "");
+      return;
+   }
+   char quoted[192];
+   size_t j = 0;
+   size_t i = 0;
+   quoted[j++] = '"';
+   for (; name[i] && j < sizeof(quoted) - 3; i++) {
+      if (name[i] == '"' || name[i] == '\\') {
+         if (j >= sizeof(quoted) - 4)
+            break;
+         quoted[j++] = '\\';
+      }
+      quoted[j++] = name[i];
+   }
+   if (name[i]) {
+      /* Cut short: never end inside a UTF-8 character. */
+      size_t start = j;
+      while (start > 1 && ((unsigned char)quoted[start - 1] & 0xC0) == 0x80)
+         start--;
+      if (start > 1 && ((unsigned char)quoted[start - 1] & 0xC0) == 0xC0) {
+         const unsigned char lead = (unsigned char)quoted[start - 1];
+         const size_t want = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+         if (j - (start - 1) < want)
+            j = start - 1;
+      }
+   }
+   quoted[j++] = '"';
+   quoted[j] = '\0';
+   snprintf(dst, dst_len, "%s <%s>", quoted, addr ? addr : "");
+}
+
 time_t email_parse_rfc822_date(const char *date_str) {
    if (!date_str || !date_str[0])
       return 0;

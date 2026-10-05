@@ -181,6 +181,7 @@ enum {
 typedef struct {
    pending_slot_t hdr;
    char number[24];   /* call / text: the resolved number; delete: by-number criterion */
+   char name[64];     /* call / text: the contact's name ("" for a number) */
    char body[1024];   /* text: what is sent */
    int64_t id;        /* delete by id (-1 otherwise) */
    time_t cutoff;     /* delete older than (0 otherwise) */
@@ -229,12 +230,14 @@ static void drop_pending(const turn_origin_t *origin, int user_id, int kind) {
 
 /* A preview's closing line: the id the confirm must name. */
 static char *with_pending_id(const char *preview, const char *confirm, uint32_t item_id) {
-   char buf[sizeof(((phone_pending_t *)0)->body) + 512];
-   snprintf(buf, sizeof(buf),
-            "%s\nIf the user says yes in their reply, call %s with pending_id %u (this item "
-            "only).",
-            preview, confirm, (unsigned)item_id);
-   return strdup(buf);
+   static const char fmt[] = "%s\nIf the user says yes in their reply, call %s with pending_id "
+                             "%u (this item only).";
+   const size_t len = strlen(preview) + strlen(confirm) + sizeof(fmt) + 16;
+   char *buf = malloc(len);
+   if (buf) {
+      snprintf(buf, len, fmt, preview, confirm, (unsigned)item_id);
+   }
+   return buf;
 }
 
 /* The pending_id a confirm names (0 when missing or not a number). */
@@ -426,6 +429,29 @@ static bool phone_previews(void) {
    return s_config.confirm_outbound;
 }
 
+/* A call or text's recipient for this turn: NULL with @p rez ready (a number,
+ * one contact, or one to confirm: *confirm), else the question to ask. */
+static char *resolve_recipient(const char *target,
+                               int user_id,
+                               const turn_origin_t *origin,
+                               int kind,
+                               phone_resolve_t *rez,
+                               bool *confirm) {
+   phone_contacts_resolve(user_id, target, rez);
+   /* Approved by the user's reply code: the code's text named them. */
+   if (rez->kind == PHONE_RESOLVE_CONFIRM && session_call_code_redeemed()) {
+      rez->kind = PHONE_RESOLVE_UNIQUE;
+   }
+   *confirm = rez->kind == PHONE_RESOLVE_CONFIRM;
+   if (rez->kind == PHONE_RESOLVE_NUMBER || rez->kind == PHONE_RESOLVE_UNIQUE || *confirm) {
+      return NULL;
+   }
+   drop_pending(origin, user_id, kind); /* disambiguate first */
+   char buf[sizeof(rez->question)];
+   phone_contacts_format_disambiguation(target, rez, buf, sizeof(buf));
+   return strdup(buf);
+}
+
 static char *handle_call(struct json_object *details, int user_id, const turn_origin_t *origin) {
    const char *target = json_get_str(details, "target");
    if (!target || target[0] == '\0') {
@@ -433,19 +459,15 @@ static char *handle_call(struct json_object *details, int user_id, const turn_or
                     "Error: 'target' is required (phone number or contact name)");
    }
 
-   if (phone_previews()) {
-      /* Resolve the contact NOW (at preview) so the user confirms a real,
-       * verified number — not a name we haven't checked.  Ambiguous or
-       * fuzzy-only matches surface candidates instead of arming a call. */
-      phone_resolve_t rez;
-      phone_contacts_resolve(user_id, target, &rez);
-      if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
-         drop_pending(origin, user_id, PHONE_PENDING_CALL); /* disambiguate first */
-         char buf[512];
-         phone_contacts_format_disambiguation(target, &rez, buf, sizeof(buf));
-         return strdup(buf);
-      }
-
+   phone_resolve_t rez;
+   bool confirm = false;
+   char *ask = resolve_recipient(target, user_id, origin, PHONE_PENDING_CALL, &rez, &confirm);
+   if (ask) {
+      return ask;
+   }
+   /* A preview when previews are on, and always for a recipient to confirm:
+    * the user's yes to it is the confirmation. */
+   if (phone_previews() || confirm) {
       /* Arm the resolved number so confirm dials exactly what was previewed. */
       pthread_mutex_lock(&s_phone_tool_mutex);
       pending_stage_rc_t src = PENDING_STAGED;
@@ -453,24 +475,26 @@ static char *handle_call(struct json_object *details, int user_id, const turn_or
       const uint32_t pending_id = p ? p->hdr.item_id : 0;
       if (p) {
          snprintf(p->number, sizeof(p->number), "%s", rez.number);
+         snprintf(p->name, sizeof(p->name), "%s", rez.name);
       }
       pthread_mutex_unlock(&s_phone_tool_mutex);
       if (pending_id == 0) {
          return stage_refusal(src, "call");
       }
-      char buf[256];
+      char buf[768];
       if (rez.name[0]) {
-         snprintf(buf, sizeof(buf), "About to call %s at %s. Say 'confirm' to proceed.", rez.name,
-                  rez.number);
+         snprintf(buf, sizeof(buf), "About to call %s at %s. %s", rez.name, rez.number,
+                  confirm ? rez.question : "Say 'confirm' to proceed.");
       } else {
-         snprintf(buf, sizeof(buf), "About to call %s. Say 'confirm' to proceed.", rez.number);
+         snprintf(buf, sizeof(buf), "About to call %s. %s", rez.number,
+                  confirm ? rez.question : "Say 'confirm' to proceed.");
       }
       return with_pending_id(buf, "confirm_call", pending_id);
    }
 
-   /* No confirmation — dial immediately (service layer applies the same guard) */
+   /* No confirmation: dial the number resolved above. */
    char result[RESULT_BUF_SIZE];
-   int rc = phone_service_call(user_id, target, result, sizeof(result));
+   int rc = phone_service_call(user_id, rez.number, result, sizeof(result));
    return phone_service_result_dup(rc, result);
 }
 
@@ -513,7 +537,14 @@ static char *handle_send_sms(struct json_object *details,
    if (!body || body[0] == '\0') {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: 'body' is required (message text)");
    }
-   const bool previews = phone_previews();
+   phone_resolve_t rez;
+   bool confirm = false;
+   char *ask = resolve_recipient(target, user_id, origin, PHONE_PENDING_SMS, &rez, &confirm);
+   if (ask) {
+      return ask;
+   }
+   /* A preview when previews are on, and always for a recipient to confirm. */
+   const bool previews = phone_previews() || confirm;
    if (previews && strlen(body) >= sizeof(((phone_pending_t *)0)->body)) {
       /* Stored cut short, the text sent wouldn't be the one previewed. */
       return strdup(TOOL_RESULT_ERROR_MARK "Error: the message is too long to preview; keep it "
@@ -522,17 +553,6 @@ static char *handle_send_sms(struct json_object *details,
    }
 
    if (previews) {
-      /* Resolve the recipient NOW (at preview) — same guard as calls, so the
-       * user confirms a verified number rather than an unchecked name. */
-      phone_resolve_t rez;
-      phone_contacts_resolve(user_id, target, &rez);
-      if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
-         drop_pending(origin, user_id, PHONE_PENDING_SMS); /* disambiguate first */
-         char buf[512];
-         phone_contacts_format_disambiguation(target, &rez, buf, sizeof(buf));
-         return strdup(buf);
-      }
-
       /* Arm the resolved number so confirm sends exactly what was previewed. */
       pthread_mutex_lock(&s_phone_tool_mutex);
       pending_stage_rc_t src = PENDING_STAGED;
@@ -540,6 +560,7 @@ static char *handle_send_sms(struct json_object *details,
       const uint32_t pending_id = p ? p->hdr.item_id : 0;
       if (p) {
          snprintf(p->number, sizeof(p->number), "%s", rez.number);
+         snprintf(p->name, sizeof(p->name), "%s", rez.name);
          snprintf(p->body, sizeof(p->body), "%s", body);
       }
       pthread_mutex_unlock(&s_phone_tool_mutex);
@@ -547,24 +568,27 @@ static char *handle_send_sms(struct json_object *details,
          return stage_refusal(src, "text");
       }
 
-      const char *recipient = rez.name[0] ? rez.name : rez.number;
+      char recipient[96];
+      if (rez.name[0]) {
+         snprintf(recipient, sizeof(recipient), "%s (%s)", rez.name, rez.number);
+      } else {
+         snprintf(recipient, sizeof(recipient), "%s", rez.number);
+      }
       int segs = s_config.warn_on_multi_segment ? estimate_sms_segments(body) : 1;
       /* Room for the whole body: the preview shows exactly what is sent. */
-      char buf[sizeof(((phone_pending_t *)0)->body) + 256];
+      char buf[sizeof(((phone_pending_t *)0)->body) + 768];
+      char multi[64] = "";
       if (segs > 1) {
-         snprintf(buf, sizeof(buf),
-                  "About to send SMS to %s: \"%s\". This will send as %d text messages. "
-                  "Say 'confirm' to send.",
-                  recipient, body, segs);
-      } else {
-         snprintf(buf, sizeof(buf), "About to send SMS to %s: \"%s\". Say 'confirm' to send.",
-                  recipient, body);
+         snprintf(multi, sizeof(multi), " This will send as %d text messages.", segs);
       }
+      snprintf(buf, sizeof(buf), "About to send SMS to %s: \"%s\".%s %s", recipient, body, multi,
+               confirm ? rez.question : "Say 'confirm' to send.");
       return with_pending_id(buf, "confirm_sms", pending_id);
    }
 
+   /* No confirmation: text the number resolved above. */
    char result[RESULT_BUF_SIZE];
-   int rc = phone_service_send_sms(user_id, target, body, result, sizeof(result));
+   int rc = phone_service_send_sms(user_id, rez.number, body, result, sizeof(result));
    return phone_service_result_dup(rc, result);
 }
 
@@ -1382,10 +1406,14 @@ static const treg_param_t phone_params[] = {
            "status {}.\n"
            "  target: E.164 phone number ('+16785551212') OR a contact name resolvable via "
            "the contacts system. Bare digits ('6785551212') are also accepted and normalized. "
-           "The tool checks contacts itself before dialing: pass the name the user said and let "
-           "the tool resolve it — you do NOT need the number. If the name is ambiguous or only a "
-           "near-miss (e.g. a mis-heard surname), the tool returns candidates ('did you mean…') "
-           "instead of dialing; relay them and pass the user's choice back on the next turn.\n"
+           "The tool checks contacts itself before dialing: pass the name exactly as the user "
+           "said it (never a correction or a guess of yours; for a relationship such as 'my "
+           "wife', the name of the person you know it means; with the label if the user gave one, "
+           "'Bob Smith mobile') and let the tool resolve it — you do NOT need the number, so "
+           "don't look the person up first. If the name is ambiguous or only a near-miss (e.g. a "
+           "mis-heard surname), the tool returns candidates ('did you mean…') instead of "
+           "dialing; relay them and pass the user's choice back on the next turn. If the "
+           "preview asks whether it's the right person, ask the user.\n"
            "  body: SMS message text. Concatenated SMS (multi-segment) is supported "
            "automatically; concise messages save segments.\n"
            "  pending_id: the number a preview (call, send_sms, delete_*) returns; its confirm "
@@ -1441,11 +1469,13 @@ static int describe_pending(struct json_object *details,
       char date[32];
       switch (kind) {
          case PHONE_PENDING_CALL:
-            n = snprintf(out, out_len, "call %s", p->number);
+            n = snprintf(out, out_len, "call %s%s%s%s", p->name, p->name[0] ? " (" : "", p->number,
+                         p->name[0] ? ")" : "");
             break;
          case PHONE_PENDING_SMS:
             str_excerpt_line(p->body, 200, text, sizeof(text));
-            n = snprintf(out, out_len, "text %s: \"%s\"", p->number, text);
+            n = snprintf(out, out_len, "text %s%s%s%s: \"%s\"", p->name, p->name[0] ? " (" : "",
+                         p->number, p->name[0] ? ")" : "", text);
             break;
          default: {
             const char *what = kind == PHONE_PENDING_DELETE_SMS ? "text message" : "call";
@@ -1515,8 +1545,8 @@ static int phone_describe_call(const char *action,
       }
    } else if ((strcmp(action, "call") == 0 || strcmp(action, "send_sms") == 0) && details) {
       /* Going at once (confirm_outbound off): the number the target resolves
-       * to, as the handler will dial or text it.  An ambiguous name can't be
-       * approved. */
+       * to, as the handler will dial or text it.  One the user should confirm
+       * is fine here: the code's text is that confirmation. */
       const char *target = json_get_str(details, "target");
       phone_resolve_t rez;
       memset(&rez, 0, sizeof(rez));
@@ -1524,7 +1554,8 @@ static int phone_describe_call(const char *action,
          phone_contacts_resolve(tool_get_current_user_id(), target, &rez);
       }
       if (target && target[0] &&
-          (rez.kind == PHONE_RESOLVE_NUMBER || rez.kind == PHONE_RESOLVE_UNIQUE)) {
+          (rez.kind == PHONE_RESOLVE_NUMBER || rez.kind == PHONE_RESOLVE_UNIQUE ||
+           rez.kind == PHONE_RESOLVE_CONFIRM)) {
          char who[160];
          snprintf(who, sizeof(who), "%s%s%s%s", rez.name[0] ? rez.name : "",
                   rez.name[0] ? " (" : "", rez.number, rez.name[0] ? ")" : "");
@@ -1534,15 +1565,12 @@ static int phone_describe_call(const char *action,
             str_excerpt_line(json_get_str(details, "body"), 200, text, sizeof(text));
             n = snprintf(out, out_len, "text %s: \"%s\"", who, text);
          }
+      } else if (target && target[0]) {
+         /* What the voice path says too: which contacts it could be. */
+         phone_contacts_format_disambiguation(target, &rez, out, out_len);
       } else {
-         /* What the voice path says too: which contacts it could be, or that
-          * none is. */
-         if (target && target[0]) {
-            phone_contacts_format_disambiguation(target, &rez, out, out_len);
-         } else {
-            snprintf(out, out_len, "it doesn't say who to %s",
-                     strcmp(action, "call") == 0 ? "call" : "text");
-         }
+         snprintf(out, out_len, "it doesn't say who to %s",
+                  strcmp(action, "call") == 0 ? "call" : "text");
       }
    } else {
       handled = false;

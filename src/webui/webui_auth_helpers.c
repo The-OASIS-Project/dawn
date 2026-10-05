@@ -798,8 +798,10 @@ int dawn_build_prompt(session_t *session,
    }
    /* No items when retrieval fails: the turn runs without them. */
    (void)build_focus_block(dispatch, user_id, conv_id, turn_id, user_turn_text, out);
+   /* A WebUI voice turn (other voice surfaces carry the hint as a standing
+    * direction, build_directives). */
    const bool spoken = dispatch != NULL && dispatch->type == SESSION_TYPE_WEBUI &&
-                       dispatch->input_was_voice;
+                       session_turn_spoken(dispatch);
    const char *hint = spoken ? asr_disambiguation_hint_effective() : NULL;
    if (hint && hint[0]) {
       out->context_tail = strdup(hint);

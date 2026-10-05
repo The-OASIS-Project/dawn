@@ -1193,6 +1193,25 @@ static inline int tool_get_current_user_id(void) {
    return session ? 0 : session_default_voice_user_id();
 }
 
+/** Whether the calling turn was spoken (session_turn_spoken); false with no
+ *  session. */
+static inline bool tool_turn_spoken(void) {
+   return session_turn_spoken(session_get_command_context());
+}
+
+/** The calling user's own words this turn and the turn before
+ *  (session_recent_questions_dup; caller frees): "" in a session with none
+ *  (an image-only turn: nothing counts as said), NULL with no session (no
+ *  turn to check against). */
+static inline char *tool_user_words_dup(void) {
+   session_t *session = session_get_command_context();
+   if (!session) {
+      return NULL;
+   }
+   char *words = session_recent_questions_dup(session);
+   return words ? words : strdup("");
+}
+
 /** The result for a guest (tool_get_current_user_id() == 0) asking for personal data. */
 #define TOOL_GUEST_REFUSAL                                                                   \
    TOOL_RESULT_ERROR_MARK "This device isn't assigned to a user, so personal data (memory, " \

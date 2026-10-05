@@ -945,6 +945,14 @@ static inline bool session_saved_whole(const session_t *s) {
                         s->type == SESSION_TYPE_DAP2);
 }
 
+/** Whether the session's turn was spoken (speech-transcribed, so a name in it
+ *  may be misheard): a voice surface, or a WebUI turn whose input was voice.
+ *  (A WebUI re-engagement turn keeps the last turn's value.) */
+static inline bool session_turn_spoken(session_t *s) {
+   return s != NULL && (session_saved_whole(s) ||
+                        (s->type == SESSION_TYPE_WEBUI && atomic_load(&s->input_was_voice)));
+}
+
 /**
  * @brief Mark @p session as a deep-research fetch session (or clear it).
  *
@@ -1492,6 +1500,18 @@ int64_t session_get_last_user_msg_id(session_t *session);
  * @return Heap copy (caller frees), or NULL when there is none.
  */
 char *session_previous_question_dup(session_t *session);
+
+/**
+ * @brief The user's own words this turn and the turn before (the question this
+ *        turn answers, then the previous one, newline-separated), or NULL
+ *
+ * What a tool checks a name or address against before it acts on it: words
+ * the model read elsewhere (an email, a web page) are not in it.
+ *
+ * @note Thread-safe — acquires `session->history_mutex`.
+ * @return Heap copy (caller frees), or NULL when there is none.
+ */
+char *session_recent_questions_dup(session_t *session);
 
 /**
  * @brief Set (or clear) the tool-turn persist hook for a session.
@@ -2064,6 +2084,11 @@ static inline void session_command_context_cleanup(session_t **ctx) {
 
 /* Stub: No sessions in local-only mode */
 static inline session_t *session_get_command_context(void) {
+   return NULL;
+}
+
+static inline char *session_recent_questions_dup(session_t *session) {
+   (void)session;
    return NULL;
 }
 

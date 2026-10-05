@@ -1539,3 +1539,28 @@ char *llm_context_withdraw_body(const char *text, bool *changed) {
    }
    return out;
 }
+
+char *llm_context_strip_attachments(const char *text) {
+   const char *p = text ? text : "";
+   char *out = malloc(strlen(p) + 1);
+   if (!out) {
+      return NULL;
+   }
+   size_t n = 0;
+   while (*p) {
+      const char *open = strstr(p, LLM_CONTEXT_DOC_OPEN);
+      const size_t keep = open ? (size_t)(open - p) : strlen(p);
+      memcpy(out + n, p, keep);
+      n += keep;
+      if (!open) {
+         break;
+      }
+      const char *close = strstr(open, LLM_CONTEXT_DOC_CLOSE);
+      if (!close) {
+         break;
+      }
+      p = close + strlen(LLM_CONTEXT_DOC_CLOSE);
+   }
+   out[n] = '\0';
+   return out;
+}

@@ -26,6 +26,43 @@
 
 #include <stdint.h>
 
+/* A name as contacts_find compares it: hyphens as spaces, dots and
+ * apostrophes dropped ("mary-jane" ~ "mary jane", "o'brien" ~ "obrien"). */
+#define CONTACTS_NAME_SQL(col) "replace(replace(replace(" col ", '-', ' '), '.', ''), '''', '')"
+
+/* contacts_find's query: a name's contacts, best match first: the exact name
+ * (0), a whole word of it or of another name of the same person (1: the
+ * person's entity tree, its head and every alias of it; never exact), a
+ * substring (2).  ?1 user, ?2 the normalized name, ?3 '%name%', ?4 field type,
+ * ?5 '% name %', ?6 limit. */
+#define CONTACTS_SAME_PERSON_SQL                                                    \
+   "a.user_id = ?1 AND a.id <> e.id AND (a.id = COALESCE(e.canonical_id, e.id) OR " \
+   "a.canonical_id = COALESCE(e.canonical_id, e.id))"
+// clang-format off
+#define CONTACTS_FIND_SQL                                                                     \
+   "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label, "     \
+   "e.photo_id, "                                                                             \
+   "CASE WHEN " CONTACTS_NAME_SQL("e.canonical_name") " = ?2 THEN 0 "                         \
+   "WHEN (' ' || " CONTACTS_NAME_SQL("e.canonical_name") " || ' ') LIKE ?5 ESCAPE '\\' "      \
+   "THEN 1 "                                                                                  \
+   "WHEN EXISTS (SELECT 1 FROM memory_entities a WHERE " CONTACTS_SAME_PERSON_SQL " AND "      \
+   "(' ' || " CONTACTS_NAME_SQL("a.canonical_name") " || ' ') LIKE ?5 ESCAPE '\\') "          \
+   "THEN 1 ELSE 2 END AS quality "                                                            \
+   "FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "                            \
+   "WHERE c.user_id = ?1 AND c.field_type LIKE ?4 AND ("                                      \
+   CONTACTS_NAME_SQL("e.canonical_name") " LIKE ?3 ESCAPE '\\' OR EXISTS (SELECT 1 FROM "     \
+   "memory_entities a WHERE " CONTACTS_SAME_PERSON_SQL " AND "                                \
+   CONTACTS_NAME_SQL("a.canonical_name") " LIKE ?3 ESCAPE '\\')) "                            \
+   "ORDER BY quality, e.name LIMIT ?6"
+// clang-format on
+
+/* How a contact's name matched what was asked for (contacts_find). */
+typedef enum {
+   CONTACT_MATCH_EXACT = 0, /* the whole name */
+   CONTACT_MATCH_WORD,      /* whole word(s) of the name, or of an alias */
+   CONTACT_MATCH_PARTIAL,   /* inside a word ("chris" in "christine") */
+} contact_match_t;
+
 typedef struct {
    int64_t contact_id;
    int64_t entity_id;
@@ -33,15 +70,18 @@ typedef struct {
    char canonical_name[64];
    char field_type[16]; /* "email", "phone", "address" */
    char value[256];
-   char label[32];    /* "work", "personal", "mobile" */
-   char photo_id[32]; /* image store ID or empty */
+   char label[32];        /* "work", "personal", "mobile" */
+   char photo_id[32];     /* image store ID or empty */
+   contact_match_t match; /* contacts_find only */
 } contact_result_t;
 
 /**
  * @brief Find contacts by entity name and optional field type.
  *
- * Performs case-insensitive LIKE search on entity canonical_name.
- * Escapes LIKE metacharacters (%, _, \) in the name parameter.
+ * Matches the name (normalized like canonical names) inside the entity's
+ * canonical name or an alias's, best first: exact, whole word, then partial
+ * (each row's `match`), so an exact name is never cut by the limit.  Escapes
+ * LIKE metacharacters (%, _, \) in the name parameter.
  *
  * @param user_id     User ID for isolation
  * @param name        Entity name to search for (fuzzy match)
@@ -109,6 +149,29 @@ int contacts_list(int user_id,
  * @return SUCCESS (0) on success, FAILURE (1) on failure
  */
 int contacts_count(int user_id, int *count_out);
+
+/**
+ * @brief The person's other names (canonical, as stored): the head of
+ *        @p entity_id's entity tree and every alias of it ("Cris", "wife")
+ * @return SUCCESS, FAILURE on a database error (*count_out 0)
+ */
+int contacts_entity_aliases(int user_id,
+                            int64_t entity_id,
+                            char (*names)[64],
+                            int max_names,
+                            int *count_out);
+
+/**
+ * @brief contacts_list, one row per name of each contact's person (its own
+ *        and every name in its entity tree, in canonical_name): for matching
+ *        a name against everything a person is called
+ */
+int contacts_list_names(int user_id,
+                        const char *field_type,
+                        contact_result_t *out,
+                        int max_results,
+                        int offset,
+                        int *count_out);
 
 /**
  * @brief Update an existing contact record.
