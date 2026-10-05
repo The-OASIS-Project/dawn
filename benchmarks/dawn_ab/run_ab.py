@@ -73,8 +73,8 @@ CRED_FILE = os.path.expanduser("~/.config/dawn/dawn_ab.env")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # Daemon-log lines worth keeping per turn: provider usage/cache lines, context size,
 # errors.  Best-effort only — a concurrent session on the same daemon interleaves here.
-LOG_KEEP = re.compile(r"cache|usage|Context: |ERROR|WARN|400|binding|input_transformations",
-                      re.IGNORECASE)
+LOG_KEEP = re.compile(r"cache|usage|Context: |ERROR|WARN|400|binding|input_transformations|"
+                      r"Tool views?: |result_read: ", re.IGNORECASE)
 
 
 # ----------------------------------------------------------------------------- daemon client
@@ -215,6 +215,11 @@ def account_user_id(db, username):
     return row[0] if row else None
 
 
+def account_is_admin(db, user_id):
+    row = db.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+    return bool(row and row[0])
+
+
 def non_import_memory_count(db, user_id):
     facts = db.execute("SELECT COUNT(*) FROM memory_facts WHERE user_id = ? AND "
                        "COALESCE(source,'') != 'import'", (user_id,)).fetchone()[0]
@@ -337,6 +342,10 @@ EMBED_WAIT_S = 120
 
 def reseed_memory(client, db_path, user_id, fixture_path, force=False):
     with db_connect_ro(db_path) as db:
+        if account_is_admin(db, user_id):
+            # A wipe on an admin account is a wipe of a real person's memory.
+            sys.exit("refusing --reseed-memory: the eval account is an admin; use a dedicated "
+                     "non-admin account")
         foreign = non_import_memory_count(db, user_id)
     if foreign and force:
         print(f"--force-reseed: wiping {foreign} non-import memory rows from the eval account")
@@ -514,6 +523,10 @@ def main():
     if args.only:
         wanted = set(args.only.split(","))
         scenarios = [s for s in scenarios if s["id"] in wanted]
+    else:
+        # An opt-in scenario needs something a default run can't assume (web
+        # access, a particular model window): it runs only when named.
+        scenarios = [s for s in scenarios if not s.get("opt_in")]
         missing = wanted - {s["id"] for s in scenarios}
         if missing:
             sys.exit(f"unknown scenario ids: {sorted(missing)}")

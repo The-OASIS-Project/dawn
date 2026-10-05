@@ -11,16 +11,16 @@ the request is built by the real code under test.
 
 | File | Role |
 |---|---|
-| `scenarios.json` | Scripted multi-turn conversations. Each turn has `expect_tools`, a judge `rubric`, and optional `needs_date` / `expect_citation` / `forbid_tools` / `switch_to_alternate` (switch the conversation's model before this turn, to the first `--alternates` entry that isn't the model in use). |
+| `scenarios.json` | Scripted multi-turn conversations. Each turn has `expect_tools`, a judge `rubric`, and optional `needs_date` / `expect_citation` / `forbid_tools` / `expect_answer` (regexes that must all match the answer: a ground-truth check graded without the judge) / `switch_to_alternate` (switch the conversation's model before this turn, to the first `--alternates` entry that isn't the model in use). A scenario marked `opt_in` runs only when named in `--only`. |
 | `memory_fixture.json` | Fixed, fictional memory set loaded into the eval account before a run. |
 | `run_ab.py` | Drives the conversations; writes one JSON artifact per (model, scenario). |
 | `grade_ab.py` | Offline grading (tool check, LLM judge, citation audit, cache lines) and run-vs-run comparison. |
 
 ## Setup (once)
 
-A **dedicated eval account** on the daemon (e.g. `benchmark`). `--reseed-memory` wipes that account's
-memory and loads the fixture; it refuses to run if the account holds memory that didn't come from an
-import. Never point it at a real user.
+A **dedicated, non-admin eval account** on the daemon (e.g. `benchmark`). `--reseed-memory` wipes that
+account's memory and loads the fixture; it refuses an admin account, and an account holding memory
+that didn't come from an import. Never point it at a real user.
 
 ## Running
 
@@ -44,6 +44,13 @@ Useful flags: `--only memory_recall,tool_followup`, `--repeat 3` (LLM variance),
 `--effort`, `--alternates` (models a `switch_to_alternate` turn switches to), `--no-judge`
 (deterministic checks only, no API spend).
 
+`large_page_view` (opt-in) checks large tool results: a pinned Wikipedia revision fetched with
+`url_fetch`, with the answer in the middle a view leaves out, so the model has to read more of the
+stored result (`result_read`) or say it couldn't find it. It needs web access, and a view only fires on
+a model with a window of about 200K tokens or less (the page is cut at 24,000 characters), so run it as
+`--only large_page_view --models claude:claude-sonnet-4-5`. Its `expect_answer` grades the numbers
+deterministically; `tool result views` and `result_read calls` show whether the view path ran.
+
 `long_single_topic` is one topic over 12 turns, with the same remembered facts relevant early, in the
 middle and late, and a model switch at turn 10. It measures what remembered context costs per turn
 over a long conversation, and whether answers still use a fact that was shown many turns back.
@@ -51,6 +58,12 @@ over a long conversation, and whether answers still use a fact that was shown ma
 ## What each metric means
 
 - **tool check %** — every `expect_tools` tool was called in the turn, and no `forbid_tools` tool.
+- **answer check %** — on turns with `expect_answer`, every pattern matched the answer (no API spend).
+- **tool result views / result_read calls** — views the daemon made of large tool results, and reads
+  of stored results, from the daemon-log lines written during each turn.
+- **first batch tokens (med)** — on turns that called tools, how many tokens the first tool batch
+  added to the request (the first tool iteration's prompt minus the call's before it), median over
+  those turns. The cost a view saves; any provider.
 - **judge pass %** — a fixed grader model (`--judge-model`, default `claude-sonnet-5`) passes the
   answer against the turn rubric. Verdicts are cached in `<run>/judge_cache.json`. Compare runs only
   when both used the same judge model.

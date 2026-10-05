@@ -1,5 +1,5 @@
 {
-  "_comment": "Scripted multi-turn conversations for the DAWN request-layout A/B. Each stresses a place where moving the per-turn context block (time + retrieval) out of the system prompt could change behavior: follow-ups after tool use, memory recall and citation, [system_time] awareness, long tool loops, and back-references across turns. expect_tools: every listed tool must be called during that turn. rubric: what the judge checks (pass/fail). needs_date: the judge is given the turn's wall-clock date/time. expect_citation: a memory-recall turn, counted in cite-rate.",
+  "_comment": "Scripted multi-turn conversations for the DAWN request-layout A/B. Each stresses a place where moving the per-turn context block (time + retrieval) out of the system prompt could change behavior: follow-ups after tool use, memory recall and citation, [system_time] awareness, long tool loops, and back-references across turns. expect_tools: every listed tool must be called during that turn. rubric: what the judge checks (pass/fail). needs_date: the judge is given the turn's wall-clock date/time. expect_citation: a memory-recall turn, counted in cite-rate. expect_answer: regexes that must all match the answer (case-insensitive), a deterministic ground-truth check graded without the judge. opt_in: the scenario runs only when named in --only.",
   "scenarios": [
     {
       "id": "tool_followup",
@@ -239,6 +239,25 @@
           "expect_tools": [],
           "expect_citation": true,
           "rubric": "Mentions both: the user dislikes cold, windy weather, and the user is allergic to shellfish (so seafood dinners need to avoid shellfish)."
+        }
+      ]
+    },
+    {
+      "id": "large_page_view",
+      "opt_in": true,
+      "why": "A tool result too big for the model's share of the context is sent as a view (head and tail) with a handle; the answer sits in the omitted middle, so the model must read more of the stored result (result_read) or fail honestly. The page is a pinned Wikipedia revision, so the ground truth never changes. Needs web access. url_fetch keeps up to 24,000 characters, so the view only fires on a model whose window gives a smaller share (about 200K tokens or less, e.g. claude:claude-sonnet-4-5); on a 1M-window model the whole page fits and this is a plain tool question.",
+      "turns": [
+        {
+          "text": "Fetch https://en.wikipedia.org/w/index.php?title=Apollo_11&oldid=1371120273 with url_fetch. From the fetched page text only: how many people does it say attended Kennedy's September 1962 speech at Rice University's football stadium, and which citation numbers follow that sentence? Answer from the page, not from memory.",
+          "expect_tools": [
+            "url_fetch"
+          ],
+          "expect_answer": [
+            "40,?000",
+            "23",
+            "24"
+          ],
+          "rubric": "Says about 40,000 people and citations 23 and 24, taken from the fetched page (or says honestly that it couldn't find it in the page)."
         }
       ]
     }

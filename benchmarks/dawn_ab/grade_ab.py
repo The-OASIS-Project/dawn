@@ -71,6 +71,33 @@ RE_CLAUDE_USAGE = re.compile(r"Claude usage: (\d+) input, (\d+) output")
 
 # ----------------------------------------------------------------------------- helpers
 
+RE_TOOL_VIEW = re.compile(r"Tool view: ")
+# Any provider's per-call line: the prompt size of the conversation's own calls.
+RE_CALL_PROMPT = re.compile(r"LLM cache: provider=\S+ .*?kind=(turn|tool_iter) .*?prompt=(\d+) ")
+
+
+def batch_growth(lines):
+    """Tokens the turn's first tool batch added to the request: the prompt of
+    the first tool iteration minus the prompt of the call before it.  None when
+    the turn ran no tools."""
+    prompts = [(m.group(1), int(m.group(2))) for ln in lines or []
+               if (m := RE_CALL_PROMPT.search(ln))]
+    for (_, before), (kind, after) in zip(prompts, prompts[1:]):
+        if kind == "tool_iter":
+            return after - before
+    return None
+RE_RESULT_READ = re.compile(r"result_read: ")
+
+
+def answer_check(script, answer):
+    """True when every expect_answer pattern matches the answer (case-insensitive);
+    None when the turn has none."""
+    pats = script.get("expect_answer")
+    if not pats:
+        return None
+    return bool(answer) and all(re.search(p, answer, re.I | re.S) for p in pats)
+
+
 def load_secret(name):
     for p in (os.path.join(REPO, "secrets.toml"), os.path.expanduser("~/.config/dawn/secrets.toml")):
         if os.path.exists(p):
@@ -248,8 +275,13 @@ def grade_turn(art, i, judge):
     inj_set, ref_set, cit_set = set(inj_ids), set(ref_ids), set(cit_ids)
     ctx = pers.get("context_chars") or {}
     calls = parse_claude_calls(live.get("daemon_log"))
+    log_lines = live.get("daemon_log") or []
     return {"scenario": art["scenario"], "rep": art.get("rep", 1), "turn": i + 1,
             "tool_ok": tool_ok, "called": called, "expect_tools": expect,
+            "answer_ok": answer_check(script, answer),
+            "views": sum(1 for ln in log_lines if RE_TOOL_VIEW.search(ln)),
+            "result_reads": sum(1 for ln in log_lines if RE_RESULT_READ.search(ln)),
+            "batch_growth": batch_growth(log_lines),
             "errored": errored, "errors": real_errors, "notices": notices,
             "elapsed_s": live.get("elapsed_s"),
             "judge": verdict, "expect_citation": bool(script.get("expect_citation")),
@@ -283,6 +315,13 @@ def summarize(rows):
         "errored": sum(r["errored"] for r in rows),
         "turns_with_notices": sum(bool(r.get("notices")) for r in rows),
         "tool_ok_pct": pct(sum(r["tool_ok"] for r in rows), n),
+        "answer_ok_pct": pct(sum(bool(r.get("answer_ok")) for r in rows
+                                 if r.get("answer_ok") is not None),
+                             sum(1 for r in rows if r.get("answer_ok") is not None)),
+        "tool_views": sum(r.get("views", 0) for r in rows),
+        "result_reads": sum(r.get("result_reads", 0) for r in rows),
+        "batch_growth_median": (lambda g: sorted(g)[len(g) // 2] if g else None)(
+            [r["batch_growth"] for r in rows if r.get("batch_growth") is not None]),
         "judge_pass_pct": pct(sum(r["judge"]["pass"] for r in judged), len(judged)),
         "judged": len(judged),
         "recall_turns": len(cite_rows),
@@ -339,6 +378,9 @@ def grade(run_dir, judge_model, use_judge):
 
 METRICS = [("turns", "turns"), ("errored", "errored turns"),
            ("turns_with_notices", "turns w/ INFO notice"), ("tool_ok_pct", "tool check %"),
+           ("answer_ok_pct", "answer check %"), ("tool_views", "tool result views"),
+           ("result_reads", "result_read calls"),
+           ("batch_growth_median", "first batch tokens (med)"),
            ("judge_pass_pct", "judge pass %"), ("recall_injected_pct", "recall: injected %"),
            ("recall_cited_pct", "recall: cited %"),
            ("recall_memory_injected_pct", "recall: memory injected %"),
@@ -365,12 +407,13 @@ def print_summary(s):
         for key, label in METRICS:
             print(f"    {label:24s} {m.get(key)}")
     for model, rows in s["turns"].items():
-        bad = [r for r in rows if r["errored"] or not r["tool_ok"]
+        bad = [r for r in rows if r["errored"] or not r["tool_ok"] or r.get("answer_ok") is False
                or (r["judge"] is not None and not r["judge"]["pass"])]
         for r in bad:
             why = r["judge"]["reason"] if r["judge"] else ""
             print(f"  FAIL {model} {r['scenario']}#{r['turn']}: tool_ok={r['tool_ok']} "
-                  f"called={r['called']} errored={r['errored']} {why}")
+                  f"answer_ok={r.get('answer_ok')} called={r['called']} errored={r['errored']} "
+                  f"{why}")
 
 
 def compare(a_dir, b_dir):
