@@ -98,6 +98,11 @@ void session_compaction_reset_locked(session_t *session) {
    (void)session;
 }
 /* The boundary the last take-back declared to its turn's record. */
+static int s_rewritten = 0; /* llm_cache_monitor_history_rewritten calls */
+void llm_cache_monitor_history_rewritten(uint32_t session_id) {
+   (void)session_id;
+   s_rewritten++;
+}
 static int s_take_back_boundary = -1;
 struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
                                                             struct json_object *question,
@@ -827,7 +832,9 @@ void test_new_context_drops_unclaimed_exchange(void) {
    session_turn_await_conversation(s);
    session_turn_set_pending(s, "user", "abandoned");
    session_turn_end(s);
-   session_clear_history(s); /* "New chat" */
+   s_rewritten = 0;
+   session_clear_history(s);              /* "New chat" */
+   TEST_ASSERT_EQUAL_INT(1, s_rewritten); /* a key the session keeps starts over */
    char *user = NULL, *reply = NULL;
    TEST_ASSERT_FALSE(claim(9, &user, &reply));
 }
@@ -1041,7 +1048,9 @@ void test_rollback_after_moving_to_own_history(void) {
    session_add_turn_message(s, "user", "q");
    session_turn_set_conversation(s, 9, true); /* carried onto its own copy */
    session_add_turn_message(s, "assistant", "partial");
+   s_rewritten = 0;
    TEST_ASSERT_EQUAL_INT(2, session_rollback_turn(s));
+   TEST_ASSERT_EQUAL_INT(1, s_rewritten); /* its calls cached what was taken back */
 }
 
 void test_notice_is_one_line(void) {

@@ -2323,6 +2323,9 @@ static int handle_client(int client_fd) {
       case ADMIN_MSG_OTA_ROLLOUT_ABORT:
          return handle_ota_rollout_abort_cmd(client_fd);
 
+      case ADMIN_MSG_CACHE_STATS:
+         return handle_cache_stats_cmd(client_fd, payload, header.payload_len);
+
 #ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL
       /* Deep-research operator commands (headless benchmark spawn path, §16). */
       case ADMIN_MSG_RESEARCH_START:

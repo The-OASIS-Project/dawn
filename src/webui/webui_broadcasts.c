@@ -61,6 +61,7 @@
 #include "core/session_compaction.h"
 #include "dawn_error.h"
 #include "image_store.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
@@ -1910,3 +1911,27 @@ void code_project_broadcast_import_failed(int64_t user_id, const char *name, con
    broadcast_json_to_user_ex((int)user_id, root, false);
 }
 #endif /* DAWN_ENABLE_CODE_PROJECTS */
+
+/* Overrides the cache monitor's weak hook: reasoning dropped by the binding
+ * controls is a DAWN bug, so the admins hear of it (once per conversation,
+ * from the main loop's flush, no locks held).  Browsers only: a toast.  Not
+ * which conversation: it may be another user's, or private; the log's
+ * "LLM binding" line names it for the report. */
+void llm_cache_alert_notify(int64_t conversation_id, int drops, const char *model) {
+   char message[256];
+   snprintf(message, sizeof(message),
+            "Earlier reasoning was dropped in a conversation: %d thinking block(s) on %s. This "
+            "is a DAWN bug; please report it with today's log.",
+            drops, model && model[0] ? model : "the model");
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "kind", json_object_new_string("reasoning_dropped"));
+   json_object_object_add(payload, "drops", json_object_new_int(drops));
+   json_object_object_add(payload, "model", json_object_new_string(model ? model : ""));
+   json_object_object_add(payload, "message", json_object_new_string(message));
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("cache_alert"));
+   json_object_object_add(root, "payload", payload);
+   const int sent = broadcast_json_to_admins(root, /*browsers_only=*/true);
+   OLOG_INFO("WebUI: cache_alert (reasoning dropped, conv %lld) sent to %d admin client(s)",
+             (long long)conversation_id, sent);
+}

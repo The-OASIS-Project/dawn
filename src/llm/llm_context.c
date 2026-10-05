@@ -172,6 +172,7 @@ typedef struct {
    int last_cached_tokens;      /* Cache-read prompt tokens from the last sub-call */
    int last_cache_write_tokens; /* Cache-write prompt tokens from the last sub-call (GPT-5.6+) */
    int last_saved_input_tokens; /* Provider-discounted net input tokens saved (may be negative) */
+   char last_cache_state[16];   /* The last call's cache state (llm_cache_state_name) */
    uint64_t touched;            /* when last used (a sequence): the oldest is reused */
 
    /* Calibration (llm_compaction.h).  The request on its way (set when it is
@@ -913,6 +914,8 @@ void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usa
          tracking->last_cached_tokens = cached_tokens;
          tracking->last_cache_write_tokens = cache_write_tokens;
          tracking->last_saved_input_tokens = saved_input_tokens;
+         safe_strscpy(tracking->last_cache_state,
+                      rec.classified ? llm_cache_state_name(rec.state) : "untracked");
       }
    }
 
@@ -1047,6 +1050,7 @@ void llm_context_get_last_cache(uint32_t session_id, llm_cache_snapshot_t *out) 
       snap.cached_tokens = tracking->last_cached_tokens;
       snap.cache_write_tokens = tracking->last_cache_write_tokens;
       snap.saved_input_tokens = tracking->last_saved_input_tokens;
+      safe_strscpy(snap.cache_state, tracking->last_cache_state);
    }
    pthread_mutex_unlock(&s_state.mutex);
    *out = snap;
@@ -1061,6 +1065,7 @@ void llm_context_reset_turn_cache(uint32_t session_id) {
       tracking->last_cached_tokens = 0;
       tracking->last_cache_write_tokens = 0;
       tracking->last_saved_input_tokens = 0;
+      tracking->last_cache_state[0] = '\0';
    }
    pthread_mutex_unlock(&s_state.mutex);
 }

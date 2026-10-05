@@ -30,6 +30,7 @@
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_cache_monitor_internal.h"
+#include "llm/llm_local_provider.h"
 #include "unity.h"
 
 /* ---- stubs ---- */
@@ -63,6 +64,21 @@ int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
       s_written[s_written_count++] = rows[i];
    }
    return AUTH_DB_SUCCESS;
+}
+
+/* The local server in use: llama.cpp reports what it reused, Ollama nothing. */
+static local_provider_t s_local_provider = LOCAL_PROVIDER_LLAMA_CPP;
+local_provider_t llm_local_get_provider(void) {
+   return s_local_provider;
+}
+
+/* The alert hook (weak in the monitor): captured. */
+static int s_alerts;
+static int64_t s_alert_conv;
+void llm_cache_alert_notify(int64_t conversation_id, int drops, const char *model) {
+   (void)drops, (void)model;
+   s_alerts++;
+   s_alert_conv = conversation_id;
 }
 
 /* ---- helpers ---- */
@@ -111,6 +127,8 @@ static int expect(const llm_cache_prefix_t *p,
 
 void setUp(void) {
    s_context = NULL;
+   s_alerts = 0;
+   s_local_provider = LOCAL_PROVIDER_LLAMA_CPP;
    llm_cache_monitor_flush(); /* drain whatever an earlier test queued */
    s_insert_fails = false;
    s_written_count = 0;
@@ -499,6 +517,191 @@ static void test_one_off_calls(void) {
    }
 }
 
+
+/* ---- P3: detectors ---- */
+
+static session_t s_conv_session;
+
+/* A conversation call on session 7, conversation 70: the request, then its usage. */
+static llm_cache_record_t call(struct json_object *request,
+                               llm_type_t type,
+                               cloud_provider_t provider,
+                               int prompt,
+                               int read,
+                               int write) {
+   memset(&s_conv_session, 0, sizeof(s_conv_session));
+   s_conv_session.session_id = 7;
+   s_conv_session.type = SESSION_TYPE_WEBUI;
+   atomic_store(&s_conv_session.stream_conversation_id, 70);
+   s_context = &s_conv_session;
+   llm_cache_monitor_note_request(request);
+   llm_usage_report_t usage = { .prompt_tokens = prompt,
+                                .cached_tokens = read,
+                                .cache_write_tokens = write,
+                                .type = type,
+                                .provider = provider };
+   llm_cache_record_t rec;
+   llm_cache_monitor_record(7, &usage, &rec);
+   return rec;
+}
+
+static llm_cache_record_t claude_call(struct json_object *r, int prompt, int read, int write) {
+   return call(r, LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, prompt, read, write);
+}
+
+void test_warm_miss_on_a_dropped_read(void) {
+   struct json_object *r = claude_request("persona", "", "search");
+   llm_cache_monitor_set_iteration(0);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_FIRST, claude_call(r, 10000, 0, 9000).state);
+   llm_cache_monitor_set_iteration(1);
+   llm_cache_record_t rec = claude_call(r, 11000, 9000, 1500);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM, rec.state); /* read all it should */
+   rec = claude_call(r, 12000, 2000, 9000);
+   TEST_ASSERT_EQUAL_INT(10500, rec.expected);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM_MISS, rec.state);
+   json_object_put(r);
+}
+
+/* A model that ignores the markers: expected stays 0, and the call still misses. */
+void test_nothing_read_or_written_is_a_miss(void) {
+   struct json_object *r = claude_request("persona", "", "search");
+   claude_call(r, 10000, 0, 0);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM_MISS, claude_call(r, 10500, 0, 0).state);
+   /* Below the cacheable minimum it is just a small prompt. */
+   llm_cache_monitor_reset_keys();
+   claude_call(r, 900, 0, 0);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM, claude_call(r, 950, 0, 0).state);
+   json_object_put(r);
+}
+
+/* Known events: a rewritten history, a model switch, a thinking toggle, a
+ * changed tool_choice (the forced final answer), the conversation's first image.
+ * A later image call reads its whole prefix. */
+void test_known_events_are_not_misses(void) {
+   struct json_object *r = claude_request("persona", "", "search");
+   claude_call(r, 10000, 0, 9000);
+   llm_cache_monitor_history_rewritten(7);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_REWRITTEN, claude_call(r, 8000, 3000, 5000).state);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM, claude_call(r, 8500, 8000, 500).state); /* once */
+
+   json_object_object_add(r, "model", json_object_new_string("claude-opus-5-5"));
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_MODEL, claude_call(r, 9000, 0, 9000).state);
+
+   struct json_object *thinking = json_object_new_object();
+   json_object_object_add(thinking, "type", json_object_new_string("adaptive"));
+   json_object_object_add(r, "thinking", thinking);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_THINKING, claude_call(r, 9500, 0, 9500).state);
+
+   /* The tool loop's forced final answer: tool_choice none. */
+   json_object_object_add(r, "tool_choice", json_object_new_string("none"));
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_TOOLS, claude_call(r, 9800, 0, 9800).state);
+   json_object_object_del(r, "tool_choice");
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_TOOLS, claude_call(r, 9900, 0, 9900).state);
+
+   /* The conversation's first image invalidates the messages; the next one doesn't. */
+   struct json_object *messages = json_object_new_array();
+   struct json_object *msg = json_object_new_object();
+   struct json_object *content = json_object_new_array();
+   struct json_object *img = json_object_new_object();
+   json_object_object_add(img, "type", json_object_new_string("image"));
+   json_object_array_add(content, img);
+   json_object_object_add(msg, "content", content);
+   json_object_array_add(messages, msg);
+   json_object_object_add(r, "messages", messages);
+   llm_cache_record_t rec = claude_call(r, 11000, 3000, 8000);
+   TEST_ASSERT_TRUE(rec.images);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_IMAGES, rec.state);
+   rec = claude_call(r, 12000, 11000, 1000);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM, rec.state);
+   json_object_put(r);
+}
+
+/* OpenAI: a partial read is normal; three warm zero reads in a row are a miss. */
+void test_openai_zero_read_streak(void) {
+   struct json_object *r = json_object_new_object();
+   json_object_object_add(r, "model", json_object_new_string("gpt-5.5"));
+   llm_cache_record_t rec = call(r, LLM_CLOUD, CLOUD_PROVIDER_OPENAI, 5000, 0, 0);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_FIRST, rec.state);
+   TEST_ASSERT_EQUAL_INT(-1, rec.expected);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM,
+                         call(r, LLM_CLOUD, CLOUD_PROVIDER_OPENAI, 5000, 0, 0).state);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM,
+                         call(r, LLM_CLOUD, CLOUD_PROVIDER_OPENAI, 5000, 0, 0).state);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM_MISS,
+                         call(r, LLM_CLOUD, CLOUD_PROVIDER_OPENAI, 5000, 0, 0).state);
+   /* A read ends the run. */
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM,
+                         call(r, LLM_CLOUD, CLOUD_PROVIDER_OPENAI, 5000, 1024, 0).state);
+   /* Gemini isn't judged at all. */
+   llm_cache_monitor_reset_keys();
+   rec = call(r, LLM_CLOUD, CLOUD_PROVIDER_GEMINI, 5000, 0, 0);
+   TEST_ASSERT_FALSE(rec.classified);
+   json_object_put(r);
+}
+
+/* Local: the next call reads the previous prompt, unless something else used the server. */
+void test_local_server_expected_read(void) {
+   struct json_object *r = json_object_new_object();
+   json_object_object_add(r, "model", json_object_new_string("qwen"));
+   call(r, LLM_LOCAL, CLOUD_PROVIDER_NONE, 31549, 0, 0);
+   llm_cache_record_t rec = call(r, LLM_LOCAL, CLOUD_PROVIDER_NONE, 31739, 31545, 0);
+   TEST_ASSERT_EQUAL_INT(31549, rec.expected);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM, rec.state);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM_MISS,
+                         call(r, LLM_LOCAL, CLOUD_PROVIDER_NONE, 32598, 3000, 0).state);
+   /* A side call (memory extraction) on the server in between: shared. */
+   const int prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
+   call(r, LLM_LOCAL, CLOUD_PROVIDER_NONE, 900, 0, 0);
+   llm_cache_monitor_pop_kind(prev);
+   rec = call(r, LLM_LOCAL, CLOUD_PROVIDER_NONE, 33000, 100, 0);
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_SHARED, rec.state);
+   /* Ollama reports nothing reused: not judged. */
+   s_local_provider = LOCAL_PROVIDER_OLLAMA;
+   call(r, LLM_LOCAL, CLOUD_PROVIDER_NONE, 33000, 0, 0);
+   rec = call(r, LLM_LOCAL, CLOUD_PROVIDER_NONE, 34000, 0, 0);
+   TEST_ASSERT_FALSE(rec.classified);
+   json_object_put(r);
+}
+
+/* Every state has its name: the usage log, the stats and the WebUI read them. */
+void test_state_names(void) {
+   TEST_ASSERT_EQUAL_STRING("rewritten", llm_cache_state_name(LLM_CACHE_COLD_REWRITTEN));
+   TEST_ASSERT_EQUAL_STRING("shared", llm_cache_state_name(LLM_CACHE_COLD_SHARED));
+   TEST_ASSERT_EQUAL_STRING("warm_miss", llm_cache_state_name(LLM_CACHE_WARM_MISS));
+   TEST_ASSERT_EQUAL_STRING("images", llm_cache_state_name(LLM_CACHE_COLD_IMAGES));
+   TEST_ASSERT_EQUAL_STRING("?", llm_cache_state_name(LLM_CACHE_STATE_COUNT));
+}
+
+void test_warnings_are_rate_limited(void) {
+   TEST_ASSERT_TRUE(llm_cache_monitor_warn_due("claude", "claude-opus-5-5", 1000));
+   TEST_ASSERT_FALSE(llm_cache_monitor_warn_due("claude", "claude-opus-5-5", 2000));
+   TEST_ASSERT_TRUE(llm_cache_monitor_warn_due("claude", "claude-sonnet-5", 2000));
+   TEST_ASSERT_TRUE(llm_cache_monitor_warn_due("claude", "claude-opus-5-5", 1000 + 600000));
+}
+
+/* Dropped reasoning reaches the admins once per conversation, from the flush. */
+void test_dropped_reasoning_alerts_once(void) {
+   struct json_object *r = claude_request("persona", "", "search");
+   llm_claude_drops_t drops = { .reported = true, .prefix_drops = 2 };
+   for (int i = 0; i < 2; i++) {
+      memset(&s_conv_session, 0, sizeof(s_conv_session));
+      s_conv_session.session_id = 7;
+      atomic_store(&s_conv_session.stream_conversation_id, 70);
+      s_context = &s_conv_session;
+      llm_cache_monitor_note_request(r);
+      llm_usage_report_t usage = { .prompt_tokens = 5000,
+                                   .type = LLM_CLOUD,
+                                   .provider = CLOUD_PROVIDER_CLAUDE,
+                                   .drops = &drops };
+      llm_cache_monitor_record(7, &usage, NULL);
+   }
+   TEST_ASSERT_EQUAL_INT(0, s_alerts); /* queued, not sent from the worker */
+   llm_cache_monitor_flush();
+   TEST_ASSERT_EQUAL_INT(1, s_alerts);
+   TEST_ASSERT_EQUAL_INT64(70, s_alert_conv);
+   json_object_put(r);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_prefix_hash_covers_tools_and_stable_system_only);
@@ -518,5 +721,13 @@ int main(void) {
    RUN_TEST(test_a_failed_write_keeps_the_rows);
    RUN_TEST(test_diagnostics_chain_follows_the_conversation);
    RUN_TEST(test_one_off_calls);
+   RUN_TEST(test_warm_miss_on_a_dropped_read);
+   RUN_TEST(test_nothing_read_or_written_is_a_miss);
+   RUN_TEST(test_known_events_are_not_misses);
+   RUN_TEST(test_openai_zero_read_streak);
+   RUN_TEST(test_local_server_expected_read);
+   RUN_TEST(test_state_names);
+   RUN_TEST(test_warnings_are_rate_limited);
+   RUN_TEST(test_dropped_reasoning_alerts_once);
    return UNITY_END();
 }

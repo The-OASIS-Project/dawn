@@ -154,6 +154,11 @@ static void print_usage(const char *prog) {
    fprintf(stderr,
            "  schwab auth [--user <id>]            Link a Schwab account (paste-the-redirect).\n"
            "  schwab status [--user <id>]          Show link state + days to refresh expiry.\n");
+   fprintf(stderr, "\nPrompt cache:\n");
+   fprintf(stderr,
+           "  cache stats [--since 24h|7d] [--provider <p>]\n"
+           "                                       Cache coverage, savings, warm misses and\n"
+           "                                       dropped reasoning per provider/model/kind\n");
    fprintf(stderr, "\nMCP Bridge (coding harness):\n");
    fprintf(stderr,
            "  mcp list                             List connected MCP servers + tool counts\n"
@@ -2638,6 +2643,49 @@ int main(int argc, char *argv[]) {
 
       fprintf(stderr, "Error: Unknown ota subcommand: %s\n", subcmd);
       fprintf(stderr, "Available: list, rescan, push, push-all, rollout-status, rollout-abort\n");
+      return 1;
+   }
+
+   if (strcmp(cmd, "cache") == 0) {
+      if (argc < 3 || strcmp(argv[2], "stats") != 0) {
+         fprintf(stderr, "Usage: %s cache stats [--since 24h|7d] [--provider <p>]\n", argv[0]);
+         return 1;
+      }
+      int hours = 24;
+      const char *provider = "";
+      for (int i = 3; i < argc; i++) {
+         if (strcmp(argv[i], "--since") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            const long v = strtol(argv[++i], &end, 10);
+            if (v <= 0 || !end || (*end != 'h' && *end != 'd') || end[1] != '\0') {
+               fprintf(stderr, "Error: --since takes hours or days, e.g. 24h or 7d\n");
+               return 1;
+            }
+            if (v > (*end == 'd' ? 90 : 90 * 24)) {
+               fprintf(stderr, "Error: the usage log keeps 90 days\n");
+               return 1;
+            }
+            hours = (int)(*end == 'd' ? v * 24 : v);
+         } else if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
+            provider = argv[++i];
+         } else {
+            fprintf(stderr, "Error: Unknown option: %s\n", argv[i]);
+            return 1;
+         }
+      }
+      int fd = admin_client_connect();
+      if (fd < 0) {
+         return 1;
+      }
+      char response[ADMIN_MSG_CONTENT_MAX + 1] = "";
+      const admin_resp_code_t resp = admin_client_cache_stats(fd, hours, provider, response,
+                                                              sizeof(response));
+      admin_client_disconnect(fd);
+      if (resp == ADMIN_RESP_SUCCESS) {
+         printf("%s\n", response);
+         return 0;
+      }
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
       return 1;
    }
 

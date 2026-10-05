@@ -613,8 +613,9 @@ void send_metrics_impl(struct lws *wsi,
                        int cached_tokens,
                        int cache_write_tokens,
                        int cache_saved_tokens,
+                       const char *cache_state,
                        int64_t conversation_id) {
-   char json[384];
+   char json[448];
    /* input_tokens (this turn's prompt) is the cache-rate denominator: hit% =
     * cached_tokens / input_tokens. cached_tokens is always present (0 = miss);
     * cache_write_tokens only when non-zero (GPT-5.6+ / Claude) so clients feature-
@@ -627,14 +628,22 @@ void send_metrics_impl(struct lws *wsi,
       snprintf(cache_write_field, sizeof(cache_write_field), ",\"cache_write_tokens\":%d",
                cache_write_tokens);
    }
+   /* cache_state: the call's cache state (warm, warm_miss, ttl, rewritten, ...;
+    * "untracked" where the monitor doesn't judge the provider), when there is one.
+    * A fixed vocabulary from llm_cache_state_name(), never user text. */
+   char cache_state_field[40] = "";
+   if (cache_state && cache_state[0]) {
+      snprintf(cache_state_field, sizeof(cache_state_field), ",\"cache_state\":\"%s\"",
+               cache_state);
+   }
    /* conversation_id lets the client gate the footer to the active view — a
     * background turn's tok/s/TTFT must not update the footer of an idle view. */
    snprintf(json, sizeof(json),
             "{\"type\":\"metrics_update\",\"payload\":{\"state\":\"%s\",\"ttft_ms\":%d,"
             "\"token_rate\":%.1f,\"context_percent\":%d,\"input_tokens\":%d,\"cached_tokens\":%d%s,"
-            "\"cache_saved_tokens\":%d,\"conversation_id\":%lld}}",
+            "\"cache_saved_tokens\":%d%s,\"conversation_id\":%lld}}",
             state, ttft_ms, token_rate, context_pct, input_tokens, cached_tokens, cache_write_field,
-            cache_saved_tokens, (long long)conversation_id);
+            cache_saved_tokens, cache_state_field, (long long)conversation_id);
    send_json_message(wsi, json);
 }
 
@@ -999,7 +1008,7 @@ void process_one_response(void) {
                            resp.metrics.token_rate, resp.metrics.context_pct,
                            resp.metrics.input_tokens, resp.metrics.cached_tokens,
                            resp.metrics.cache_write_tokens, resp.metrics.cache_saved_tokens,
-                           resp.metrics.conversation_id);
+                           resp.metrics.cache_state, resp.metrics.conversation_id);
          break;
       case WS_RESP_COMPACTION_COMPLETE:
          send_compaction_impl(conn->wsi, resp.compaction.conversation_id,

@@ -78,6 +78,11 @@ bool llm_context_over_threshold(uint32_t session_id,
    (void)model, (void)threshold;
    return s_over;
 }
+static int s_rewritten = 0; /* llm_cache_monitor_history_rewritten calls */
+void llm_cache_monitor_history_rewritten(uint32_t session_id) {
+   (void)session_id;
+   s_rewritten++;
+}
 void llm_context_note_compacted(uint32_t session_id, int tokens) {
    (void)session_id;
    s_noted_tokens = tokens;
@@ -265,6 +270,7 @@ void setUp(void) {
    s_summary = NULL;
    s_summarized[0] = '\0';
    s_noted_tokens = -1;
+   s_rewritten = 0;
    s_compaction_notices = 0;
    s_panel_n = -1;
    memset(s_panel_states, 0, sizeof(s_panel_states));
@@ -826,6 +832,7 @@ static void test_a_live_history_withdraws_too(void) {
    TEST_ASSERT_NULL(s->withdraw_pending);
    TEST_ASSERT_NULL(strstr(json_object_to_json_string(s->conversation_history), "a secret"));
    TEST_ASSERT_FALSE(json_object_object_get_ex(at(2), LLM_TURN_BLOCKS_KEY, NULL));
+   TEST_ASSERT_EQUAL_INT(1, s_rewritten); /* the next call's cache state: rewritten */
    db_close();
 }
 
@@ -962,6 +969,7 @@ static void test_a_compaction_applies_at_the_seam_and_reloads_the_same(void) {
    TEST_ASSERT_EQUAL_INT(MESSAGE_KIND_INSTRUCTION, llm_history_kind_of(last));
    TEST_ASSERT_NOT_NULL(strstr(content_of(count() - 1), "P2"));
    TEST_ASSERT_TRUE(s_noted_tokens > 0);
+   TEST_ASSERT_EQUAL_INT(1, s_rewritten);          /* the next call's cache state: rewritten */
    TEST_ASSERT_EQUAL_INT(1, s_compaction_notices); /* the client's marker */
 
    /* Saved with the turn: the summary, its node, the watermark. */

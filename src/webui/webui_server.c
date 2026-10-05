@@ -3153,6 +3153,7 @@ void webui_send_metrics_update(session_t *session,
    resp.metrics.cached_tokens = cache.cached_tokens;
    resp.metrics.cache_write_tokens = cache.cache_write_tokens;
    resp.metrics.cache_saved_tokens = cache.saved_input_tokens;
+   safe_strscpy(resp.metrics.cache_state, cache.cache_state);
    resp.metrics.conversation_id = atomic_load(&session->stream_conversation_id);
 
    queue_response(&resp);

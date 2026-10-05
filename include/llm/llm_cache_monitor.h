@@ -70,15 +70,20 @@ bool llm_call_kind_is_conversation(llm_call_kind_t kind);
  */
 bool llm_call_kind_sets_context(llm_call_kind_t kind);
 
-/** Why a call's expected cache read is 0 (LLM_CACHE_WARM when it isn't). */
+/** A conversation call's cache state: warm, why it was cold, or a warm miss. */
 typedef enum {
-   LLM_CACHE_WARM = 0,     /**< Expected read computed from the previous call */
-   LLM_CACHE_COLD_FIRST,   /**< First call on its cache key */
-   LLM_CACHE_COLD_TTL,     /**< The cache expired since the previous call */
-   LLM_CACHE_COLD_TOOLS,   /**< The tool set changed */
-   LLM_CACHE_COLD_SYSTEM,  /**< The stable system text changed */
-   LLM_CACHE_COLD_MODEL,   /**< Another model */
-   LLM_CACHE_COLD_THINKING /**< The thinking / effort settings changed */
+   LLM_CACHE_WARM = 0,       /**< Should read what the previous call left, and did */
+   LLM_CACHE_COLD_FIRST,     /**< First call on its cache key */
+   LLM_CACHE_COLD_TTL,       /**< The cache expired since the previous call */
+   LLM_CACHE_COLD_TOOLS,     /**< The tool set changed */
+   LLM_CACHE_COLD_SYSTEM,    /**< The stable system text changed */
+   LLM_CACHE_COLD_MODEL,     /**< Another model */
+   LLM_CACHE_COLD_THINKING,  /**< The thinking / effort settings changed */
+   LLM_CACHE_COLD_REWRITTEN, /**< The history was rewritten (compaction, a forget, a rollback) */
+   LLM_CACHE_COLD_SHARED,    /**< Local: another conversation used the server in between */
+   LLM_CACHE_COLD_IMAGES,    /**< The first image in the conversation (invalidates the messages) */
+   LLM_CACHE_WARM_MISS,      /**< Should have read the cache and didn't: a regression to look at */
+   LLM_CACHE_STATE_COUNT
 } llm_cache_state_t;
 
 /** Stable lowercase name for @p state ("warm", "first", "ttl", ...). */
@@ -100,11 +105,12 @@ typedef struct {
    int write;               /**< Written to the provider's cache */
    int uncached;            /**< Billed at the full input price */
    int output;
-   int expected;                          /**< Expected read; -1 = not computed */
-   llm_cache_state_t state;               /**< Why expected is 0, when it is */
-   uint64_t gap_ms;                       /**< Since the previous call on the key */
-   uint32_t tools_hash;                   /**< 0 = no tools */
-   uint32_t system_hash;                  /**< The stable system text */
+   int expected;            /**< Expected read; -1 = not computed */
+   bool classified;         /**< state is set (a conversation call on a tracked cache) */
+   llm_cache_state_t state; /**< Warm, why it was cold, or a warm miss */
+   uint64_t gap_ms;         /**< Since the previous call on the key */
+   uint32_t tools_hash;     /**< 0 = no tools */
+   uint32_t system_hash;    /**< The stable system text */
    char thinking[LLM_CACHE_THINKING_MAX]; /**< e.g. "adaptive/low", "" = none sent */
    bool images;                           /**< The newest message carries an image */
    char miss_reason[32];                  /**< Anthropic's own diagnosis ("" = none) */
@@ -200,11 +206,31 @@ bool llm_cache_monitor_previous_message_id(uint32_t session_id,
 int llm_cache_monitor_ttl_ms(llm_type_t type, cloud_provider_t provider);
 
 /**
+ * @brief The calling session's history was rewritten (compacted, a forget's
+ *        lines withdrawn, a turn rolled back)
+ * Its next call on each of its cache keys can't read what the last one left,
+ * and is "rewritten", not a warm miss.  Leaf lock: safe under history_mutex.
+ */
+void llm_cache_monitor_history_rewritten(uint32_t session_id);
+
+/**
+ * @brief Hand an alert that a person should see to the WebUI's admins
+ * Called by llm_cache_monitor_flush() on the main loop (no locks held): reasoning
+ * dropped by the binding controls, once per conversation.  A weak no-op here; the
+ * WebUI overrides it.
+ * @param conversation_id The conversation (0: the local microphone's)
+ * @param drops Thinking blocks dropped
+ * @param model The model
+ */
+void llm_cache_alert_notify(int64_t conversation_id, int drops, const char *model);
+
+/**
  * @brief Write the queued call records to the llm_usage_log table
  *
  * Records are queued by llm_cache_monitor_record() (which runs inside provider
  * callbacks, so it never touches the database) and written here in one
- * transaction.  Called from the main loop's once-a-second heartbeat.
+ * transaction, and send the queued alerts (llm_cache_alert_notify).  Called from
+ * the main loop's once-a-second heartbeat.
  */
 void llm_cache_monitor_flush(void);
 

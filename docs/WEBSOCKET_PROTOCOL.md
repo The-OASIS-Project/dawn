@@ -1745,18 +1745,38 @@ Notification after automatic context compaction.
 ```
 
 #### `metrics_update`
-Real-time metrics for UI visualization (rings/gauges).
+Real-time metrics for UI visualization (rings/gauges), and the turn's prompt-cache figures.
 ```json
 {
    "type": "metrics_update",
    "payload": {
-      "state": "thinking",
+      "state": "idle",
       "ttft_ms": 450,
       "token_rate": 42.5,
-      "context_percent": 35
+      "context_percent": 35,
+      "input_tokens": 48832,
+      "cached_tokens": 48640,
+      "cache_write_tokens": 192,
+      "cache_saved_tokens": 43536,
+      "cache_state": "warm",
+      "conversation_id": 1703
    }
 }
 ```
+- The cache fields describe the turn's **last LLM call** and are meaningful on the final
+  `"idle"` frame only (mid-stream frames carry zeros and no `cache_state`).
+- `input_tokens` is the whole prompt (the hit-rate denominator), `cached_tokens` what was read
+  from the provider's cache (0 = a miss), `cache_write_tokens` only when non-zero,
+  `cache_saved_tokens` the input tokens' worth saved (list prices; negative on a write-heavy call).
+- `cache_state` (optional; absent before any call) says how the call should have cached:
+  `warm` (read what the previous call left), `warm_miss` (should have and didn't: a
+  regression worth reporting, or for OpenAI three warm calls in a row that read nothing),
+  `first`, `ttl` (expired), `model`, `tools` (the tools or `tool_choice`), `system`, `thinking`
+  (that part changed), `images` (the conversation's first image),
+  `rewritten` (the history was compacted, a forgotten item withdrawn, or a turn taken back),
+  `shared` (a local server another conversation used in between), or `untracked` (not judged:
+  Gemini, other OpenRouter vendors, a local server other than llama.cpp, and the local
+  microphone's turns).
 
 #### `conversation_reset`
 Notification that conversation context was reset (via tool).
@@ -1879,6 +1899,25 @@ DAWN stored or updated a memory during a turn.
 ```json
 { "type": "memory_extraction_notice", "payload": { "level": "info", "message": "Saved: prefers metric units." } }
 ```
+
+#### `cache_alert`
+A DAWN bug a person should report: the Anthropic API dropped earlier reasoning because a
+request's prefix changed (`prefix_binding_mismatch`).  **Admin-only, browsers only**, once per
+conversation per daemon run.  `message` is DAWN's own plain-language text (show it via
+`textContent`); the WebUI keeps it as a toast until dismissed.
+```json
+{
+   "type": "cache_alert",
+   "payload": {
+      "kind": "reasoning_dropped",
+      "drops": 2,
+      "model": "claude-opus-5-5",
+      "message": "Earlier reasoning was dropped in a conversation: ..."
+   }
+}
+```
+The conversation isn't named (it may be another user's, or private); the daemon log's
+`LLM binding` line names it.
 
 #### `memory_proposals_changed`
 The count of pending memory proposals changed (signal to refresh a proposals view).

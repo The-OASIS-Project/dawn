@@ -279,7 +279,9 @@ typedef enum {
    ADMIN_MSG_SCHWAB_AUTH_URL = 0xE3,      /**< generate the Schwab authorize URL */
    ADMIN_MSG_SCHWAB_AUTH_COMPLETE = 0xE4, /**< complete enrollment from the pasted redirect URL */
    ADMIN_MSG_SCHWAB_STATUS = 0xE5,        /**< linked-account status + refresh-expiry countdown */
-   /* Next free operator opcode: 0xE6.  (Range ends 0xEF.) */
+   /* Prompt-cache stats: [hours i32][provider bytes, optional] → a text table. */
+   ADMIN_MSG_CACHE_STATS = 0xE6,
+   /* Next free operator opcode: 0xE7.  (Range ends 0xEF.) */
 } admin_msg_type_t;
 
 /**

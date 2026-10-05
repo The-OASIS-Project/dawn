@@ -1269,6 +1269,13 @@
                   DawnSettingsConfig.requestConfig();
                }
                break;
+            case 'cache_alert':
+               /* A DAWN bug a person should report (reasoning dropped): stays until
+                * dismissed.  Sent to admins only. */
+               if (msg.payload && msg.payload.message) {
+                  DawnToast.show(msg.payload.message, 'error', 0);
+               }
+               break;
             case 'memory_extraction_notice':
                if (msg.payload) {
                   showMemoryExtractionNotice(msg.payload.level, msg.payload.message);

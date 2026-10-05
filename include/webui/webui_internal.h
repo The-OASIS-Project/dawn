@@ -342,6 +342,7 @@ typedef struct {
          int cached_tokens; /* Cache-read prompt tokens for this turn (last sub-call; 0 = miss) */
          int cache_write_tokens; /* Cache-write prompt tokens for this turn (0 when unreported) */
          int cache_saved_tokens; /* Provider-discounted net input tokens saved (may be negative) */
+         char cache_state[16];   /* The last call's cache state ("" = none to report) */
          int64_t
              conversation_id; /* turn's conversation — client gates the footer to the active view */
       } metrics;

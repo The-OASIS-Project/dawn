@@ -1294,6 +1294,7 @@ dawn_add_unit_test(test_silent_observe
 dawn_add_unit_test(test_llm_cache_monitor
    SOURCES test_llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
    DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
@@ -1474,6 +1475,13 @@ dawn_add_unit_test(test_memory_extraction_input
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
    LIBS    dawn_common unity json-c
+   LABEL   ci)
+
+# The dawn-admin cache stats table.
+dawn_add_unit_test(test_admin_cache_stats
+   SOURCES test_admin_cache_stats.c
+           ${SRC_ROOT}/src/auth/admin_socket_cache.c
+   LIBS    dawn_common unity
    LABEL   ci)
 
 dawn_add_unit_test(test_scheduled_context

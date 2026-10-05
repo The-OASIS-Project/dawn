@@ -154,6 +154,37 @@ Blocks are persisted with their row so a reloaded conversation replays each turn
 - **Reading.** Only a load that becomes an LLM context asks for blocks: `memory_history_load_for_llm()` and the WebUI restore (`memory_history_load_rows(..., with_blocks = true)`). The loader reads `messages.llm_blocks` through `conv_db_get_messages_for_llm()`, parses it after the read (outside the database lock), and attaches blocks only when they parse (`llm_turn_blocks_from_stored`, fail-closed) and record the row's tool calls. Display, export, search, admin and memory reads never see the column; `scripts/check_llm_blocks_confined.sh` enforces this at build time.
 - **Bounds.** 4 MiB per row (so a row always fits a load) and assistant rows only (a schema CHECK; `llm_blocks_len`, placed before `llm_blocks`, holds the byte length so no check reads the blob), 8 MiB of blocks per load (older rows past it load without them). Advancing the compaction watermark clears blocks at or below it right after, in batches, and the periodic auth cleanup sweeps any it missed; a trigger drops a row's blocks when its text or tool calls change.
 
+## Prompt-cache monitor
+
+Every provider call's usage passes through `llm_cache_monitor_record()` (`src/llm/llm_cache_monitor.c`),
+which logs one `LLM cache:` line, queues a row for `llm_usage_log` (90 days), and gives a
+conversation's own calls a cache state (the `cache_state` column, and the `cache_state` field of the
+WebUI's idle `metrics_update` frame):
+
+- **Anthropic (direct):** the next call should read what the previous one read or wrote. Under 90% of
+  that, or nothing at all on a prompt of 4096+ tokens, is a **warm miss**.
+- **Local llama.cpp** (only it reports what it reused; Ollama isn't judged): the next call should read
+  the previous prompt from the slot's KV cache, unless
+  another conversation or a side call used the server in between (`shared`). Its misses log at INFO
+  (latency, not cost).
+- **OpenAI, and OpenRouter's OpenAI and Anthropic models:** tracked for state with no expected read
+  (OpenAI drops earlier turns' reasoning by design; OpenRouter routes Anthropic best-effort without
+  BYOK); three warm calls in a row reading nothing are a warm miss.
+- **Not judged:** Gemini, other vendors, side calls (extraction, compaction, briefings), and the local
+  microphone's turns (session 0, shared with session-less calls).
+- **Known events are never misses:** a TTL gap (measured from the request), a model, tool-set (or
+  `tool_choice`), system or thinking change, the conversation's first image, and a rewritten history
+  (`llm_cache_monitor_history_rewritten()`: compaction, a forget's withdrawal, a turn's rollback, a
+  history cleared or replaced, as a research round does).
+
+A warm miss logs a WARNING (one per provider and model per 10 minutes) with the expected and actual read
+and, on Anthropic, its own diagnosis. Reasoning the binding controls dropped for a prefix change is a
+DAWN bug: besides the rate-limited WARNING, the admins' WebUI gets a `cache_alert` toast once per
+conversation (queued by the LLM worker, sent from the main loop's flush through a weak hook the WebUI
+overrides). `dawn-admin cache stats [--since 24h|7d] [--provider p]` reads the usage log back: calls,
+prompt tokens, coverage, input tokens' worth saved, warm misses and dropped reasoning per provider,
+model and kind. The thresholds are constants, not settings.
+
 ## OpenRouter Provider
 
 OpenRouter (`https://openrouter.ai/api/v1`) fronts many vendors' models behind one key, with

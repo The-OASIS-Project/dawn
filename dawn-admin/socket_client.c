@@ -1933,6 +1933,28 @@ admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len)
    return recv_text_response(fd, response, resp_len);
 }
 
+/* ===== Prompt-cache stats (0xE6) ===== */
+
+admin_resp_code_t admin_client_cache_stats(int fd,
+                                           int hours,
+                                           const char *provider,
+                                           char *response,
+                                           size_t resp_len) {
+   /* Wire: [hours i32][provider bytes, optional]. */
+   uint8_t buf[4 + 16];
+   const int32_t h = (int32_t)hours;
+   memcpy(buf, &h, sizeof(h));
+   size_t plen = provider ? strlen(provider) : 0;
+   if (plen >= 16) {
+      return ADMIN_RESP_FAILURE;
+   }
+   memcpy(buf + 4, provider ? provider : "", plen);
+   if (send_message(fd, ADMIN_MSG_CACHE_STATS, buf, (uint16_t)(4 + plen)) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 /* ===== MCP bridge (0xB0-0xB4) ===== */
 
 admin_resp_code_t admin_client_mcp_list(int fd, char *response, size_t resp_len) {

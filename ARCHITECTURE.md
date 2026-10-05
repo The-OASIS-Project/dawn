@@ -494,6 +494,9 @@ Per-module locks (scoped to a single subsystem):
   session_prefix::s_withdraw_mutex (src/core/session_prefix.c) — the withdraw worker's queue (LEAF: never held across a withdrawal)
   auth_db_storage::s_wake_mutex (src/auth/auth_db_storage.c) — wakes the storage thread (LEAF: taken by the WAL hook inside a
                                                                      commit, the auth_db mutex held; the thread never holds it while taking the auth_db mutex)
+  llm_cache_monitor::s_keys_mutex + s_alert_mutex (src/llm/llm_cache_monitor.c) — cache keys, warning times, queued
+                                                                     alerts (LEAVES: taken under history_mutex by a history
+                                                                     rewrite; no other lock or callout while held)
   tool_call_challenge::s_mutex (src/core/tool_call_challenge.c) — actions waiting for a reply code (LEAF: held only to find,
                                                                      add, hand out or drop an entry; never across a tool call or a send)
   session_reaper::s_mutex (src/core/session_reaper.c)          — the reaper's list of destroyed sessions (LEAF: never held while

@@ -37,6 +37,7 @@
 #include "core/session_prefix.h"
 #include "core/tool_result_store.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_tool_defs.h"
@@ -359,6 +360,9 @@ int session_rollback_turn(session_t *session) {
       const bool stranded = strands_inline_change(hist, from, len);
       taken = session_prefix_take_back_locked(session, session->turn_user_msg, stranded);
       removed = take_back_locked(hist, from, len);
+      if (removed > 0) {
+         llm_cache_monitor_history_rewritten(session->session_id); /* its calls cached them */
+      }
       if (stranded) {
          const int dropped = llm_history_drop_turn_blocks(hist);
          OLOG_INFO("Session %u: prefix boundary (tool_set_changed): a tool change sent in "
@@ -919,6 +923,8 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
       session->turn_awaits_conversation = false;
       session->turn_context_reset = true;
    }
+   /* A cache key the session keeps (conversation 0, a research round) starts over. */
+   llm_cache_monitor_history_rewritten(session->session_id);
    if (session->conversation_history) {
       json_object_put(session->conversation_history);
    }
@@ -971,6 +977,7 @@ void session_replace_history(session_t *session, struct json_object *history, in
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
+   llm_cache_monitor_history_rewritten(session->session_id);
    if (session->conversation_history) {
       json_object_put(session->conversation_history);
    }

@@ -35,6 +35,8 @@
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor_internal.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_local_provider.h"
+#include "llm/llm_model_family.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -48,6 +50,28 @@
  * for the expected-read math; the least recently used is replaced.  Sized for
  * the background-job pool (256) plus the interactive sessions. */
 #define CACHE_KEYS_MAX 320
+
+/* Warm-miss detection.  A warm call should read what the previous one left; below
+ * 90% of that is a miss (the margin covers the few tokens a template adds
+ * between calls).  A call reading and writing nothing is a miss when its prompt
+ * is big enough to cache at all (Anthropic's minimum is 4096 on its largest
+ * models).  On an implicit cache (OpenAI), a partial read is normal (previous
+ * turns' reasoning is dropped by design), so only a run of zero reads on a
+ * prompt past its 1024-token minimum counts. */
+#define WARM_MISS_PERCENT 90
+#define CACHEABLE_PROMPT_MIN 4096
+#define IMPLICIT_PROMPT_MIN 1024
+#define IMPLICIT_ZERO_STREAK 3
+
+/* One warning per (provider, model) per WARN_INTERVAL_MS; the table holds the
+ * models in use (a full table reuses its oldest entry). */
+#define WARN_INTERVAL_MS (10 * 60 * 1000)
+#define WARN_KEYS_MAX 16
+
+/* Alerts for a person: queued by the LLM worker, sent from the main loop; each
+ * conversation once per run (the usage log keeps every drop). */
+#define ALERT_QUEUE_MAX 8
+#define ALERTED_CONVS_MAX 64
 
 static const char *const s_kind_names[LLM_CALL_KIND_COUNT] = {
    [LLM_CALL_TURN] = "turn",
@@ -71,7 +95,13 @@ static const char *const s_state_names[] = {
    [LLM_CACHE_COLD_SYSTEM] = "system",
    [LLM_CACHE_COLD_MODEL] = "model",
    [LLM_CACHE_COLD_THINKING] = "thinking",
+   [LLM_CACHE_COLD_REWRITTEN] = "rewritten",
+   [LLM_CACHE_COLD_SHARED] = "shared",
+   [LLM_CACHE_COLD_IMAGES] = "images",
+   [LLM_CACHE_WARM_MISS] = "warm_miss",
 };
+_Static_assert(sizeof(s_state_names) / sizeof(s_state_names[0]) == LLM_CACHE_STATE_COUNT,
+               "a cache state without a name");
 
 /* The calling thread's tag, iteration and noted request (-1 = none). */
 static __thread int t_kind = -1;
@@ -83,6 +113,7 @@ static __thread struct {
    char model[LLM_CACHE_MODEL_MAX];
    char thinking[LLM_CACHE_THINKING_MAX];
    bool images;
+   uint64_t sent_ms; /* when it was sent: a cache's life runs from the request */
 } t_note;
 
 /* The previous conversation call per cache key, for the expected read. */
@@ -93,10 +124,37 @@ typedef struct {
    llm_cache_prefix_t prefix;
    int cached_after;    /* read + write: what the next call on this key can read */
    char message_id[64]; /* the response id, for Anthropic cache diagnostics */
+   bool rewritten;      /* the session's history was rewritten since */
+   int zero_streak;     /* implicit caches: warm calls in a row that read nothing */
 } cache_key_state_t;
 
 static pthread_mutex_t s_keys_mutex = PTHREAD_MUTEX_INITIALIZER; /* leaf */
 static cache_key_state_t s_keys[CACHE_KEYS_MAX];
+/* The cache key that used the local server last ({0, -1} = a side call). */
+static uint32_t s_local_session;
+static int64_t s_local_conversation = -1;
+
+/* Under s_keys_mutex: when each (provider, model) last warned. */
+static struct {
+   uint32_t key; /* hash of provider + model; 0 = free */
+   uint64_t at_ms;
+} s_warned[WARN_KEYS_MAX];
+
+/* Queued alerts and the conversations already alerted (s_alert_mutex, a leaf).
+ * A ring of conversation ids rather than a bit in the key slot: the local
+ * microphone's turn (conversation 0, session 0) has no key slot, and a slot
+ * evicted from the LRU would alert again. */
+typedef struct {
+   int64_t conversation_id;
+   int drops;
+   char model[LLM_CACHE_MODEL_MAX];
+} cache_alert_t;
+static pthread_mutex_t s_alert_mutex = PTHREAD_MUTEX_INITIALIZER;
+static cache_alert_t s_alerts[ALERT_QUEUE_MAX];
+static int s_alert_count;
+static int64_t s_alerted[ALERTED_CONVS_MAX];
+static int s_alerted_count;
+static int s_alerted_next;
 
 /* Records waiting for llm_cache_monitor_flush().  A few calls a second at most,
  * flushed every second; a failed write leaves them queued for the next flush,
@@ -125,8 +183,7 @@ bool llm_call_kind_sets_context(llm_call_kind_t kind) {
 }
 
 const char *llm_cache_state_name(llm_cache_state_t state) {
-   return (state >= LLM_CACHE_WARM && state <= LLM_CACHE_COLD_THINKING) ? s_state_names[state]
-                                                                        : "?";
+   return (state >= LLM_CACHE_WARM && state < LLM_CACHE_STATE_COUNT) ? s_state_names[state] : "?";
 }
 
 int llm_cache_monitor_push_kind(llm_call_kind_t kind) {
@@ -235,19 +292,10 @@ static void thinking_text(struct json_object *request, char *out, size_t out_len
    snprintf(out, out_len, "%s%s%s", type, effort[0] ? "/" : "", effort);
 }
 
-/* Whether the newest message (the one this call adds) carries an image: its
- * tokens are new, so an image call is never a warm miss. */
-static bool newest_message_has_image(struct json_object *request) {
-   struct json_object *items = NULL;
-   if (!json_object_object_get_ex(request, "messages", &items) &&
-       !json_object_object_get_ex(request, "input", &items)) {
-      return false;
-   }
-   const size_t n = json_object_is_type(items, json_type_array) ? json_object_array_length(items)
-                                                                : 0;
+/* Whether @p msg's content carries an image part. */
+static bool message_has_image(struct json_object *msg) {
    struct json_object *content = NULL;
-   if (n == 0 ||
-       !json_object_object_get_ex(json_object_array_get_idx(items, n - 1), "content", &content) ||
+   if (!msg || !json_object_object_get_ex(msg, "content", &content) ||
        !json_object_is_type(content, json_type_array)) {
       return false;
    }
@@ -264,6 +312,43 @@ static bool newest_message_has_image(struct json_object *request) {
    return false;
 }
 
+/* The request's messages (Chat Completions, Claude) or input items (Responses). */
+static struct json_object *request_items(struct json_object *request) {
+   struct json_object *items = NULL;
+   if (!json_object_object_get_ex(request, "messages", &items) &&
+       !json_object_object_get_ex(request, "input", &items)) {
+      return NULL;
+   }
+   return json_object_is_type(items, json_type_array) ? items : NULL;
+}
+
+/* Whether the newest message (the one this call adds) carries an image: its
+ * tokens are new. */
+static bool newest_message_has_image(struct json_object *request) {
+   struct json_object *items = request_items(request);
+   const size_t n = items ? json_object_array_length(items) : 0;
+   return n > 0 && message_has_image(json_object_array_get_idx(items, n - 1));
+}
+
+/* Whether any message carries an image: the first one in a conversation
+ * invalidates Anthropic's message cache. */
+static bool any_message_has_image(struct json_object *request) {
+   struct json_object *items = request_items(request);
+   const size_t n = items ? json_object_array_length(items) : 0;
+   for (size_t i = 0; i < n; i++) {
+      if (message_has_image(json_object_array_get_idx(items, i))) {
+         return true;
+      }
+   }
+   return false;
+}
+
+static uint64_t now_ms(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
 void llm_cache_monitor_note_request(struct json_object *request) {
    t_note.valid = false;
    if (!request) {
@@ -274,9 +359,15 @@ void llm_cache_monitor_note_request(struct json_object *request) {
    if (json_object_object_get_ex(request, "model", &v)) {
       safe_strscpy(t_note.model, json_object_get_string(v));
    }
+   /* The tools and the tool_choice: a changed tool_choice (the tool loop's forced
+    * final answer) invalidates Anthropic's message cache too. */
    t_note.prefix.tools = 0;
    if (json_object_object_get_ex(request, "tools", &v)) {
       t_note.prefix.tools = fnv1a(FNV_OFFSET,
+                                  json_object_to_json_string_ext(v, JSON_C_TO_STRING_PLAIN));
+   }
+   if (json_object_object_get_ex(request, "tool_choice", &v)) {
+      t_note.prefix.tools = fnv1a(t_note.prefix.tools ? t_note.prefix.tools : FNV_OFFSET,
                                   json_object_to_json_string_ext(v, JSON_C_TO_STRING_PLAIN));
    }
    t_note.prefix.system = fnv1a(FNV_OFFSET, stable_system_text(request));
@@ -284,6 +375,8 @@ void llm_cache_monitor_note_request(struct json_object *request) {
    thinking_text(request, t_note.thinking, sizeof(t_note.thinking));
    t_note.prefix.thinking = fnv1a(FNV_OFFSET, t_note.thinking);
    t_note.images = newest_message_has_image(request);
+   t_note.prefix.has_images = any_message_has_image(request);
+   t_note.sent_ms = now_ms();
    t_note.valid = true;
 }
 
@@ -300,13 +393,15 @@ bool llm_cache_monitor_noted(llm_cache_prefix_t *prefix, const char **model) {
 void llm_cache_monitor_reset_keys(void) {
    pthread_mutex_lock(&s_keys_mutex);
    memset(s_keys, 0, sizeof(s_keys));
+   memset(s_warned, 0, sizeof(s_warned));
+   s_local_session = 0;
+   s_local_conversation = -1;
    pthread_mutex_unlock(&s_keys_mutex);
-}
-
-static uint64_t now_ms(void) {
-   struct timespec ts;
-   clock_gettime(CLOCK_MONOTONIC, &ts);
-   return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+   pthread_mutex_lock(&s_alert_mutex);
+   s_alert_count = 0;
+   s_alerted_count = 0;
+   s_alerted_next = 0;
+   pthread_mutex_unlock(&s_alert_mutex);
 }
 
 /* The call's kind: an explicit tag, else from its session and loop iteration. */
@@ -343,6 +438,9 @@ static llm_cache_state_t prefix_change(const llm_cache_prefix_t *was,
    if (was->thinking != now->thinking) {
       return LLM_CACHE_COLD_THINKING;
    }
+   if (was->has_images != now->has_images) {
+      return LLM_CACHE_COLD_IMAGES; /* the first image anywhere invalidates the messages */
+   }
    return LLM_CACHE_WARM;
 }
 
@@ -374,9 +472,11 @@ int llm_cache_monitor_expected_read_at(uint32_t session_id,
       }
    }
    if (slot) {
-      *gap_ms = now - slot->last_ms;
+      *gap_ms = now > slot->last_ms ? now - slot->last_ms : 0;
       if (*gap_ms >= (uint64_t)ttl_ms) {
          *state = LLM_CACHE_COLD_TTL;
+      } else if (slot->rewritten) {
+         *state = LLM_CACHE_COLD_REWRITTEN;
       } else {
          *state = prefix_change(&slot->prefix, prefix);
          if (*state == LLM_CACHE_WARM) {
@@ -387,13 +487,119 @@ int llm_cache_monitor_expected_read_at(uint32_t session_id,
       slot = oldest;
       slot->session_id = session_id;
       slot->conversation_id = conversation_id;
+      slot->zero_streak = 0;
    }
+   slot->rewritten = false;
    slot->last_ms = now;
    slot->prefix = *prefix;
    slot->cached_after = cached_after;
    snprintf(slot->message_id, sizeof(slot->message_id), "%s", message_id ? message_id : "");
    pthread_mutex_unlock(&s_keys_mutex);
    return expected;
+}
+
+void llm_cache_monitor_history_rewritten(uint32_t session_id) {
+   if (session_id == 0) {
+      return;
+   }
+   pthread_mutex_lock(&s_keys_mutex);
+   for (int i = 0; i < CACHE_KEYS_MAX; i++) {
+      if (s_keys[i].session_id == session_id) {
+         s_keys[i].rewritten = true;
+      }
+   }
+   pthread_mutex_unlock(&s_keys_mutex);
+}
+
+bool llm_cache_monitor_warm_miss(int expected, int read, int write, int prompt) {
+   if (expected > 0 && (int64_t)read * 100 < (int64_t)expected * WARM_MISS_PERCENT) {
+      return true;
+   }
+   return read == 0 && write == 0 && prompt >= CACHEABLE_PROMPT_MIN;
+}
+
+int llm_cache_monitor_zero_streak(uint32_t session_id, int64_t conversation_id, bool zero_read) {
+   int streak = 0;
+   pthread_mutex_lock(&s_keys_mutex);
+   for (int i = 0; i < CACHE_KEYS_MAX; i++) {
+      if (s_keys[i].session_id == session_id && s_keys[i].conversation_id == conversation_id) {
+         s_keys[i].zero_streak = zero_read ? s_keys[i].zero_streak + 1 : 0;
+         streak = s_keys[i].zero_streak;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_keys_mutex);
+   return streak;
+}
+
+bool llm_cache_monitor_local_shared(uint32_t session_id,
+                                    int64_t conversation_id,
+                                    bool conversation) {
+   const uint32_t sid = conversation ? session_id : 0;
+   const int64_t cid = conversation ? conversation_id : -1;
+   pthread_mutex_lock(&s_keys_mutex);
+   const bool shared = s_local_session != sid || s_local_conversation != cid;
+   s_local_session = sid;
+   s_local_conversation = cid;
+   pthread_mutex_unlock(&s_keys_mutex);
+   return shared;
+}
+
+bool llm_cache_monitor_warn_due(const char *provider, const char *model, uint64_t now) {
+   const uint32_t key = fnv1a(fnv1a(FNV_OFFSET, provider ? provider : ""), model ? model : "") | 1u;
+   bool due = true;
+   pthread_mutex_lock(&s_keys_mutex);
+   int slot = -1;
+   int oldest = 0;
+   for (int i = 0; i < WARN_KEYS_MAX; i++) {
+      if (s_warned[i].key == key) {
+         slot = i;
+         break;
+      }
+      if (s_warned[i].key == 0 || s_warned[i].at_ms < s_warned[oldest].at_ms) {
+         oldest = i;
+      }
+   }
+   if (slot >= 0 && now - s_warned[slot].at_ms < (uint64_t)WARN_INTERVAL_MS) {
+      due = false;
+   } else {
+      if (slot < 0) {
+         slot = oldest;
+      }
+      s_warned[slot].key = key;
+      s_warned[slot].at_ms = now;
+   }
+   pthread_mutex_unlock(&s_keys_mutex);
+   return due;
+}
+
+/* Queue an alert that reasoning was dropped, once per conversation. */
+static void queue_drop_alert(const llm_cache_record_t *rec) {
+   pthread_mutex_lock(&s_alert_mutex);
+   bool seen = false;
+   for (int i = 0; i < s_alerted_count && !seen; i++) {
+      seen = s_alerted[i] == rec->conversation_id;
+   }
+   if (!seen && s_alert_count < ALERT_QUEUE_MAX) {
+      cache_alert_t *a = &s_alerts[s_alert_count++];
+      a->conversation_id = rec->conversation_id;
+      a->drops = rec->drops.prefix_drops;
+      safe_strscpy(a->model, rec->model);
+      s_alerted[s_alerted_next] = rec->conversation_id;
+      s_alerted_next = (s_alerted_next + 1) % ALERTED_CONVS_MAX;
+      if (s_alerted_count < ALERTED_CONVS_MAX) {
+         s_alerted_count++;
+      }
+   }
+   pthread_mutex_unlock(&s_alert_mutex);
+}
+
+__attribute__((weak)) void llm_cache_alert_notify(int64_t conversation_id,
+                                                  int drops,
+                                                  const char *model) {
+   (void)conversation_id;
+   (void)drops;
+   (void)model;
 }
 
 bool llm_cache_monitor_previous_message_id(uint32_t session_id,
@@ -442,7 +648,7 @@ static void enqueue_row(const llm_cache_record_t *rec, session_t *session, const
    safe_strscpy(row.provider, provider ? provider : "?");
    safe_strscpy(row.model, rec->model);
    safe_strscpy(row.kind, llm_call_kind_name(rec->kind));
-   safe_strscpy(row.cache_state, llm_cache_state_name(rec->state));
+   safe_strscpy(row.cache_state, rec->classified ? llm_cache_state_name(rec->state) : "");
    safe_strscpy(row.thinking, rec->thinking);
    safe_strscpy(row.cache_miss_reason, rec->miss_reason);
    row.cache_missed_tokens = rec->missed_tokens;
@@ -461,6 +667,78 @@ static void enqueue_row(const llm_cache_record_t *rec, session_t *session, const
    s_queue[(s_queue_head + s_queue_count) % USAGE_QUEUE_MAX] = row;
    s_queue_count++;
    pthread_mutex_unlock(&s_queue_mutex);
+}
+
+/* The call's cache state and expected read, by how its provider caches:
+ * - Anthropic (direct): explicit breakpoints; the next call reads what this one
+ *   read or wrote.  A miss is under 90% of that, or nothing on a cacheable prompt.
+ * - Local llama.cpp: the slot's KV cache holds the previous prompt, unless another
+ *   conversation (or a side call) used the server in between ("shared").
+ * - OpenAI, and OpenRouter's OpenAI and Anthropic models: tracked for state, with
+ *   no expected read (OpenAI drops previous turns' reasoning by design; OpenRouter's
+ *   own key pool routes Anthropic best-effort); a run of zero reads is a miss.
+ * - Anything else (Gemini, other vendors): not tracked.
+ * Only a conversation's own calls: side calls have their own prefixes. */
+static void classify(uint32_t session_id,
+                     const llm_usage_report_t *usage,
+                     bool noted,
+                     llm_cache_record_t *rec) {
+   const bool conversation = noted && session_id > 0 && llm_call_kind_is_conversation(rec->kind);
+   const bool local = usage->type == LLM_LOCAL;
+   const bool shared = local && llm_cache_monitor_local_shared(session_id, rec->conversation_id,
+                                                               conversation);
+   if (!conversation) {
+      return;
+   }
+   enum {
+      EXPECT_READ,
+      EXPECT_LOCAL,
+      ZERO_STREAK
+   } policy;
+   char id[LLM_MODEL_NAME_MAX];
+   const llm_model_family_t family = llm_model_route(usage->type, usage->provider, rec->model, id,
+                                                     sizeof(id));
+   if (local && llm_local_get_provider() == LOCAL_PROVIDER_LLAMA_CPP) {
+      /* Only llama.cpp reports what it reused (timings.cache_n); Ollama and other
+       * compatible servers report nothing, which would read as a miss. */
+      policy = EXPECT_LOCAL;
+   } else if (local) {
+      return;
+   } else if (usage->provider == CLOUD_PROVIDER_CLAUDE) {
+      policy = EXPECT_READ;
+   } else if ((usage->provider == CLOUD_PROVIDER_OPENAI ||
+               usage->provider == CLOUD_PROVIDER_OPENROUTER) &&
+              (family == LLM_FAMILY_OPENAI || family == LLM_FAMILY_ANTHROPIC)) {
+      policy = ZERO_STREAK;
+   } else {
+      return;
+   }
+   const int cached_after = policy == EXPECT_LOCAL ? rec->prompt : rec->read + rec->write;
+   const int expected = llm_cache_monitor_expected_read_at(
+       session_id, rec->conversation_id, &t_note.prefix,
+       llm_cache_monitor_ttl_ms(usage->type, usage->provider), cached_after, usage->message_id,
+       t_note.sent_ms, &rec->gap_ms, &rec->state);
+   rec->classified = true;
+   if (policy == ZERO_STREAK) {
+      const bool zero = rec->state == LLM_CACHE_WARM && rec->read == 0 &&
+                        rec->prompt >= IMPLICIT_PROMPT_MIN;
+      if (llm_cache_monitor_zero_streak(session_id, rec->conversation_id, zero) >=
+          IMPLICIT_ZERO_STREAK) {
+         rec->state = LLM_CACHE_WARM_MISS;
+         llm_cache_monitor_zero_streak(session_id, rec->conversation_id, false); /* a new run */
+      }
+      return;
+   }
+   if (policy == EXPECT_LOCAL && shared && rec->state == LLM_CACHE_WARM) {
+      rec->state = LLM_CACHE_COLD_SHARED;
+      rec->expected = 0;
+      return;
+   }
+   rec->expected = expected;
+   if (rec->state == LLM_CACHE_WARM &&
+       llm_cache_monitor_warm_miss(expected, rec->read, rec->write, rec->prompt)) {
+      rec->state = LLM_CACHE_WARM_MISS;
+   }
 }
 
 void llm_cache_monitor_record(uint32_t session_id,
@@ -496,20 +774,7 @@ void llm_cache_monitor_record(uint32_t session_id,
       rec.images = t_note.images;
    }
 
-   /* Expected read: for a conversation's own calls on Anthropic, where the
-    * provider's counts define it (the next call reads what this one read or
-    * wrote, while the prefix and the TTL hold).  Side calls have their own
-    * prefixes and don't disturb a conversation's key.  The implicit caches
-    * (OpenAI, Gemini, local) are best-effort: a request routed elsewhere can miss
-    * with an identical prefix, so a read below the prior span is not a defect and
-    * there is no expected read to hold them to. */
-   if (noted && session_id > 0 && usage->type == LLM_CLOUD &&
-       usage->provider == CLOUD_PROVIDER_CLAUDE && llm_call_kind_is_conversation(rec.kind)) {
-      rec.expected = llm_cache_monitor_expected_read_at(
-          session_id, rec.conversation_id, &t_note.prefix,
-          llm_cache_monitor_ttl_ms(usage->type, usage->provider), rec.read + rec.write,
-          usage->message_id, now_ms(), &rec.gap_ms, &rec.state);
-   }
+   classify(session_id, usage, noted, &rec);
 
    if (usage->cache_miss_reason && usage->cache_miss_reason[0]) {
       safe_strscpy(rec.miss_reason, usage->cache_miss_reason);
@@ -520,6 +785,26 @@ void llm_cache_monitor_record(uint32_t session_id,
    }
 
    const char *provider = rec.type == LLM_LOCAL ? "local" : cloud_provider_to_string(rec.provider);
+   if (rec.classified && rec.state == LLM_CACHE_WARM_MISS &&
+       llm_cache_monitor_warn_due(provider, rec.model, now_ms())) {
+      /* Money on a cloud cache, latency on a local one. */
+      if (rec.type == LLM_LOCAL) {
+         OLOG_INFO("LLM cache: warm miss on the local server, conv=%lld read=%d of %d expected "
+                   "(prompt %d): its KV cache didn't hold the conversation",
+                   (long long)rec.conversation_id, rec.read, rec.expected, rec.prompt);
+      } else if (rec.expected < 0) {
+         OLOG_WARNING("LLM cache: warm miss, provider=%s model=%s conv=%lld: %d warm calls in a "
+                      "row read nothing from the cache (prompt %d)",
+                      provider ? provider : "?", rec.model[0] ? rec.model : "?",
+                      (long long)rec.conversation_id, IMPLICIT_ZERO_STREAK, rec.prompt);
+      } else {
+         OLOG_WARNING("LLM cache: warm miss, provider=%s model=%s conv=%lld read=%d expected=%d "
+                      "prompt=%d gap=%.1fs miss=%s: the request's prefix may have changed",
+                      provider ? provider : "?", rec.model[0] ? rec.model : "?",
+                      (long long)rec.conversation_id, rec.read, rec.expected, rec.prompt,
+                      (double)rec.gap_ms / 1000.0, rec.miss_reason[0] ? rec.miss_reason : "-");
+      }
+   }
    const int coverage = rec.prompt > 0 ? (int)((int64_t)rec.read * 100 / rec.prompt) : 0;
    char expected_str[24] = "n/a";
    if (rec.expected >= 0) {
@@ -537,14 +822,19 @@ void llm_cache_monitor_record(uint32_t session_id,
              provider ? provider : "?", rec.model[0] ? rec.model : "?",
              llm_call_kind_name(rec.kind), (long long)rec.conversation_id, rec.iteration,
              rec.prompt, rec.read, rec.write, rec.uncached, coverage, expected_str,
-             rec.expected >= 0 ? llm_cache_state_name(rec.state) : "n/a",
-             (double)rec.gap_ms / 1000.0, rec.tools_hash, rec.system_hash,
-             rec.thinking[0] ? rec.thinking : "-", rec.images ? 1 : 0,
-             rec.miss_reason[0] ? rec.miss_reason : "-", rec.missed_tokens, drops_str, rec.output);
+             rec.classified ? llm_cache_state_name(rec.state) : "n/a", (double)rec.gap_ms / 1000.0,
+             rec.tools_hash, rec.system_hash, rec.thinking[0] ? rec.thinking : "-",
+             rec.images ? 1 : 0, rec.miss_reason[0] ? rec.miss_reason : "-", rec.missed_tokens,
+             drops_str, rec.output);
    if (rec.drops.prefix_drops > 0) {
       /* The history changed under a replayed thinking block: DAWN edited a
        * prefix it must only append to.  The API dropped the block (and every
-       * later one) instead of failing the turn, so the answer lost reasoning. */
+       * later one) instead of failing the turn, so the answer lost reasoning.
+       * Every drop is in the usage log; a person hears of it once per
+       * conversation, and the log line is rate-limited. */
+      queue_drop_alert(&rec);
+   }
+   if (rec.drops.prefix_drops > 0 && llm_cache_monitor_warn_due("binding", rec.model, now_ms())) {
       OLOG_WARNING("LLM binding: %d thinking block(s) dropped for a prefix change (first at %s), "
                    "model=%s conv=%lld kind=%s: this is a DAWN bug, please report it",
                    rec.drops.prefix_drops, rec.drops.first_path[0] ? rec.drops.first_path : "?",
@@ -563,7 +853,21 @@ void llm_cache_monitor_record(uint32_t session_id,
    }
 }
 
+/* Send the queued alerts (main loop, no locks held). */
+static void send_alerts(void) {
+   cache_alert_t batch[ALERT_QUEUE_MAX];
+   pthread_mutex_lock(&s_alert_mutex);
+   const int n = s_alert_count;
+   memcpy(batch, s_alerts, sizeof(batch[0]) * (size_t)n);
+   s_alert_count = 0;
+   pthread_mutex_unlock(&s_alert_mutex);
+   for (int i = 0; i < n; i++) {
+      llm_cache_alert_notify(batch[i].conversation_id, batch[i].drops, batch[i].model);
+   }
+}
+
 void llm_cache_monitor_flush(void) {
+   send_alerts();
    /* Copy the queued rows (they stay queued), write them, and only then remove
     * them: a failed write keeps them for the next flush.  Rows dropped from the
     * full ring while writing are counted by sequence, not position. */

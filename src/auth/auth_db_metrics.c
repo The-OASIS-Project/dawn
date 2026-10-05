@@ -457,9 +457,12 @@ int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
       sqlite3_bind_int(st, 12, r->output_tokens);
       if (r->expected_read >= 0) {
          sqlite3_bind_int(st, 13, r->expected_read);
-         sqlite3_bind_text(st, 14, r->cache_state, -1, SQLITE_STATIC);
       } else {
          sqlite3_bind_null(st, 13);
+      }
+      if (r->cache_state[0]) {
+         sqlite3_bind_text(st, 14, r->cache_state, -1, SQLITE_STATIC);
+      } else {
          sqlite3_bind_null(st, 14);
       }
       sqlite3_bind_int64(st, 15, r->gap_ms);
@@ -485,4 +488,57 @@ int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
    return ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int auth_db_llm_usage_stats(int64_t since,
+                            const char *provider,
+                            llm_usage_stat_t *out,
+                            int max,
+                            int *count) {
+   if (!out || !count || max <= 0) {
+      return AUTH_DB_FAILURE;
+   }
+   *count = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT provider, model, kind, COUNT(*), SUM(prompt_tokens), SUM(cache_read_tokens), "
+       "SUM(cache_write_tokens), SUM(cache_state = 'warm_miss'), SUM(binding_prefix_drops) "
+       "FROM llm_usage_log WHERE created_at >= ?1 AND (?2 IS NULL OR provider = ?2) "
+       "GROUP BY provider, model, kind ORDER BY SUM(prompt_tokens) DESC LIMIT ?3",
+       -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: usage stats query failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, since);
+   if (provider && provider[0]) {
+      sqlite3_bind_text(st, 2, provider, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(st, 2);
+   }
+   sqlite3_bind_int(st, 3, max);
+   int n = 0;
+   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+      llm_usage_stat_t *r = &out[n++];
+      memset(r, 0, sizeof(*r));
+      const unsigned char *t = sqlite3_column_text(st, 0);
+      snprintf(r->provider, sizeof(r->provider), "%s", t ? (const char *)t : "");
+      t = sqlite3_column_text(st, 1);
+      snprintf(r->model, sizeof(r->model), "%s", t ? (const char *)t : "");
+      t = sqlite3_column_text(st, 2);
+      snprintf(r->kind, sizeof(r->kind), "%s", t ? (const char *)t : "");
+      r->calls = sqlite3_column_int(st, 3);
+      r->prompt_tokens = sqlite3_column_int64(st, 4);
+      r->cache_read_tokens = sqlite3_column_int64(st, 5);
+      r->cache_write_tokens = sqlite3_column_int64(st, 6);
+      r->warm_misses = sqlite3_column_int(st, 7);
+      r->binding_drops = sqlite3_column_int64(st, 8);
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   *count = n;
+   return AUTH_DB_SUCCESS;
 }

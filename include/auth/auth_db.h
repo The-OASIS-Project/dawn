@@ -2611,8 +2611,8 @@ typedef struct {
    int cache_write_tokens;
    int uncached_tokens;
    int output_tokens;
-   int expected_read; /**< -1 = not computed (stored as NULL) */
-   char cache_state[12];
+   int expected_read;    /**< -1 = not computed (stored as NULL) */
+   char cache_state[12]; /**< "" = not judged (stored as NULL) */
    int64_t gap_ms;
    uint32_t tools_hash;
    uint32_t system_hash;
@@ -2631,6 +2631,32 @@ typedef struct {
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (none inserted)
  */
 int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count);
+
+/** Usage totals for one (provider, model, kind) since a time. */
+typedef struct {
+   char provider[16];
+   char model[64];
+   char kind[16];
+   int calls;
+   int64_t prompt_tokens;
+   int64_t cache_read_tokens;
+   int64_t cache_write_tokens;
+   int warm_misses;       /**< calls with cache_state 'warm_miss' */
+   int64_t binding_drops; /**< thinking blocks dropped for a prefix change (a DAWN bug) */
+} llm_usage_stat_t;
+
+/**
+ * @brief Usage totals per (provider, model, kind) since @p since, the largest
+ *        prompt volume first
+ * @param provider Only this provider ("claude", "local", ...); NULL = all
+ * @param out Up to @p max rows; @p count gets how many
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_llm_usage_stats(int64_t since,
+                            const char *provider,
+                            llm_usage_stat_t *out,
+                            int max,
+                            int *count);
 
 /**
  * @brief Maximum session type string length

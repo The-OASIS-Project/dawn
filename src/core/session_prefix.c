@@ -40,6 +40,7 @@
 #include "core/session_history.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
@@ -870,6 +871,7 @@ void session_prefix_apply_turn(session_t *session,
    /* After a compaction the last response's count was of the history before. */
    if (did_compact) {
       llm_context_note_compacted(session->session_id, llm_context_estimate_tokens(hist));
+      llm_cache_monitor_history_rewritten(session->session_id);
    }
    /* Its question already saved (or none to wait for): the record goes with
     * its conversation now. */
@@ -1327,6 +1329,7 @@ static bool withdraw_now_locked(session_t *session, const withdraw_ctx_t *wc) {
    if (any) {
       OLOG_INFO("Session %u: forgotten items withdrawn from its history (boundary)",
                 session->session_id);
+      llm_cache_monitor_history_rewritten(session->session_id);
       /* A summary of the history as it was is dropped: the next one is of what
        * it holds now. */
       session_compaction_drop_locked(session);

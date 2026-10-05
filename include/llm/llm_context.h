@@ -171,6 +171,9 @@ typedef struct {
    int cached_tokens;      /**< Cache-read prompt tokens */
    int cache_write_tokens; /**< Cache-write prompt tokens */
    int saved_input_tokens; /**< Net effective input tokens saved (may be negative) */
+   /** The call's cache state ("warm", "warm_miss", "ttl", ...; "untracked" for a
+    *  provider the monitor doesn't judge, "" before any call) */
+   char cache_state[16];
 } llm_cache_snapshot_t;
 
 /**
