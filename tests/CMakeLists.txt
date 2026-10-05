@@ -362,6 +362,7 @@ dawn_add_unit_test(test_text_input_dispatch
    SOURCES test_text_input_dispatch.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
 
 # A turn's attached documents built into its text (bodies defused, boundaries kept).
