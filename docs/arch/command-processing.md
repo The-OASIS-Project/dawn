@@ -147,3 +147,58 @@ Tools can be enabled/disabled per session type (local vs remote):
 
 - Settings UI provides per-tool toggles.
 - Disabled tools are omitted from the native tool schemas sent to the LLM.
+
+## Who May Make a Call: Kinds of Action
+
+Every tool action has a **kind**, declared in the tool's `action_kinds` table
+(`tool_action_kind_entry_t`, `include/tools/tool_registry.h`). An action the table doesn't list
+takes the tool's `default_kind`, which is `TOOL_KIND_ACT` unless set (deny by default; web
+search defaults to `FETCH`, music to `DEVICE`).
+
+| Kind | Meaning | Examples |
+|---|---|---|
+| `READ` | No effect anyone would notice | memory search, calendar today/range, HA status |
+| `FETCH` | An outward read: the request reaches a host the caller picks, so it can carry data out | web search, `url_fetch` |
+| `STATE` | State scoped to the session or run | the active code project, a research ledger |
+| `DEVICE` | An effect someone in the home hears or sees | music, volume |
+| `PREPARE` | Stages an item that does nothing until its confirm runs | email draft, call preview, HA unlock preview |
+| `ACT` | Changes, sends or starts something | confirm_send, remember, set a timer |
+
+A `PREPARE` entry names its confirm (an `ACT` in the same table). Registration refuses a table
+that breaks these rules, and `scripts/check_tool_action_kinds.sh` checks every table at build
+time. A tool whose kind depends on more than the action (on its configuration, or the device it
+resolves) supplies `classify_call`.
+
+**The caller** is decided from the turn (`tool_call_policy_caller`, `src/core/tool_call_policy.c`):
+the **user**; an **unverified sender** (an SMS session: a text can claim any number); a
+background **job** on its own session; or **unattended** (a background turn such as a job's
+follow-up, or no running user turn at all).
+
+| Caller \ kind | act | read | fetch | state | device | prepare |
+|---|---|---|---|---|---|---|
+| user | allow | allow | allow | allow | allow | allow |
+| unverified sender | code | allow | code | allow | code | allow |
+| job | refuse | allow | allow | allow | refuse | refuse |
+| unattended | refuse | allow | refuse | allow | refuse | refuse |
+
+**code** = the call is held and DAWN texts the number what was asked plus a 6-digit code
+(`llm_tools_reply_code.c`, `core/tool_call_challenge.c`, `core/reply_code.c`). The held call runs
+once, unchanged, when that code comes back, and STOP cancels it. The text describes the call in
+the tool's own words (`describe_call`), or else by its declared, non-empty parameters. The
+approval is bound to the call's arguments and to that description, re-made when it runs, so a
+changed target is refused. A forger can fake the sender of a text but can't receive the reply.
+
+**Where it's decided:** once per call, in `llm_tools_execute_from_treg` (`tool_call_policy_check`:
+the named action in the tool's own spelling, the effective action, its kind, the table). Plan
+steps are each decided as they run, inside the plan's scope. An MQTT message that names a session
+is decided at its entry (`mosquitto_comms.c`), always as unattended. Not gated, by design: the local mic's direct commands, MQTT messages that
+name no session (broker trust), and scheduled briefing steps (only schedulable actions are
+allowed at create time).
+
+**Confirms are bound to their preview.** A `PREPARE` stages one item per session and kind in
+`core/pending_slots` with a fresh id, which its preview shows and its confirm must name. Each
+item records where it was made (`turn_origin_t`, `include/core/turn_origin.h`). A confirm
+runs only in the same session, in the user's very next turn (or, approved by the user's SMS
+reply code, a later turn of that session), and only for the item its id names. So an item staged again (a forged text, content the model read) is never what an earlier
+preview's "yes" carries out. Email drafts keep their own tables with random ids under the same
+rule.

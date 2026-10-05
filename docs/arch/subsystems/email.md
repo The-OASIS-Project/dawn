@@ -52,6 +52,14 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **Compile-time gate**: `DAWN_ENABLE_EMAIL_TOOL=ON` in CMake; runtime gate in `[email] enabled`.
 - **WebUI management**: account CRUD via `webui_email.c`, Google OAuth connect flow.
 
+## Recipients
+
+A `to` that names a person is resolved by the same rules as a phone call or text
+(`contact_resolve.c`; see [PHONE_SMS_DESIGN.md](../../PHONE_SMS_DESIGN.md#who-a-call-or-text-goes-to-contact-resolution)):
+a partial name, a near-miss or a name the user never said still makes a draft, but the draft
+says to check the recipient first. A literal `to` is exactly one address (a list is refused).
+Display names are quoted in the To and From headers (`email_format_mailbox`).
+
 ## Reading a message
 
 Both backends end in one reader, `email_mime.c`, the only file that uses GMime.

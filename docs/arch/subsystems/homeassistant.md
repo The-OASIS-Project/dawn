@@ -36,7 +36,21 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ## Key Design Points
 
-- **Fuzzy matching**: "Turn on the living room light" works even if the HA entity name differs slightly.
+- **Fuzzy matching, never a guess** (`homeassistant_match.c`, pure, `tests/test_homeassistant_match.c`):
+  "Turn on the living room light" works even if the HA entity name differs slightly, but two
+  entities tied for the best match are listed for the user to pick ("could be: …"), never the
+  first one. A whole name wins over names that contain it. A switch tied with a same-named
+  entity of another domain (its "change device type" replacement) drops out of the tie. The matched entity is copied
+  out under the cache lock.
+- **Doors need their name and a yes**: an entity that opens a door is a lock; a cover whose
+  device class is garage, gate or door, or whose name says so (blinds and awnings aren't); or
+  a switch, scene, script or automation with garage, gate, door or unlock as a whole word of its
+  name or entity_id (`homeassistant_opens_door`). It matches only by its whole name or one
+  containing what was said, and unlock, open, on, toggle, or activating/running/triggering it
+  stage a preview; `confirm` with its pending_id carries it out in the user's next turn
+  (`core/pending_slots`). Opening blinds or an awning acts directly (`ha_classify_call` tells
+  the gate it's an action, so a text needs its reply code). Lock, close and off act directly.
+  Unlock can't be scheduled; a scheduled open of a door is refused when it fires.
 - **Area-aware**: satellite user mapping injects `HomeAssistant_Area=[X]` into LLM system prompt.
 - **Feature guard**: `DAWN_ENABLE_HOMEASSISTANT_TOOL` CMake option. (DAWN's standalone SmartThings tool was removed in May 2026 — its upstream OAuth flow was permanently broken by an AWS WAF rule. Install Home Assistant via `docs/HOMEASSISTANT_SETUP.md` and use HA's own SmartThings integration if you need SmartThings device coverage.)
 - **Entity cache**: avoids per-request API calls; refreshed on configurable interval.

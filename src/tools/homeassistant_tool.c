@@ -35,6 +35,7 @@
 
 #include "core/buf_printf.h"
 #include "core/pending_slots.h"
+#include "core/tool_call_policy.h"
 #include "core/turn_origin.h"
 #include "logging.h"
 #include "tools/homeassistant_match.h"
@@ -188,11 +189,27 @@ static int ha_describe_call(const char *action,
                             size_t out_len,
                             int *valid_for_sec);
 
-/* Unlock and open wait for the user's yes, which a scheduled step can't get:
- * refused when the schedule is made, not when it fires. */
+/* 'open' is a preview only for a cover that opens a door: blinds open now, so
+ * the gate treats them as an action (a text then needs its reply code). */
+static tool_action_kind_t ha_classify_call(const char *device,
+                                           const char *action,
+                                           const char *value,
+                                           tool_action_kind_t listed) {
+   (void)device;
+   if (listed != TOOL_KIND_PREPARE || !action || strcmp(action, "open") != 0 || !value)
+      return listed;
+   ha_entity_t entity;
+   if (homeassistant_find_entity(value, HA_DOMAIN_COVER, &entity, NULL, 0) == HA_OK &&
+       !homeassistant_opens_door(&entity))
+      return TOOL_KIND_ACT;
+   return listed;
+}
+
+/* Unlock waits for the user's yes, which a scheduled step can't get: refused
+ * when the schedule is made, not when it fires.  'open' may be scheduled
+ * (blinds); a scheduled open of a door is refused when it fires. */
 static int ha_validate_schedulable_action(const char *action, char *err_buf, size_t err_buf_size) {
-   if (strcmp(action, "unlock") != 0 && strcmp(action, "open") != 0 &&
-       strcmp(action, "confirm") != 0)
+   if (strcmp(action, "unlock") != 0 && strcmp(action, "confirm") != 0)
       return SUCCESS;
    if (err_buf && err_buf_size)
       snprintf(err_buf, err_buf_size,
@@ -237,6 +254,7 @@ static const tool_metadata_t ha_metadata = {
    .secret_requirements = ha_secrets,
    .describe_call = ha_describe_call,
    .validate_schedulable_action = ha_validate_schedulable_action,
+   .classify_call = ha_classify_call,
 
    .is_available = ha_tool_is_available,
    .init = ha_tool_init,
@@ -991,7 +1009,16 @@ static char *handle_open(const char *value) {
    char *ask = find_or_ask(value, HA_DOMAIN_COVER, "Cover '%s' not found", &entity);
    if (ask)
       return ask;
-   return stage_door(&entity, "open");
+   /* A door waits for the user's yes; blinds and awnings open now.  A call the
+    * gate decided is a preview (ha_classify_call) previews either way. */
+   tool_action_kind_t kind = TOOL_KIND_ACT;
+   if (homeassistant_opens_door(&entity) ||
+       (tool_call_policy_decided(&kind) && kind == TOOL_KIND_PREPARE))
+      return stage_door(&entity, "open");
+   ha_error_t err = homeassistant_open_cover(entity.entity_id);
+   if (err != HA_OK)
+      return make_error_msg("Failed to open: %s", homeassistant_error_str(err));
+   return make_success_msg("Opened '%s'", entity.friendly_name);
 }
 
 static char *handle_close(const char *value) {

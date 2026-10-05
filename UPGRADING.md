@@ -55,8 +55,9 @@ memory; review it in the Memory panel if you want it gone.
   door (a garage-door or gate cover, or a switch, scene, script or automation
   whose name says garage, gate, door or unlock) shows a preview and waits for
   your "yes". Lock, close and turning things off act right away. Blinds and
-  awnings don't ask. Because they need your yes at the time, unlock and open
-  can no longer be scheduled.
+  awnings don't ask. Because it needs your yes at the time, unlock can no
+  longer be scheduled, and a scheduled open of a garage door or gate is refused
+  when it fires (scheduled blinds still open).
 - **Those devices also need their name.** Friday acts on them only when what you
   said is the device's name or part of it ("front door", "garage"); a looser
   match, such as "garage side door" for "Garage Main Door", is offered back to

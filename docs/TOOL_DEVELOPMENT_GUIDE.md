@@ -202,6 +202,14 @@ typedef struct {
    /* Secret Requirements */
    const tool_secret_requirement_t *secret_requirements;
 
+   /* Who may make a call (see "Kinds of Action" below) */
+   const tool_action_kind_entry_t *action_kinds;      /* Each action's kind */
+   int action_kind_count;
+   tool_action_kind_t default_kind;                   /* For an unlisted action (ACT) */
+   int (*describe_call)(...);                         /* A held call, in words */
+   tool_action_kind_t (*classify_call)(...);          /* Kind beyond the action */
+   int (*validate_schedulable_action)(...);           /* Refuse an action at schedule time */
+
    /* Lifecycle */
    tool_init_fn init;                                 /* Called after config parse */
    tool_cleanup_fn cleanup;                           /* Called at shutdown */
@@ -827,6 +835,52 @@ verbose_logging = false
 ---
 
 ## Security Considerations
+
+### Kinds of Action
+
+Who may make a call depends on the kind of its action: read, fetch, state, device, prepare or
+act. The policy (the user, an unverified SMS sender, a background job, an unattended turn) is
+in [command-processing.md](arch/command-processing.md#who-may-make-a-call-kinds-of-action).
+Every tool declares its actions' kinds:
+
+```c
+static const tool_action_kind_entry_t s_mytool_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "delete", TOOL_KIND_PREPARE, "confirm_delete" },
+   { "confirm_delete", TOOL_KIND_ACT, NULL },
+};
+/* in tool_metadata_t: */
+   .action_kinds = s_mytool_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_mytool_action_kinds),
+```
+
+- **Unlisted actions act.** An action not in the table takes `default_kind`, which is
+  `TOOL_KIND_ACT` unless you set it: a user may run it, a text needs a reply code, and
+  background work is refused. List every read as `READ`, or background jobs and texts can't use
+  it. Set `default_kind` only for a tool whose every action is one kind (web search: `FETCH`;
+  music: `DEVICE`).
+- **A request that leaves the house is `FETCH`, not `READ`.** The request itself (a query, a URL)
+  can carry data out.
+- **`PREPARE` stages, its confirm acts.** Each `PREPARE` entry names its confirm, an `ACT` in the
+  same table. The build fails otherwise (`scripts/check_tool_action_kinds.sh`, run by `make`).
+- **`classify_call`:** when a call's kind depends on more than its action (configuration, the
+  device it resolves), return it from this hook.
+
+**Staging a confirm.** Keep what a `PREPARE` stages in a `core/pending_slots` table (one item
+per session and kind, with a fresh id), capturing `turn_origin_capture()` when staging. The
+preview shows the id; the confirm takes the item by that id (`pending_slots_take`), which
+refuses another session, a later turn and a replaced item. See `document_manage_tool.c`
+(`stage_pending` / `take_pending`) or `homeassistant_tool.c` (`stage_door` / `handle_confirm`).
+
+**`describe_call`.** When an SMS sender's call waits for a reply code, DAWN texts what it does.
+Without this hook it lists the call's declared, non-empty parameters. With it, say it the way a
+person reads it (`remember: "…"`; `unlock 'Front Door Lock'`), return `TOOL_DESCRIBE_DEFAULT` for
+actions you leave to the default, and `FAILURE` when the call can't be described (it's then
+refused). For a confirm, describe the staged item and set `*valid_for_sec` to its remaining time.
+
+**`validate_schedulable_action`.** A `TOOL_CAP_SCHEDULABLE` tool refuses any action that can't
+run unattended (one that always needs the user's yes, for example). It's checked when the
+schedule is made and again when it fires.
 
 ### Dangerous Tools
 
