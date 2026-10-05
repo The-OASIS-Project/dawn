@@ -277,6 +277,13 @@ static void test_group_owner_and_second_user(void) {
    TEST_ASSERT_EQUAL_INT(CHANNEL_RESOLVED,
                          resolve("telegram", "-500", "11", MESSAGING_CHAT_SHARED, &ref));
    TEST_ASSERT_EQUAL_INT(s_user_a, ref.user_id);
+
+   /* A provider that vouches for its sender keeps a public conversation. */
+   int64_t conv = resolve_channel_conversation_id(&ref, "telegram", "-500", NULL);
+   TEST_ASSERT_TRUE(conv > 0);
+   bool is_private = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(conv, s_user_a, &is_private));
+   TEST_ASSERT_FALSE(is_private);
 }
 
 /* The same person can't link one chat to a second DAWN account; in a group
@@ -374,6 +381,19 @@ static void test_sms_verify(void) {
                          resolve("sms", "+15550001111", NULL, MESSAGING_CHAT_ONE_TO_ONE, &ref));
    TEST_ASSERT_EQUAL_INT(s_user_a, ref.user_id);
    TEST_ASSERT_FALSE(ref.authenticates_sender);
+
+   /* Texts aren't learned: the channel's conversation is private, and made
+    * private again if it was made public. */
+   int64_t conv = resolve_channel_conversation_id(&ref, "sms", "+15550001111", NULL);
+   TEST_ASSERT_TRUE(conv > 0);
+   bool is_private = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(conv, s_user_a, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(conv, s_user_a, false));
+   TEST_ASSERT_EQUAL_INT64(conv,
+                           resolve_channel_conversation_id(&ref, "sms", "+15550001111", NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(conv, s_user_a, &is_private));
+   TEST_ASSERT_TRUE(is_private);
 }
 
 /* A number's tries are counted per day, across codes: once spent, neither

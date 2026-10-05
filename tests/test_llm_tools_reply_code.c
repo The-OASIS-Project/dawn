@@ -193,7 +193,7 @@ static void test_hold(void) {
 }
 
 /* No describe_call: the declared parameters only, required first; keys the
- * tool doesn't declare (words the model added) are left out. */
+ * tool doesn't declare (words the model added) and empty values are left out. */
 static void test_described_from_params(void) {
    s_tool.describe_call = NULL;
    snprintf(s_call.arguments, sizeof(s_call.arguments),
@@ -207,6 +207,18 @@ static void test_described_from_params(void) {
    TEST_ASSERT_EQUAL_INT(TOOL_TAKE_OK,
                          tool_call_challenge_take_unsent(5, code, desc, sizeof(desc), NULL));
    TEST_ASSERT_EQUAL_STRING("widget send: target=\"Bob\", body=\"hi there\"", desc);
+   tool_call_challenge_clear_all();
+
+   /* An empty value says nothing to the person reading it: left out. */
+   snprintf(s_call.arguments, sizeof(s_call.arguments),
+            "{\"action\":\"send\",\"body\":\"\",\"target\":\"Bob\"}");
+   free(result->result_extended);
+   memset(result, 0, sizeof(*result));
+   TEST_ASSERT_EQUAL_INT(0, llm_tools_hold_for_reply_code(&s_call, &s_tool, &s_verdict, "widget",
+                                                          "v", result));
+   TEST_ASSERT_EQUAL_INT(TOOL_TAKE_OK,
+                         tool_call_challenge_take_unsent(5, code, desc, sizeof(desc), NULL));
+   TEST_ASSERT_EQUAL_STRING("widget send: target=\"Bob\"", desc);
    free(result);
    tool_call_challenge_clear_all();
 }

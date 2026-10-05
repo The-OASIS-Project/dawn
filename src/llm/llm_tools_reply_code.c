@@ -57,9 +57,33 @@ static void call_binding(const tool_metadata_t *meta,
    sodium_bin2hex(out, LLM_TOOLS_BINDING_HEX, digest, sizeof(digest));
 }
 
+/* A value that says nothing (empty, false, 0, [] or {}): left out of a
+ * description, which a person reads on a phone. */
+static bool says_nothing(struct json_object *v) {
+   switch (json_object_get_type(v)) {
+      case json_type_null:
+         return true;
+      case json_type_string:
+         return json_object_get_string_len(v) == 0;
+      case json_type_boolean:
+         return !json_object_get_boolean(v);
+      case json_type_int:
+         return json_object_get_int64(v) == 0;
+      case json_type_double:
+         return json_object_get_double(v) == 0.0;
+      case json_type_array:
+         return json_object_array_length(v) == 0;
+      case json_type_object:
+         return json_object_object_length(v) == 0;
+      default:
+         return false;
+   }
+}
+
 /* A tool with no describe_call: its name, action and declared parameters, in
- * the order declared, required ones first.  Keys the tool doesn't declare
- * (which it ignores) are left out, so the model can't add words of its own. */
+ * the order declared, required ones first, leaving out values that say
+ * nothing.  Keys the tool doesn't declare (which it ignores) are left out, so
+ * the model can't add words of its own. */
 static int describe_from_params(const tool_call_t *call,
                                 const tool_metadata_t *meta,
                                 const tool_call_verdict_t *verdict,
@@ -89,7 +113,7 @@ static int describe_from_params(const tool_call_t *call,
          const treg_param_t *p = &meta->params[i];
          struct json_object *v = NULL;
          if (p->required != (pass == 0) || p->maps_to == TOOL_MAPS_TO_ACTION ||
-             !json_object_object_get_ex(args, p->name, &v) || !v) {
+             !json_object_object_get_ex(args, p->name, &v) || !v || says_nothing(v)) {
             continue;
          }
          const char *text = json_object_is_type(v, json_type_string)

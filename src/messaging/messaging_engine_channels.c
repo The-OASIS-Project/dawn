@@ -277,7 +277,19 @@ int64_t resolve_channel_conversation_id(channel_ref_t *ref,
    /* The current name, so a rename shows in this turn's prompt. */
    snprintf(ref->display_name, sizeof(ref->display_name), "%s", display_name);
 
+   /* A provider that can't vouch for who sent (SMS: a sender number can be
+    * forged) gets a private conversation: DAWN doesn't learn from texts, and
+    * private is what keeps a conversation out of memory on every path.  One
+    * made before this, or made public in the WebUI, is made private again. */
    if (existing > 0) {
+      bool is_private = true;
+      if (!ref->authenticates_sender &&
+          conv_db_is_private(existing, user_id, &is_private) == AUTH_DB_SUCCESS && !is_private) {
+         if (conv_db_set_private(existing, user_id, true) == AUTH_DB_SUCCESS) {
+            OLOG_INFO("messaging: %s conversation %lld made private (texts aren't learned)",
+                      provider, (long long)existing);
+         }
+      }
       return existing;
    }
 
@@ -295,10 +307,10 @@ int64_t resolve_channel_conversation_id(channel_ref_t *ref,
    snprintf(origin, sizeof(origin), "messaging:%s", provider);
 
    int64_t new_conv_id = 0;
-   int rc = conv_db_create_with_origin(user_id, title, origin, &new_conv_id);
+   int rc = conv_db_create_ex(user_id, title, origin, !ref->authenticates_sender, &new_conv_id);
    if (rc != AUTH_DB_SUCCESS || new_conv_id <= 0) {
-      OLOG_ERROR("messaging: resolve_conv: conv_db_create_with_origin failed for %s:%s (rc=%d)",
-                 provider, provider_address, rc);
+      OLOG_ERROR("messaging: resolve_conv: conv_db_create_ex failed for %s:%s (rc=%d)", provider,
+                 provider_address, rc);
       return 0;
    }
 
@@ -980,7 +992,9 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
        * the last_used lock below — resolve_channel_conversation_id and
        * conv_db_add_message_ex take the auth_db leaf lock themselves. */
       if (provider_address[0]) {
-         channel_ref_t ref = { .channel_id = channel_id, .user_id = user_id };
+         channel_ref_t ref = { .channel_id = channel_id,
+                               .user_id = user_id,
+                               .authenticates_sender = drv->authenticates_sender };
          int64_t conv_id = resolve_channel_conversation_id(&ref, provider, provider_address, NULL);
          if (conv_id > 0) {
             int64_t msg_id = 0;

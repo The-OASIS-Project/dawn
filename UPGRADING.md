@@ -12,6 +12,24 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-05 — Friday doesn't learn from text messages
+
+**What changed.**
+- **Your SMS conversation is private.** Anyone can put your number on a text, so
+  nothing said by text is learned into memory. A new SMS link gets a private
+  conversation, and an existing one becomes private when the next text arrives
+  (and again if it's ever made public). You still see it in the WebUI, marked
+  private; Friday still reads her memory there. "Remember …" by text still
+  works, after the reply code. Being private, it's also not searched from your
+  other conversations, and an LLM switch asked for by text lasts for that reply
+  only. Telegram, Discord and Slack, which vouch for who sent each message, are
+  unchanged.
+
+**What you need to do.** Nothing. What earlier texts already taught stays in
+memory; review it in the Memory panel if you want it gone.
+
+---
+
 ## 2026-10-05 — Private mode applies from the first message
 
 **What changed.**

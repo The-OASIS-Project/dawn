@@ -38,6 +38,7 @@
 #include "auth/auth_db_withdraw.h"
 #include "config/dawn_config.h"
 #include "core/iso8601.h"
+#include "core/session_history.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "core/strbuf.h"
@@ -2059,6 +2060,11 @@ static char *memory_private_confirm_gate(int user_id, const char *value) {
    }
    int64_t conv_id = atomic_load(&session->stream_conversation_id);
    if (conv_id <= 0) {
+      return NULL;
+   }
+   /* Approved by the user's reply code (a text): that was the user deciding to
+    * save it; asking again would need a second code. */
+   if (session_call_code_redeemed()) {
       return NULL;
    }
    bool is_private = false;
