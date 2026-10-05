@@ -66,7 +66,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ## Prompt construction (append-only, cache-aware)
 
-A conversation's request is **append-only**: nothing already sent to the model is rewritten. That keeps the provider's prompt cache valid across the whole conversation, and keeps a model's signed reasoning replayable (Anthropic refuses reasoning whose earlier prompt changed). It is built in three layers:
+A conversation's request is **append-only**: nothing already sent to the model is rewritten. That keeps the provider's prompt cache valid across the whole conversation, and keeps a model's signed reasoning replayable (Anthropic refuses reasoning whose earlier prompt changed). The design record (the evidence, per-provider measurements, phases and decisions) is in ATLAS: `dawn/archive/PROMPT_CACHE_DESIGN.md`. It is built in three layers:
 
 1. **The prompt builder** — `dawn_build_prompt()` (`src/webui/webui_auth_helpers.c`), registered as the session prompt builder. For each turn it returns a `composed_prompt_t` (`include/core/prompt_parts.h`) describing what a conversation *starting now* would get, plus this turn's context. It does not decide what reaches the model.
 2. **The prefix engine** — `session_prefix_apply_turn()` (`src/core/session_prefix.c`, API in `include/core/session_prefix.h`). It compares the composed prompt with what the conversation already has in force and appends only the differences, as kind-marked messages.
@@ -142,7 +142,17 @@ An unbound capture no row binds is reclaimed after `IMAGE_UNBOUND_GRACE_SEC` (24
 - **OpenAI Responses** (`llm_openai_responses_input.c`): the prefix is `instructions` (byte-stable), notes are system items, and the context goes as an item before the question.
 - **Chat Completions** (`llm_openai_history.c`): the prefix is the first system message. Notes are system messages on native OpenAI (`api.openai.com`); on other carriers (OpenRouter's other models, Gemini, local) they are tagged in-band notes. The context goes into the question's message.
 
-Cache-token accounting is unified across providers (Claude `cache_creation`/`cache_read`, the Responses usage struct). Gemini caching is unreliable upstream; see the Gemini native-API notes in `docs/TODO.md`.
+Cache-token accounting is unified across providers (Claude `cache_creation`/`cache_read`, the Responses usage struct, Chat Completions `prompt_tokens_details`, llama.cpp `timings.cache_n`).
+
+### How each provider caches (measured, 2026-10)
+
+What the request shapes above rely on; change them only with these in mind.
+
+- **Anthropic.** Explicit breakpoints (end of the frozen system, the last tool, the newest user turn), 5-minute lifetime from each use. A signed thinking block is bound to the exact prefix it was produced under: DAWN sends `thinking.block_binding.prefix_mismatch_behavior = "drop_block"` (beta `thinking-binding-controls-2026-08-01`) so a prefix edit drops reasoning instead of failing the request, and every drop is reported in `input_transformations` (a DAWN bug when it says `prefix_binding_mismatch`; see the cache monitor below). The message cache is also invalidated by a changed `tool_choice` and by the conversation's first image. Cache diagnostics (beta `cache-diagnosis-2026-04-07`) name a prefix divergence, not a TTL expiry.
+- **OpenRouter, Anthropic models** (its Messages endpoint): forwards the binding controls and cache markers; drops the diagnostics object; rejects a `tool_addition` (tool changes fold into the tools array); omits `input_transformations` when nothing was dropped; ends the stream with `data: [DONE]` after `message_stop`. Requests are pinned to Anthropic, since a cache and a reasoning binding are per platform.
+- **OpenAI.** Automatic prefix caching (≥1024 tokens), steered by `prompt_cache_key` (the conversation). Reasoning items from earlier turns are dropped server-side when a new user message arrives, so the first call of each turn re-bills the previous turn's tail after its reasoning; within a turn, tool iterations read the whole prefix. Chat Completions with a reasoning model caches worse than Responses, which is why GPT-5.4+ goes to Responses.
+- **Gemini 3.x.** No implicit caching through the compatible endpoint (identical repeats read 0). Explicit `cachedContent` would need cache objects with a storage cost; not used.
+- **Local llama.cpp.** The slot's KV cache holds the previous prompt; anything else run on the server in between (another conversation, a side call) can evict it. The Qwen 3.6 template drops `<think>` from assistant messages before the latest question unless `chat_template_kwargs.preserve_thinking` is set, which DAWN sends: without it, every turn after a tool call re-processed the previous turn (a probe: 843 tokens re-processed without, 21 with). Strict Jinja templates reject a second leading system message, so a Chat Completions request is sent with one.
 
 ## Turn blocks: replay and persistence
 
@@ -153,6 +163,43 @@ Blocks are persisted with their row so a reloaded conversation replays each turn
 - **Writing.** A history message becomes rows through `llm_history_rows_append()` (`src/llm/llm_history_rows.c`): the canonical `{role, content, tool_calls, tool_call_id}` rows every reader expects, plus the assistant turn's blocks in the stored shape (`llm_turn_blocks_to_stored`, a versioned `{"v":1,"blocks":[...]}` envelope serialized exactly). The tool loop, the voice save and every final-answer writer save through `conv_db_add_row()` (`src/auth/auth_db_messages.c`). A final answer's blocks come from the copy `llm_call_finalize()` keeps as the reply joins the history (`session_take_reply_blocks()`), never from reading the history afterwards.
 - **Reading.** Only a load that becomes an LLM context asks for blocks: `memory_history_load_for_llm()` and the WebUI restore (`memory_history_load_rows(..., with_blocks = true)`). The loader reads `messages.llm_blocks` through `conv_db_get_messages_for_llm()`, parses it after the read (outside the database lock), and attaches blocks only when they parse (`llm_turn_blocks_from_stored`, fail-closed) and record the row's tool calls. Display, export, search, admin and memory reads never see the column; `scripts/check_llm_blocks_confined.sh` enforces this at build time.
 - **Bounds.** 4 MiB per row (so a row always fits a load) and assistant rows only (a schema CHECK; `llm_blocks_len`, placed before `llm_blocks`, holds the byte length so no check reads the blob), 8 MiB of blocks per load (older rows past it load without them). Advancing the compaction watermark clears blocks at or below it right after, in batches, and the periodic auth cleanup sweeps any it missed; a trigger drops a row's blocks when its text or tool calls change.
+
+## Large tool results: views over stored results
+
+A tool result too big for its share of the context is sent as a **view** and kept whole behind a
+**handle** the model can read more of (`result_read`). The design record, with the prior art and the
+A/B that measured it, is in ATLAS (`dawn/archive/TOOL_RESULT_VIEWS_DESIGN.md`).
+
+- **Where.** A batch's results go through the view stage as the tool loop's finish step
+  (`llm_tools_execute_all` → `llm_tool_views_apply.c`), after MCP results are normalized
+  (`src/tools/mcp_result.c`: `structuredContent` or its text, never both; a resource's text inline,
+  blobs and audio as references). Nothing is stored unless `result_read` is offered in that request;
+  `result_read`'s own answers are viewed but never stored; a tool flagged `result_whole`
+  (`render_visual`) is exempt.
+- **Budget.** A character budget scaled to the model's window (48K chars at 1M, 3K at 16K, a 1,500
+  floor), shared across the batch by water-filling, so small results stay whole and only the large
+  ones are cut.
+- **The view** (`llm_tool_view.c`, pure). JSON keeps its structure: the shape tightens until it fits
+  (and loosens back while more than half the budget is unused), with `... N more items at
+  $.path[a:b]` markers naming where the rest is. Text keeps its head and tail with `... N lines
+  omitted: lines a-b ...`. Anything json-c would read loosely (NaN, comments, integers past 64 bits)
+  goes to the text view. A header says the result is partial and how to get more: `count` /
+  `distinct` to tally a whole array in one call, `path`, `grep`, `read`, or a narrower call.
+- **The store** (`tool_result_store.c`, `auth_db_tool_results.c`, table `tool_results`). Readable
+  only in the conversation that stored it, or by the turn that stored it before its conversation
+  exists; deleted with its conversation. Per-result, per-conversation, per-user and global byte caps
+  (16 MB / 256 MB / 1 GB / 4 GB); the global cap evicts the heaviest user's oldest results first.
+  Unbound results are swept after 24 h. A result over 16 MB is kept as text with its first and last
+  parts. A small cache keeps parsed trees for repeated reads.
+- **`result_read`** (`result_read_tool.c`, `result_read_ops.c`): `read` (lines), `path` (a JSON path;
+  no wildcards, negative indices, a slice only last), `grep` (a pattern with context), `count`,
+  `distinct`. It answers only inside the model's own tool calls (an MQTT message naming a session is
+  refused), and its answers are themselves viewed to the batch's share.
+- **Untrusted text.** Results pass the neutralizer before they reach the request; it decodes `\u`,
+  `\U`, surrogate pairs, C escapes and HTML entities first, so an encoded imitation of DAWN's own
+  framing is defused too.
+- **Compaction** keeps each handle in the summary with a phrase on what it held, so a summarized
+  result can still be read.
 
 ## Prompt-cache monitor
 
