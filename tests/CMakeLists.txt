@@ -1466,6 +1466,14 @@ dawn_add_unit_test(test_homeassistant_match
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_memory_extraction_input
+   SOURCES test_memory_extraction_input.c
+           ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+   LIBS    dawn_common unity json-c
+   LABEL   ci)
+
 dawn_add_unit_test(test_scheduled_context
    SOURCES test_scheduled_context.c
            ${SRC_ROOT}/src/core/scheduled_context.c

@@ -239,7 +239,10 @@ struct json_object *memory_extraction_build_input(int user_id,
       if (msg_id == 0 || msg_id > last_msg_id) {
          if (msg_id > 0 && row_ids) {
             json_object_array_add(row_ids, json_object_new_int64(msg_id));
-         } else if (msg_id <= 0 && strcmp(json_object_get_string(role_obj), "user") == 0) {
+         } else if (msg_id <= 0 && llm_history_is_question(msg)) {
+            /* A question the user asked; a tool batch's results (a Claude
+             * user message of tool_result parts) are the tool's, like an
+             * OpenAI role:tool message, and carry no id of their own. */
             unverified_user++;
          }
          /* strip_images then guard-redact: both return an owned ref and never
@@ -268,7 +271,7 @@ struct json_object *memory_extraction_build_input(int user_id,
                  "row list",
                  (long long)conversation_id, user_id);
    } else if (conversation_id > 0 && unverified_user > 0) {
-      /* Every user message of a DB conversation is persisted and stamped before the
+      /* Every question of a DB conversation is persisted and stamped before the
        * model sees it, so one without a row id can't be attributed. */
       OLOG_WARNING("memory_extraction: refusing conv %lld for user %d: %d user message(s) "
                    "carry no row id",
