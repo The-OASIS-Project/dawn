@@ -188,6 +188,14 @@ typedef struct {
     * text worker thread (tool-turn persistence, focus injection, auto-compaction). */
    _Atomic int64_t active_conversation_id;
    bool active_conversation_private; /* If true, skip memory extraction */
+   /* Private set before the conversation exists (set_private with no id): the
+    * next conversation this connection creates is private from its first row.
+    * Cleared when a conversation is bound.  Atomic: set on the lws thread, read
+    * by a voice turn's auto-create on the audio worker.  When voice-only
+    * surfaces get a way to go private first, this moves to session_t (their
+    * conversations are created in session_voice_save, with no connection):
+    * one flag, not two. */
+   atomic_bool pending_private;
 
    /* Music streaming state (per-session, owned by webui_music.c) */
    void *music_state; /* session_music_state_t*, NULL if not initialized */

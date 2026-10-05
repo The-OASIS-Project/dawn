@@ -109,8 +109,45 @@ static void build_like_pattern(const char *query, char *pattern, size_t pattern_
  * ============================================================================= */
 
 int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
+   return conv_db_create_ex(user_id, title, NULL, false, conv_id_out);
+}
+
+int conv_db_create_with_origin(int user_id,
+                               const char *title,
+                               const char *origin,
+                               int64_t *conv_id_out) {
+   return conv_db_create_ex(user_id, title, origin, false, conv_id_out);
+}
+
+int conv_db_create_ex(int user_id,
+                      const char *title,
+                      const char *origin,
+                      bool is_private,
+                      int64_t *conv_id_out) {
    if (user_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
+   }
+
+   /* Use 'webui' as default origin if not specified */
+   const bool webui = !origin || !origin[0] || strcmp(origin, "webui") == 0;
+   const char *safe_origin = webui ? "webui" : origin;
+
+   /* Default title if none given, truncated without splitting a UTF-8
+    * character: invalid UTF-8 in a stored title breaks the whole
+    * conversation-list JSON frame on the client. */
+   char safe_title[CONV_TITLE_MAX];
+   if (title && title[0] != '\0') {
+      size_t cut = strlen(title);
+      if (cut > CONV_TITLE_MAX - 1) {
+         cut = CONV_TITLE_MAX - 1;
+         while (cut > 0 && ((unsigned char)title[cut] & 0xC0) == 0x80) {
+            cut--;
+         }
+      }
+      memcpy(safe_title, title, cut);
+      safe_title[cut] = '\0';
+   } else {
+      strcpy(safe_title, webui ? "New Conversation" : "Voice Conversation");
    }
 
    AUTH_DB_LOCK_OR_FAIL();
@@ -131,35 +168,17 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
    }
 
    time_t now = time(NULL);
+   sqlite3_reset(s_db.stmt_conv_create_origin);
+   sqlite3_bind_int(s_db.stmt_conv_create_origin, 1, user_id);
+   sqlite3_bind_text(s_db.stmt_conv_create_origin, 2, safe_title, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 3, (int64_t)now);
+   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 4, (int64_t)now);
+   sqlite3_bind_text(s_db.stmt_conv_create_origin, 5, safe_origin, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 6, (int64_t)now); /* anchor_date = now (v42) */
+   sqlite3_bind_int(s_db.stmt_conv_create_origin, 7, is_private ? 1 : 0);
 
-   /* Use default title if none provided, truncate if too long */
-   char safe_title[CONV_TITLE_MAX];
-   if (title && title[0] != '\0') {
-      size_t cut = strlen(title);
-      if (cut > CONV_TITLE_MAX - 1) {
-         cut = CONV_TITLE_MAX - 1;
-         /* Don't split a multibyte UTF-8 codepoint at the truncation point — invalid
-          * UTF-8 in a stored title breaks the whole conversation-list JSON frame on
-          * the client.  Back up while the cut lands on a 10xxxxxx continuation byte. */
-         while (cut > 0 && ((unsigned char)title[cut] & 0xC0) == 0x80) {
-            cut--;
-         }
-      }
-      memcpy(safe_title, title, cut);
-      safe_title[cut] = '\0';
-   } else {
-      strcpy(safe_title, "New Conversation");
-   }
-
-   sqlite3_reset(s_db.stmt_conv_create);
-   sqlite3_bind_int(s_db.stmt_conv_create, 1, user_id);
-   sqlite3_bind_text(s_db.stmt_conv_create, 2, safe_title, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(s_db.stmt_conv_create, 3, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_conv_create, 4, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_conv_create, 5, (int64_t)now); /* anchor_date = now (v42) */
-
-   int rc = sqlite3_step(s_db.stmt_conv_create);
-   sqlite3_reset(s_db.stmt_conv_create);
+   int rc = sqlite3_step(s_db.stmt_conv_create_origin);
+   sqlite3_reset(s_db.stmt_conv_create_origin);
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_create: insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -171,73 +190,8 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
 
    AUTH_DB_UNLOCK();
 
-   OLOG_INFO("Created conversation %lld for user %d", (long long)*conv_id_out, user_id);
-   conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
-   return AUTH_DB_SUCCESS;
-}
-
-int conv_db_create_with_origin(int user_id,
-                               const char *title,
-                               const char *origin,
-                               int64_t *conv_id_out) {
-   if (user_id <= 0 || !conv_id_out) {
-      return AUTH_DB_INVALID;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   /* Check conversation limit per user */
-   if (CONV_MAX_PER_USER > 0) {
-      sqlite3_reset(s_db.stmt_conv_count);
-      sqlite3_bind_int(s_db.stmt_conv_count, 1, user_id);
-      if (sqlite3_step(s_db.stmt_conv_count) == SQLITE_ROW) {
-         int count = sqlite3_column_int(s_db.stmt_conv_count, 0);
-         if (count >= CONV_MAX_PER_USER) {
-            sqlite3_reset(s_db.stmt_conv_count);
-            AUTH_DB_UNLOCK();
-            return AUTH_DB_LIMIT_EXCEEDED;
-         }
-      }
-      sqlite3_reset(s_db.stmt_conv_count);
-   }
-
-   time_t now = time(NULL);
-
-   /* Use default title if none provided, truncate if too long */
-   char safe_title[CONV_TITLE_MAX];
-   if (title && title[0] != '\0') {
-      safe_strscpy(safe_title, title);
-   } else {
-      strcpy(safe_title, "Voice Conversation");
-   }
-
-   /* Use 'webui' as default origin if not specified */
-   const char *safe_origin = (origin && origin[0] != '\0') ? origin : "webui";
-
-   /* Insert with origin field using prepared statement */
-   sqlite3_reset(s_db.stmt_conv_create_origin);
-   sqlite3_bind_int(s_db.stmt_conv_create_origin, 1, user_id);
-   sqlite3_bind_text(s_db.stmt_conv_create_origin, 2, safe_title, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 3, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 4, (int64_t)now);
-   sqlite3_bind_text(s_db.stmt_conv_create_origin, 5, safe_origin, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 6, (int64_t)now); /* anchor_date = now (v42) */
-
-   int rc = sqlite3_step(s_db.stmt_conv_create_origin);
-   sqlite3_reset(s_db.stmt_conv_create_origin);
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("conv_db_create_with_origin: insert failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   *conv_id_out = sqlite3_last_insert_rowid(s_db.db);
-
-   AUTH_DB_UNLOCK();
-
-   OLOG_INFO("Created %s conversation %lld for user %d", safe_origin, (long long)*conv_id_out,
-             user_id);
+   OLOG_INFO("Created %s%s conversation %lld for user %d", is_private ? "private " : "",
+             safe_origin, (long long)*conv_id_out, user_id);
    conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
    return AUTH_DB_SUCCESS;
 }
@@ -836,14 +790,17 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
 
    int cascaded = 0;
    if (rc == SQLITE_DONE && changes > 0 && is_private) {
-      /* Continuations open with a summary of this conversation. */
+      /* Continuations open with a summary of this conversation, and its jobs and
+       * research runs carry its work (and their results feed memory): all go
+       * private with it, and what they continued into or spawned in turn. */
       sqlite3_stmt *st = NULL;
       if (sqlite3_prepare_v2(s_db.db,
                              "WITH RECURSIVE chain(id) AS ("
-                             "  SELECT id FROM conversations WHERE continued_from = ?1 AND "
-                             "  user_id = ?2 "
+                             "  SELECT id FROM conversations WHERE (continued_from = ?1 OR "
+                             "  parent_id = ?1) AND user_id = ?2 "
                              "  UNION SELECT c.id FROM conversations c JOIN chain ON "
-                             "  c.continued_from = chain.id WHERE c.user_id = ?2) "
+                             "  (c.continued_from = chain.id OR c.parent_id = chain.id) "
+                             "  WHERE c.user_id = ?2) "
                              "UPDATE conversations SET is_private = 1 WHERE user_id = ?2 AND "
                              "is_private = 0 AND id IN (SELECT id FROM chain)",
                              -1, &st, NULL) == SQLITE_OK) {
@@ -878,7 +835,8 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
 
    if (changes > 0) {
       OLOG_INFO("Conversation %lld privacy set to %s%s", (long long)conv_id,
-                is_private ? "private" : "public", cascaded > 0 ? " (with continuations)" : "");
+                is_private ? "private" : "public",
+                cascaded > 0 ? " (with its continuations and jobs)" : "");
    }
 
    /* No rows updated means either not found or forbidden */

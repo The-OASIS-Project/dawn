@@ -324,6 +324,15 @@
                if (msg.payload.authenticated && DawnWS.startHeartbeat) {
                   DawnWS.startHeartbeat();
                }
+               // A private toggle waiting for its conversation lives on the server
+               // connection: a reconnect lost it.
+               if (
+                  msg.payload.authenticated &&
+                  typeof DawnSettingsLlm !== 'undefined' &&
+                  DawnSettingsLlm.resendPendingPrivacy
+               ) {
+                  DawnSettingsLlm.resendPendingPrivacy();
+               }
                // Claim session ownership for sibling tabs (steal-back guard): this
                // tab holds the token now, so a background sibling must not reconnect
                // and evict it.

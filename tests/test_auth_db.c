@@ -326,6 +326,20 @@ static void test_create_conversation(void) {
    TEST_ASSERT_TRUE(conv_id > 0);
 }
 
+/* A conversation private before its first message is created private; the
+ * plain creates stay public. */
+static void test_create_conversation_private(void) {
+   int user_id = create_and_get_id("conv_private", "hash", false);
+   int64_t priv = 0, pub = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create_ex(user_id, NULL, NULL, true, &priv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create_with_origin(user_id, NULL, "voice", &pub));
+   bool is_private = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(priv, user_id, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(pub, user_id, &is_private));
+   TEST_ASSERT_FALSE(is_private);
+}
+
 static void test_get_conversation(void) {
    int user_id = create_and_get_id("conv_get", "hash", false);
 
@@ -524,6 +538,9 @@ static void test_set_private_cascades_to_continuations(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_create_continuation(user_id, child, "summary", &grandchild));
    conv_db_create(user_id, "Unrelated", &unrelated);
+   int64_t job = 0; /* a job (or research run) the root spawned while public */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create_job(user_id, "Job", root, "detached",
+                                                             "notify", NULL, 1, NULL, &job));
 
    int64_t chain[CONV_CHAIN_MAX];
    int n = 0;
@@ -541,6 +558,8 @@ static void test_set_private_cascades_to_continuations(void) {
    conv_db_is_private(child, user_id, &p);
    TEST_ASSERT_TRUE(p);
    conv_db_is_private(grandchild, user_id, &p);
+   TEST_ASSERT_TRUE(p);
+   conv_db_is_private(job, user_id, &p);
    TEST_ASSERT_TRUE(p);
    conv_db_is_private(unrelated, user_id, &p);
    TEST_ASSERT_FALSE(p);
@@ -1341,6 +1360,7 @@ int main(void) {
 
    /* Conversations */
    RUN_TEST(test_create_conversation);
+   RUN_TEST(test_create_conversation_private);
    RUN_TEST(test_get_conversation);
    RUN_TEST(test_delete_conversation);
    RUN_TEST(test_delete_conversation_keeps_its_memories);

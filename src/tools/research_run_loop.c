@@ -319,6 +319,7 @@ static void research_report_label(int64_t run_id,
  * report too large for one note falls back to the multi-chunk "text" document
  * path (§8 short-vs-large split) — searchable/readable, just no note gloss. */
 static void research_persist_report_note(int user_id,
+                                         int64_t conversation_id,
                                          int64_t run_id,
                                          const char *brief,
                                          const char *report) {
@@ -353,8 +354,14 @@ static void research_persist_report_note(int user_id,
       return;
    }
    research_db_run_set_report_doc(run_id, res.doc_id);
-   /* Best-effort memory->note bridge, exactly like do_save_note. */
-   (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   /* Best-effort memory->note bridge, exactly like do_save_note; never from a
+    * private conversation's run (the job inherits its privacy): the gloss is a
+    * memory, and nothing private is learned.  Unreadable counts as private. */
+   bool is_private = true;
+   if (conv_db_is_private(conversation_id, user_id, &is_private) == AUTH_DB_SUCCESS &&
+       !is_private) {
+      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   }
    OLOG_INFO("research: run %lld report saved as note %lld (%s)", (long long)run_id,
              (long long)res.doc_id, label);
 }
@@ -1029,7 +1036,8 @@ const char *research_run_execute(struct session *s,
    if (report != NULL) {
       research_db_revision_add(run_id, last_round, report);
       if (claim_count > 0) {
-         research_persist_report_note(run0->user_id, run_id, run0->brief, report);
+         research_persist_report_note(run0->user_id, run0->conversation_id, run_id, run0->brief,
+                                      report);
          /* Job-conversation copy so the WebUI viewer shows the answer, not a blank
           * transcript.  With prose, the chat bubble carries just the answer (the full
           * evidence lives in the note); otherwise the whole report. */

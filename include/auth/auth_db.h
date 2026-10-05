@@ -1264,6 +1264,19 @@ int conv_db_create_with_origin(int user_id,
                                int64_t *conv_id_out);
 
 /**
+ * @brief Create a conversation, private from its first row when @p is_private
+ *        (conv_db_create and conv_db_create_with_origin create public ones)
+ *
+ * @param origin "webui" (or NULL), "voice", "briefing", ...
+ * @return AUTH_DB_SUCCESS, AUTH_DB_LIMIT_EXCEEDED, or AUTH_DB_FAILURE
+ */
+int conv_db_create_ex(int user_id,
+                      const char *title,
+                      const char *origin,
+                      bool is_private,
+                      int64_t *conv_id_out);
+
+/**
  * @brief Reassign a conversation to a different user (admin only)
  *
  * Used to reassign voice conversations to different users.

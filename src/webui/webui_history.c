@@ -413,8 +413,8 @@ static void extract_history_before_replace(ws_connection_t *conn, const char *wh
 /**
  * @brief Shared create+bind seam for a new conversation on this connection.
  *
- * Creates the row, makes it the active conversation, marks it public (a fresh
- * conversation is never private until the user toggles it), stamps the session's
+ * Creates the row (private when the user turned private on before it existed,
+ * conn->pending_private), makes it the active conversation, stamps the session's
  * LLM settings, and audit-logs it. Both the client-driven handler
  * (handle_new_conversation) and the server-driven voice auto-bind
  * (webui_ensure_active_conversation) go through here so create semantics live in
@@ -430,16 +430,22 @@ static int webui_conv_create_bind(ws_connection_t *conn,
                                   const char *title,
                                   const char *log_detail,
                                   int64_t *conv_id_out) {
-   int rc = conv_db_create(conn->auth_user_id, title, conv_id_out);
+   /* Private from its first row when the user turned private on before it existed:
+    * the first turn (typed or voice) runs in a private conversation. */
+   const bool is_private = atomic_exchange(&conn->pending_private, false);
+   int rc = conv_db_create_ex(conn->auth_user_id, title, NULL, is_private, conv_id_out);
    if (rc != AUTH_DB_SUCCESS) {
+      if (is_private) {
+         atomic_store(&conn->pending_private, true); /* the next create gets it */
+      }
       return rc;
    }
 
    webui_conn_set_active_conversation(conn, *conv_id_out);
-   /* A fresh conversation is public; active_conversation_id + active_conversation_private
-    * move together as a pair (see the invariant note where should_skip_memory_extraction
-    * reads it) so the cache can't report a public row as private. */
-   conn->active_conversation_private = false;
+   /* active_conversation_id + active_conversation_private move together as a pair
+    * (see the invariant note where should_skip_memory_extraction reads it) so the
+    * cache can't report a public row as private. */
+   conn->active_conversation_private = is_private;
    /* Stamp the session's current LLM settings onto the fresh row so it records the
     * model/reasoning it runs with instead of leaving NULL columns (which the client
     * would render as stale defaults). Safe no-op once a message lands. */
@@ -480,6 +486,8 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+      json_object_object_add(resp_payload, "is_private",
+                             json_object_new_boolean(conn->active_conversation_private));
 
       /* NOTE: We intentionally do NOT clear session history here.
        *
@@ -629,6 +637,8 @@ int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *titl
    json_object *resp_payload = json_object_new_object();
    json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(resp_payload, "is_private",
+                          json_object_new_boolean(conn->active_conversation_private));
    /* Include the transcript-derived title so a client can reflect it immediately
     * instead of blanking the title until a later refresh (voice turns clear the
     * >=3-word floor, so `title` is populated here). */

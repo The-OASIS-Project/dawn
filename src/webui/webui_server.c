@@ -3096,6 +3096,7 @@ void webui_conn_set_active_conversation(ws_connection_t *conn, int64_t conv_id) 
       return;
    }
    conn->active_conversation_id = conv_id;
+   atomic_store(&conn->pending_private, false); /* applied by the create, or moot */
    if (conn_owns_session(conn)) {
       atomic_store(&conn->session->viewed_conversation_id, conv_id > 0 ? conv_id : 0);
    }

@@ -627,7 +627,10 @@ Create a new conversation (clears current session context).
    }
 }
 ```
-Response: `new_conversation_response`
+Response: `new_conversation_response` — `{success, conversation_id, is_private}`. The
+conversation is private from its first row when `set_private` with `conversation_id: 0` came
+first. A voice turn that creates the conversation sends the same frame unsolicited, with
+`server_initiated: true`.
 
 #### `load_conversation`
 Load a saved conversation into the current session.
@@ -697,6 +700,10 @@ Mark a conversation as private (hidden from admin view).
 }
 ```
 Response: `set_private_response`
+
+With `conversation_id: 0` (no conversation yet), it sets the privacy of the next conversation
+this connection creates, typed or voice, and gets no reply. It lasts until a conversation is
+created or loaded or the session is cleared, and lives on the connection: send it again after a reconnect.
 
 #### `reassign_conversation`
 Reassign a conversation to a different user. **Admin only.**

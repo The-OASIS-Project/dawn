@@ -349,6 +349,30 @@
    }
 
    /**
+    * Tell the server the privacy of the next conversation it creates for this
+    * connection (conversation_id 0; no reply).
+    * @param {boolean} isPrivate
+    */
+   function sendPendingPrivacy(isPrivate) {
+      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
+         DawnWS.send({
+            type: 'set_private',
+            payload: { conversation_id: 0, is_private: isPrivate },
+         });
+      }
+   }
+
+   /**
+    * After a (re)connect: the server forgot a private toggle still waiting for its
+    * conversation (it lives on the connection), so send it again.
+    */
+   function resendPendingPrivacy() {
+      if (!conversationLlmState.conversation_id && conversationLlmState.is_private) {
+         sendPendingPrivacy(true);
+      }
+   }
+
+   /**
     * Set privacy mode for current conversation (or pending state for new conversation)
     * @param {boolean} isPrivate - True to enable private mode
     */
@@ -356,9 +380,9 @@
       // Always update local state and UI - privacy can be set before conversation exists
       updatePrivacyToggleUI(isPrivate);
 
-      // If no conversation exists yet, just update local state (will be applied when conversation is created)
+      // No conversation yet: the server creates the next one with it (typed or voice)
       if (!conversationLlmState.conversation_id) {
-         console.log('Privacy set to', isPrivate, '- will apply when conversation is created');
+         sendPendingPrivacy(isPrivate);
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(
                isPrivate ? 'Private mode enabled for new conversation' : 'Private mode disabled',
@@ -482,7 +506,11 @@
    function resetConversationLlmControls() {
       setConversationLlmLocked(false);
 
-      // Reset privacy state (new conversations start as public)
+      // Reset privacy state (new conversations start as public); a private toggle
+      // still waiting for its conversation is withdrawn on the server too
+      if (!conversationLlmState.conversation_id && conversationLlmState.is_private) {
+         sendPendingPrivacy(false);
+      }
       conversationLlmState.conversation_id = null;
       conversationLlmState.is_private = false;
       updatePrivacyToggleUI(false);
@@ -1184,6 +1212,7 @@
       isConversationLlmLocked,
       setCurrentConversation,
       getPrivacyState,
+      resendPendingPrivacy,
       setPrivacy,
       handleSetPrivateResponse,
       updatePrivacyToggleUI,

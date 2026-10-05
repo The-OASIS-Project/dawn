@@ -451,7 +451,6 @@ typedef struct {
    sqlite3_stmt *stmt_set_user_settings;
 
    /* === Conversation module statements (auth_db_conv.c) === */
-   sqlite3_stmt *stmt_conv_create;
    sqlite3_stmt *stmt_conv_get;
    sqlite3_stmt *stmt_conv_list;
    sqlite3_stmt *stmt_conv_list_all;

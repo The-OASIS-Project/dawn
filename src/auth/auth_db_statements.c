@@ -246,16 +246,6 @@ int auth_db_prepare_statements(void) {
     * temporal phrases.  Production passes time(NULL); bench passes session date. */
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "INSERT INTO conversations (user_id, title, created_at, updated_at, anchor_date) "
-       "VALUES (?, ?, ?, ?, ?)",
-       -1, &s_db.stmt_conv_create, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare conv_create failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
-
-   rc = sqlite3_prepare_v2(
-       s_db.db,
        "SELECT id, user_id, title, created_at, updated_at, message_count, is_archived, "
        "context_tokens, context_max, continued_from, compaction_summary, "
        "llm_type, cloud_provider, model, tools_mode, thinking_mode, is_private, origin, "
@@ -443,8 +433,8 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "INSERT INTO conversations (user_id, title, created_at, updated_at, origin, anchor_date) "
-       "VALUES (?, ?, ?, ?, ?, ?)",
+       "INSERT INTO conversations (user_id, title, created_at, updated_at, origin, anchor_date, "
+       "is_private) VALUES (?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_conv_create_origin, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_create_origin failed: %s", sqlite3_errmsg(s_db.db));
@@ -2712,8 +2702,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_set_user_settings);
 
    /* Conversation statements */
-   if (s_db.stmt_conv_create)
-      sqlite3_finalize(s_db.stmt_conv_create);
    if (s_db.stmt_conv_get)
       sqlite3_finalize(s_db.stmt_conv_get);
    if (s_db.stmt_conv_list)

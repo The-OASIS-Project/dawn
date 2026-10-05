@@ -266,6 +266,17 @@ void handle_set_private(ws_connection_t *conn, struct json_object *payload) {
    int64_t conv_id = json_object_get_int64(id_obj);
    bool is_private = json_object_get_boolean(private_obj);
 
+   /* No conversation yet: the next one this connection creates (a typed message
+    * or a voice turn) is created with it.  No reply; the client already shows it.
+    * One a voice turn created meanwhile gets it now. */
+   if (conv_id <= 0) {
+      conv_id = conn->active_conversation_id;
+      if (conv_id <= 0) {
+         atomic_store(&conn->pending_private, is_private);
+         return;
+      }
+   }
+
    int result = conv_db_set_private(conv_id, conn->auth_user_id, is_private);
    if (result == AUTH_DB_NOT_FOUND) {
       send_error(conn, "set_private_response", conv_id, "Conversation not found");

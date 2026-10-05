@@ -12,6 +12,21 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-05 — Private mode applies from the first message
+
+**What changed.**
+- **Turning on private mode before you start a conversation now covers its first
+  message.** In the WebUI, a conversation you mark private before typing (or
+  speaking) is created private, so nothing from its first turn is learned.
+  Before, it was made private only after the first turn had started, and a
+  conversation started by voice ignored the setting.
+- **Research from a private conversation stays out of memory.** Its report is
+  still saved as a note you can read, without the memory entry that pointed to it.
+
+**What you need to do.** Nothing.
+
+---
+
 ## 2026-10-05 — Home Assistant and calendar ask instead of picking
 
 **What changed.**

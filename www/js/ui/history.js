@@ -632,10 +632,18 @@
          const pendingPrivacy = DawnSettingsLlm.getPrivacyState
             ? DawnSettingsLlm.getPrivacyState()
             : false;
-         DawnSettingsLlm.setCurrentConversation(payload.conversation_id);
+         // The server creates it with the privacy set before it existed and says so
+         const serverPrivate =
+            typeof payload.is_private === 'boolean' ? payload.is_private : undefined;
+         DawnSettingsLlm.setCurrentConversation(payload.conversation_id, serverPrivate);
 
-         // If privacy was set before conversation was created, apply it now
-         if (!serverInitiated && pendingPrivacy && DawnSettingsLlm.setPrivacy) {
+         // An older server: apply privacy set before the conversation was created now
+         if (
+            serverPrivate === undefined &&
+            !serverInitiated &&
+            pendingPrivacy &&
+            DawnSettingsLlm.setPrivacy
+         ) {
             DawnSettingsLlm.setPrivacy(true);
          }
       }
