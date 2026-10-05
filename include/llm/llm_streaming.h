@@ -173,6 +173,7 @@ typedef struct {
 
    /* Stream completion tracking */
    int stream_complete;    /**< 1 when stream has ended */
+   char stream_error[160]; /**< An error event's message (Claude); "" = none */
    char finish_reason[32]; /**< Final finish/stop reason from stream */
 
    /* TTFT (Time To First Token) tracking for metrics */

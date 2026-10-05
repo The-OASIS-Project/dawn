@@ -104,7 +104,7 @@ static const char *part_image_id(struct json_object *part) {
 }
 
 /* A tool row: @p call_id's result, from its @p content (a string, or parts:
- * its text parts joined as llm_claude_tool_result_text joins them, its
+ * its text parts joined as llm_claude_content_text joins them, its
  * images by id).  NULL on out of memory. */
 static struct json_object *tool_row(const char *call_id, struct json_object *content) {
    if (!json_object_is_type(content, json_type_array)) {

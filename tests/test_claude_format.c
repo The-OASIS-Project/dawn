@@ -38,6 +38,7 @@
 #include "core/image_rehydrate.h"
 #include "llm/llm_capabilities.h"
 #include "llm/llm_claude_format.h"
+#include "llm/llm_claude_parts.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_tool_defs.h"
@@ -520,6 +521,27 @@ static void test_reasoning_only_turn_and_user_text(void) {
    json_object_put(conv);
 }
 
+/* A reply's text is its text blocks, whatever comes first: a model that can't
+ * turn thinking off may open with a thinking block. */
+static void test_reply_text_skips_thinking(void) {
+   json_object *reply = json_tokener_parse(
+       "{\"content\":[{\"type\":\"thinking\",\"thinking\":\"hmm\",\"signature\":\"s\"},"
+       "{\"type\":\"redacted_thinking\",\"data\":\"x\"},"
+       "{\"type\":\"text\",\"text\":\"Summary one.\"},"
+       "{\"type\":\"text\",\"text\":\"Summary two.\"}]}");
+   char *text = llm_claude_content_text(reply);
+   TEST_ASSERT_EQUAL_STRING("Summary one.\nSummary two.", text);
+   free(text);
+   json_object_put(reply);
+
+   reply = json_tokener_parse(
+       "{\"content\":[{\"type\":\"thinking\",\"thinking\":\"hmm\",\"signature\":\"s\"}]}");
+   text = llm_claude_content_text(reply);
+   TEST_ASSERT_EQUAL_STRING("", text); /* no text: the caller fails the call */
+   free(text);
+   json_object_put(reply);
+}
+
 int main(void) {
    char err[256];
    FILE *f = fopen(MODELS_TOML_PATH, "r");
@@ -542,5 +564,6 @@ int main(void) {
    RUN_TEST(test_results_without_their_call_become_notes);
    RUN_TEST(test_calls_and_results_are_paired);
    RUN_TEST(test_reasoning_only_turn_and_user_text);
+   RUN_TEST(test_reply_text_skips_thinking);
    return UNITY_END();
 }

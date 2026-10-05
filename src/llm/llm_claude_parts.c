@@ -16,7 +16,7 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Claude user-message parts read for other providers.  See llm_claude_parts.h.
+ * Claude message parts read for other providers and for a reply's text.  See llm_claude_parts.h.
  */
 
 #include "llm/llm_claude_parts.h"
@@ -32,7 +32,7 @@ static const char *str_of(struct json_object *obj, const char *key) {
    return (obj && json_object_object_get_ex(obj, key, &v)) ? json_object_get_string(v) : NULL;
 }
 
-char *llm_claude_tool_result_text(struct json_object *part) {
+char *llm_claude_content_text(struct json_object *part) {
    struct json_object *content = NULL;
    json_object_object_get_ex(part, "content", &content);
    if (!content || !json_object_is_type(content, json_type_array)) {

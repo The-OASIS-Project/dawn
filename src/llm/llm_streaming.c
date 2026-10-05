@@ -1181,8 +1181,18 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       if (ctx->has_tool_calls) {
          OLOG_INFO("Claude stream completed with %d tool call(s)", ctx->tool_calls.count);
       }
+   } else if (strcmp(type, "error") == 0) {
+      /* An error after the 200 (an overload mid-stream): the reply is cut off. */
+      json_object *err = NULL;
+      json_object *msg = NULL;
+      const char *text = "error event";
+      if (json_object_object_get_ex(event, "error", &err) &&
+          json_object_object_get_ex(err, "message", &msg)) {
+         text = json_object_get_string(msg);
+      }
+      safe_strscpy(ctx->stream_error, text ? text : "error event");
+      OLOG_ERROR("Claude stream error: %s", ctx->stream_error);
    }
-   // Note: ping and error events are ignored
 
    json_object_put(event);
 }

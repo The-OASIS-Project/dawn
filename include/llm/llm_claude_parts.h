@@ -16,8 +16,8 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Claude user-message parts (tool results, images) read for other providers'
- * request shapes.
+ * Claude message parts (tool results, images, a reply's text): read for other
+ * providers' request shapes, and for the text of a reply.
  */
 
 #ifndef LLM_CLAUDE_PARTS_H
@@ -30,15 +30,15 @@ extern "C" {
 struct json_object;
 
 /**
- * @brief A Claude tool_result part's text
+ * @brief The text of a Claude object with `content`: a tool_result part or a response
  *
  * Its content as a string, or its text parts joined with newlines (other part
- * types, such as images, are not text and are left out).
+ * types, such as images or a response's thinking, are not text and are left out).
  *
  * @return A new string (caller frees; "" when it has no text), or NULL on
  *         allocation failure
  */
-char *llm_claude_tool_result_text(struct json_object *part);
+char *llm_claude_content_text(struct json_object *part);
 
 /**
  * @brief A Claude base64 image part as a data URL ("data:<type>;base64,...")

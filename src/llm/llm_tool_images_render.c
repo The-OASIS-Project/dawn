@@ -220,7 +220,7 @@ struct json_object *llm_tool_images_without(struct json_object *history) {
 
 /* @p msg's content joined as its text (a string, or its text parts). */
 static char *text_of(struct json_object *msg) {
-   return llm_claude_tool_result_text(msg);
+   return llm_claude_content_text(msg);
 }
 
 /* Append @p msg's images (image_url parts) to @p images, after its label.

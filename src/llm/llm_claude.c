@@ -35,6 +35,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude_betas.h"
 #include "llm/llm_claude_format.h"
+#include "llm/llm_claude_parts.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_key_tag.h"
 #include "llm/llm_openai.h"
@@ -221,45 +222,6 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
       return NULL;
    }
 
-   // Extract text from response.content[0].text
-   json_object *content_array, *first_content, *text_obj, *type_obj;
-   if (!json_object_object_get_ex(parsed, "content", &content_array) ||
-       json_object_get_type(content_array) != json_type_array ||
-       json_object_array_length(content_array) < 1) {
-      OLOG_ERROR("Invalid Claude response format: missing content array");
-      json_object_put(parsed);
-      curl_buffer_free(&chunk);
-      return NULL;
-   }
-
-   first_content = json_object_array_get_idx(content_array, 0);
-   if (!first_content) {
-      OLOG_ERROR("Empty content array in Claude response");
-      json_object_put(parsed);
-      curl_buffer_free(&chunk);
-      return NULL;
-   }
-
-   // Verify it's a text block
-   if (json_object_object_get_ex(first_content, "type", &type_obj)) {
-      const char *content_type = json_object_get_string(type_obj);
-      if (strcmp(content_type, "text") != 0) {
-         OLOG_ERROR("First content block is not text: %s", content_type);
-         json_object_put(parsed);
-         curl_buffer_free(&chunk);
-         return NULL;
-      }
-   }
-
-   if (!json_object_object_get_ex(first_content, "text", &text_obj)) {
-      OLOG_ERROR("No text in Claude response");
-      json_object_put(parsed);
-      curl_buffer_free(&chunk);
-      return NULL;
-   }
-
-   response = strdup(json_object_get_string(text_obj));
-
    // Log cache usage (important for cost monitoring)
    json_object *usage_obj, *cache_creation_obj, *cache_read_obj;
    int input_tokens = 0;
@@ -336,6 +298,21 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
          .drops = &drops,
       };
       llm_context_update_usage(session ? session->session_id : 0, &usage);
+   }
+
+   /* The reply is its text blocks; a model that can't turn thinking off may put
+    * a thinking block first. */
+   json_object *content_array = NULL;
+   if (json_object_object_get_ex(parsed, "content", &content_array) &&
+       json_object_is_type(content_array, json_type_array)) {
+      response = llm_claude_content_text(parsed);
+   }
+   if (response && !response[0]) {
+      free(response);
+      response = NULL;
+   }
+   if (!response) {
+      OLOG_ERROR("Claude response has no text");
    }
 
    // Check stop reason
@@ -476,6 +453,9 @@ static int claude_single_shot_once(struct json_object *conversation_history,
       return 1;
    }
    memset(result, 0, sizeof(*result));
+   /* Each attempt's own outcome: the tool loop retries on what this call sets,
+    * never on what an earlier attempt left. */
+   llm_set_last_error(LLM_ERR_NONE);
 
    if (!api_key) {
       OLOG_ERROR("Claude API key is required");
@@ -661,6 +641,31 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    curl_easy_cleanup(curl_handle);
    curl_slist_free_all(headers);
    curl_buffer_free(&streaming_ctx.raw_response);
+
+   /* A 200 says only that the stream started: an error event, or a stream that
+    * ends without message_stop, means the reply was cut off.  (A user stop
+    * aborts the transfer and fails above.)  Before any output it is worth a
+    * retry; after some (text or thinking), a retry would repeat what the user
+    * already heard or saw. */
+   if (!llm_stream_is_complete(stream_ctx)) {
+      const char *why = stream_ctx->stream_error[0] ? stream_ctx->stream_error
+                                                    : "the response ended early";
+      const bool shown = stream_ctx->first_token_received || stream_ctx->has_thinking;
+      OLOG_ERROR("Claude API: stream failed: %s", why);
+      if (!shown) {
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      }
+#ifdef ENABLE_WEBUI
+      session_t *session = session_get_command_context();
+      if (shown && session && session->type == SESSION_TYPE_WEBUI) {
+         webui_send_error(session, "LLM_ERROR", why);
+      }
+#endif
+      sse_parser_free(sse_parser);
+      llm_stream_free(stream_ctx);
+      json_object_put(request);
+      return 1;
+   }
 
    /* Populate result from stream context */
    if (llm_stream_has_tool_calls(stream_ctx)) {

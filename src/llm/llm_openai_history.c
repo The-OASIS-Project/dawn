@@ -182,7 +182,7 @@ int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *o
                continue;
             }
          }
-         char *result = llm_claude_tool_result_text(elem);
+         char *result = llm_claude_content_text(elem);
          if (!result) {
             OLOG_WARNING("OpenAI: tool result text not converted (out of memory); sent empty");
          }
