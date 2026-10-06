@@ -40,29 +40,52 @@ typedef struct {
 } email_conn_t;
 
 /**
+ * IMAP paging cursor.  UIDs only grow within one UIDVALIDITY epoch, so "the next
+ * page" is "matches with a UID below the oldest one already returned".
+ */
+typedef struct {
+   uint32_t before_uid;       /* in:  only match UIDs below this (0 = first page) */
+   uint32_t uidvalidity;      /* in:  epoch the cursor was issued under (0 = don't assert) */
+   uint32_t next_before_uid;  /* out: cursor for the next page (0 = no more matches) */
+   uint32_t next_uidvalidity; /* out: epoch observed on this call (0 = not reported);
+                               * captured by email_instrument's debug callback */
+   bool stale;                /* out: the pinned epoch no longer matches the mailbox */
+} email_imap_page_t;
+
+/**
  * @brief Fetch recent emails from an IMAP folder, sorted newest-first.
  * @param folder       IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
  * @param unread_only  If true, only fetch unread (UNSEEN) emails
- * @return 0 on success, 1 on failure
+ * @param page         Optional paging cursor (NULL = first page, no cursor out)
+ * @return 0 on success, 1 on failure (page->stale set when the cursor's epoch changed)
  */
 int email_fetch_recent(const email_conn_t *conn,
                        const char *folder,
                        int count,
                        bool unread_only,
+                       email_imap_page_t *page,
                        email_summary_t *out,
                        int max_out,
                        int *out_count);
 
 /**
- * @brief Read a full message by UID from an IMAP folder.
- * Allocates msg->body on heap; caller must call email_message_free().
- * @param folder  IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
- * @return 0 on success, 1 on failure
+ * @brief Read a message by UID from an IMAP folder (email_mime.h does the reading)
+ *
+ * Fetches at most opts->fetch_bytes of it (a bigger message reads as
+ * truncated, never fails), or with opts->headers_only just From and Subject
+ * (FETCH ENVELOPE, which leaves the message unread).  A full read marks the
+ * message read on the server.
+ *
+ * @param folder IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
+ * @param err    Why it failed (may be NULL); EMAIL_ERR_NOT_FOUND for no such UID
+ * @return 0, or 1 with no heap left in @p out; free a success with email_message_free()
  */
 int email_read_message(const email_conn_t *conn,
                        const char *folder,
                        uint32_t uid,
-                       email_message_t *out);
+                       const email_read_opts_t *opts,
+                       email_message_t *out,
+                       email_err_t *err);
 
 /**
  * @brief Search emails by criteria in an IMAP folder.
@@ -79,6 +102,7 @@ int email_read_message(const email_conn_t *conn,
 int email_search(const email_conn_t *conn,
                  const char *folder,
                  const email_search_params_t *params,
+                 email_imap_page_t *page,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
@@ -120,25 +144,44 @@ int email_send(const email_conn_t *conn,
  */
 int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok);
 
-/**
- * @brief Trash a message via IMAP (COPY to Trash + delete from source).
- * @param folder         Source folder (e.g. "INBOX")
- * @param uid            Message UID
- * @param is_gmail       True if Gmail IMAP server (uses [Gmail]/Trash)
- * @return 0 on success, 1 on failure
- */
-int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid, bool is_gmail);
+/* Trash / archive results (0 = done).  The values match the service's
+ * EMAIL_RC_* codes of the same names so they pass through. */
+#define EMAIL_CLIENT_RC_FAILURE 1         /* network, server, or bad input */
+#define EMAIL_CLIENT_RC_NOT_FOUND 13      /* no message with that UID in the folder */
+#define EMAIL_CLIENT_RC_NO_TRASH 16       /* the account has no Trash folder */
+#define EMAIL_CLIENT_RC_FOLDER_MISSING 17 /* the account has no Archive folder */
+#define EMAIL_CLIENT_RC_ALREADY_THERE 18  /* the message is already in that folder */
+#define EMAIL_CLIENT_RC_LEFT_FLAGGED 19   /* copied + \Deleted; no MOVE or UIDPLUS to remove it */
+#define EMAIL_CLIENT_RC_NOT_REMOVED 20    /* copied; removing the original failed */
 
 /**
- * @brief Archive a message via IMAP (COPY to Archive + delete from source).
- * @param folder         Source folder (e.g. "INBOX")
- * @param uid            Message UID
- * @param is_gmail       True if Gmail IMAP server (uses [Gmail]/All Mail)
- * @return 0 on success, 1 on failure
+ * @brief Move a message to the account's Trash folder (email_imap_move.c)
+ *
+ * The Trash is the user's own folder the server marks \Trash, else one with
+ * a known name at the top of their folders; with none the message stays
+ * where it is (EMAIL_CLIENT_RC_NO_TRASH), never deleted.  Only this message
+ * is touched: UID MOVE, or UID COPY + UID STORE \Deleted + UID EXPUNGE of its
+ * UID; never a bare EXPUNGE.  A server with neither MOVE nor UIDPLUS gets the
+ * copy and the \Deleted flag only (EMAIL_CLIENT_RC_LEFT_FLAGGED); a copy whose
+ * original couldn't then be removed is EMAIL_CLIENT_RC_NOT_REMOVED.
+ *
+ * @param folder Source folder (e.g. "INBOX")
+ * @param uid    Message UID
+ * @return 0, EMAIL_CLIENT_RC_NOT_FOUND, _NO_TRASH, _ALREADY_THERE,
+ *         _LEFT_FLAGGED, _NOT_REMOVED, or _FAILURE
  */
-int email_archive_message(const email_conn_t *conn,
-                          const char *folder,
-                          uint32_t uid,
-                          bool is_gmail);
+int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid);
+
+/**
+ * @brief Move a message to the account's Archive folder (email_imap_move.c)
+ *
+ * The Archive is the user's own folder the server marks \Archive, else on
+ * Gmail \All (All Mail), else one with a known name.  Moves as
+ * email_trash_message does.
+ *
+ * @return 0, EMAIL_CLIENT_RC_NOT_FOUND, _FOLDER_MISSING, _ALREADY_THERE,
+ *         _LEFT_FLAGGED, _NOT_REMOVED, or _FAILURE
+ */
+int email_archive_message(const email_conn_t *conn, const char *folder, uint32_t uid);
 
 #endif /* EMAIL_CLIENT_H */

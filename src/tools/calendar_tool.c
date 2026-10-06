@@ -36,6 +36,7 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "logging.h"
+#include "tools/calendar_pick.h"
 #include "tools/calendar_service.h"
 #include "tools/oauth_client.h"
 #include "tools/tool_registry.h"
@@ -392,9 +393,24 @@ static char *handle_add(struct json_object *details, int user_id) {
    const char *rrule = json_get_str(details, "rrule");
    const char *tz = g_config.localization.timezone;
 
+   char cal_used[CALENDAR_PICK_LABEL_MAX] = ""; /* a label, whole */
    char uid[256] = { 0 };
    int rc = calendar_service_add(user_id, summary, start, end, location, description, all_day,
-                                 calendar_name, rrule, tz, uid, sizeof(uid));
+                                 calendar_name, rrule, tz, uid, sizeof(uid), cal_used,
+                                 sizeof(cal_used));
+   if (rc == CALENDAR_RC_NOT_FOUND) {
+      /* Never a guess: the calendar named, or the user picks. */
+      char writable[512] = { 0 }, ro[512] = { 0 };
+      calendar_service_get_access_summary(user_id, writable, sizeof(writable), ro, sizeof(ro));
+      char *msg = malloc(1024);
+      if (!msg)
+         return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed");
+      snprintf(msg, 1024,
+               "No single writable calendar is named '%s'. Writable calendars: %s. Ask the user "
+               "which one, then pass its name.",
+               calendar_name ? calendar_name : "", writable[0] ? writable : "(none)");
+      return msg;
+   }
    if (rc == CALENDAR_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: the target calendar belongs to a read-only account. "
@@ -427,10 +443,10 @@ static char *handle_add(struct json_object *details, int user_id) {
       snprintf(time_str, sizeof(time_str), "%s at %s", date_str, t_str);
    }
 
-   int pos = snprintf(buf, 512, "Event created: '%s' on %s.%s%s", summary, time_str,
-                      location ? " Location: " : "", location ? location : "");
-   if (uid[0])
-      snprintf(buf + pos, 512 - pos, "\nUID: %s", uid);
+   int pos = snprintf(buf, 512, "Event created on the '%s' calendar: '%s' on %s.%s%s", cal_used,
+                      summary, time_str, location ? " Location: " : "", location ? location : "");
+   if (uid[0] && pos >= 0 && pos < 512)
+      snprintf(buf + pos, 512 - (size_t)pos, "\nUID: %s", uid);
    return buf;
 }
 
@@ -508,6 +524,10 @@ static char *calendar_tool_callback(const char *action, char *value, int *should
       return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0) {
+      json_object_put(details);
+      return strdup(TOOL_GUEST_REFUSAL);
+   }
 
    char *result = NULL;
 
@@ -612,8 +632,16 @@ static const treg_param_t calendar_params[] = {
  * Tool Metadata
  * ============================================================================= */
 
+static const tool_action_kind_entry_t s_calendar_action_kinds[] = {
+   { "calendars", TOOL_KIND_READ, NULL }, { "today", TOOL_KIND_READ, NULL },
+   { "range", TOOL_KIND_READ, NULL },     { "next", TOOL_KIND_READ, NULL },
+   { "search", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t calendar_metadata = {
    .name = "calendar",
+   .action_kinds = s_calendar_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_calendar_action_kinds),
    .device_string = "calendar",
    .topic = "dawn",
    .aliases = { "cal", "schedule", "events", "appointment" },
@@ -627,7 +655,7 @@ static const tool_metadata_t calendar_metadata = {
                   "create events ('add a meeting tomorrow at 2pm'), "
                   "update or delete events by UID.",
    .params = calendar_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(calendar_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SECRETS | TOOL_CAP_SCHEDULABLE,

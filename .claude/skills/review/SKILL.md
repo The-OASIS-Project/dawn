@@ -1,6 +1,6 @@
 ---
 name: review
-description: Run all five review agents on changes, synthesize findings, triage based on developer thinking, and fix approved items. Trigger when the user says "review", "run the agents", "run all four", "run all five", "full review", "code review", or similar.
+description: Run the six review agents on changes, synthesize findings, triage based on developer thinking, and fix approved items. Trigger when the user says "review", "run the agents", "run the big three", "run all four", "run all five", "run all six", "full review", "code review", or similar.
 disable-model-invocation: false
 user-invocable: true
 allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Agent
@@ -17,6 +17,8 @@ The user may specify scope in any way they like — a file path, "the last commi
 
 If no argument is given, default to all uncommitted changes (`git diff` + `git diff --cached` + new untracked source files from `git status`).
 
+For a whole-branch or pre-merge review ("review the branch", "before I push/merge"), use `git diff main...HEAD` plus `git log main..HEAD --oneline`, and tell the correctness-reviewer it is in holistic-diff mode so it hunts cross-commit interactions.
+
 The user may also say something like "and fix everything" or "auto-fix" — this means skip the confirmation step and proceed directly to fixes after triage. The default is to wait for confirmation.
 
 ## Step 1: Gather Changes
@@ -26,17 +28,26 @@ The user may also say something like "and fix everything" or "auto-fix" — this
 
 ## Step 2: Launch Review Agents
 
-Launch all five agents **in parallel** (single message, multiple Agent tool calls). Feed each one the actual diff content and the project context (embedded C on Jetson, CLAUDE.md standards).
+Launch the agents **in parallel** (single message, multiple Agent tool calls). Feed each one the actual diff content and the project context (embedded C on Jetson, CLAUDE.md standards).
 
 The agents already know their domains and how to structure their output:
 
 1. **architecture-reviewer**
 2. **embedded-efficiency-reviewer**
 3. **security-auditor**
-4. **ui-design-architect** — relevant for ANY UI changes: web (JS/CSS/HTML), SDL, LVGL, or any other display/interaction layer
-5. **coding-standards-auditor** — audits compliance with CLAUDE.md and CODING_STYLE_GUIDE.md (return codes, naming, Doxygen, formatting, include hygiene)
+4. **correctness-reviewer**: logic and correctness, the lens the specialists structurally miss. It covers state-ordering hazards, contract vs. implementation, boundaries, error paths and cross-commit interactions. It also checks **non-literal format strings**: prompt templates and other named formats passed to `snprintf`/logging, which `-Wformat` cannot check, including a stray `%` in prompt prose.
+5. **ui-design-architect**: relevant for ANY UI changes: web (JS/CSS/HTML), SDL, LVGL, or any other display/interaction layer
+6. **coding-standards-auditor**: audits compliance with CLAUDE.md and CODING_STYLE_GUIDE.md (return codes, naming, Doxygen, formatting, include hygiene)
 
-If the changes clearly don't touch any UI surface at all, you may skip the ui-design-architect and note why.
+**Which agents per trigger phrase** (correctness-reviewer is in every set; it's the general-logic lens, not a specialist):
+
+| Phrase | Agents |
+|---|---|
+| "review", "code review", "run the agents", "run the big three" | 1–4 |
+| "run all four" | 1–4 + ui-design-architect |
+| "run all five", "run all six", "full review" | all six (mandatory for large refactors, new modules, pre-release audits) |
+
+If the changes clearly don't touch any UI surface at all, you may skip the ui-design-architect and note why. Do NOT substitute or add `master-code-reviewer`; the specialized set above replaces it. Use it only if the developer asks for it by name.
 
 ## Step 3: Synthesize and Validate
 
@@ -78,13 +89,21 @@ Show the developer:
 For each approved fix:
 1. Read the file first (always)
 2. Make the minimal change needed — don't refactor surrounding code
-3. After all fixes, run `./format_code.sh`
-4. Run `make -C build-debug -j8` to verify the build
-5. If the build fails, fix it before continuing
+
+Then verify in the project's commit order. Format **before** building, so the bytes you compiled and tested are the bytes that get committed:
+1. `./format_code.sh --changed` (never the bare full-tree run, which is slow and touches unrelated files)
+2. `make -C build-debug -j8 2>&1 | grep -E "warning:|error:"`: the build must be clean, **zero warnings** (no warnings get checked in)
+3. `make -C build-debug tests-ci` then run the unit tests relevant to the touched modules (`./build-debug/tests/test_<name>`). Plain `make` does not rebuild test binaries, and some tests bare-link a single `.c`, so a new cross-module call only fails to link here.
+4. `./format_code.sh --check --changed`
+5. If any step fails, fix it before continuing
+
+## Step 6b: Re-review Post-Review Changes
+
+Code written after the agent pass (the fixes themselves, or new work added during a redirect) was seen by no reviewer. If a fix is more than a trivial localized edit (new logic, new branches, touched lock/lifetime/ordering, or a multi-file change), re-run the relevant lens(es) on just that delta before calling the review done. A bug introduced while applying feedback is invisible to the original pass; that is how the reconnect-state bug on the music branch reached a PR.
 
 ## Step 7: Summary
 
 1. List what was fixed (file:line + one-line description)
 2. List what was skipped and why
-3. Confirm build + format pass
-4. Do NOT commit — the developer handles git
+3. Confirm build (zero warnings) + tests + format check pass, and note any post-review re-review from Step 6b
+4. Do NOT run `git add`/`commit`/`push`; the developer handles git. Offer a single `git add <files>` command and a terse commit message (no Claude trailers, no real names, no internal planning labels)

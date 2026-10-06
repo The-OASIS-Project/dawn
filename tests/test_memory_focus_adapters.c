@@ -34,6 +34,7 @@
 #include "core/focus/focus_source.h"
 #include "core/focus/focus_source_internal.h"
 #include "dawn_error.h"
+#include "memory/memory_embeddings.h"
 #include "memory/memory_focus_adapters.h"
 #include "test_memory_focus_adapters_mocks.h"
 #include "unity.h"
@@ -59,6 +60,9 @@ static void config_defaults_for_test(void) {
 void setUp(void) {
    focus_unregister_all();
    mock_reset();
+   /* The real entity cache is linked in: each test's mock entities are a new
+    * pool, as an entity change would make them in production. */
+   memory_embeddings_invalidate_entity_cache();
    config_defaults_for_test();
 }
 
@@ -449,6 +453,341 @@ static void test_cap_honoring_facts(void) {
  * Round-robin determinism — relation adapter
  * ===================================================================== */
 
+/* At cosine 0.5 to embed_q_match_e1: the pool's typical level for that query. */
+static const float embed_typical[MOCK_DIMS] = { 0.5f, 0.8660254f, 0.0f, 0.0f };
+
+/* A pool of @p n entities at the typical level, then @p last (if any) at the
+ * end: the least mentioned, so outside any most-mentioned subset. */
+static void seed_entity_pool(int n) {
+   for (int i = 0; i < n; i++) {
+      char name[32];
+      snprintf(name, sizeof(name), "Filler Thing %d", i);
+      seed_entity(i, 1000 + i, 1, name, "thing", false, embed_typical, NULL);
+      s_mock.entities[i].mention_count = 100;
+   }
+   s_mock.entity_count = n;
+   s_mock.entity_dim = MOCK_DIMS;
+   s_mock.embeddings_available = true;
+   g_config.memory.focus_injection.entity_min_relevance = 0.40f;
+}
+
+static bool has_entity(const focus_compose_result_t *r, const char *needle) {
+   for (int i = 0; i < r->candidate_count; i++) {
+      if (strcmp(r->candidates[i].source_id, "memory_entity") == 0 &&
+          strstr(r->candidates[i].text, needle))
+         return true;
+   }
+   return false;
+}
+
+static int count_source(const focus_compose_result_t *r, const char *source) {
+   int n = 0;
+   for (int i = 0; i < r->candidate_count; i++)
+      if (strcmp(r->candidates[i].source_id, source) == 0)
+         n++;
+   return n;
+}
+
+/* The most similar entity is found wherever it sits in mention order, past
+ * the cache's first read, and the typical ones are gated out. */
+static void test_entity_found_past_the_most_mentioned(void) {
+   seed_entity_pool(MOCK_MAX_ENTITIES - 1);
+   seed_entity(MOCK_MAX_ENTITIES - 1, 9999, 1, "Marigold Garden Planner", "project", false,
+               embed_e1, NULL);
+   s_mock.entity_count = MOCK_MAX_ENTITIES;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "unrelated words", embed_q_match_e1,
+                                                MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_TRUE(has_entity(&result, "Marigold Garden Planner"));
+   TEST_ASSERT_FALSE(has_entity(&result, "Filler Thing"));
+   focus_result_free(&result);
+}
+
+/* An entity a long message names is found although the message's embedding
+ * is diluted to the typical level; a two-word name needs both words. */
+static void test_entity_named_in_long_message(void) {
+   seed_entity_pool(40);
+   seed_entity(40, 2001, 1, "Quillon", "organization", false, embed_typical, NULL);
+   seed_entity(41, 2002, 1, "Nightly Backup Test", "event", false, embed_typical, NULL);
+   s_mock.entity_count = 42;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS,
+       focus_compose(1, false,
+                     "good evening, what do you think about my decision to take my quillon "
+                     "move? I'm also running a documents test",
+                     embed_q_match_e1, MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_TRUE(has_entity(&result, "Quillon"));
+   TEST_ASSERT_FALSE(has_entity(&result, "Nightly Backup Test")); /* only "test" */
+   TEST_ASSERT_FALSE(has_entity(&result, "Filler Thing"));
+   focus_result_free(&result);
+}
+
+/* Relations come only from relevant subjects: none relevant, none at all. */
+static void test_relation_needs_a_relevant_subject(void) {
+   seed_entity_pool(40);
+   seed_entity(0, 1000, 1, "Marigold Project", "project", false, embed_typical, NULL);
+   seed_relation(0, 5000, 1, 1000, "owns", "something", 0, 0);
+   s_mock.relation_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "the weather today", embed_q_match_e1,
+                                                MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_EQUAL_INT(0, count_source(&result, "memory_relation"));
+   focus_result_free(&result);
+
+   /* Named, the same subject brings its relation. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "tell me about the marigold project",
+                                       embed_q_match_e1, MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_EQUAL_INT(1, count_source(&result, "memory_relation"));
+   focus_result_free(&result);
+}
+
+/* Without a query embedding, named entities are still found. */
+static void test_entity_names_without_embedding(void) {
+   seed_entity_pool(40);
+   seed_entity(40, 2001, 1, "Quillon", "organization", false, embed_typical, NULL);
+   s_mock.entity_count = 41;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what about quillon", NULL, 0, 1700000200,
+                                                8, &result));
+   TEST_ASSERT_TRUE(has_entity(&result, "Quillon"));
+   TEST_ASSERT_EQUAL_INT(1, count_source(&result, "memory_entity"));
+   focus_result_free(&result);
+}
+
+/* A pool too small to gate: context injection keeps the most similar, the
+ * memory tool's search returns only the entities the query names. */
+static void test_entity_small_pool(void) {
+   seed_entity(0, 1, 1, "Quillon", "organization", false, embed_e1, NULL);
+   seed_entity(1, 2, 1, "Watanabe", "person", false, embed_e2, NULL);
+   s_mock.entity_count = 2;
+   s_mock.entity_dim = MOCK_DIMS;
+   s_mock.embeddings_available = true;
+   g_config.memory.focus_injection.entity_min_relevance = 0.40f;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "unrelated words", embed_q_match_e2,
+                                                MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_TRUE(has_entity(&result, "Watanabe"));
+   focus_result_free(&result);
+
+   int64_t ids[4];
+   char names[4][MEMORY_ENTITY_NAME_MAX];
+   TEST_ASSERT_EQUAL_INT(0, memory_embeddings_entity_search(1, "unrelated words", NULL, ids, names,
+                                                            NULL, NULL, 4));
+   TEST_ASSERT_EQUAL_INT(1, memory_embeddings_entity_search(1, "what do we know about quillon?",
+                                                            NULL, ids, names, NULL, NULL, 4));
+   TEST_ASSERT_EQUAL_STRING("Quillon", names[0]);
+
+   /* The gate off (0) means any similar entity counts, on this path too. */
+   g_config.memory.focus_injection.entity_min_relevance = 0.0f;
+   memory_entity_match_t m[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         memory_embeddings_entity_matches(1, "unrelated words", embed_q_match_e2,
+                                                          MOCK_DIMS, 0.0f, m, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+}
+
+/* A name near the end of a long message is still found. */
+static void test_entity_named_late_in_long_message(void) {
+   seed_entity_pool(40);
+   seed_entity(40, 2001, 1, "Quillon", "organization", false, embed_typical, NULL);
+   s_mock.entity_count = 41;
+   char msg[1024];
+   size_t off = 0;
+   for (int i = 0; i < 60; i++) {
+      off += (size_t)snprintf(msg + off, sizeof(msg) - off, "word%02d ", i);
+   }
+   snprintf(msg + off, sizeof(msg) - off, "and finally quillon");
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, msg, embed_q_match_e1, MOCK_DIMS,
+                                                1700000200, 8, &result));
+   TEST_ASSERT_TRUE(has_entity(&result, "Quillon"));
+   focus_result_free(&result);
+}
+
+/* Longest match wins: the query's "ai" belongs to "Marigold AI Planner", so
+ * "AI" isn't named; "Quillon" alone still is. */
+static void test_entity_longest_match_wins(void) {
+   seed_entity_pool(40);
+   seed_entity(40, 3001, 1, "Marigold AI Planner", "project", false, embed_typical, NULL);
+   seed_entity(41, 3002, 1, "AI", "topic", false, embed_typical, NULL);
+   seed_entity(42, 3003, 1, "Quillon", "org", false, embed_typical, NULL);
+   s_mock.entity_count = 43;
+   memory_entity_match_t m[8];
+   int n = 0;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "recall Marigold AI Planner",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Marigold AI Planner", m[0].name);
+
+   /* Without the longer match, "ai" does name AI. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "what can ai do for us",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("AI", m[0].name);
+
+   /* A three-word title with one content word takes two matching words. */
+   seed_entity(43, 3004, 1, "Why We Build", "work", false, embed_typical, NULL);
+   s_mock.entity_count = 44;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "who builds the displays",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   /* Function words and repeats count toward a name: "the quillmen" names
+    * The Quillmen, "borra borra" names Borra Borra.  A tie goes to the exact
+    * name: "morning report" names Morning Report, not Morning Report Test. */
+   seed_entity(44, 3005, 1, "The Quillmen", "band", false, embed_typical, NULL);
+   seed_entity(45, 3006, 1, "Borra Borra", "place", false, embed_typical, NULL);
+   seed_entity(46, 3007, 1, "Morning Report", "event", false, embed_typical, NULL);
+   seed_entity(47, 3008, 1, "Morning Report Test", "event", false, embed_typical, NULL);
+   s_mock.entity_count = 48;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         memory_embeddings_entity_matches(1, "play the quillmen", embed_q_match_e1,
+                                                          MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("The Quillmen", m[0].name);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "trip to borra borra",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Borra Borra", m[0].name);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "time for the morning report",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Morning Report", m[0].name);
+
+   /* A single letter is a word too: "X Corp" needs the phrase, not "corp". */
+   seed_entity(48, 3009, 1, "X Corp", "org", false, embed_typical, NULL);
+   s_mock.entity_count = 49;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         memory_embeddings_entity_matches(1, "the corp picnic", embed_q_match_e1,
+                                                          MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "what does x corp sell",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("X Corp", m[0].name);
+
+   /* Unrelated names each stand on their own. */
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "the marigold ai planner and quillon",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+}
+
+/* Summaries found only by meaning must stand out from the pool; a keyword
+ * match always counts; a small pool isn't gated. */
+static void test_summary_relevance_gate(void) {
+   const time_t now = 1790000000;
+   seed_summary(0, 11, 1, "the relevant summary", now - 3600, false);
+   seed_summary(1, 12, 1, "a typical summary", now - 3600, false);
+   s_mock.summary_count = 2;
+   s_mock.summary_keyword_off = true;
+   s_mock.summary_sem_score[0] = 0.80f; /* relevance (0.8-0.5)/0.5 = 0.60 */
+   s_mock.summary_sem_score[1] = 0.55f; /* relevance 0.10 */
+   s_mock.summary_pool_scored = 100;
+   s_mock.summary_pool_sum = 50.0; /* mean cosine 0.5 */
+   s_mock.embeddings_available = true;
+   s_mock.entity_dim = MOCK_DIMS;
+   g_config.memory.focus_injection.summary_min_relevance = 0.22f;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q_match_e1, MOCK_DIMS,
+                                                now, 8, &result));
+   bool relevant = false, typical = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strstr(result.candidates[i].text, "the relevant summary"))
+         relevant = true;
+      if (strstr(result.candidates[i].text, "a typical summary"))
+         typical = true;
+   }
+   TEST_ASSERT_TRUE(relevant);
+   TEST_ASSERT_FALSE(typical);
+   focus_result_free(&result);
+
+   /* A keyword match counts whatever its similarity. */
+   s_mock.summary_keyword_off = false;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q_match_e1, MOCK_DIMS,
+                                                now, 8, &result));
+   typical = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strstr(result.candidates[i].text, "a typical summary"))
+         typical = true;
+   }
+   TEST_ASSERT_TRUE(typical);
+   focus_result_free(&result);
+
+   /* Too small a pool for a baseline: not gated. */
+   s_mock.summary_keyword_off = true;
+   s_mock.summary_pool_scored = 10;
+   s_mock.summary_pool_sum = 5.0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q_match_e1, MOCK_DIMS,
+                                                now, 8, &result));
+   typical = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strstr(result.candidates[i].text, "a typical summary"))
+         typical = true;
+   }
+   TEST_ASSERT_TRUE(typical);
+   focus_result_free(&result);
+}
+
+/* Each user keeps a copy; changing one user's entities reloads only theirs. */
+static void test_entity_cache_per_user(void) {
+   seed_entity(0, 1, 1, "Quillon", "organization", false, embed_e1, NULL);
+   seed_entity(1, 2, 2, "Watanabe", "person", false, embed_e2, NULL);
+   s_mock.entity_count = 2;
+   s_mock.entity_dim = MOCK_DIMS;
+   s_mock.embeddings_available = true;
+   memory_entity_match_t m[4];
+   int n = 0;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         memory_embeddings_entity_matches(1, "quillon", NULL, 0, 0.4f, m, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         memory_embeddings_entity_matches(2, "watanabe", NULL, 0, 0.4f, m, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Watanabe", m[0].name);
+   const int loads = s_mock.call_count_entity_embeddings;
+
+   /* Alternating users: both copies stay. */
+   memory_embeddings_entity_matches(1, "quillon", NULL, 0, 0.4f, m, 4, &n);
+   memory_embeddings_entity_matches(2, "watanabe", NULL, 0, 0.4f, m, 4, &n);
+   TEST_ASSERT_EQUAL_INT(loads, s_mock.call_count_entity_embeddings);
+
+   /* User 2 changes: only user 2 reloads. */
+   memory_embeddings_invalidate_entity_cache_for_user(2);
+   memory_embeddings_entity_matches(1, "quillon", NULL, 0, 0.4f, m, 4, &n);
+   TEST_ASSERT_EQUAL_INT(loads, s_mock.call_count_entity_embeddings);
+   memory_embeddings_entity_matches(2, "watanabe", NULL, 0, 0.4f, m, 4, &n);
+   TEST_ASSERT_EQUAL_INT(loads + 1, s_mock.call_count_entity_embeddings);
+}
+
 static void test_relation_round_robin(void) {
    /* 3 entities, all valid subjects.  Top-3 cosine seeds the round-robin. */
    seed_entity(0, 1, 1, "Subj1", "person", false, embed_e1, NULL);
@@ -707,6 +1046,15 @@ int main(void) {
 
    /* Round-robin determinism */
    RUN_TEST(test_relation_round_robin);
+   RUN_TEST(test_entity_found_past_the_most_mentioned);
+   RUN_TEST(test_entity_named_in_long_message);
+   RUN_TEST(test_relation_needs_a_relevant_subject);
+   RUN_TEST(test_entity_names_without_embedding);
+   RUN_TEST(test_entity_small_pool);
+   RUN_TEST(test_entity_named_late_in_long_message);
+   RUN_TEST(test_entity_cache_per_user);
+   RUN_TEST(test_summary_relevance_gate);
+   RUN_TEST(test_entity_longest_match_wins);
 
    /* NULL safety */
    RUN_TEST(test_summary_null_query_text);

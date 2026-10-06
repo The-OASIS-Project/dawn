@@ -24,8 +24,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/session_prefix.h"
 #include "core/text_filter.h"
 #include "dawn_error.h"
+#include "llm/llm_context_text.h"
+#include "logging.h"
 #include "memory/memory_citation.h"
 
 /* Trim trailing ASCII whitespace in place (Claude rejects assistant turns that
@@ -64,8 +67,25 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
     * trailing <cited> tag from the parser. */
    memory_citation_capture(session, clean);
 
+   /* The tags DAWN reads out of a reply come out next, before the reply is
+    * defused: what stripping removes can't join a marker back together after
+    * it was checked. */
    text_filter_command_strip(clean, false); /* complete response: leave an orphan <command> */
    text_filter_cited_strip(clean);          /* <cited>…</cited> (always removed) */
+
+   /* What the model was led to write that imitates DAWN's framing, or carries
+    * the conversation's tag, doesn't stay in the conversation to pass for
+    * DAWN's on a later turn (the text is kept otherwise, byte for byte). */
+   char *safe = session_prefix_mask_secret(session, llm_context_neutralize(clean));
+   if (!safe) {
+      free(clean);
+      return FAILURE;
+   }
+   if (strcmp(safe, clean) != 0) {
+      OLOG_WARNING("finalize: the reply imitated DAWN's framing or carried its tag; defused");
+   }
+   free(clean);
+   clean = safe;
    rtrim(clean);
 
    out->text = clean;

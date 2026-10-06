@@ -38,8 +38,26 @@ the thread at any time with `/new`.
    Codes are 8-character Crockford base32 (no I/L/O/U) and expire in 10 minutes.
 3. From the chat app, send `/link CODE` to the bot (Slack users: send
    `link CODE` without the slash — Slack reserves `/` for its own commands).
-4. DAWN confirms the link. From then on, every message in that conversation
-   reaches the assistant.
+4. DAWN confirms the link. From then on, your messages in that conversation
+   reach the assistant.
+
+**A channel belongs to the person who linked it.** DAWN records the chat app's
+id for whoever sent `/link` and answers only that person. In a group chat the
+other members are ignored, and each of them can link their own DAWN account
+from the same group: each gets their own conversation, memory and tools. These
+are ignored too, because no single, known person sent them: anonymous group
+admins, posts in a channel's or group's name, bots, and forwarded messages.
+Discord and Slack channels are direct messages, and DAWN records your id on the
+first message.
+
+**Replies in a group are seen by the whole group.** The assistant answers you
+with your data (email, calendar, memory), and everyone in the chat reads the
+answer. Link a group only if that's fine with you; a private chat with the bot
+keeps it private. A link code you send in a group is used up there even if the
+link is refused, so no one else in the group can reuse it.
+
+One chat app account links to one DAWN account per chat; linking it to a second
+account is refused until it's unlinked from the first.
 
 Once linked, just talk normally — no wake word needed (except SMS outside its
 active window; see [SMS](#sms)). Send `/new` (Slack: ask the assistant to
@@ -108,7 +126,26 @@ the messaging engine is running.
 
 1. Generate a link code for your user (with `--provider sms` if you like).
 2. From the phone you want to link, text `/link CODE` to your DAWN/ECHO number.
-3. After linking, you have an **active-conversation window**: for
+3. DAWN texts that number a 6-digit code. Enter it on the new channel in the
+   WebUI **Messaging Channels** panel (it shows **Waiting for code**). The code
+   lasts 10 minutes, and a number allows 10 tries a day (new codes don't add
+   more); **Send a new code** texts another
+   (a number gets up to 3 a day, shared by every account linking it; an
+   account gets 5). A code that can't be sent (the modem is offline, say) is
+   cancelled, so ask for another once texts work again. Neither the code DAWN sends
+   nor the `/link` code you text is kept in DAWN's SMS log.
+
+   Why: anyone can put any number on a text, so `/link` from a number doesn't
+   show it's yours. Receiving the code there does. A number linked before this
+   step existed keeps working. Unlinking a number drops its proof (numbers get
+   reassigned), so linking it again needs a new code.
+
+   **This proof is only as good as your MQTT broker.** DAWN and ECHO exchange
+   texts over MQTT (`echo/cmd`, `echo/events`), so anyone who can read and
+   publish there can forge a `/link` from any number and read the code back.
+   Run the broker with authentication and ACLs on `echo/#` (see
+   [GETTING_STARTED.md, MQTT Security](../GETTING_STARTED.md#mqtt-security-authentication--tls)).
+4. After linking, you have an **active-conversation window**: for
    `active_window_sec` seconds after each exchange (default 600 = 10 min),
    replies route straight to the assistant with no wake word. Outside the
    window, an SMS needs the wake word ("Hey Friday, ...") or it falls through to
@@ -117,6 +154,35 @@ the messaging engine is running.
    [messaging.sms]
    active_window_sec = 600   # 0 disables (every SMS then needs a wake word); range 0-86400
    ```
+5. **Actions by text need a reply code.** Anyone can put your number on a
+   text, so a text can read things (your calendar, email, weather) and
+   prepare them (an email draft, a call preview), but anything that acts —
+   sending, calling, deleting, searching the web, playing music — waits for
+   you. DAWN texts your number what was asked and a 6-digit code:
+
+   > Code 482193: reply with it within 5 minutes ONLY if you sent this request:
+   > "send email to Bob <bob@example.com> from you@example.com, subject "Lunch":
+   > Can we move it to 1?"
+   > Reply STOP to cancel.
+
+   For something Friday previews first (an email, a call), the code is your
+   confirmation: there's no separate "yes" step by text, and asking again
+   for the same thing while its code waits doesn't send another code. To
+   change it, just say what to change: the new version replaces the one
+   waiting, and the old code stops working.
+
+   Reply with the code to go ahead, or STOP to drop it; neither needs the wake
+   word, and while a code waits, a text that starts with six digits or says
+   STOP is read as the answer. A forger can put your number on a text but can't
+   read what DAWN texts back. One action waits at a time: a newer request
+   replaces the older one (its code stops working). Three wrong codes drop the
+   action. A code you reply with doesn't count against any limit; a number can
+   have at most 10 unused codes an hour and 30 a day (expired, replaced or
+   stopped), which is what bounds a forger. `/new` also drops a waiting action.
+   Codes and code replies aren't kept in DAWN's SMS log. A
+   plan of several actions can't be approved by one code: ask for them one at
+   a time. (Telegram, Slack and Discord vouch for who sent each message, so
+   they need no code.)
 
 ---
 
@@ -272,9 +338,13 @@ later re-link of the same address resumes the prior thread and custom name.
   shows **Not connected** in the Messaging Channels panel — that means the token
   is missing (or you rotated/removed it and haven't restarted).
 - **`/link` says invalid/expired?** Codes last 10 minutes and are single-use.
-  Generate a fresh one. Review attempts with `dawn-admin messaging link-attempts`.
+  Generate a fresh one. You can hold up to 5 unused codes at a time. Review attempts with `dawn-admin messaging link-attempts`.
 - **Messages from an unlinked sender are ignored** by design — the bot never
-  replies to strangers.
+  replies to strangers. That includes other people in a group chat you linked.
+- **A group chat linked before senders were recorded answers no one** until
+  someone re-sends `/link CODE` there (the daemon log names the channel). A
+  Telegram group upgraded to a supergroup gets a new id, so its link stops
+  working the same way; re-link it.
 - **SMS vs ECHO phone:** the messaging-channels SMS path (this doc) routes your
   texts to the LLM as a conversation. The ECHO phone integration
   (`PHONE_SMS_DESIGN`) surfaces inbound calls/texts as MIRAGE HUD notifications

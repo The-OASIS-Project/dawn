@@ -16,8 +16,8 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Pure request-input shaping for the OpenAI Responses API (see header +
- * docs/RESPONSES_CACHE_REORDER_PLAN.md).
+ * Pure request-input shaping for the OpenAI Responses API (see the header and
+ * the prompt-cache layout note below).
  */
 
 #include "llm/llm_openai_responses_input.h"
@@ -27,32 +27,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_claude_parts.h"
+#include "llm/llm_history_kind.h"
+#include "llm/llm_tool_images_render.h"
+#include "llm/llm_turn_blocks.h"
+#include "logging.h"
+
 /*
- * Prompt-cache layout (see docs/RESPONSES_CACHE_REORDER_PLAN.md).
+ * Prompt-cache layout.
  *
- * CROSS-MODULE INVARIANT: DAWN's two-segment system prompt is produced by
- * rebuild_history_with_two_system_messages_locked() (session_manager.c) as a
- * LEADING CONTIGUOUS RUN of system messages: index 0 = stable prefix (persona +
- * static rules, byte-identical across turns), index 1 = volatile block (per-turn
- * memory/docs/calendar + [system_time], the "--- TURN CONTEXT ---" DATA block).
- * A later `role:"system"` message is NOT part of that pair — it is a mid-history
- * broadcast (session_broadcast_system_message(), e.g. an incoming-call notice).
+ * A conversation's request is append-only (src/core/session_prefix.c): its system
+ * prompt and tool set are frozen at its first turn, in one leading system message,
+ * and later changes (directives, instructions, tool-set changes, each turn's context)
+ * are appended where they happen. That leading message goes in `instructions`, so
+ * [instructions][tools][history] is byte-stable across turns and OpenAI caches it with
+ * its implicit end-of-messages breakpoint; a turn's context is part of its question,
+ * not a separate block. Conversation-scoped system messages (a directive, instruction
+ * or tool-set change) are never part of the leading run: they are emitted inline at
+ * their position (a tool-set change goes in the request's tools instead). A later
+ * `role:"system"` message from a history an older build saved is emitted inline too.
  *
- * For OpenAI Responses the STABLE segment goes in `instructions` (kept byte-stable so
- * [instructions][tools][history] forms a reusable prefix); the VOLATILE segment is
+ * A history without a frozen prefix (a research run, whose system messages are its
+ * prompt) can carry a second leading system message: a per-turn volatile block. It is
  * repositioned to a user-role input item just before the current question
- * (llm_responses_build_input), and mid-history broadcasts are emitted inline at their
- * position. Because the volatile changes every turn and sits before the question,
- * implicit-only caching cannot reuse the stable prefix cross-turn (OpenAI's "a shared
- * prefix is not always a cached prefix" gotcha). GPT-5.6+ resolves this with an EXPLICIT
- * `prompt_cache_breakpoint` stamped on the last stable input_text before the volatile,
- * paired with request-root `prompt_cache_options:{mode:implicit}` (set in
- * llm_openai_responses.c) — implicit keeps the within-turn end breakpoint, the explicit
- * one makes the history cache cross-turn. This differs from the Anthropic `cache_control`
- * mechanism (llm_openai_cache.c), which is position-independent; the breakpoint here is
- * gated on model >= 5.6 (pre-5.6 Responses models reject the field). If the CC path is
- * ever taught to cache cross-turn, reuse this "volatile as a user item before the
- * question" pattern.
+ * (llm_responses_build_input), and on GPT-5.6+ an explicit `prompt_cache_breakpoint`
+ * is stamped on the last stable input_text before it, paired with request-root
+ * `prompt_cache_options:{mode:implicit}` (set in llm_openai_responses.c), so the
+ * history before the volatile block still caches across rounds. Pre-5.6 Responses
+ * models reject the field, so it is gated on the model version.
  */
 
 int llm_responses_count_leading_system_run(struct json_object *history) {
@@ -64,6 +66,10 @@ int llm_responses_count_leading_system_run(struct json_object *history) {
       if (!json_object_object_get_ex(msg, "role", &role_obj))
          break;
       if (strcmp(json_object_get_string(role_obj), "system") != 0)
+         break;
+      /* A directive, instruction or tool-set change is the conversation's, not
+       * the prompt's. */
+      if (message_kind_conversation_scoped(llm_history_kind_of(msg)))
          break;
       run++;
    }
@@ -121,40 +127,15 @@ char *llm_responses_extract_volatile_context(struct json_object *history) {
    return out;
 }
 
-/* Append vision images to a content_part array (Responses schema). */
-void llm_responses_append_vision_parts(struct json_object *content_array,
-                                       const char **vision_images,
-                                       const size_t *vision_image_sizes,
-                                       int vision_image_count) {
-   for (int i = 0; i < vision_image_count; i++) {
-      if (!vision_images[i])
-         continue;
-      if (vision_image_sizes && vision_image_sizes[i] == 0)
-         continue;
-
-      struct json_object *part = json_object_new_object();
-      json_object_object_add(part, "type", json_object_new_string("input_image"));
-      const char *prefix = "data:image/jpeg;base64,";
-      size_t uri_len = strlen(prefix) + strlen(vision_images[i]) + 1;
-      char *uri = malloc(uri_len);
-      if (uri) {
-         snprintf(uri, uri_len, "%s%s", prefix, vision_images[i]);
-         json_object_object_add(part, "image_url", json_object_new_string(uri));
-         free(uri);
-      }
-      json_object_array_add(content_array, part);
-   }
-}
-
 /*
  * Stamp an explicit prompt-cache breakpoint on the last stable input_text block.
  *
- * GPT-5.6+ prompt caching (docs/RESPONSES_CACHE_REORDER_PLAN.md, OpenAI "Prompt caching"
- * guide): implicit caching writes ONE breakpoint at the end of the latest message, so the
- * stable [instructions][tools][history] prefix in front of DAWN's per-turn volatile block
- * ([system_time] + memory retrieval, which changes every turn) is never independently
- * reusable — the documented "a shared prefix is not always a cached prefix" gotcha
- * (live-measured: within-turn cached ~full, each NEW turn fell back to header-only ~21K).
+ * GPT-5.6+ prompt caching (OpenAI "Prompt caching" guide): implicit caching writes ONE
+ * breakpoint at the end of the latest message, so the stable [instructions][tools][history]
+ * prefix in front of a per-turn volatile block (only a history without a frozen prefix
+ * has one: a research run) is never independently reusable — the documented "a shared
+ * prefix is not always a cached prefix" gotcha (live-measured: within-turn cached ~full,
+ * each NEW turn fell back to header-only ~21K).
  * An explicit breakpoint after the stable content makes that prefix cache cross-turn. It
  * is honored ALONGSIDE the implicit end breakpoint (mode stays "implicit"), so within-turn
  * tool-loop caching is preserved. OpenAI accepts breakpoints only on input-side text
@@ -187,17 +168,118 @@ static bool responses_mark_cache_breakpoint(struct json_object *item) {
    return true;
 }
 
+/* A Claude tool_result part as a function_call_output item. */
+static void responses_add_claude_tool_result(struct json_object *part, struct json_object *input) {
+   struct json_object *id = NULL;
+   const char *call_id = json_object_object_get_ex(part, "tool_use_id", &id)
+                             ? json_object_get_string(id)
+                             : NULL;
+   if (!call_id) {
+      return; /* unpairable: sending it would be an API error */
+   }
+   struct json_object *content = NULL;
+   json_object_object_get_ex(part, "content", &content);
+   struct json_object *output = llm_tool_images_responses_output(content);
+   struct json_object *item = output ? json_object_new_object() : NULL;
+   if (item) {
+      json_object_object_add(item, "type", json_object_new_string("function_call_output"));
+      json_object_object_add(item, "call_id", json_object_new_string(call_id));
+      json_object_object_add(item, "output", output);
+      json_object_array_add(input, item);
+   } else {
+      json_object_put(output);
+   }
+}
+
+/* A Claude base64 image part as an input_image part. */
+static void responses_add_claude_image(struct json_object *part, struct json_object *parts) {
+   char *url = llm_claude_image_data_url(part);
+   struct json_object *img = url ? json_object_new_object() : NULL;
+   if (img) {
+      json_object_object_add(img, "type", json_object_new_string("input_image"));
+      json_object_object_add(img, "image_url", json_object_new_string(url));
+      json_object_array_add(parts, img);
+   }
+   free(url);
+}
+
+/* The call_id of a function_call or function_call_output item, or NULL. */
+static const char *pairing_id(struct json_object *item, bool *is_call) {
+   struct json_object *t = NULL, *id = NULL;
+   if (!json_object_object_get_ex(item, "type", &t) || !json_object_get_string(t)) {
+      return NULL;
+   }
+   const char *type = json_object_get_string(t);
+   *is_call = strcmp(type, "function_call") == 0;
+   if (!*is_call && strcmp(type, "function_call_output") != 0) {
+      return NULL;
+   }
+   return json_object_object_get_ex(item, "call_id", &id) ? json_object_get_string(id) : NULL;
+}
+
+/* @p input without any function call or output that lacks its partner: a
+ * history compacted mid-exchange, or converted from another provider, can hold
+ * one, and either alone fails the request.  Each output pairs with the
+ * nearest unanswered call of its id before it (servers that number calls per
+ * turn reuse ids).  Takes @p input; returns the result. */
+static struct json_object *drop_unpaired_calls(struct json_object *input) {
+   const size_t n = json_object_array_length(input);
+   bool *keep = calloc(n ? n : 1, sizeof(*keep));
+   struct json_object *out = keep ? json_object_new_array() : NULL;
+   if (!out) {
+      free(keep);
+      return input;
+   }
+   for (size_t j = 0; j < n; j++) {
+      bool is_call = false;
+      const char *id = pairing_id(json_object_array_get_idx(input, j), &is_call);
+      if (!id) {
+         keep[j] = true;
+         continue;
+      }
+      if (is_call) {
+         continue; /* a call is kept by the output that answers it */
+      }
+      /* An output answers the nearest call of its id before it not yet answered. */
+      for (size_t i = j; i-- > 0;) {
+         bool other_is_call = false;
+         const char *other = pairing_id(json_object_array_get_idx(input, i), &other_is_call);
+         if (other && other_is_call && !keep[i] && strcmp(other, id) == 0) {
+            keep[i] = keep[j] = true;
+            break;
+         }
+      }
+   }
+   size_t dropped = 0;
+   for (size_t i = 0; i < n; i++) {
+      if (keep[i]) {
+         json_object_array_add(out, json_object_get(json_object_array_get_idx(input, i)));
+      } else {
+         dropped++;
+      }
+   }
+   if (dropped > 0) {
+      OLOG_WARNING("Responses: dropped %zu function call item(s) without a partner", dropped);
+   }
+   free(keep);
+   json_object_put(input);
+   return out;
+}
+
 struct json_object *llm_responses_build_input(struct json_object *history,
                                               const char *input_text,
-                                              const char **vision_images,
-                                              const size_t *vision_image_sizes,
-                                              int vision_image_count,
                                               const char *volatile_block,
                                               int leading_system_run,
-                                              bool enable_cache_breakpoint) {
+                                              bool enable_cache_breakpoint,
+                                              const char *carrier,
+                                              const char *model) {
    struct json_object *input = json_object_new_array();
    if (!input)
       return NULL;
+
+   /* The newest user item while it is still the conversation's last word (an
+    * operator's direction after it doesn't change that). */
+   struct json_object *question_item = NULL;
 
    int len = json_object_array_length(history);
    for (int i = 0; i < len; i++) {
@@ -208,12 +290,15 @@ struct json_object *llm_responses_build_input(struct json_object *history,
       const char *role = json_object_get_string(role_obj);
 
       /* Leading system run (stable + volatile) → instructions + repositioned
-       * volatile below; skip here. A LATER system message is a mid-history
-       * broadcast (session_broadcast_system_message, e.g. an incoming-call notice)
-       * — emit it inline at its position so it is not lost and stays frozen in the
-       * cacheable prefix. */
+       * volatile below; skip here. A LATER system message (from a history an
+       * older build saved) is emitted inline at its position so it is not lost
+       * and stays frozen in the cacheable prefix. */
       if (strcmp(role, "system") == 0) {
          if (i < leading_system_run)
+            continue;
+         /* A tool-set change goes in the request's tools (folded:
+          * llm_tool_defs_for_request), not here. */
+         if (llm_history_kind_of(msg) == MESSAGE_KIND_TOOL_CHANGE)
             continue;
          struct json_object *bc_content;
          if (!json_object_object_get_ex(msg, "content", &bc_content))
@@ -231,6 +316,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          json_object_array_add(bc_arr, bc_part);
          json_object_object_add(bc_item, "content", bc_arr);
          json_object_array_add(input, bc_item);
+         if (llm_history_kind_of(msg) == MESSAGE_KIND_NONE) {
+            question_item = NULL; /* an older build's system message ends the question */
+         }
          continue;
       }
 
@@ -245,73 +333,22 @@ struct json_object *llm_responses_build_input(struct json_object *history,
          json_object_object_add(item, "type", json_object_new_string("function_call_output"));
          json_object_object_add(item, "call_id",
                                 json_object_new_string(json_object_get_string(call_id_obj)));
-         json_object_object_add(item, "output",
-                                json_object_new_string(json_object_get_string(content_obj)));
+         /* A result that carried images: its text and images, in order
+          * (input_text / input_image items: llm_tool_images_render.h). */
+         struct json_object *output = llm_tool_images_responses_output(content_obj);
+         json_object_object_add(item, "output", output ? output : json_object_new_string(""));
          json_object_array_add(input, item);
+         question_item = NULL;
          continue;
       }
 
-      /* Assistant message: emit reasoning items first, then text, then function_call items */
+      /* Assistant message: rendered from its blocks, in the order produced (OpenAI's
+       * own reasoning items included, other vendors' left out). */
       if (strcmp(role, "assistant") == 0) {
-         /* Echoed reasoning items (Mode B round-trip) */
-         struct json_object *prov_state, *openai_resp, *r_items;
-         if (json_object_object_get_ex(msg, "_provider_state", &prov_state) &&
-             json_object_object_get_ex(prov_state, "openai_responses", &openai_resp) &&
-             json_object_object_get_ex(openai_resp, "reasoning_items", &r_items) &&
-             json_object_get_type(r_items) == json_type_array) {
-            int n = json_object_array_length(r_items);
-            for (int k = 0; k < n; k++) {
-               struct json_object *item = json_object_array_get_idx(r_items, k);
-               json_object_array_add(input, json_object_get(item));
-            }
-         }
-
-         /* Pre-tool assistant text (if any) */
-         struct json_object *content_obj;
-         if (json_object_object_get_ex(msg, "content", &content_obj)) {
-            const char *txt = json_object_get_string(content_obj);
-            if (txt && *txt) {
-               struct json_object *item = json_object_new_object();
-               json_object_object_add(item, "type", json_object_new_string("message"));
-               json_object_object_add(item, "role", json_object_new_string("assistant"));
-               struct json_object *content_array = json_object_new_array();
-               struct json_object *part = json_object_new_object();
-               json_object_object_add(part, "type", json_object_new_string("output_text"));
-               json_object_object_add(part, "text", json_object_new_string(txt));
-               json_object_array_add(content_array, part);
-               json_object_object_add(item, "content", content_array);
-               json_object_array_add(input, item);
-            }
-         }
-
-         /* Tool calls → function_call items */
-         struct json_object *tool_calls;
-         if (json_object_object_get_ex(msg, "tool_calls", &tool_calls) &&
-             json_object_get_type(tool_calls) == json_type_array) {
-            int n = json_object_array_length(tool_calls);
-            for (int k = 0; k < n; k++) {
-               struct json_object *tc = json_object_array_get_idx(tool_calls, k);
-               struct json_object *id_obj, *fn_obj;
-               if (!json_object_object_get_ex(tc, "id", &id_obj))
-                  continue;
-               if (!json_object_object_get_ex(tc, "function", &fn_obj))
-                  continue;
-               struct json_object *name_obj, *args_obj;
-               if (!json_object_object_get_ex(fn_obj, "name", &name_obj))
-                  continue;
-               if (!json_object_object_get_ex(fn_obj, "arguments", &args_obj))
-                  continue;
-               struct json_object *item = json_object_new_object();
-               json_object_object_add(item, "type", json_object_new_string("function_call"));
-               json_object_object_add(item, "call_id",
-                                      json_object_new_string(json_object_get_string(id_obj)));
-               json_object_object_add(item, "name",
-                                      json_object_new_string(json_object_get_string(name_obj)));
-               json_object_object_add(item, "arguments",
-                                      json_object_new_string(json_object_get_string(args_obj)));
-               json_object_array_add(input, item);
-            }
-         }
+         struct json_object *blocks = llm_turn_message_blocks(msg);
+         llm_turn_blocks_render_responses(blocks, input, carrier, model);
+         json_object_put(blocks);
+         question_item = NULL;
          continue;
       }
 
@@ -334,7 +371,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
                                    json_object_new_string(json_object_get_string(content_obj)));
             json_object_array_add(content_array, part);
          } else if (json_object_get_type(content_obj) == json_type_array) {
-            /* Chat-completions multimodal array → translate text/image_url parts */
+            /* A multimodal array (chat-completions or Claude parts) → input parts.
+             * A Claude tool_result becomes its own function_call_output item, ahead
+             * of the message (the call it answers came just before it). */
             int n = json_object_array_length(content_obj);
             for (int k = 0; k < n; k++) {
                struct json_object *part_in = json_object_array_get_idx(content_obj, k);
@@ -342,7 +381,14 @@ struct json_object *llm_responses_build_input(struct json_object *history,
                if (!json_object_object_get_ex(part_in, "type", &type_obj))
                   continue;
                const char *t = json_object_get_string(type_obj);
-               if (strcmp(t, "text") == 0) {
+               if (!t) {
+                  continue;
+               }
+               if (strcmp(t, "tool_result") == 0) {
+                  responses_add_claude_tool_result(part_in, input);
+               } else if (strcmp(t, "image") == 0) {
+                  responses_add_claude_image(part_in, content_array);
+               } else if (strcmp(t, "text") == 0) {
                   struct json_object *txt_obj;
                   if (json_object_object_get_ex(part_in, "text", &txt_obj)) {
                      struct json_object *part = json_object_new_object();
@@ -366,8 +412,16 @@ struct json_object *llm_responses_build_input(struct json_object *history,
             }
          }
 
-         json_object_object_add(item, "content", content_array);
-         json_object_array_add(input, item);
+         if (json_object_array_length(content_array) > 0) {
+            json_object_object_add(item, "content", content_array);
+            json_object_array_add(input, item);
+            question_item = item;
+         } else {
+            /* Only tool results: they were emitted as their own items. */
+            json_object_put(content_array);
+            json_object_put(item);
+            question_item = NULL;
+         }
       }
    }
 
@@ -379,50 +433,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
     * which also poisons cross-turn prompt caching. The chat-completions builder guards
     * this with the identical last-is-user check (llm_openai_history.c:638); mirror it so
     * the Responses request carries the question exactly once. When the last item already
-    * IS the user turn, attach any vision to it instead of emitting a duplicate. */
-   int tail_n = json_object_array_length(input);
-   struct json_object *tail_item = (tail_n > 0) ? json_object_array_get_idx(input, tail_n - 1)
-                                                : NULL;
-   bool tail_is_user = false;
-   if (tail_item != NULL) {
-      struct json_object *tr;
-      if (json_object_object_get_ex(tail_item, "role", &tr) && json_object_get_string(tr) &&
-          strcmp(json_object_get_string(tr), "user") == 0)
-         tail_is_user = true;
-   }
-
-   if (tail_is_user && input_text && *input_text) {
-      /* Question already present as the last history item — REPLACE its content with
-       * input_text (+ vision) rather than appending a duplicate. input_text is
-       * authoritative for the current question, so this mirrors the CC builder
-       * (llm_openai_history.c: last_is_user → rebuild the last user message's content).
-       * PRECONDITION (holds on every live call path): the trailing user item IS the
-       * current question — the add-path leaves history ending in an assistant turn, and
-       * the no-add path's trailing user is the same text passed here. If a caller ever
-       * violated it (trailing user is an older, different unanswered turn), that turn's
-       * text would be overwritten rather than preserved — same as the CC builder.
-       * tail_item is a fresh object this function built in the history loop, so
-       * replacing its "content" key (json_object_object_add frees the old value) is safe. */
-      struct json_object *content_array = json_object_new_array();
-      struct json_object *part = json_object_new_object();
-      json_object_object_add(part, "type", json_object_new_string("input_text"));
-      json_object_object_add(part, "text", json_object_new_string(input_text));
-      json_object_array_add(content_array, part);
-      llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
-                                        vision_image_count);
-      json_object_object_add(tail_item, "content", content_array);
-   } else if (tail_is_user) {
-      /* No new input_text (e.g. a tool-loop iteration) — keep the existing question,
-       * just attach vision to it if any images were supplied. */
-      if (vision_image_count > 0) {
-         struct json_object *content_obj;
-         if (json_object_object_get_ex(tail_item, "content", &content_obj) &&
-             json_object_get_type(content_obj) == json_type_array) {
-            llm_responses_append_vision_parts(content_obj, vision_images, vision_image_sizes,
-                                              vision_image_count);
-         }
-      }
-   } else if (input_text && *input_text) {
+    * IS the user turn (its context, its text and its own images: a turn's images live
+    * in its question's history message), it is kept exactly as built above. */
+   if (question_item == NULL && input_text && *input_text) {
       struct json_object *item = json_object_new_object();
       json_object_object_add(item, "type", json_object_new_string("message"));
       json_object_object_add(item, "role", json_object_new_string("user"));
@@ -431,20 +444,23 @@ struct json_object *llm_responses_build_input(struct json_object *history,
       json_object_object_add(part, "type", json_object_new_string("input_text"));
       json_object_object_add(part, "text", json_object_new_string(input_text));
       json_object_array_add(content_array, part);
-      llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
-                                        vision_image_count);
       json_object_object_add(item, "content", content_array);
       json_object_array_add(input, item);
    }
 
+   /* After the question is placed: dropping an unpaired call first could make an
+    * earlier question the tail, and the new one would replace it. */
+   input = drop_unpaired_calls(input);
+
    /* Reposition the volatile TURN CONTEXT block as a user item IMMEDIATELY BEFORE the
     * current question (the last user-role item in the fully-assembled input, after
-    * both vision branches above). This keeps `instructions` byte-stable so
+    * the question's placement above). This keeps `instructions` byte-stable so
     * [instructions][tools][history] caches cross-turn (see the cache-layout note at
     * the top of this file). Anchoring on "last user item" is robust to whether the
     * question arrived via history or input_text, and keeps the volatile pinned before
-    * the (fixed) question across tool-loop iterations. Not persisted — the session
-    * already rebuilds/replaces the two system messages each turn. */
+    * the (fixed) question across tool-loop iterations. Only a history without a frozen
+    * prefix has one (a session whose system messages are its prompt: a research run);
+    * a frozen conversation's turn context is part of its question. */
    if (volatile_block && *volatile_block) {
       int n = json_object_array_length(input);
       int last_user = -1;

@@ -52,9 +52,6 @@ extern "C" {
  *
  * @param conversation_history JSON array of messages
  * @param input_text User input (empty string for follow-up calls)
- * @param vision_images Vision images array (NULL if none)
- * @param vision_image_sizes Vision image sizes (NULL if none)
- * @param vision_image_count Number of vision images
  * @param base_url Provider endpoint URL
  * @param api_key API key (NULL for local)
  * @param model Model name
@@ -66,9 +63,6 @@ extern "C" {
  */
 typedef int (*llm_single_shot_fn)(struct json_object *conversation_history,
                                   const char *input_text,
-                                  const char **vision_images,
-                                  const size_t *vision_image_sizes,
-                                  int vision_image_count,
                                   const char *base_url,
                                   const char *api_key,
                                   const char *model,
@@ -86,9 +80,6 @@ typedef int (*llm_single_shot_fn)(struct json_object *conversation_history,
 typedef struct {
    struct json_object *conversation_history; /**< Conversation history (modified in place) */
    const char *input_text;                   /**< User input text */
-   const char **vision_images;               /**< Vision images (NULL if none) */
-   const size_t *vision_image_sizes;         /**< Vision image sizes */
-   int vision_image_count;                   /**< Number of vision images */
    const char *base_url;                     /**< Provider endpoint URL */
    const char *api_key;                      /**< API key (NULL for local) */
    const char *model;                        /**< Model name (ptr into model_storage or external) */
@@ -97,7 +88,10 @@ typedef struct {
    void *callback_userdata;                  /**< User context for callback */
    llm_single_shot_fn provider_fn;           /**< Current provider single-shot function */
    llm_history_format_t history_format;      /**< Current history format (OpenAI or Claude) */
-   uint32_t session_id;                      /**< Session ID for compaction */
+   uint32_t session_id;                      /**< The session the call is for */
+   bool has_session;                         /**< session_id names one (0 is the local mic's);
+                                                  false: a call on no session's behalf, which
+                                                  reads and writes no session's state */
    llm_type_t llm_type;                      /**< Current LLM type */
    cloud_provider_t cloud_provider;          /**< Current cloud provider */
    _Atomic bool *cancel_flag;                /**< Per-session cancel_requested (NULL if none);

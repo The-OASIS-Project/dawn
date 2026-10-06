@@ -111,8 +111,10 @@ BUILD_LOG=$(mktemp -t dawn-precommit-build.XXXXXX.log)
 TEST_LOG=$(mktemp -t dawn-precommit-test.XXXXXX.log)
 trap 'rm -f "$BUILD_LOG" "$TEST_LOG"' EXIT
 
-echo -e "${BLUE}Pre-commit: building tests-ci in $BUILD_DIR…${NC}"
-if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
+# `benches` (the NO_TEST benchmark drivers) is built here rather than in GitHub
+# CI, which has no onnxruntime — otherwise nothing ever compiles them.
+echo -e "${BLUE}Pre-commit: building tests-ci + benches in $BUILD_DIR…${NC}"
+if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci benches > "$BUILD_LOG" 2>&1; then
    echo ""
    echo -e "${RED}Test build FAILED.  Last 30 lines:${NC}"
    tail -30 "$BUILD_LOG"

@@ -88,9 +88,9 @@ typedef struct {
    int64_t archived_at;
 } document_version_meta_t;
 
-/* v61: one lexical (BM25) candidate from document_db_chunk_search_bm25.  Carries
- * enough to fuse with the semantic channel and format a citation — no embedding
- * (the lexical side doesn't need it). */
+/* A chunk's coordinates and its document's label, without its text or
+ * embedding: what ranking needs (text is fetched for the chunks kept, with
+ * document_db_chunks_get_by_ids). */
 typedef struct {
    int64_t id; /* chunk id (== FTS rowid) */
    int chunk_index;
@@ -99,8 +99,10 @@ typedef struct {
    char filetype[DOC_FILETYPE_MAX];
    int num_chunks; /* parent doc chunk count (1 == note / whole-record) */
    int64_t created_at;
-   char text[DOC_CHUNK_TEXT_MAX];
-} doc_bm25_hit_t;
+} doc_chunk_meta_t;
+
+/* One lexical (BM25) candidate from document_db_chunk_search_bm25. */
+typedef doc_chunk_meta_t doc_bm25_hit_t;
 
 /* One literal-grep hit: just the coordinates needed to fetch a context window
  * (the matching text comes from document_db_chunk_read_range, not duplicated
@@ -590,25 +592,99 @@ int document_db_chunk_grep(int user_id,
                            bool *more_out);
 
 /**
- * @brief Load all chunks accessible to a user for vector search
+ * @brief Number of chunks a user can access (own + shared documents)
  *
- * Caller must provide embedding_buf with enough space for max_count * dims floats.
- * Each chunk's embedding pointer is set into embedding_buf.
+ * An upper bound on what document_db_chunk_embeddings_page() returns (it skips
+ * chunks of another embedding size).
  *
- * @param user_id User ID (loads own docs + global)
- * @param chunks Output array
- * @param embedding_buf Flat float buffer for embeddings
- * @param dims Expected embedding dimensions
- * @param max_count Maximum chunks to load
- * @param[out] count_out Number of chunks loaded (must not be NULL)
- * @return SUCCESS (0) on success, FAILURE (1) on error
+ * @return SUCCESS or FAILURE
  */
-int document_db_chunk_search_load(int user_id,
-                                  document_chunk_t *chunks,
-                                  float *embedding_buf,
-                                  int dims,
-                                  int max_count,
+int document_db_chunk_count(int user_id, int *count_out);
+
+/** Where document_db_chunk_embeddings_page() continues: start zeroed. */
+typedef struct {
+   int64_t doc_id;   /**< document being read */
+   int64_t chunk_id; /**< last chunk read in it */
+   bool done;        /**< every accessible chunk has been read */
+} document_chunk_cursor_t;
+
+/**
+ * @brief One page of the embeddings of the chunks a user can access
+ *
+ * Chunks of the user's own and shared documents, document by document and in
+ * id order within each, from @p cursor on, without their text (fetch text for
+ * the top hits with document_db_chunks_get_by_ids).  Each document is read by
+ * index seek, so a whole walk is linear in the chunks read.  Chunks whose
+ * embedding size isn't @p dims are skipped but still advance the cursor, so
+ * paging always progresses.  Each page is its own short database-lock hold;
+ * ranking the whole corpus should go through document_embed_rank(), which
+ * caches these.
+ *
+ * @param user_id   User
+ * @param dims      Expected embedding dimension
+ * @param cursor    [in,out] Position; set done when nothing is left
+ * @param max       Page size (chunks read, including skipped ones)
+ * @param ids_out   [out] Up to @p max chunk ids
+ * @param norms_out [out] Their embedding norms
+ * @param embs_out  [out] Their embeddings, @p max * @p dims floats
+ * @param count_out [out] Chunks written
+ * @return SUCCESS or FAILURE
+ */
+int document_db_chunk_embeddings_page(int user_id,
+                                      int dims,
+                                      document_chunk_cursor_t *cursor,
+                                      int max,
+                                      int64_t *ids_out,
+                                      float *norms_out,
+                                      float *embs_out,
+                                      int *count_out);
+
+/** The generation of the chunks a user can see (document_db_chunk_generation). */
+typedef struct {
+   int64_t own;    /**< the user's own documents */
+   int64_t shared; /**< shared (global) documents */
+} document_chunk_gen_t;
+
+/**
+ * @brief Current chunk-visibility generation for a user
+ *
+ * Counters the database itself bumps (triggers) whenever a chunk of the user's
+ * own documents, or of a shared one, is added, removed or re-embedded, or such a
+ * document is deleted or its sharing changes.  A cache of the user's chunk
+ * embeddings is valid while both are unchanged.
+ *
+ * @return SUCCESS or FAILURE
+ */
+int document_db_chunk_generation(int user_id, document_chunk_gen_t *gen_out);
+
+/**
+ * @brief Load chunks by id (text, filename, timestamp; no embedding)
+ *
+ * Only chunks the user can access (own + global) are returned; order follows
+ * the database, not @p ids.
+ *
+ * @param[out] count_out Chunks written to @p out
+ * @return SUCCESS or FAILURE
+ */
+int document_db_chunks_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  document_chunk_t *out,
                                   int *count_out);
+
+/**
+ * @brief Load chunks' coordinates and labels by id (no text, no embedding)
+ *
+ * Same access rule and ordering as document_db_chunks_get_by_ids().
+ *
+ * @param[out] count_out Entries written to @p out
+ * @return SUCCESS or FAILURE
+ */
+int document_db_chunks_meta_by_ids(int user_id,
+                                   const int64_t *ids,
+                                   int n,
+                                   doc_chunk_meta_t *out,
+                                   int *count_out);
 
 /**
  * @brief Lexical (BM25) chunk search — the v61 keyword candidate set.
@@ -617,6 +693,7 @@ int document_db_chunk_search_load(int user_id,
  * returns its OWN ranked candidates (NOT a re-rank of the semantic top-K), so a
  * semantically-buried but lexically-matching chunk still surfaces.  Scores are
  * sigmoid-normalized to [0, 1] (memory_bm25_normalize) for fusion with cosine.
+ * Hits carry no text, so the database lock is held for the search alone.
  *
  * @param user_id      User scope (own docs + global)
  * @param query        Raw query text (stemmed internally)

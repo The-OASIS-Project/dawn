@@ -67,6 +67,7 @@ typedef struct {
    char genre[AUDIO_METADATA_STRING_MAX];
    char rating_key[32];
    uint32_t duration_sec;
+   uint32_t year;
    time_t updated_at;
 } plex_track_t;
 
@@ -138,8 +139,9 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count, int *inserted_out
 
    static const char *SQL_UPSERT =
        "INSERT OR REPLACE INTO music_metadata "
-       "(path, mtime, title, artist, album, genre, duration_sec, source, rating_key, sync_gen) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+       "(path, mtime, title, artist, album, genre, duration_sec, source, rating_key, sync_gen, "
+       "year) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(g_plex_db, SQL_UPSERT, -1, &stmt, NULL);
@@ -170,6 +172,12 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count, int *inserted_out
       sqlite3_bind_int(stmt, 8, MUSIC_SOURCE_PLEX);
       sqlite3_bind_text(stmt, 9, t->rating_key[0] ? t->rating_key : NULL, -1, SQLITE_STATIC);
       sqlite3_bind_int(stmt, 10, current_gen);
+      /* NULL (not 0) for unknown year so `year BETWEEN ?` filters exclude it. */
+      if (t->year) {
+         sqlite3_bind_int(stmt, 11, (int)t->year);
+      } else {
+         sqlite3_bind_null(stmt, 11);
+      }
 
       rc = sqlite3_step(stmt);
       if (rc == SQLITE_DONE) {
@@ -352,6 +360,7 @@ static int plex_sync(void) {
                safe_copy(t->genre, sizeof(t->genre), genre);
 
             t->duration_sec = (uint32_t)json_int(item, "duration_sec");
+            t->year = (uint32_t)json_int(item, "year");
             t->updated_at = (time_t)json_int(item, "updated_at");
 
             total_tracks++;

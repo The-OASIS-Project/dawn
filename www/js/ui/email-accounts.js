@@ -9,12 +9,10 @@
    let callbacks = {};
    let pendingOAuthAccountKey = '';
 
-   /* Per-account "max body characters" bounds.  Mirror the server-side
-    * EMAIL_MAX_READ_BODY_LEN / EMAIL_MIN_READ_BODY_LEN in
-    * include/tools/email_types.h (and the WebUI clamp in src/webui/webui_email.c)
-    * — keep in sync. */
-   const EMAIL_MAX_BODY_CHARS = 50000;
-   const EMAIL_MIN_BODY_CHARS = 500;
+   /* Numeric bounds + defaults for the per-account advanced settings.  Supplied by
+    * the server in every email_list_accounts_response (`limits`), so the form never
+    * duplicates the C constants; the update handler enforces the same ranges. */
+   let limits = {};
 
    var GOOGLE_EMAIL_SCOPE =
       'https://mail.google.com/ https://www.googleapis.com/auth/userinfo.email';
@@ -104,6 +102,46 @@
       DawnWS.send({ type: 'email_set_enabled', payload: { id: id, enabled: enabled } });
    }
 
+   /* One whole-number advanced-settings input, labelled and described for
+    * assistive tech.  `label`, `name` and `hint` are inserted unescaped, so they
+    * must be trusted string literals — never account data.  Every value is
+    * coerced with Number() before it reaches the HTML string, and a missing bound
+    * (limits not yet received) simply omits that attribute rather than inventing
+    * one.  The minimum of 1 passed for the count fields is intentional. */
+   function numberField(label, name, value, min, max, hint) {
+      const id = 'email-edit-' + name.replace(/_/g, '-');
+      const hintId = id + '-hint';
+      const n = Number(value);
+      const lo = Number(min);
+      const hi = Number(max);
+      const hasLo = Number.isFinite(lo);
+      const hasHi = Number.isFinite(hi);
+      let range = '';
+      if (hasLo && hasHi) range = ' Range: ' + lo + ' to ' + hi + '.';
+      return (
+         '  <div class="form-group"><label for="' +
+         id +
+         '">' +
+         label +
+         '</label><input type="number" step="1" inputmode="numeric" id="' +
+         id +
+         '" name="' +
+         name +
+         '" aria-describedby="' +
+         hintId +
+         '"' +
+         (Number.isFinite(n) ? ' value="' + n + '"' : '') +
+         (hasLo ? ' min="' + lo + '"' : '') +
+         (hasHi ? ' max="' + hi + '"' : '') +
+         '><span class="form-hint" id="' +
+         hintId +
+         '">' +
+         hint +
+         range +
+         '</span></div>'
+      );
+   }
+
    /* =========================================================================
     * Response Handlers
     * ========================================================================= */
@@ -114,6 +152,7 @@
          return;
       }
       accounts = payload.accounts || [];
+      limits = payload.limits || {};
       renderAccounts();
    }
 
@@ -628,7 +667,7 @@
       let html = '<h3 id="email-modal-title">Edit Email Account</h3>';
       html += '<div class="dawn-form email-add-form">';
       html +=
-         '<div class="form-group"><label>Account Name</label><input type="text" name="name" value="' +
+         '<div class="form-group"><label for="email-edit-name">Account Name</label><input type="text" id="email-edit-name" name="name" value="' +
          escapeHtml(acct.name) +
          '"></div>';
 
@@ -637,10 +676,13 @@
          html += '  <div class="setting-group-title">IMAP Settings</div>';
          html += '  <div class="server-row">';
          html +=
-            '    <input type="text" name="imap_server" value="' +
+            '    <input type="text" name="imap_server" aria-label="IMAP server" value="' +
             escapeHtml(acct.imap_server) +
             '">';
-         html += '    <input type="number" name="imap_port" value="' + acct.imap_port + '">';
+         html +=
+            '    <input type="number" name="imap_port" aria-label="IMAP port" value="' +
+            Number(acct.imap_port) +
+            '">';
          html += '  </div>';
          html += '  <div class="ssl-toggle-row">';
          html +=
@@ -655,10 +697,13 @@
          html += '  <div class="setting-group-title">SMTP Settings</div>';
          html += '  <div class="server-row">';
          html +=
-            '    <input type="text" name="smtp_server" value="' +
+            '    <input type="text" name="smtp_server" aria-label="SMTP server" value="' +
             escapeHtml(acct.smtp_server) +
             '">';
-         html += '    <input type="number" name="smtp_port" value="' + acct.smtp_port + '">';
+         html +=
+            '    <input type="number" name="smtp_port" aria-label="SMTP port" value="' +
+            Number(acct.smtp_port) +
+            '">';
          html += '  </div>';
          html += '  <div class="ssl-toggle-row">';
          html +=
@@ -672,17 +717,18 @@
          html += '<div class="setting-group">';
          html += '  <div class="setting-group-title">Credentials</div>';
          html +=
-            '  <div class="form-group"><label>Username</label><input type="text" name="username" value="' +
+            '  <div class="form-group"><label for="email-edit-username">Username</label><input type="text" id="email-edit-username" name="username" value="' +
             escapeHtml(acct.username) +
             '"></div>';
          html +=
-            '  <div class="form-group"><label>Display Name</label><input type="text" name="display_name" value="' +
+            '  <div class="form-group"><label for="email-edit-display-name">Display Name</label><input type="text" id="email-edit-display-name" name="display_name" value="' +
             escapeHtml(acct.display_name) +
             '"></div>';
-         html += '  <div class="form-group"><label>Password (leave blank to keep current)</label>';
+         html +=
+            '  <div class="form-group"><label for="email-edit-password">Password (leave blank to keep current)</label>';
          html += '    <div class="password-input-wrapper">';
          html +=
-            '      <input type="password" name="password" placeholder="Leave blank to keep current">';
+            '      <input type="password" id="email-edit-password" name="password" placeholder="Leave blank to keep current">';
          html +=
             '      <button type="button" class="password-toggle btn btn-secondary btn-small">Show</button>';
          html += '    </div>';
@@ -693,22 +739,30 @@
       // Advanced settings (collapsible)
       html += '<details class="setting-group advanced-settings">';
       html += '  <summary class="setting-group-title">Advanced Settings</summary>';
-      html +=
-         '  <div class="form-group"><label>Max recent emails</label><input type="number" name="max_recent" value="' +
-         (acct.max_recent || 10) +
-         '" min="1" max="50"><span class="form-hint">Number of emails returned by "recent" action (1-50)</span></div>';
-      html +=
-         '  <div class="form-group"><label>Max body characters</label><input type="number" name="max_body_chars" value="' +
-         (acct.max_body_chars || EMAIL_MAX_BODY_CHARS) +
-         '" min="' +
-         EMAIL_MIN_BODY_CHARS +
-         '" max="' +
-         EMAIL_MAX_BODY_CHARS +
-         '"><span class="form-hint">Max email body length sent to AI (' +
-         EMAIL_MIN_BODY_CHARS +
-         '-' +
-         EMAIL_MAX_BODY_CHARS +
-         ')</span></div>';
+      html += numberField(
+         'Max recent emails',
+         'max_recent',
+         acct.max_recent || limits.max_recent_default,
+         1,
+         limits.max_recent_max,
+         'Emails shown when you ask for recent mail without a number.'
+      );
+      html += numberField(
+         'Messages checked for daily digest',
+         'digest_depth',
+         acct.digest_depth || limits.digest_depth_default,
+         1,
+         limits.digest_depth_max,
+         "How many of this inbox's newest messages the daily digest looks at. Lower it for a busy inbox you don't need fully covered; each 50 above the first adds a trip to the mail server."
+      );
+      html += numberField(
+         'Longest email the AI reads (characters)',
+         'max_body_chars',
+         acct.max_body_chars || limits.body_chars_max,
+         limits.body_chars_min,
+         limits.body_chars_max,
+         'Longer emails are cut off at this length.'
+      );
       html += '</details>';
 
       html += '<div class="form-actions">';
@@ -954,11 +1008,33 @@
             if (passEl && passEl.value) data.password = passEl.value;
          }
 
-         // Advanced settings
-         const maxRecentEl = form.querySelector('[name="max_recent"]');
-         if (maxRecentEl) data.max_recent = parseInt(maxRecentEl.value, 10) || 10;
-         const maxBodyEl = form.querySelector('[name="max_body_chars"]');
-         if (maxBodyEl) data.max_body_chars = parseInt(maxBodyEl.value, 10) || EMAIL_MAX_BODY_CHARS;
+         // Advanced numeric fields.  The form isn't a <form>, so min/max/step are
+         // never enforced on their own: check them here and stop on the first bad
+         // field (opening the collapsed section so it's visible) instead of sending
+         // a value the server will reject.  An empty field is omitted so the
+         // server keeps the stored value.
+         let invalid = null;
+         ['max_recent', 'digest_depth', 'max_body_chars'].forEach(function (name) {
+            const el = form.querySelector('[name="' + name + '"]');
+            if (!el) return;
+            // Unparseable typing (e.g. "abc", "1e") reads as '' — treat it as an
+            // error, not as "left blank".
+            if (el.value === '' && !el.validity.badInput) return;
+            const ok = el.checkValidity() && Number.isInteger(Number(el.value));
+            el.classList.toggle('input-error', !ok);
+            if (!ok) {
+               invalid = invalid || el;
+               return;
+            }
+            data[name] = Number(el.value);
+         });
+         if (invalid) {
+            const section = invalid.closest('details');
+            if (section) section.open = true;
+            invalid.focus();
+            invalid.reportValidity();
+            return;
+         }
 
          requestUpdateAccount(data);
       });

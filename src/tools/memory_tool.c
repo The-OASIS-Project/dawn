@@ -30,6 +30,7 @@
 #include "logging.h"
 #include "memory/memory_types.h" /* MEMORY_FACT_CATEGORIES */
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* Forward declaration of callback from memory/memory_callback.c */
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -259,12 +260,78 @@ static const treg_param_t memory_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "replaced_by",
    },
+   /* The contact fields: save_contact reads all four, find_contact and
+    * list_contacts read field_type. */
+   {
+       .name = "field_type",
+       .description = "For 'save_contact' / 'find_contact' / 'list_contacts': the kind of "
+                      "contact info, e.g. 'email', 'phone' or 'address'.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "field_type",
+   },
+   {
+       .name = "value",
+       .description = "For 'save_contact': the address, number or other contact info itself.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "value",
+   },
+   {
+       .name = "label",
+       .description = "For 'save_contact': an optional label, e.g. 'work' or 'personal'.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "label",
+   },
+   {
+       .name = "entity_id",
+       .description = "For 'save_contact': the person's entity ID, when a previous call asked you "
+                      "to choose between similar people.",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "entity_id",
+   },
 };
 
 /* ========== Tool Metadata ========== */
 
+static const tool_action_kind_entry_t s_memory_action_kinds[] = {
+   { "search", TOOL_KIND_READ, NULL },       { "get", TOOL_KIND_READ, NULL },
+   { "recent", TOOL_KIND_READ, NULL },       { "find_duplicates", TOOL_KIND_READ, NULL },
+   { "find_contact", TOOL_KIND_READ, NULL }, { "list_contacts", TOOL_KIND_READ, NULL },
+};
+
+/* What a call waiting for the user's reply code does: 'remember' by the fact
+ * it saves (tool_metadata_t describe_call); the rest by their parameters. */
+static int memory_describe_call(const char *action,
+                                const char *value,
+                                char *out,
+                                size_t out_len,
+                                int *valid_for_sec) {
+   (void)valid_for_sec;
+   if (strcmp(action, "remember") != 0) {
+      return TOOL_DESCRIBE_DEFAULT;
+   }
+   char fact[MEMORY_FACT_TEXT_MAX * 2] = "";
+   tool_param_extract_base(value, fact, sizeof(fact));
+   char shown[400];
+   str_excerpt_line(fact, 300, shown, sizeof(shown));
+   if (!shown[0]) {
+      return FAILURE;
+   }
+   const int n = snprintf(out, out_len, "remember: \"%s\"", shown);
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
 static const tool_metadata_t memory_metadata = {
    .name = "memory",
+   .action_kinds = s_memory_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_memory_action_kinds),
    .device_string = "memory",
    .topic = "dawn",
    /* 'recall' was an alias here; it is now the dedicated unified cross-source
@@ -272,6 +339,7 @@ static const tool_metadata_t memory_metadata = {
     * so the alias was removed.  'remember' stays. */
    .aliases = { "remember" },
    .alias_count = 1,
+   .describe_call = memory_describe_call,
 
    .description = "Store and retrieve persistent memories about the user. "
                   "Use 'remember' to store facts (preferences, information shared by user). "
@@ -324,7 +392,7 @@ static const tool_metadata_t memory_metadata = {
                   "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
-   .param_count = 12,
+   .param_count = TOOL_PARAM_COUNT(memory_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,

@@ -25,6 +25,8 @@
 #define AUTH_DB_INTERNAL_ALLOWED
 #include "memory/contacts_db.h"
 
+#include <ctype.h>
+#include <stdbool.h>
 #include <string.h>
 #include <time.h>
 
@@ -49,11 +51,36 @@ static void escape_like(const char *input, char *out, size_t out_len) {
    out[j] = '\0';
 }
 
+/* @p in as contacts_find compares names (CONTACTS_NAME_SQL over canonical
+ * names, which are lowercase ASCII with UTF-8 kept): hyphens as spaces, dots
+ * and apostrophes dropped, leading, trailing and repeated spaces removed. */
+static void normalize_name(const char *in, char *out, size_t out_len) {
+   size_t j = 0;
+   bool space = true; /* drops leading spaces */
+   for (size_t i = 0; in[i] && j < out_len - 1; i++) {
+      const unsigned char c = (unsigned char)in[i];
+      if (c == '.' || c == '\'') {
+         continue; /* as CONTACTS_NAME_SQL drops them */
+      }
+      const bool is_space = c == ' ' || c == '\t' || c == '-';
+      if (is_space && space) {
+         continue;
+      }
+      out[j++] = is_space ? ' ' : (c >= 0x80 ? (char)c : (char)tolower(c));
+      space = is_space;
+   }
+   while (j > 0 && out[j - 1] == ' ') {
+      j--;
+   }
+   out[j] = '\0';
+}
+
 /* =============================================================================
  * Row Helper
  * ============================================================================= */
 
 static void row_to_contact(sqlite3_stmt *st, contact_result_t *out) {
+   out->match = CONTACT_MATCH_EXACT; /* contacts_find sets the real one */
    out->contact_id = sqlite3_column_int64(st, 0);
    out->entity_id = sqlite3_column_int64(st, 1);
 
@@ -96,31 +123,44 @@ int contacts_find(int user_id,
    if (strlen(name) > 200)
       return 0;
 
-   AUTH_DB_LOCK_OR_FAIL();
+   /* The name as canonical names are stored: lowercase, single spaces. */
+   char norm[256];
+   normalize_name(name, norm, sizeof(norm));
+   if (!norm[0])
+      return 0;
 
    /* Escape LIKE metacharacters */
    char escaped[512];
-   escape_like(name, escaped, sizeof(escaped));
+   escape_like(norm, escaped, sizeof(escaped));
 
    char pattern[600];
    snprintf(pattern, sizeof(pattern), "%%%s%%", escaped);
+   char word[600];
+   snprintf(word, sizeof(word), "%% %s %%", escaped);
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_contacts_find;
    sqlite3_reset(st);
    sqlite3_bind_int(st, 1, user_id);
-   sqlite3_bind_text(st, 2, pattern, -1, SQLITE_TRANSIENT);
-
+   sqlite3_bind_text(st, 2, norm, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 3, pattern, -1, SQLITE_TRANSIENT);
    if (field_type && field_type[0]) {
-      sqlite3_bind_text(st, 3, field_type, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(st, 4, field_type, -1, SQLITE_TRANSIENT);
    } else {
-      sqlite3_bind_text(st, 3, "%", -1, SQLITE_STATIC);
+      sqlite3_bind_text(st, 4, "%", -1, SQLITE_STATIC);
    }
-   sqlite3_bind_int(st, 4, max_results);
+   sqlite3_bind_text(st, 5, word, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int(st, 6, max_results);
 
    int count = 0;
    int step_rc;
    while (count < max_results && (step_rc = sqlite3_step(st)) == SQLITE_ROW) {
       row_to_contact(st, &out[count]);
+      const int q = sqlite3_column_int(st, 8);
+      out[count].match = q == 0   ? CONTACT_MATCH_EXACT
+                         : q == 1 ? CONTACT_MATCH_WORD
+                                  : CONTACT_MATCH_PARTIAL;
       count++;
    }
    sqlite3_reset(st);
@@ -289,6 +329,93 @@ int contacts_list(int user_id,
 
    AUTH_DB_UNLOCK();
 
+   if (count_out)
+      *count_out = count;
+   return 0;
+}
+
+int contacts_entity_aliases(int user_id,
+                            int64_t entity_id,
+                            char (*names)[64],
+                            int max_names,
+                            int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!names || max_names <= 0 || entity_id <= 0)
+      return 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int count = 0;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT n.canonical_name FROM memory_entities e JOIN "
+                               "memory_entities n ON n.user_id = e.user_id AND n.id <> e.id AND "
+                               "(n.id = COALESCE(e.canonical_id, e.id) OR n.canonical_id = "
+                               "COALESCE(e.canonical_id, e.id)) WHERE e.user_id = ? AND e.id = ? "
+                               "LIMIT ?",
+                               -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, entity_id);
+      sqlite3_bind_int(st, 3, max_names);
+      while (count < max_names && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+         const char *name = (const char *)sqlite3_column_text(st, 0);
+         snprintf(names[count++], 64, "%s", name ? name : "");
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+      OLOG_ERROR("contacts_entity_aliases: %s", sqlite3_errmsg(s_db.db));
+      return 1;
+   }
+   if (count_out)
+      *count_out = count;
+   return 0;
+}
+
+int contacts_list_names(int user_id,
+                        const char *field_type,
+                        contact_result_t *out,
+                        int max_results,
+                        int offset,
+                        int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out || max_results <= 0)
+      return 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int count = 0;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT c.id, c.entity_id, e.name, n.canonical_name, c.field_type, c.value, c.label, "
+       "e.photo_id FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
+       "JOIN memory_entities n ON n.user_id = c.user_id AND (n.id = COALESCE(e.canonical_id, e.id) "
+       "OR n.canonical_id = COALESCE(e.canonical_id, e.id)) "
+       "WHERE c.user_id = ? AND (? IS NULL OR c.field_type = ?) "
+       "ORDER BY c.id, n.id LIMIT ? OFFSET ?",
+       -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      if (field_type) {
+         sqlite3_bind_text(st, 2, field_type, -1, SQLITE_TRANSIENT);
+         sqlite3_bind_text(st, 3, field_type, -1, SQLITE_TRANSIENT);
+      } else {
+         sqlite3_bind_null(st, 2);
+         sqlite3_bind_null(st, 3);
+      }
+      sqlite3_bind_int(st, 4, max_results);
+      sqlite3_bind_int(st, 5, offset);
+      while (count < max_results && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+         row_to_contact(st, &out[count++]);
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+      OLOG_ERROR("contacts_list_names: %s", sqlite3_errmsg(s_db.db));
+      return 1;
+   }
    if (count_out)
       *count_out = count;
    return 0;

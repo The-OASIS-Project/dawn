@@ -26,9 +26,9 @@
  * notes + job-conversation copy).
  *
  * Kept SEPARATE from research_run.c (the deterministic core) because this half
- * depends on the session + dispatch subsystems (which are ENABLE_WEBUI-coupled,
- * like the jobs code it rides on), whereas the core is standalone and unit-
- * tested against the ledger alone.
+ * depends on the session + dispatch subsystems (like the jobs code it rides
+ * on), whereas the core is standalone and unit-tested against the ledger
+ * alone.
  */
 
 #include <stdatomic.h>
@@ -45,6 +45,7 @@
 #include "core/memory_filter.h" /* memory_filter_check_injection_commands (critic gap gate) */
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
+#include "llm/llm_cache_monitor.h"
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "tools/document_index_pipeline.h"
@@ -318,6 +319,7 @@ static void research_report_label(int64_t run_id,
  * report too large for one note falls back to the multi-chunk "text" document
  * path (§8 short-vs-large split) — searchable/readable, just no note gloss. */
 static void research_persist_report_note(int user_id,
+                                         int64_t conversation_id,
                                          int64_t run_id,
                                          const char *brief,
                                          const char *report) {
@@ -352,8 +354,14 @@ static void research_persist_report_note(int user_id,
       return;
    }
    research_db_run_set_report_doc(run_id, res.doc_id);
-   /* Best-effort memory->note bridge, exactly like do_save_note. */
-   (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   /* Best-effort memory->note bridge, exactly like do_save_note; never from a
+    * private conversation's run (the job inherits its privacy): the gloss is a
+    * memory, and nothing private is learned.  Unreadable counts as private. */
+   bool is_private = true;
+   if (conv_db_is_private(conversation_id, user_id, &is_private) == AUTH_DB_SUCCESS &&
+       !is_private) {
+      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   }
    OLOG_INFO("research: run %lld report saved as note %lld (%s)", (long long)run_id,
              (long long)res.doc_id, label);
 }
@@ -385,7 +393,11 @@ static char *research_synthesize(struct session *s,
       .auth_user_id = run0->user_id,
       .skip_prompt_rebuild = true, /* keep the synthesis prompt (no memory/persona rebuild) */
    };
-   char *prose = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+   /* A side call on the run's session: recorded, but it doesn't touch the
+    * rounds' cache key or context numbers. */
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
+   char *prose = core_text_input_dispatch(s, directive, &opts);
+   llm_cache_monitor_pop_kind(kind_prev);
    session_set_tools_suppressed(s, false);
    free(directive);
    return prose;
@@ -430,7 +442,11 @@ static int research_run_critic(struct session *s,
       .auth_user_id = run0->user_id,
       .skip_prompt_rebuild = true,
    };
-   char *resp = core_text_input_dispatch(s, digest, NULL, NULL, NULL, 0, &opts);
+   /* A side call on the run's session: recorded, but it doesn't touch the
+    * rounds' cache key or context numbers. */
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
+   char *resp = core_text_input_dispatch(s, digest, &opts);
+   llm_cache_monitor_pop_kind(kind_prev);
    session_set_input_token_ceiling(s, b->max_input_tokens);
    session_set_tools_suppressed(s, false);
    free(digest);
@@ -508,6 +524,7 @@ static char *research_assemble_report(const char *prose, const char *evidence, c
  * research worker otherwise writes no messages there).  Best-effort. */
 static void research_persist_report_to_job_conv(const research_run_t *run0, const char *body) {
    int64_t msg_id = 0;
+   /* no-blocks: the report DAWN compiled from its evidence ledger. */
    if (conv_db_add_message_with_tools(run0->conversation_id, run0->user_id, "assistant", body, NULL,
                                       NULL, NULL, &msg_id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("research: failed to persist report to job conv %lld",
@@ -670,7 +687,11 @@ static char *research_commentary(struct session *s, const research_run_t *run0, 
       .auth_user_id = run0->user_id,
       .skip_prompt_rebuild = true,
    };
-   char *take = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+   /* A side call on the run's session: recorded, but it doesn't touch the
+    * rounds' cache key or context numbers. */
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
+   char *take = core_text_input_dispatch(s, directive, &opts);
+   llm_cache_monitor_pop_kind(kind_prev);
    session_set_tools_suppressed(s, false);
    free(directive);
    free(sysprompt);
@@ -754,7 +775,7 @@ const char *research_run_execute(struct session *s,
          .auth_user_id = run0->user_id,
          .skip_prompt_rebuild = true, /* keep the per-turn builder (memory) OUT of the loop */
       };
-      char *resp = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+      char *resp = core_text_input_dispatch(s, directive, &opts);
       const bool round_failed = (resp == NULL);
       free(resp);
 
@@ -1015,7 +1036,8 @@ const char *research_run_execute(struct session *s,
    if (report != NULL) {
       research_db_revision_add(run_id, last_round, report);
       if (claim_count > 0) {
-         research_persist_report_note(run0->user_id, run_id, run0->brief, report);
+         research_persist_report_note(run0->user_id, run0->conversation_id, run_id, run0->brief,
+                                      report);
          /* Job-conversation copy so the WebUI viewer shows the answer, not a blank
           * transcript.  With prose, the chat bubble carries just the answer (the full
           * evidence lives in the note); otherwise the whole report. */

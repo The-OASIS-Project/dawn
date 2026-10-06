@@ -1077,7 +1077,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
 
    /* v34 migration: fact category column + per-user backfill gate.
     * categories_backfilled_at = 0 means embedding-centroid classification has not yet run
-    * for that user; memory_embeddings_start_backfill() picks it up on next session. */
+    * for that user; the user's next complete embedding-backfill pass runs it. */
    if (current_version >= 1 && current_version < 34) {
       const char *v34_sql = "ALTER TABLE memory_facts ADD COLUMN category TEXT NOT NULL "
                             "  DEFAULT 'general';"
@@ -3057,6 +3057,378 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v86: stocks_watchlist — per-user WebUI stocks watchlist (arbitrary not-held
+    * tickers). Base SCHEMA_SQL carries the table; this CREATE back-fills an existing
+    * DB. CREATE TABLE IF NOT EXISTS is idempotent, so (unlike the ALTER steps above)
+    * it also runs harmlessly on a fresh install. Gated `< 86`. */
+   bool v86_ok = (current_version >= 86);
+   if (current_version < 86) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE TABLE IF NOT EXISTS stocks_watchlist ("
+                        "  user_id INTEGER NOT NULL,"
+                        "  symbol TEXT NOT NULL,"
+                        "  position INTEGER NOT NULL DEFAULT 0,"
+                        "  added_at INTEGER NOT NULL,"
+                        "  PRIMARY KEY(user_id, symbol))",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v86 migration (stocks_watchlist) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v86_ok = false;
+      } else {
+         v86_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v87: email_accounts.digest_depth — per-account cap on how many of an inbox's
+    * newest messages the daily digest may scan (reached by paging).  Base SCHEMA_SQL
+    * carries the column; this ALTER back-fills an existing DB with the default
+    * (a literal DEFAULT keeps SQLite's fast ADD COLUMN path).  Gated `< 87` so it
+    * also runs on fresh installs (duplicate-column expected + tolerated, as v85). */
+   bool v87_ok = (current_version >= 87);
+   if (current_version < 87) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE email_accounts ADD COLUMN digest_depth INTEGER NOT NULL "
+                        "DEFAULT " STRINGIFY(EMAIL_DEFAULT_DIGEST_DEPTH),
+                        NULL, NULL, &errmsg);
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v87 migration (email digest_depth) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v87_ok = false;
+      } else {
+         v87_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v88: re-run the one-shot fact-category pass for every user.  Its inline
+    * UPDATE (memory_embeddings.c categorize_user_facts) bound only (category, id)
+    * against "... WHERE id = ? AND user_id = ?", so user_id compared against NULL,
+    * nothing was written, and users.categories_backfilled_at was still set.  Every
+    * pass that ran since that filter was added was a silent no-op.  Clearing the
+    * flag lets the next backfill sweep run the fixed pass; it only classifies facts
+    * still in 'general', so categories set by extraction are untouched. */
+   bool v88_ok = (current_version >= 88);
+   if (current_version < 88) {
+      rc = sqlite3_exec(s_db.db, "UPDATE users SET categories_backfilled_at = 0", NULL, NULL,
+                        &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v88 migration (re-run fact categories) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v88_ok = false;
+      } else {
+         v88_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v89: (1) index memory rows by the conversation they were learned from, for
+    * the per-conversation count and forget offered when a conversation is marked
+    * private (otherwise each is a scan of the user's whole memory).  Migration-only:
+    * source_conversation_id is itself migration-added on older databases.
+    * (2) doc_chunk_generation: a counter the database bumps on every change to
+    * which chunk embeddings a user can see (chunk insert/delete/re-embed, document
+    * delete or sharing change), so the in-memory chunk-embedding cache
+    * (document_embed_cache.c) is invalidated by every writer, including ones
+    * added later, without each having to remember to.
+    * Every statement is idempotent (IF NOT EXISTS / OR IGNORE), so a partial run
+    * is simply redone on the next start.
+    * (3) memory_{fact,relation,preference}_sources: every conversation a fact or
+    * relation was learned or reinforced from (for a preference: every one that
+    * gave its current value).  The rows' source_conversation_id keeps only the
+    * latest, so forgetting a conversation would otherwise delete what other
+    * conversations also taught; seeded from that column (older history is not
+    * recoverable).  Deleting a conversation deletes its source rows (FK cascade),
+    * so a forget never counts a deleted conversation as "another source". */
+   bool v89_ok = (current_version >= 89);
+   if (current_version < 89) {
+      /* (4) origin_unsourced: the row was also learned outside any conversation
+       * (the memory tool's "remember", an import, or before provenance was
+       * kept), so no forget of a conversation removes it.  One statement each,
+       * tolerating a column a partial earlier run already added. */
+      static const char *const V89_COLUMNS[] = {
+         "ALTER TABLE memory_facts ADD COLUMN origin_unsourced INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE memory_preferences ADD COLUMN origin_unsourced INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE memory_relations ADD COLUMN origin_unsourced INTEGER NOT NULL DEFAULT 0",
+      };
+      bool columns_ok = true;
+      for (size_t c = 0; c < sizeof(V89_COLUMNS) / sizeof(V89_COLUMNS[0]); c++) {
+         rc = sqlite3_exec(s_db.db, V89_COLUMNS[c], NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+            OLOG_ERROR("auth_db: v89 migration (%s) failed: %s", V89_COLUMNS[c],
+                       errmsg ? errmsg : "unknown");
+            columns_ok = false;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      rc = !columns_ok
+               ? SQLITE_ERROR
+               : sqlite3_exec(
+                     s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_source_conv ON "
+                     "memory_facts(user_id, source_conversation_id);"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_summaries_source_conv ON "
+                     "memory_summaries(user_id, source_conversation_id);"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_relations_source_conv ON "
+                     "memory_relations(user_id, source_conversation_id);"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_preferences_source_conv ON "
+                     "memory_preferences(user_id, source_conversation_id);"
+                     /* Foreign-key children of memory_facts.id: without these every
+                      * fact delete scans both tables for rows to null out. */
+                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_superseded_by ON "
+                     "memory_facts(superseded_by) WHERE superseded_by IS NOT NULL;"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_relations_fact ON "
+                     "memory_relations(fact_id) WHERE fact_id IS NOT NULL;"
+                     /* Chunk-visibility generation per owner (a user id; 0 = shared
+                      * documents), bumped by the database on every change, so one
+                      * user's upload doesn't invalidate every user's cache. */
+                     "CREATE TABLE IF NOT EXISTS doc_chunk_generation ("
+                     "  owner INTEGER PRIMARY KEY,"
+                     "  gen INTEGER NOT NULL DEFAULT 0);" DOC_CHUNK_GENERATION_TRIGGERS_SQL
+                     "CREATE TRIGGER IF NOT EXISTS trg_documents_gen_vis AFTER UPDATE OF "
+                     "user_id, is_global ON documents BEGIN "
+                     "INSERT INTO doc_chunk_generation (owner, gen) VALUES "
+                     "(COALESCE(CASE WHEN OLD.is_global THEN 0 ELSE OLD.user_id END, 0), 1) "
+                     "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; "
+                     "INSERT INTO doc_chunk_generation (owner, gen) VALUES "
+                     "(COALESCE(CASE WHEN NEW.is_global THEN 0 ELSE NEW.user_id END, 0), 1) "
+                     "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"
+                     "CREATE TRIGGER IF NOT EXISTS trg_documents_gen_del AFTER DELETE ON "
+                     "documents BEGIN INSERT INTO doc_chunk_generation (owner, gen) VALUES "
+                     "(COALESCE(CASE WHEN OLD.is_global THEN 0 ELSE OLD.user_id END, 0), 1) "
+                     "ON CONFLICT(owner) DO UPDATE SET gen = gen + 1; END;"
+                     "CREATE TABLE IF NOT EXISTS memory_fact_sources ("
+                     "  fact_id INTEGER NOT NULL,"
+                     "  conversation_id INTEGER NOT NULL,"
+                     "  PRIMARY KEY (fact_id, conversation_id),"
+                     "  FOREIGN KEY (fact_id) REFERENCES memory_facts(id) ON DELETE CASCADE,"
+                     "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE "
+                     "CASCADE"
+                     ") WITHOUT ROWID;"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_fact_sources_conv ON "
+                     "memory_fact_sources(conversation_id);"
+                     "UPDATE memory_facts SET origin_unsourced = 1 WHERE "
+                     "source_conversation_id IS NULL;"
+                     "UPDATE memory_preferences SET origin_unsourced = 1 WHERE "
+                     "source_conversation_id IS NULL;"
+                     "UPDATE memory_relations SET origin_unsourced = 1 WHERE "
+                     "source_conversation_id IS NULL;"
+                     "INSERT OR IGNORE INTO memory_fact_sources (fact_id, conversation_id) "
+                     "SELECT id, source_conversation_id FROM memory_facts WHERE "
+                     "source_conversation_id IN (SELECT id FROM conversations);"
+                     "CREATE TABLE IF NOT EXISTS memory_relation_sources ("
+                     "  relation_id INTEGER NOT NULL,"
+                     "  conversation_id INTEGER NOT NULL,"
+                     "  PRIMARY KEY (relation_id, conversation_id),"
+                     "  FOREIGN KEY (relation_id) REFERENCES memory_relations(id) ON DELETE "
+                     "CASCADE,"
+                     "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE "
+                     "CASCADE"
+                     ") WITHOUT ROWID;"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_relation_sources_conv ON "
+                     "memory_relation_sources(conversation_id);"
+                     "INSERT OR IGNORE INTO memory_relation_sources (relation_id, "
+                     "conversation_id) SELECT id, source_conversation_id FROM "
+                     "memory_relations WHERE source_conversation_id IN (SELECT id FROM "
+                     "conversations);"
+                     "CREATE TABLE IF NOT EXISTS memory_preference_sources ("
+                     "  preference_id INTEGER NOT NULL,"
+                     "  conversation_id INTEGER NOT NULL,"
+                     "  PRIMARY KEY (preference_id, conversation_id),"
+                     "  FOREIGN KEY (preference_id) REFERENCES memory_preferences(id) ON DELETE "
+                     "CASCADE,"
+                     "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE "
+                     "CASCADE"
+                     ") WITHOUT ROWID;"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_preference_sources_conv ON "
+                     "memory_preference_sources(conversation_id);"
+                     "INSERT OR IGNORE INTO memory_preference_sources (preference_id, "
+                     "conversation_id) SELECT id, source_conversation_id FROM "
+                     "memory_preferences WHERE source_conversation_id IN (SELECT id FROM "
+                     "conversations);",
+                     NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v89 migration (memory sources, chunk generation) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v89_ok = false;
+      } else {
+         v89_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v90: llm_usage_log, one row per LLM call.  The base schema creates it on
+    * every start; repeated here (idempotent) so the bump is gated on it. */
+   bool v90_ok = (current_version >= 90);
+   if (current_version < 90) {
+      rc = sqlite3_exec(s_db.db, LLM_USAGE_LOG_SCHEMA_SQL, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v90 migration (llm_usage_log) failed: %s",
+                    errmsg ? errmsg : "unknown");
+      } else {
+         v90_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v91: llm_usage_log.binding_* — what Anthropic's thinking binding controls
+    * reported dropping (input_transformations).  Base SCHEMA_SQL carries the
+    * columns; these ALTERs back-fill a v90 table.  Gated `< 91` so they also run
+    * on fresh installs (duplicate-column expected + tolerated, as v87). */
+   bool v91_ok = (current_version >= 91);
+   if (current_version < 91) {
+      static const char *const v91_sql[] = {
+         "ALTER TABLE llm_usage_log ADD COLUMN binding_reported INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE llm_usage_log ADD COLUMN binding_prefix_drops INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE llm_usage_log ADD COLUMN binding_model_drops INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE llm_usage_log ADD COLUMN binding_other_drops INTEGER NOT NULL DEFAULT 0",
+      };
+      v91_ok = true;
+      for (size_t i = 0; i < sizeof(v91_sql) / sizeof(v91_sql[0]); i++) {
+         rc = sqlite3_exec(s_db.db, v91_sql[i], NULL, NULL, &errmsg);
+         const bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+         if (rc != SQLITE_OK && !duplicate) {
+            OLOG_ERROR("auth_db: v91 migration (llm_usage_log binding) failed: %s",
+                       errmsg ? errmsg : "unknown");
+            v91_ok = false;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+   }
+
+   /* v92: messages.llm_blocks (an assistant turn's stored blocks, read only to
+    * rebuild an LLM context), the trigger that drops them when a row's text
+    * changes, and a re-render of voice rows saved as raw Claude block arrays.
+    * Idempotent (probe-guarded ALTER, IF NOT EXISTS trigger, a scrub that
+    * finds nothing once run). */
+   bool v92_ok = (current_version >= 92);
+   if (current_version < 92) {
+      if (auth_db_migrations_v92(s_db.db) == AUTH_DB_SUCCESS) {
+         v92_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v92 migration (message turn blocks) failed");
+      }
+   }
+
+   /* v93: voice rows whose tool calls the old voice save dropped (an empty
+    * assistant turn, results without a call id) become text notes.  After v92,
+    * whose columns it reads.  Idempotent. */
+   bool v93_ok = (current_version >= 93);
+   if (current_version < 93) {
+      if (auth_db_migrations_v93(s_db.db) == AUTH_DB_SUCCESS) {
+         v93_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v93 migration (voice rows without tool calls) failed");
+      }
+   }
+
+   /* v94: messages.kind, the frozen request prefix (prompt_blobs + conversation
+    * columns) and stable memory citation handles.  Idempotent (probe-guarded
+    * ALTERs, IF NOT EXISTS indexes); no data changes. */
+   bool v94_ok = (current_version >= 94);
+   if (current_version < 94) {
+      if (auth_db_migrations_v94(s_db.db) == AUTH_DB_SUCCESS) {
+         v94_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v94 migration (message kinds, frozen prefix) failed");
+      }
+   }
+
+   /* v95: memory_facts.superseded_at, so a merged fact is pruned a window
+    * after its merge, not its creation.  Idempotent (probe-guarded ALTER; the
+    * stamp only fills NULLs). */
+   bool v95_ok = (current_version >= 95);
+   if (current_version < 95) {
+      if (auth_db_migrations_v95(s_db.db) == AUTH_DB_SUCCESS) {
+         v95_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v95 migration (memory_facts.superseded_at) failed");
+      }
+   }
+
+   /* v96: a compacted conversation's summary moved into its first kept
+    * question, so the reasoning its kept turns recorded is left behind once. */
+   bool v96_ok = (current_version >= 96);
+   if (current_version < 96) {
+      if (auth_db_migrations_v96(s_db.db) == AUTH_DB_SUCCESS) {
+         v96_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v96 migration (compacted conversations' reasoning floor) failed");
+      }
+   }
+
+   /* v97: tool_results, a tool result kept whole behind the view the model is
+    * shown.  Idempotent (IF NOT EXISTS; the base schema runs the same DDL). */
+   bool v97_ok = (current_version >= 97);
+   if (current_version < 97) {
+      if (auth_db_migrations_v97(s_db.db) == AUTH_DB_SUCCESS) {
+         v97_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v97 migration (tool_results) failed");
+      }
+   }
+
+   /* v98: messages rebuilt once (same rows, ids and sequence) with
+    * messages.images, and kinds checked by triggers instead of a CHECK (kind
+    * tool_change).  Needs room for a copy of the table; held otherwise. */
+   bool v98_ok = (current_version >= 98);
+   if (!v98_ok) {
+      if (auth_db_migrations_v98(s_db.db, db_path) == AUTH_DB_SUCCESS) {
+         v98_ok = true;
+      } else {
+         /* Fatal: every message read and write needs the v98 table, so there
+          * is no degraded mode to run in.  The step logged why (and, when it
+          * is room, how much to free); the next start tries again. */
+         OLOG_ERROR("auth_db: v98 migration (messages rebuild: images, kind triggers) failed; "
+                    "the database stays at v%d and DAWN cannot start until it succeeds",
+                    current_version);
+         return AUTH_DB_FAILURE;
+      }
+   }
+
+   /* v99: memory_citation_audit.referenced_ids (the items a turn named again
+    * rather than sent).  Idempotent (probe-guarded ALTER). */
+   bool v99_ok = (current_version >= 99);
+   if (current_version < 99) {
+      if (auth_db_migrations_v99(s_db.db) == AUTH_DB_SUCCESS) {
+         v99_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v99 migration (memory_citation_audit.referenced_ids) failed");
+      }
+   }
+
+   /* v100: compaction summaries stored as they are sent (neutralized once,
+    * replayed verbatim); one whose rendering that changes is a declared
+    * boundary for its conversation. */
+   bool v100_ok = (current_version >= 100);
+   if (current_version < 100) {
+      if (auth_db_migrations_v100(s_db.db) == AUTH_DB_SUCCESS) {
+         v100_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v100 migration (compaction summaries stored as sent) failed");
+      }
+   }
+
+   /* v101: messaging channels bound to the person who linked them, and SMS
+    * links verified by a code texted to the number. */
+   bool v101_ok = (current_version >= 101);
+   if (current_version < 101) {
+      if (auth_db_migrations_v101(s_db.db) == AUTH_DB_SUCCESS) {
+         v101_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v101 migration (messaging channel owners) failed");
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3080,7 +3452,9 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
-                              v83_ok && v84_ok && v85_ok;
+                              v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
+                              v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
+                              v97_ok && v98_ok && v99_ok && v100_ok && v101_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {
@@ -3107,4 +3481,24 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
    }
 
    return AUTH_DB_SUCCESS;
+}
+
+/* Whether @p table has column @p col (auth_db_internal.h). */
+bool auth_db_column_exists(sqlite3 *db, const char *table, const char *col) {
+   char sql[128];
+   snprintf(sql, sizeof(sql), "PRAGMA table_info(%s)", table);
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+      return false;
+   }
+   bool found = false;
+   while (sqlite3_step(st) == SQLITE_ROW) {
+      const unsigned char *name = sqlite3_column_text(st, 1);
+      if (name && strcmp((const char *)name, col) == 0) {
+         found = true;
+         break;
+      }
+   }
+   sqlite3_finalize(st);
+   return found;
 }

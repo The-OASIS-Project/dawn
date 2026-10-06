@@ -85,10 +85,33 @@ int webui_music_server_get_port(void);
 /**
  * @brief Wake up the music server's event loop
  *
- * Call this after lws_callback_on_writable() from another thread
- * to ensure the service loop processes the writeable request.
+ * Any thread.  The music thread then arms a writeable callback on each music
+ * connection that asked for one (webui_music_server_request_write, or a close
+ * requested).  Other threads never call lws functions on music connections
+ * themselves.
  */
 void webui_music_server_wake(void);
+
+struct lws;
+
+/**
+ * @brief A frame is queued for music connection @p wsi: arm its writeable
+ *        callback on the music thread.  Any thread; a connection no longer
+ *        listed (closed) is ignored.
+ */
+void webui_music_server_request_write(struct lws *wsi);
+
+struct session;
+
+/**
+ * @brief Close the music connections bound to @p session (it was destroyed).
+ *
+ * Any thread.  Marks them and wakes the music thread, which closes each one;
+ * its close releases the connection's session reference (the only place that
+ * reference is released, so no other thread frees a session the music thread
+ * is using).
+ */
+void webui_music_server_close_session(struct session *session);
 
 #ifdef __cplusplus
 }

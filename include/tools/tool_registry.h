@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Forward declaration for TOML table (avoid including toml.h everywhere) */
@@ -46,8 +47,9 @@ extern "C" {
  * Constants
  * ============================================================================= */
 
-#define TOOL_MAX_REGISTERED 64 /* Max tools in registry */
-#define TOOL_NAME_MAX 64       /* Max length of tool name */
+#define TOOL_MAX_REGISTERED 64  /* Max tools in registry */
+#define TOOL_NAME_MAX 64        /* Max length of tool name */
+#define TOOL_DESCRIBE_DEFAULT 2 /* describe_call: this action takes the default description */
 #define TOOL_DESC_MAX                                                            \
    2048                   /* Max length of an MCP-sourced tool/param description \
                            * (wrapped + sanitized at ingest in                   \
@@ -60,7 +62,7 @@ extern "C" {
  * cap (also the MCP bridge's property limit). 20 admits real MCP tools like cbm's
  * search_graph (14 params) while still bounding an untrusted upstream schema. */
 #define TOOL_PARAM_MAX 20
-#define TOOL_PARAM_ENUM_MAX 16        /* Max enum values per parameter */
+#define TOOL_PARAM_ENUM_MAX 24        /* Max enum values per parameter */
 #define TOOL_ALIAS_MAX 8              /* Max aliases per tool */
 #define TOOL_DEVICE_MAP_MAX 8         /* Max device map entries for meta-tools */
 #define TOOL_REPEATABLE_ACTIONS_MAX 4 /* Max non-deterministic actions per tool */
@@ -83,19 +85,25 @@ typedef enum {
 } tool_param_type_t;
 
 /*
- * ARRAY param delivery contract:
+ * ARRAY param delivery:
  *   The LLM emits a native JSON array; the schema advertises
  *   {"type":"array","items":{"type":"string"}}. At encode time
  *   (llm_tools.c) json-c serializes the array to its compact JSON string,
- *   which rides the existing TOOL_MAPS_TO_CUSTOM "::field::value" packing.
- *   Because that packing is "::"-delimited and a serialized array (or an
- *   element) can itself contain "::", an ARRAY custom param MUST be the
- *   LAST-declared param in the tool's params[] so its value occupies the
- *   terminal slot, and the callback MUST decode it with
- *   tool_param_extract_custom_tail() (reads to end-of-string), not the
- *   plain tool_param_extract_custom(). A tool may declare at most one
- *   ARRAY param for this reason.
+ *   which rides the TOOL_MAPS_TO_CUSTOM "::field::value" packing like any
+ *   other value (escaped, so its "::" can't break it); the callback reads it
+ *   with tool_param_extract_custom().
  */
+
+/** A tool's param count, from its params array: never written by hand, so a
+ *  param added to the array can't be left out of the count. */
+#define TOOL_PARAM_COUNT(params)                                                       \
+   ((int)(sizeof(params) / sizeof((params)[0]) +                                       \
+          0 * sizeof(struct {                                                          \
+             int unused;                                                               \
+             _Static_assert(!__builtin_types_compatible_p(__typeof__(params),          \
+                                                          __typeof__(&(params)[0])),   \
+                            "TOOL_PARAM_COUNT needs the params array, not a pointer"); \
+          })))
 
 /**
  * @brief How a parameter maps to the device/action/value model
@@ -149,6 +157,50 @@ typedef enum {
     * distinguish a scheduled read from a scheduled write. */
    TOOL_CAP_INFORMATIONAL = (1 << 7),
 } tool_capability_t;
+
+/* =============================================================================
+ * Kinds of Action
+ *
+ * What a call does, by its action: who may make it depends on this (a text
+ * from an unverified sender may read; a background job may read and fetch; an
+ * action needs the user).  Deny by default: an action a tool doesn't list is
+ * TOOL_KIND_ACT, the zero value, so a tool that declares nothing acts.
+ * ============================================================================= */
+
+typedef enum {
+   TOOL_KIND_ACT = 0, /**< changes, sends or starts something (the default) */
+   /** no effect the user or anyone outside would notice (known, benign
+    *  writes: a mailbox's \Seen flag, an SMS marked read, recall
+    *  statistics) */
+   TOOL_KIND_READ,
+   /** an outward read: the request (a query, a URL) reaches a host the caller
+    *  picks, so it can carry data out */
+   TOOL_KIND_FETCH,
+   /** state scoped to the session or the run, nothing in the home or outside
+    *  (a research ledger, the active code project) */
+   TOOL_KIND_STATE,
+   /** an effect someone in the home hears or sees (music, volume, speech) */
+   TOOL_KIND_DEVICE,
+   /** stages a pending item that does nothing until its confirm runs (an
+    *  email draft, a call preview, a delete awaiting its confirm) */
+   TOOL_KIND_PREPARE,
+} tool_action_kind_t;
+
+/**
+ * @brief One action's kind.  A PREPARE entry names its confirm: the action
+ *        that carries out what it staged, itself listed in the same table.
+ */
+typedef struct {
+   const char *action;
+   tool_action_kind_t kind;
+   const char *confirm; /**< TOOL_KIND_PREPARE only: the action that confirms it (listed ACT) */
+} tool_action_kind_entry_t;
+
+/** Entries in an action_kinds table: .action_kind_count = TOOL_KIND_COUNT(t) */
+#define TOOL_KIND_COUNT(table) ((int)(sizeof(table) / sizeof((table)[0])))
+
+/** The kind's name, for logs and messages ("read", "fetch", ...). */
+const char *tool_action_kind_name(tool_action_kind_t kind);
 
 /* =============================================================================
  * Parameter Definition
@@ -364,6 +416,20 @@ typedef struct {
    tool_device_type_t device_type; /**< boolean, analog, getter, etc. */
    tool_capability_t capabilities; /**< Capability flags */
    bool skip_followup;             /**< Skip LLM follow-up response (see guide for details) */
+   /**< Show this tool's result whole up to this many characters (0: no
+    * ask; its share of the tool loop's batch budget decides).  A result
+    * within it is served first in the batch's split, whole while it fits the
+    * batch budget, which it never exceeds; a larger one is split like any
+    * other.  An MCP tool's comes from _meta["anthropic/maxResultSizeChars"]. */
+   size_t max_result_chars;
+   /**< Never store this tool's result (over its share it is still shown as a
+    * view, with no handle): result_read's own answers, so a read can't hand
+    * out a handle to itself. */
+   bool result_no_store;
+   /**< Always shown whole, never viewed: render_visual's markup, which the
+    * WebUI renders from the full text.  Keyed on the tool, never on content,
+    * so untrusted text can't claim the exemption. */
+   bool result_whole;
    /**< When true, a scheduled-briefing step running this tool has its result
     * persisted into the briefing conversation as a synthetic tool-call/result
     * pair (rendered as a tool entry, reloaded into LLM context) alongside the
@@ -391,6 +457,61 @@ typedef struct {
     *  NULL = every action of a schedulable tool may be scheduled.
     *  @return SUCCESS if `action` may be scheduled, FAILURE otherwise (writes err_buf). */
    int (*validate_schedulable_action)(const char *action, char *err_buf, size_t err_buf_size);
+
+   /** Optional check of a call's resolved arguments before it runs (NULL =
+    *  none): for a parameter whose valid values change at runtime and so are
+    *  kept out of the schema (a conversation freezes the schema; the live set
+    *  reaches the model in its standing directions).
+    *  @return SUCCESS to run it, FAILURE to refuse it (writes err_buf, which
+    *          the model is told). */
+   int (*validate_call)(const char *device,
+                        const char *action,
+                        const char *value,
+                        char *err_buf,
+                        size_t err_buf_size);
+
+   /* Kinds of action (see tool_action_kind_t).  action_kinds lists the
+    * actions of the tool's ENUM action parameter (checked at registration),
+    * each with its kind; any other action, and every call of a tool without
+    * an action parameter, is default_kind (TOOL_KIND_ACT unless set). */
+   const tool_action_kind_entry_t *action_kinds;
+   int action_kind_count;
+   tool_action_kind_t default_kind;
+   /** A call of this tool can't be approved by reply code (a plan: its
+    *  steps would each need their own): a call that would need one is refused. */
+   bool no_reply_code;
+   /** Optional: what a call does, in DAWN's words, for the text that asks the
+    *  user for its reply code (NULL = the tool, its action and its declared
+    *  parameters).  Names what the call acts on as it will resolve it (the
+    *  item, call, recipient or number), with addresses and accounts in full;
+    *  what it writes or sends, its start at least.  Gets the effective action
+    *  and the packed value; runs on the turn's thread (its user and session).
+    *  Sets *valid_for_sec when what it confirms expires sooner than a code
+    *  would (the code then expires with it).
+    *
+    *  The description is part of what the code approves: it is made again
+    *  when the approved call runs, and a call whose description changed is
+    *  refused.  So it must depend only on what the call will act on, and what
+    *  a confirm carries out must not change under the id it names.
+    *
+    *  @return SUCCESS; FAILURE when it can't say, or what it says doesn't
+    *          fit @p out (the call is refused; a reason written to @p out is
+    *          given to the model); or
+    *          TOOL_DESCRIBE_DEFAULT for an action it leaves to the default
+    *          description. */
+   int (*describe_call)(const char *action,
+                        const char *value,
+                        char *out,
+                        size_t out_len,
+                        int *valid_for_sec);
+   /** Optional: a call's kind when it depends on more than its action, or
+    *  on configuration (NULL = the table's).  Gets the resolved device, the
+    *  effective action, the packed value (NULL when empty) and the kind the
+    *  table gives; returns the call's kind. */
+   tool_action_kind_t (*classify_call)(const char *device,
+                                       const char *action,
+                                       const char *value,
+                                       tool_action_kind_t listed);
 
    /* Config (optional - NULL if tool has no config) */
    void *config;                        /**< Pointer to tool's config struct */
@@ -619,6 +740,81 @@ const char *tool_registry_get_action_param_name(const char *tool_name);
  */
 bool tool_registry_action_is_repeatable(const char *tool_name, const char *action);
 
+/**
+ * @brief The action a tool runs when a call names none: by its device type
+ *        (boolean "toggle", analog "set", trigger "trigger", music "play",
+ *        otherwise "get").  What command_execute and an MQTT publish use.
+ */
+const char *tool_default_action(const tool_metadata_t *meta);
+
+/**
+ * @brief The action a native tool call runs, as the tool receives it: the
+ *        call's own when it names one; else "get" for a callback tool (the
+ *        native path's rule), the device default (tool_default_action) for
+ *        an MQTT tool, and none ("") for the viewing sync path and a tool
+ *        with no callback (command_execute defaults it by the tool it
+ *        resolves the device to).
+ *        What is classified must be what runs: the gate and the dispatch
+ *        both take it from here.
+ *
+ * @param meta   The tool
+ * @param action The action the call named ("" or NULL when none)
+ * @return A static or borrowed string (never NULL)
+ */
+const char *tool_effective_action(const tool_metadata_t *meta, const char *action);
+
+/**
+ * @brief A call's kind of action: the action's entry in the tool's table, else
+ *        its default_kind, passed through its classify_call when it has one;
+ *        a confirm a PREPARE names is always ACT
+ *
+ * @param meta   The tool (not an alias lookup: the metadata that runs)
+ * @param device The resolved device (a meta-tool's target; may be NULL)
+ * @param action The effective action (tool_effective_action; may be NULL)
+ * @param value  The packed value, as the callback receives it (NULL when empty)
+ * @return The kind; TOOL_KIND_ACT when @p meta is NULL
+ */
+tool_action_kind_t tool_action_kind(const tool_metadata_t *meta,
+                                    const char *device,
+                                    const char *action,
+                                    const char *value);
+
+/**
+ * @brief The tool's own spelling of @p action: the value of its ENUM action
+ *        parameter it matches, ignoring case (a tool without one takes any
+ *        action, as given)
+ *
+ * @param out     Receives the spelling (NUL-terminated; may be cut to fit)
+ * @param out_len Size of @p out
+ * @return false when the tool has an ENUM action parameter and @p action is
+ *         none of its values
+ */
+bool tool_action_canonical(const tool_metadata_t *meta,
+                           const char *action,
+                           char *out,
+                           size_t out_len);
+
+/**
+ * @brief The tool's actions, comma-separated, for a message ("" for a tool
+ *        without an ENUM action parameter)
+ */
+void tool_action_list(const tool_metadata_t *meta, char *out, size_t out_len);
+
+/**
+ * @brief Check a tool's action_kinds table: every action is one of its ENUM
+ *        action parameter's values, listed once; a tool without such a
+ *        parameter lists none; a PREPARE entry names a confirm the table
+ *        lists as ACT, and no other entry names one.
+ *        Registration refuses a tool that fails (scripts/
+ *        check_tool_action_kinds.sh catches it at build time).
+ *
+ * @param meta    The tool
+ * @param why     Receives the reason on failure (may be NULL)
+ * @param why_len Size of @p why
+ * @return SUCCESS, or FAILURE with @p why set
+ */
+int tool_action_kinds_validate(const tool_metadata_t *meta, char *why, size_t why_len);
+
 /* =============================================================================
  * Config Integration
  * ============================================================================= */
@@ -797,6 +993,14 @@ void tool_registry_invalidate_cache(void);
  */
 bool tool_registry_is_cache_valid(void);
 
+/**
+ * @brief A number that rises whenever a tool is registered, the registry is
+ *        (re)initialized, a parameter's values or a tool's config change, or
+ *        the cache is invalidated: anything that can change a tool's schema
+ *        or the set of tools.  For callers caching what they derive from it.
+ */
+uint64_t tool_registry_generation(void);
+
 /* =============================================================================
  * Direct Command Variation Statistics
  * ============================================================================= */
@@ -830,8 +1034,20 @@ int tool_registry_count_tool_variations(const char *name);
  * TOOL_MAPS_TO_CUSTOM parameters are encoded by llm_tools.c as:
  *   "base_value::field_name::field_value[::field_name::field_value...]"
  *
- * These inline helpers decode the encoding. Co-located here so the
- * encode/decode contract lives in one place.
+ * A value can hold any text, "::" included: the encoder escapes each colon a
+ * separator could be mistaken for (one next to another colon, or at either end
+ * of the value) as TOOL_VALUE_ESC 'c', and a TOOL_VALUE_ESC byte itself as
+ * TOOL_VALUE_ESC 'u', so every "::" in the packed string is a separator.  The
+ * helpers below decode as they copy.  A string packed by anything that doesn't
+ * escape (a direct command, MQTT) decodes unchanged.
+ *
+ * Only a tool that declares CUSTOM params gets an escaped value; a callback of
+ * one reads it through these helpers (or tool_value_decode_copy), never raw.
+ * Direct commands, MQTT and scheduled steps pack without escaping: their text
+ * is written with its separators in it, so a "::" inside a value there still
+ * ends it (and could set a field).  No authorization check may trust a packed
+ * field unless the call is known to come from the LLM tool loop.
+ * Co-located here so the encode/decode contract lives in one place.
  * ============================================================================= */
 
 #include <stdio.h>
@@ -840,12 +1056,76 @@ int tool_registry_count_tool_variations(const char *name);
 #include "core/scheduled_context.h"
 #include "core/session_manager.h"
 
+/** The escape byte of a packed tool value (ASCII unit separator). */
+#define TOOL_VALUE_ESC '\x1F'
+
+/**
+ * @brief Escape @p in (@p len bytes) as a packed tool value into @p out.
+ * @return The escaped length (excluding the NUL); when it is >= @p out_len the
+ *         output was cut short (still NUL-terminated when @p out_len > 0).
+ */
+static inline size_t tool_value_escape(const char *in, size_t len, char *out, size_t out_len) {
+   size_t n = 0; /* the escaped length */
+   size_t w = 0; /* bytes written: what fits, never half an escape */
+   bool fits = out_len > 0;
+   for (size_t i = 0; i < len; i++) {
+      const char c = in[i];
+      const bool colon_at_risk = c == ':' &&
+                                 (i == 0 || i + 1 == len || in[i - 1] == ':' || in[i + 1] == ':');
+      char pair = 0;
+      if (colon_at_risk) {
+         pair = 'c';
+      } else if (c == TOOL_VALUE_ESC) {
+         pair = 'u';
+      }
+      const size_t need = pair ? 2 : 1;
+      if (fits && w + need < out_len) {
+         if (pair) {
+            out[w++] = TOOL_VALUE_ESC;
+            out[w++] = pair;
+         } else {
+            out[w++] = c;
+         }
+      } else {
+         fits = false;
+      }
+      n += need;
+   }
+   if (out_len > 0) {
+      out[w] = '\0';
+   }
+   return n;
+}
+
+/**
+ * @brief Copy @p len bytes of a packed value from @p src into @p out, decoded.
+ *        Always NUL-terminates (when @p out_len > 0); truncates to fit.
+ */
+static inline void tool_value_decode_copy(const char *src, size_t len, char *out, size_t out_len) {
+   if (!out || out_len == 0) {
+      return;
+   }
+   size_t n = 0;
+   for (size_t i = 0; i < len && n + 1 < out_len; i++) {
+      char c = src[i];
+      if (c == TOOL_VALUE_ESC && i + 1 < len && (src[i + 1] == 'c' || src[i + 1] == 'u')) {
+         c = src[i + 1] == 'c' ? ':' : TOOL_VALUE_ESC;
+         i++;
+      }
+      out[n++] = c;
+   }
+   out[n] = '\0';
+}
+
 /**
  * @brief Extract a custom parameter value from an encoded value string
  *
+ * Walks the name/value pairs after the base, so a value can't be mistaken for
+ * a field name.
+ *
  * @param value Full value string (may contain custom params)
  * @param field_name Name of field to extract
- * @param out_value Buffer for extracted value
+ * @param out_value Buffer for the decoded value
  * @param out_len Size of out_value buffer
  * @return true if found, false otherwise
  */
@@ -856,101 +1136,88 @@ static inline bool tool_param_extract_custom(const char *value,
    if (!value || !field_name || !out_value || out_len == 0)
       return false;
 
-   char pattern[64];
-   snprintf(pattern, sizeof(pattern), "::%s::", field_name);
-
-   const char *pos = strstr(value, pattern);
-   if (!pos)
-      return false;
-
-   const char *val_start = pos + strlen(pattern);
-   const char *val_end = strstr(val_start, "::");
-   size_t val_len = val_end ? (size_t)(val_end - val_start) : strlen(val_start);
-
-   if (val_len >= out_len)
-      val_len = out_len - 1;
-
-   memcpy(out_value, val_start, val_len);
-   out_value[val_len] = '\0';
-   return true;
-}
-
-/**
- * @brief Extract a terminal custom parameter, reading to end-of-string
- *
- * Like tool_param_extract_custom() but, once it finds "::field_name::", it
- * copies everything to the end of the string rather than stopping at the next
- * "::". This is required for TOOL_PARAM_TYPE_ARRAY values: the serialized JSON
- * array (or an element) may contain a literal "::", which the plain extractor
- * would truncate. Valid ONLY for the LAST-declared param (the terminal slot) —
- * see the ARRAY contract note near tool_param_type_t.
- *
- * @param value Full value string (may contain custom params)
- * @param field_name Name of the terminal field to extract
- * @param out_value Buffer for extracted value
- * @param out_len Size of out_value buffer
- * @return true if found, false otherwise
- */
-static inline bool tool_param_extract_custom_tail(const char *value,
-                                                  const char *field_name,
-                                                  char *out_value,
-                                                  size_t out_len) {
-   if (!value || !field_name || !out_value || out_len == 0)
-      return false;
-
-   char pattern[64];
-   snprintf(pattern, sizeof(pattern), "::%s::", field_name);
-
-   const char *pos = strstr(value, pattern);
-   if (!pos)
-      return false;
-
-   const char *val_start = pos + strlen(pattern);
-   size_t val_len = strlen(val_start);
-
-   if (val_len >= out_len)
-      val_len = out_len - 1;
-
-   memcpy(out_value, val_start, val_len);
-   out_value[val_len] = '\0';
-   return true;
+   const size_t name_len = strlen(field_name);
+   const char *sep = strstr(value, "::"); /* the end of the base */
+   while (sep) {
+      const char *name = sep + 2;
+      const char *name_end = strstr(name, "::");
+      if (!name_end)
+         return false;
+      const char *val = name_end + 2;
+      const char *val_end = strstr(val, "::");
+      if ((size_t)(name_end - name) == name_len && strncmp(name, field_name, name_len) == 0) {
+         tool_value_decode_copy(val, val_end ? (size_t)(val_end - val) : strlen(val), out_value,
+                                out_len);
+         return true;
+      }
+      sep = val_end;
+   }
+   return false;
 }
 
 /**
  * @brief Extract the base value (before any custom params) from an encoded string
  *
  * @param value Full value string
- * @param out_base Buffer for base value
+ * @param out_base Buffer for the decoded base value
  * @param out_len Size of out_base buffer
  */
 static inline void tool_param_extract_base(const char *value, char *out_base, size_t out_len) {
-   if (!value || !out_base)
+   if (!value || !out_base || out_len == 0)
       return;
 
    const char *delim = strstr(value, "::");
-   size_t base_len = delim ? (size_t)(delim - value) : strlen(value);
-
-   if (base_len >= out_len)
-      base_len = out_len - 1;
-
-   memcpy(out_base, value, base_len);
-   out_base[base_len] = '\0';
+   tool_value_decode_copy(value, delim ? (size_t)(delim - value) : strlen(value), out_base,
+                          out_len);
 }
 
+/**
+ * @brief The user a tool call acts for; 0 for a guest
+ *
+ * The calling session's user (session_effective_user_id(): the local mic is
+ * the default voice user's, an unmapped satellite is a guest's).  With no
+ * session user, a scheduled briefing step acts for the briefing's owner
+ * (scheduled_context_set; the scheduler thread has no command context).  A
+ * caller with no session at all (MQTT, the device itself) acts for the default
+ * voice user.  A tool reading or changing personal data refuses a guest (0)
+ * with TOOL_GUEST_REFUSAL.
+ */
 static inline int tool_get_current_user_id(void) {
    session_t *session = session_get_command_context();
-   if (session && session->metrics.user_id > 0)
-      return session->metrics.user_id;
-   /* No live session: a scheduled briefing step runs on the scheduler thread
-    * with no command context, so consult the scheduled-origin user the briefing
-    * executor set (scheduled_context_set) before defaulting to user 1 —
-    * otherwise every scheduled tool would bill/audit/act as user 1 rather than
-    * the briefing's owner.  See include/core/scheduled_context.h. */
+   const int user_id = session ? session_effective_user_id(session) : 0;
+   if (user_id > 0)
+      return user_id;
    int sched_user = 0;
    if (scheduled_context_get(&sched_user) && sched_user > 0)
       return sched_user;
-   return 1;
+   return session ? 0 : session_default_voice_user_id();
 }
+
+/** Whether the calling turn was spoken (session_turn_spoken); false with no
+ *  session. */
+static inline bool tool_turn_spoken(void) {
+   return session_turn_spoken(session_get_command_context());
+}
+
+/** The calling user's own words this turn and the turn before
+ *  (session_recent_questions_dup; caller frees): "" in a session with none
+ *  (an image-only turn: nothing counts as said), NULL with no session (no
+ *  turn to check against). */
+static inline char *tool_user_words_dup(void) {
+   session_t *session = session_get_command_context();
+   if (!session) {
+      return NULL;
+   }
+   char *words = session_recent_questions_dup(session);
+   return words ? words : strdup("");
+}
+
+/** The result for a guest (tool_get_current_user_id() == 0) asking for personal data. */
+#define TOOL_GUEST_REFUSAL                                                                   \
+   TOOL_RESULT_ERROR_MARK "This device isn't assigned to a user, so personal data (memory, " \
+                          "calendar, email, documents, reminders) isn't available here. An " \
+                          "admin can assign it to a user on the satellite management page."
+
 
 #ifdef __cplusplus
 }

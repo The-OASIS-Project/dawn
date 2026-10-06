@@ -487,12 +487,40 @@ confirm_outbound = true
 pcm_port = "/dev/ttyUSB4"          # modem USB audio port (raw 16k S16LE PCM); no USB sound card
 sms_retention_days = 90
 call_log_retention_days = 90
-rate_limit_sms_per_min = 5
+rate_limit_sms_per_min = 10
 rate_limit_calls_per_min = 3
 rate_limit_sms_per_day = 30
 ```
 
 ---
+
+## Who a Call or Text Goes To (contact resolution)
+
+`src/tools/contact_resolve.c`, shared by phone and email (`phone_contacts.c` is a thin
+wrapper), resolves a name, number or address without guessing:
+
+- **Ranking in SQL** (`contacts_find`): the whole name, then a whole word of it or of any name
+  in the person's entity tree (head and aliases, so "Jane" finds "Jane Doe"), then
+  part of a name. Names are compared with hyphens as spaces, dots and apostrophes dropped.
+- **Certain (dials or previews as usual):** one value at the best match, which is the whole
+  name or a whole word, with the name **said by the user** in this turn or the one before: the
+  words passed, a word that alone picks this person, or an alias of theirs. A literal number or
+  address is taken as given when the user said it or it belongs to a contact the user named;
+  otherwise it previews. A number is reverse-looked-up to name the person in the preview.
+- **Asks (a preview the user confirms, even with `confirm_outbound = false`):** part of a name
+  ("Chri" for Chris Smith); exactly one near-miss ("Jon Smyth" for John Smith: a
+  yes-or-no, since a misheard name can't be said again any better); or a name the user never
+  said (taken from an email or web page the model read).
+- **Asks which:** several people or several values ("mobile or work?"; answered with the name
+  plus label, "Bob Smith mobile", or the number). On spoken turns, a contact whose name sounds
+  like the one asked for (same sound key and edit ratio ≥ 55, or a short form such as
+  Chris/Cristopher) is offered too.
+- **Not in the contacts, and no near-miss either** ("my wife"): the reply carries the top
+  three memory facts for the name, so the model can call again with the person's name. That call is then a name the user
+  didn't say, so it previews.
+- A call approved by an SMS reply code counts as certain (the code's text named the person).
+  `phone_service_call` / `phone_service_send_sms` (after the tool's own check, and SMS replies)
+  resolve as given: no turn checks, but only a number or one unique contact dials or sends.
 
 ## Phone Audio Bridge
 

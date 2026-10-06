@@ -76,51 +76,6 @@ void phone_number_redact(const char *in, char *out, size_t out_size) {
    snprintf(out, out_size, "...%s", in + len - 4);
 }
 
-void phone_number_normalize(const char *in, char *out, size_t out_size) {
-   if (!out || out_size == 0)
-      return;
-   out[0] = '\0';
-   if (!in)
-      return;
-
-   char digits[32];
-   size_t di = 0;
-   int leading_plus = 0;
-
-   /* Skip leading whitespace */
-   while (*in == ' ' || *in == '\t')
-      in++;
-   if (*in == '+') {
-      leading_plus = 1;
-      in++;
-   }
-
-   /* Copy digits, ignore spaces/dashes/parens/dots */
-   while (*in && di < sizeof(digits) - 1) {
-      if (isdigit((unsigned char)*in))
-         digits[di++] = *in;
-      in++;
-   }
-   digits[di] = '\0';
-
-   /* Bare 10-digit US number → prefix +1. Bare 11-digit starting with 1 → +. */
-   if (!leading_plus) {
-      if (di == 10) {
-         snprintf(out, out_size, "+1%s", digits);
-         return;
-      }
-      if (di == 11 && digits[0] == '1') {
-         snprintf(out, out_size, "+%s", digits);
-         return;
-      }
-      /* Otherwise pass through as-is (no + prefix) for short codes etc. */
-      snprintf(out, out_size, "%s", digits);
-      return;
-   }
-
-   snprintf(out, out_size, "+%s", digits);
-}
-
 /* =============================================================================
  * Helper: safe string copy from SQLite column
  * ============================================================================= */

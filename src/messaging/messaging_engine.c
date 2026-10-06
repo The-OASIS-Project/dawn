@@ -59,6 +59,10 @@
  * one, change both. */
 #define MESSAGING_RL_LINK_SLOTS 64
 #define MESSAGING_RL_GENERAL_SLOTS 128
+/* Whole-chat inbound budget, above the per-sender one: in a group each member
+ * has their own budget, and this bounds the chat as a whole. */
+#define MESSAGING_RL_CHAT_SLOTS 64
+#define MESSAGING_RL_CHAT_MAX_COUNT 240
 #define MESSAGING_RL_OUTBOUND_SLOTS 64
 #define MESSAGING_RL_OUTBOUND_MAX_COUNT 10 /* outbound sends per window, per channel */
 #define MESSAGING_RL_OUTBOUND_WINDOW_SEC 60
@@ -99,9 +103,8 @@ pthread_cond_t s_inbound_cond = PTHREAD_COND_INITIALIZER;
 static pthread_t s_worker_thread;
 static bool s_worker_started = false;
 
-/* In-memory session map: (provider, provider_address) → session_t*.
- * Linear scan; v1 scale is small (one slot per active conversation per
- * user, typically < 10). */
+/* In-memory session map: channel row → session_t*.  Linear scan; v1 scale
+ * is small (one slot per active conversation per user, typically < 10). */
 session_slot_t s_session_slots[MESSAGING_MAX_SESSIONS];
 pthread_mutex_t s_session_slots_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -110,12 +113,14 @@ pthread_mutex_t s_session_slots_mutex = PTHREAD_MUTEX_INITIALIZER;
  * configs (messaging_engine_init) can't drift apart. */
 static rate_limit_entry_t s_inbound_link_entries[MESSAGING_RL_LINK_SLOTS];
 static rate_limit_entry_t s_inbound_general_entries[MESSAGING_RL_GENERAL_SLOTS];
+static rate_limit_entry_t s_inbound_chat_entries[MESSAGING_RL_CHAT_SLOTS];
 static rate_limit_entry_t s_outbound_per_user_entries[MESSAGING_RL_OUTBOUND_SLOTS];
 static rate_limit_entry_t s_read_per_user_entries[MESSAGING_RL_READ_SLOTS];
 static rate_limit_entry_t s_read_server_entries[MESSAGING_RL_READ_SERVER_SLOTS];
 
 rate_limiter_t s_inbound_link_limiter;
 rate_limiter_t s_inbound_general_limiter;
+rate_limiter_t s_inbound_chat_limiter;
 rate_limiter_t s_outbound_per_user_limiter;
 rate_limiter_t s_read_per_user_limiter;
 rate_limiter_t s_read_server_limiter;
@@ -133,6 +138,24 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id) {
    (void)user_id;
    (void)conv_id;
+}
+
+/* Weak symbol — tell the user's open WebUI that their channel list changed
+ * (a /link arrived from a chat, a code was verified, a channel was unlinked
+ * in another tab).  Same no-op-unless-WebUI pattern as above; the strong
+ * override is in src/webui/webui_broadcasts.c. */
+void webui_broadcast_messaging_channels_changed(int user_id,
+                                                int64_t channel_id,
+                                                const char *change,
+                                                const char *link_code) __attribute__((weak));
+void webui_broadcast_messaging_channels_changed(int user_id,
+                                                int64_t channel_id,
+                                                const char *change,
+                                                const char *link_code) {
+   (void)user_id;
+   (void)channel_id;
+   (void)change;
+   (void)link_code;
 }
 
 /* =============================================================================
@@ -175,6 +198,16 @@ static const char *engine_rc_name(int rc) {
          return "DRIVER_NOT_REGISTERED";
       case MESSAGING_INVALID_ADDRESS:
          return "INVALID_ADDRESS";
+      case MESSAGING_NAME_TAKEN:
+         return "NAME_TAKEN";
+      case MESSAGING_ALREADY_LINKED:
+         return "ALREADY_LINKED";
+      case MESSAGING_BAD_CODE:
+         return "BAD_CODE";
+      case MESSAGING_NOT_VERIFIED:
+         return "NOT_VERIFIED";
+      case MESSAGING_INVALID_NAME:
+         return "INVALID_NAME";
       default:
          return "UNKNOWN";
    }
@@ -215,6 +248,9 @@ int messaging_engine_init(void) {
    rate_limiter_config_t general_cfg = { .max_count = 60,
                                          .window_sec = 600,
                                          .slot_count = MESSAGING_RL_GENERAL_SLOTS };
+   rate_limiter_config_t chat_cfg = { .max_count = MESSAGING_RL_CHAT_MAX_COUNT,
+                                      .window_sec = 600,
+                                      .slot_count = MESSAGING_RL_CHAT_SLOTS };
    rate_limiter_config_t outbound_cfg = { .max_count = MESSAGING_RL_OUTBOUND_MAX_COUNT,
                                           .window_sec = MESSAGING_RL_OUTBOUND_WINDOW_SEC,
                                           .slot_count = MESSAGING_RL_OUTBOUND_SLOTS };
@@ -229,12 +265,14 @@ int messaging_engine_init(void) {
 
    memset(s_inbound_link_entries, 0, sizeof(s_inbound_link_entries));
    memset(s_inbound_general_entries, 0, sizeof(s_inbound_general_entries));
+   memset(s_inbound_chat_entries, 0, sizeof(s_inbound_chat_entries));
    memset(s_outbound_per_user_entries, 0, sizeof(s_outbound_per_user_entries));
    memset(s_read_per_user_entries, 0, sizeof(s_read_per_user_entries));
    memset(s_read_server_entries, 0, sizeof(s_read_server_entries));
 
    rate_limiter_init(&s_inbound_link_limiter, s_inbound_link_entries, &link_cfg);
    rate_limiter_init(&s_inbound_general_limiter, s_inbound_general_entries, &general_cfg);
+   rate_limiter_init(&s_inbound_chat_limiter, s_inbound_chat_entries, &chat_cfg);
    rate_limiter_init(&s_outbound_per_user_limiter, s_outbound_per_user_entries, &outbound_cfg);
    rate_limiter_init(&s_read_per_user_limiter, s_read_per_user_entries, &read_cfg);
    rate_limiter_init(&s_read_server_limiter, s_read_server_entries, &read_server_cfg);

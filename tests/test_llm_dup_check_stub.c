@@ -29,6 +29,7 @@
 #include <json-c/json.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 #include "config/dawn_config.h"
 
@@ -76,25 +77,40 @@ int llm_context_get_size(void) {
 int llm_get_type(void) {
    return 0;
 }
-/* Pulled in by the new capture-image persistence helpers in llm_tools.c
- * (build_openai_capture_image_message/build_claude_capture_image_message) —
- * not on the dup-check path under test. */
-const char *llm_claude_detect_image_mime_type(const char *base64_data) {
-   (void)base64_data;
-   return "image/jpeg";
+/* A tool's image (llm_tool_images.c) — not on the paths under test: no
+ * image is ever taken, and a result's content is its text. */
+bool llm_tool_images_ingest(char *base64, void *result) {
+   (void)result;
+   free(base64);
+   return false;
 }
-json_object *llm_claude_create_image_block(const char *vision_image) {
-   (void)vision_image;
-   return NULL;
+json_object *llm_tool_images_result_content(const void *result) {
+   (void)result;
+   return NULL; /* the caller then takes the result's text */
 }
 char *ocp_base64_encode(void) {
    return NULL;
 }
+/* The command context a test runs as (none unless it sets one). */
+void *g_stub_command_context = NULL;
 void *session_get_command_context(void) {
-   return NULL;
+   return g_stub_command_context;
 }
 void session_set_command_context(void *session) {
    (void)session;
+}
+int session_effective_user_id(void *session) {
+   (void)session;
+   return 1;
+}
+uint64_t session_turn_token(void) {
+   return 0;
+}
+void session_set_turn_token(uint64_t token) {
+   (void)token;
+}
+void session_history_append(struct json_object *history, struct json_object *msg) {
+   json_object_array_add(history, msg);
 }
 /* strcasestr_portable is NOT stubbed here: llm_tools.c now references
  * sanitize_utf8_for_json (tool-description hardening), which pulls the real
@@ -103,6 +119,20 @@ void session_set_command_context(void *session) {
 const void *tool_registry_find(const char *name) {
    (void)name;
    return NULL;
+}
+bool session_prefix_tag(void *session, char *out, size_t size) {
+   (void)session;
+   if (out && size) {
+      out[0] = '\0';
+   }
+   return false;
+}
+char *session_prefix_mask_secret(void *session, char *text) {
+   (void)session;
+   return text;
+}
+unsigned long long tool_registry_generation(void) {
+   return 0;
 }
 const void *tool_registry_lookup(const char *name) {
    (void)name;
@@ -117,6 +147,21 @@ const void *tool_registry_get_effective_param(const char *tool_name, int idx) {
    (void)idx;
    return NULL;
 }
+int tool_action_kind(const void *meta, const char *device, const char *action, const char *value) {
+   (void)meta;
+   (void)device;
+   (void)action;
+   (void)value;
+   return 0;
+}
+const char *tool_effective_action(const void *meta, const char *action) {
+   (void)meta;
+   return (action && action[0]) ? action : "get";
+}
+const char *tool_action_kind_name(int kind) {
+   (void)kind;
+   return "act";
+}
 const char *tool_registry_resolve_device(const void *meta, const char *key) {
    (void)meta;
    (void)key;
@@ -129,4 +174,11 @@ void webui_send_state_with_detail(void *session, const char *state, const char *
 }
 void *worker_pool_get_mosq(void) {
    return NULL;
+}
+
+/* llm_budget_tokens_for_effort (llm_tools.c) takes the level's size from the
+ * capability module, which this test doesn't link. */
+int llm_thinking_budget_size(const char *level) {
+   (void)level;
+   return 8192;
 }

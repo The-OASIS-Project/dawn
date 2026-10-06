@@ -242,5 +242,5 @@ int tavily_rate_limit_resolve_user_id(void) {
    if (!sess) {
       sess = session_get_local();
    }
-   return sess ? sess->metrics.user_id : 0;
+   return sess ? session_effective_user_id(sess) : 0;
 }

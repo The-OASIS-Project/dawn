@@ -215,12 +215,15 @@ static int ranker_cmp(const void *a, const void *b) {
    return 0;
 }
 
-/* Byte cost of a candidate's rendered text.  The focus budget is
- * measured in bytes (focus_budget_bytes) — exact, no token estimate. */
-static int candidate_byte_cost(const char *text) {
-   if (text == NULL)
-      return 0;
-   return (int)strlen(text);
+/* Byte cost of a candidate: what the caller shows for it (limits->item_bytes)
+ * when set, otherwise its text's length in bytes (focus_budget_bytes is exact,
+ * no token estimate). */
+static int candidate_byte_cost(const focus_candidate_t *c, const focus_limits_t *limits) {
+   if (limits && limits->item_bytes) {
+      const int cost = limits->item_bytes(c);
+      return cost > 0 ? cost : 0; /* a negative cost must not refund budget */
+   }
+   return c->text ? (int)strlen(c->text) : 0;
 }
 
 /* =============================================================================
@@ -491,7 +494,7 @@ int focus_compose_ex(int user_id,
       if (e->score < min_score)
          break; /* Sorted desc — once below, all rest are below. */
 
-      const int cost = candidate_byte_cost(pool[e->idx].text);
+      const int cost = candidate_byte_cost(&pool[e->idx], limits);
       if (cost > budget_left) {
          /* Budget exceeded.  Subtle case: when this is the FIRST
           * candidate (kept == 0), a strict break produces an empty
@@ -501,15 +504,14 @@ int focus_compose_ex(int user_id,
           * prefix can land just above a small focus_budget_bytes;
           * dropping it leaves the LLM with no focus context at all.
           * Force-keep the first candidate (the per-candidate
-          * truncation cap already bounds it) and let the next
-          * iteration cleanly break on the second candidate's cost.
-          * Subsequent candidates honor the budget normally.
+          * truncation cap already bounds it).  Subsequent candidates
+          * honor the budget normally.
           *
           * Termination invariant: focus_candidate_init rejects NULL
           * / empty text, so every surviving candidate has length ≥ 1
           * and candidate_byte_cost ≥ 1.  After saturating budget_left
-          * to 0, the next iteration's `cost > budget_left` is true
-          * and the regular `break` fires — no infinite loop. */
+          * to 0, every later candidate is skipped; the loop is bounded
+          * by pool_count. */
          if (kept == 0) {
             OLOG_INFO("focus_source: top-ranked candidate cost=%d exceeds budget=%d — "
                       "force-keeping single candidate (source='%s')",
@@ -519,9 +521,10 @@ int focus_compose_ex(int user_id,
             kept++;
             continue;
          }
-         /* Truncate at last fully-included candidate.  Don't consume
-          * partial budget — keeps the output coherent. */
-         break;
+         /* Doesn't fit: skip it and keep packing, so one large candidate
+          * (a document chunk) doesn't shut out every smaller one ranked below
+          * it.  Nothing is cut partway: each kept candidate is whole. */
+         continue;
       }
       keep[e->idx] = true;
       budget_left -= cost;

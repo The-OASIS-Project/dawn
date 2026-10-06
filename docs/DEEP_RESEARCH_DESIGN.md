@@ -354,7 +354,7 @@ envelope), and the run spawns only on a yes. See [§7a](#7a-invocation-routing--
 | Concurrency backstop | `[jobs]` runtime reap (`max_runtime_sec`) | Per-run round/tool/**token-cost** budgets |
 
 **Not reusable (corrected assumptions, verified against the tree):**
-- `worker_pool.c` is an **audio-client pipeline pool** (`WORKER_POOL_MAX_SIZE 8`, `ENABLE_MULTI_CLIENT`), not a
+- `worker_pool.c` is an **audio-client pipeline pool** (`WORKER_POOL_MAX_SIZE 8`), not a
   submit-N/collect-N task pool. P2 parallel page-fetch uses the detached-thread + counter pattern
   (`job_worker.c:495`), or introduces a small bounded pool — flagged as a P2 gap, **not** a reuse.
 - Programmatic note-create is `document_index_note()` (`document_index_pipeline.h:110`, **single-chunk**);
@@ -570,7 +570,7 @@ builder means **no private memory reaches the fetch loop at all** — the arch H
 [§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)) — never via the automatic per-turn block
 inside the fetch loop.
 
-**Build-time confirmations (before P0, low risk):** verify that (a) `session_llm_call_with_tts_vision_no_add`
+**Build-time confirmations (before P0, low risk):** verify that (a) `session_llm_call_with_tts_no_add`
 does not *itself* re-inject memory (the builder should be the only composer — then skipping it is sufficient),
 and (b) native tool schemas attach from the registry at the LLM call independent of the prompt text, so the
 read-only allowlist ([§7](#7-tools)) is the enforcement point even with the builder skipped.
@@ -791,21 +791,25 @@ routes a request to `deep_research`, the `start` action's first step is a **pre-
    yes, so it is load-bearing, not decoration.
 3. **Spawn only on confirmation.**
 
-**Mechanism — a real two-call handshake at email-parity, not a model-authored boolean** (hardened 2026-08-18
-after a code-review flagged that a bare `confirm=true` is model-self-asserted). The unconfirmed `start` mints a
-random, single-use, user-bound, 10-minute-TTL **pending token** (7-byte `randombytes_buf`, byte-identical to
-email's `generate_draft_id`), stashes the *exact* proposed run (brief / deliver_to / parent), and returns the
-token in the proposal; the confirmed `start` must present that token and spawns the **stored** brief — never the
-confirm-call's args, so there's no propose-innocuous-then-confirm-malicious — with a 3-fail/60s throttle. A lone
-self-asserted `confirm=true` with no valid token (including one produced by a prompt injection) spawns nothing.
-This is the same mechanism as email send/trash (`email_service.c`).
+**Mechanism — a two-call handshake at email parity, not a model-authored boolean** (hardened 2026-08-18
+after a code-review flagged that a bare `confirm=true` is model-self-asserted; split into two actions
+2026-10-03). `start` only proposes: it mints a random, single-use, 10-minute-TTL **pending token** (7-byte
+`randombytes_buf`), stashes the *exact* proposed run (brief / deliver_to / parent) as the session's one
+pending proposal, and returns the token in the proposal. `confirm_start` must present that token and spawns
+the **stored** brief — never the confirm call's args, so there's no propose-innocuous-then-confirm-malicious —
+with a 3-fail/60s throttle.
 
-**Honest scope.** Like email's, the token is *relayed through the model*, so this is a **cost guardrail** (it
-stops an un-proposed paid run), **not** proof-of-human-consent — a compromised model that also sees the proposal
-could relay the token. The durable consent control for outward/irreversible tools is the per-session
-**capability mask** ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)); deep_research's actual
-security boundary is the §11 sandbox (read-only allowlist + no `reinvoke_parent`), and the hard kill switch is
-`[research] enabled`.
+**The user's reply, not the model's next step.** Like email send, the proposal records the turn that made
+it (`turn_origin_t`, `include/core/turn_origin.h`), and `confirm_start` counts only from the same session in
+the user's very next turn. A model can't start a run in the turn it proposed it, nor after the user moved
+on, nor from another session (another tab, device or channel), and a proposal made elsewhere can't replace
+the one the user is answering (`core/pending_slots.h`). Both actions need the user in a live turn: a
+re-engaged turn, a background job or an MQTT message can't propose or start one. This proves timing, not
+consent: the token is relayed through the model, so in the user's next turn a compromised model could still
+call `confirm_start` whatever the user said — it is a cost guardrail. The durable consent control is the
+per-session capability mask ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)). The hard kill switch is
+`[research] enabled`; deep_research's other security boundary is the §11 sandbox (read-only allowlist + no
+`reinvoke_parent`).
 
 The one exception is a **P4 SAGE-triggered** run, which is governed by the watch's own configured policy rather
 than an interactive confirm.
@@ -1083,7 +1087,7 @@ hard-budget + all-closed stopping.
 - ✅ **`skip_prompt_rebuild` dispatch option** — shipped, verified clean across the pre-merge audits; no other caller
   regressed.
 - ✅ **Two build-time confirmations from the pressure-test** — both confirmed at P0: (a)
-  `session_llm_call_with_tts_vision_no_add` does not re-inject memory; (b) native tool schemas attach from the
+  `session_llm_call_with_tts_no_add` does not re-inject memory; (b) native tool schemas attach from the
   registry independent of prompt text → the read-only allowlist is the real enforcement point.
 - ✅ **Persona-less research session** — addressed: the user-facing take is the completion-commentary turn
   ([§7a](#7a-invocation-routing--confirmation)), generated in a persona-carrying context, not the bare research session.
@@ -1120,7 +1124,7 @@ section that specifies it. Build + format + the relevant unit test after each lo
 
 0a. **Two build-time confirmations** ([§4a](#4a-context-reconstruction--the-core-mechanism)) — cheap reads,
    but they decide whether the mechanism is sound:
-   - Confirm `session_llm_call_with_tts_vision_no_add` (`session_manager_llm.c`) does **not** itself re-inject
+   - Confirm `session_llm_call_with_tts_no_add` (`session_manager_llm.c`) does **not** itself re-inject
      memory — the per-turn builder should be the only composer. If it does, the bare-session guarantee needs a
      second suppression point.
    - Confirm native tool schemas attach from the registry at the LLM call **independent of the prompt text**,
@@ -1230,7 +1234,8 @@ work — not the subcommands.
 ```
 
 **The real daemon touchpoint is a spawn-path extraction, not the verb (arch HIGH-1).** The existing spawn entry
-`handle_start()` (`deep_research_tool.c:~96–225`) is **static, `confirm`-gated, and returns human prose**, so the
+`handle_start()` (`deep_research_tool.c:~96–225`, as built then) was **static, `confirm`-gated, and returned
+human prose** — since 2026-10-03 `handle_start()` only proposes and the spawn is `handle_confirm_start()` — so the
 admin verb *cannot* call it — and it must **not** re-implement the sequence, because that sequence carries the
 feature's most safety-critical ordering: the search-backend availability refusal, the `[jobs]` capacity gate,
 `conv_db_create_job_ex`, the **fail-closed `conv_db_job_set_kind("research")`** (the stamp that blocks
@@ -1240,7 +1245,8 @@ row it does *not* create). Duplicating that in the admin module silently breaks 
 
 So P0 of this feature extracts the post-confirm body into a shared non-static
 **`research_spawn_run(user_id, parent_conv, brief, mode, deliver_to, &run_id, &conv_id, &err)`**, called by
-**both** `handle_start` (after its confirm gate) and the admin handler. Only then is "changes nothing about the
+**both** `handle_start` (after its confirm gate; since 2026-10-03 the separate `confirm_start` action,
+`handle_confirm_start`) and the admin handler. Only then is "changes nothing about the
 loop / allowlist / gates" literally true rather than aspirational. `memory_filter_check(brief)` lives inside the
 shared function, so it fires on both paths by construction.
 
@@ -1364,7 +1370,7 @@ touches C and a re-score never re-runs research.
 
 1. **Extract `research_spawn_run()`** (the load-bearing step, arch HIGH-1) — pull the post-confirm body of
    `handle_start` (`deep_research_tool.c`) into a shared non-static function called by both `handle_start` (after
-   its confirm gate) and the new admin handler, preserving the exact ordering (fail-closed `job_kind` stamp,
+   its confirm gate; now `handle_confirm_start`) and the new admin handler, preserving the exact ordering (fail-closed `job_kind` stamp,
    `research_db_run_create` before spawn). `memory_filter_check(brief)` lives inside it. Zero behaviour change to
    the conversational path.
 2. **`admin_socket_research.c`** (GPL header) — the `research start`/`status`/`cancel` verb, wired into the admin

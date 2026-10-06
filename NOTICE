@@ -19,6 +19,7 @@ Mem0 (mem0ai/mem0)
   Licensed under the Apache License, Version 2.0
   https://github.com/mem0ai/mem0
   https://www.apache.org/licenses/LICENSE-2.0
+  A copy of the license is included in LICENSES/Apache-2.0.txt.
 
 Components of D.A.W.N.'s memory subsystem are derived from or directly inspired
 by Mem0's published implementation.  Specific borrowings are called out in

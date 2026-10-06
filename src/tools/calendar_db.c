@@ -97,10 +97,14 @@ static void row_to_calendar(sqlite3_stmt *stmt, calendar_calendar_t *c) {
    col_str(c->ctag, sizeof(c->ctag), stmt, 6);
    col_str(c->sync_token, sizeof(c->sync_token), stmt, 7);
    c->created_at = (time_t)sqlite3_column_int64(stmt, 8);
-   /* Column 9 (account read_only) only present in active_for_user JOIN query.
-    * Standard calendar queries return 9 columns; the JOIN query returns 10. */
+   /* Columns 9-10 (the account's read_only and name) only in the
+    * active_for_user JOIN query; standard calendar queries return 9 columns. */
    int col_count = sqlite3_column_count(stmt);
    c->account_read_only = (col_count >= 10) ? (sqlite3_column_int(stmt, 9) != 0) : false;
+   c->account_name[0] = '\0';
+   if (col_count >= 11) {
+      col_str(c->account_name, sizeof(c->account_name), stmt, 10);
+   }
 }
 
 static void row_to_event(sqlite3_stmt *stmt, calendar_event_t *e) {
@@ -764,6 +768,43 @@ int calendar_db_occurrence_delete_for_event(int64_t event_id) {
 
    AUTH_DB_UNLOCK();
    return result;
+}
+
+int calendar_db_events_nearest(const int64_t *calendar_ids,
+                               int calendar_count,
+                               time_t range_start,
+                               time_t range_end,
+                               time_t now,
+                               calendar_occurrence_t *out,
+                               int max_count,
+                               int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out || !count_out || max_count <= 0)
+      return FAILURE;
+   if (calendar_count <= 0)
+      return SUCCESS;
+
+   char id_json[768];
+   build_cal_id_json(calendar_ids, calendar_count, id_json, sizeof(id_json));
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = s_db.stmt_cal_events_nearest;
+   sqlite3_reset(st);
+   sqlite3_bind_text(st, 1, id_json, -1, SQLITE_STATIC);
+   sqlite3_bind_int64(st, 2, (int64_t)range_start);
+   sqlite3_bind_int64(st, 3, (int64_t)range_end);
+   sqlite3_bind_int64(st, 4, (int64_t)now);
+   sqlite3_bind_int(st, 5, max_count);
+   int count = 0;
+   while (count < max_count && sqlite3_step(st) == SQLITE_ROW) {
+      row_to_occurrence(st, &out[count]);
+      count++;
+   }
+   sqlite3_reset(st);
+   AUTH_DB_UNLOCK();
+   *count_out = count;
+   return SUCCESS;
 }
 
 int calendar_db_occurrences_in_range(const int64_t *calendar_ids,

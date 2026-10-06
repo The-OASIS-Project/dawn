@@ -30,6 +30,9 @@
 
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
+#include "core/conv_images.h"
+#include "core/session_prefix.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
 
@@ -209,7 +212,25 @@ void handle_delete_user(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
+   /* The account's documents (a shared one is in other users' conversations)
+    * and memories go with it: removed on its behalf, and withdrawn. */
+   auth_user_t target;
+   const int target_id = auth_db_get_user(username, &target) == AUTH_DB_SUCCESS ? target.id : 0;
+   /* The account's stores (images, document originals) go first: their rows
+    * cascade with the user, their files don't, and after it nothing names
+    * them.  Not for the last admin, whose delete is refused below. */
+   int admins = 0;
+   const bool last_admin = target_id > 0 && target.is_admin &&
+                           auth_db_count_admins(&admins) == AUTH_DB_SUCCESS && admins <= 1;
+   if (target_id > 0 && !last_admin) {
+      (void)conv_images_purge_user(target_id);
+   }
+   conv_db_withdraw_intent_begin(target_id);
    int result = auth_db_delete_user(username);
+   conv_db_withdraw_intent_end();
+   if (result == AUTH_DB_SUCCESS && target_id > 0) {
+      session_withdraw_forgotten_async(target_id, false);
+   }
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
@@ -334,9 +355,13 @@ void handle_change_password(ws_connection_t *conn, struct json_object *payload) 
    }
 
    /* Update password (this also invalidates all sessions) */
-   int result = auth_db_update_password(username, hash);
+   /* Your own password: every other login of yours ends, this one stays (you
+    * proved you're you).  Someone else's: all of theirs end. */
+   int result = auth_db_update_password(username, hash,
+                                        is_self_change ? conn->auth_session_token : NULL);
 
    if (result == AUTH_DB_SUCCESS) {
+      /* The account's other logins ended: auth_db's hook signs them out. */
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message", json_object_new_string("Password changed"));
 

@@ -50,7 +50,8 @@ _Static_assert(IMAGE_STORE_SUCCESS == BLOB_STORE_SUCCESS &&
                "image/blob error codes must match for direct return");
 _Static_assert(IMAGE_RETAIN_DEFAULT == (int)BLOB_RETAIN_DEFAULT &&
                    IMAGE_RETAIN_PERMANENT == (int)BLOB_RETAIN_PERMANENT &&
-                   IMAGE_RETAIN_CACHE == (int)BLOB_RETAIN_CACHE,
+                   IMAGE_RETAIN_CACHE == (int)BLOB_RETAIN_CACHE &&
+                   IMAGE_RETAIN_UNBOUND == (int)BLOB_RETAIN_UNBOUND,
                "image/blob retention enums must match");
 _Static_assert(IMAGE_MIME_MAX <= BLOB_MIME_MAX, "image MIME buffer must fit blob MIME");
 _Static_assert(IMAGE_ID_LEN == BLOB_ID_LEN, "image/blob id buffer must match");
@@ -71,10 +72,24 @@ static blob_store_table_t s_image_desc;
 static blob_store_handle_t s_image_handle = -1;
 static bool s_image_ready = false;
 
-/** @brief Read access: UPLOAD and MMS are private (owner-only, service token
- *  denied); other sources are shareable.  Reproduces the pre-extraction rule. */
+/* What still holds unbound images: a live session's unsaved history
+ * (core/session_image_hold.c, a layer up; weak, so the image store never
+ * includes the session layer, and a binary without it holds nothing). */
+extern void session_images_held(const char *const ids[], const int owners[], int n, bool held[])
+    __attribute__((weak));
+
+/* The descriptor's orphans_held. */
+static void unbound_held(const char *const ids[], const int owners[], int n, bool held[]) {
+   if (session_images_held) {
+      session_images_held(ids, owners, n, held);
+   }
+}
+
+/** @brief Read access: UPLOAD, MMS and CAPTURE are private (owner-only, service
+ *  token denied); other sources are shareable. */
 static bool image_can_read(int user_id, int owner_id, int source) {
-   if ((source == IMAGE_SOURCE_UPLOAD || source == IMAGE_SOURCE_MMS) &&
+   if ((source == IMAGE_SOURCE_UPLOAD || source == IMAGE_SOURCE_MMS ||
+        source == IMAGE_SOURCE_CAPTURE) &&
        (user_id == 0 || owner_id != user_id)) {
       return false;
    }
@@ -120,6 +135,7 @@ int image_store_init(const image_store_config_t *config) {
       .update_access = s_db.stmt_image_update_access,
       .update_retention = s_db.stmt_image_update_retention,
       .count_user = s_db.stmt_image_count_user,
+      .count_user_source = s_db.stmt_image_count_user_source,
       .sum_bytes_user = NULL, /* images have no aggregate-byte budget */
       .find_by_hash = NULL,   /* images have no content-hash dedup */
       .delete_old = s_db.stmt_image_delete_old,
@@ -129,7 +145,8 @@ int image_store_init(const image_store_config_t *config) {
           s_db.stmt_image_delete_cache_lru, /* id-only DELETE (images: no orphan sweep) */
       .get_expired_ids = s_db.stmt_image_get_expired_ids,
       .get_cache_lru_ids = s_db.stmt_image_get_cache_lru_ids,
-      .get_orphan_ids = NULL, /* images are not orphan-swept */
+      .get_orphan_ids = s_db.stmt_image_get_unbound_ids, /* unbound past their grace */
+      .delete_orphan = s_db.stmt_image_delete_unbound,   /* if still unbound */
       .stats = s_db.stmt_image_stats,
    };
 
@@ -145,8 +162,15 @@ int image_store_init(const image_store_config_t *config) {
       .validate_mime = image_store_validate_mime,
       .can_read = image_can_read,
       .stmts = &s_image_stmts,
+      .orphans_held = unbound_held,
       .max_size = config->max_size > 0 ? config->max_size : IMAGE_MAX_SIZE_DEFAULT,
       .max_per_user = config->max_per_user > 0 ? config->max_per_user : IMAGE_MAX_PER_USER_DEFAULT,
+      /* A tool's captures have their own cap, so a camera never fills the
+       * room uploads need (nor uploads the camera's); past it a capture is
+       * refused, never an earlier one evicted (a conversation names it). */
+      .apart_source = IMAGE_SOURCE_CAPTURE,
+      .apart_max_per_user = config->max_captures_per_user > 0 ? config->max_captures_per_user
+                                                              : IMAGE_CAPTURE_MAX_PER_USER_DEFAULT,
       .max_total_bytes_per_user = 0,
       .retention_days = config->retention_days,
       .cache_size_mb = config->cache_size_mb > 0 ? config->cache_size_mb
@@ -159,6 +183,8 @@ int image_store_init(const image_store_config_t *config) {
    }
    s_image_ready = true;
    OLOG_INFO("Image store initialized (blob handle %d)", s_image_handle);
+   /* What the last run stored for rows it never wrote. */
+   (void)image_store_reclaim_unbound(IMAGE_UNBOUND_GRACE_SEC, NULL);
    return IMAGE_STORE_SUCCESS;
 }
 
@@ -242,12 +268,32 @@ int image_store_count_user(int user_id, int *count_out) {
    return blob_store_count_user(s_image_handle, user_id, count_out);
 }
 
+int image_store_unlink_file(const char *filename) {
+   return blob_store_unlink_file(s_image_handle, filename);
+}
+
 int image_store_delete_user(int user_id) {
    return blob_store_delete_user(s_image_handle, user_id);
 }
 
 int image_store_cleanup(int *deleted_out) {
-   return blob_store_cleanup(s_image_handle, deleted_out);
+   const int rc = blob_store_cleanup(s_image_handle, deleted_out);
+   int reclaimed = 0;
+   if (image_store_reclaim_unbound(IMAGE_UNBOUND_GRACE_SEC, &reclaimed) == IMAGE_STORE_SUCCESS &&
+       deleted_out) {
+      *deleted_out += reclaimed;
+   }
+   return rc;
+}
+
+int image_store_reclaim_unbound(int grace_sec, int *deleted_out) {
+   if (deleted_out) {
+      *deleted_out = 0;
+   }
+   if (!s_image_ready) {
+      return IMAGE_STORE_SUCCESS;
+   }
+   return blob_store_cleanup_orphans(s_image_handle, grace_sec < 0 ? 0 : grace_sec, deleted_out);
 }
 
 int image_store_stats(int *total_count, int64_t *total_bytes) {

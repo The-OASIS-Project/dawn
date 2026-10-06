@@ -89,15 +89,10 @@
                updateState(msg.payload.state, msg.payload.detail, msg.payload.tools);
                break;
             case 'force_logout':
-               // Session was revoked - force immediate logout
-               console.warn('Force logout received:', msg.payload.reason);
-               DawnToast.show(msg.payload.reason || 'Session revoked', 'error');
-               DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
-               sessionStorage.removeItem('dawn_active_conversation');
-               DawnWS.disconnect();
-               setTimeout(() => {
-                  window.location.href = '/login.html';
-               }, 1500);
+               // This browser's login ended (logout, revoke, password change,
+               // expiry). The server closes the socket next (WS 4002).
+               console.warn('Force logout received:', msg.payload && msg.payload.reason);
+               endLogin((msg.payload && msg.payload.reason) || 'Signed out');
                break;
             case 'transcript':
                // Check for special LLM state update (sent with role '__llm_state__')
@@ -271,8 +266,10 @@
                   setTimeout(() => {
                      window.location.href = '/login.html';
                   }, 1500);
-               } else if (msg.payload.code === 'FORBIDDEN') {
-                  // Permission error (e.g., not admin) - just show toast
+               } else if (['FORBIDDEN', 'RATE_LIMITED'].includes(msg.payload.code)) {
+                  // Refusals of a settings-panel action (permission, too many
+                  // link codes): a toast, where the user is looking, not the
+                  // transcript behind the overlay.
                   DawnToast.show(msg.payload.message, 'error');
                } else if (msg.payload.code && msg.payload.code.startsWith('LLM_')) {
                   // LLM errors - show toast and add to transcript
@@ -326,6 +323,15 @@
                // (re)connect; startHeartbeat() resets any prior state.
                if (msg.payload.authenticated && DawnWS.startHeartbeat) {
                   DawnWS.startHeartbeat();
+               }
+               // A private toggle waiting for its conversation lives on the server
+               // connection: a reconnect lost it.
+               if (
+                  msg.payload.authenticated &&
+                  typeof DawnSettingsLlm !== 'undefined' &&
+                  DawnSettingsLlm.resendPendingPrivacy
+               ) {
+                  DawnSettingsLlm.resendPendingPrivacy();
                }
                // Claim session ownership for sibling tabs (steal-back guard): this
                // tab holds the token now, so a background sibling must not reconnect
@@ -591,6 +597,8 @@
                break;
             }
             case 'context_compacted':
+               // A turn can run on a conversation other than the one on screen.
+               if (isForeignConvFrame(msg.payload)) break;
                DawnHistory.handleContextCompacted(msg.payload);
                break;
             case 'silent_observation':
@@ -772,6 +780,18 @@
                if (typeof DawnMessaging !== 'undefined')
                   DawnMessaging.handleSetChannelLlmResponse(msg.payload);
                break;
+            case 'verify_channel_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleVerifyResponse(msg.payload);
+               break;
+            case 'messaging_channels_changed':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleChannelsChanged(msg.payload);
+               break;
+            case 'resend_channel_code_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleResendResponse(msg.payload);
+               break;
             case 'get_my_settings_response':
                DawnMySettings.handleGetResponse(msg.payload);
                break;
@@ -816,6 +836,12 @@
                break;
             case 'set_private_response':
                DawnSettings.handleSetPrivateResponse(msg.payload);
+               break;
+            case 'forget_conversation_memories_response':
+               DawnSettings.handleForgetConversationMemoriesResponse(msg.payload);
+               break;
+            case 'conversation_learned':
+               DawnSettings.handleConversationLearned(msg.payload);
                break;
             case 'set_pinned_response':
                DawnHistory.handleSetPinnedResponse(msg.payload);
@@ -1243,6 +1269,13 @@
                   DawnSettingsConfig.requestConfig();
                }
                break;
+            case 'cache_alert':
+               /* A DAWN bug a person should report (reasoning dropped): stays until
+                * dismissed.  Sent to admins only. */
+               if (msg.payload && msg.payload.message) {
+                  DawnToast.show(msg.payload.message, 'error', 0);
+               }
+               break;
             case 'memory_extraction_notice':
                if (msg.payload) {
                   showMemoryExtractionNotice(msg.payload.level, msg.payload.message);
@@ -1408,23 +1441,19 @@
          return false;
       }
 
-      // Prepend any attached document content
-      let messageText = text;
+      // Attached documents go as their own field: the daemon defuses each body
+      // (someone else's text) and builds the inlined form the transcript shows.
+      const messageText = text;
+      let attachments = null;
       if (typeof DawnDocuments !== 'undefined') {
          const docs = DawnDocuments.getAndClearDocuments();
          if (docs.length > 0) {
-            const docText = docs
-               .map((d) => {
-                  // v68: link the stored original file so a reloaded chip can
-                  // offer the real PDF/DOCX (older messages just omit it).
-                  // Marker "blob:<id>]" format is mirrored by the parser
-                  // (documents.js DOC_MARKER_RE) and the orphan-sweep SQL; kept in
-                  // sync by scripts/check_blob_marker_sync.sh — change all together.
-                  const blobSuffix = d.original_blob_id ? ` blob:${d.original_blob_id}` : '';
-                  return `[ATTACHED DOCUMENT: ${d.filename} (${d.size} bytes)${blobSuffix}]\n${d.content}\n[END DOCUMENT]`;
-               })
-               .join('\n\n');
-            messageText = docText + '\n\n' + messageText;
+            attachments = docs.map((d) => {
+               const a = { filename: d.filename, size: d.size, content: d.content };
+               // The stored original, so a reloaded chip can offer the real file.
+               if (d.original_blob_id) a.blob_id = d.original_blob_id;
+               return a;
+            });
          }
       }
 
@@ -1444,6 +1473,9 @@
          type: 'text',
          payload: { text: messageText },
       };
+      if (attachments) {
+         msg.payload.attachments = attachments;
+      }
 
       // Tell the server which conversation this message belongs to, so it tags
       // this turn's frames explicitly instead of inferring from the live view
@@ -1457,24 +1489,13 @@
          msg.payload.conversation_id = activeConvId;
       }
 
-      // Add vision images if pending (supports multiple)
-      const pendingImages = DawnVision.getPendingImages();
-      if (pendingImages.length > 0) {
-         msg.payload.images = pendingImages.map((img) => ({
-            data: img.data,
-            mime_type: img.mimeType,
-         }));
-         // Persistence keys (from /api/images). NOTE: getPendingImages() above
-         // intentionally returns only {data, mimeType} (no id), so read the ids via
-         // getPendingImageIds() — which maps the SAME pendingImages array in order,
-         // keeping them aligned with images[]. The DAEMON is authoritative for
-         // user-turn persistence: it builds the [IMAGE:<id>] markers and persists the
-         // turn itself, then echoes server_saved=true so the client skips its own save.
-         // image_ids is MANDATORY on an image turn — without valid ids the daemon
-         // persists text-only and the images are lost on reload (hard cut-over).
-         const pendingImageIds = DawnVision.getPendingImageIds
-            ? DawnVision.getPendingImageIds()
-            : [];
+      // Attached images, by the ids /api/images gave them. The daemon reads the
+      // stored files (no image bytes on the socket), builds the [IMAGE:<id>]
+      // markers and persists the turn itself, then echoes server_saved=true so the
+      // client skips its own save. An id the daemon can't use (gone, another
+      // user's) fails the turn with an error frame; nothing is sent without it.
+      const pendingImageIds = DawnVision.getPendingImageIds();
+      if (pendingImageIds.length > 0) {
          msg.payload.image_ids = pendingImageIds;
          // Retained only for local display of the just-sent turn (no longer a save key).
          pendingThumbnailsForSave = pendingImageIds;
@@ -1492,6 +1513,35 @@
    // =============================================================================
    // UI Updates
    // =============================================================================
+   // =============================================================================
+   // Login ended
+   // =============================================================================
+   let loginEnded = false;
+
+   /**
+    * This browser's login ended: forget the session, stop reconnecting, and go to
+    * the login page. A logout this tab asked for (DawnWS.markSelfLogout) is
+    * left to DawnUserBadge, which navigates once the server's reply (it clears
+    * the cookie) is in; one from elsewhere (another tab's logout, a revoke, a
+    * password change, expiry) says so briefly first.
+    */
+   function endLogin(reason) {
+      if (loginEnded) return;
+      loginEnded = true;
+      const selfInitiated = DawnWS.isSelfLogout();
+      DawnWS.markLoggedOut();
+      DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
+      sessionStorage.removeItem('dawn_active_conversation');
+      DawnWS.disconnect();
+      if (selfInitiated) {
+         return;
+      }
+      DawnToast.show(reason || 'Signed out', 'error');
+      setTimeout(() => {
+         window.location.href = '/login.html';
+      }, 1500);
+   }
+
    function updateConnectionStatus(status, reason) {
       // A new (re)connect: allow the next 'session' message to restore the active
       // conversation once (the duplicate-restore guard in the session handler).
@@ -1539,6 +1589,10 @@
          DawnElements.connectionStatus.className = 'connecting';
          DawnElements.connectionStatus.textContent = 'Unstable…';
          DawnElements.connectionStatus.title = reason || 'Connection unstable — checking…';
+      } else if (status === 'logged_out') {
+         DawnElements.connectionStatus.className = 'disconnected';
+         DawnElements.connectionStatus.textContent = 'Signed out';
+         endLogin(reason);
       } else {
          if (status === 'superseded') {
             // Another tab/device took over this session. Reuse the 'disconnected'
@@ -2059,9 +2113,10 @@
       modeEl.textContent = typeSelect
          ? typeSelect.options[typeSelect.selectedIndex]?.text || 'Local'
          : 'Local';
-      modelEl.textContent = modelSelect
-         ? modelSelect.options[modelSelect.selectedIndex]?.text || ''
-         : '';
+      const model = modelSelect ? modelSelect.options[modelSelect.selectedIndex]?.text || '' : '';
+      /* The reasoning setting too: a server adjustment stays visible collapsed. */
+      const reasoning = typeof DawnReasoning !== 'undefined' ? DawnReasoning.summary() : '';
+      modelEl.textContent = reasoning ? `${model} \u00b7 ${reasoning}` : model;
    }
 
    function toggleLlmControlsCollapse() {

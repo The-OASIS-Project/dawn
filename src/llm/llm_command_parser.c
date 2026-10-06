@@ -109,44 +109,27 @@ static const char *OUTPUT_FORMATTING_RULES =
  * End Prompt Strings
  * ============================================================================= */
 
-// Static buffer for command prompt - make it static, make it large
+// Static buffer for the command prompt - make it static, make it large
 #define PROMPT_BUFFER_SIZE 65536
 static char command_prompt[PROMPT_BUFFER_SIZE];
 static int prompt_initialized = 0;
-
-// Static buffer for remote command prompt
-static char remote_command_prompt[PROMPT_BUFFER_SIZE];
-static int remote_prompt_initialized = 0;
 
 // Static buffer for localization context
 #define LOCALIZATION_BUFFER_SIZE 512
 static char localization_context[LOCALIZATION_BUFFER_SIZE];
 static int localization_initialized = 0;
 
-// Static buffers for dynamic system instructions.
-// Local and remote prompts use separate buffers because the disabled-tool hint
-// differs per session (a tool can be locally available but remotely disabled,
-// or vice versa). Both must remain simultaneously valid — initialize_*_command_prompt
-// read from their respective buffer and expect the other's to still be live.
+// Static buffer for dynamic system instructions.
 #define SYSTEM_INSTRUCTIONS_BUFFER_SIZE 8192
-static char system_instructions_local_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
-static char system_instructions_remote_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
-static int system_instructions_local_initialized = 0;
-static int system_instructions_remote_initialized = 0;
-
-// Monotonic version counter, bumped by invalidate_system_instructions().
-// Lets consumers that cache derived prompts (e.g., direct-mode prompt in
-// dawn.c) detect staleness and rebuild.
-static int system_instructions_version = 0;
+static char system_instructions_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
+static int system_instructions_initialized = 0;
 
 /*
  * Serializes all access to the cached system_instructions state above, plus
- * the derived command_prompt / remote_command_prompt buffers and their
- * _initialized flags. Before this existed, invalidation was called only at
- * well-defined init boundaries and the buffers were treated as build-once;
- * now invalidation fires from MQTT callback threads (HUD status / discovery)
- * while LLM worker threads may be mid-read, so the previous lock-free
- * pattern no longer holds.
+ * the derived command_prompt buffer and its _initialized flag. Before this existed, invalidation
+ * was called only at well-defined init boundaries and the buffers were treated as build-once; now
+ * invalidation fires from MQTT callback threads (HUD status / discovery) while LLM worker threads
+ * may be mid-read, so the previous lock-free pattern no longer holds.
  */
 static pthread_mutex_t system_instructions_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -193,20 +176,10 @@ int is_vision_enabled_for_current_llm(void) {
  */
 void invalidate_system_instructions(void) {
    pthread_mutex_lock(&system_instructions_mutex);
-   system_instructions_local_initialized = 0;
-   system_instructions_remote_initialized = 0;
+   system_instructions_initialized = 0;
    prompt_initialized = 0;
-   remote_prompt_initialized = 0;
-   system_instructions_version++;
    pthread_mutex_unlock(&system_instructions_mutex);
    OLOG_INFO("System instructions cache invalidated - will rebuild on next LLM call");
-}
-
-int get_system_instructions_version(void) {
-   pthread_mutex_lock(&system_instructions_mutex);
-   int v = system_instructions_version;
-   pthread_mutex_unlock(&system_instructions_mutex);
-   return v;
 }
 
 /**
@@ -235,18 +208,12 @@ static void instr_appendf(char *buffer, int cap, int *len, const char *fmt, ...)
 /**
  * @brief Build system instructions into a provided buffer
  *
- * Core logic for both the cached (global) and non-cached (session) builds.
- *
  * @param tools_on true = native tool rules; false = prose format rules only
- * @param is_remote true for a remote-session prompt, false for local
  * @param buffer Output buffer to write instructions to
  * @param buffer_size Size of the output buffer
  * @return Number of bytes written (excluding null terminator)
  */
-static int build_system_instructions_to_buffer(bool tools_on,
-                                               bool is_remote,
-                                               char *buffer,
-                                               size_t buffer_size) {
+static int build_system_instructions_to_buffer(bool tools_on, char *buffer, size_t buffer_size) {
    int len = 0;
    int cap = (int)buffer_size;
 
@@ -259,44 +226,40 @@ static int build_system_instructions_to_buffer(bool tools_on,
    }
 
    instr_appendf(buffer, cap, &len, "%s\n", NATIVE_TOOLS_RULES);
-   /* Add plan executor DSL when tool is registered and 3+ tools enabled */
-   if (tool_registry_is_enabled("execute_plan") && llm_tools_get_enabled_count() >= 3) {
+   /* The plan executor's DSL when the tool is registered (with enough tools
+    * for a plan to use): by registration, like a conversation's frozen tool
+    * set, never by what is enabled now, so the prompt doesn't change as tools
+    * are switched on and off (that reaches the model as a direction). */
+   if (tool_registry_find("execute_plan") != NULL && tool_registry_count() >= 3) {
       instr_appendf(buffer, cap, &len, "%s", PLAN_EXECUTOR_PROMPT);
    }
-   /* Append per-session hint about unavailable/disabled tools */
-   if (len < cap - 1) {
-      len += llm_tools_build_disabled_hint(is_remote, buffer + len, cap - len);
-   }
+   /* Which tools are unavailable right now is not here: it changes as devices
+    * come and go, and a conversation's system prompt must not.  It reaches the
+    * model with the turn's standing directions (dawn_build_prompt). */
    return len;
 }
 
-const char *get_system_instructions(bool is_remote) {
-   char *buffer = is_remote ? system_instructions_remote_buffer : system_instructions_local_buffer;
-   int *initialized = is_remote ? &system_instructions_remote_initialized
-                                : &system_instructions_local_initialized;
-
+const char *get_system_instructions(void) {
    pthread_mutex_lock(&system_instructions_mutex);
 
-   if (*initialized) {
+   if (system_instructions_initialized) {
       pthread_mutex_unlock(&system_instructions_mutex);
-      return buffer;
+      return system_instructions_buffer;
    }
 
    /* Tools on/off from global config (native tool calling is the only tool path). */
    bool tools_on = llm_tools_enabled(NULL);
 
-   int len = build_system_instructions_to_buffer(tools_on, is_remote, buffer,
+   int len = build_system_instructions_to_buffer(tools_on, system_instructions_buffer,
                                                  SYSTEM_INSTRUCTIONS_BUFFER_SIZE);
 
-   *initialized = 1;
+   system_instructions_initialized = 1;
 
    pthread_mutex_unlock(&system_instructions_mutex);
 
-   const char *scope = is_remote ? "remote" : "local";
-   OLOG_INFO("Built %s system instructions (%s, %d bytes)", scope,
-             tools_on ? "tools on" : "tools off", len);
+   OLOG_INFO("Built system instructions (%s, %d bytes)", tools_on ? "tools on" : "tools off", len);
 
-   return buffer;
+   return system_instructions_buffer;
 }
 
 /**
@@ -317,8 +280,10 @@ static const char *get_localization_context(void) {
    int has_context = 0;
 
    // Check if any localization fields are set
+   /* Where the daemon itself sits (its room) is not here: the prompt is every
+    * surface's, and a room is one surface's (a local standing direction). */
    if (g_config.localization.location[0] != '\0' || g_config.localization.units[0] != '\0' ||
-       g_config.localization.timezone[0] != '\0' || g_config.general.room[0] != '\0') {
+       g_config.localization.timezone[0] != '\0') {
       offset = snprintf(localization_context, LOCALIZATION_BUFFER_SIZE, "%s",
                         TOOL_DEFAULTS_HEADER_TEXT);
       has_context = 1;
@@ -327,11 +292,6 @@ static const char *get_localization_context(void) {
    if (g_config.localization.location[0] != '\0') {
       offset += snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset,
                          " Location=%s.", g_config.localization.location);
-   }
-
-   if (g_config.general.room[0] != '\0') {
-      offset += snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset,
-                         " Room=%s.", g_config.general.room);
    }
 
    if (g_config.localization.units[0] != '\0') {
@@ -344,13 +304,9 @@ static const char *get_localization_context(void) {
                          " TZ=%s.", g_config.localization.timezone);
    }
 
-   /* `Today=` used to land here so models with stale training cutoffs
-    * knew the current date.  The two-segment prompt-cache split moves
-    * the per-turn time into the volatile focus block as a synthetic
-    * `[system_time]` candidate — keeping a stale process-lifetime
-    * `Today=` cached here would defeat the cache (re-emit at midnight)
-    * AND duplicate the focus-block entry.  See the prompt-cache split
-    * design doc. */
+   /* No `Today=`: the time is in each turn's context ([system_time]).  A date
+    * here would change the prompt at midnight, and a conversation's prompt is
+    * frozen. */
 
    if (has_context) {
       snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset, "\n\n");
@@ -402,31 +358,19 @@ static const char *get_persona_description(void) {
 }
 
 /**
- * @brief Builds the system prompt for the local interface
+ * @brief Builds the command prompt every surface starts from
  *
- * All tools are defined via the modular tool_registry and called natively.
- * When tools are disabled the prompt carries only prose format rules.
+ * Persona, system instructions and localization.  Nothing about the surface a
+ * turn arrives on (a local mic's voice and room, a satellite's room, a
+ * channel): those are standing directions (dawn_build_prompt), so a
+ * conversation that moves between surfaces keeps one system prompt.
  */
 static void initialize_command_prompt(void) {
    /* Gather inputs without holding the mutex — these call helpers that each
     * take the mutex briefly (get_system_instructions) or none at all. */
    const char *persona = get_persona_description();
-   const char *sys_instr = get_system_instructions(false);
+   const char *sys_instr = get_system_instructions();
    const char *loc_ctx = get_localization_context();
-   /* Local mic is a voice surface: input is ASR-transcribed and output is spoken.
-    * Append the spoken-output directive + ASR-disambiguation hint (config-or-
-    * built-in-default) so the local prompt shapes replies for the ear and warns
-    * about homophone mis-recognition.  Rebuilt on invalidate_system_instructions()
-    * so a WebUI config edit takes effect.
-    *
-    * NOTE: this is ONE of TWO injection sites for these directives.  The other is
-    * the per-turn builder for satellites/WebUI (append_block_directive in
-    * src/webui/webui_auth_helpers.c dawn_build_prompt).  Local bakes them into the
-    * static prompt here (the shared remote base can't carry them — text-WebUI
-    * reuses it); satellites/WebUI append per turn.  Keep the two in sync if you
-    * change the injection contract (ordering, separators, gates). */
-   const char *voice_dir = voice_directive_effective();
-   const char *asr_hint = asr_disambiguation_hint_effective();
 
    pthread_mutex_lock(&system_instructions_mutex);
    if (prompt_initialized) {
@@ -434,8 +378,8 @@ static void initialize_command_prompt(void) {
       return;
    }
 
-   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s\n\n%s\n\n%s",
-                             persona, sys_instr, loc_ctx, voice_dir, asr_hint);
+   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s", persona,
+                             sys_instr, loc_ctx);
    prompt_initialized = 1;
    pthread_mutex_unlock(&system_instructions_mutex);
 
@@ -443,59 +387,45 @@ static void initialize_command_prompt(void) {
              g_config.llm.tools.enabled ? "on" : "off", prompt_len);
 }
 
-/**
- * @brief Gets the local command prompt string (all commands including HUD/helmet)
- *
- * @return The local command prompt string
- */
-const char *get_local_command_prompt(void) {
-   /* Always delegate to the initializer — it takes system_instructions_mutex
-    * and early-returns if already initialized. Reading prompt_initialized
-    * here without the lock is a data race because invalidate_system_instructions()
-    * (runnable from MQTT callback threads) writes the flag under the mutex. */
-   initialize_command_prompt();
-   return command_prompt;
+int get_command_prompt_parts(command_prompt_parts_t *out) {
+   if (!out) {
+      return 1;
+   }
+   memset(out, 0, sizeof(*out));
+   const char *persona = get_persona_description();
+   (void)get_system_instructions();
+   (void)get_localization_context();
+   /* Copied under the mutex a rebuild writes the buffers under. */
+   pthread_mutex_lock(&system_instructions_mutex);
+   out->persona = strdup(persona);
+   out->rules = strdup(system_instructions_buffer);
+   out->tool_defaults = strdup(localization_context);
+   pthread_mutex_unlock(&system_instructions_mutex);
+   if (!out->persona || !out->rules || !out->tool_defaults) {
+      command_prompt_parts_free(out);
+      return 1;
+   }
+   return 0;
 }
 
-/**
- * @brief Builds the remote command prompt (excludes local-only topics like hud, helmet)
- *
- * All tools are defined via the modular tool_registry and called natively;
- * remote-available tools are filtered automatically.
- */
-static void initialize_remote_command_prompt(void) {
-   const char *persona = get_persona_description();
-   const char *sys_instr = get_system_instructions(true);
-   const char *loc_ctx = get_localization_context();
-
-   pthread_mutex_lock(&system_instructions_mutex);
-   if (remote_prompt_initialized) {
-      pthread_mutex_unlock(&system_instructions_mutex);
+void command_prompt_parts_free(command_prompt_parts_t *parts) {
+   if (!parts) {
       return;
    }
-
-   int prompt_len = snprintf(remote_command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s", persona,
-                             sys_instr, loc_ctx);
-   remote_prompt_initialized = 1;
-   pthread_mutex_unlock(&system_instructions_mutex);
-
-   OLOG_INFO("Remote AI prompt initialized (tools %s). Length: %d",
-             g_config.llm.tools.enabled ? "on" : "off", prompt_len);
+   free(parts->persona);
+   free(parts->rules);
+   free(parts->tool_defaults);
+   memset(parts, 0, sizeof(*parts));
 }
 
-/**
- * @brief Gets the remote command prompt string (for network satellite clients)
- *
- * This prompt excludes local-only commands (HUD, helmet) and only includes
- * general commands like date, time, etc.
- *
- * @return The remote command prompt string
- */
-const char *get_remote_command_prompt(void) {
-   /* Always delegate to the initializer — it takes system_instructions_mutex
-    * and early-returns if already initialized. See get_local_command_prompt(). */
-   initialize_remote_command_prompt();
-   return remote_command_prompt;
+char *get_command_prompt_dup(void) {
+   initialize_command_prompt();
+   /* Copied under the mutex a rebuild writes the buffer under, so a config edit
+    * mid-copy can't hand the caller half of each. */
+   pthread_mutex_lock(&system_instructions_mutex);
+   char *copy = strdup(command_prompt);
+   pthread_mutex_unlock(&system_instructions_mutex);
+   return copy;
 }
 
 /* =============================================================================

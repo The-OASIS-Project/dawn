@@ -28,6 +28,7 @@
 #include <strings.h>
 
 #include "auth/auth_db.h"
+#include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_context.h"
@@ -92,6 +93,7 @@ static const treg_param_t switch_llm_params[] = {
 
 static const tool_metadata_t switch_llm_metadata = {
    .name = "switch_llm",
+   /* Kind of action: act (the default): changes the model the conversation runs on. */
    .device_string = "switch_llm",
    .topic = "dawn",
    .aliases = { "llm", "ai", "model", "provider", "cloud provider", "local llm", "cloud llm" },
@@ -102,7 +104,7 @@ static const tool_metadata_t switch_llm_metadata = {
        "use the local LLM server, 'cloud' to use cloud AI, or specify a provider name like "
        "'openai', 'claude', or 'gemini'.",
    .params = switch_llm_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(switch_llm_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_NONE,
@@ -129,42 +131,6 @@ static const llm_target_entry_t *find_target(const char *name) {
       }
    }
    return NULL;
-}
-
-/**
- * @brief Compact conversation history before switching to a provider with smaller context
- *
- * Uses the current (larger-context) provider to summarize before switching.
- */
-static void compact_before_switch(session_t *session,
-                                  const session_llm_config_t *current,
-                                  const llm_target_entry_t *entry) {
-   extern struct json_object *conversation_history;
-   if (!conversation_history) {
-      return;
-   }
-
-   /* Determine target provider: for "cloud" with no explicit provider, keep current */
-   cloud_provider_t target_provider = entry->provider;
-   if (entry->type == LLM_CLOUD && target_provider == CLOUD_PROVIDER_NONE) {
-      target_provider = current->cloud_provider;
-   }
-
-   if (!llm_context_needs_compaction_for_switch(session->session_id, conversation_history,
-                                                entry->type, target_provider, NULL)) {
-      return;
-   }
-
-   llm_compaction_result_t compact_result = { 0 };
-   int rc = llm_context_compact_for_switch(session->session_id, conversation_history, current->type,
-                                           current->cloud_provider, current->model, entry->type,
-                                           target_provider, NULL, &compact_result);
-   if (rc == 0 && compact_result.performed) {
-      OLOG_INFO("Pre-switch compaction: %d messages summarized, %d -> %d tokens",
-                compact_result.messages_summarized, compact_result.tokens_before,
-                compact_result.tokens_after);
-   }
-   llm_compaction_result_free(&compact_result);
 }
 
 static char *switch_llm_tool_callback(const char *action, char *value, int *should_respond) {
@@ -205,20 +171,62 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       return strdup(TOOL_RESULT_ERROR_MARK "No active session available for LLM switch.");
    }
 
+   /* Inside a turn, the switch lasts beyond it only when the user asked for it:
+    * a background or job turn acting on untrusted content (a fetched page, a
+    * job's result) changes this reply's model and nothing else, and never moves
+    * it from the local model to a cloud one.  Nor does a
+    * switch that would move a private conversation from the local model to a
+    * cloud one.  Outside a turn (an MQTT command) it is the session's setting,
+    * as before: with no turn running to pin the history, the next turn's own
+    * context management fits the history to the new model. */
+   const bool in_turn = session_turn_is_caller(session);
+   if (!in_turn && session_turn_active(session)) {
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Can't switch the AI while it is answering; try again in a moment.");
+   }
+
    session_llm_config_t config;
    session_get_llm_config(session, &config);
+   const llm_type_t type_before = config.type;
 
-   /* Compact conversation if switching to a provider with smaller context window */
-   compact_before_switch(session, &config, entry);
+   int64_t conv_id = session->messaging_identity.conversation_id;
+   if (conv_id <= 0) {
+      conv_id = session_turn_conversation(session);
+   }
+   const bool user_asked = !in_turn || session_turn_user_originated(session);
+   if (!user_asked && type_before == LLM_LOCAL && entry->type == LLM_CLOUD) {
+      /* Not even for this reply: the turn would send its whole history, which
+       * the user kept on the local model, to a cloud provider because of
+       * content the turn read. */
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Switching from the local model to a cloud one needs the user to ask for it.");
+   }
+   bool lasting = user_asked;
+   const int owner = session_effective_user_id(session); /* whose conversations */
+   if (lasting && in_turn && conv_id > 0 && type_before == LLM_LOCAL && entry->type == LLM_CLOUD) {
+      bool is_private = true;
+      lasting = owner > 0 && conv_db_is_private(conv_id, owner, &is_private) == AUTH_DB_SUCCESS &&
+                !is_private;
+   }
 
-   OLOG_INFO("Setting AI to %s via switch_llm tool.", entry->label);
+   /* The switch takes effect with the next message: its seam fits the history
+    * to the new model's window, summarizing with this one if it must (never
+    * inside this tool call: mid tool round, the turn's request stands as it is). */
+   if (in_turn && lasting) {
+      session_compaction_note_switch(session, &config);
+   }
+
+   OLOG_INFO("Setting AI to %s via switch_llm tool%s.", entry->label,
+             lasting ? "" : " (this reply only)");
    config.type = entry->type;
    if (entry->provider != CLOUD_PROVIDER_NONE) {
       config.cloud_provider = entry->provider;
    }
    config.model[0] = '\0'; /* Clear model to use provider default */
 
-   if (session_set_llm_config(session, &config) != SUCCESS) {
+   const int set_rc = lasting ? session_set_llm_config(session, &config)
+                              : session_set_turn_llm_config(session, &config);
+   if (set_rc != SUCCESS) {
       char *result = malloc(128);
       if (result) {
          snprintf(result, 128, TOOL_RESULT_ERROR_MARK "Failed to switch to %s.%s%s", entry->label,
@@ -227,16 +235,17 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       return result;
    }
 
-   /* Persist the change to the conversation row so it survives session
-    * recreation (idle eviction / daemon restart).  Only messaging sessions
-    * carry a conversation_id; WebUI/local sessions (conv_id 0) keep their
-    * existing live-only behavior — the WebUI has its own per-conversation
-    * lock UI.  Re-read the applied config first (session_set_llm_config may
+   /* A lasting switch inside a turn is saved to the conversation the turn
+    * belongs to, so it holds whenever that conversation is used again (opened
+    * in the WebUI, a later message on its channel, a session recreated after
+    * idle or a restart), and for a turn on a conversation the user isn't
+    * viewing.  Re-read the applied config first (session_set_llm_config may
     * fall back on a missing key) and write the FULL config, because
-    * conv_db_update_llm_settings overwrites all columns (no keep-current) —
-    * passing the current thinking_mode/reasoning_effort preserves the
-    * conversation's thinking-on seed that switch_llm itself doesn't touch. */
-   if (session->messaging_identity.conversation_id > 0 && session->metrics.user_id > 0) {
+    * conv_db_update_llm_settings overwrites all columns (no keep-current):
+    * passing the current thinking_mode / reasoning_effort keeps the thinking
+    * settings switch_llm doesn't touch. */
+   bool saved = false;
+   if (lasting && in_turn && conv_id > 0 && owner > 0) {
       session_llm_config_t applied;
       session_get_llm_config(session, &applied);
       const char *type_str = (applied.type == LLM_LOCAL) ? "local" : "cloud";
@@ -244,22 +253,24 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
                                  ? cloud_provider_to_string(applied.cloud_provider)
                                  : "";
       /* tools_mode column is retired (dead) — pass empty. */
-      int prc = conv_db_update_llm_settings(session->messaging_identity.conversation_id,
-                                            session->metrics.user_id, type_str, prov_str,
-                                            applied.model, "", applied.thinking_mode,
-                                            applied.reasoning_effort);
-      if (prc != AUTH_DB_SUCCESS) {
-         /* Best-effort: the live session changed but the row didn't, so the
-          * change reverts on next session recreation.  Log so it's diagnosable. */
-         OLOG_WARNING("switch_llm: failed to persist LLM change to conversation %lld (rc=%d); "
-                      "live session updated but it will not survive restart",
-                      (long long)session->messaging_identity.conversation_id, prc);
+      int prc = conv_db_update_llm_settings(conv_id, owner, type_str, prov_str, applied.model, "",
+                                            applied.thinking_mode, applied.reasoning_effort);
+      if (prc == AUTH_DB_SUCCESS) {
+         saved = true;
+      } else {
+         /* This session keeps the switch, but the conversation reverts the next
+          * time it is loaded.  Log it. */
+         OLOG_WARNING("switch_llm: failed to save the LLM change to conversation %lld (rc=%d)",
+                      (long long)conv_id, prc);
       }
    }
 
-   char *result = malloc(64);
+   char *result = malloc(128);
    if (result) {
-      snprintf(result, 64, "AI switched to %s", entry->label);
+      snprintf(result, 128, "AI switched to %s%s", entry->label,
+               !lasting ? " (for this reply only; not saved to the conversation)"
+               : (!saved && in_turn && conv_id > 0) ? " (not saved to the conversation)"
+                                                    : "");
    }
    return result;
 }

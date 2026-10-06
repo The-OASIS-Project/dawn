@@ -139,6 +139,7 @@ static const treg_param_t voice_amplifier_params[] = {
 
 static const tool_metadata_t voice_amplifier_metadata = {
    .name = "voice_amplifier",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "voice amplifier",
    .topic = "dawn",
    .aliases = { "pa", "pa system", "bullhorn" },
@@ -147,7 +148,7 @@ static const tool_metadata_t voice_amplifier_metadata = {
    .description =
        "Control the voice amplifier/PA system for projecting voice through external speakers.",
    .params = voice_amplifier_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(voice_amplifier_params),
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
@@ -206,6 +207,7 @@ static const tool_device_map_t audio_device_map[] = {
 
 static const tool_metadata_t audio_device_metadata = {
    .name = "audio_device",
+   /* Kind of action: act (the default): acts on whichever device its type names. */
    .device_string = "audio_device",
    .topic = "dawn",
    .aliases = { NULL },
@@ -213,7 +215,7 @@ static const tool_metadata_t audio_device_metadata = {
 
    .description = "Switch audio input or output devices.",
    .params = audio_device_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(audio_device_params),
 
    .device_map = audio_device_map,
    .device_map_count = 2,

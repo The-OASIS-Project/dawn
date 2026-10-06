@@ -174,6 +174,10 @@ DISABLED → LISTENING → WAKE_CHECK → WAKE_PENDING → PROCESSING → LISTEN
 - **TTS echo prevention**: audio capture is muted during PROCESSING state and deferred until TTS playback completes.
 - **Per-connection context**: each WebSocket connection gets its own VAD, Opus decoder, resampler, and circular buffer. No shared state between clients.
 
+### Early decode at a pause (shadow measurement)
+
+`[vad] adaptive_endpoint` is `"off"` (default) or `"shadow"`. In `shadow`, with Whisper as the engine, a pause in the user's speech starts a speculative decode of the audio so far on a worker (`src/core/spec_slot.c` tracks it: resumed speech discards it, a committed end of speech takes it). The taken transcript is only compared with the real decode and logged (`AO spec agreement`); replies are unchanged and the end-of-speech wait is the same. A stored `"on"` is read as `"shadow"` with a warning, since nothing consumes the early result yet.
+
 ### Unified Action Button (Browser UI)
 
 The WebUI uses a single split button with a dropdown for input mode selection:

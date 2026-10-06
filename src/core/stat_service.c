@@ -34,6 +34,7 @@
 #include "core/stat_db.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * State
@@ -152,32 +153,6 @@ static bool json_get_bool(struct json_object *root, const char *key, bool *out) 
       return true;
    }
    return false;
-}
-
-/* Drop a trailing incomplete UTF-8 sequence left by a byte-boundary truncation,
- * so an untrusted field truncated into a fixed buffer never emits invalid UTF-8
- * (a cloud provider rejects the whole request on it). */
-static void utf8_trim_incomplete(char *s) {
-   size_t len = strlen(s);
-   size_t i = len;
-   while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) {
-      i--; /* walk back over continuation bytes (10xxxxxx) */
-   }
-   if (i == 0) {
-      return;
-   }
-   unsigned char lead = (unsigned char)s[i - 1];
-   size_t seq_len = 1;
-   if ((lead & 0xE0) == 0xC0) {
-      seq_len = 2;
-   } else if ((lead & 0xF0) == 0xE0) {
-      seq_len = 3;
-   } else if ((lead & 0xF8) == 0xF0) {
-      seq_len = 4;
-   }
-   if (seq_len > (len - (i - 1))) {
-      s[i - 1] = '\0'; /* incomplete trailing sequence — truncate at the lead byte */
-   }
 }
 
 /* Copy a string field, replacing control characters with spaces.  These fields

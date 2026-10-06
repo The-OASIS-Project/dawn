@@ -29,13 +29,16 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
 #include "core/memory_filter.h"
+#include "core/session_prefix.h"
 #include "core/strbuf.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
+#include "memory/memory_import.h"
 #include "memory/memory_similarity.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
@@ -332,11 +335,14 @@ void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payloa
    }
 
    int64_t fact_id = json_object_get_int64(id_obj);
+   conv_db_withdraw_intent_begin(conn->auth_user_id); /* the user removing it */
    int result = memory_db_fact_delete(fact_id, conn->auth_user_id);
+   conv_db_withdraw_intent_end();
 
    if (result == MEMORY_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message", json_object_new_string("Fact deleted"));
+      session_withdraw_forgotten_async(conn->auth_user_id, false);
       OLOG_INFO("WebUI: User %d deleted memory fact %lld", conn->auth_user_id, (long long)fact_id);
    } else if (result == MEMORY_DB_NOT_FOUND) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -687,11 +693,16 @@ void handle_delete_memory_preference(ws_connection_t *conn, struct json_object *
    }
 
    const char *category = json_object_get_string(cat_obj);
+   /* The user removing it: a preference is withdrawn with the USER MEMORY
+    * blocks it was sent in (memory_bodies, below), not as an item. */
+   conv_db_withdraw_intent_begin(conn->auth_user_id);
    int result = memory_db_pref_delete(conn->auth_user_id, category);
+   conv_db_withdraw_intent_end();
 
    if (result == MEMORY_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message", json_object_new_string("Preference deleted"));
+      session_withdraw_forgotten_async(conn->auth_user_id, true);
       OLOG_INFO("WebUI: User %d deleted memory preference '%s'", conn->auth_user_id, category);
    } else if (result == MEMORY_DB_NOT_FOUND) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -812,11 +823,14 @@ void handle_delete_memory_summary(ws_connection_t *conn, struct json_object *pay
    }
 
    int64_t summary_id = json_object_get_int64(id_obj);
+   conv_db_withdraw_intent_begin(conn->auth_user_id); /* the user removing it */
    int result = memory_db_summary_delete(summary_id, conn->auth_user_id);
+   conv_db_withdraw_intent_end();
 
    if (result == MEMORY_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message", json_object_new_string("Summary deleted"));
+      session_withdraw_forgotten_async(conn->auth_user_id, true);
       OLOG_INFO("WebUI: User %d deleted memory summary %lld", conn->auth_user_id,
                 (long long)summary_id);
    } else if (result == MEMORY_DB_NOT_FOUND) {
@@ -916,11 +930,14 @@ void handle_delete_memory_entity(ws_connection_t *conn, struct json_object *payl
    }
 
    int64_t entity_id = json_object_get_int64(id_obj);
+   conv_db_withdraw_intent_begin(conn->auth_user_id); /* the user removing it */
    int result = memory_db_entity_delete(entity_id, conn->auth_user_id);
+   conv_db_withdraw_intent_end();
 
    if (result == MEMORY_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message", json_object_new_string("Entity deleted"));
+      session_withdraw_forgotten_async(conn->auth_user_id, false);
       OLOG_INFO("WebUI: User %d deleted memory entity %lld", conn->auth_user_id,
                 (long long)entity_id);
    } else if (result == MEMORY_DB_NOT_FOUND) {
@@ -1152,9 +1169,14 @@ void handle_delete_all_memories(ws_connection_t *conn, struct json_object *paylo
       return;
    }
 
+   conv_db_withdraw_intent_begin(conn->auth_user_id); /* the user removing it all */
    int result = memory_db_delete_user_memories(conn->auth_user_id);
+   conv_db_withdraw_intent_end();
 
    if (result == MEMORY_DB_SUCCESS) {
+      /* All of it leaves the conversations it was sent into, the USER MEMORY
+       * blocks too. */
+      session_withdraw_forgotten_async(conn->auth_user_id, true);
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message",
                              json_object_new_string("All memories deleted"));
@@ -1443,33 +1465,27 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
 #define IMPORT_MAX_LINES 200
 #define IMPORT_MAX_TEXT_LEN (256 * 1024) /* 256KB max paste */
 
-/**
- * @brief Check if a fact is a duplicate of existing memories
- *
- * Uses hash lookup + Jaccard similarity fallback.
- *
- * @return true if duplicate found
- */
-static bool is_fact_duplicate(int user_id, const char *fact_text) {
-   uint32_t hash = memory_normalize_and_hash(fact_text);
-   if (hash == 0)
-      return false;
-
-   memory_fact_t existing[5];
-   int found = 0;
-   memory_db_fact_find_by_hash(user_id, hash, existing, 5, &found);
-   if (found > 0)
-      return true;
-
-   /* Fallback: Jaccard similarity against recent matches */
-   memory_fact_t similar[3];
-   int sim_count = 0;
-   memory_db_fact_find_similar(user_id, fact_text, similar, 3, &sim_count);
-   for (int i = 0; i < sim_count; i++) {
-      if (memory_is_duplicate(fact_text, similar[i].fact_text, MEMORY_SIMILARITY_THRESHOLD))
+/* Tally a skipped import outcome.  Returns true if the fact was accepted. */
+static bool count_import_status(memory_import_status_t st,
+                                int *skipped_blocked,
+                                int *skipped_dupes,
+                                int *skipped_failed) {
+   switch (st) {
+      case MEMORY_IMPORT_ACCEPTED:
          return true;
+      case MEMORY_IMPORT_BLOCKED:
+         (*skipped_blocked)++;
+         return false;
+      case MEMORY_IMPORT_DUPLICATE:
+         (*skipped_dupes)++;
+         return false;
+      case MEMORY_IMPORT_FAILED:
+         (*skipped_failed)++;
+         return false;
+      case MEMORY_IMPORT_EMPTY:
+      default:
+         return false;
    }
-   return false;
 }
 
 /**
@@ -1526,6 +1542,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
    int skipped_dupes = 0;
    int skipped_empty = 0;
    int skipped_blocked = 0;
+   int skipped_failed = 0; /* commit requested but the DB write failed */
    json_object *preview_arr = json_object_new_array();
 
    if (strcmp(format, "json") == 0) {
@@ -1557,35 +1574,23 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
                continue;
             }
 
-            float confidence = 0.8f;
+            float confidence = MEMORY_IMPORT_DEFAULT_CONFIDENCE;
             if (json_object_object_get_ex(f, "confidence", &conf_obj))
-               confidence = (float)json_object_get_double(conf_obj);
+               confidence = memory_import_confidence(json_object_get_double(conf_obj));
 
-            /* Truncate to max fact length (same as text path) */
-            char truncated[MEMORY_FACT_TEXT_MAX];
-            safe_strscpy(truncated, text);
-
-            if (memory_filter_check(truncated)) {
-               skipped_blocked++;
-               continue;
-            }
-
-            if (is_fact_duplicate(conn->auth_user_id, truncated)) {
-               skipped_dupes++;
+            char stored[MEMORY_FACT_TEXT_MAX];
+            memory_import_status_t st = memory_import_fact(conn->auth_user_id, text, confidence,
+                                                           commit, stored);
+            if (!count_import_status(st, &skipped_blocked, &skipped_dupes, &skipped_failed)) {
                continue;
             }
 
             /* Add to preview */
             json_object *preview_item = json_object_new_object();
             json_object_object_add(preview_item, "type", json_object_new_string("fact"));
-            json_object_object_add(preview_item, "text", json_object_new_string(truncated));
+            json_object_object_add(preview_item, "text", json_object_new_string(stored));
             json_object_object_add(preview_item, "confidence", json_object_new_double(confidence));
             json_object_array_add(preview_arr, preview_item);
-
-            if (commit) {
-               memory_db_fact_create(conn->auth_user_id, truncated, confidence, "import", NULL,
-                                     NULL, NULL);
-            }
             imported_facts++;
          }
       }
@@ -1615,10 +1620,12 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             safe_strscpy(category, category_raw);
             char value[MEMORY_PREF_VALUE_MAX];
             safe_strscpy(value, value_raw);
+            memory_import_clean_text(category);
+            memory_import_clean_text(value);
 
-            float confidence = 0.8f;
+            float confidence = MEMORY_IMPORT_DEFAULT_CONFIDENCE;
             if (json_object_object_get_ex(p, "confidence", &conf_obj))
-               confidence = (float)json_object_get_double(conf_obj);
+               confidence = memory_import_confidence(json_object_get_double(conf_obj));
 
             if (memory_filter_check(value) || memory_filter_check(category)) {
                skipped_blocked++;
@@ -1716,31 +1723,19 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             continue;
          }
 
-         /* Truncate to max fact length */
-         char truncated[MEMORY_FACT_TEXT_MAX];
-         safe_strscpy(truncated, fact_text);
-
-         if (memory_filter_check(truncated)) {
-            skipped_blocked++;
-            line = strtok_r(NULL, "\n", &saveptr);
-            continue;
-         }
-
-         if (is_fact_duplicate(conn->auth_user_id, truncated)) {
-            skipped_dupes++;
+         char stored[MEMORY_FACT_TEXT_MAX];
+         memory_import_status_t st = memory_import_fact(conn->auth_user_id, fact_text, 0.7f, commit,
+                                                        stored);
+         if (!count_import_status(st, &skipped_blocked, &skipped_dupes, &skipped_failed)) {
             line = strtok_r(NULL, "\n", &saveptr);
             continue;
          }
 
          json_object *preview_item = json_object_new_object();
          json_object_object_add(preview_item, "type", json_object_new_string("fact"));
-         json_object_object_add(preview_item, "text", json_object_new_string(truncated));
+         json_object_object_add(preview_item, "text", json_object_new_string(stored));
          json_object_object_add(preview_item, "confidence", json_object_new_double(0.7));
          json_object_array_add(preview_arr, preview_item);
-
-         if (commit) {
-            memory_db_fact_create(conn->auth_user_id, truncated, 0.7f, "import", NULL, NULL, NULL);
-         }
          imported_facts++;
 
          line = strtok_r(NULL, "\n", &saveptr);
@@ -1756,6 +1751,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
    json_object_object_add(resp_payload, "skipped_dupes", json_object_new_int(skipped_dupes));
    json_object_object_add(resp_payload, "skipped_empty", json_object_new_int(skipped_empty));
    json_object_object_add(resp_payload, "skipped_blocked", json_object_new_int(skipped_blocked));
+   json_object_object_add(resp_payload, "skipped_failed", json_object_new_int(skipped_failed));
    if (!commit) {
       json_object_object_add(resp_payload, "preview", preview_arr);
    } else {
@@ -1768,9 +1764,10 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
 
    if (commit) {
       OLOG_INFO(
-          "WebUI: User %d imported memories (format=%s, facts=%d, prefs=%d, dupes=%d, blocked=%d)",
+          "WebUI: User %d imported memories (format=%s, facts=%d, prefs=%d, dupes=%d, blocked=%d, "
+          "failed=%d)",
           conn->auth_user_id, format, imported_facts, imported_prefs, skipped_dupes,
-          skipped_blocked);
+          skipped_blocked, skipped_failed);
    }
 }
 

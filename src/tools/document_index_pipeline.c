@@ -225,7 +225,7 @@ int document_index_text(int user_id,
       free(emb_buf);
    } else {
       /* Memory allocation failed — delete the document record */
-      document_db_delete(doc_id);
+      document_db_delete(doc_id); /* not-a-removal: a failed index, never sent */
       chunk_result_free(&chunks);
       set_error(out, DOC_INDEX_ERROR_ALLOC, "Memory allocation failed");
       return DOC_INDEX_ERROR_ALLOC;
@@ -236,7 +236,7 @@ int document_index_text(int user_id,
     * only some embedded, correct num_chunks so it matches the actual chunk rows
     * (it gates note-vs-document editing). */
    if (embedded_count == 0) {
-      document_db_delete(doc_id);
+      document_db_delete(doc_id); /* not-a-removal: a failed index, never sent */
       chunk_result_free(&chunks);
       set_error(out, DOC_INDEX_ERROR_NO_EMBEDDING, "No chunks could be embedded");
       return DOC_INDEX_ERROR_NO_EMBEDDING;
@@ -328,14 +328,14 @@ int document_index_note(int user_id,
 
    float *emb = malloc((size_t)dims * sizeof(float));
    if (!emb) {
-      document_db_delete(doc_id);
+      document_db_delete(doc_id); /* not-a-removal: a failed index, never sent */
       set_error(out, DOC_INDEX_ERROR_ALLOC, "Memory allocation failed");
       return DOC_INDEX_ERROR_ALLOC;
    }
    int out_dims = 0;
    if (embedding_engine_embed(text, emb, dims, &out_dims) != 0 || out_dims != dims) {
       free(emb);
-      document_db_delete(doc_id);
+      document_db_delete(doc_id); /* not-a-removal: a failed index, never sent */
       set_error(out, DOC_INDEX_ERROR_CHUNK_FAIL, "Failed to embed note text");
       return DOC_INDEX_ERROR_CHUNK_FAIL;
    }
@@ -345,7 +345,7 @@ int document_index_note(int user_id,
                                      &chunk_id);
    free(emb);
    if (rc != SUCCESS) {
-      document_db_delete(doc_id);
+      document_db_delete(doc_id); /* not-a-removal: a failed index, never sent */
       set_error(out, DOC_INDEX_ERROR_DB_FAIL, "Failed to store note chunk");
       return DOC_INDEX_ERROR_DB_FAIL;
    }

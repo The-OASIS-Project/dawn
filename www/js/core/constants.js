@@ -23,6 +23,9 @@
    // readyState still reports as OPEN. Values match Aurora's proven watchdog and
    // sit well under the server's ~1800s idle expiry and typical proxy timeouts.
    const PING_IDLE_MS = 8000; // only ping after this much inbound silence (traffic already proves life)
+   // The WebUI protocol version this client speaks (the server advertises its own
+   // in the config frame; a feature flag, not a bump, covers anything additive).
+   const PROTOCOL_VERSION = 1;
    const PING_INTERVAL_MS = 10000; // heartbeat tick cadence
    const PONG_TIMEOUT_MS = 6000; // a ping unanswered this long counts as one miss
    // Hysteresis: an isolated missed pong (a single late one on a marginal link)
@@ -59,6 +62,7 @@
 
       // Liveness heartbeat
       PING_IDLE_MS: PING_IDLE_MS,
+      PROTOCOL_VERSION: PROTOCOL_VERSION,
       PING_INTERVAL_MS: PING_INTERVAL_MS,
       PONG_TIMEOUT_MS: PONG_TIMEOUT_MS,
       PONG_STALE_MISSES: PONG_STALE_MISSES,

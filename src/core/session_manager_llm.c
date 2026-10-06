@@ -20,7 +20,7 @@
  *
  * Owns the three public LLM entry points used by every caller that needs to
  * run a turn through the LLM (session_llm_call,
- * session_llm_call_with_tts, session_llm_call_with_tts_vision_no_add),
+ * session_llm_call_with_tts, session_llm_call_with_tts_no_add),
  * the three static helpers that share their setup/teardown contract
  * (llm_call_prepare / llm_call_cleanup / llm_call_finalize), and the two
  * sentence-buffer streaming callbacks (combined_sentence_callback /
@@ -39,8 +39,11 @@
 
 #include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/text_filter.h"
+#include "llm/llm_context.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "tools/time_utils.h"
 #include "utils/sentence_buffer.h"
@@ -55,7 +58,7 @@
  * Sends text to WebUI for real-time display.  Command-tag filtering is
  * handled by webui_send_stream_delta() internally.  Tracks timing metrics
  * for TTFT and token-rate visualization.  Used by session_llm_call() and
- * session_llm_call_with_tts_vision_no_add() — the paths that don't run
+ * session_llm_call_with_tts_no_add() — the paths that don't run
  * through the sentence-buffer (TTS) layer.
  * ============================================================================= */
 
@@ -123,12 +126,34 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
  * @brief Context for LLM call preparation (reduces duplication)
  */
 typedef struct {
+   session_t *session; /* owner of history (its reference is dropped under its lock) */
    struct json_object *history;
    const char *llm_input;
    llm_resolved_config_t resolved_config;
    char model_buf[LLM_MODEL_NAME_MAX]; /* Buffer for model name (outlives stack) */
    char endpoint_buf[128];             /* Buffer for endpoint (outlives stack) */
 } llm_call_ctx_t;
+
+/* A private copy of the reply's blocks for the writer that saves it
+ * (session_take_reply_blocks): the history's copy is shared from here on. */
+static void keep_reply_blocks(session_t *session, struct json_object *blocks) {
+   json_object_put(session->final_answer.reply_blocks);
+   session->final_answer.reply_blocks = NULL;
+   if (blocks && json_object_deep_copy(blocks, &session->final_answer.reply_blocks, NULL) != 0) {
+      session->final_answer.reply_blocks = NULL;
+   }
+}
+
+/* A cancelled reply the caller saves anyway: its blocks, as the history would
+ * have held them. */
+static void keep_cancelled_reply_blocks(session_t *session, const char *text) {
+   struct json_object *blocks = NULL;
+   if (session->final_answer.blocks && text && *text) {
+      blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, text);
+   }
+   json_object_put(session->final_answer.reply_blocks);
+   session->final_answer.reply_blocks = blocks;
+}
 
 /**
  * @brief Prepare for LLM call - common setup for all LLM call variants
@@ -157,21 +182,32 @@ static int llm_call_prepare(session_t *session,
     * so a leftover from a prior turn (a persist that never consumed it) must not attach to
     * this row.  Safe here precisely because the write is in-dispatch (after prepare) — a
     * prepare-clear cannot clobber the current turn's stash. */
-   if (session->final_reasoning_json != NULL) {
-      free(session->final_reasoning_json);
-      session->final_reasoning_json = NULL;
-   }
+   session_final_answer_clear(session);
+
+   /* What an earlier call of this thread left in the turn result (a side
+    * call's) is not this turn's. */
+   llm_turn_result_reset();
+
+   /* Turn-start reset of the per-turn cache-token trackers so an interrupted or
+    * usage-less turn (Stop / wake-word barge-in / a provider that omits the usage
+    * chunk) reports 0 cache tokens on its idle metrics frame rather than carrying
+    * over the prior turn's figures.  A normal turn overwrites these when its usage
+    * chunk is parsed, before the idle frame fires in llm_call_finalize. */
+   llm_context_reset_turn_cache(session->session_id);
 
    // Add user message to history (unless caller already did)
    if (!skip_add_message) {
-      session_add_message(session, "user", user_text);
+      session_add_turn_message(session, "user", user_text);
    }
 
    // Update activity timestamp
    session_touch(session);
 
    // Get conversation history
-   ctx->history = session_get_history(session);
+   /* The running turn's own history (see session_turn_begin), not whatever the
+    * user has since opened. */
+   ctx->session = session;
+   ctx->history = session_get_turn_history(session);
    if (!ctx->history) {
       OLOG_ERROR("Session %u: Failed to get conversation history", session->session_id);
       return 1;
@@ -227,7 +263,8 @@ static int llm_call_prepare(session_t *session,
 static void llm_call_cleanup(llm_call_ctx_t *ctx) {
    session_set_command_context(NULL);
    if (ctx->history) {
-      json_object_put(ctx->history);
+      session_put_history(ctx->session, ctx->history);
+      ctx->history = NULL;
    }
 }
 
@@ -237,6 +274,13 @@ static void llm_call_cleanup(llm_call_ctx_t *ctx) {
  * @return Response string on success, NULL on failure (takes ownership of response)
  */
 static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_t *ctx) {
+   /* Tools defined in a message rejected on this turn (its later requests
+    * folded them): the conversation records it, with a declared boundary, so
+    * its later turns fold them too, after a restart.  Same thread as the call
+    * (see below). */
+   if (llm_take_inline_tools_rejected()) {
+      session_prefix_inline_tools_rejected(session);
+   }
    /* Capture the provider's error code before any cleanup path can mutate it.
     * Used both to set a distinguishable WebUI stream-end reason and to refine
     * the failure log so transient retries-exhausted aren't conflated with
@@ -324,15 +368,14 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          if (llm_response_finalize(session, response, &fin) == SUCCESS) {
             free(response);
             session->cancelled_final_response = fin.text; /* caller takes + frees */
+            keep_cancelled_reply_blocks(session, fin.text);
          } else {
-            /* Degraded (llm_response_finalize alloc-failed): strip the tag grammar in
-             * place — the strips need no allocation — so residual <cited>/<command>/
-             * <end_of_turn> markers can never reach the persisted row or the browser,
-             * then stash the response itself (caller takes + frees). */
-            text_filter_cited_normalize(response);
-            text_filter_command_strip(response, false);
-            text_filter_cited_strip(response);
-            session->cancelled_final_response = response;
+            /* It couldn't be made safe (out of memory): dropped, never kept
+             * as it came (a reply is neutralized before it is kept). */
+            OLOG_ERROR("Session %u: out of memory finalizing a stopped turn's reply; "
+                       "dropped",
+                       session->session_id);
+            free(response);
          }
       } else {
          free(response);
@@ -359,16 +402,34 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    // (Phase 1 will thread `session` here for citation resolution.)
    if (*response) {
       response_final_t fin;
-      if (llm_response_finalize(session, response, &fin) == SUCCESS) {
+      if (llm_response_finalize(session, response, &fin) != SUCCESS) {
+         /* It couldn't be made safe (out of memory): the turn fails rather than
+          * keep the reply as it came, unneutralized, in the history and the
+          * saved row. */
+         OLOG_ERROR("Session %u: out of memory finalizing the reply; the turn fails",
+                    session->session_id);
          free(response);
-         response = fin.text;  // take ownership of the clean buffer
+#ifdef ENABLE_WEBUI
+         webui_send_error(session, "PROCESSING_ERROR", "The reply couldn't be prepared.");
+#endif
+         return NULL;
       }
-      // else: finalize alloc failure — keep the raw response (degraded, not fatal)
+      free(response);
+      response = fin.text;  // take ownership of the clean buffer
    }
 
-   // Add assistant response to history (only if non-empty to avoid Claude API errors)
+   // Add assistant response to history (only if non-empty to avoid Claude API errors),
+   // with its blocks: the model's reasoning, and the answer as DAWN keeps it
    if (*response) {
-      session_add_message(session, "assistant", response);
+      struct json_object *blocks = NULL;
+      if (session->final_answer.blocks) {
+         blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, response);
+         json_object_put(session->final_answer.blocks);
+         session->final_answer.blocks = NULL;
+      }
+      keep_reply_blocks(session, blocks);
+      session_add_turn_assistant(session, response, blocks);
+      json_object_put(blocks);
    } else {
       OLOG_WARNING("Session %u: LLM returned empty response, not adding to history",
                    session->session_id);
@@ -390,7 +451,7 @@ char *session_llm_call(session_t *session, const char *user_text) {
       return NULL;
    }
 
-   llm_call_ctx_t ctx;
+   llm_call_ctx_t ctx = { 0 };
    if (llm_call_prepare(session, user_text, &ctx, false) != 0) {
       llm_call_cleanup(&ctx);
       return NULL;
@@ -408,9 +469,9 @@ char *session_llm_call(session_t *session, const char *user_text) {
    /* Set per-session cancel flag for multi-user WebUI support */
    llm_set_cancel_flag(&session->cancel_requested);
 
-   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input, NULL,
-                                                              NULL, 0, session_text_chunk_callback,
-                                                              session, &ctx.resolved_config);
+   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                              session_text_chunk_callback, session,
+                                                              &ctx.resolved_config);
 
    /* Clear per-session cancel flag */
    llm_set_cancel_flag(NULL);
@@ -539,7 +600,7 @@ char *session_llm_call_with_tts(session_t *session,
       return NULL;
    }
 
-   llm_call_ctx_t ctx;
+   llm_call_ctx_t ctx = { 0 };
    if (llm_call_prepare(session, user_text, &ctx, false) != 0) {
       llm_call_cleanup(&ctx);
       return NULL;
@@ -572,9 +633,9 @@ char *session_llm_call_with_tts(session_t *session,
    llm_set_cancel_flag(&session->cancel_requested);
 
    // Call LLM with combined callback (text streaming + sentence buffering)
-   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input, NULL,
-                                                              NULL, 0, combined_chunk_callback,
-                                                              &stream_ctx, &ctx.resolved_config);
+   char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                              combined_chunk_callback, &stream_ctx,
+                                                              &ctx.resolved_config);
 
    /* Clear per-session cancel flag */
    llm_set_cancel_flag(NULL);
@@ -586,16 +647,10 @@ char *session_llm_call_with_tts(session_t *session,
    return llm_call_finalize(session, response, &ctx);
 }
 
-char *session_llm_call_with_tts_vision_no_add(session_t *session,
-                                              const char *user_text,
-                                              const char **vision_images,
-                                              const size_t *vision_image_sizes,
-                                              const char (*vision_mimes)[24],
-                                              int vision_image_count,
-                                              session_sentence_callback sentence_cb,
-                                              void *userdata) {
-   (void)vision_mimes; /* MIME types passed to LLM layer via provider-specific handling */
-
+char *session_llm_call_with_tts_no_add(session_t *session,
+                                       const char *user_text,
+                                       session_sentence_callback sentence_cb,
+                                       void *userdata) {
    if (!session || !user_text) {
       return NULL;
    }
@@ -605,28 +660,14 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
       return NULL;
    }
 
-   llm_call_ctx_t ctx;
+   llm_call_ctx_t ctx = { 0 };
    if (llm_call_prepare(session, user_text, &ctx, true) != 0) {
       llm_call_cleanup(&ctx);
       return NULL;
    }
 
-   /* Log call details */
-   const char *mode = sentence_cb ? (vision_image_count > 0 ? "TTS+vision" : "TTS") : "no-add";
-   if (vision_image_count > 0) {
-      size_t total_bytes = 0;
-      for (int i = 0; i < vision_image_count; i++) {
-         if (vision_image_sizes) {
-            total_bytes += vision_image_sizes[i];
-         }
-      }
-      OLOG_INFO("Session %u: Calling LLM (%s) with %d messages + %d images (%zu bytes)",
-                session->session_id, mode, json_object_array_length(ctx.history),
-                vision_image_count, total_bytes);
-   } else {
-      OLOG_INFO("Session %u: Calling LLM (%s) with %d messages in history", session->session_id,
-                mode, json_object_array_length(ctx.history));
-   }
+   OLOG_INFO("Session %u: Calling LLM (%s) with %d messages in history", session->session_id,
+             sentence_cb ? "TTS" : "no-add", json_object_array_length(ctx.history));
 
    /* Initialize streaming metrics before LLM call */
    session->stream_start_ms = get_time_ms();
@@ -657,17 +698,17 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
          return NULL;
       }
 
-      response = llm_chat_completion_streaming_with_config(
-          ctx.history, ctx.llm_input, vision_images, vision_image_sizes, vision_image_count,
-          combined_chunk_callback, &stream_ctx, &ctx.resolved_config);
+      response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                           combined_chunk_callback, &stream_ctx,
+                                                           &ctx.resolved_config);
 
       sentence_buffer_flush(stream_ctx.sentence_buffer);
       sentence_buffer_free(stream_ctx.sentence_buffer);
    } else {
       /* No TTS: use simple text streaming callback */
-      response = llm_chat_completion_streaming_with_config(
-          ctx.history, ctx.llm_input, vision_images, vision_image_sizes, vision_image_count,
-          session_text_chunk_callback, session, &ctx.resolved_config);
+      response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input,
+                                                           session_text_chunk_callback, session,
+                                                           &ctx.resolved_config);
    }
 
    /* Clear per-session cancel flag */

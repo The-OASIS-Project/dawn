@@ -237,22 +237,34 @@
    }
 
    async function handleLogout() {
-      // Clear WebSocket session token from localStorage
+      // Logout with the socket open: the server sends force_logout and closes it
+      // (WS 4002) and the music socket, ends this login's sessions, and clears the
+      // cookie. Marked first, so that close goes to the login page rather than
+      // reading as a dropped connection to reconnect.
+      DawnWS.markSelfLogout();
       DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
 
+      let ok = false;
       try {
-         // Use GET - logout has no request body
-         await fetch('/api/auth/logout', {
+         const res = await fetch('/api/auth/logout', {
+            method: 'POST',
             credentials: 'same-origin',
+            cache: 'no-store',
          });
-
-         // Always redirect to login page regardless of response
-         window.location.href = '/login.html';
+         ok = res.ok;
       } catch (err) {
          console.error('Logout error:', err);
-         // Redirect anyway on network error
-         window.location.href = '/login.html';
       }
+
+      if (ok) {
+         sessionStorage.removeItem('dawn_active_conversation');
+         window.location.href = '/login.html';
+         return;
+      }
+      // Not logged out (the server refused, or couldn't be reached): say so and
+      // reload, which reconnects on the login that is still valid.
+      DawnToast.show("Couldn't log out — try again", 'error');
+      setTimeout(() => window.location.reload(), 1500);
    }
 
    global.DawnUserBadge = {

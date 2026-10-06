@@ -118,8 +118,129 @@ static const treg_param_t plan_params[] = {
          "   {\"type\":\"log\",\"message\":\"Got weather: {{w}}\"}]" },
 };
 
+/* =============================================================================
+ * Kind of action: what the plan's steps do
+ *
+ * A plan is classified by its steps, so it may run for whoever could make
+ * every one of them (each step is still decided on its own as it runs): read
+ * when they all read, state when they read or keep run state, fetch when one
+ * looks something up on the web, act otherwise.  A step whose tool or action
+ * isn't known before it runs (a misspelled tool, an action from a variable)
+ * makes the plan act.
+ * ============================================================================= */
+
+/* Order of strictness for a plan; anything else is PLAN_KIND_ACT. */
+enum {
+   PLAN_KIND_READ,
+   PLAN_KIND_STATE,
+   PLAN_KIND_FETCH,
+   PLAN_KIND_ACT
+};
+
+static int plan_kind_of_steps(struct json_object *steps, int depth);
+
+static int plan_kind_of_step(struct json_object *step, int depth) {
+   struct json_object *type_obj = NULL;
+   const char *type = json_object_object_get_ex(step, "type", &type_obj)
+                          ? json_object_get_string(type_obj)
+                          : NULL;
+   if (!type) {
+      return PLAN_KIND_ACT;
+   }
+   if (strcmp(type, "set") == 0 || strcmp(type, "log") == 0 || strcmp(type, "sleep") == 0) {
+      return PLAN_KIND_READ;
+   }
+   if (strcmp(type, "if") == 0 || strcmp(type, "loop") == 0) {
+      int kind = PLAN_KIND_READ;
+      static const char *const arms[] = { "then", "else", "steps" };
+      for (size_t i = 0; i < sizeof(arms) / sizeof(arms[0]); i++) {
+         struct json_object *arm = NULL;
+         if (json_object_object_get_ex(step, arms[i], &arm)) {
+            const int k = plan_kind_of_steps(arm, depth + 1);
+            kind = k > kind ? k : kind;
+         }
+      }
+      return kind;
+   }
+   if (strcmp(type, "call") != 0) {
+      return PLAN_KIND_ACT;
+   }
+
+   struct json_object *tool_obj = NULL, *args = NULL;
+   const tool_metadata_t *meta = json_object_object_get_ex(step, "tool", &tool_obj)
+                                     ? tool_registry_find(json_object_get_string(tool_obj))
+                                     : NULL;
+   if (!meta || !json_object_object_get_ex(step, "args", &args) ||
+       !json_object_is_type(args, json_type_object)) {
+      return PLAN_KIND_ACT;
+   }
+   const char *action = "";
+   const char *action_param = tool_registry_get_action_param_name(meta->name);
+   struct json_object *action_obj = NULL;
+   if (action_param && json_object_object_get_ex(args, action_param, &action_obj)) {
+      action = json_object_get_string(action_obj);
+   }
+   char canonical[64];
+   if (!action || strstr(action, "{{") ||
+       (action[0] && !tool_action_canonical(meta, action, canonical, sizeof(canonical)))) {
+      return PLAN_KIND_ACT;
+   }
+   switch (tool_action_kind(meta, NULL, tool_effective_action(meta, action[0] ? canonical : ""),
+                            NULL)) {
+      case TOOL_KIND_READ:
+         return PLAN_KIND_READ;
+      case TOOL_KIND_STATE:
+         return PLAN_KIND_STATE;
+      case TOOL_KIND_FETCH:
+         return PLAN_KIND_FETCH;
+      default:
+         return PLAN_KIND_ACT;
+   }
+}
+
+static int plan_kind_of_steps(struct json_object *steps, int depth) {
+   if (depth > 8 || !steps || !json_object_is_type(steps, json_type_array)) {
+      return PLAN_KIND_ACT;
+   }
+   int kind = PLAN_KIND_READ;
+   const size_t n = json_object_array_length(steps);
+   for (size_t i = 0; i < n && kind != PLAN_KIND_ACT; i++) {
+      const int k = plan_kind_of_step(json_object_array_get_idx(steps, i), depth);
+      kind = k > kind ? k : kind;
+   }
+   return kind;
+}
+
+static tool_action_kind_t plan_classify_call(const char *device,
+                                             const char *action,
+                                             const char *value,
+                                             tool_action_kind_t listed) {
+   (void)device;
+   (void)action;
+   (void)listed;
+   struct json_object *plan = value ? json_tokener_parse(value) : NULL;
+   const int kind = plan_kind_of_steps(plan, 0);
+   json_object_put(plan);
+   switch (kind) {
+      case PLAN_KIND_READ:
+         return TOOL_KIND_READ;
+      case PLAN_KIND_STATE:
+         return TOOL_KIND_STATE;
+      case PLAN_KIND_FETCH:
+         return TOOL_KIND_FETCH;
+      default:
+         return TOOL_KIND_ACT;
+   }
+}
+
 static const tool_metadata_t plan_executor_metadata = {
    .name = "execute_plan",
+   /* Kind of action: by its steps (plan_classify_call), each step also decided
+    * on its own as it runs. */
+   .classify_call = plan_classify_call,
+   /* A plan from a text can't be approved by one code: its steps would each
+    * need their own.  Ask for actions one at a time. */
+   .no_reply_code = true,
    .device_string = "plan executor",
    .description = "Execute a multi-step tool plan locally. Use this when a task "
                   "requires multiple tool calls with conditional logic or data "
@@ -131,7 +252,7 @@ static const tool_metadata_t plan_executor_metadata = {
                   "If a step's tool is rejected, the result reports the failure; do not "
                   "claim the action succeeded.",
    .params = plan_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(plan_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
 

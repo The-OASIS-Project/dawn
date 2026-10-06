@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "logging.h"
+#include "tools/email_parse.h"
 
 /* Guarded-retry tuning (Phase 0). */
 #define EMAIL_BREAKER_COOLDOWN_SEC 60 /* min seconds between guarded retries per account */
@@ -142,9 +143,9 @@ static email_acct_state_t *acct_slot_locked(const char *account) {
  * password, so it is NEVER stored or logged — only the login verb is matched.
  * ============================================================================= */
 
-/* True iff the outbound IMAP/SMTP command line's first token after the tag is
- * an authentication verb (LOGIN / AUTHENTICATE / AUTH). */
-static bool header_out_is_login(const char *data, size_t size) {
+/* True iff the outbound command line's first token after the tag is one of the
+ * NULL-terminated @p verbs (case-insensitive, followed by space or end-of-token). */
+static bool header_out_verb_in(const char *data, size_t size, const char *const *verbs) {
    size_t i = 0;
    /* Skip the command tag (leading non-space run, e.g. "A001"). */
    while (i < size && !isspace((unsigned char)data[i]))
@@ -153,15 +154,25 @@ static bool header_out_is_login(const char *data, size_t size) {
       i++;
    const char *verb = data + i;
    size_t vlen = size - i;
-   /* Match verb followed by a space or end-of-token. */
-   static const char *const kVerbs[] = { "LOGIN", "AUTHENTICATE", "AUTH", NULL };
-   for (int v = 0; kVerbs[v]; v++) {
-      size_t k = strlen(kVerbs[v]);
-      if (vlen >= k && mem_ci_contains(verb, k, kVerbs[v]) &&
+   for (int v = 0; verbs[v]; v++) {
+      size_t k = strlen(verbs[v]);
+      if (vlen >= k && mem_ci_contains(verb, k, verbs[v]) &&
           (vlen == k || verb[k] == ' ' || verb[k] == '\r' || verb[k] == '\n'))
          return true;
    }
    return false;
+}
+
+/* An authentication verb (LOGIN / AUTHENTICATE / AUTH). */
+static bool header_out_is_login(const char *data, size_t size) {
+   static const char *const kVerbs[] = { "LOGIN", "AUTHENTICATE", "AUTH", NULL };
+   return header_out_verb_in(data, size, kVerbs);
+}
+
+/* A mailbox-selecting verb, whose response carries "* OK [UIDVALIDITY n]". */
+static bool header_out_is_select(const char *data, size_t size) {
+   static const char *const kVerbs[] = { "SELECT", "EXAMINE", NULL };
+   return header_out_verb_in(data, size, kVerbs);
 }
 
 static int email_debug_cb(CURL *handle,
@@ -175,6 +186,16 @@ static int email_debug_cb(CURL *handle,
       return 0;
 
    if (type == CURLINFO_HEADER_IN) {
+      /* The SELECT libcurl issues before a custom command reports the mailbox's
+       * UIDVALIDITY; keep the first one so paging cursors can pin the epoch.
+       * Only lines answering a SELECT/EXAMINE count: libcurl also hands us the
+       * lines inside IMAP literals, so a crafted subject containing CRLF +
+       * "* OK [UIDVALIDITY n]" in a later FETCH must not be able to set it. */
+      if (ctx->in_select && ctx->uidvalidity == 0)
+         email_imap_parse_uidvalidity(data, size, &ctx->uidvalidity);
+      if (ctx->in_select && !ctx->exists_seen)
+         ctx->exists_seen = email_imap_parse_exists(data, size, &ctx->exists);
+
       /* Server -> client control line.  Capture tagged failures + BYE. */
       if (mem_ci_contains(data, size, " NO ") || mem_ci_contains(data, size, " BAD ") ||
           mem_ci_contains(data, size, "* BYE")) {
@@ -196,6 +217,8 @@ static int email_debug_cb(CURL *handle,
       /* Client -> server command.  Count logins; never store the line. */
       if (header_out_is_login(data, size))
          ctx->login_seen++;
+      /* Any new command ends the previous one's response window. */
+      ctx->in_select = header_out_is_select(data, size);
    }
    return 0;
 }

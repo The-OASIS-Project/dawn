@@ -104,13 +104,23 @@ extern "C" {
 #endif
 
 /**
+ * @brief Length of the well-formed multi-byte UTF-8 sequence at @p s
+ *
+ * RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF.  Never
+ * reads past a NUL.
+ *
+ * @return 2-4, or 0 when @p s doesn't start one (ASCII included)
+ */
+size_t utf8_valid_seq_len(const char *s);
+
+/**
  * @brief Sanitize string for safe use in JSON and LLM APIs
  *
  * Removes or replaces characters that cause problems with JSON parsing or
  * LLM API calls:
- * - Invalid UTF-8 sequences are replaced with '?'
- * - Control characters (except \n, \r, \t) are removed
- * - High surrogate/private use area codepoints are replaced
+ * - Ill-formed UTF-8 (RFC 3629: overlong forms, surrogates, past U+10FFFF,
+ *   truncated sequences) has its lead byte replaced with '?'
+ * - Control characters (except \n, \r, \t) and DEL are removed
  *
  * Modifies the string in-place for efficiency. Safe to call on any string
  * that will be embedded in JSON or sent to an API.
@@ -120,6 +130,38 @@ extern "C" {
  * @param str String to sanitize (modified in-place)
  */
 void sanitize_utf8_for_json(char *str);
+
+/**
+ * @brief Drop a multi-byte UTF-8 character cut short at the end of @p s
+ *
+ * For text truncated into a fixed buffer at a byte boundary: the result is
+ * valid UTF-8 up to its end (a cloud provider rejects a whole request over one
+ * invalid byte).  Modifies @p s in place; NULL-safe.
+ */
+void utf8_trim_incomplete(char *s);
+
+/**
+ * @brief @p in as one plain line, for a short message a person reads (an SMS
+ *        asking them to approve something): control characters, line breaks,
+ *        invisible characters (bidi overrides and marks, zero-width marks,
+ *        the BOM, fillers, variation selectors, tag characters) and
+ *        malformed UTF-8 become spaces, runs of spaces one, and it is cut at
+ *        @p max_bytes on a whole character with "... (N more characters)"
+ *        after (N counting the visible ones), so a cut is never hidden.
+ *
+ * @param in        The text (NULL is "")
+ * @param max_bytes Most bytes of @p in kept
+ * @param out       Receives the line (NUL-terminated; cut to fit)
+ * @param out_len   Size of @p out
+ */
+void str_excerpt_line(const char *in, size_t max_bytes, char *out, size_t out_len);
+
+/**
+ * @brief Truncate @p str to at most @p max_bytes without splitting a character
+ *
+ * No-op when it already fits.  Modifies @p str in place; NULL-safe.
+ */
+void utf8_truncate(char *str, size_t max_bytes);
 
 /**
  * @brief Case-insensitive substring search (portable implementation)

@@ -75,8 +75,15 @@ static const treg_param_t volume_params[] = {
 
 /* ========== Tool Metadata ========== */
 
+static const tool_action_kind_entry_t s_volume_action_kinds[] = {
+   { "get", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t volume_metadata = {
    .name = "volume",
+   .action_kinds = s_volume_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_volume_action_kinds),
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "volume",
    .topic = "dawn",
    .aliases = { NULL },
@@ -84,7 +91,7 @@ static const tool_metadata_t volume_metadata = {
 
    .description = "Get or set the music volume level.",
    .params = volume_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(volume_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_SCHEDULABLE,

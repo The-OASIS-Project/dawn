@@ -46,18 +46,13 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "llm/llm_cache_monitor.h"
+#include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
-
-#ifdef ENABLE_MULTI_CLIENT
-#include "webui/webui_satellite.h"
-#endif
-
-#ifdef ENABLE_WEBUI
-#include "webui/webui_server.h"
-#endif
+#include "webui/webui_server.h" /* satellite_send_response; the user's sessions */
 
 /* Forward declaration for TTS */
 extern void text_to_speech(char *text);
@@ -225,7 +220,6 @@ static void generate_announcement_text(const sched_event_t *event, char *buf, si
  * (fixes pre-existing bug where session_get(i) missed sessions with IDs > MAX_SESSIONS).
  */
 static bool route_tts_announcement(const sched_event_t *event, const char *text) {
-#ifdef ENABLE_MULTI_CLIENT
    bool delivered = false;
 
    /* Cache the local-speaker decision once per fire — avoids 2+ DB lookups for
@@ -281,6 +275,19 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
       }
    }
 
+   bool local_fallback = false;
+#ifndef ENABLE_WEBUI
+   /* Without the WebUI the local speaker is the only output: an event made
+    * elsewhere (a WebUI or satellite, on a shared database) still sounds. */
+   if (!delivered && local_plays) {
+      char *tts_text = strdup(text);
+      if (tts_text) {
+         text_to_speech(tts_text);
+         delivered = true;
+         local_fallback = true;
+      }
+   }
+#endif
    if (!delivered) {
       OLOG_WARNING("scheduler: no active session for user %d, TTS not delivered for event %lld",
                    event->user_id, (long long)event->id);
@@ -296,7 +303,7 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
       /* Also play on daemon speaker if not already done — still respecting the
        * local pseudo-satellite assignment so announce_all doesn't override the
        * admin's device ownership. Reuses the cached decision. */
-      if (event->source_client_type != SCHED_SOURCE_LOCAL && local_plays) {
+      if (event->source_client_type != SCHED_SOURCE_LOCAL && local_plays && !local_fallback) {
          char *tts_text = strdup(text);
          if (tts_text)
             text_to_speech(tts_text);
@@ -304,13 +311,6 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
    }
 
    return delivered;
-#else
-   (void)event;
-   char *tts_text = strdup(text);
-   if (tts_text)
-      text_to_speech(tts_text);
-   return true;
-#endif
 }
 
 static void announce_event(const sched_event_t *event) {
@@ -721,6 +721,7 @@ static void briefing_persist_tool_steps(int64_t conv_id,
       json_object_object_add(tc, "function", func);
       json_object_array_add(tc_array, tc);
    }
+   /* no-blocks: the briefing's own tool steps, not a model turn. */
    if (conv_db_add_message_with_tools(conv_id, user_id, "assistant", "",
                                       json_object_to_json_string(tc_array), NULL, NULL,
                                       NULL) != AUTH_DB_SUCCESS) {
@@ -808,7 +809,14 @@ static void *briefing_thread_func(void *arg) {
          char value_buf[SCHED_TOOL_VALUE_MAX];
          snprintf(value_buf, sizeof(value_buf), "%s", steps[i].tool_value);
          int should_respond = 0;
-         char *step_result = step_meta->callback(steps[i].tool_action, value_buf, &should_respond);
+         /* Called directly, not through llm_tools_execute: its result is
+          * neutralized here the same way (text from anywhere, headed for an
+          * LLM and a conversation).  Not through the tool-call gate either
+          * (core/tool_call_policy.h): the user chose this step when they
+          * scheduled it, and scheduling is itself an action only a live user
+          * turn may take.  A tool that needs a live turn refuses here. */
+         char *step_result = llm_context_neutralize_owned(
+             step_meta->callback(steps[i].tool_action, value_buf, &should_respond));
          if (!step_result) {
             OLOG_WARNING("scheduler: briefing %lld step %d (%s) returned NULL",
                          (long long)event->id, i + 1, steps[i].tool_name);
@@ -891,7 +899,9 @@ static void *briefing_thread_func(void *arg) {
       char value_buf[SCHED_TOOL_VALUE_MAX];
       snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
       int should_respond = 0;
-      tool_result = meta->callback(event->tool_action, value_buf, &should_respond);
+      /* Called directly, as a briefing step is (see above). */
+      tool_result = llm_context_neutralize_owned(
+          meta->callback(event->tool_action, value_buf, &should_respond));
 
       if (!tool_result) {
          OLOG_ERROR("scheduler: briefing %lld tool returned NULL", (long long)event->id);
@@ -1000,7 +1010,9 @@ static void *briefing_thread_func(void *arg) {
       /* Retry a bounded number of times on an empty response — the history
        * object is owned here and safe to reuse across attempts. */
       for (int attempt = 1; attempt <= BRIEFING_LLM_MAX_ATTEMPTS; attempt++) {
-         llm_response = llm_chat_completion_with_config(history, NULL, NULL, NULL, 0, &cfg);
+         const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_BRIEFING);
+         llm_response = llm_chat_completion_with_config(history, NULL, &cfg);
+         llm_cache_monitor_pop_kind(kind_prev);
          if (llm_response && llm_response[0])
             break;
          OLOG_WARNING("scheduler: briefing %lld summarization returned empty (attempt %d/%d)",
@@ -1047,6 +1059,7 @@ static void *briefing_thread_func(void *arg) {
           * they remain useful if the user opens the briefing conv in the WebUI,
           * so we persist rather than special-case the messaging path. */
          briefing_persist_tool_steps(conv_id, event->user_id, persist_steps, persist_count);
+         /* no-blocks: a briefing summary is posted text, not a turn to replay. */
          conv_db_add_message(conv_id, event->user_id, "assistant", final_text);
       }
 

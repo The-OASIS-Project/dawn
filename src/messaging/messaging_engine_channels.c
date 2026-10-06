@@ -49,36 +49,119 @@
 #include "logging.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
+#include "messaging/messaging_sender_gate.h"
 
-int lookup_channel_user(const char *provider,
-                        const char *provider_address,
-                        char *display_name_out,
-                        size_t display_name_buf_size) {
-   if (!provider || !provider_address) {
-      return 0;
+/* Shared chats whose owner was never recorded, already warned about (a busy
+ * group would otherwise log every message).  Small and best-effort: an entry
+ * lost to wrap-around just warns again. */
+#define RELINK_WARNED_MAX 16
+static int64_t s_relink_warned[RELINK_WARNED_MAX];
+static size_t s_relink_warned_next;
+static pthread_mutex_t s_relink_warned_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void warn_relink_once(int64_t channel_id, const char *provider, const char *address) {
+   pthread_mutex_lock(&s_relink_warned_mutex);
+   for (size_t i = 0; i < RELINK_WARNED_MAX; i++) {
+      if (s_relink_warned[i] == channel_id) {
+         pthread_mutex_unlock(&s_relink_warned_mutex);
+         return;
+      }
    }
+   s_relink_warned[s_relink_warned_next] = channel_id;
+   s_relink_warned_next = (s_relink_warned_next + 1) % RELINK_WARNED_MAX;
+   pthread_mutex_unlock(&s_relink_warned_mutex);
+   OLOG_WARNING("messaging: channel %lld (%s:%s) is a group chat linked before senders were "
+                "recorded; it answers no one until it is re-linked (send /link CODE again)",
+                (long long)channel_id, provider, address);
+}
 
-   AUTH_DB_LOCK_OR_RETURN(0);
-   int user_id = 0;
+channel_resolve_t resolve_inbound_channel(const char *provider,
+                                          const char *provider_address,
+                                          const char *sender_id,
+                                          messaging_chat_kind_t kind,
+                                          channel_ref_t *ref) {
+   if (!provider || !provider_address || !ref) {
+      return CHANNEL_NONE;
+   }
+   memset(ref, 0, sizeof(*ref));
+   const messaging_driver_t *drv = find_driver(provider);
+   if (!drv) {
+      return CHANNEL_NONE;
+   }
+   ref->authenticates_sender = drv->authenticates_sender;
+   /* A provider that doesn't vouch for senders has no sender to match. */
+   const char *sender = (drv->authenticates_sender && sender_id && sender_id[0]) ? sender_id : NULL;
+
+   AUTH_DB_LOCK_OR_RETURN(CHANNEL_NONE);
+   /* This sender's own row first; else the chat's unowned row (at most one:
+    * the owner index allows a single live row per owner). */
+   const char *sql = "SELECT id, user_id, COALESCE(display_name,''), owner_sender, "
+                     "COALESCE(last_used_at,0) FROM messaging_channels "
+                     "WHERE provider = ? AND provider_address = ? AND " MESSAGING_LIVE_SQL " AND "
+                     "(owner_sender = ?3 OR owner_sender IS NULL) "
+                     "ORDER BY owner_sender IS NULL LIMIT 1";
    sqlite3_stmt *stmt = NULL;
-   const char *sql = "SELECT user_id, COALESCE(display_name,'') FROM messaging_channels "
-                     "WHERE provider = ? AND provider_address = ? AND is_enabled = 1 LIMIT 1";
+   bool found = false;
+   char owner[64] = { 0 };
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_text(stmt, 1, provider, -1, SQLITE_STATIC);
       sqlite3_bind_text(stmt, 2, provider_address, -1, SQLITE_STATIC);
+      if (sender) {
+         sqlite3_bind_text(stmt, 3, sender, -1, SQLITE_STATIC);
+      } else {
+         sqlite3_bind_null(stmt, 3);
+      }
       if (sqlite3_step(stmt) == SQLITE_ROW) {
-         user_id = sqlite3_column_int(stmt, 0);
-         if (display_name_out && display_name_buf_size > 0) {
-            const unsigned char *dn = sqlite3_column_text(stmt, 1);
-            snprintf(display_name_out, display_name_buf_size, "%s", dn ? (const char *)dn : "");
-         }
+         found = true;
+         ref->channel_id = sqlite3_column_int64(stmt, 0);
+         ref->user_id = sqlite3_column_int(stmt, 1);
+         const unsigned char *dn = sqlite3_column_text(stmt, 2);
+         snprintf(ref->display_name, sizeof(ref->display_name), "%s", dn ? (const char *)dn : "");
+         const unsigned char *ow = sqlite3_column_text(stmt, 3);
+         snprintf(owner, sizeof(owner), "%s", ow ? (const char *)ow : "");
+         ref->last_used_at = sqlite3_column_int64(stmt, 4);
       }
    }
    if (stmt) {
       sqlite3_finalize(stmt);
+      stmt = NULL;
+   }
+   if (!found) {
+      AUTH_DB_UNLOCK();
+      return CHANNEL_NONE;
+   }
+
+   messaging_sender_gate_result_t gate = messaging_sender_gate(owner, sender, kind,
+                                                               drv->authenticates_sender);
+   if (gate == MESSAGING_SENDER_BIND) {
+      /* A one-to-one chat names its owner with its first message. */
+      bool bound = false;
+      if (sqlite3_prepare_v2(s_db.db,
+                             "UPDATE messaging_channels SET owner_sender = ? "
+                             "WHERE id = ? AND owner_sender IS NULL",
+                             -1, &stmt, NULL) == SQLITE_OK) {
+         sqlite3_bind_text(stmt, 1, sender, -1, SQLITE_STATIC);
+         sqlite3_bind_int64(stmt, 2, ref->channel_id);
+         bound = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(s_db.db) > 0);
+         sqlite3_finalize(stmt);
+      }
+      AUTH_DB_UNLOCK();
+      if (!bound) {
+         OLOG_WARNING("messaging: couldn't record the sender of channel %lld (%s:%s); dropping",
+                      (long long)ref->channel_id, provider, provider_address);
+         return CHANNEL_NONE;
+      }
+      OLOG_INFO("messaging: channel %lld (%s:%s) now answers only its sender",
+                (long long)ref->channel_id, provider, provider_address);
+      return CHANNEL_RESOLVED;
    }
    AUTH_DB_UNLOCK();
-   return user_id;
+
+   if (gate == MESSAGING_SENDER_RELINK) {
+      warn_relink_once(ref->channel_id, provider, provider_address);
+      return CHANNEL_NONE;
+   }
+   return (gate == MESSAGING_SENDER_ALLOW) ? CHANNEL_RESOLVED : CHANNEL_NONE;
 }
 
 /* Look up channel by (user_id, display_name) — case-insensitive name
@@ -89,7 +172,8 @@ static char *lookup_channel_address(int user_id,
                                     char *provider_out,
                                     size_t provider_buf_size,
                                     char *provider_address_out,
-                                    size_t provider_address_buf_size) {
+                                    size_t provider_address_buf_size,
+                                    int64_t *channel_id_out) {
    if (user_id <= 0 || !channel_name) {
       return NULL;
    }
@@ -101,8 +185,8 @@ static char *lookup_channel_address(int user_id,
     * can pass the typed primary key straight to drv->send_text and
     * skip the address_json JSON parse on the hot path.  Drivers that
     * need extras still receive address_json as the source of truth. */
-   const char *sql = "SELECT provider, address_json, provider_address FROM messaging_channels "
-                     "WHERE user_id = ? AND is_enabled = 1 AND "
+   const char *sql = "SELECT provider, address_json, provider_address, id FROM messaging_channels "
+                     "WHERE user_id = ? AND " MESSAGING_LIVE_SQL " AND "
                      "LOWER(COALESCE(display_name,'')) = LOWER(?) LIMIT 1";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int(stmt, 1, user_id);
@@ -119,6 +203,9 @@ static char *lookup_channel_address(int user_id,
          }
          if (pa && provider_address_out && provider_address_buf_size > 0) {
             snprintf(provider_address_out, provider_address_buf_size, "%s", (const char *)pa);
+         }
+         if (channel_id_out) {
+            *channel_id_out = sqlite3_column_int64(stmt, 3);
          }
       }
    }
@@ -140,25 +227,31 @@ static char *lookup_channel_address(int user_id,
  * turn" — the conversation still works in memory, but messages won't
  * survive daemon restart and the recovery worker won't extract from
  * them.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
-int64_t resolve_channel_conversation_id(const char *provider,
+int64_t resolve_channel_conversation_id(channel_ref_t *ref,
+                                        const char *provider,
                                         const char *provider_address,
-                                        int user_id) {
-   if (!provider || !provider_address || user_id <= 0) {
+                                        bool *gone) {
+   if (gone) {
+      *gone = false;
+   }
+   if (!ref || ref->channel_id <= 0 || ref->user_id <= 0 || !provider || !provider_address) {
       return 0;
    }
+   const int64_t channel_id = ref->channel_id;
+   const int user_id = ref->user_id;
 
    /* Phase 1: read existing conversation_id under lock. */
    AUTH_DB_LOCK_OR_RETURN(0);
    int64_t existing = 0;
-   char display_name[128] = { 0 };
+   char display_name[MESSAGING_DISPLAY_NAME_MAX + 1] = { 0 };
    sqlite3_stmt *stmt = NULL;
    const char *sel_sql = "SELECT COALESCE(conversation_id, 0), COALESCE(display_name,'') "
                          "FROM messaging_channels "
-                         "WHERE provider = ? AND provider_address = ? AND is_enabled = 1 LIMIT 1";
+                         "WHERE id = ? AND user_id = ? AND " MESSAGING_LIVE_SQL;
    bool found = false;
    if (sqlite3_prepare_v2(s_db.db, sel_sql, -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_text(stmt, 1, provider, -1, SQLITE_STATIC);
-      sqlite3_bind_text(stmt, 2, provider_address, -1, SQLITE_STATIC);
+      sqlite3_bind_int64(stmt, 1, channel_id);
+      sqlite3_bind_int(stmt, 2, user_id);
       if (sqlite3_step(stmt) == SQLITE_ROW) {
          existing = sqlite3_column_int64(stmt, 0);
          const unsigned char *dn = sqlite3_column_text(stmt, 1);
@@ -174,12 +267,29 @@ int64_t resolve_channel_conversation_id(const char *provider,
    AUTH_DB_UNLOCK();
 
    if (!found) {
-      OLOG_WARNING("messaging: resolve_conv: channel %s:%s not found (race with unlink?)", provider,
-                   provider_address);
+      OLOG_INFO("messaging: channel %lld (%s:%s) was unlinked or isn't verified any more",
+                (long long)channel_id, provider, provider_address);
+      if (gone) {
+         *gone = true;
+      }
       return 0;
    }
+   /* The current name, so a rename shows in this turn's prompt. */
+   snprintf(ref->display_name, sizeof(ref->display_name), "%s", display_name);
 
+   /* A provider that can't vouch for who sent (SMS: a sender number can be
+    * forged) gets a private conversation: DAWN doesn't learn from texts, and
+    * private is what keeps a conversation out of memory on every path.  One
+    * made before this, or made public in the WebUI, is made private again. */
    if (existing > 0) {
+      bool is_private = true;
+      if (!ref->authenticates_sender &&
+          conv_db_is_private(existing, user_id, &is_private) == AUTH_DB_SUCCESS && !is_private) {
+         if (conv_db_set_private(existing, user_id, true) == AUTH_DB_SUCCESS) {
+            OLOG_INFO("messaging: %s conversation %lld made private (texts aren't learned)",
+                      provider, (long long)existing);
+         }
+      }
       return existing;
    }
 
@@ -197,10 +307,10 @@ int64_t resolve_channel_conversation_id(const char *provider,
    snprintf(origin, sizeof(origin), "messaging:%s", provider);
 
    int64_t new_conv_id = 0;
-   int rc = conv_db_create_with_origin(user_id, title, origin, &new_conv_id);
+   int rc = conv_db_create_ex(user_id, title, origin, !ref->authenticates_sender, &new_conv_id);
    if (rc != AUTH_DB_SUCCESS || new_conv_id <= 0) {
-      OLOG_ERROR("messaging: resolve_conv: conv_db_create_with_origin failed for %s:%s (rc=%d)",
-                 provider, provider_address, rc);
+      OLOG_ERROR("messaging: resolve_conv: conv_db_create_ex failed for %s:%s (rc=%d)", provider,
+                 provider_address, rc);
       return 0;
    }
 
@@ -211,13 +321,11 @@ int64_t resolve_channel_conversation_id(const char *provider,
    AUTH_DB_LOCK_OR_RETURN(new_conv_id); /* fall through on lock fail; conv exists, just unlinked */
    sqlite3_stmt *upd = NULL;
    const char *upd_sql = "UPDATE messaging_channels SET conversation_id = ? "
-                         "WHERE provider = ? AND provider_address = ? AND is_enabled = 1 AND "
-                         "conversation_id IS NULL";
+                         "WHERE id = ? AND is_enabled = 1 AND conversation_id IS NULL";
    bool stamped = false;
    if (sqlite3_prepare_v2(s_db.db, upd_sql, -1, &upd, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(upd, 1, new_conv_id);
-      sqlite3_bind_text(upd, 2, provider, -1, SQLITE_STATIC);
-      sqlite3_bind_text(upd, 3, provider_address, -1, SQLITE_STATIC);
+      sqlite3_bind_int64(upd, 2, channel_id);
       if (sqlite3_step(upd) == SQLITE_DONE) {
          stamped = (sqlite3_changes(s_db.db) > 0);
       }
@@ -257,18 +365,17 @@ int64_t resolve_channel_conversation_id(const char *provider,
 /* Clear messaging_channels.conversation_id for a channel.  Returns
  * MESSAGING_SUCCESS on a 1-row update, MESSAGING_UNKNOWN_CHANNEL if no
  * row matched, MESSAGING_FAILURE on lock / prepare failure. */
-int clear_channel_conversation_id(const char *provider, const char *provider_address) {
-   if (!provider || !provider_address) {
+int clear_channel_conversation_id(int64_t channel_id) {
+   if (channel_id <= 0) {
       return MESSAGING_FAILURE;
    }
    AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
    sqlite3_stmt *stmt = NULL;
    int rc = MESSAGING_FAILURE;
    const char *sql = "UPDATE messaging_channels SET conversation_id = NULL "
-                     "WHERE provider = ? AND provider_address = ? AND is_enabled = 1";
+                     "WHERE id = ? AND is_enabled = 1";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_text(stmt, 1, provider, -1, SQLITE_STATIC);
-      sqlite3_bind_text(stmt, 2, provider_address, -1, SQLITE_STATIC);
+      sqlite3_bind_int64(stmt, 1, channel_id);
       if (sqlite3_step(stmt) == SQLITE_DONE) {
          rc = (sqlite3_changes(s_db.db) > 0) ? MESSAGING_SUCCESS : MESSAGING_UNKNOWN_CHANNEL;
       }
@@ -281,71 +388,46 @@ int clear_channel_conversation_id(const char *provider, const char *provider_add
 }
 
 /* Active-conversation window for SMS.  Returns true when an inbound
- * SMS from this sender should bypass the wake-word gate because the
+ * SMS from this channel should bypass the wake-word gate because the
  * channel had an LLM-bound exchange within g_config.messaging
- * .sms_active_window_sec.  Returns false when:
- *   - the window is disabled (config value 0 or negative),
- *   - the sender isn't linked (no channel row),
- *   - no prior LLM exchange has happened yet (last_used_at NULL or 0),
- *   - the most recent exchange is older than the window.
- *
- * Reads BOTH user_id and last_used_at in one query to avoid a
- * double-lookup on the inbound hot path. */
-bool sms_within_active_window(const char *sender_e164) {
-   if (!sender_e164) {
+ * .sms_active_window_sec.  False when the window is disabled (0 or
+ * negative), or no exchange has happened yet, or the last one is older
+ * than the window.  The channel's last exchange time came with its
+ * resolution, so no second lookup. */
+bool sms_within_active_window(const channel_ref_t *ref) {
+   if (!ref || ref->last_used_at <= 0) {
       return false;
    }
    int window_sec = g_config.messaging.sms_active_window_sec;
    if (window_sec <= 0) {
       return false;
    }
-
-   AUTH_DB_LOCK_OR_RETURN(false);
-   sqlite3_stmt *stmt = NULL;
-   bool within = false;
-   const char *sql = "SELECT COALESCE(last_used_at, 0) FROM messaging_channels "
-                     "WHERE provider = 'sms' AND provider_address = ? AND is_enabled = 1 LIMIT 1";
-   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_text(stmt, 1, sender_e164, -1, SQLITE_STATIC);
-      if (sqlite3_step(stmt) == SQLITE_ROW) {
-         int64_t last_used = sqlite3_column_int64(stmt, 0);
-         if (last_used > 0) {
-            int64_t now = (int64_t)time(NULL);
-            within = ((now - last_used) <= (int64_t)window_sec);
-         }
-      }
-   }
-   if (stmt) {
-      sqlite3_finalize(stmt);
-   }
-   AUTH_DB_UNLOCK();
-   return within;
+   return ((int64_t)time(NULL) - ref->last_used_at) <= (int64_t)window_sec;
 }
 
 /* Touch a channel's last_used_at to NOW.  Called after a successful
  * LLM-bound exchange so the active-conversation window slides forward
  * with each turn.  Best-effort — failure is logged at DEBUG and the
  * turn still completes. */
-void touch_channel_last_used(const char *provider, const char *provider_address) {
-   if (!provider || !provider_address) {
+void touch_channel_last_used(int64_t channel_id) {
+   if (channel_id <= 0) {
       return;
    }
    AUTH_DB_LOCK_OR_RETURN_VOID();
    sqlite3_stmt *stmt = NULL;
-   const char *sql = "UPDATE messaging_channels SET last_used_at = ? "
-                     "WHERE provider = ? AND provider_address = ? AND is_enabled = 1";
+   const char *sql =
+       "UPDATE messaging_channels SET last_used_at = ? WHERE id = ? AND is_enabled = 1";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(stmt, 1, (int64_t)time(NULL));
-      sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_STATIC);
-      sqlite3_bind_text(stmt, 3, provider_address, -1, SQLITE_STATIC);
+      sqlite3_bind_int64(stmt, 2, channel_id);
       sqlite3_step(stmt);
       sqlite3_finalize(stmt);
    }
    AUTH_DB_UNLOCK();
 }
 
-int messaging_engine_reset_channel(const char *provider, const char *provider_address) {
-   if (!provider || !provider_address) {
+int messaging_engine_reset_channel(int user_id, int64_t channel_id) {
+   if (user_id <= 0 || channel_id <= 0) {
       return MESSAGING_FAILURE;
    }
    if (!atomic_load(&s_initialized)) {
@@ -354,8 +436,28 @@ int messaging_engine_reset_channel(const char *provider, const char *provider_ad
 
    /* Validate the channel exists first.  reset is a no-op + error if
     * the channel isn't linked (matches messaging_engine_send's contract). */
-   int user_id = lookup_channel_user(provider, provider_address, NULL, 0);
-   if (user_id <= 0) {
+   char provider[16] = { 0 };
+   char provider_address[128] = { 0 };
+   bool found = false;
+   AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT provider, provider_address FROM messaging_channels "
+                          "WHERE id = ? AND user_id = ? AND is_enabled = 1",
+                          -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(stmt, 1, channel_id);
+      sqlite3_bind_int(stmt, 2, user_id);
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+         const unsigned char *p = sqlite3_column_text(stmt, 0);
+         const unsigned char *a = sqlite3_column_text(stmt, 1);
+         snprintf(provider, sizeof(provider), "%s", p ? (const char *)p : "");
+         snprintf(provider_address, sizeof(provider_address), "%s", a ? (const char *)a : "");
+         found = true;
+      }
+      sqlite3_finalize(stmt);
+   }
+   AUTH_DB_UNLOCK();
+   if (!found) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
@@ -367,7 +469,7 @@ int messaging_engine_reset_channel(const char *provider, const char *provider_ad
     * anyway → UAF on resume.  Defer via pending_reset on the slot;
     * process_inbound checks at end-of-dispatch and performs the
     * actual eviction + clear there. */
-   if (mark_pending_reset_if_self(provider, provider_address)) {
+   if (mark_pending_reset_if_self(channel_id)) {
       return MESSAGING_SUCCESS;
    }
 
@@ -378,21 +480,25 @@ int messaging_engine_reset_channel(const char *provider, const char *provider_ad
     * would still fire but on a session whose conv_id was already
     * un-stamped — extraction works either way (it copies history) but
     * the audit log makes more sense in eviction-then-clear order. */
-   evict_session_slot(provider, provider_address);
+   tool_call_challenge_cancel(channel_id); /* what waited belonged to the old conversation */
+   evict_session_slot(channel_id);
 
-   int rc = clear_channel_conversation_id(provider, provider_address);
+   int rc = clear_channel_conversation_id(channel_id);
    if (rc == MESSAGING_SUCCESS) {
-      OLOG_INFO("messaging: /new reset channel %s:%s — next inbound will start a fresh conv",
-                provider, provider_address);
+      OLOG_INFO("messaging: /new reset channel %lld (%s:%s) — next inbound will start a fresh "
+                "conv",
+                (long long)channel_id, provider, provider_address);
    } else if (rc == MESSAGING_UNKNOWN_CHANNEL) {
       /* Channel exists (lookup succeeded above) but conversation_id was
        * already NULL — that's not an error, just nothing to clear. */
-      OLOG_DEBUG("messaging: /new on %s:%s — conversation_id already NULL, no-op", provider,
-                 provider_address);
+      OLOG_DEBUG("messaging: /new on channel %lld — conversation_id already NULL, no-op",
+                 (long long)channel_id);
       rc = MESSAGING_SUCCESS;
    }
    return rc;
 }
+
+static int64_t resolve_enabled_channel_id_by_name(int user_id, const char *display_name);
 
 int messaging_engine_reset_by_name(int user_id, const char *channel_name) {
    if (user_id <= 0 || !channel_name) {
@@ -401,43 +507,13 @@ int messaging_engine_reset_by_name(int user_id, const char *channel_name) {
    if (!atomic_load(&s_initialized)) {
       return MESSAGING_FAILURE;
    }
-
-   /* Resolve channel_name → (provider, provider_address) under the
-    * authenticated user.  Mirrors the ownership boundary that
-    * messaging_engine_send enforces. */
-   AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
-   char provider[16] = { 0 };
-   char provider_address[128] = { 0 };
-   sqlite3_stmt *stmt = NULL;
-   bool found = false;
-   const char *sql = "SELECT provider, provider_address FROM messaging_channels "
-                     "WHERE user_id = ? AND is_enabled = 1 AND "
-                     "LOWER(COALESCE(display_name,'')) = LOWER(?) LIMIT 1";
-   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_int(stmt, 1, user_id);
-      sqlite3_bind_text(stmt, 2, channel_name, -1, SQLITE_STATIC);
-      if (sqlite3_step(stmt) == SQLITE_ROW) {
-         const unsigned char *p = sqlite3_column_text(stmt, 0);
-         const unsigned char *a = sqlite3_column_text(stmt, 1);
-         if (p) {
-            snprintf(provider, sizeof(provider), "%s", (const char *)p);
-         }
-         if (a) {
-            snprintf(provider_address, sizeof(provider_address), "%s", (const char *)a);
-         }
-         found = true;
-      }
-   }
-   if (stmt) {
-      sqlite3_finalize(stmt);
-   }
-   AUTH_DB_UNLOCK();
-
-   if (!found || provider[0] == '\0' || provider_address[0] == '\0') {
+   /* Resolve channel_name → row id under the authenticated user.  Mirrors
+    * the ownership boundary that messaging_engine_send enforces. */
+   int64_t channel_id = resolve_enabled_channel_id_by_name(user_id, channel_name);
+   if (channel_id <= 0) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
-
-   return messaging_engine_reset_channel(provider, provider_address);
+   return messaging_engine_reset_channel(user_id, channel_id);
 }
 
 /* Reject display names with control characters or characters that would be
@@ -594,16 +670,27 @@ int messaging_engine_unlink_channel_by_id(int user_id, int64_t channel_id) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
-   evict_session_slot(provider, provider_address);
+   tool_call_challenge_cancel(channel_id); /* a code for an unlinked channel never runs */
+   evict_session_slot(channel_id);
+
+   /* An SMS number can change hands while unlinked (carriers recycle
+    * numbers), so linking it again must prove it afresh: unlinking drops
+    * its verification.  Chat-app links name their owner instead. */
+   const messaging_driver_t *drv = find_driver(provider);
+   /* With the driver not running, assume the link needs proving again: a
+    * chat app's re-link restores it, an SMS one must not come back unproven. */
+   const bool keep_verified = drv && drv->authenticates_sender;
 
    AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
    int rc = MESSAGING_FAILURE;
    if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE messaging_channels SET is_enabled = 0 "
-                          "WHERE id = ? AND user_id = ?",
+                          "UPDATE messaging_channels SET is_enabled = 0, "
+                          "verified_at = CASE WHEN ?3 THEN verified_at ELSE NULL END "
+                          "WHERE id = ?1 AND user_id = ?2",
                           -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(stmt, 1, channel_id);
       sqlite3_bind_int(stmt, 2, user_id);
+      sqlite3_bind_int(stmt, 3, keep_verified ? 1 : 0);
       if (sqlite3_step(stmt) == SQLITE_DONE) {
          rc = (sqlite3_changes(s_db.db) > 0) ? MESSAGING_SUCCESS : MESSAGING_UNKNOWN_CHANNEL;
       }
@@ -615,6 +702,7 @@ int messaging_engine_unlink_channel_by_id(int user_id, int64_t channel_id) {
    if (rc == MESSAGING_SUCCESS) {
       OLOG_INFO("messaging: unlinked channel id %lld (%s:%s) for user %d", (long long)channel_id,
                 provider, provider_address, user_id);
+      webui_broadcast_messaging_channels_changed(user_id, channel_id, "unlinked", NULL);
    }
    return rc;
 }
@@ -624,7 +712,7 @@ int messaging_engine_rename_channel_by_id(int user_id, int64_t channel_id, const
       return MESSAGING_FAILURE;
    }
    if (strlen(new_name) >= MESSAGING_DISPLAY_NAME_MAX || display_name_unsafe(new_name)) {
-      return MESSAGING_FAILURE;
+      return MESSAGING_INVALID_NAME;
    }
    if (!atomic_load(&s_initialized)) {
       return MESSAGING_FAILURE;
@@ -702,6 +790,7 @@ int messaging_engine_rename_channel_by_id(int user_id, int64_t channel_id, const
    if (rc == MESSAGING_SUCCESS) {
       OLOG_INFO("messaging: renamed channel id %lld → '%s' for user %d", (long long)channel_id,
                 new_name, user_id);
+      webui_broadcast_messaging_channels_changed(user_id, channel_id, "renamed", NULL);
    }
    return rc;
 }
@@ -722,9 +811,10 @@ int messaging_engine_reenable_channel_by_id(int user_id, int64_t channel_id) {
     * check for a collision with an enabled channel. */
    char name[MESSAGING_DISPLAY_NAME_MAX] = { 0 };
    bool found = false;
+   bool verified = false;
    if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT COALESCE(display_name,'') FROM messaging_channels "
-                          "WHERE id = ? AND user_id = ? AND is_enabled = 0",
+                          "SELECT COALESCE(display_name,''), verified_at IS NOT NULL "
+                          "FROM messaging_channels WHERE id = ? AND user_id = ? AND is_enabled = 0",
                           -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(stmt, 1, channel_id);
       sqlite3_bind_int(stmt, 2, user_id);
@@ -733,6 +823,7 @@ int messaging_engine_reenable_channel_by_id(int user_id, int64_t channel_id) {
          if (n) {
             snprintf(name, sizeof(name), "%s", (const char *)n);
          }
+         verified = sqlite3_column_int(stmt, 1) != 0;
          found = true;
       }
    }
@@ -743,6 +834,12 @@ int messaging_engine_reenable_channel_by_id(int user_id, int64_t channel_id) {
    if (!found) {
       AUTH_DB_UNLOCK();
       return MESSAGING_UNKNOWN_CHANNEL;
+   }
+   /* An unverified row (an SMS link that never got its code, or one unlinked
+    * since) comes back only through a new /link. */
+   if (!verified) {
+      AUTH_DB_UNLOCK();
+      return MESSAGING_NOT_VERIFIED;
    }
 
    /* Reject if re-enabling would duplicate an enabled channel's name. */
@@ -773,8 +870,13 @@ int messaging_engine_reenable_channel_by_id(int user_id, int64_t channel_id) {
                           -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(stmt, 1, channel_id);
       sqlite3_bind_int(stmt, 2, user_id);
-      if (sqlite3_step(stmt) == SQLITE_DONE) {
+      int step = sqlite3_step(stmt);
+      if (step == SQLITE_DONE) {
          rc = (sqlite3_changes(s_db.db) > 0) ? MESSAGING_SUCCESS : MESSAGING_UNKNOWN_CHANNEL;
+      } else if (sqlite3_extended_errcode(s_db.db) == SQLITE_CONSTRAINT_UNIQUE) {
+         /* The same person's chat is linked to another DAWN account (the
+          * owner index allows one live row). */
+         rc = MESSAGING_ALREADY_LINKED;
       }
    }
    if (stmt) {
@@ -784,6 +886,7 @@ int messaging_engine_reenable_channel_by_id(int user_id, int64_t channel_id) {
    if (rc == MESSAGING_SUCCESS) {
       OLOG_INFO("messaging: re-enabled channel id %lld ('%s') for user %d", (long long)channel_id,
                 name, user_id);
+      webui_broadcast_messaging_channels_changed(user_id, channel_id, "enabled", NULL);
    }
    return rc;
 }
@@ -803,7 +906,8 @@ int messaging_engine_reenable_channel(int user_id, const char *display_name) {
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db,
                           "SELECT id FROM messaging_channels WHERE user_id = ? AND is_enabled = 0 "
-                          "AND LOWER(COALESCE(display_name,'')) = LOWER(?) ORDER BY id ASC LIMIT 1",
+                          "AND LOWER(COALESCE(display_name,'')) = LOWER(?) "
+                          "ORDER BY verified_at IS NULL, id ASC LIMIT 1",
                           -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int(stmt, 1, user_id);
       sqlite3_bind_text(stmt, 2, display_name, -1, SQLITE_STATIC);
@@ -832,8 +936,10 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
 
    char provider[16] = { 0 };
    char provider_address[128] = { 0 };
+   int64_t channel_id = 0;
    char *address_json = lookup_channel_address(user_id, channel_name, provider, sizeof(provider),
-                                               provider_address, sizeof(provider_address));
+                                               provider_address, sizeof(provider_address),
+                                               &channel_id);
    if (!address_json) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
@@ -886,9 +992,13 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
        * the last_used lock below — resolve_channel_conversation_id and
        * conv_db_add_message_ex take the auth_db leaf lock themselves. */
       if (provider_address[0]) {
-         int64_t conv_id = resolve_channel_conversation_id(provider, provider_address, user_id);
+         channel_ref_t ref = { .channel_id = channel_id,
+                               .user_id = user_id,
+                               .authenticates_sender = drv->authenticates_sender };
+         int64_t conv_id = resolve_channel_conversation_id(&ref, provider, provider_address, NULL);
          if (conv_id > 0) {
             int64_t msg_id = 0;
+            /* no-blocks: a channel post DAWN sent, not a model turn. */
             if (conv_db_add_message_ex(conv_id, user_id, "assistant", text, &msg_id) ==
                     AUTH_DB_SUCCESS &&
                 msg_id > 0) {
@@ -900,13 +1010,10 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
       /* Bump last_used_at. */
       AUTH_DB_LOCK_OR_RETURN(MESSAGING_SUCCESS); /* if lock fails just skip */
       sqlite3_stmt *stmt = NULL;
-      if (sqlite3_prepare_v2(s_db.db,
-                             "UPDATE messaging_channels SET last_used_at = ? "
-                             "WHERE user_id = ? AND LOWER(COALESCE(display_name,'')) = LOWER(?)",
+      if (sqlite3_prepare_v2(s_db.db, "UPDATE messaging_channels SET last_used_at = ? WHERE id = ?",
                              -1, &stmt, NULL) == SQLITE_OK) {
          sqlite3_bind_int64(stmt, 1, (int64_t)time(NULL));
-         sqlite3_bind_int(stmt, 2, user_id);
-         sqlite3_bind_text(stmt, 3, channel_name, -1, SQLITE_STATIC);
+         sqlite3_bind_int64(stmt, 2, channel_id);
          sqlite3_step(stmt);
          sqlite3_finalize(stmt);
       }
@@ -948,7 +1055,8 @@ char *messaging_engine_list_channels_json(int user_id) {
                      "COALESCE(mc.last_used_at,0), COALESCE(mc.conversation_id,0), "
                      "COALESCE(c.llm_type,''), COALESCE(c.cloud_provider,''), "
                      "COALESCE(c.model,''), COALESCE(c.thinking_mode,''), "
-                     "COALESCE(c.reasoning_effort,'') "
+                     "COALESCE(c.reasoning_effort,''), (mc.verified_at IS NOT NULL), "
+                     "COALESCE(mc.verify_expires_at,0) "
                      "FROM messaging_channels mc "
                      "LEFT JOIN conversations c ON c.id = mc.conversation_id "
                      "AND c.user_id = mc.user_id "
@@ -969,12 +1077,26 @@ char *messaging_engine_list_channels_json(int user_id) {
          const unsigned char *model = sqlite3_column_text(stmt, 8);
          const unsigned char *thinking_mode = sqlite3_column_text(stmt, 9);
          const unsigned char *reasoning_effort = sqlite3_column_text(stmt, 10);
+         int verified = sqlite3_column_int(stmt, 11);
+         int64_t verify_expires = sqlite3_column_int64(stmt, 12);
          json_object_object_add(obj, "id", json_object_new_int64(id));
          json_object_object_add(obj, "name",
                                 json_object_new_string(name ? (const char *)name : ""));
          json_object_object_add(obj, "provider",
                                 json_object_new_string(prov ? (const char *)prov : ""));
          json_object_object_add(obj, "enabled", json_object_new_boolean(enabled != 0));
+         /* false = an SMS link waiting for the code texted to the number */
+         json_object_object_add(obj, "verified", json_object_new_boolean(verified != 0));
+         if (!verified) {
+            /* Seconds the code texted to the number has left (0 = expired,
+             * -1 = none sent); relative, so a browser's clock doesn't matter. */
+            int64_t left = -1;
+            if (verify_expires > 0) {
+               left = verify_expires - (int64_t)time(NULL);
+               left = left < 0 ? 0 : left;
+            }
+            json_object_object_add(obj, "verify_ttl_seconds", json_object_new_int64(left));
+         }
          json_object_object_add(obj, "last_used_at", json_object_new_int64(last_used));
          json_object_object_add(obj, "conversation_id", json_object_new_int64(conv_id));
          json_object_object_add(obj, "llm_type",
@@ -1033,7 +1155,8 @@ int messaging_engine_list_channels_text(int user_id, char *buf, size_t buflen) {
    AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
    sqlite3_stmt *stmt = NULL;
    const char *sql = "SELECT id, COALESCE(display_name,''), provider, is_enabled, "
-                     "COALESCE(last_used_at,0) FROM messaging_channels WHERE user_id = ? "
+                     "COALESCE(last_used_at,0), (verified_at IS NOT NULL) "
+                     "FROM messaging_channels WHERE user_id = ? "
                      "ORDER BY last_used_at DESC NULLS LAST, id ASC";
 
    size_t off = 0;
@@ -1052,6 +1175,7 @@ int messaging_engine_list_channels_text(int user_id, char *buf, size_t buflen) {
          const unsigned char *prov = sqlite3_column_text(stmt, 2);
          int enabled = sqlite3_column_int(stmt, 3);
          int64_t last_used = sqlite3_column_int64(stmt, 4);
+         int verified = sqlite3_column_int(stmt, 5);
 
          char timebuf[32] = "never";
          if (last_used > 0) {
@@ -1063,7 +1187,7 @@ int messaging_engine_list_channels_text(int user_id, char *buf, size_t buflen) {
          }
          n = snprintf(buf + off, buflen - off, "%-5lld  %-24.24s  %-8.8s  %-7s  %s\n",
                       (long long)id, name ? (const char *)name : "", prov ? (const char *)prov : "",
-                      enabled ? "yes" : "no", timebuf);
+                      !enabled ? "no" : (!verified ? "pending" : "yes"), timebuf);
          if (n <= 0 || (size_t)n >= buflen - off) {
             snprintf(buf + off, buflen - off, "... (truncated)\n");
             break;

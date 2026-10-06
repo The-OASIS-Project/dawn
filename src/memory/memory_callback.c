@@ -35,12 +35,16 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
 #include "config/dawn_config.h"
 #include "core/iso8601.h"
+#include "core/session_history.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/strbuf.h"
 #include "core/text_filter.h" /* SURFACED_ID_FMT — one marker for both memory renderers */
 #include "core/time_query_parser.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_callback_internal.h"
@@ -308,30 +312,6 @@ static int append_source_excerpt_from_range(int user_id,
  * endpoint in webui_memory.c, which doesn't render the excerpt itself.) */
 
 /* =============================================================================
- * Helper: Get user ID from current session
- * ============================================================================= */
-
-static int get_current_user_id(void) {
-#ifdef ENABLE_MULTI_CLIENT
-   session_t *session = session_get_command_context();
-   if (session) {
-      /* For authenticated WebSocket sessions, use their user_id */
-      if (session->metrics.user_id > 0) {
-         return session->metrics.user_id;
-      }
-      /* For local voice sessions, use configured default user */
-      if (session->type == SESSION_TYPE_LOCAL) {
-         int user_id = g_config.memory.default_voice_user_id;
-         return (user_id > 0) ? user_id : 1; /* Fallback to admin */
-      }
-   }
-#endif
-   /* Fallback for non-multi-client builds: use default voice user */
-   int user_id = g_config.memory.default_voice_user_id;
-   return (user_id > 0) ? user_id : 1;
-}
-
-/* =============================================================================
  * Helper: Format time difference
  * ============================================================================= */
 
@@ -534,35 +514,6 @@ static void append_tool_citation_hint(strbuf_t *sb) {
                   "\nIf any " SURFACED_ID_HINT " fact above informed your reply, end your reply "
                   "with a citation tag listing the ids you used, e.g. " CITED_TAG_ID_EXAMPLE
                   " (comma-separated, no spaces).\n");
-}
-
-/* Every TOOL_MAPS_TO_CUSTOM field the `memory` tool declares (memory_tool.c),
- * flattened into the callback value as "::field::value" (tool_registry.h).
- * `remember` stores its input verbatim as fact_text, so ANY of these that the
- * flattening appends must be trimmed first — a stray param tail poisons the
- * fact_text, its embedding, and its dedup hash (observed: a remember call that
- * carried spurious search/recent params). Keep in sync with memory_tool.c. */
-static const char *const kMemoryParamMarkers[] = {
-   "::time_range::",  "::limit::",           "::sort::",        "::before::",
-   "::target_name::", "::category::",        "::as_of::",       "::include_historical::",
-   "::with_source::", "::confirm_private::", "::replaced_by::",
-};
-
-/* Length of `value` up to the EARLIEST known custom-param marker (or the whole
- * length if none). Matches on the known "::field::" names rather than a bare
- * "::", so a fact that legitimately contains "::" (e.g. "the ratio is 3::1") is
- * never truncated. */
-static size_t memory_value_base_len(const char *value) {
-   size_t base = strlen(value);
-   for (size_t i = 0; i < sizeof(kMemoryParamMarkers) / sizeof(kMemoryParamMarkers[0]); i++) {
-      const char *m = strstr(value, kMemoryParamMarkers[i]);
-      if (m != NULL) {
-         size_t len = (size_t)(m - value);
-         if (len < base)
-            base = len;
-      }
-   }
-   return base;
 }
 
 /* category (v34): when non-NULL/non-empty, pre-filters fact-ID set by exact category
@@ -954,6 +905,27 @@ char *memory_action_search(int user_id,
  * fact, or 0 for durable.  When set and [memory] expire_enabled is on, a fresh
  * fact gets expires_at = expires_ref + grace (v58/C3).  The AI is the judge — we
  * never derive this; it only fires when the model attaches a date. */
+/* Record where a fact a "remember" created (@p created) or restated was learned:
+ * the running turn's conversation, so forgetting that conversation forgets what
+ * was saved in it too.  A turn whose conversation doesn't exist yet (a voice
+ * turn, a new chat's first message) records it once it does.  Outside a turn
+ * (the scheduler, MQTT) the fact is stated outside any conversation. */
+static int remember_record_source(int64_t fact_id, int user_id, bool created) {
+   int64_t conv = 0;
+   int where = FAILURE;
+   session_t *session = session_get_command_context();
+   if (session) {
+      where = session_defer_fact_source(session, fact_id, user_id, created, &conv);
+   }
+   if (where == SUCCESS) {
+      memory_db_fact_attach_source(fact_id, user_id, created, conv);
+   } else if (where == FAILURE && !created) {
+      /* Stated outside any conversation (a create already is). */
+      memory_db_fact_mark_unsourced(fact_id, user_id);
+   }
+   return where;
+}
+
 static char *memory_action_remember_single(int user_id,
                                            const char *fact_text,
                                            int64_t expires_ref) {
@@ -998,6 +970,7 @@ static char *memory_action_remember_single(int user_id,
                if (new_conf > 1.0f)
                   new_conf = 1.0f;
                memory_db_fact_update_confidence(hash_matches[i].id, user_id, new_conf);
+               (void)remember_record_source(hash_matches[i].id, user_id, false);
                OLOG_INFO("memory_callback: duplicate detected (hash match), reinforced fact %ld",
                          (long)hash_matches[i].id);
                return strdup("I already know that. Increased my confidence in this fact.");
@@ -1021,6 +994,7 @@ static char *memory_action_remember_single(int user_id,
             if (new_conf > 1.0f)
                new_conf = 1.0f;
             memory_db_fact_update_confidence(similar[i].id, user_id, new_conf);
+            (void)remember_record_source(similar[i].id, user_id, false);
             OLOG_INFO("memory_callback: duplicate detected (Jaccard=%.2f), reinforced fact %ld",
                       similarity, (long)similar[i].id);
             return strdup(
@@ -1056,13 +1030,23 @@ static char *memory_action_remember_single(int user_id,
                                              &neighbor_count);
    }
 
-   /* No duplicates found - store the new fact (no provenance: user-initiated) */
+   /* No duplicates found - store the new fact, then record the conversation it
+    * was learned in (checked to still exist and be this user's, atomically with
+    * the write), or keep it waiting for one. */
    int64_t fact_id = 0;
    int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, NULL,
                                          &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
       return strdup(TOOL_RESULT_ERROR_MARK "Failed to store the fact. Please try again.");
+   }
+   if (remember_record_source(fact_id, user_id, true) == SESSION_FACT_SOURCE_DROPPED) {
+      /* Too many facts wait for this turn's conversation: stored, it could never
+       * be tied to it, and forgetting that conversation would keep it. */
+      memory_db_fact_delete(fact_id, user_id); /* not-a-removal: just created, never sent */
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Too many facts saved in this reply to keep track of; save this one in the "
+                    "next reply.");
    }
 
    /* AI-decided expiry (v58/C3): if the model attached a reference date and
@@ -1277,6 +1261,11 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
                        "The 'replaced_by' keeper ID wasn't found (or isn't yours). "
                        "Nothing was changed.");
       }
+      if (keep.superseded_by != 0) {
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "The 'replaced_by' keeper was itself merged into another fact; keep "
+                       "that one instead. Nothing was changed.");
+      }
       for (int i = 0; i < id_count; i++) {
          if (ids[i] == replaced_by) {
             return strdup("'replaced_by' must be the fact you are KEEPING, not one of the IDs "
@@ -1295,11 +1284,16 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    char nf_ids[400] = "";
    size_t ok_pos = 0, nf_pos = 0;
 
+   /* A forgotten fact is the user removing it (a merge isn't: the kept fact
+    * says it). */
+   if (!merge) {
+      conv_db_withdraw_intent_begin(user_id);
+   }
    for (int i = 0; i < id_count; i++) {
       memory_fact_t fact;
       bool removed = false;
       if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS &&
-          (merge ? memory_db_fact_supersede(ids[i], replaced_by, user_id)
+          (merge ? memory_db_fact_merge(ids[i], replaced_by, user_id)
                  : memory_db_fact_delete(ids[i], user_id)) == MEMORY_DB_SUCCESS) {
          removed = true;
          if (forgotten == 0) {
@@ -1316,6 +1310,12 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
       if (*lp < cap - 24)
          *lp += (size_t)snprintf(list + *lp, cap - *lp, "%s%lld", *lp ? ", " : "",
                                  (long long)ids[i]);
+   }
+   conv_db_withdraw_intent_end();
+   /* What was forgotten leaves the conversations it was sent into (a merged
+    * fact stays, in the one it merged into). */
+   if (forgotten > 0 && !merge) {
+      session_withdraw_forgotten_async(user_id, false);
    }
 
    /* Single valid ID that succeeded → detailed response (back-compat). */
@@ -1914,8 +1914,10 @@ static char *memory_action_find_contact(int user_id, const char *value) {
  * ============================================================================= */
 
 static char *memory_action_list_contacts(int user_id, const char *value) {
+   /* The field_type param, else (as the tool describes it too) the query. */
    char field_type[32] = "";
-   if (value)
+   if (value && (!tool_param_extract_custom(value, "field_type", field_type, sizeof(field_type)) ||
+                 !field_type[0]))
       tool_param_extract_base(value, field_type, sizeof(field_type));
 
    contact_result_t results[20];
@@ -2063,6 +2065,11 @@ static char *memory_private_confirm_gate(int user_id, const char *value) {
    if (conv_id <= 0) {
       return NULL;
    }
+   /* Approved by the user's reply code (a text): that was the user deciding to
+    * save it; asking again would need a second code. */
+   if (session_call_code_redeemed()) {
+      return NULL;
+   }
    bool is_private = false;
    if (conv_db_is_private(conv_id, user_id, &is_private) != AUTH_DB_SUCCESS || !is_private) {
       /* On a read error, proceed: a private conversation is already exempt from
@@ -2102,9 +2109,10 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
    }
 
    /* Get current user ID */
-   int user_id = get_current_user_id();
+   /* Whose memory: see tool_get_current_user_id() (0 = a guest). */
+   int user_id = tool_get_current_user_id();
    if (user_id <= 0) {
-      return strdup(TOOL_RESULT_ERROR_MARK "Memory system requires authentication. Please log in.");
+      return strdup(TOOL_GUEST_REFUSAL);
    }
 
    if (!actionName) {
@@ -2196,40 +2204,25 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       if (gate != NULL) {
          return gate; /* private conversation, not yet confirmed */
       }
-      /* Strip the packed custom-param suffix before the text is stored.
-       * TOOL_MAPS_TO_CUSTOM params ride INSIDE `value` as "base::field::val"
-       * (tool_registry.h), and remember stores its input verbatim as fact_text.
-       * ANY declared param the flattening appends (not just confirm_private —
-       * a remember call has been seen carrying spurious search/recent params)
-       * would otherwise persist "…the 14th::confirm_private::true" /
-       * "…::time_range::…" as the fact, poisoning its embedding, its dedup hash
-       * and every later recall.
-       *
-       * Trimmed at the earliest KNOWN "::field::" marker rather than via
-       * tool_param_extract_base(), which cuts at the FIRST "::" — fine for the
-       * ID lists `forget` passes, but a fact is free-form user text and may
-       * legitimately contain "::" ("the ratio is 3::1"), which base-extraction
-       * would silently truncate. */
-      size_t base_len = memory_value_base_len(value);
-      if (base_len < strlen(value)) {
-         /* A param tail was appended — trim it before storing.  Warn: a normal
-          * remember carries no flattened params, so a trim means the model
-          * over-populated the call (the observed poisoning path) or, very rarely,
-          * a fact legitimately contained a "::field::" token — either way worth a
-          * breadcrumb. */
-         OLOG_WARNING("memory remember: stripped %zu-byte custom-param tail before storing fact",
-                      strlen(value) - base_len);
-         char *trimmed = strndup(value, base_len);
-         if (trimmed == NULL) {
-            /* Fail SAFE: never fall back to the untrimmed value — that would
-             * persist the param tail this strip exists to remove. */
-            return strdup(TOOL_RESULT_ERROR_MARK "Memory remember failed: out of memory.");
-         }
-         char *res = memory_action_remember(user_id, trimmed);
-         free(trimmed);
-         return res;
+      /* The fact is the base value: TOOL_MAPS_TO_CUSTOM params ride inside
+       * `value` as "base::field::val" (tool_registry.h), and remember stores
+       * its input verbatim as fact_text, so a param the model sent with it
+       * (a remember call has been seen carrying search/recent params) must
+       * not persist as part of the fact.  The base is decoded, so a fact
+       * that itself contains "::" ("the ratio is 3::1") stays whole. */
+      const char *packed = value ? value : "";
+      char *fact = malloc(strlen(packed) + 1);
+      if (fact == NULL) {
+         return strdup(TOOL_RESULT_ERROR_MARK "Memory remember failed: out of memory.");
       }
-      return memory_action_remember(user_id, value);
+      tool_param_extract_base(packed, fact, strlen(packed) + 1);
+      if (strstr(packed, "::") != NULL) {
+         /* A normal remember carries no params: worth a breadcrumb. */
+         OLOG_WARNING("memory remember: params sent with the fact were not stored with it");
+      }
+      char *res = memory_action_remember(user_id, fact);
+      free(fact);
+      return res;
    } else if (strcmp(actionName, "forget") == 0) {
       /* IDs are the base value; optional replaced_by switches delete -> supersede (merge).
        * Base-extract so the ID parser doesn't choke on the ::replaced_by:: suffix. */

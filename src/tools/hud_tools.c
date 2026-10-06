@@ -26,9 +26,11 @@
 
 #include "tools/hud_tools.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/hud_discovery.h"
 #include "tools/tool_registry.h"
@@ -67,15 +69,11 @@ static char *mqtt_only_stub_callback(const char *action, char *value, int *shoul
 static const treg_param_t hud_control_params[] = {
    {
        .name = "element",
-       .description = "The HUD element to control.  Valid values are discovered "
-                      "from the connected helmet/HUD at runtime — only call this "
-                      "tool when the LLM has seen a non-empty enum_values list "
-                      "in the schema (gated by is_available below).",
-       .type = TOOL_PARAM_TYPE_ENUM,
+       .description = "The HUD element to control: one the standing directions list as "
+                      "available now (they change as the helmet connects).",
+       .type = TOOL_PARAM_TYPE_STRING,
        .required = true,
        .maps_to = TOOL_MAPS_TO_DEVICE,
-       .enum_values = { NULL }, /* Populated by discovery */
-       .enum_count = 0,
    },
    {
        .name = "action",
@@ -88,12 +86,39 @@ static const treg_param_t hud_control_params[] = {
    },
 };
 
-/* Hide hud_control from the LLM schema until discovery has populated
- * the `element` enum.  Otherwise the LLM sees a tool with an empty
- * enum array, infers no valid input exists, and either skips silently
- * or fabricates element names ("hud", "main", etc.).  Discovery
- * normally completes within seconds of MQTT connection; until it does,
- * the tool stays hidden (there are no valid elements to control). */
+/* The elements a helmet offers change as it connects, so the schema names
+ * none (a conversation freezes its tool schemas): the live set is in the
+ * turn's standing directions (hud_discovery_describe), and a call naming one
+ * not discovered is refused here. */
+static int hud_control_validate(const char *device,
+                                const char *action,
+                                const char *value,
+                                char *err,
+                                size_t err_size) {
+   (void)action;
+   (void)value;
+   if (hud_discovery_has_element(device)) {
+      return SUCCESS;
+   }
+   char live[512];
+   if (hud_discovery_describe(live, sizeof(live)) == 0) {
+      snprintf(err, err_size,
+               "the HUD reports no elements right now (the helmet may be offline); tell the "
+               "user the HUD can't be changed at the moment.");
+   } else {
+      /* The model's value is echoed only in a name's shape. */
+      if (hud_discovery_name_ok(device)) {
+         snprintf(err, err_size, "'%s' isn't a HUD element the helmet offers now. %s", device,
+                  live);
+      } else {
+         snprintf(err, err_size, "That isn't a HUD element the helmet offers now. %s", live);
+      }
+   }
+   return FAILURE;
+}
+
+/* Unavailable until discovery has listed an element: there is nothing to
+ * control (the turn's standing directions say so, and a call is refused). */
 static bool hud_control_is_available(void) {
    return hud_discovery_get_element_count() > 0;
 }
@@ -102,6 +127,8 @@ static bool hud_control_is_available(void) {
 
 static const tool_metadata_t hud_control_metadata = {
    .name = "hud_control",
+   /* Kind of action: act (the default): it passes any element name through to
+    * the HUD, so what it changes isn't known here. */
    .device_string = "hud_control",
    .topic = "hud",
    .aliases = { NULL },
@@ -110,7 +137,7 @@ static const tool_metadata_t hud_control_metadata = {
    .description = "Control HUD (Heads-Up Display) elements. Enable or disable display overlays "
                   "like the armor display, minimap, object detection, or info panel.",
    .params = hud_control_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(hud_control_params),
 
    .device_map = NULL,
    .device_map_count = 0,
@@ -132,6 +159,7 @@ static const tool_metadata_t hud_control_metadata = {
    .callback = mqtt_only_stub_callback,
 
    .is_available = hud_control_is_available,
+   .validate_call = hud_control_validate,
 };
 
 int hud_control_tool_register(void) {
@@ -145,16 +173,40 @@ int hud_control_tool_register(void) {
 static const treg_param_t hud_mode_params[] = {
    {
        .name = "mode",
-       .description = "The HUD mode to switch to.  Valid values are discovered "
-                      "from the connected helmet at runtime; the enum below is "
-                      "the live set this user's HUD supports (not a fixed list).",
-       .type = TOOL_PARAM_TYPE_ENUM,
+       .description = "The HUD mode to switch to: one the standing directions list as "
+                      "available now (they change as the helmet connects).",
+       .type = TOOL_PARAM_TYPE_STRING,
        .required = true,
        .maps_to = TOOL_MAPS_TO_VALUE,
-       .enum_values = { "default" },
-       .enum_count = 1,
    },
 };
+
+/* As hud_control's elements: the live modes are in the standing directions,
+ * and a mode not discovered is refused. */
+static int hud_mode_validate(const char *device,
+                             const char *action,
+                             const char *value,
+                             char *err,
+                             size_t err_size) {
+   (void)device;
+   (void)action;
+   if (hud_discovery_has_mode(value)) {
+      return SUCCESS;
+   }
+   char live[512];
+   if (hud_discovery_describe(live, sizeof(live)) == 0) {
+      snprintf(err, err_size,
+               "the HUD reports no modes right now (the helmet may be offline); tell the user "
+               "the HUD mode can't be changed at the moment.");
+   } else {
+      if (hud_discovery_name_ok(value)) {
+         snprintf(err, err_size, "'%s' isn't a HUD mode the helmet offers now. %s", value, live);
+      } else {
+         snprintf(err, err_size, "That isn't a HUD mode the helmet offers now. %s", live);
+      }
+   }
+   return FAILURE;
+}
 
 /* Hide hud_mode until at least one mode has been discovered.  Unlike
  * hud_control (which truly has no valid value until elements are
@@ -169,16 +221,16 @@ static bool hud_mode_is_available(void) {
 
 static const tool_metadata_t hud_mode_metadata = {
    .name = "hud_mode",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "hud",
    .topic = "hud",
    .aliases = { "display", "screen" },
    .alias_count = 2,
 
    .description = "Switch the HUD display mode.  Available modes are discovered "
-                  "from the connected helmet — see the `mode` parameter's "
-                  "enum_values for the live set.",
+                  "from the connected helmet; the standing directions list them.",
    .params = hud_mode_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(hud_mode_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
@@ -197,6 +249,7 @@ static const tool_metadata_t hud_mode_metadata = {
    .callback = mqtt_only_stub_callback,
 
    .is_available = hud_mode_is_available,
+   .validate_call = hud_mode_validate,
 };
 
 int hud_mode_tool_register(void) {
@@ -221,6 +274,7 @@ static const treg_param_t faceplate_params[] = {
 
 static const tool_metadata_t faceplate_metadata = {
    .name = "faceplate",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "faceplate",
    .topic = "helmet",
    .aliases = { "face plate", "mask", "helmet", "visor" },
@@ -228,7 +282,7 @@ static const tool_metadata_t faceplate_metadata = {
 
    .description = "Control the helmet faceplate/visor. Open or close the faceplate.",
    .params = faceplate_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(faceplate_params),
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
@@ -284,6 +338,7 @@ static const tool_device_map_t recording_device_map[] = {
 
 static const tool_metadata_t recording_metadata = {
    .name = "recording",
+   /* Kind of action: act (the default): it records and streams video. */
    .device_string = "recording",
    .topic = "hud",
    .aliases = { NULL },
@@ -292,7 +347,7 @@ static const tool_metadata_t recording_metadata = {
    .description = "Control video recording and streaming. Start or stop recording, streaming, "
                   "or both simultaneously.",
    .params = recording_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(recording_params),
 
    .device_map = recording_device_map,
    .device_map_count = 3,
@@ -334,6 +389,7 @@ static const treg_param_t visual_offset_params[] = {
 
 static const tool_metadata_t visual_offset_metadata = {
    .name = "visual_offset",
+   .default_kind = TOOL_KIND_DEVICE,
    .device_string = "visual offset",
    .topic = "hud",
    .aliases = { "3d offset", "eye offset" },
@@ -341,7 +397,7 @@ static const tool_metadata_t visual_offset_metadata = {
 
    .description = "Adjust the 3D visual offset for stereoscopic display alignment.",
    .params = visual_offset_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(visual_offset_params),
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,

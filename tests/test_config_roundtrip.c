@@ -126,6 +126,18 @@ static void test_asr_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(7, g_read.asr.dedup_window_sec);
 }
 
+/* --- [vad] ----------------------------------------------------------------- */
+
+static void test_vad_roundtrip(void) {
+   /* adaptive_endpoint is a string enum; a non-default valid value must survive
+    * the write/re-parse (the silent-deletion guard for this field). */
+   strncpy(g_written.vad.adaptive_endpoint, "shadow", sizeof(g_written.vad.adaptive_endpoint) - 1);
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_STRING("shadow", g_read.vad.adaptive_endpoint);
+}
+
 /* --- [research] ------------------------------------------------------------ */
 
 static void test_research_roundtrip(void) {
@@ -248,6 +260,55 @@ static void test_memory_citation_roundtrip(void) {
    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, g_read.memory.citation_reinforcement_boost);
 }
 
+static void test_focus_document_min_relevance_roundtrip(void) {
+   /* A non-default value must survive: a dropped key would silently revert to the
+    * default on the next WebUI settings save. */
+   g_written.memory.focus_injection.document_min_relevance = 0.62f;
+   g_written.memory.focus_injection.fact_min_relevance = 0.26f;
+   g_written.memory.focus_injection.entity_min_relevance = 0.52f;
+   g_written.memory.focus_injection.summary_min_relevance = 0.18f;
+
+   round_trip();
+
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.62f, g_read.memory.focus_injection.document_min_relevance);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.26f, g_read.memory.focus_injection.fact_min_relevance);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.52f, g_read.memory.focus_injection.entity_min_relevance);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.18f, g_read.memory.focus_injection.summary_min_relevance);
+}
+
+static void test_memory_fact_cache_mb_roundtrip(void) {
+   g_written.memory.fact_cache_mb = 123;
+   round_trip();
+   TEST_ASSERT_EQUAL_INT(123, g_read.memory.fact_cache_mb);
+}
+
+static void test_memory_fact_cache_mb_is_clamped(void) {
+   g_written.memory.fact_cache_mb = 1; /* below the floor */
+   round_trip();
+   TEST_ASSERT_EQUAL_INT(MEMORY_FACT_CACHE_MB_MIN, g_read.memory.fact_cache_mb);
+}
+
+/* The voice idle timeout: 0 is off, 5 is allowed, 1-4 rises to 5, and the
+ * settings POST shares these bounds (config_clamp_memory). */
+static void test_memory_idle_timeout_bounds(void) {
+   g_written.memory.conversation_idle_timeout_min = 5;
+   round_trip();
+   TEST_ASSERT_EQUAL_INT(5, g_read.memory.conversation_idle_timeout_min);
+
+   memory_config_t m = g_written.memory;
+   m.conversation_idle_timeout_min = 0;
+   config_clamp_memory(&m);
+   TEST_ASSERT_EQUAL_INT(0, m.conversation_idle_timeout_min);
+   m.conversation_idle_timeout_min = 3;
+   config_clamp_memory(&m);
+   TEST_ASSERT_EQUAL_INT(5, m.conversation_idle_timeout_min);
+   m.conversation_idle_timeout_min = 90;
+   m.context_budget_tokens = 99999;
+   config_clamp_memory(&m);
+   TEST_ASSERT_EQUAL_INT(60, m.conversation_idle_timeout_min);
+   TEST_ASSERT_EQUAL_INT(2000, m.context_budget_tokens);
+}
+
 /* --- section coverage ------------------------------------------------------
  * The generic half: every section config_write_toml is responsible for must
  * appear in its output.  A new section wired into the parser but not the writer
@@ -297,6 +358,32 @@ static void test_use_openrouter_not_written(void) {
    TEST_ASSERT_FALSE_MESSAGE(found, "retired use_openrouter must not be written to dawn.toml");
 }
 
+/* --- [vision] capture_history_count retirement ---------------------------- */
+
+/* Retired: never written back, and an older dawn.toml that still sets it
+ * parses (one "retired, ignored" warning, not a typo warning). */
+static void test_capture_history_count_retired(void) {
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+   FILE *fp = fopen(RT_PATH, "r");
+   TEST_ASSERT_NOT_NULL(fp);
+   char line[512];
+   bool found = false;
+   while (fgets(line, sizeof(line), fp)) {
+      found = found || strstr(line, "capture_history_count") != NULL;
+   }
+   fclose(fp);
+   TEST_ASSERT_FALSE_MESSAGE(found, "retired capture_history_count must not be written");
+
+   fp = fopen(RT_PATH, "w");
+   TEST_ASSERT_NOT_NULL(fp);
+   fputs("[vision]\nmax_images = 3\ncapture_history_count = 4\n", fp);
+   fclose(fp);
+   test_stub_reset_warnings();
+   TEST_ASSERT_EQUAL_INT(0, config_parse_file(RT_PATH, &g_read));
+   TEST_ASSERT_EQUAL_INT(3, g_read.vision.max_images);
+   TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
+}
+
 static void test_all_writer_owned_sections_present(void) {
    /* Every section config_write_toml() emits, INCLUDING sub-tables. Parent-only
     * coverage would let an entire [llm.tools] or [memory.embeddings] writer block
@@ -324,7 +411,6 @@ static void test_all_writer_owned_sections_present(void) {
       "[memory.embeddings]",
       "[memory.entity_merge]",
       "[memory.focus_injection]",
-      "[memory.focus_injection.dedup]",
       "[memory.focus_injection.dominant_token_heuristic]",
       "[memory.focus_injection.source_weights]",
       "[memory.graph_retrieval]",
@@ -455,12 +541,18 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
    RUN_TEST(test_asr_roundtrip);
+   RUN_TEST(test_vad_roundtrip);
    RUN_TEST(test_research_roundtrip);
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);
    RUN_TEST(test_llm_tools_roundtrip);
    RUN_TEST(test_memory_citation_roundtrip);
+   RUN_TEST(test_focus_document_min_relevance_roundtrip);
+   RUN_TEST(test_memory_fact_cache_mb_roundtrip);
+   RUN_TEST(test_memory_fact_cache_mb_is_clamped);
+   RUN_TEST(test_memory_idle_timeout_bounds);
    RUN_TEST(test_use_openrouter_migrates_to_provider);
+   RUN_TEST(test_capture_history_count_retired);
    RUN_TEST(test_use_openrouter_not_written);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);

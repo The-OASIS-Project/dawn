@@ -95,6 +95,7 @@ typedef enum {
    BLOB_RETAIN_DEFAULT = 0,   /* Global retention_days applies (0 = forever) */
    BLOB_RETAIN_PERMANENT = 1, /* Never auto-delete */
    BLOB_RETAIN_CACHE = 2,     /* LRU eviction at size cap */
+   BLOB_RETAIN_UNBOUND = 3,   /* Awaiting the row that names it: orphan-swept after a grace */
 } blob_retention_t;
 
 /** @brief One MIME -> file-extension mapping entry. */
@@ -135,6 +136,7 @@ typedef struct {
    struct sqlite3_stmt *update_access;     /* last_accessed by id */
    struct sqlite3_stmt *update_retention;  /* retention by id + owner */
    struct sqlite3_stmt *count_user;        /* COUNT by user_id */
+   struct sqlite3_stmt *count_user_source; /* COUNT by user_id + source (nullable) */
    struct sqlite3_stmt *sum_bytes_user;    /* SUM(size) by user_id (nullable) */
    struct sqlite3_stmt *find_by_hash;      /* id by user_id + content_hash (nullable) */
    struct sqlite3_stmt *delete_old;        /* DEFAULT-age delete by cutoff */
@@ -143,7 +145,13 @@ typedef struct {
    struct sqlite3_stmt *delete_by_id;      /* DELETE one by id (orphan reclamation) */
    struct sqlite3_stmt *get_expired_ids;   /* id+filename of DEFAULT-age expired */
    struct sqlite3_stmt *get_cache_lru_ids; /* id+filename+size of LRU overflow */
-   struct sqlite3_stmt *get_orphan_ids;    /* id+filename of orphans by cutoff (nullable) */
+   struct sqlite3_stmt *get_orphan_ids;    /* orphans by cutoff, past a cursor (nullable):
+                                              binds ?1 cutoff, ?2/?3 the last row's
+                                              created_at/id; reads id, filename,
+                                              created_at, user_id in (created_at, id)
+                                              order, LIMIT 100 */
+   struct sqlite3_stmt *delete_orphan;     /* DELETE one by id while still an orphan (nullable:
+                                              needed by orphans_held) */
    struct sqlite3_stmt *stats;             /* COUNT + SUM(size) */
 } blob_store_stmts_t;
 
@@ -173,9 +181,20 @@ typedef struct {
 
    const blob_store_stmts_t *stmts; /* prepared statements for this table */
 
+   /* Whether something outside the database still holds each of the @p n
+    * orphans in @p ids, owned by @p owners[i] (held[i] = true keeps it this
+    * sweep).  Called with no lock held; NULL = nothing does (needs
+    * stmts->delete_orphan). */
+   void (*orphans_held)(const char *const ids[], const int owners[], int n, bool held[]);
+
    /* Per-store caps. */
-   size_t max_size;                  /* per-blob byte cap (0 = unlimited) */
-   int max_per_user;                 /* per-user count cap (0 = unlimited) */
+   size_t max_size;  /* per-blob byte cap (0 = unlimited) */
+   int max_per_user; /* per-user count cap (0 = unlimited) */
+   /* One source counted and capped apart (needs stmts->count_user_source):
+    * its saves are held to apart_max_per_user and never count toward
+    * max_per_user.  apart_max_per_user 0 = no source apart. */
+   int apart_source;
+   int apart_max_per_user;
    int64_t max_total_bytes_per_user; /* per-user aggregate byte cap (0 = unlimited) */
    int retention_days;               /* DEFAULT-age days (0 = forever) */
    int cache_size_mb;                /* RETAIN_CACHE LRU cap (0 = disabled) */
@@ -247,6 +266,14 @@ int blob_store_update_retention(blob_store_handle_t handle,
 int blob_store_count_user(blob_store_handle_t handle, int user_id, int *count_out);
 int blob_store_delete_user(blob_store_handle_t handle, int user_id);
 
+/**
+ * @brief Unlink the file @p filename (a stored name, validated) of a row the
+ *        caller already deleted in its own transaction.  No database work.
+ * @return BLOB_STORE_SUCCESS (or already gone), BLOB_STORE_INVALID or
+ *         BLOB_STORE_FAILURE.
+ */
+int blob_store_unlink_file(blob_store_handle_t handle, const char *filename);
+
 /** @brief Look up an existing blob id by (user_id, content_hash).  Returns
  *         BLOB_STORE_NOT_FOUND when absent or the table has no dedup support. */
 int blob_store_find_by_hash(blob_store_handle_t handle,
@@ -258,7 +285,11 @@ int blob_store_find_by_hash(blob_store_handle_t handle,
 int blob_store_cleanup(blob_store_handle_t handle, int *deleted_out);
 
 /** @brief Orphan sweep: delete blobs with no referrer older than @p grace_sec.
- *         No-op when the table declares no `get_orphan_ids` statement. */
+ *         No-op when the table declares no `get_orphan_ids` statement.
+ *
+ * Walks the orphans oldest first by a (created_at, id) cursor, so a batch a
+ * live session holds whole doesn't stop the ones after it; at most
+ * BLOB_ORPHAN_SWEEP_MAX_BATCHES batches per call (the next sweep goes on). */
 int blob_store_cleanup_orphans(blob_store_handle_t handle, int grace_sec, int *deleted_out);
 
 int blob_store_stats(blob_store_handle_t handle, int *total_count, int64_t *total_bytes);

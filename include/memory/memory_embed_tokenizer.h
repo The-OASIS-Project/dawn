@@ -38,6 +38,14 @@ extern "C" {
 #define MEMORY_TOKENIZER_TOKEN_SEP 102
 #define MEMORY_TOKENIZER_TOKEN_UNK 100
 
+/* Revision of the tokenizer's output.  Bump whenever a change alters the token
+ * ids produced for any input: stored ONNX embeddings were computed with the old
+ * ids, and the embedding re-index keys on this (memory_embed_recompute.c) so
+ * they are rebuilt once on upgrade.
+ *   1 = ASCII-only pre-tokenization
+ *   2 = reference BERT (Unicode) pre-tokenization and WordPiece */
+#define MEMORY_EMBED_TOKENIZER_REVISION 2
+
 /**
  * @brief Acquire a reference to the shared vocab table.
  *

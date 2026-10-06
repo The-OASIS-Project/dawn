@@ -51,6 +51,8 @@
 #include "core/path_utils.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
+#include "tools/calendar_pick.h"
+#include "tools/calendar_query_window.h"
 #include "tools/email_db.h"
 #include "tools/oauth_client.h"
 
@@ -900,8 +902,9 @@ int calendar_service_sync_now(int64_t account_id) {
  * ============================================================================= */
 
 /** Get user's active calendar IDs (helper).
- *  When calendar_name is non-NULL, only return IDs for calendars matching that name
- *  (case-insensitive exact match). When NULL, return all active calendars. */
+ *  When calendar_name is non-NULL, only return IDs for calendars it names: a
+ *  display name (every calendar of it) or a label (calendar_pick_label: one).
+ *  When NULL, return all active calendars. */
 static int get_user_calendar_ids(int user_id,
                                  const char *calendar_name,
                                  int64_t *ids,
@@ -917,7 +920,7 @@ static int get_user_calendar_ids(int user_id,
 
    int matched = 0;
    for (int i = 0; i < count; i++) {
-      if (strcasecmp(cals[i].display_name, calendar_name) == 0)
+      if (calendar_pick_names(cals, count, i, calendar_name))
          ids[matched++] = cals[i].id;
    }
    return matched;
@@ -1019,24 +1022,10 @@ int calendar_service_range(int user_id,
     * into a temp buffer and merge, so the max_count cap applies to the COMBINED
     * start-ordered set — a window that fills the cap with timed events must
     * still surface the soonest all-day events instead of dropping them all.
-    * Same localtime_r/tm_gmtoff date approximation calendar_service_today uses. */
-   struct tm start_tm;
-   struct tm end_tm;
-   localtime_r(&start, &start_tm);
-   localtime_r(&end, &end_tm);
-
-   char start_date[16];
-   iso8601_format_date(start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday, start_date,
-                       sizeof(start_date));
-
-   /* Exclusive upper date bound = day after the window's end day, so an all-day
-    * event on the final day is included. */
-   struct tm end_next = end_tm;
-   end_next.tm_mday += 1;
-   mktime(&end_next); /* normalize */
-   char end_date[16];
-   iso8601_format_date(end_next.tm_year + 1900, end_next.tm_mon + 1, end_next.tm_mday, end_date,
-                       sizeof(end_date));
+    * The window is [start, end), like the timed query. */
+   char start_date[CALENDAR_DATE_LEN];
+   char end_date[CALENDAR_DATE_LEN];
+   calendar_window_dates(start, end, start_date, end_date);
 
    calendar_occurrence_t *allday = malloc((size_t)max_count * sizeof(*allday));
    int allday_count = 0;
@@ -1157,7 +1146,9 @@ int calendar_service_add(int user_id,
                          const char *rrule,
                          const char *tz_name,
                          char *uid_out,
-                         size_t uid_out_len) {
+                         size_t uid_out_len,
+                         char *calendar_out,
+                         size_t calendar_out_len) {
    /* Find target calendar */
    calendar_calendar_t cals[32];
    int cal_count = 0;
@@ -1166,30 +1157,12 @@ int calendar_service_add(int user_id,
       OLOG_ERROR("calendar: no active calendars for user %d", user_id);
       return CALENDAR_RC_FAILURE;
    }
-
-   /* Select target: match by name or use first writable */
    int target = -1;
-   if (calendar_name) {
-      for (int i = 0; i < cal_count; i++) {
-         if (strcasecmp(cals[i].display_name, calendar_name) == 0) {
-            if (cals[i].account_read_only)
-               return CALENDAR_RC_READONLY; /* user explicitly named a read-only calendar */
-            target = i;
-            break;
-         }
-      }
-   }
-   if (target < 0) {
-      /* No name given or name didn't match — find first writable calendar */
-      for (int i = 0; i < cal_count; i++) {
-         if (!cals[i].account_read_only) {
-            target = i;
-            break;
-         }
-      }
-   }
-   if (target < 0)
-      return CALENDAR_RC_READONLY; /* all calendars read-only */
+   const calendar_pick_rc_t pick = calendar_pick_writable(cals, cal_count, calendar_name, &target);
+   if (pick != CALENDAR_PICK_OK)
+      return pick == CALENDAR_PICK_READONLY ? CALENDAR_RC_READONLY : CALENDAR_RC_NOT_FOUND;
+   if (calendar_out && calendar_out_len > 0)
+      calendar_pick_label(cals, cal_count, target, calendar_out, calendar_out_len);
 
    /* Get account for auth */
    calendar_account_t acct;
@@ -1592,14 +1565,17 @@ int calendar_service_get_access_summary(int user_id,
    read_only_out[0] = '\0';
 
    for (int i = 0; i < count; i++) {
-      if (cals[i].account_read_only) {
-         has_read_only = true;
-         r_pos += snprintf(read_only_out + r_pos, r_len - r_pos, "%s%s", r_pos ? ", " : "",
-                           cals[i].display_name);
-      } else {
-         w_pos += snprintf(writable + w_pos, w_len - w_pos, "%s%s", w_pos ? ", " : "",
-                           cals[i].display_name);
-      }
+      char *dst = cals[i].account_read_only ? read_only_out : writable;
+      size_t dst_len = cals[i].account_read_only ? r_len : w_len;
+      int *pos = cals[i].account_read_only ? &r_pos : &w_pos;
+      has_read_only = has_read_only || cals[i].account_read_only;
+      if ((size_t)*pos >= dst_len)
+         continue; /* full: snprintf returns what it would have written */
+      char label[CALENDAR_PICK_LABEL_MAX];
+      calendar_pick_label(cals, count, i, label, sizeof(label));
+      int w = snprintf(dst + *pos, dst_len - (size_t)*pos, "%s%s", *pos ? ", " : "", label);
+      if (w > 0)
+         *pos += w;
    }
    return has_read_only ? 1 : 0;
 }

@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sodium.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -41,7 +42,9 @@
  * ============================================================================= */
 
 static unsigned char s_crypto_key[crypto_secretbox_KEYBYTES];
-static bool s_crypto_ready = false;
+/* Released false before shutdown zeroes the key; a digest checks it (acquire)
+ * before touching the key. */
+static atomic_bool s_crypto_ready = false;
 static pthread_once_t s_crypto_once = PTHREAD_ONCE_INIT;
 static int s_crypto_error = 0;
 
@@ -148,6 +151,11 @@ static void crypto_init_once(void) {
  * Public API
  * ============================================================================= */
 
+/* The key is loaded and not being zeroed by shutdown. */
+static bool key_usable(void) {
+   return crypto_store_init() == 0 && atomic_load_explicit(&s_crypto_ready, memory_order_acquire);
+}
+
 int crypto_store_init(void) {
    pthread_once(&s_crypto_once, crypto_init_once);
    return s_crypto_error;
@@ -164,7 +172,7 @@ int crypto_store_encrypt(const void *plaintext,
                          size_t *out_written) {
    if (!plaintext || !out)
       return 1;
-   if (crypto_store_init() != 0)
+   if (!key_usable())
       return 1;
 
    size_t needed = crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES + pt_len;
@@ -196,7 +204,7 @@ int crypto_store_decrypt(const unsigned char *ciphertext,
                          size_t *out_written) {
    if (!ciphertext || !out || out_len == 0)
       return 1;
-   if (crypto_store_init() != 0)
+   if (!key_usable())
       return 1;
 
    if (ct_len < crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES) {
@@ -225,7 +233,33 @@ int crypto_store_decrypt(const unsigned char *ciphertext,
    return 0;
 }
 
+int crypto_store_keyed_digest(const char *context,
+                              const void *msg,
+                              size_t msg_len,
+                              unsigned char *out,
+                              size_t out_len) {
+   if (!context || strlen(context) != crypto_kdf_CONTEXTBYTES || (!msg && msg_len > 0) || !out ||
+       out_len < crypto_generichash_BYTES_MIN || out_len > crypto_generichash_BYTES_MAX)
+      return 1;
+   /* Not after shutdown zeroed the key: a digest under a zero key is the same
+    * on every install. */
+   if (!key_usable())
+      return 1;
+
+   _Static_assert(crypto_secretbox_KEYBYTES == crypto_kdf_KEYBYTES,
+                  "the store key doubles as the KDF master key");
+   unsigned char subkey[crypto_generichash_KEYBYTES];
+   if (crypto_kdf_derive_from_key(subkey, sizeof(subkey), 1, context, s_crypto_key) != 0)
+      return 1;
+   const int rc = crypto_generichash(out, out_len, (const unsigned char *)msg, msg_len, subkey,
+                                     sizeof(subkey));
+   sodium_memzero(subkey, sizeof(subkey));
+   return rc == 0 ? 0 : 1;
+}
+
 void crypto_store_shutdown(void) {
+   /* Not ready first, then the key: a caller that checks readiness never starts
+    * on a key being zeroed. */
+   atomic_store_explicit(&s_crypto_ready, false, memory_order_release);
    sodium_memzero(s_crypto_key, sizeof(s_crypto_key));
-   s_crypto_ready = false;
 }

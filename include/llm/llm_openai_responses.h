@@ -40,15 +40,12 @@ struct llm_tool_response;
  * Same contract as llm_openai_streaming_single_shot() but uses POST /v1/responses.
  * Caller decides routing via llm_openai_model_prefers_responses_api() + config knob.
  *
- * Stateless mode (Mode B) — echoes prior reasoning items from the in-memory
- * conversation_history (assistant messages may carry _provider_state.openai_responses
- * with prior reasoning items). Server state is not relied upon.
+ * Stateless mode (Mode B) — echoes prior reasoning items from the assistant
+ * turns' blocks in conversation_history (llm_turn_blocks.h). Server state is not
+ * relied upon.  The result's blocks are the turn's output items, in order.
  *
  * @param conversation_history JSON array of messages (DAWN's OpenAI-shaped internal format).
  * @param input_text User input (empty string for follow-up calls inside a tool loop).
- * @param vision_images Array of base64 images (NULL if not used).
- * @param vision_image_sizes Array of image sizes (NULL if not used).
- * @param vision_image_count Number of images.
  * @param base_url API base URL (e.g. "https://api.openai.com").
  * @param api_key Cloud API key.
  * @param model Model name (must be a Responses-supported model).
@@ -56,14 +53,11 @@ struct llm_tool_response;
  * @param callback_userdata User context for callback.
  * @param iteration Current iteration (controls whether tools are included).
  * @param result Output: structured response (text, tool_calls, thinking, response_id,
- * provider_state).
+ * blocks).
  * @return 0 on success, non-zero on error.
  */
 int llm_openai_responses_streaming_single_shot(struct json_object *conversation_history,
                                                const char *input_text,
-                                               const char **vision_images,
-                                               const size_t *vision_image_sizes,
-                                               int vision_image_count,
                                                const char *base_url,
                                                const char *api_key,
                                                const char *model,

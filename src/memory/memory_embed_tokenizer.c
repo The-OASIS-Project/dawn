@@ -34,6 +34,7 @@
 
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_embed_unicode.h"
 #include "utils/string_utils.h"
 
 #define VOCAB_HASH_SIZE 65536 /* ~30K entries, 0.46 load factor */
@@ -229,22 +230,103 @@ bool memory_embed_tokenizer_available(void) {
    return ok;
 }
 
+/* Reference WordPiece limit: a longer word becomes a single [UNK]. */
+#define WP_MAX_WORD_CHARS 100
+/* Input read per call (bytes).  Far more than max_len tokens can use. */
+#define WP_MAX_INPUT_BYTES 4096
+
+static int emit_token(int id,
+                      int64_t type_id,
+                      int64_t *input_ids,
+                      int64_t *attention_mask,
+                      int64_t *token_type_ids,
+                      int pos) {
+   input_ids[pos] = id;
+   attention_mask[pos] = 1;
+   token_type_ids[pos] = type_id;
+   return pos + 1;
+}
+
+/* Greedy longest-match-first WordPiece over one word's characters, exactly as
+ * the reference: if any position has no matching piece the whole word is one
+ * [UNK] (never a partial word). */
+static int wordpiece_word(const uint32_t *w,
+                          int n,
+                          bool overlong,
+                          int64_t type_id,
+                          int64_t *input_ids,
+                          int64_t *attention_mask,
+                          int64_t *token_type_ids,
+                          int pos,
+                          int limit) {
+   if ((n <= 0 && !overlong) || pos >= limit) {
+      return pos;
+   }
+   if (overlong) {
+      return emit_token(MEMORY_TOKENIZER_TOKEN_UNK, type_id, input_ids, attention_mask,
+                        token_type_ids, pos);
+   }
+
+   /* The word's UTF-8 once, with each character's byte offset, so a candidate
+    * piece is a slice rather than a re-encode. */
+   char bytes[WP_MAX_WORD_CHARS * 4];
+   int off[WP_MAX_WORD_CHARS + 1];
+   int nb = 0;
+   for (int k = 0; k < n; k++) {
+      off[k] = nb;
+      nb += embed_utf8_encode(w[k], bytes + nb);
+   }
+   off[n] = nb;
+
+   int pieces[WP_MAX_WORD_CHARS];
+   int n_pieces = 0;
+   int start = 0;
+   while (start < n) {
+      int found = -1;
+      int end = n;
+      const size_t prefix = (start > 0) ? 2 : 0; /* "##" */
+      for (; end > start; end--) {
+         const size_t span = (size_t)(off[end] - off[start]);
+         if (prefix + span >= VOCAB_MAX_WORD_LEN) {
+            continue; /* longer than any vocabulary entry */
+         }
+         char piece[VOCAB_MAX_WORD_LEN];
+         if (prefix) {
+            piece[0] = '#';
+            piece[1] = '#';
+         }
+         memcpy(piece + prefix, bytes + off[start], span);
+         piece[prefix + span] = '\0';
+         int id = vocab_lookup(piece);
+         if (id >= 0) {
+            found = id;
+            break;
+         }
+      }
+      if (found < 0) {
+         return emit_token(MEMORY_TOKENIZER_TOKEN_UNK, type_id, input_ids, attention_mask,
+                           token_type_ids, pos);
+      }
+      pieces[n_pieces++] = found;
+      start = end;
+   }
+   for (int i = 0; i < n_pieces && pos < limit; i++) {
+      pos = emit_token(pieces[i], type_id, input_ids, attention_mask, token_type_ids, pos);
+   }
+   return pos;
+}
+
 /**
- * @brief Lowercase + naive punctuation/whitespace word splitter.
+ * @brief Tokenize @p text into WordPiece ids, as the reference uncased BERT
+ *        tokenizer does.
  *
- * Writes lowercased text into @p out (capped at @p out_size - 1) and runs
- * the WordPiece greedy-longest-match step over each word, appending tokens
- * to @p input_ids / @p attention_mask / @p token_type_ids starting at @p pos.
- * Stops when @p max_len - reserve is reached so the caller can append [SEP]s.
+ * Pipeline: UTF-8 decode; drop control characters (and NUL / U+FFFD);
+ * whitespace separates words; each CJK ideograph is its own word; every other
+ * character is lowercased, NFD-decomposed and stripped of combining marks
+ * (so "Café" -> "cafe"), and punctuation characters (ASCII or Unicode P*)
+ * become single-character words; then WordPiece.  Appends tokens starting at
+ * @p pos and stops at @p max_len - @p reserve so the caller can add [SEP]s.
  *
- * @param text Input text
- * @param type_id Token type ID to assign to every emitted token
- * @param input_ids Output token IDs (length @p max_len)
- * @param attention_mask Output attention mask (length @p max_len)
- * @param token_type_ids Output token type IDs (length @p max_len)
- * @param pos Current write position (updated on success)
- * @param max_len Total buffer length
- * @param reserve Reserve count of trailing positions for [SEP] tokens
  * @return Updated position
  */
 static int wordpiece_append(const char *text,
@@ -257,88 +339,60 @@ static int wordpiece_append(const char *text,
                             int reserve) {
    if (!text)
       return pos;
+   const int limit = max_len - reserve;
 
-   /* Lowercase copy — bounded for stack safety. */
-   size_t text_len = strlen(text);
-   if (text_len > 4096)
-      text_len = 4096;
-   char lower[4097];
-   for (size_t i = 0; i < text_len; i++) {
-      lower[i] = (char)tolower((unsigned char)text[i]);
-   }
-   lower[text_len] = '\0';
+   size_t len = strlen(text);
+   if (len > WP_MAX_INPUT_BYTES)
+      len = WP_MAX_INPUT_BYTES;
 
-   const char *p = lower;
-   while (*p && pos < max_len - reserve) {
-      while (*p && isspace((unsigned char)*p))
-         p++;
-      if (!*p)
-         break;
+   uint32_t word[WP_MAX_WORD_CHARS];
+   int wn = 0;
+   bool overlong = false;
 
-      const char *word_start = p;
-      while (*p && !isspace((unsigned char)*p)) {
-         if (ispunct((unsigned char)*p) && p > word_start)
-            break;
-         if (ispunct((unsigned char)*p)) {
-            p++;
-            break;
-         }
-         p++;
-      }
+#define FLUSH_WORD()                                                                               \
+   do {                                                                                            \
+      pos = wordpiece_word(word, wn, overlong, type_id, input_ids, attention_mask, token_type_ids, \
+                           pos, limit);                                                            \
+      wn = 0;                                                                                      \
+      overlong = false;                                                                            \
+   } while (0)
 
-      int word_len = (int)(p - word_start);
-      if (word_len <= 0)
+   size_t i = 0;
+   while (i < len && pos < limit) {
+      uint32_t cp;
+      i += embed_utf8_decode(text + i, len - i, &cp);
+      if (cp == 0 || cp == 0xFFFD || embed_cp_is_control(cp)) {
          continue;
+      }
+      if (embed_cp_is_space(cp)) {
+         FLUSH_WORD();
+         continue;
+      }
+      if (embed_cp_is_cjk(cp)) {
+         FLUSH_WORD();
+         word[wn++] = cp;
+         FLUSH_WORD();
+         continue;
+      }
 
-      int offset = 0;
-      bool is_first_piece = true;
-
-      while (offset < word_len && pos < max_len - reserve) {
-         int best_len = 0;
-         int best_id = MEMORY_TOKENIZER_TOKEN_UNK;
-
-         for (int try_len = word_len - offset; try_len > 0; try_len--) {
-            char piece[VOCAB_MAX_WORD_LEN];
-            int prefix_len = 0;
-
-            if (!is_first_piece) {
-               piece[0] = '#';
-               piece[1] = '#';
-               prefix_len = 2;
-            }
-
-            if (prefix_len + try_len >= VOCAB_MAX_WORD_LEN)
-               continue;
-
-            memcpy(piece + prefix_len, word_start + offset, (size_t)try_len);
-            piece[prefix_len + try_len] = '\0';
-
-            int id = vocab_lookup(piece);
-            if (id >= 0) {
-               best_len = try_len;
-               best_id = id;
-               break;
-            }
+      uint32_t folded[EMBED_FOLD_MAX];
+      int nf = embed_cp_fold(cp, folded);
+      for (int k = 0; k < nf; k++) {
+         if (embed_cp_is_punct(folded[k])) {
+            FLUSH_WORD();
+            word[wn++] = folded[k];
+            FLUSH_WORD();
+         } else if (wn < WP_MAX_WORD_CHARS) {
+            word[wn++] = folded[k];
+         } else {
+            overlong = true;
          }
-
-         if (best_len == 0) {
-            input_ids[pos] = MEMORY_TOKENIZER_TOKEN_UNK;
-            attention_mask[pos] = 1;
-            token_type_ids[pos] = type_id;
-            pos++;
-            break;
-         }
-
-         input_ids[pos] = best_id;
-         attention_mask[pos] = 1;
-         token_type_ids[pos] = type_id;
-         pos++;
-
-         offset += best_len;
-         is_first_piece = false;
       }
    }
-
+   if (pos < limit) {
+      FLUSH_WORD();
+   }
+#undef FLUSH_WORD
    return pos;
 }
 

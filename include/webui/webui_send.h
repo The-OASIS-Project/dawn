@@ -109,6 +109,7 @@ void send_audio_impl(struct lws *wsi, const uint8_t *data, size_t len);
 void send_audio_end_impl(struct lws *wsi, bool is_opus);
 
 void send_compaction_impl(struct lws *wsi,
+                          int64_t conversation_id,
                           int tokens_before,
                           int tokens_after,
                           int messages_summarized,
@@ -122,6 +123,11 @@ void send_metrics_impl(struct lws *wsi,
                        int ttft_ms,
                        float token_rate,
                        int context_tokens,
+                       int input_tokens,
+                       int cached_tokens,
+                       int cache_write_tokens,
+                       int cache_saved_tokens,
+                       const char *cache_state,
                        int64_t conversation_id);
 void send_music_position_impl(struct lws *wsi, double position_sec, uint32_t duration_sec);
 void send_reasoning_summary_impl(struct lws *wsi,
@@ -157,7 +163,8 @@ void send_transcript_impl_ex(struct lws *wsi,
                              bool replay,
                              bool server_saved,
                              int64_t conversation_id,
-                             int64_t message_id);
+                             int64_t message_id,
+                             const char *client_ref);
 
 /* =============================================================================
  * Audio Send (used by webui_audio.c)

@@ -173,9 +173,13 @@ static bool extract_filename(const char *headers,
    }
    fn_len = (size_t)(fn_end - basename);
 
-   /* Truncate to display size */
-   if (fn_len >= filename_size)
+   /* Truncate to display size, never inside a UTF-8 character (a cut one comes
+    * back from the browser as U+FFFD, longer than the limit it was cut to). */
+   if (fn_len >= filename_size) {
       fn_len = filename_size - 1;
+      while (fn_len > 0 && ((unsigned char)basename[fn_len] & 0xC0) == 0x80)
+         fn_len--;
+   }
 
    memcpy(filename, basename, fn_len);
    filename[fn_len] = '\0';
@@ -215,8 +219,10 @@ static bool parse_doc_multipart(document_upload_session_t *session) {
 
    size_t headers_len = (size_t)(headers_end - part_start);
 
-   /* Extract filename from Content-Disposition */
-   extract_filename(part_start, headers_len, session->filename, sizeof(session->filename));
+   /* Extract filename from Content-Disposition; an upload without a usable one
+    * is refused here rather than stored under an empty name. */
+   if (!extract_filename(part_start, headers_len, session->filename, sizeof(session->filename)))
+      return false;
 
    /* Content starts after headers */
    const char *content_start = headers_end + 4;

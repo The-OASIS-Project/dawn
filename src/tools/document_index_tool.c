@@ -386,6 +386,7 @@ static const treg_param_t doc_index_params[] = {
 
 static const tool_metadata_t doc_index_metadata = {
    .name = "document_index",
+   /* Kind of action: act (the default): fetches a URL and keeps what it finds. */
    .device_string = "document indexer",
    .description = "Download a document from a URL and index it for later search. "
                   "Supports PDF, DOCX, HTML, plain text, Markdown, code files, and more. "
@@ -393,7 +394,7 @@ static const tool_metadata_t doc_index_metadata = {
                   "document. Use this when the user asks you to save, remember, or index "
                   "a web page or document URL for reference.",
    .params = doc_index_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(doc_index_params),
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK,
    .callback = doc_index_callback,
@@ -415,18 +416,9 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
       return strdup(result_buf);
    }
 
-   /* Extract URL (strip custom params if present) */
+   /* The URL is the base value, before any custom params. */
    char url[2048];
-   const char *sep = strstr(value, "::");
-   if (sep) {
-      size_t url_len = (size_t)(sep - value);
-      if (url_len >= sizeof(url))
-         url_len = sizeof(url) - 1;
-      memcpy(url, value, url_len);
-      url[url_len] = '\0';
-   } else {
-      snprintf(url, sizeof(url), "%s", value);
-   }
+   tool_param_extract_base(value, url, sizeof(url));
 
    /* Trim whitespace */
    char *url_start = url;
@@ -442,6 +434,8 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
 
    /* Rate limit check */
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    if (!rate_limit_check(user_id)) {
       snprintf(result_buf, sizeof(result_buf),
                TOOL_RESULT_ERROR_MARK "Rate limit: max %d document indexing requests per minute.",

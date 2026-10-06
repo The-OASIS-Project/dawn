@@ -50,6 +50,7 @@
 #include "asr/asr_interface.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "core/worker_pool_select.h"
 #include "dawn.h"
 #include "logging.h"
 #include "tts/text_to_speech.h"
@@ -62,6 +63,7 @@
 static worker_context_t workers[WORKER_POOL_MAX_SIZE];
 static int actual_worker_count = 0;  // Set from config at init
 static bool pool_initialized = false;
+static asr_engine_type_t s_engine_type = ASR_ENGINE_WHISPER;  // Set from config at init
 
 // Pool-level mutex for finding/assigning workers
 static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -102,6 +104,8 @@ int worker_pool_init(asr_engine_type_t engine_type, const char *model_path) {
       OLOG_ERROR("Worker pool init: model_path is NULL");
       return 1;
    }
+
+   s_engine_type = engine_type;
 
    // Determine worker count from config (clamped to valid range)
    int config_workers = g_config.network.workers;
@@ -383,6 +387,42 @@ asr_context_t *worker_pool_borrow_asr(void) {
 
    OLOG_INFO("Borrowed ASR context from worker %d", available->worker_id);
    return ctx;
+}
+
+asr_context_t *worker_pool_try_borrow_asr(int keep_idle) {
+   if (!pool_initialized) {
+      return NULL;
+   }
+   if (keep_idle < 0) {
+      keep_idle = 0;
+   }
+
+   pthread_mutex_lock(&pool_mutex);
+
+   // Snapshot idle flags, then defer the reserve decision to the pure, unit-tested
+   // selector so the shipped policy is exactly the tested one (never block/wait).
+   unsigned char idle[WORKER_POOL_MAX_SIZE];
+   for (int i = 0; i < actual_worker_count; i++) {
+      idle[i] = (workers[i].state == WORKER_STATE_IDLE) ? 1 : 0;
+   }
+   int pick = worker_pool_select_idle(idle, actual_worker_count, keep_idle);
+   if (pick < 0) {
+      pthread_mutex_unlock(&pool_mutex);
+      return NULL;
+   }
+
+   worker_context_t *chosen = &workers[pick];
+   pthread_mutex_lock(&chosen->mutex);
+   chosen->state = WORKER_STATE_BUSY;
+   pthread_mutex_unlock(&chosen->mutex);
+
+   asr_context_t *ctx = chosen->asr_ctx;
+   pthread_mutex_unlock(&pool_mutex);
+   return ctx;
+}
+
+asr_engine_type_t worker_pool_engine_type(void) {
+   return s_engine_type;
 }
 
 void worker_pool_return_asr(asr_context_t *ctx) {

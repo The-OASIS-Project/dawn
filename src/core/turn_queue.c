@@ -214,6 +214,47 @@ void turn_queue_turn_done(uint32_t session_id) {
    }
 }
 
+int turn_queue_discard_queued(uint32_t session_id,
+                              void (*free_work)(void *work),
+                              void (*discard)(void *work)) {
+   if (session_id == 0 || free_work == NULL || discard == NULL) {
+      return 0;
+   }
+   pending_turn_t *dropped = NULL;
+   pthread_mutex_lock(&s_turn_queue_mutex);
+   session_turn_q_t *q = find_queue(session_id, /*allocate=*/false);
+   if (q != NULL) {
+      pending_turn_t **link = &q->head;
+      pending_turn_t *prev = NULL;
+      while (*link != NULL) {
+         pending_turn_t *p = *link;
+         if (p->free_work == free_work) {
+            *link = p->next;
+            if (q->tail == p) {
+               q->tail = prev;
+            }
+            q->count--;
+            p->next = dropped;
+            dropped = p;
+         } else {
+            prev = p;
+            link = &p->next;
+         }
+      }
+   }
+   pthread_mutex_unlock(&s_turn_queue_mutex);
+
+   int n = 0;
+   while (dropped != NULL) {
+      pending_turn_t *nx = dropped->next;
+      discard(dropped->work);
+      free(dropped);
+      dropped = nx;
+      n++;
+   }
+   return n;
+}
+
 void turn_queue_purge_session(uint32_t session_id) {
    if (session_id == 0) {
       return;

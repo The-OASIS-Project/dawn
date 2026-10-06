@@ -37,12 +37,6 @@
 extern "C" {
 #endif
 
-/* Append vision images to a Responses content_part array (data:image/jpeg;base64). */
-void llm_responses_append_vision_parts(struct json_object *content_array,
-                                       const char **vision_images,
-                                       const size_t *vision_image_sizes,
-                                       int vision_image_count);
-
 /* Count the leading contiguous run of role:"system" messages from index 0 (the
  * stable+volatile pair; anything after the run is a mid-history broadcast). */
 int llm_responses_count_leading_system_run(struct json_object *history);
@@ -62,16 +56,19 @@ char *llm_responses_extract_volatile_context(struct json_object *history);
  * skip (later system messages are emitted inline). When `enable_cache_breakpoint` is
  * true, an explicit GPT-5.6+ `prompt_cache_breakpoint` is stamped on the last stable
  * input_text block before the volatile (caller must pass false for pre-5.6 models, which
- * reject the field, and must pair a true value with root `prompt_cache_options`). New
- * array (caller json_object_put), or NULL on error. */
+ * reject the field, and must pair a true value with root `prompt_cache_options`).
+ * Assistant turns render from their blocks (llm_turn_blocks.h): reasoning items go
+ * back only when they came from `carrier` (llm_request_carrier: the endpoint
+ * and key) and `model`.  A
+ * function call and its output are sent only as a pair: either alone is an API
+ * error.  New array (caller json_object_put), or NULL on error. */
 struct json_object *llm_responses_build_input(struct json_object *history,
                                               const char *input_text,
-                                              const char **vision_images,
-                                              const size_t *vision_image_sizes,
-                                              int vision_image_count,
                                               const char *volatile_block,
                                               int leading_system_run,
-                                              bool enable_cache_breakpoint);
+                                              bool enable_cache_breakpoint,
+                                              const char *carrier,
+                                              const char *model);
 
 #ifdef __cplusplus
 }

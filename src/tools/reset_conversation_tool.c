@@ -28,7 +28,6 @@
 
 #include "conversation_manager.h"
 #include "core/session_manager.h"
-#include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "webui/webui_server.h"
@@ -41,6 +40,7 @@ static char *reset_conversation_tool_callback(const char *action, char *value, i
 
 static const tool_metadata_t reset_conversation_metadata = {
    .name = "reset_conversation",
+   /* Kind of action: act (the default): clears the conversation. */
    .device_string = "reset conversation",
    .topic = "dawn",
    .aliases = { "reset context", "clear conversation", "clear context", "new conversation" },
@@ -90,18 +90,9 @@ static char *reset_conversation_tool_callback(const char *action,
    if (is_local) {
       reset_conversation();
    } else {
-      /* For remote sessions, reset with appropriate system prompt
-       * Note: WebUI sessions will have memory context rebuilt on next message */
-      const char *system_prompt = (session->type == SESSION_TYPE_DAP2) ? get_remote_command_prompt()
-                                                                       : get_local_command_prompt();
-      session_init_system_prompt(session, system_prompt);
-
-#ifdef ENABLE_MULTI_CLIENT
-      /* Re-append room context for DAP2 satellites */
-      if (session->type == SESSION_TYPE_DAP2) {
-         session_append_room_context(session, session->identity.location);
-      }
-#endif
+      /* A new context: its first turn freezes the prompt it runs under, and
+       * the surface's directions (a satellite's room) come with it. */
+      session_clear_history(session);
    }
 
 #ifdef ENABLE_WEBUI

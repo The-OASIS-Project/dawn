@@ -28,8 +28,10 @@
 #ifndef MEMORY_EMBEDDINGS_H
 #define MEMORY_EMBEDDINGS_H
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "core/embedding_engine.h"
 #include "memory/memory_types.h"
@@ -40,33 +42,6 @@ extern "C" {
 
 /* Maximum embedding dimensions (all-MiniLM = 384, OpenAI ada = 1536) */
 #define MAX_EMBEDDING_DIMS 2048
-
-/* Maximum facts to cache for vector search.
- *
- * Sizing rationale (May 2026, efficiency H1):
- *   - per-user RAM at 8192 × 384 dims × 4 B = 12 MB embeddings + 12 KB norms +
- *     64 KB ids + 64 KB created_ats ≈ 12.1 MB per user — comfortable on Jetson.
- *   - At ~6 facts/conv, 8192 facts represents ~1300 conversations of memory,
- *     ~4-6 months of growth headroom at typical use.
- *   - When the cap is hit, the cache silently truncates additional rows.
- *     `cache_load_saturated_warn()` emits a one-shot OLOG_WARNING per user so
- *     the operator notices before retrieval quality degrades.
- *
- * NOTE: the per-call scratch arrays (merged, pool, rank_X, scored) in
- * memory_embeddings.c are sized via MEMORY_HYBRID_SCRATCH_CAP, NOT this
- * constant, so bumping this value does NOT blow per-call stack frames.
- * Production pthread stacks are as small as 256 KB (llm_context.c), so the
- * scratch bound is intentionally decoupled. */
-#define EMBEDDING_SEARCH_CAP 8192
-
-/* Per-call scratch bound for hybrid/rrf search.  Caps the in-flight working
- * set independently of the cache size — keeps stack frames at ~24 KB
- * (hybrid) / ~384 KB (rrf, gated by smaller pthread stacks elsewhere if
- * relevant) regardless of how large the cache grows.
- *
- * Picked at the historical EMBEDDING_SEARCH_CAP value (2000) so behavior
- * matches pre-bump for callers below that scale. */
-#define MEMORY_HYBRID_SCRATCH_CAP 2000
 
 _Static_assert(MAX_EMBEDDING_DIMS * sizeof(float) <= 8192, "Embedding stack buffer exceeds 8KB");
 
@@ -140,9 +115,9 @@ int memory_embeddings_embed_and_store(int user_id, int64_t fact_id, const char *
  * an N-fact extraction loop does not pay N cache-reload cycles against
  * SQLite.
  *
- * If cache append fails (e.g. EMBEDDING_SEARCH_CAP reached or user
- * mismatch), the function falls back to invalidating the cache so the
- * next access reloads fresh.
+ * If cache append fails (out of memory growing it, or a user mismatch), the
+ * function falls back to invalidating the cache so the next access reloads
+ * fresh.
  *
  * @param user_id User who owns the fact (for ownership check on the DB write)
  * @param fact_id Fact ID to update — the row must already exist
@@ -507,9 +482,70 @@ int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, con
 int memory_embeddings_embed_and_store_summary(int user_id, int64_t summary_id, const char *text);
 
 /**
- * @brief Invalidate the entity embedding cache
+ * @brief Invalidate every user's entity embedding cache
+ *
+ * Lock-free: safe to call while holding the database lock.
  */
 void memory_embeddings_invalidate_entity_cache(void);
+
+/**
+ * @brief Invalidate one user's entity embedding cache (after changing their
+ *        entities); other users' copies stay.  Lock-free.
+ */
+void memory_embeddings_invalidate_entity_cache_for_user(int user_id);
+
+/** Most matches memory_embeddings_entity_matches() returns. */
+#define MEMORY_ENTITY_MATCH_MAX 64
+
+/** An entity relevant to a query. */
+typedef struct {
+   int64_t id;
+   char name[MEMORY_ENTITY_NAME_MAX];
+   char type[MEMORY_ENTITY_TYPE_MAX];
+   bool has_cosine; /**< false without a usable query embedding */
+   float cosine;
+   float relevance; /**< cosine measured from the pool's typical level (see
+                         embedding_corpus_relevance) */
+   bool named;      /**< the query contains the entity's name */
+} memory_entity_match_t;
+
+/**
+ * @brief The user's entities relevant to a query, most relevant first
+ *
+ * Every canonical entity is considered.  One is relevant when either:
+ *   - the query names it: two of its name's content words appear in @p query,
+ *     or the one word of a one-word name (a long message's embedding is
+ *     diluted, but the name is still there).  Longest match wins: an entity
+ *     whose matched words all belong to a longer named match isn't named
+ *     (the query meant the longer one);
+ *   - its relevance reaches @p min_relevance.  Embedding models put
+ *     unrelated text at a model-specific baseline similarity, so a raw cosine
+ *     floor doesn't transfer; relevance is measured from the pool's mean.
+ *     A pool smaller than EMBEDDING_RELEVANCE_MIN_POOL isn't gated, and
+ *     @p min_relevance <= 0 turns the gate off.
+ * Named entities rank first, then by cosine.  Only entities with an embedding
+ * from the current model are held, so one still awaiting its embedding
+ * (after a model change, until the recompute worker reaches it) isn't found.
+ *
+ * @param user_id        Whose entities
+ * @param query          Query text (for names), or NULL
+ * @param qvec           Query embedding, or NULL (names only)
+ * @param dims           Its dimension; a mismatch with the stored embeddings
+ *                       is treated as no embedding
+ * @param min_relevance  Relevance an unnamed entity needs (entity_min_relevance)
+ * @param out            [out] The matches
+ * @param max            Capacity of @p out (<= MEMORY_ENTITY_MATCH_MAX)
+ * @param n_out          [out] Matches written
+ * @return SUCCESS or FAILURE
+ */
+int memory_embeddings_entity_matches(int user_id,
+                                     const char *query,
+                                     const float *qvec,
+                                     int dims,
+                                     float min_relevance,
+                                     memory_entity_match_t *out,
+                                     int max,
+                                     int *n_out);
 
 /**
  * @brief Invalidate both fact and entity embedding caches in one call.
@@ -522,7 +558,13 @@ void memory_embeddings_invalidate_entity_cache(void);
 void memory_embeddings_invalidate_all(void);
 
 /**
- * @brief Search entities by semantic similarity
+ * @brief Search entities by semantic similarity and name
+ *
+ * The entities memory_embeddings_entity_matches() finds for @p query, gated
+ * at the configured entity_min_relevance, optionally of one type.  Unlike
+ * context injection, a pool too small to gate returns only named entities:
+ * similarity with no baseline says nothing, and the caller falls back to a
+ * keyword search.
  *
  * @param user_id User ID
  * @param query Search query
@@ -573,12 +615,34 @@ int memory_embeddings_entity_cosine(int user_id,
                                     float query_norm,
                                     float *out_cosine);
 
+/** out_rel value for a fact that has no cached embedding (NaN: no relevance
+ *  value can equal it; test with isnan()). */
+#define MEMORY_RELEVANCE_NA NAN
+
+/** Most ids memory_embeddings_fact_relevance() scores per call. */
+#define MEMORY_RELEVANCE_MAX_IDS 64
+
 /**
- * @brief Start background backfill of un-embedded facts
+ * @brief Corpus-relative relevance of facts to a query
  *
- * @param user_id User ID to backfill
+ * embedding_corpus_relevance() of each fact against the query's cosines over all
+ * of the user's cached fact embeddings: how far a fact stands out from the user's
+ * typical fact, which (unlike raw cosine) is comparable across embedding models.
+ *
+ * @param user_id   Owner of the facts
+ * @param query_emb Query embedding (dims = engine dims)
+ * @param ids       Facts to score
+ * @param n         Number of ids (<= MEMORY_RELEVANCE_MAX_IDS)
+ * @param out_rel   Per-id relevance, or MEMORY_RELEVANCE_NA if not cached
+ * @param pool_out  Facts the mean was taken over (may be NULL)
+ * @return SUCCESS, or FAILURE if the cache can't be loaded
  */
-void memory_embeddings_start_backfill(int user_id);
+int memory_embeddings_fact_relevance(int user_id,
+                                     const float *query_emb,
+                                     const int64_t *ids,
+                                     int n,
+                                     float *out_rel,
+                                     int *pool_out);
 
 /* Compute L2 norm of a float vector */
 float memory_embeddings_l2_norm(const float *vec, int dims);

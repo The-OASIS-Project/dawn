@@ -30,6 +30,7 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <sodium.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,12 +38,19 @@
 #include <time.h>
 
 #include "core/crypto_store.h"
+#include "core/pending_slots.h" /* pending_slots_now: expiry on a clock that never steps back */
 #include "logging.h"
 #include "tools/calendar_db.h"
 #include "tools/email_client.h"
 #include "tools/email_db.h"
+#include "tools/email_parse.h"
+#include "tools/email_service_internal.h"
 #include "tools/gmail_client.h"
 #include "tools/oauth_client.h"
+#include "utils/string_utils.h"
+
+/* Characters of a sender shown in a trash confirmation. */
+#define EMAIL_TRASH_FROM_SHOWN 100
 
 /* =============================================================================
  * Module State
@@ -134,25 +142,23 @@ static bool is_loopback(const char *host) {
  * TLS enforcement: refuse plaintext to non-loopback servers.
  * ============================================================================= */
 
-/* build_conn_for_account() outcomes.  Callers that only need pass/fail keep
- * checking `!= CONN_RC_OK`; the search path distinguishes CONN_RC_AUTH_FAILURE
+/* email_svc_build_conn() outcomes (CONN_RC_*, email_service_internal.h).  Callers that
+ * only need pass/fail keep
+ * checking `!= EMAIL_SVC_CONN_OK`; the search path distinguishes EMAIL_SVC_CONN_AUTH
  * (a real credential problem worth telling the user about) from a config/TLS
  * refusal, so it doesn't mislabel a TLS misconfig as "login failed". */
-#define CONN_RC_OK 0           /* success */
-#define CONN_RC_FAILURE 1      /* config/TLS refusal or internal — not a credential problem */
-#define CONN_RC_AUTH_FAILURE 2 /* OAuth token fetch or password decrypt failed (credentials) */
 
-static int build_conn_for_account(const email_account_t *acct, email_conn_t *conn) {
+int email_svc_build_conn(const email_account_t *acct, email_conn_t *conn) {
    memset(conn, 0, sizeof(*conn));
 
    /* Enforce TLS for non-loopback servers */
    if (!acct->imap_ssl && !is_loopback(acct->imap_server)) {
       OLOG_ERROR("email: refusing plaintext IMAP to non-loopback server %s", acct->imap_server);
-      return CONN_RC_FAILURE;
+      return EMAIL_SVC_CONN_FAILURE;
    }
    if (!acct->smtp_ssl && !is_loopback(acct->smtp_server)) {
       OLOG_ERROR("email: refusing plaintext SMTP to non-loopback server %s", acct->smtp_server);
-      return CONN_RC_FAILURE;
+      return EMAIL_SVC_CONN_FAILURE;
    }
 
    /* Build IMAP URL */
@@ -174,22 +180,24 @@ static int build_conn_for_account(const email_account_t *acct, email_conn_t *con
       oauth_provider_config_t google;
       if (oauth_build_google_provider(GOOGLE_EMAIL_SCOPE, &google) != 0) {
          OLOG_ERROR("email: failed to build Google OAuth provider");
-         return CONN_RC_FAILURE;
+         return EMAIL_SVC_CONN_FAILURE;
       }
       if (oauth_get_access_token(&google, acct->user_id, acct->oauth_account_key,
                                  conn->bearer_token, sizeof(conn->bearer_token)) != 0) {
          OLOG_ERROR("email: failed to get OAuth access token for %s", acct->name);
-         return CONN_RC_AUTH_FAILURE;
+         /* oauth_get_access_token clears the flag on entry: it is this call's */
+         return oauth_was_last_refresh_revoked(NULL, 0) ? EMAIL_SVC_CONN_REVOKED
+                                                        : EMAIL_SVC_CONN_AUTH;
       }
    } else {
       /* App password — decrypt */
       if (email_decrypt_password(acct, conn->password, sizeof(conn->password)) != 0) {
          OLOG_ERROR("email: failed to decrypt password for %s", acct->name);
-         return CONN_RC_AUTH_FAILURE;
+         return EMAIL_SVC_CONN_AUTH;
       }
    }
 
-   return CONN_RC_OK;
+   return EMAIL_SVC_CONN_OK;
 }
 
 /* =============================================================================
@@ -198,7 +206,22 @@ static int build_conn_for_account(const email_account_t *acct, email_conn_t *con
  * Finds account by name (case-insensitive). NULL = first enabled account.
  * ============================================================================= */
 
-static int find_account(int user_id, const char *account_name, email_account_t *out) {
+email_err_t email_svc_account_err(int rc) {
+   switch (rc) {
+      case EMAIL_RC_OK:
+         return EMAIL_ERR_NONE;
+      case EMAIL_RC_NO_ACCOUNTS:
+         return EMAIL_ERR_NO_ACCOUNT;
+      case EMAIL_RC_UNKNOWN_ACCOUNT:
+         return EMAIL_ERR_ACCOUNT_NOT_FOUND;
+      case EMAIL_ACCT_RC_READONLY:
+         return EMAIL_ERR_READ_ONLY;
+      default:
+         return EMAIL_ERR_FAILED;
+   }
+}
+
+int email_svc_find_account(int user_id, const char *account_name, email_account_t *out) {
    email_account_t accounts[EMAIL_MAX_ACCOUNTS];
    int count = 0;
    email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS, &count);
@@ -241,13 +264,13 @@ static int find_account(int user_id, const char *account_name, email_account_t *
  * Gmail API accounts: auth_type == "oauth" AND imap_server contains "gmail.com".
  * ============================================================================= */
 
-static bool is_gmail_api_account(const email_account_t *acct) {
+bool email_svc_is_gmail_api(const email_account_t *acct) {
    return strcmp(acct->auth_type, "oauth") == 0 &&
           strcasestr(acct->imap_server, "gmail.com") != NULL;
 }
 
 bool email_service_is_gmail_account(const email_account_t *acct) {
-   return acct && is_gmail_api_account(acct);
+   return acct && email_svc_is_gmail_api(acct);
 }
 
 /** IMAP server is Gmail (regardless of auth type) */
@@ -352,13 +375,20 @@ static void normalize_folder(const char *folder, const email_account_t *acct, fo
    snprintf(out->imap_folder, sizeof(out->imap_folder), "%s", folder);
 }
 
-static int get_gmail_token(const email_account_t *acct, char *token, size_t len) {
+int email_svc_gmail_token(const email_account_t *acct, char *token, size_t len, bool *revoked) {
+   if (revoked)
+      *revoked = false;
    oauth_provider_config_t google;
    if (oauth_build_google_provider(GOOGLE_EMAIL_SCOPE, &google) != 0) {
       OLOG_ERROR("email: failed to build Google OAuth provider for Gmail API");
       return 1;
    }
-   return oauth_get_access_token(&google, acct->user_id, acct->oauth_account_key, token, len);
+   const int rc = oauth_get_access_token(&google, acct->user_id, acct->oauth_account_key, token,
+                                         len);
+   /* oauth_get_access_token clears the flag on entry: it is this call's */
+   if (rc != 0 && revoked)
+      *revoked = oauth_was_last_refresh_revoked(NULL, 0) != 0;
+   return rc;
 }
 
 /* =============================================================================
@@ -475,9 +505,9 @@ int email_service_test_connection(int64_t account_id, bool *imap_ok, bool *smtp_
       return 1;
 
    /* Gmail API path — single API call covers both directions */
-   if (is_gmail_api_account(&acct)) {
+   if (email_svc_is_gmail_api(&acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(&acct, token, sizeof(token)) != 0) {
+      if (email_svc_gmail_token(&acct, token, sizeof(token), NULL) != 0) {
          sodium_memzero(token, sizeof(token));
          return 1;
       }
@@ -490,7 +520,7 @@ int email_service_test_connection(int64_t account_id, bool *imap_ok, bool *smtp_
    }
 
    email_conn_t conn;
-   int rc = build_conn_for_account(&acct, &conn);
+   int rc = email_svc_build_conn(&acct, &conn);
    if (rc != 0) {
       sodium_memzero(&conn, sizeof(conn));
       return 1;
@@ -512,6 +542,34 @@ int email_service_list_accounts(int user_id, email_account_t *out, int max) {
 /* =============================================================================
  * Operations (Tool Layer)
  * ============================================================================= */
+
+/* IMAP page_token <-> cursor.  An empty token is the first page; anything that
+ * isn't a well-formed IMAP cursor (e.g. a Gmail token) is rejected rather than
+ * silently restarting from page one. */
+static int imap_page_from_token(const char *page_token, email_imap_page_t *page) {
+   memset(page, 0, sizeof(*page));
+   if (!page_token || !page_token[0])
+      return EMAIL_RC_OK;
+   if (!email_imap_page_token_parse(page_token, &page->before_uid, &page->uidvalidity))
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+   return EMAIL_RC_OK;
+}
+
+static void imap_page_to_token(const email_imap_page_t *page, char *npt, size_t npt_len) {
+   if (!npt || npt_len == 0 || page->next_before_uid == 0)
+      return;
+   /* Pin the epoch this page was read under; fall back to the one the incoming
+    * cursor carried if the server's SELECT line wasn't observed. */
+   uint32_t v = page->next_uidvalidity ? page->next_uidvalidity : page->uidvalidity;
+   email_imap_page_token_format(page->next_before_uid, v, npt, npt_len);
+}
+
+/* A Gmail account handed an IMAP cursor: reject it the same way instead of
+ * letting the Gmail API 400 into a generic "network error". */
+static bool is_imap_page_token(const char *page_token) {
+   uint32_t uid = 0, v = 0;
+   return page_token && page_token[0] && email_imap_page_token_parse(page_token, &uid, &v);
+}
 
 /* Stamp the owning account's display name + address onto each returned row.
  * The lower-level fetch primitives don't know the account, so the service layer
@@ -536,6 +594,12 @@ int email_service_recent(int user_id,
                          int *out_count,
                          char *next_page_token,
                          size_t npt_len) {
+   /* Copy the incoming cursor before clearing the outgoing one, so a caller may
+    * pass the same buffer for both (page N's token in, page N+1's out). */
+   char tok_in[EMAIL_PAGE_TOKEN_LEN];
+   snprintf(tok_in, sizeof(tok_in), "%s", page_token ? page_token : "");
+   page_token = tok_in;
+
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
@@ -544,20 +608,22 @@ int email_service_recent(int user_id,
       return EMAIL_RC_INVALID_FOLDER;
 
    email_account_t acct;
-   int find_rc = find_account(user_id, account_name, &acct);
+   int find_rc = email_svc_find_account(user_id, account_name, &acct);
    if (find_rc != EMAIL_RC_OK)
       return find_rc;
 
    if (count <= 0)
-      count = acct.max_recent > 0 ? acct.max_recent : 10;
+      count = acct.max_recent > 0 ? acct.max_recent : EMAIL_MAX_RECENT_DEFAULT;
 
    folder_norm_t norm;
    normalize_folder(folder, &acct, &norm);
 
    /* Gmail API path */
-   if (is_gmail_api_account(&acct)) {
+   if (email_svc_is_gmail_api(&acct)) {
+      if (is_imap_page_token(page_token))
+         return EMAIL_RC_INVALID_PAGE_TOKEN;
       char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(&acct, token, sizeof(token)) != 0) {
+      if (email_svc_gmail_token(&acct, token, sizeof(token), NULL) != 0) {
          sodium_memzero(token, sizeof(token));
          return 1;
       }
@@ -568,137 +634,29 @@ int email_service_recent(int user_id,
       return rc;
    }
 
-   /* IMAP path (no pagination support) */
+   /* IMAP path: UID cursor paging */
+   email_imap_page_t page;
+   if (imap_page_from_token(page_token, &page) != EMAIL_RC_OK)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+
    email_conn_t conn;
-   int rc = build_conn_for_account(&acct, &conn);
+   int rc = email_svc_build_conn(&acct, &conn);
    if (rc != 0) {
       sodium_memzero(&conn, sizeof(conn));
       return 1;
    }
 
-   rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, out, max, out_count);
+   rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, &page, out, max, out_count);
    sodium_memzero(&conn, sizeof(conn));
+   if (rc != 0 && page.stale)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+   if (rc == 0)
+      imap_page_to_token(&page, next_page_token, npt_len);
 
    /* Populate message_id (folder:uid) for IMAP results, then stamp the account. */
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
    stamp_account(out, *out_count, &acct);
-
-   return rc;
-}
-
-/** Read from a single account */
-static int read_single_account(email_account_t *acct,
-                               const char *message_id,
-                               email_message_t *out,
-                               bool fanout);
-
-int email_service_read(int user_id,
-                       const char *account_name,
-                       const char *message_id,
-                       email_message_t *out) {
-   if (!message_id || !message_id[0])
-      return 1;
-
-   /* Specific account requested */
-   if (account_name && account_name[0]) {
-      email_account_t acct;
-      int find_rc = find_account(user_id, account_name, &acct);
-      if (find_rc != EMAIL_RC_OK)
-         return find_rc;
-      return read_single_account(&acct, message_id, out, false);
-   }
-
-   /* No account specified — try all enabled accounts until one succeeds */
-   email_account_t accounts[16];
-   int acct_count = 0;
-   email_db_account_list(user_id, accounts, 16, &acct_count);
-   if (acct_count <= 0)
-      return EMAIL_RC_NO_ACCOUNTS;
-   int enabled_seen = 0;
-   int all_not_found = 1; /* every failure so far was a clean 404, not a network error */
-   for (int i = 0; i < acct_count; i++) {
-      if (!accounts[i].enabled)
-         continue;
-      enabled_seen = 1;
-      int rc = read_single_account(&accounts[i], message_id, out, true);
-      if (rc == EMAIL_RC_OK)
-         return EMAIL_RC_OK;
-      if (rc != EMAIL_RC_NOT_FOUND)
-         all_not_found = 0;
-   }
-   /* Distinguish "you have accounts but they're all disabled" (enable one) from
-    * "the id isn't in any mailbox" (stale/wrong id) from a generic fetch failure. */
-   if (!enabled_seen)
-      return EMAIL_RC_NO_ACCOUNTS;
-   return all_not_found ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;
-}
-
-static int read_single_account(email_account_t *acct,
-                               const char *message_id,
-                               email_message_t *out,
-                               bool fanout) {
-   /* Gmail API path — hex IDs contain no colons */
-   if (is_gmail_api_account(acct)) {
-      char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(acct, token, sizeof(token)) != 0) {
-         sodium_memzero(token, sizeof(token));
-         return 1;
-      }
-      int max_chars = acct->max_body_chars > 0 ? acct->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
-      int rc = gmail_read_message(token, message_id, max_chars, out);
-      sodium_memzero(token, sizeof(token));
-      if (rc == GMAIL_RC_NOT_FOUND)
-         return EMAIL_RC_NOT_FOUND;
-      return rc ? EMAIL_RC_FAILURE : EMAIL_RC_OK;
-   }
-
-   /* IMAP path — parse composite "folder:uid" using strrchr (last colon).
-    * Folder names can contain colons but UIDs are always pure decimal. */
-   char imap_folder[128] = "INBOX";
-   const char *uid_str = message_id;
-
-   const char *last_colon = strrchr(message_id, ':');
-   if (last_colon) {
-      size_t folder_len = last_colon - message_id;
-      if (folder_len > 0 && folder_len < sizeof(imap_folder)) {
-         memcpy(imap_folder, message_id, folder_len);
-         imap_folder[folder_len] = '\0';
-      }
-      uid_str = last_colon + 1;
-   }
-
-   if (!validate_folder_name(imap_folder)) {
-      OLOG_ERROR("email: invalid folder name in message_id '%s'", message_id);
-      return 1;
-   }
-
-   char *endptr = NULL;
-   unsigned long uid_val = strtoul(uid_str, &endptr, 10);
-   if (!endptr || *endptr != '\0' || uid_val == 0 || uid_val > UINT32_MAX) {
-      /* During a no-account read fan-out this is just a Gmail hex id landing on an
-       * IMAP account (backend mismatch) — expected, not an error.  When the caller
-       * named a specific IMAP account, a bad UID is a real error. */
-      if (fanout)
-         OLOG_DEBUG("email: message id '%s' is not an IMAP UID (skipping IMAP account)", uid_str);
-      else
-         OLOG_ERROR("email: invalid IMAP UID '%s'", uid_str);
-      return 1;
-   }
-
-   email_conn_t conn;
-   int rc = build_conn_for_account(acct, &conn);
-   if (rc != 0) {
-      sodium_memzero(&conn, sizeof(conn));
-      return 1;
-   }
-
-   rc = email_read_message(&conn, imap_folder, (uint32_t)uid_val, out);
-   sodium_memzero(&conn, sizeof(conn));
-
-   /* Populate message_id for IMAP results */
-   if (rc == 0)
-      snprintf(out->message_id, sizeof(out->message_id), "%s", message_id);
 
    return rc;
 }
@@ -713,6 +671,11 @@ static int search_single_account(email_account_t *acct,
                                  char *next_page_token,
                                  size_t npt_len,
                                  bool *auth_error) {
+   /* Work on a copy so the caller may hand back the previous page's token buffer
+    * as next_page_token (see email_service_recent). */
+   email_search_params_t local_params = *params;
+   params = &local_params;
+
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
@@ -722,12 +685,14 @@ static int search_single_account(email_account_t *acct,
    folder_norm_t norm;
    normalize_folder(params->folder, acct, &norm);
 
-   if (is_gmail_api_account(acct)) {
+   if (email_svc_is_gmail_api(acct)) {
+      if (is_imap_page_token(params->page_token))
+         return EMAIL_RC_INVALID_PAGE_TOKEN;
       email_search_params_t gmail_params = *params;
       snprintf(gmail_params.folder, sizeof(gmail_params.folder), "%s", norm.gmail_query);
 
       char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(acct, token, sizeof(token)) != 0) {
+      if (email_svc_gmail_token(acct, token, sizeof(token), NULL) != 0) {
          /* Token fetch failed = the account can't authenticate (revoked/expired). */
          if (auth_error)
             *auth_error = true;
@@ -741,25 +706,33 @@ static int search_single_account(email_account_t *acct,
       return rc;
    }
 
-   /* IMAP path (no pagination support) */
+   /* IMAP path: UID cursor paging */
+   email_imap_page_t page;
+   if (imap_page_from_token(params->page_token, &page) != EMAIL_RC_OK)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+
    email_conn_t conn;
-   int rc = build_conn_for_account(acct, &conn);
-   if (rc != CONN_RC_OK) {
+   int rc = email_svc_build_conn(acct, &conn);
+   if (rc != EMAIL_SVC_CONN_OK) {
       /* Only a credential failure (bad token / undecryptable password) is a "login"
        * problem; a TLS/config refusal must NOT be mislabeled as bad credentials. */
       if (auth_error)
-         *auth_error = (rc == CONN_RC_AUTH_FAILURE);
+         *auth_error = (rc == EMAIL_SVC_CONN_AUTH);
       sodium_memzero(&conn, sizeof(conn));
       return 1;
    }
 
    bool imap_auth_denied = false;
    bool imap_timed_out = false;
-   rc = email_search(&conn, norm.imap_folder, params, out, max, out_count, &imap_auth_denied,
+   rc = email_search(&conn, norm.imap_folder, params, &page, out, max, out_count, &imap_auth_denied,
                      &imap_timed_out);
    if (rc != 0 && auth_error)
       *auth_error = imap_auth_denied;
    sodium_memzero(&conn, sizeof(conn));
+   if (rc != 0 && page.stale)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+   if (rc == 0)
+      imap_page_to_token(&page, next_page_token, npt_len);
 
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
@@ -794,7 +767,7 @@ int email_service_search(int user_id,
    /* Specific account requested — search just that one */
    if (account_name && account_name[0]) {
       email_account_t acct;
-      int find_rc = find_account(user_id, account_name, &acct);
+      int find_rc = email_svc_find_account(user_id, account_name, &acct);
       if (find_rc != EMAIL_RC_OK)
          return find_rc;
       return search_single_account(&acct, params, out, max, out_count, next_page_token, npt_len,
@@ -802,7 +775,12 @@ int email_service_search(int user_id,
    }
 
    /* No account specified — search ALL enabled accounts and merge results.
-    * Pagination only applies to single-account searches. */
+    * Pagination only applies to single-account searches, so drop any page_token:
+    * a cursor belongs to one account and would 400 the others (Gmail) or be
+    * rejected as foreign (IMAP), turning a fresh search into spurious errors. */
+   email_search_params_t first_page = *params;
+   first_page.page_token[0] = '\0';
+   params = &first_page;
    email_account_t accounts[16];
    int acct_count = 0;
    email_db_account_list(user_id, accounts, 16, &acct_count);
@@ -876,7 +854,7 @@ void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nro
       return; /* leave all rows UNKNOWN */
 
    for (int a = 0; a < nacct; a++) {
-      if (!accts[a].enabled || !is_gmail_api_account(&accts[a]))
+      if (!accts[a].enabled || !email_svc_is_gmail_api(&accts[a]))
          continue;
 
       /* Find this account's enrichable rows and the oldest one's date — the
@@ -981,13 +959,54 @@ static void generate_draft_id(char *out, size_t out_len) {
 
 /** Expire old drafts (must hold draft_mutex) */
 static void expire_drafts_locked(void) {
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    for (int i = 0; i < EMAIL_MAX_DRAFTS; i++) {
       if (s_email.drafts[i].draft_id[0] && !s_email.drafts[i].used &&
           now - s_email.drafts[i].created_at > EMAIL_DRAFT_EXPIRY_SEC) {
          sodium_memzero(&s_email.drafts[i], sizeof(email_draft_t));
       }
    }
+}
+
+/* The slot to replace when a table of pending email items is full, or -1:
+ * the caller's own session's oldest item when it holds one, else the oldest
+ * item of a session that holds more than one.  A session's only item is never
+ * pushed out (it may be what that user is about to confirm), and a session
+ * that holds several gives one up to a session that holds none.  @p base points at items @p stride
+ * bytes apart, each with its origin at @p origin_off, its user id at @p user_off and its time at @p
+ * time_off. */
+static int pick_victim(const void *base,
+                       size_t stride,
+                       int count,
+                       size_t origin_off,
+                       size_t user_off,
+                       size_t time_off,
+                       int user_id,
+                       uint32_t session_id) {
+#define ITEM(i) ((const char *)base + (size_t)(i)*stride)
+#define SESSION(i) (((const turn_origin_t *)(ITEM(i) + origin_off))->session_id)
+#define USER(i) (*(const int *)(ITEM(i) + user_off))
+#define MADE(i) (*(const time_t *)(ITEM(i) + time_off))
+   int own = -1, shared = -1;
+   for (int i = 0; i < count; i++) {
+      if (USER(i) == user_id && SESSION(i) == session_id) {
+         if (own < 0 || MADE(i) < MADE(own))
+            own = i;
+         continue;
+      }
+      int same = 0;
+      for (int j = 0; j < count; j++) {
+         if (SESSION(j) == SESSION(i) && USER(j) == USER(i))
+            same++;
+      }
+      if (same > 1 && (shared < 0 || MADE(i) < MADE(shared)))
+         shared = i;
+   }
+#undef ITEM
+#undef SESSION
+#undef USER
+#undef MADE
+   return own >= 0 ? own : shared;
 }
 
 int email_service_create_draft(int user_id,
@@ -999,7 +1018,10 @@ int email_service_create_draft(int user_id,
                                char *draft_id_out,
                                size_t draft_id_len,
                                char *from_account_out,
-                               size_t from_account_len) {
+                               size_t from_account_len,
+                               const turn_origin_t *origin) {
+   if (!origin || origin->turn_token == 0)
+      return EMAIL_RC_FAILURE; /* only a user's running turn prepares a draft */
    if (from_account_out && from_account_len > 0)
       from_account_out[0] = '\0';
 
@@ -1021,7 +1043,7 @@ int email_service_create_draft(int user_id,
       return EMAIL_RC_FAILURE;
 
    email_account_t acct;
-   int find_rc = find_account(user_id, account_name, &acct);
+   int find_rc = email_svc_find_account(user_id, account_name, &acct);
    if (find_rc != EMAIL_RC_OK) {
       sodium_memzero(&acct, sizeof(acct));
       return find_rc;
@@ -1044,20 +1066,21 @@ int email_service_create_draft(int user_id,
    }
 
    if (slot < 0) {
-      /* Evict oldest */
-      time_t oldest = 0;
-      for (int i = 0; i < EMAIL_MAX_DRAFTS; i++) {
-         if (oldest == 0 || s_email.drafts[i].created_at < oldest) {
-            oldest = s_email.drafts[i].created_at;
-            slot = i;
-         }
+      slot = pick_victim(s_email.drafts, sizeof(email_draft_t), EMAIL_MAX_DRAFTS,
+                         offsetof(email_draft_t, origin), offsetof(email_draft_t, user_id),
+                         offsetof(email_draft_t, created_at), user_id, origin->session_id);
+      if (slot < 0) {
+         pthread_mutex_unlock(&s_email.draft_mutex);
+         sodium_memzero(&acct, sizeof(acct));
+         return EMAIL_RC_PENDING_FULL;
       }
       sodium_memzero(&s_email.drafts[slot], sizeof(email_draft_t));
    }
 
    email_draft_t *d = &s_email.drafts[slot];
    d->user_id = user_id;
-   d->created_at = time(NULL);
+   d->origin = turn_origin_stored(origin);
+   d->created_at = pending_slots_now();
    d->used = false;
    generate_draft_id(d->draft_id, sizeof(d->draft_id));
 
@@ -1082,7 +1105,7 @@ int email_service_create_draft(int user_id,
 
 static bool is_throttled(int user_id) {
    pthread_mutex_lock(&s_email.draft_mutex);
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    bool throttled = false;
    for (int i = 0; i < s_email.throttle_count; i++) {
       if (s_email.throttle[i].user_id == user_id) {
@@ -1101,7 +1124,7 @@ static bool is_throttled(int user_id) {
 
 static void record_confirm_failure(int user_id) {
    pthread_mutex_lock(&s_email.draft_mutex);
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    for (int i = 0; i < s_email.throttle_count; i++) {
       if (s_email.throttle[i].user_id == user_id) {
          if (now - s_email.throttle[i].first_fail > EMAIL_CONFIRM_LOCKOUT_SEC) {
@@ -1124,7 +1147,81 @@ static void record_confirm_failure(int user_id) {
    pthread_mutex_unlock(&s_email.draft_mutex);
 }
 
-int email_service_confirm_send(int user_id, const char *draft_id) {
+
+static void expire_pending_trash_locked(void);
+
+int email_service_describe_draft(int user_id,
+                                 uint32_t session_id,
+                                 const char *draft_id,
+                                 char *out,
+                                 size_t out_len,
+                                 int *valid_for_sec) {
+   if (!draft_id || !out || out_len == 0) {
+      return EMAIL_RC_FAILURE;
+   }
+   int rc = EMAIL_RC_FAILURE;
+   pthread_mutex_lock(&s_email.draft_mutex);
+   expire_drafts_locked();
+   for (int i = 0; i < EMAIL_MAX_DRAFTS; i++) {
+      const email_draft_t *d = &s_email.drafts[i];
+      if (d->draft_id[0] && !d->used && d->user_id == user_id &&
+          d->origin.session_id == session_id && strcmp(d->draft_id, draft_id) == 0) {
+         char subject[160], body[320], name[96];
+         str_excerpt_line(d->subject, 100, subject, sizeof(subject));
+         str_excerpt_line(d->body, 200, body, sizeof(body));
+         str_excerpt_line(d->to_name, 48, name, sizeof(name));
+         /* The address first: a display name is the model's to choose. */
+         const int n = snprintf(out, out_len,
+                                "send email to %s%s%s%s from %s, subject \"%s\": "
+                                "\"%s\"",
+                                d->to_address, name[0] ? " (" : "", name, name[0] ? ")" : "",
+                                d->from_account, subject, body);
+         if (valid_for_sec) {
+            *valid_for_sec = (int)(EMAIL_DRAFT_EXPIRY_SEC - (pending_slots_now() - d->created_at));
+         }
+         rc = (n > 0 && (size_t)n < out_len) ? EMAIL_RC_OK : EMAIL_RC_FAILURE;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_email.draft_mutex);
+   return rc;
+}
+
+int email_service_describe_pending_trash(int user_id,
+                                         uint32_t session_id,
+                                         const char *pending_id,
+                                         char *out,
+                                         size_t out_len,
+                                         int *valid_for_sec) {
+   if (!pending_id || !out || out_len == 0) {
+      return EMAIL_RC_FAILURE;
+   }
+   int rc = EMAIL_RC_FAILURE;
+   pthread_mutex_lock(&s_email.pending_trash_mutex);
+   expire_pending_trash_locked();
+   for (int i = 0; i < EMAIL_MAX_PENDING_TRASH; i++) {
+      const email_pending_trash_t *t = &s_email.pending_trash[i];
+      if (t->pending_id[0] && !t->used && t->user_id == user_id &&
+          t->origin.session_id == session_id && strcmp(t->pending_id, pending_id) == 0) {
+         char subject[160], from[160];
+         str_excerpt_line(t->subject, 100, subject, sizeof(subject));
+         str_excerpt_line(t->from, EMAIL_TRASH_FROM_SHOWN, from, sizeof(from));
+         if (valid_for_sec) {
+            *valid_for_sec = (int)(EMAIL_PENDING_TRASH_EXPIRY_SEC -
+                                   (pending_slots_now() - t->created_at));
+         }
+         const int n = snprintf(out, out_len,
+                                "move to Trash the email from %s, subject \"%s\" (account %s)",
+                                from, subject, t->account_name);
+         rc = (n > 0 && (size_t)n < out_len) ? EMAIL_RC_OK : EMAIL_RC_FAILURE;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_email.pending_trash_mutex);
+   return rc;
+}
+
+int email_service_confirm_send(int user_id, const char *draft_id, const turn_origin_t *origin) {
    if (!draft_id || !draft_id[0])
       return EMAIL_CONFIRM_RC_NOT_FOUND;
 
@@ -1162,6 +1259,16 @@ int email_service_confirm_send(int user_id, const char *draft_id) {
       return EMAIL_CONFIRM_RC_NOT_FOUND;
    }
 
+   /* The person's yes comes in a later turn of the session that drafted it.
+    * Refused here, the draft stays (and the throttle isn't charged): the right
+    * turn can still confirm it. */
+   const turn_origin_rc_t orc = turn_origin_check(&found->origin, origin);
+   if (orc != TURN_ORIGIN_OK) {
+      pthread_mutex_unlock(&s_email.draft_mutex);
+      OLOG_WARNING("email: confirm_send refused (%s)", turn_origin_refusal(orc));
+      return email_confirm_rc(orc);
+   }
+
    /* Mark as used before releasing mutex */
    found->used = true;
 
@@ -1182,16 +1289,16 @@ int email_service_confirm_send(int user_id, const char *draft_id) {
     * disabled, deleted, or flipped read-only between draft and confirm, fail
     * rather than fall back to a different mailbox. */
    email_account_t acct;
-   if (find_account(user_id, from_account, &acct) != EMAIL_RC_OK || acct.read_only) {
+   if (email_svc_find_account(user_id, from_account, &acct) != EMAIL_RC_OK || acct.read_only) {
       OLOG_WARNING("email: confirm_send account '%s' no longer available/writable", from_account);
       sodium_memzero(&acct, sizeof(acct));
       return EMAIL_CONFIRM_RC_ACCOUNT_GONE;
    }
 
    /* Gmail API path */
-   if (is_gmail_api_account(&acct)) {
+   if (email_svc_is_gmail_api(&acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(&acct, token, sizeof(token)) != 0) {
+      if (email_svc_gmail_token(&acct, token, sizeof(token), NULL) != 0) {
          sodium_memzero(token, sizeof(token));
          return 1;
       }
@@ -1202,7 +1309,7 @@ int email_service_confirm_send(int user_id, const char *draft_id) {
 
    /* IMAP/SMTP path */
    email_conn_t conn;
-   int rc = build_conn_for_account(&acct, &conn);
+   int rc = email_svc_build_conn(&acct, &conn);
    if (rc != 0) {
       sodium_memzero(&conn, sizeof(conn));
       return 1;
@@ -1223,14 +1330,14 @@ int email_service_list_folders(int user_id, const char *account_name, char *out,
    out[0] = '\0';
 
    email_account_t acct;
-   int find_rc = find_account(user_id, account_name, &acct);
+   int find_rc = email_svc_find_account(user_id, account_name, &acct);
    if (find_rc != EMAIL_RC_OK)
       return find_rc;
 
    /* Gmail API path */
-   if (is_gmail_api_account(&acct)) {
+   if (email_svc_is_gmail_api(&acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(&acct, token, sizeof(token)) != 0) {
+      if (email_svc_gmail_token(&acct, token, sizeof(token), NULL) != 0) {
          sodium_memzero(token, sizeof(token));
          return 1;
       }
@@ -1241,7 +1348,7 @@ int email_service_list_folders(int user_id, const char *account_name, char *out,
 
    /* IMAP path */
    email_conn_t conn;
-   int rc = build_conn_for_account(&acct, &conn);
+   int rc = email_svc_build_conn(&acct, &conn);
    if (rc != 0) {
       sodium_memzero(&conn, sizeof(conn));
       return 1;
@@ -1257,7 +1364,7 @@ int email_service_list_folders(int user_id, const char *account_name, char *out,
  * ============================================================================= */
 
 static void expire_pending_trash_locked(void) {
-   time_t now = time(NULL);
+   time_t now = pending_slots_now();
    for (int i = 0; i < EMAIL_MAX_PENDING_TRASH; i++) {
       if (s_email.pending_trash[i].pending_id[0] && !s_email.pending_trash[i].used &&
           now - s_email.pending_trash[i].created_at > EMAIL_PENDING_TRASH_EXPIRY_SEC) {
@@ -1274,32 +1381,52 @@ int email_service_create_pending_trash(int user_id,
                                        char *subject_out,
                                        size_t subject_len,
                                        char *from_out,
-                                       size_t from_len) {
+                                       size_t from_len,
+                                       const turn_origin_t *origin) {
+   if (!origin || origin->turn_token == 0)
+      return EMAIL_RC_FAILURE; /* only a user's running turn prepares a trash */
    if (!message_id || !message_id[0])
       return 1;
 
    /* Find account — must not be read-only */
    email_account_t acct;
    if (account_name && account_name[0]) {
-      if (find_account(user_id, account_name, &acct) != 0)
+      if (email_svc_find_account(user_id, account_name, &acct) != 0) {
+         sodium_memzero(&acct, sizeof(acct));
          return 1;
+      }
    } else {
       /* Try to find account that can access this message */
-      if (find_account(user_id, NULL, &acct) != 0)
+      if (email_svc_find_account(user_id, NULL, &acct) != 0) {
+         sodium_memzero(&acct, sizeof(acct));
          return 1;
+      }
    }
-   if (acct.read_only)
+   if (acct.read_only) {
+      sodium_memzero(&acct, sizeof(acct));
       return EMAIL_ACCT_RC_READONLY;
+   }
 
-   /* Fetch message metadata for confirmation display */
+   /* From and Subject for the confirmation: headers only, no body fetched (and
+    * on IMAP the message isn't marked read). */
    email_message_t msg = { 0 };
-   int read_rc = read_single_account(&acct, message_id, &msg, false);
+   const email_read_opts_t headers = { .headers_only = true };
+   int read_rc = email_svc_read_single(&acct, message_id, &headers, &msg, NULL, false);
    char fetched_subject[256] = "(unknown)";
    char fetched_from[128] = "(unknown)";
    if (read_rc == 0) {
+      /* snprintf cuts bytes; a character cut in two would reach the
+       * confirmation text as invalid UTF-8, so drop any such tail. */
       snprintf(fetched_subject, sizeof(fetched_subject), "%s", msg.subject);
-      snprintf(fetched_from, sizeof(fetched_from), "%.63s%s%.63s", msg.from_name,
-               msg.from_name[0] ? " " : "", msg.from_addr);
+      utf8_trim_incomplete(fetched_subject);
+      char from[2 * sizeof(msg.from_name) + sizeof(msg.from_addr) + 8];
+      email_display_mailbox(msg.from_name, msg.from_addr, from, sizeof(from));
+      /* A long name would push the address out of the confirmation (excerpted
+       * to EMAIL_TRASH_FROM_SHOWN); the address is the part that identifies. */
+      if (strlen(from) > EMAIL_TRASH_FROM_SHOWN && msg.from_addr[0])
+         email_display_mailbox(NULL, msg.from_addr, from, sizeof(from));
+      safe_strncpy(fetched_from, from, sizeof(fetched_from));
+      utf8_trim_incomplete(fetched_from);
       email_message_free(&msg);
    }
 
@@ -1321,20 +1448,22 @@ int email_service_create_pending_trash(int user_id,
    }
 
    if (slot < 0) {
-      /* Evict oldest */
-      time_t oldest = 0;
-      for (int i = 0; i < EMAIL_MAX_PENDING_TRASH; i++) {
-         if (oldest == 0 || s_email.pending_trash[i].created_at < oldest) {
-            oldest = s_email.pending_trash[i].created_at;
-            slot = i;
-         }
+      slot = pick_victim(s_email.pending_trash, sizeof(email_pending_trash_t),
+                         EMAIL_MAX_PENDING_TRASH, offsetof(email_pending_trash_t, origin),
+                         offsetof(email_pending_trash_t, user_id),
+                         offsetof(email_pending_trash_t, created_at), user_id, origin->session_id);
+      if (slot < 0) {
+         pthread_mutex_unlock(&s_email.pending_trash_mutex);
+         sodium_memzero(&acct, sizeof(acct));
+         return EMAIL_RC_PENDING_FULL;
       }
       sodium_memzero(&s_email.pending_trash[slot], sizeof(email_pending_trash_t));
    }
 
    email_pending_trash_t *pt = &s_email.pending_trash[slot];
    pt->user_id = user_id;
-   pt->created_at = time(NULL);
+   pt->origin = turn_origin_stored(origin);
+   pt->created_at = pending_slots_now();
    pt->used = false;
    generate_draft_id(pt->pending_id, sizeof(pt->pending_id));
 
@@ -1346,15 +1475,16 @@ int email_service_create_pending_trash(int user_id,
    snprintf(pending_id_out, pending_id_len, "%s", pt->pending_id);
 
    pthread_mutex_unlock(&s_email.pending_trash_mutex);
+   sodium_memzero(&acct, sizeof(acct));
    return 0;
 }
 
 /** Execute trash on a resolved account + message_id */
 static int execute_trash(email_account_t *acct, const char *message_id) {
    /* Gmail API path */
-   if (is_gmail_api_account(acct)) {
+   if (email_svc_is_gmail_api(acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(acct, token, sizeof(token)) != 0) {
+      if (email_svc_gmail_token(acct, token, sizeof(token), NULL) != 0) {
          sodium_memzero(token, sizeof(token));
          return 1;
       }
@@ -1363,41 +1493,24 @@ static int execute_trash(email_account_t *acct, const char *message_id) {
       return rc;
    }
 
-   /* IMAP path — parse composite "folder:uid" */
-   char imap_folder[128] = "INBOX";
-   const char *uid_str = message_id;
-
-   const char *last_colon = strrchr(message_id, ':');
-   if (last_colon) {
-      size_t folder_len = last_colon - message_id;
-      if (folder_len > 0 && folder_len < sizeof(imap_folder)) {
-         memcpy(imap_folder, message_id, folder_len);
-         imap_folder[folder_len] = '\0';
-      }
-      uid_str = last_colon + 1;
-   }
-
-   if (!validate_folder_name(imap_folder))
-      return 1;
-
-   char *endptr = NULL;
-   unsigned long uid_val = strtoul(uid_str, &endptr, 10);
-   if (!endptr || *endptr != '\0' || uid_val == 0 || uid_val > UINT32_MAX)
+   char imap_folder[128];
+   uint32_t uid_val = 0;
+   if (!email_svc_parse_imap_id(message_id, imap_folder, sizeof(imap_folder), &uid_val, false))
       return 1;
 
    email_conn_t conn;
-   int rc = build_conn_for_account(acct, &conn);
+   int rc = email_svc_build_conn(acct, &conn);
    if (rc != 0) {
       sodium_memzero(&conn, sizeof(conn));
       return 1;
    }
 
-   rc = email_trash_message(&conn, imap_folder, (uint32_t)uid_val, is_gmail_imap_server(acct));
+   rc = email_trash_message(&conn, imap_folder, uid_val);
    sodium_memzero(&conn, sizeof(conn));
    return rc;
 }
 
-int email_service_confirm_trash(int user_id, const char *pending_id) {
+int email_service_confirm_trash(int user_id, const char *pending_id, const turn_origin_t *origin) {
    if (!pending_id || !pending_id[0])
       return EMAIL_CONFIRM_RC_NOT_FOUND;
 
@@ -1433,6 +1546,14 @@ int email_service_confirm_trash(int user_id, const char *pending_id) {
       return EMAIL_CONFIRM_RC_NOT_FOUND;
    }
 
+   /* As for a draft: a later turn of the session that asked. */
+   const turn_origin_rc_t orc = turn_origin_check(&found->origin, origin);
+   if (orc != TURN_ORIGIN_OK) {
+      pthread_mutex_unlock(&s_email.pending_trash_mutex);
+      OLOG_WARNING("email: confirm_trash refused (%s)", turn_origin_refusal(orc));
+      return email_confirm_rc(orc);
+   }
+
    found->used = true;
 
    /* Copy data locally before releasing mutex */
@@ -1447,7 +1568,7 @@ int email_service_confirm_trash(int user_id, const char *pending_id) {
     * flipped read-only, disabled, or deleted between 'trash' and 'confirm_trash'
     * must not still execute the delete (mirrors confirm_send). */
    email_account_t acct;
-   if (find_account(user_id, account_name, &acct) != EMAIL_RC_OK || acct.read_only) {
+   if (email_svc_find_account(user_id, account_name, &acct) != EMAIL_RC_OK || acct.read_only) {
       OLOG_WARNING("email: confirm_trash account '%s' no longer available/writable", account_name);
       sodium_memzero(&acct, sizeof(acct));
       return EMAIL_CONFIRM_RC_ACCOUNT_GONE;
@@ -1467,10 +1588,10 @@ int email_service_archive(int user_id, const char *account_name, const char *mes
    /* Resolve account */
    email_account_t acct;
    if (account_name && account_name[0]) {
-      if (find_account(user_id, account_name, &acct) != 0)
+      if (email_svc_find_account(user_id, account_name, &acct) != 0)
          return 1;
    } else {
-      if (find_account(user_id, NULL, &acct) != 0)
+      if (email_svc_find_account(user_id, NULL, &acct) != 0)
          return 1;
    }
 
@@ -1478,9 +1599,9 @@ int email_service_archive(int user_id, const char *account_name, const char *mes
       return EMAIL_ACCT_RC_READONLY;
 
    /* Gmail API path */
-   if (is_gmail_api_account(&acct)) {
+   if (email_svc_is_gmail_api(&acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      if (get_gmail_token(&acct, token, sizeof(token)) != 0) {
+      if (email_svc_gmail_token(&acct, token, sizeof(token), NULL) != 0) {
          sodium_memzero(token, sizeof(token));
          return 1;
       }
@@ -1489,36 +1610,19 @@ int email_service_archive(int user_id, const char *account_name, const char *mes
       return rc;
    }
 
-   /* IMAP path — parse composite "folder:uid" */
-   char imap_folder[128] = "INBOX";
-   const char *uid_str = message_id;
-
-   const char *last_colon = strrchr(message_id, ':');
-   if (last_colon) {
-      size_t folder_len = last_colon - message_id;
-      if (folder_len > 0 && folder_len < sizeof(imap_folder)) {
-         memcpy(imap_folder, message_id, folder_len);
-         imap_folder[folder_len] = '\0';
-      }
-      uid_str = last_colon + 1;
-   }
-
-   if (!validate_folder_name(imap_folder))
-      return 1;
-
-   char *endptr = NULL;
-   unsigned long uid_val = strtoul(uid_str, &endptr, 10);
-   if (!endptr || *endptr != '\0' || uid_val == 0 || uid_val > UINT32_MAX)
+   char imap_folder[128];
+   uint32_t uid_val = 0;
+   if (!email_svc_parse_imap_id(message_id, imap_folder, sizeof(imap_folder), &uid_val, false))
       return 1;
 
    email_conn_t conn;
-   int rc = build_conn_for_account(&acct, &conn);
+   int rc = email_svc_build_conn(&acct, &conn);
    if (rc != 0) {
       sodium_memzero(&conn, sizeof(conn));
       return 1;
    }
 
-   rc = email_archive_message(&conn, imap_folder, (uint32_t)uid_val, is_gmail_imap_server(&acct));
+   rc = email_archive_message(&conn, imap_folder, uid_val);
    sodium_memzero(&conn, sizeof(conn));
    return rc;
 }

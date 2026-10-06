@@ -29,9 +29,10 @@
  * (research_db_claims_add, one BEGIN/COMMIT for N rows) EXISTS for a caller that
  * accumulates claims in memory — but the live loop does NOT use it: research_record
  * records ONE claim per tool call (via research_db_claim_add → the n=1 path), each
- * its own transaction.  That stays cheap because WAL + synchronous=NORMAL make a
- * COMMIT a lock-held frame append with no fsync, and claims are dispersed across
- * seconds of LLM latency, so they never burst against the global auth_db mutex.
+ * its own transaction.  That stays cheap: in WAL a COMMIT is a lock-held frame
+ * append plus one WAL fsync (the build's default synchronous=FULL; ~2 ms), and
+ * claims are dispersed across seconds of LLM latency, so they never burst
+ * against the global auth_db mutex.
  *
  * SECURITY: All SQL is constant or parameterized.  research_db_run_get() is the
  * only user-facing reader and binds user_id; every other function is a system

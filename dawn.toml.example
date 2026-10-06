@@ -83,6 +83,10 @@
                                   # Env: DAWN_VAD_MAX_RECORDING_DURATION
 # preroll_ms = 500                # Audio to keep before speech detected
                                   # Env: DAWN_VAD_PREROLL_MS
+# adaptive_endpoint = "off"       # "off" | "shadow": at each pause, transcribe early and
+                                  # log whether it matched (measurement only; replies are
+                                  # unchanged). WebUI always-on voice; Whisper only.
+                                  # Env: DAWN_VAD_ADAPTIVE_ENDPOINT
 
 [vad.chunking]
 # enabled = true                  # Enable chunked transcription for long utterances
@@ -185,8 +189,6 @@
                                   # compaction is a summarization pass, so a small fast model keeps it
                                   # cheap (same reasoning as extraction; not separately benchmarked). A
                                   # "vendor/model" slug when compact_provider = "openrouter".
-# conversation_logging = false    # Save chat history to log files (WebUI saves to DB)
-                                  # Env: DAWN_LLM_CONVERSATION_LOGGING
 # rate_limit_enabled = true       # Throttle cloud API calls to avoid 429 errors
                                   # Env: DAWN_LLM_RATE_LIMIT_ENABLED
 # rate_limit_rpm = 40             # Max cloud API requests per minute
@@ -479,12 +481,10 @@
                                   # Range: 256-4096
 # max_images = 5                  # Maximum images per message
                                   # Range: 1-10
-# capture_history_count = 1       # Tool-captured images (e.g. the `viewing` camera tool) kept
-                                  # visible in conversation history for follow-up questions.
-                                  # 0 = unlimited: images are only bounded by normal context
-                                  # compaction (no per-capture eviction), so a long session with
-                                  # repeated captures can grow noticeably before compaction runs.
-                                  # Range: 0-50
+# capture_history_count            # Retired (ignored): an image a tool returns stays in the
+                                  # conversation, inside its result, until compaction summarizes
+                                  # it; models.toml [max_request_images] bounds how many a request
+                                  # carries.
 
 # =============================================================================
 # Document Library (RAG)
@@ -588,8 +588,16 @@
 # expire_grace_days = 7           # Keep an expiring fact visible N days past its reference date
 # prune_expired_days = 30         # Recoverable buffer before hard-delete (0 = delete on expiry)
 # conversation_idle_timeout_min = 15  # Auto-save voice conversations after N minutes idle
-                                  # (0 = disabled, minimum 10 if enabled)
-# default_voice_user_id = 1       # User account for local microphone and DAP conversations
+                                  # (0 = disabled, minimum 5 if enabled)
+# default_voice_user_id = 1       # User the local microphone speaks for while the Local Device
+                                  # isn't assigned on the admin satellite page (assigned, its mic
+                                  # and speaker are that user's).  Satellites not assigned to a
+                                  # user are guests: no personal memory, data, alerts or persona.
+# fact_cache_mb = 80              # RAM for one user's facts held for semantic search.  A fact
+                                  # takes about 1.6 KB with the default 384-dim model (about
+                                  # 50,000 facts); larger models hold fewer.  Past it, recently
+                                  # used facts and note links are kept first, then the most
+                                  # confident and recent; the rest are found by keyword search.
 
 [memory.decay]
 # enabled = true                  # Enable nightly confidence decay
@@ -771,6 +779,26 @@ citation_reinforcement_boost = 0.05
                                       # threshold and you observe drops.
 # min_score = 0.4                     # Floor — anything below is dropped.
                                       # Range: 0.0 - 1.0
+# document_min_relevance = 0.48       # Documents only: how far a passage's
+                                      # similarity must sit above your
+                                      # corpus-typical level (0 = typical,
+                                      # 1 = identical) to be injected.
+                                      # Works across embedding models.
+                                      # 0 disables.  Range: 0.0 - 1.0
+# fact_min_relevance = 0.34           # Same measure for remembered facts,
+                                      # against your other facts.  Injection
+                                      # only; memory search is unaffected.
+                                      # 0 disables.  Range: 0.0 - 1.0
+# summary_min_relevance = 0.22        # Same measure for past conversation
+                                      # summaries found by meaning (last 30
+                                      # days), in context injection and recall.
+                                      # Keyword matches always count.
+                                      # 0 disables.  Range: 0.0 - 1.0
+# entity_min_relevance = 0.40         # Same measure for people, places and
+                                      # things.  An entity the message names
+                                      # always counts.  Injection, recall and
+                                      # memory search.  0 disables.
+                                      # Range: 0.0 - 1.0
 # classifier_enabled = false          # RAGRoute-style source classifier
                                       # (default off — opt-in only after probe).
 # weight_semantic = 1.0               # Generative-Agents three-factor ranker
@@ -807,24 +835,11 @@ citation_reinforcement_boost = 0.05
 # recent_email = 0.5
 # dawn_background = 0.8               # Phase 2
 
-[memory.focus_injection.dedup]
-# Re-injection policy.  Active when [memory.focus_injection].enabled = true;
-# dedup is a correctness layer on top of focus injection (no separate enable
-# flag — the two knobs below ARE the tuning surface).
-#
-# An item is re-injected on a later turn only if EITHER:
-#   - turns_since_last_inject > recent_window_turns AND current_score >= min_score
-#       (strict greater-than: at recent_window_turns=8, turn 9+ admits)
-#   - current_score >= prior_score * score_uplift_factor
-#       (uplift path admits regardless of window)
-#
-# Tuning notes:
-#   - recent_window_turns = 0 effectively disables time-based dedup —
-#     turns_since=1 already passes, so only score_uplift can suppress.
-#   - High recent_window_turns (≤100) requires score-uplift for re-admission,
-#     useful for "only show this fact if it gets noticeably more relevant."
-# recent_window_turns = 8             # Range: 0 - 100
-# score_uplift_factor = 1.5           # Range: 1.0 - 5.0
+# Re-injection: a turn sends only the items its conversation doesn't already
+# show, read from the conversation itself; an item already shown is named on a
+# "[still relevant: ...]" line instead.  There is nothing to tune: the former
+# [memory.focus_injection.dedup] keys (recent_window_turns,
+# score_uplift_factor) are retired and ignored.
 
 # =============================================================================
 # [memory.focus_injection.dominant_token_heuristic]
@@ -997,8 +1012,9 @@ citation_reinforcement_boost = 0.05
 # max_alerts_per_hour = 4         # Global spoken-alert budget; over-budget
                                   #   alerts degrade to a silent banner. 0-100;
                                   #   0 = no limit (every alert is always spoken).
-# inject_into_sessions = false    # Also make an active conversation aware of a
-                                  #   fired alert (so Friday can reference it).
+# inject_into_sessions = false    # Also make the watch owner's conversations aware
+                                  #   of a fired alert for 10 minutes (so Friday can
+                                  #   reference it). Only that user's surfaces see it.
 # judge_enabled = false           # P2 LLM salience judge (not yet active).
 # judge_threshold = 3.5           # P2 score floor (1.0-5.0).
 # quiet_hours = ""                # P1 quiet-hours window, e.g. "23:00-07:00".
@@ -1170,7 +1186,7 @@ citation_reinforcement_boost = 0.05
 # audio_device = ""                 # USB sound card device for call audio (e.g. "hw:2,0")
 # sms_retention_days = 90           # Auto-delete SMS logs older than N days
 # call_log_retention_days = 90      # Auto-delete call logs older than N days
-# rate_limit_sms_per_min = 5        # UX rate limit: max SMS per minute
+# rate_limit_sms_per_min = 10       # UX rate limit: max SMS per minute
 # rate_limit_calls_per_min = 3      # UX rate limit: max dial attempts per minute
 # rate_limit_sms_per_day = 30       # UX rate limit: max SMS per day
 #

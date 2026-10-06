@@ -34,6 +34,8 @@ APT_PACKAGES=(
    libxml2-dev
    # Calendar
    libical-dev
+   # Email: reading messages (MIME parts, charsets)
+   libgmime-3.0-dev
    # Memory BM25 keyword index (Porter2 stemming) — hard build dep, links memory_stem.c
    libstemmer-dev
    # Logging

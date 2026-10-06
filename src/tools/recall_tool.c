@@ -58,6 +58,7 @@ static const treg_param_t recall_params[] = {
 
 static const tool_metadata_t recall_metadata = {
    .name = "recall",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "recall",
    .description =
        "Your FIRST move for any \"what do we know / what's the status / how does X stand / tell me "
@@ -71,7 +72,7 @@ static const tool_metadata_t recall_metadata = {
        "text. This is the high-level context tool; the per-source search tools are for targeted "
        "follow-ups.",
    .params = recall_params,
-   .param_count = 1,
+   .param_count = TOOL_PARAM_COUNT(recall_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
    .is_available = recall_is_available,
@@ -107,6 +108,8 @@ static char *recall_callback(const char *action, char *value, int *should_respon
       return strdup("Error: recall needs a query (a topic, person, project, or status).");
 
    const int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    const int dims = embedding_engine_dims();
    if (dims <= 0)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: embedding engine not initialized.");
@@ -129,6 +132,9 @@ static char *recall_callback(const char *action, char *value, int *should_respon
       .top_k = rc->top_k,
       .min_score = rc->min_score,
       .budget_bytes = rc->budget_bytes,
+      /* Recall shows each item as one capped line with a read-pointer, so
+       * that, not the full text, is what an item costs. */
+      .item_bytes = recall_format_item_bytes,
    };
 
    focus_compose_result_t result;

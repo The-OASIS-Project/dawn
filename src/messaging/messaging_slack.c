@@ -388,8 +388,17 @@ static void dispatch_to_engine(const char *channel_id,
    cb = s_inbound_cb;
    pthread_mutex_unlock(&s_inbound_cb_mutex);
    if (cb) {
-      const char *display = (user_id && user_id[0]) ? user_id : "slack_user";
-      cb("slack", channel_id, display, body_text, timestamp);
+      /* DMs only (filtered by the caller): one person per chat. */
+      messaging_inbound_t in = {
+         .provider = "slack",
+         .provider_address = channel_id,
+         .sender_id = user_id,
+         .sender_display = user_id,
+         .body = body_text,
+         .timestamp = timestamp,
+         .chat_kind = MESSAGING_CHAT_ONE_TO_ONE,
+      };
+      cb(&in);
    }
 }
 
@@ -439,6 +448,13 @@ static void handle_event_envelope(struct json_object *root) {
    if (!channel_id || channel_id[0] != 'D') {
       goto ack;
    }
+   /* Slack names the channel's kind; only a direct message ("im") holds
+    * one person.  Older payloads without the field fall back on the 'D'. */
+   struct json_object *ctype_obj = NULL;
+   if (json_object_object_get_ex(event, "channel_type", &ctype_obj) && ctype_obj &&
+       strcmp(json_object_get_string(ctype_obj), "im") != 0) {
+      goto ack;
+   }
 
    /* Bot filter: skip messages from bot_id (don't echo ourselves). */
    struct json_object *bot_id_obj = NULL;
@@ -473,6 +489,10 @@ static void handle_event_envelope(struct json_object *root) {
       }
    }
 
+   /* The engine answers only the person who linked the channel, by id. */
+   if (!user_id_str || !user_id_str[0]) {
+      goto ack;
+   }
    dispatch_to_engine(channel_id, user_id_str, body_text, timestamp);
 
 ack:
@@ -1008,6 +1028,7 @@ static int sk_reconnect(void) {
 
 static const messaging_driver_t s_slack_driver = {
    .name = "slack",
+   .authenticates_sender = true,
    .out_format = MSG_FMT_SLACK_MRKDWN,
    .init = sk_init,
    .shutdown = sk_shutdown,

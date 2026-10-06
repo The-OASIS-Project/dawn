@@ -51,15 +51,7 @@
 extern "C" {
 #endif
 
-/**
- * @brief Send response text to satellite (non-streaming)
- *
- * For short responses or when streaming is not desired.
- *
- * @param session DAP2 session
- * @param text Response text
- */
-void satellite_send_response(session_t *session, const char *text);
+/* satellite_send_response: webui_server.h (callers outside the WebUI use it). */
 
 /**
  * @brief Start streaming response to satellite

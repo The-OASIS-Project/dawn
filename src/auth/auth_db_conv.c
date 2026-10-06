@@ -34,7 +34,9 @@
 #include <string.h>
 #include <time.h>
 
+#include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
+#include "llm/llm_context_text.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -107,8 +109,45 @@ static void build_like_pattern(const char *query, char *pattern, size_t pattern_
  * ============================================================================= */
 
 int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
+   return conv_db_create_ex(user_id, title, NULL, false, conv_id_out);
+}
+
+int conv_db_create_with_origin(int user_id,
+                               const char *title,
+                               const char *origin,
+                               int64_t *conv_id_out) {
+   return conv_db_create_ex(user_id, title, origin, false, conv_id_out);
+}
+
+int conv_db_create_ex(int user_id,
+                      const char *title,
+                      const char *origin,
+                      bool is_private,
+                      int64_t *conv_id_out) {
    if (user_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
+   }
+
+   /* Use 'webui' as default origin if not specified */
+   const bool webui = !origin || !origin[0] || strcmp(origin, "webui") == 0;
+   const char *safe_origin = webui ? "webui" : origin;
+
+   /* Default title if none given, truncated without splitting a UTF-8
+    * character: invalid UTF-8 in a stored title breaks the whole
+    * conversation-list JSON frame on the client. */
+   char safe_title[CONV_TITLE_MAX];
+   if (title && title[0] != '\0') {
+      size_t cut = strlen(title);
+      if (cut > CONV_TITLE_MAX - 1) {
+         cut = CONV_TITLE_MAX - 1;
+         while (cut > 0 && ((unsigned char)title[cut] & 0xC0) == 0x80) {
+            cut--;
+         }
+      }
+      memcpy(safe_title, title, cut);
+      safe_title[cut] = '\0';
+   } else {
+      strcpy(safe_title, webui ? "New Conversation" : "Voice Conversation");
    }
 
    AUTH_DB_LOCK_OR_FAIL();
@@ -129,35 +168,17 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
    }
 
    time_t now = time(NULL);
+   sqlite3_reset(s_db.stmt_conv_create_origin);
+   sqlite3_bind_int(s_db.stmt_conv_create_origin, 1, user_id);
+   sqlite3_bind_text(s_db.stmt_conv_create_origin, 2, safe_title, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 3, (int64_t)now);
+   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 4, (int64_t)now);
+   sqlite3_bind_text(s_db.stmt_conv_create_origin, 5, safe_origin, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 6, (int64_t)now); /* anchor_date = now (v42) */
+   sqlite3_bind_int(s_db.stmt_conv_create_origin, 7, is_private ? 1 : 0);
 
-   /* Use default title if none provided, truncate if too long */
-   char safe_title[CONV_TITLE_MAX];
-   if (title && title[0] != '\0') {
-      size_t cut = strlen(title);
-      if (cut > CONV_TITLE_MAX - 1) {
-         cut = CONV_TITLE_MAX - 1;
-         /* Don't split a multibyte UTF-8 codepoint at the truncation point — invalid
-          * UTF-8 in a stored title breaks the whole conversation-list JSON frame on
-          * the client.  Back up while the cut lands on a 10xxxxxx continuation byte. */
-         while (cut > 0 && ((unsigned char)title[cut] & 0xC0) == 0x80) {
-            cut--;
-         }
-      }
-      memcpy(safe_title, title, cut);
-      safe_title[cut] = '\0';
-   } else {
-      strcpy(safe_title, "New Conversation");
-   }
-
-   sqlite3_reset(s_db.stmt_conv_create);
-   sqlite3_bind_int(s_db.stmt_conv_create, 1, user_id);
-   sqlite3_bind_text(s_db.stmt_conv_create, 2, safe_title, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(s_db.stmt_conv_create, 3, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_conv_create, 4, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_conv_create, 5, (int64_t)now); /* anchor_date = now (v42) */
-
-   int rc = sqlite3_step(s_db.stmt_conv_create);
-   sqlite3_reset(s_db.stmt_conv_create);
+   int rc = sqlite3_step(s_db.stmt_conv_create_origin);
+   sqlite3_reset(s_db.stmt_conv_create_origin);
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_create: insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -169,73 +190,8 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
 
    AUTH_DB_UNLOCK();
 
-   OLOG_INFO("Created conversation %lld for user %d", (long long)*conv_id_out, user_id);
-   conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
-   return AUTH_DB_SUCCESS;
-}
-
-int conv_db_create_with_origin(int user_id,
-                               const char *title,
-                               const char *origin,
-                               int64_t *conv_id_out) {
-   if (user_id <= 0 || !conv_id_out) {
-      return AUTH_DB_INVALID;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   /* Check conversation limit per user */
-   if (CONV_MAX_PER_USER > 0) {
-      sqlite3_reset(s_db.stmt_conv_count);
-      sqlite3_bind_int(s_db.stmt_conv_count, 1, user_id);
-      if (sqlite3_step(s_db.stmt_conv_count) == SQLITE_ROW) {
-         int count = sqlite3_column_int(s_db.stmt_conv_count, 0);
-         if (count >= CONV_MAX_PER_USER) {
-            sqlite3_reset(s_db.stmt_conv_count);
-            AUTH_DB_UNLOCK();
-            return AUTH_DB_LIMIT_EXCEEDED;
-         }
-      }
-      sqlite3_reset(s_db.stmt_conv_count);
-   }
-
-   time_t now = time(NULL);
-
-   /* Use default title if none provided, truncate if too long */
-   char safe_title[CONV_TITLE_MAX];
-   if (title && title[0] != '\0') {
-      safe_strscpy(safe_title, title);
-   } else {
-      strcpy(safe_title, "Voice Conversation");
-   }
-
-   /* Use 'webui' as default origin if not specified */
-   const char *safe_origin = (origin && origin[0] != '\0') ? origin : "webui";
-
-   /* Insert with origin field using prepared statement */
-   sqlite3_reset(s_db.stmt_conv_create_origin);
-   sqlite3_bind_int(s_db.stmt_conv_create_origin, 1, user_id);
-   sqlite3_bind_text(s_db.stmt_conv_create_origin, 2, safe_title, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 3, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 4, (int64_t)now);
-   sqlite3_bind_text(s_db.stmt_conv_create_origin, 5, safe_origin, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 6, (int64_t)now); /* anchor_date = now (v42) */
-
-   int rc = sqlite3_step(s_db.stmt_conv_create_origin);
-   sqlite3_reset(s_db.stmt_conv_create_origin);
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("conv_db_create_with_origin: insert failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   *conv_id_out = sqlite3_last_insert_rowid(s_db.db);
-
-   AUTH_DB_UNLOCK();
-
-   OLOG_INFO("Created %s conversation %lld for user %d", safe_origin, (long long)*conv_id_out,
-             user_id);
+   OLOG_INFO("Created %s%s conversation %lld for user %d", is_private ? "private " : "",
+             safe_origin, (long long)*conv_id_out, user_id);
    conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
    return AUTH_DB_SUCCESS;
 }
@@ -395,17 +351,14 @@ void conv_free(conversation_t *conv) {
    }
 }
 
-int conv_db_create_continuation(int user_id,
-                                int64_t parent_id,
-                                const char *compaction_summary,
-                                int64_t *conv_id_out) {
+static int create_continuation(int user_id,
+                               int64_t parent_id,
+                               const char *compaction_summary,
+                               int64_t *conv_id_out) {
    if (user_id <= 0 || parent_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
    }
-
    AUTH_DB_LOCK_OR_FAIL();
-
-   /* Verify parent exists and belongs to user, then archive it */
    const char *sql_archive = "UPDATE conversations SET is_archived = 1, updated_at = ? "
                              "WHERE id = ? AND user_id = ?";
    sqlite3_stmt *stmt = NULL;
@@ -440,9 +393,9 @@ int conv_db_create_continuation(int user_id,
    }
 
    /* Get parent title and LLM settings for the continuation */
-   const char *sql_get_parent =
-       "SELECT title, llm_type, cloud_provider, model, tools_mode, thinking_mode, reasoning_effort "
-       "FROM conversations WHERE id = ?";
+   const char *sql_get_parent = "SELECT title, llm_type, cloud_provider, model, tools_mode, "
+                                "thinking_mode, reasoning_effort, "
+                                "is_private FROM conversations WHERE id = ?";
    rc = sqlite3_prepare_v2(s_db.db, sql_get_parent, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
@@ -457,6 +410,9 @@ int conv_db_create_continuation(int user_id,
    char parent_tools_mode[16] = "";
    char parent_thinking_mode[16] = "";
    char parent_reasoning_effort[16] = "";
+   /* A continuation carries the parent's compaction summary, so it must be at
+    * least as private as the parent; otherwise that summary reaches memory. */
+   int parent_private = 0;
 
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       const char *title = (const char *)sqlite3_column_text(stmt, 0);
@@ -483,6 +439,7 @@ int conv_db_create_continuation(int user_id,
       if ((val = (const char *)sqlite3_column_text(stmt, 6)) != NULL) {
          safe_strscpy(parent_reasoning_effort, val);
       }
+      parent_private = sqlite3_column_int(stmt, 7);
    }
    sqlite3_finalize(stmt);
 
@@ -496,8 +453,8 @@ int conv_db_create_continuation(int user_id,
    const char *sql_create =
        "INSERT INTO conversations (user_id, title, created_at, updated_at, continued_from, "
        "compaction_summary, llm_type, cloud_provider, model, tools_mode, thinking_mode, "
-       "reasoning_effort, anchor_date) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+       "reasoning_effort, anchor_date, is_private) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
    rc = sqlite3_prepare_v2(s_db.db, sql_create, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_continuation: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -523,6 +480,7 @@ int conv_db_create_continuation(int user_id,
    sqlite3_bind_text(stmt, 11, parent_thinking_mode, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 12, parent_reasoning_effort, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int64(stmt, 13, (int64_t)now);
+   sqlite3_bind_int(stmt, 14, parent_private != 0);
 
    rc = sqlite3_step(stmt);
    sqlite3_finalize(stmt);
@@ -541,6 +499,21 @@ int conv_db_create_continuation(int user_id,
              (long long)*conv_id_out, (long long)parent_id, user_id);
    conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
    return AUTH_DB_SUCCESS;
+}
+
+int conv_db_create_continuation(int user_id,
+                                int64_t parent_id,
+                                const char *compaction_summary,
+                                int64_t *conv_id_out) {
+   /* Stored as it would be sent (a compaction summary is replayed verbatim,
+    * llm_history_summary_text): neutralized here, once. */
+   char *safe = compaction_summary ? llm_context_neutralize(compaction_summary) : NULL;
+   if (compaction_summary && !safe) {
+      return AUTH_DB_FAILURE;
+   }
+   const int rc = create_continuation(user_id, parent_id, safe, conv_id_out);
+   free(safe);
+   return rc;
 }
 
 /* =============================================================================
@@ -774,12 +747,36 @@ int conv_db_set_title_locked(int64_t conv_id, int user_id, int locked) {
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
+/* Caller holds the auth_db lock.  Detach the per-call usage rows (llm_usage_log)
+ * matching @p where from their conversation: the cost is kept, the link to what
+ * was talked about isn't.  Returns SQLITE_DONE or an error. */
+static int unlink_usage_rows_locked(const char *where, int64_t arg) {
+   char sql[192];
+   snprintf(sql, sizeof(sql), "UPDATE llm_usage_log SET conversation_id = 0 WHERE %s", where);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, arg);
+      rc = sqlite3_step(st);
+   }
+   sqlite3_finalize(st);
+   return rc;
+}
+
 int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    if (conv_id <= 0 || user_id <= 0) {
       return AUTH_DB_INVALID;
    }
 
    AUTH_DB_LOCK_OR_FAIL();
+
+   /* Going private updates the conversation and its continuations together. */
+   const bool txn = is_private &&
+                    auth_db_txn_begin_locked("conv_db_set_private") == AUTH_DB_SUCCESS;
+   if (is_private && !txn) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
 
    sqlite3_reset(s_db.stmt_conv_set_private);
    sqlite3_bind_int(s_db.stmt_conv_set_private, 1, is_private ? 1 : 0);
@@ -790,20 +787,109 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    int changes = sqlite3_changes(s_db.db);
    sqlite3_reset(s_db.stmt_conv_set_private);
 
+   int cascaded = 0;
+   if (rc == SQLITE_DONE && changes > 0 && is_private) {
+      /* Continuations open with a summary of this conversation, and its jobs and
+       * research runs carry its work (and their results feed memory): all go
+       * private with it, and what they continued into or spawned in turn. */
+      sqlite3_stmt *st = NULL;
+      if (sqlite3_prepare_v2(s_db.db,
+                             "WITH RECURSIVE chain(id) AS ("
+                             "  SELECT id FROM conversations WHERE (continued_from = ?1 OR "
+                             "  parent_id = ?1) AND user_id = ?2 "
+                             "  UNION SELECT c.id FROM conversations c JOIN chain ON "
+                             "  (c.continued_from = chain.id OR c.parent_id = chain.id) "
+                             "  WHERE c.user_id = ?2) "
+                             "UPDATE conversations SET is_private = 1 WHERE user_id = ?2 AND "
+                             "is_private = 0 AND id IN (SELECT id FROM chain)",
+                             -1, &st, NULL) == SQLITE_OK) {
+         sqlite3_bind_int64(st, 1, conv_id);
+         sqlite3_bind_int(st, 2, user_id);
+         rc = sqlite3_step(st);
+         cascaded = sqlite3_changes(s_db.db);
+         sqlite3_finalize(st);
+      } else {
+         rc = SQLITE_ERROR;
+      }
+   }
+   if (rc == SQLITE_DONE && changes > 0 && is_private) {
+      /* The per-call usage rows of the user's private conversations (this one and
+       * the continuations just made private) lose their conversation link. */
+      rc = unlink_usage_rows_locked("conversation_id IN (SELECT id FROM conversations WHERE "
+                                    "user_id = ?1 AND is_private = 1)",
+                                    (int64_t)user_id);
+   }
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("conv_db_set_private: update failed: %s", sqlite3_errmsg(s_db.db));
+   }
+   if (txn && auth_db_txn_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                                     "conv_db_set_private") != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
+
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {
-      OLOG_ERROR("conv_db_set_private: update failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
    if (changes > 0) {
-      OLOG_INFO("Conversation %lld privacy set to %s", (long long)conv_id,
-                is_private ? "private" : "public");
+      OLOG_INFO("Conversation %lld privacy set to %s%s", (long long)conv_id,
+                is_private ? "private" : "public",
+                cascaded > 0 ? " (with its continuations and jobs)" : "");
    }
 
    /* No rows updated means either not found or forbidden */
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_continuation_chain(int64_t conv_id,
+                               int user_id,
+                               int64_t *ids_out,
+                               int max,
+                               int *count_out) {
+   if (count_out) {
+      *count_out = 0;
+   }
+   if (conv_id <= 0 || user_id <= 0 || !ids_out || max <= 0 || !count_out) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "WITH RECURSIVE chain(id, depth) AS ("
+                          "  SELECT id, 0 FROM conversations WHERE id = ?1 AND user_id = ?2 "
+                          "  UNION SELECT c.id, chain.depth + 1 FROM conversations c JOIN chain "
+                          "  ON c.continued_from = chain.id WHERE c.user_id = ?2) "
+                          "SELECT id FROM chain ORDER BY depth, id LIMIT ?3",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("conv_db_continuation_chain: prepare failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   sqlite3_bind_int(st, 3, max + 1); /* one more, to tell "exactly max" from "more" */
+   int n = 0;
+   int rc;
+   bool too_long = false;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+      if (n == max) {
+         too_long = true;
+         break;
+      }
+      ids_out[n++] = sqlite3_column_int64(st, 0);
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (too_long) {
+      return AUTH_DB_LIMIT_EXCEEDED;
+   }
+   if (rc != SQLITE_DONE) {
+      return AUTH_DB_FAILURE;
+   }
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
 }
 
 int conv_db_set_pinned(int64_t conv_id, int user_id, bool is_pinned) {
@@ -868,6 +954,48 @@ int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    AUTH_DB_UNLOCK();
 
    return AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out) {
+   if (!ids_json || !out) {
+      return AUTH_DB_FAILURE;
+   }
+   memset(out, 0, sizeof(*out));
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Extraction-time only (not per turn), so an ad-hoc prepare is fine.
+    * kind-rows: rows named by id; any row names its own conversation. */
+   const char *sql = "SELECT m.conversation_id, c.is_private, c.job_status IS NOT NULL, COUNT(*) "
+                     "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                     "WHERE c.user_id = ?1 AND m.id IN (SELECT value FROM json_each(?2)) "
+                     "GROUP BY m.conversation_id";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_WARNING("conv_db: prepare messages_ownership failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, ids_json, -1, SQLITE_TRANSIENT);
+
+   int rc;
+   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      out->distinct_convs++;
+      out->conv_id = sqlite3_column_int64(stmt, 0);
+      out->any_private = out->any_private || sqlite3_column_int(stmt, 1) != 0;
+      out->any_job = out->any_job || sqlite3_column_int(stmt, 2) != 0;
+      out->matched += sqlite3_column_int(stmt, 3);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      return AUTH_DB_FAILURE;
+   }
+   if (out->distinct_convs != 1) {
+      out->conv_id = 0;
+   }
+   return AUTH_DB_SUCCESS;
 }
 
 int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
@@ -974,60 +1102,161 @@ int conv_db_force_anchor_date_unsafe(int64_t conv_id, int user_id, int64_t ancho
    return AUTH_DB_SUCCESS;
 }
 
-/* Null the provenance back-pointers on any memory row that referenced a
- * conversation just deleted.  The memory tables intentionally have NO foreign
- * key to conversations — a fact outlives the chat it was learned from — so
- * nothing nulls source_conversation_id automatically; without this, every
- * conversation delete leaves a dangling link behind (they had accumulated into
- * the thousands before this).  The rows (the knowledge) are kept; only the stale
- * pointer + its now-meaningless message range are cleared.  Caller holds the
- * auth_db lock.  A structural FK ON DELETE SET NULL would be cleaner but means
- * rebuilding memory_facts and its FTS shadow tables — deferred as too risky. */
-static void clear_memory_provenance(int64_t conv_id) {
-   static const char *const TABLES[] = { "memory_facts", "memory_preferences", "memory_summaries",
-                                         "memory_relations" };
+/* Move the provenance back-pointers off a conversation just deleted: onto
+ * another conversation that also taught the row (its *_sources rows, whose own
+ * entry for this conversation the FK cascade removes), or NULL.  The memory
+ * tables intentionally have NO foreign key to conversations — a fact outlives
+ * the chat it was learned from — so nothing updates source_conversation_id
+ * automatically; without this, every conversation delete leaves a dangling link
+ * behind.  The rows (the knowledge) are kept; the now-meaningless message range
+ * is cleared.  Caller holds the auth_db lock. */
+static int clear_memory_provenance(int64_t conv_id, int user_id) {
+   /* Rows with a sources table point at another conversation that taught them
+    * when there is one (as a forget does); summaries have only this one. */
+   static const struct {
+      const char *table;
+      const char *sources; /* NULL = none */
+      const char *key;
+   } TABLES[] = {
+      { "memory_facts", "memory_fact_sources", "fact_id" },
+      { "memory_preferences", "memory_preference_sources", "preference_id" },
+      { "memory_relations", "memory_relation_sources", "relation_id" },
+      { "memory_summaries", NULL, NULL },
+   };
    for (size_t i = 0; i < sizeof(TABLES) / sizeof(TABLES[0]); i++) {
-      char sql[192];
-      snprintf(sql, sizeof(sql),
-               "UPDATE %s SET source_conversation_id=NULL, source_msg_id_start=NULL, "
-               "source_msg_id_end=NULL WHERE source_conversation_id=?",
-               TABLES[i]); /* table name is a fixed allowlist literal, never input */
+      char sql[768];
+      /* Scoped to the owner, so the (user_id, source_conversation_id) indexes
+       * apply rather than a scan of every user's memory. */
+      if (TABLES[i].sources) {
+         /* No other source left: the row stays (a delete keeps the knowledge)
+          * and counts as learned outside any conversation, so a later forget of
+          * a conversation that merely repeats it doesn't take it. */
+         snprintf(sql, sizeof(sql),
+                  "UPDATE %s SET source_conversation_id = (SELECT MAX(x.conversation_id) FROM %s "
+                  "x WHERE x.%s = %s.id AND x.conversation_id != ?1), origin_unsourced = CASE "
+                  "WHEN EXISTS (SELECT 1 FROM %s x WHERE x.%s = %s.id AND x.conversation_id != "
+                  "?1) THEN origin_unsourced ELSE 1 END, source_msg_id_start=NULL, "
+                  "source_msg_id_end=NULL WHERE user_id = ?2 AND source_conversation_id = ?1",
+                  TABLES[i].table, TABLES[i].sources, TABLES[i].key, TABLES[i].table,
+                  TABLES[i].sources, TABLES[i].key, TABLES[i].table);
+      } else {
+         snprintf(sql, sizeof(sql),
+                  "UPDATE %s SET source_conversation_id=NULL, source_msg_id_start=NULL, "
+                  "source_msg_id_end=NULL WHERE user_id = ?2 AND source_conversation_id = ?1",
+                  TABLES[i].table);
+      } /* table names are a fixed allowlist, never input */
       sqlite3_stmt *st = NULL;
       if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
-         OLOG_WARNING("conv_db_delete: provenance-clear prepare for %s failed: %s", TABLES[i],
+         OLOG_WARNING("conv_db_delete: provenance-clear prepare for %s failed: %s", TABLES[i].table,
                       sqlite3_errmsg(s_db.db));
-         continue;
+         return AUTH_DB_FAILURE;
       }
       sqlite3_bind_int64(st, 1, conv_id);
-      if (sqlite3_step(st) != SQLITE_DONE) {
-         OLOG_WARNING("conv_db_delete: provenance-clear on %s failed: %s", TABLES[i],
-                      sqlite3_errmsg(s_db.db));
-      }
+      sqlite3_bind_int(st, 2, user_id);
+      const int rc = sqlite3_step(st);
       sqlite3_finalize(st);
+      if (rc != SQLITE_DONE) {
+         OLOG_WARNING("conv_db_delete: provenance-clear on %s failed: %s", TABLES[i].table,
+                      sqlite3_errmsg(s_db.db));
+         return AUTH_DB_FAILURE;
+      }
    }
+   return AUTH_DB_SUCCESS;
 }
 
-int conv_db_delete(int64_t conv_id, int user_id) {
-   if (conv_id <= 0) {
+/* Caller holds the auth_db lock and has bound @p del.  Clears the owner's
+ * (@p owner, 0 = not found or not theirs) memory provenance for the
+ * conversation, then deletes it, in one transaction: a memory is never left
+ * pointing at a conversation that is gone, nor a conversation deleted with its
+ * memories still attributed to it.  The clear runs first: a fresh install's
+ * schema has the memory tables' source_conversation_id reference
+ * conversations(id) ON DELETE SET NULL, which would otherwise erase the column
+ * the clear keys on.  Returns the sqlite step result; @p changes_out the rows
+ * deleted. */
+static int delete_conversation_locked(sqlite3_stmt *del,
+                                      int64_t conv_id,
+                                      int owner,
+                                      conv_images_mode_t mode,
+                                      conv_image_files_t *files,
+                                      int *changes_out) {
+   *changes_out = 0;
+   if (sqlite3_exec(s_db.db, "SAVEPOINT conv_delete", NULL, NULL, NULL) != SQLITE_OK) {
+      sqlite3_reset(del);
+      return SQLITE_ERROR;
+   }
+   int rc = SQLITE_DONE;
+   if (owner > 0 && clear_memory_provenance(conv_id, owner) != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
+   /* The images it owns, before the cascade removes what names them. */
+   if (rc == SQLITE_DONE &&
+       conv_images_take_locked(conv_id, owner, mode, files) != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
+   int changes = 0;
+   if (rc == SQLITE_DONE) {
+      rc = sqlite3_step(del);
+      changes = sqlite3_changes(s_db.db);
+   }
+   sqlite3_reset(del);
+   if (rc == SQLITE_DONE && changes > 0) {
+      rc = unlink_usage_rows_locked("conversation_id = ?1", conv_id);
+   }
+   if (rc == SQLITE_DONE &&
+       sqlite3_exec(s_db.db, "RELEASE conv_delete", NULL, NULL, NULL) == SQLITE_OK) {
+      *changes_out = changes;
+      return SQLITE_DONE;
+   }
+   /* Undo all of it (a failed RELEASE, when outermost, is a failed commit). */
+   OLOG_WARNING("conv_db_delete: conversation %lld not deleted: %s", (long long)conv_id,
+                sqlite3_errmsg(s_db.db));
+   sqlite3_exec(s_db.db, "ROLLBACK TO conv_delete", NULL, NULL, NULL);
+   sqlite3_exec(s_db.db, "RELEASE conv_delete", NULL, NULL, NULL);
+   conv_image_files_free(files);
+   return rc == SQLITE_DONE ? SQLITE_ERROR : rc;
+}
+
+/* Caller holds the auth_db lock.  The conversation's owner, or 0 when it
+ * doesn't exist (or, with @p user_id > 0, isn't @p user_id's). */
+static int conversation_owner_locked(int64_t conv_id, int user_id) {
+   int owner = 0;
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT user_id FROM conversations WHERE id = ?", -1, &st,
+                          NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, conv_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         owner = sqlite3_column_int(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   return (user_id > 0 && owner != user_id) ? 0 : owner;
+}
+
+int conv_db_delete_ex(int64_t conv_id,
+                      int user_id,
+                      bool admin,
+                      conv_images_mode_t mode,
+                      conv_image_files_t *files_out) {
+   if (files_out) {
+      memset(files_out, 0, sizeof(*files_out));
+   }
+   if (conv_id <= 0 || (mode == CONV_IMAGES_DELETE && !files_out)) {
       return AUTH_DB_INVALID;
    }
 
    AUTH_DB_LOCK_OR_FAIL();
 
    /* Messages are deleted automatically via CASCADE */
-   sqlite3_reset(s_db.stmt_conv_delete);
-   sqlite3_bind_int64(s_db.stmt_conv_delete, 1, conv_id);
-   sqlite3_bind_int(s_db.stmt_conv_delete, 2, user_id);
-
-   int rc = sqlite3_step(s_db.stmt_conv_delete);
-   int changes = sqlite3_changes(s_db.db);
-   sqlite3_reset(s_db.stmt_conv_delete);
-
-   /* Only clear provenance if we actually deleted the row (owned + existed) —
-    * otherwise the facts belong to whoever really owns conv_id. */
-   if (rc == SQLITE_DONE && changes > 0) {
-      clear_memory_provenance(conv_id);
+   sqlite3_stmt *del = admin ? s_db.stmt_conv_delete_admin : s_db.stmt_conv_delete;
+   sqlite3_reset(del);
+   sqlite3_bind_int64(del, 1, conv_id);
+   if (!admin) {
+      sqlite3_bind_int(del, 2, user_id);
    }
+
+   int changes = 0;
+   const int owner = conversation_owner_locked(conv_id, admin ? 0 : user_id);
+   const int rc = delete_conversation_locked(del, conv_id, owner, mode, files_out, &changes);
 
    AUTH_DB_UNLOCK();
 
@@ -1036,43 +1265,21 @@ int conv_db_delete(int64_t conv_id, int user_id) {
    }
 
    if (changes > 0) {
-      OLOG_INFO("Deleted conversation %lld for user %d", (long long)conv_id, user_id);
+      if (admin) {
+         OLOG_INFO("Admin deleted conversation %lld", (long long)conv_id);
+      } else {
+         OLOG_INFO("Deleted conversation %lld for user %d", (long long)conv_id, user_id);
+      }
+      /* Its frozen prompt holds the user's identity and settings. */
+      (void)conv_db_prompt_blobs_gc(NULL);
       return AUTH_DB_SUCCESS;
    }
 
    return AUTH_DB_NOT_FOUND;
 }
 
-int conv_db_delete_admin(int64_t conv_id) {
-   if (conv_id <= 0) {
-      return AUTH_DB_INVALID;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   sqlite3_reset(s_db.stmt_conv_delete_admin);
-   sqlite3_bind_int64(s_db.stmt_conv_delete_admin, 1, conv_id);
-
-   int rc = sqlite3_step(s_db.stmt_conv_delete_admin);
-   int changes = sqlite3_changes(s_db.db);
-   sqlite3_reset(s_db.stmt_conv_delete_admin);
-
-   if (rc == SQLITE_DONE && changes > 0) {
-      clear_memory_provenance(conv_id);
-   }
-
-   AUTH_DB_UNLOCK();
-
-   if (rc != SQLITE_DONE) {
-      return AUTH_DB_FAILURE;
-   }
-
-   if (changes > 0) {
-      OLOG_INFO("Admin deleted conversation %lld", (long long)conv_id);
-      return AUTH_DB_SUCCESS;
-   }
-
-   return AUTH_DB_NOT_FOUND;
+int conv_db_delete(int64_t conv_id, int user_id) {
+   return conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_KEEP, NULL);
 }
 
 /* =============================================================================
@@ -1263,75 +1470,6 @@ int conv_db_update_context(int64_t conv_id, int user_id, int context_tokens, int
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
-int conv_db_set_compaction_watermark(int64_t conv_id,
-                                     int user_id,
-                                     const char *summary,
-                                     int64_t watermark_msg_id) {
-   if (conv_id <= 0 || watermark_msg_id <= 0) {
-      return AUTH_DB_INVALID;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   /* Single atomic monotonic UPDATE on the same conversation row — no archive,
-    * no continuation.  The WHERE guard `? >= context_watermark_msg_id` makes a
-    * stale async compaction a harmless no-op rather than a watermark rewind. */
-   sqlite3_reset(s_db.stmt_conv_set_watermark);
-   if (summary) {
-      sqlite3_bind_text(s_db.stmt_conv_set_watermark, 1, summary, -1, SQLITE_TRANSIENT);
-   } else {
-      sqlite3_bind_null(s_db.stmt_conv_set_watermark, 1);
-   }
-   sqlite3_bind_int64(s_db.stmt_conv_set_watermark, 2, watermark_msg_id);
-   sqlite3_bind_int64(s_db.stmt_conv_set_watermark, 3, conv_id);
-   sqlite3_bind_int(s_db.stmt_conv_set_watermark, 4, user_id);
-   sqlite3_bind_int64(s_db.stmt_conv_set_watermark, 5, watermark_msg_id);
-
-   int rc = sqlite3_step(s_db.stmt_conv_set_watermark);
-   sqlite3_reset(s_db.stmt_conv_set_watermark);
-
-   if (rc != SQLITE_DONE) {
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   /* 0 changes = not found / wrong owner / stale (guard rejected the rewind).
-    * Stale is benign, so treat 0 changes as success for the caller's purposes. */
-   AUTH_DB_UNLOCK();
-   return AUTH_DB_SUCCESS;
-}
-
-void conv_db_format_compaction_context(int64_t conv_id,
-                                       const char *summary,
-                                       char *out,
-                                       size_t out_len) {
-   if (!out || out_len == 0) {
-      return;
-   }
-   out[0] = '\0';
-   if (!summary || !summary[0]) {
-      return;
-   }
-
-   /* Reconstruct a [COMPACTED conv=N msgs=X-Y node=Z depth=D] marker from the
-    * latest summary node so a RELOADED session keeps a context_expand handle to
-    * the compacted originals (the live in-memory marker is built in
-    * llm_context.c; keep the two formats recognizable to the same tool/parser).
-    * Falls back to a plain summary line when no node metadata exists. */
-   summary_node_t node = { 0 };
-   if (summary_node_get_latest(conv_id, &node) == AUTH_DB_SUCCESS && node.msg_id_start > 0 &&
-       node.msg_id_end > 0) {
-      snprintf(out, out_len,
-               "[COMPACTED conv=%lld msgs=%lld-%lld node=%lld depth=%d] "
-               "Previous conversation context (summarized): %s",
-               (long long)conv_id, (long long)node.msg_id_start, (long long)node.msg_id_end,
-               (long long)node.id, node.depth, summary);
-   } else {
-      snprintf(out, out_len, "Previous conversation context (summarized): %s", summary);
-   }
-   summary_node_free(&node);
-}
-
 int conv_db_lock_llm_settings(int64_t conv_id,
                               int user_id,
                               const char *llm_type,
@@ -1505,139 +1643,6 @@ int conv_db_update_llm_settings(int64_t conv_id,
 /* =============================================================================
  * Message Operations
  * ============================================================================= */
-
-int conv_db_add_message_with_tools_ex(int64_t conv_id,
-                                      int user_id,
-                                      const char *role,
-                                      const char *content,
-                                      const char *tool_calls,
-                                      const char *tool_call_id,
-                                      const char *reasoning,
-                                      bool is_error,
-                                      int64_t *msg_id_out) {
-   if (msg_id_out)
-      *msg_id_out = 0;
-
-   if (conv_id <= 0 || !role || !content) {
-      return AUTH_DB_INVALID;
-   }
-
-   /* Validate role */
-   if (strcmp(role, "system") != 0 && strcmp(role, "user") != 0 && strcmp(role, "assistant") != 0 &&
-       strcmp(role, "tool") != 0) {
-      return AUTH_DB_INVALID;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   time_t now = time(NULL);
-
-   /* Insert message with ownership check in single query */
-   sqlite3_reset(s_db.stmt_msg_add);
-   sqlite3_bind_int64(s_db.stmt_msg_add, 1, conv_id);
-   sqlite3_bind_text(s_db.stmt_msg_add, 2, role, -1, SQLITE_STATIC);
-   sqlite3_bind_text(s_db.stmt_msg_add, 3, content, -1, SQLITE_STATIC);
-   if (tool_calls)
-      sqlite3_bind_text(s_db.stmt_msg_add, 4, tool_calls, -1, SQLITE_STATIC);
-   else
-      sqlite3_bind_null(s_db.stmt_msg_add, 4);
-   if (tool_call_id)
-      sqlite3_bind_text(s_db.stmt_msg_add, 5, tool_call_id, -1, SQLITE_STATIC);
-   else
-      sqlite3_bind_null(s_db.stmt_msg_add, 5);
-   if (reasoning)
-      sqlite3_bind_text(s_db.stmt_msg_add, 6, reasoning, -1, SQLITE_STATIC);
-   else
-      sqlite3_bind_null(s_db.stmt_msg_add, 6);
-   sqlite3_bind_int64(s_db.stmt_msg_add, 7, (int64_t)now);
-   sqlite3_bind_int(s_db.stmt_msg_add, 8, is_error ? 1 : 0);
-   sqlite3_bind_int64(s_db.stmt_msg_add, 9, conv_id); /* For ownership check */
-   sqlite3_bind_int(s_db.stmt_msg_add, 10, user_id);  /* For ownership check */
-
-   int rc = sqlite3_step(s_db.stmt_msg_add);
-   sqlite3_reset(s_db.stmt_msg_add);
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("conv_db_add_message: insert failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   /* Check if message was actually inserted (ownership verification) */
-   int changes = sqlite3_changes(s_db.db);
-   if (changes == 0) {
-      /* Distinguish between not found and forbidden:
-       * Check if conversation exists but belongs to different user */
-      const char *check_sql = "SELECT user_id FROM conversations WHERE id = ?";
-      sqlite3_stmt *check_stmt;
-      int check_rc = sqlite3_prepare_v2(s_db.db, check_sql, -1, &check_stmt, NULL);
-      int result = AUTH_DB_NOT_FOUND;
-
-      if (check_rc == SQLITE_OK) {
-         sqlite3_bind_int64(check_stmt, 1, conv_id);
-         if (sqlite3_step(check_stmt) == SQLITE_ROW) {
-            /* Conversation exists but user doesn't own it */
-            result = AUTH_DB_FORBIDDEN;
-         }
-         sqlite3_finalize(check_stmt);
-      }
-
-      AUTH_DB_UNLOCK();
-      return result;
-   }
-
-   if (msg_id_out)
-      *msg_id_out = sqlite3_last_insert_rowid(s_db.db);
-
-   /* Update conversation metadata */
-   sqlite3_reset(s_db.stmt_conv_update_meta);
-   sqlite3_bind_int64(s_db.stmt_conv_update_meta, 1, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_conv_update_meta, 2, conv_id);
-
-   rc = sqlite3_step(s_db.stmt_conv_update_meta);
-   sqlite3_reset(s_db.stmt_conv_update_meta);
-
-   AUTH_DB_UNLOCK();
-
-   if (rc != SQLITE_DONE)
-      return AUTH_DB_FAILURE;
-
-   /* The updated_at bump re-orders this user's sidebar — tell any connected
-    * browser (leaf-lock rule: after the unlock). Skip role="tool" rows: the
-    * assistant row of the same turn already emitted a "bumped", so a multi-row
-    * tool turn fires one signal, not N. */
-   if (strcmp(role, "tool") != 0)
-      conversation_list_changed_notify(user_id, conv_id, CONV_LIST_CHANGE_BUMPED);
-
-   return AUTH_DB_SUCCESS;
-}
-
-/* Back-compat wrapper: assistant/user/system rows never carry a failure flag, so they persist
- * with is_error = false. Only the tool-persist hook (role='tool' results) calls the _ex form. */
-int conv_db_add_message_with_tools(int64_t conv_id,
-                                   int user_id,
-                                   const char *role,
-                                   const char *content,
-                                   const char *tool_calls,
-                                   const char *tool_call_id,
-                                   const char *reasoning,
-                                   int64_t *msg_id_out) {
-   return conv_db_add_message_with_tools_ex(conv_id, user_id, role, content, tool_calls,
-                                            tool_call_id, reasoning, false, msg_id_out);
-}
-
-int conv_db_add_message_ex(int64_t conv_id,
-                           int user_id,
-                           const char *role,
-                           const char *content,
-                           int64_t *msg_id_out) {
-   return conv_db_add_message_with_tools(conv_id, user_id, role, content, NULL, NULL, NULL,
-                                         msg_id_out);
-}
-
-int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const char *content) {
-   return conv_db_add_message_ex(conv_id, user_id, role, content, NULL);
-}
 
 /* Read the content + tool/reasoning columns + created_at + is_error from a message-SELECT row
  * whose projection is (id, conversation_id, role, content, tool_calls, tool_call_id, reasoning,
@@ -1906,66 +1911,6 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len) {
    }
 }
 
-/* =============================================================================
- * LCM Phase 3 — Message ID Resolution and Range Retrieval
- * ============================================================================= */
-
-int conv_db_get_message_ids(int64_t conv_id, int user_id, int64_t **ids_out, int *count_out) {
-   if (conv_id <= 0 || !ids_out || !count_out)
-      return AUTH_DB_INVALID;
-
-   *ids_out = NULL;
-   *count_out = 0;
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   const char *sql = "SELECT m.id FROM messages m "
-                     "INNER JOIN conversations c ON m.conversation_id = c.id "
-                     "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.id ASC";
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("conv_db_get_message_ids: prepare failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   sqlite3_bind_int64(stmt, 1, conv_id);
-   sqlite3_bind_int(stmt, 2, user_id);
-
-   int capacity = 64;
-   int count = 0;
-   int64_t *ids = malloc(capacity * sizeof(int64_t));
-   if (!ids) {
-      sqlite3_finalize(stmt);
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   while (sqlite3_step(stmt) == SQLITE_ROW) {
-      if (count >= capacity) {
-         capacity *= 2;
-         int64_t *tmp = realloc(ids, capacity * sizeof(int64_t));
-         if (!tmp) {
-            free(ids);
-            sqlite3_finalize(stmt);
-            AUTH_DB_UNLOCK();
-            return AUTH_DB_FAILURE;
-         }
-         ids = tmp;
-      }
-      ids[count++] = sqlite3_column_int64(stmt, 0);
-   }
-
-   sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
-
-   *ids_out = ids;
-   *count_out = count;
-   return AUTH_DB_SUCCESS;
-}
-
 int conv_db_get_messages_by_range(int64_t conv_id,
                                   int user_id,
                                   int64_t start_id,
@@ -2004,12 +1949,12 @@ int conv_db_get_messages_by_range(int64_t conv_id,
                             "FROM messages m "
                             "INNER JOIN conversations c ON m.conversation_id = c.id "
                             "WHERE m.conversation_id = ? AND c.user_id = ? "
-                            "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC"
+                            "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC"
                           : "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
                             "FROM messages m "
                             "INNER JOIN conversations c ON m.conversation_id = c.id "
                             "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
-                            "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC";
+                            "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC";
 
    char sql[512];
    snprintf(sql, sizeof(sql), "%s%s", base, max_rows > 0 ? " LIMIT ?" : "");
@@ -2079,7 +2024,8 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
       return AUTH_DB_FORBIDDEN;
    }
 
-   const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?";
+   const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ? "
+                     "AND kind IS NULL";
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
@@ -2104,57 +2050,6 @@ void summary_node_free(summary_node_t *node) {
       free(node->summary_text);
       node->summary_text = NULL;
    }
-}
-
-int summary_node_create(const summary_node_t *node, int64_t *node_id_out) {
-   if (!node || !node_id_out || !node->summary_text)
-      return AUTH_DB_INVALID;
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   const char *sql = "INSERT INTO summary_nodes "
-                     "(conversation_id, prior_node_id, depth, msg_id_start, msg_id_end, "
-                     "level, summary_text, token_count, created_at) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("summary_node_create: prepare failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   sqlite3_bind_int64(stmt, 1, node->conversation_id);
-   if (node->prior_node_id > 0)
-      sqlite3_bind_int64(stmt, 2, node->prior_node_id);
-   else
-      sqlite3_bind_null(stmt, 2);
-   sqlite3_bind_int(stmt, 3, node->depth);
-   sqlite3_bind_int64(stmt, 4, node->msg_id_start);
-   sqlite3_bind_int64(stmt, 5, node->msg_id_end);
-   sqlite3_bind_int(stmt, 6, node->level);
-   sqlite3_bind_text(stmt, 7, node->summary_text, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int(stmt, 8, node->token_count);
-   sqlite3_bind_int64(stmt, 9, (int64_t)time(NULL));
-
-   rc = sqlite3_step(stmt);
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("summary_node_create: insert failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_finalize(stmt);
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   *node_id_out = sqlite3_last_insert_rowid(s_db.db);
-   sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
-
-   OLOG_INFO("summary_node: created node %lld (conv=%lld, depth=%d, msgs=%lld-%lld)",
-             (long long)*node_id_out, (long long)node->conversation_id, node->depth,
-             (long long)node->msg_id_start, (long long)node->msg_id_end);
-
-   return AUTH_DB_SUCCESS;
 }
 
 static void summary_node_from_row(sqlite3_stmt *stmt, summary_node_t *node) {

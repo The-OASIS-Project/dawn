@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_handles.h"
 #include "core/focus/focus_source.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
@@ -58,6 +59,7 @@ typedef struct {
    bool last_had_query_embedding;
    size_t last_embed_dim;
    char last_query_text[256];
+   int last_per_source_max;
 } pb_focus_compose_mock_t;
 
 static pb_focus_compose_mock_t s_focus = { 0 };
@@ -105,9 +107,9 @@ int focus_compose(int user_id,
                   focus_compose_result_t *out_result) {
    (void)include_private;
    (void)now;
-   (void)per_source_max_candidates;
 
    s_focus.call_count++;
+   s_focus.last_per_source_max = per_source_max_candidates;
    s_focus.last_user_id = user_id;
    s_focus.last_had_query_embedding = (query_embedding != NULL);
    s_focus.last_embed_dim = embed_dim;
@@ -271,7 +273,8 @@ float pb_focus_seed_final_score_for(int idx) {
 
 /* ----- webui_broadcast_context_injection stub ----------------------------
  *
- * build_focus_block calls this when conv_id > 0; in unit tests we
+ * The panel hook (session_focus_client_notice) calls this when the turn has a
+ * conversation; in unit tests we
  * record the last-call args + a per-test counter so tests can assert
  * "broadcast fired" / "broadcast skipped" / "args match expectation"
  * without linking the full webui_server.c (which pulls auth_db, conv_db,
@@ -288,6 +291,7 @@ typedef struct {
    int last_candidate_count;
    float last_first_final_score; /* 0 when last call had zero candidates */
    bool last_had_breakdowns;
+   char last_states[8][16]; /* the first items' states, as sent */
 } pb_broadcast_mock_t;
 
 static pb_broadcast_mock_t s_broadcast = { 0 };
@@ -300,12 +304,35 @@ pb_broadcast_mock_t *pb_broadcast_state(void) {
    return &s_broadcast;
 }
 
-/* webui_get_active_conversation_id stub — build_focus_block calls this
- * just before the broadcast to re-read the dispatching session's active
- * conv id (first-turn race fix).  Tests do not publish a dispatch session,
- * so session_get_dispatch_session() returns NULL and this stub never fires
- * — but the symbol must resolve at link time. */
-int64_t webui_get_active_conversation_id(struct session *session) {
+/* The session's stable citation handles (core/focus/focus_handles.c needs the
+ * database): each call numbers its items 1, 2, 3, the old per-turn numbering. */
+int focus_handles_assign(struct session *session,
+                         int64_t conv_id,
+                         int user_id,
+                         conv_focus_handle_t *items,
+                         int count) {
+   (void)session;
+   (void)conv_id;
+   (void)user_id;
+   for (int i = 0; i < count; i++) {
+      items[i].handle = i + 1;
+      items[i].is_new = true;
+   }
+   return 0;
+}
+
+/* session_turn_conversation stub — the panel hook re-reads the turn's
+ * conversation (first-turn race fix); no conversation here, so the one the
+ * prompt was built with stands. */
+/* The previous question session_previous_question_dup gives, or NULL. */
+const char *pb_previous_question = NULL;
+
+char *session_previous_question_dup(struct session *session) {
+   (void)session;
+   return pb_previous_question ? strdup(pb_previous_question) : NULL;
+}
+
+int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
 }
@@ -313,8 +340,14 @@ int64_t webui_get_active_conversation_id(struct session *session) {
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result) {
+                                       const focus_compose_result_t *result,
+                                       const char *const *states) {
    s_broadcast.call_count++;
+   for (int i = 0; i < 8; i++) {
+      const bool have = states && result && i < result->candidate_count && states[i];
+      snprintf(s_broadcast.last_states[i], sizeof(s_broadcast.last_states[i]), "%s",
+               have ? states[i] : "");
+   }
    s_broadcast.last_user_id = user_id;
    s_broadcast.last_conv_id = conv_id;
    s_broadcast.last_turn_id = turn_id;
@@ -333,9 +366,8 @@ void webui_broadcast_context_injection(int user_id,
 
 /* ----- session_t test fixtures -------------------------------------------
  *
- * Phase 1f+: tests need a real session_t with at least history_mutex
- * inited (session_dedup.c locks it via session_injected_set_clear).
- * Other session_t fields are zeroed and unused by build_focus_block. */
+ * Tests need a real session_t with history_mutex inited; other session_t
+ * fields are zeroed and unused by build_focus_block. */
 
 void pb_session_init(session_t *s, uint32_t session_id) {
    memset(s, 0, sizeof(*s));
@@ -355,6 +387,7 @@ typedef struct {
    int dims;
    bool fail_embed;
    int embed_call_count;
+   char last_text[512]; /* the text last embedded */
 } pb_embed_mock_t;
 
 static pb_embed_mock_t s_embed = { 0 };
@@ -376,7 +409,7 @@ int memory_embeddings_dims(void) {
 }
 
 int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
-   (void)text;
+   snprintf(s_embed.last_text, sizeof(s_embed.last_text), "%s", text ? text : "");
    s_embed.embed_call_count++;
    if (s_embed.fail_embed)
       return FAILURE;

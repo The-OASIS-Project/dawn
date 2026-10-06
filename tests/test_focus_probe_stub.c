@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_handles.h"
 #include "core/focus/focus_source.h"
 #include "dawn_error.h"
 #include "memory/memory_embeddings.h"
@@ -81,7 +82,7 @@ int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
 /* =============================================================================
  * WebSocket broadcast stub
  *
- * build_focus_block calls this when conv_id > 0.  Real implementation
+ * The context panel's hook calls this.  Real implementation
  * lives in webui_server.c which pulls in libwebsockets, json-c, the
  * full ws connection registry — none of which the unit test cares about.
  * No-op stub.
@@ -90,21 +91,44 @@ int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result) {
+                                       const focus_compose_result_t *result,
+                                       const char *const *states) {
    (void)user_id;
    (void)conv_id;
    (void)turn_id;
    (void)result;
+   (void)states;
+}
+
+/* The session's stable citation handles (core/focus/focus_handles.c needs the
+ * database): each call numbers its items 1, 2, 3, the old per-turn numbering. */
+int focus_handles_assign(struct session *session,
+                         int64_t conv_id,
+                         int user_id,
+                         conv_focus_handle_t *items,
+                         int count) {
+   (void)session;
+   (void)conv_id;
+   (void)user_id;
+   for (int i = 0; i < count; i++) {
+      items[i].handle = i + 1;
+      items[i].is_new = true;
+   }
+   return 0;
 }
 
 /* =============================================================================
- * webui_get_active_conversation_id stub — build_focus_block.c re-reads the
- * active conversation_id from the dispatch session right before broadcast
- * (first-turn race fix, May 2026).  Tests don't exercise the WebSocket
- * server's session registry, so returning 0 is the safe no-op (caller
- * falls back to the captured value).
+ * session_turn_conversation stub — build_focus_block.c re-reads the dispatching
+ * turn's conversation right before broadcast (first-turn race fix).  Tests don't
+ * run turns, so returning 0 is the safe no-op (caller falls back to the captured
+ * value).
  * ============================================================================= */
-int64_t webui_get_active_conversation_id(struct session *session) {
+char *session_previous_question_dup(struct session *session) {
+   (void)session;
+   return NULL;
+}
+
+int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
 }

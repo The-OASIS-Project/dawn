@@ -73,6 +73,7 @@ typedef struct {
    char genre[AUDIO_METADATA_STRING_MAX];            /**< Genre (comma-separated if multiple) */
    char display_name[AUDIO_METADATA_STRING_MAX * 2]; /**< "Artist - Title" or filename */
    uint32_t duration_sec;                            /**< Duration in seconds */
+   uint32_t year;                                    /**< Release year (0 if unknown) */
    music_source_t source;                            /**< Which source this track came from */
 } music_search_result_t;
 
@@ -167,42 +168,75 @@ int music_db_get_stats(music_db_stats_t *stats);
  * Search
  * ============================================================================= */
 
-/**
- * @brief Search for music by pattern
- *
- * Searches artist, title, and album fields using SQL LIKE patterns.
- * The pattern is matched against each field independently.
- *
- * @param pattern Search pattern (wildcards: % for any chars, _ for single char)
- * @param results Output array for results
- * @param max_results Maximum number of results to return
- * @param count_out Output for number of results found
- * @return SUCCESS or FAILURE
- */
-int music_db_search(const char *pattern,
-                    music_search_result_t *results,
-                    int max_results,
-                    int *count_out);
 
 /**
- * @brief Pick the most relevant result from a candidate set (pure, no DB/locks)
+ * @brief Structured music query: fielded filters + relevance-ranked free text
  *
- * music_db_search() orders alphabetically, so its first row is rarely the best
- * match for a track query (e.g. searching "Africa" returns Bo Burnham before
- * Toto). This ranks candidates by title closeness — exact title > title prefix >
- * substring — adds a strong bonus when @p artist is non-NULL and matches the
- * candidate's artist, and breaks ties toward the shorter (closer) title.
- *
- * @param results     Candidate array (from music_db_search)
- * @param count       Number of candidates
- * @param title_query The track title (or whole query) to match against
- * @param artist      Optional artist to prefer (NULL when the query has no artist)
- * @return index of the best candidate in [0, count), or 0 if count <= 0
+ * Fields left NULL / 0 are ignored. Matching is punctuation-insensitive and
+ * token-based (see music_rank.h): @ref text matches rows whose artist/title/
+ * album/genre hold every significant query token, ranked best-first;
+ * artist/title/album are word-boundary-strict filters requiring every word;
+ * genre is a substring filter; year bounds are inclusive. The file path is never
+ * matched, so folder names don't leak into results.
  */
-int music_db_pick_best_match(const music_search_result_t *results,
-                             int count,
-                             const char *title_query,
-                             const char *artist);
+typedef struct {
+   const char *text;   /**< Free text, ranked across artist/title/album/genre (NULL = none) */
+   const char *artist; /**< Artist filter, whole words (NULL = none) */
+   const char *title;  /**< Title filter, whole words (NULL = none) */
+   const char *album;  /**< Album filter, whole words (NULL = none) */
+   const char *genre;  /**< Genre filter, substring (NULL = none) */
+   int year_min;       /**< Inclusive lower year bound (0 = unbounded) */
+   int year_max;       /**< Inclusive upper year bound (0 = unbounded) */
+   bool allow_partial; /**< When no row matches every word of @ref text, fall back to
+                            rows missing one word (flagged approximate). Only for
+                            surfaces that SHOW results and can say so — never for
+                            play/enqueue/resolve, which act on them. */
+} music_query_t;
+
+/** Upper sanity bound for a parsed release year (exclusive); rejects garbage. */
+#define MUSIC_QUERY_YEAR_MAX 3000
+
+/** One page of a ranked query. */
+typedef struct {
+   int count;        /**< Rows written to the results array */
+   int total;        /**< Total matching rows across all pages (exact) */
+   bool approximate; /**< No row matched every query word; these are the closest
+                          (one word unmatched) — say so rather than presenting them
+                          as exact hits */
+} music_query_page_t;
+
+/**
+ * @brief Run a structured, relevance-ranked query and return one page
+ *
+ * Ranks every matching row (duplicates across and within sources collapsed) by
+ * relevance to the query's most specific term — text, else artist/title/album —
+ * then alphabetically, and returns rows [@p offset, @p offset + @p max_results).
+ * With @c allow_partial, if no row matches every word of a long free-text query,
+ * the rows missing just one word are returned instead, flagged @c approximate. A
+ * query with no constraints returns nothing.
+ *
+ * @param query       The structured query
+ * @param offset      Rows to skip (< 0 treated as 0)
+ * @param results     Output array (caller-owned, holds at least @p max_results)
+ * @param max_results Page size / capacity of @p results
+ * @param page_out    Output: count, exact total, approximate flag
+ * @return SUCCESS or FAILURE
+ */
+int music_db_query_page(const music_query_t *query,
+                        int offset,
+                        music_search_result_t *results,
+                        int max_results,
+                        music_query_page_t *page_out);
+
+/**
+ * @brief First page of music_db_query_page() without a total (strict matching
+ *        unless the query sets allow_partial)
+ */
+int music_db_query(const music_query_t *query,
+                   music_search_result_t *results,
+                   int max_results,
+                   int *count_out);
+
 
 /**
  * @brief Get metadata for a specific file from the database
@@ -290,6 +324,9 @@ typedef struct {
    char name[AUDIO_METADATA_STRING_MAX];   /**< Album name */
    char artist[AUDIO_METADATA_STRING_MAX]; /**< Primary artist */
    int track_count;                        /**< Number of tracks */
+   int year;         /**< Earliest release year (0 = unknown; by-artist listing only) */
+   int editions;     /**< Distinct album names folded into this entry (by-artist only) */
+   int artist_count; /**< Distinct track artists on the album (by-artist only) */
 } music_album_info_t;
 
 /**
@@ -319,6 +356,30 @@ int music_db_list_albums_with_stats(music_album_info_t *albums,
                                     int max_albums,
                                     int offset,
                                     int *count_out);
+
+/**
+ * @brief List an artist's albums (discography-style inventory)
+ *
+ * Albums with at least one track whose artist matches @p artist as whole words
+ * (punctuation-insensitive, so "Ben Folds" also covers "Ben Folds Five" and
+ * "Ben Folds Presents: …"). Editions/formats of one album ("(Expanded Edition)",
+ * "(EP)", "[Clean]", " - Disc 1") fold into a single entry whose @c track_count is
+ * the number of distinct titles across them. Oldest first; unknown years last.
+ *
+ * @param artist     Artist to match (required)
+ * @param albums     Output array
+ * @param max_albums Page size / capacity of @p albums
+ * @param offset     Albums to skip (pagination)
+ * @param count_out  Output: albums written
+ * @param total_out  Output: total albums for the artist (NULL = don't compute)
+ * @return SUCCESS or FAILURE
+ */
+int music_db_list_albums_by_artist(const char *artist,
+                                   music_album_info_t *albums,
+                                   int max_albums,
+                                   int offset,
+                                   int *count_out,
+                                   int *total_out);
 
 /**
  * @brief Get all tracks by a specific artist

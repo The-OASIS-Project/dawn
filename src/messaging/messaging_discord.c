@@ -420,6 +420,15 @@ static void handle_message_create(struct json_object *d) {
    if (json_object_object_get_ex(author_obj, "bot", &bot_obj) && json_object_get_boolean(bot_obj)) {
       return;
    }
+   /* The engine answers only the person who linked the channel, by id. */
+   struct json_object *author_id_obj = NULL;
+   if (!json_object_object_get_ex(author_obj, "id", &author_id_obj) || !author_id_obj) {
+      return;
+   }
+   const char *author_id = json_object_get_string(author_id_obj);
+   if (!author_id || !author_id[0]) {
+      return;
+   }
 
    /* Required fields: channel_id, content. */
    struct json_object *channel_id_obj = NULL;
@@ -470,7 +479,17 @@ static void handle_message_create(struct json_object *d) {
    cb = s_inbound_cb;
    pthread_mutex_unlock(&s_inbound_cb_mutex);
    if (cb) {
-      cb("discord", channel_id, sender_display, body, timestamp);
+      /* DMs only (guild messages dropped above): one person per chat. */
+      messaging_inbound_t in = {
+         .provider = "discord",
+         .provider_address = channel_id,
+         .sender_id = author_id,
+         .sender_display = sender_display,
+         .body = body,
+         .timestamp = timestamp,
+         .chat_kind = MESSAGING_CHAT_ONE_TO_ONE,
+      };
+      cb(&in);
    }
 }
 
@@ -1217,6 +1236,7 @@ static int dc_reconnect(void) {
 
 static const messaging_driver_t s_discord_driver = {
    .name = "discord",
+   .authenticates_sender = true,
    .out_format = MSG_FMT_DISCORD,
    .init = dc_init,
    .shutdown = dc_shutdown,

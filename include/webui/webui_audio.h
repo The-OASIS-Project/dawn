@@ -39,6 +39,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Forward decl: a caller-owned ASR context (full type in asr/asr_interface.h). */
+typedef struct asr_context asr_context_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -203,6 +206,25 @@ int webui_opus_encode_stream(const int16_t *pcm_data,
 int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **text_out);
 
 /**
+ * @brief Transcribe 16kHz PCM on a CALLER-OWNED ASR context (no borrow/return).
+ *
+ * Same decode as webui_audio_transcribe() but operates on a context the caller
+ * has already obtained (e.g. via worker_pool_try_borrow_asr()) and will return
+ * itself. Lets opportunistic/speculative work manage the context lifecycle so it
+ * never blocks in the pool's borrow path.
+ *
+ * @param asr_ctx     A borrowed ASR context; the caller owns borrow AND return.
+ * @param pcm_data    PCM samples (16-bit signed, mono, 16kHz).
+ * @param pcm_samples Number of samples.
+ * @param text_out    Output: transcribed text (caller must free).
+ * @return WEBUI_AUDIO_SUCCESS on success, error code on failure.
+ */
+int webui_audio_transcribe_on_ctx(asr_context_t *asr_ctx,
+                                  const int16_t *pcm_data,
+                                  size_t pcm_samples,
+                                  char **text_out);
+
+/**
  * @brief Complete audio processing pipeline: Opus → ASR → text
  *
  * Convenience function that decodes Opus stream and runs ASR.
@@ -231,6 +253,24 @@ int webui_audio_opus_to_text(const uint8_t *opus_data, size_t opus_len, char **t
  * @note Caller is responsible for freeing *text_out
  */
 int webui_audio_pcm48k_to_text(const int16_t *pcm_data, size_t pcm_samples, char **text_out);
+
+/**
+ * @brief 48kHz PCM → resample → ASR → text on a CALLER-OWNED ASR context.
+ *
+ * The caller-owned-context sibling of webui_audio_pcm48k_to_text(): the caller has
+ * already borrowed @p asr_ctx (and will return it). Used by the always-on
+ * speculative decode, which try-borrows a context so it never blocks a real turn.
+ *
+ * @param asr_ctx     A borrowed ASR context; the caller owns borrow AND return.
+ * @param pcm_data    PCM samples at 48kHz (16-bit signed, mono).
+ * @param pcm_samples Number of input samples.
+ * @param text_out    Output: transcribed text (caller must free).
+ * @return WEBUI_AUDIO_SUCCESS on success, error code on failure.
+ */
+int webui_audio_pcm48k_to_text_on_ctx(asr_context_t *asr_ctx,
+                                      const int16_t *pcm_data,
+                                      size_t pcm_samples,
+                                      char **text_out);
 
 /* =============================================================================
  * TTS Integration Functions

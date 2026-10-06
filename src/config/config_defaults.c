@@ -80,6 +80,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->vad.end_of_speech_duration = 1.0f;  /* VAD_END_OF_SPEECH_DURATION */
    config->vad.max_recording_duration = 30.0f; /* VAD_MAX_RECORDING_DURATION */
    config->vad.preroll_ms = 500;
+   safe_strscpy(config->vad.adaptive_endpoint, "off");
 
    /* VAD Chunking - matching defines in dawn.c */
    config->vad.chunking.enabled = true;
@@ -180,8 +181,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.silent_observe.model[0] = '\0'; /* Empty = let provider pick */
 
    /* LLM Thinking/Reasoning */
-   safe_strscpy(config->llm.thinking.mode, "disabled"); /* "disabled", "enabled", "auto" */
-   safe_strscpy(config->llm.thinking.reasoning_effort, "medium"); /* Controls budget via dropdown */
+   safe_strscpy(config->llm.thinking.mode, LLM_THINKING_MODE_DEFAULT);
+   safe_strscpy(config->llm.thinking.reasoning_effort, LLM_REASONING_EFFORT_DEFAULT);
    config->llm.thinking.budget_low = LLM_THINKING_BUDGET_LOW_DEFAULT;
    config->llm.thinking.budget_medium = LLM_THINKING_BUDGET_MEDIUM_DEFAULT;
    config->llm.thinking.budget_high = LLM_THINKING_BUDGET_HIGH_DEFAULT;
@@ -194,7 +195,6 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.compact_use_session = true;     /* Use session's provider for compaction */
    config->llm.compact_provider[0] = '\0';     /* Dedicated provider (empty = none) */
    config->llm.compact_model[0] = '\0';        /* Dedicated model (empty = none) */
-   config->llm.conversation_logging = false;   /* Disabled: WebUI saves to DB, set true for debug */
    config->llm.rate_limit_enabled = true;      /* Throttle cloud API calls by default */
    config->llm.rate_limit_rpm = 40;            /* 20% headroom under typical 50 RPM limit */
 
@@ -308,7 +308,6 @@ void config_set_defaults(dawn_config_t *config) {
    config->vision.max_image_size_kb = 4096;
    config->vision.max_dimension = 1024;
    config->vision.max_images = 5;
-   config->vision.capture_history_count = 1;
 
    /* Memory - persistent user memory system */
    config->memory.enabled = true;
@@ -329,6 +328,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.conversation_idle_timeout_min =
        15;                                   /* Auto-save voice conversations after 15 min */
    config->memory.default_voice_user_id = 1; /* Assign to first user (admin) by default */
+   config->memory.fact_cache_mb = MEMORY_FACT_CACHE_MB_DEFAULT;
 
    /* Memory decay (Phase 5) */
    config->memory.decay_enabled = true;
@@ -441,10 +441,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.recovery_max_attempts = 2;
    config->memory.recovery_recurring_interval_seconds = 86400; /* daily */
 
-   /* Per-turn focus injection (Phase 1 of Dynamic Context Injection) —
-    * disabled by default until adapters land in 1c/1d and the
-    * prompt-builder integration ships in 1e.  Defaults match the design
-    * doc §"Phase 1 — Per-Turn Focus" TOML block. */
+   /* Per-turn focus injection: automatically adds relevant memory, document,
+    * calendar and email content to each turn.  Opt-in. */
    config->memory.focus_injection.enabled = false;
    /* Per-turn focus-block budget in BYTES (same unit as FOCUS_TEXT_MAX_BYTES).
     * 10240 ≈ two full document chunks plus several small fact/summary
@@ -458,6 +456,26 @@ void config_set_defaults(dawn_config_t *config) {
     * 1j fixtures get summary-relevant probes. */
    config->memory.focus_injection.top_k = 12;
    config->memory.focus_injection.min_score = 0.4f;
+   /* Calibrated 2026-09 on 1,330 real document chunks with 15 document questions and
+    * 15 everyday turns, on bge-small and MiniLM-L6: 0.48 injected no unrelated chunk
+    * on either model while keeping 9-11 of 15 relevant ones (the rest stay reachable
+    * through document_search).  A raw cosine floor does not transfer between models. */
+   config->memory.focus_injection.document_min_relevance = 0.48f;
+   /* Calibrated 2026-09 on 5,109 real facts: 0.34 kept all 15 targeted facts
+    * (lowest 0.35) while dropping the clearly unrelated ones everyday turns
+    * pulled in (arithmetic, jokes).  Personal facts legitimately relate to many
+    * requests, so this is a gentle trim, not a hard filter. */
+   config->memory.focus_injection.fact_min_relevance = 0.34f;
+   /* Calibrated 2026-09 on a real pool of ~700 entities: the entities a short
+    * query names scored 0.42-1.0, while look-alikes sharing a common word stayed
+    * under 0.37.  Names mentioned in a long message are caught by the name
+    * check instead, since the message's embedding dilutes them. */
+   config->memory.focus_injection.entity_min_relevance = 0.40f;
+   /* Calibrated 2026-09 on a real month of ~120 summaries: summaries about a
+    * short query's topic scored 0.24-0.58, unrelated ones at most 0.21.
+    * Summaries are long, so their relevance runs lower than facts' or
+    * entities'. */
+   config->memory.focus_injection.summary_min_relevance = 0.22f;
    config->memory.focus_injection.classifier_enabled = false;
    config->memory.focus_injection.summary_max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.
@@ -495,8 +513,6 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.source_weights.calendar_event = 0.6f;
    config->memory.focus_injection.source_weights.recent_email = 0.5f;
    config->memory.focus_injection.source_weights.dawn_background = 0.8f;
-   config->memory.focus_injection.dedup.recent_window_turns = 8;
-   config->memory.focus_injection.dedup.score_uplift_factor = 1.5f;
 
    /* Dominant-token over-inclusion heuristic (Phase B reranker workstream,
     * 2026-05-13).  Bench-validated at canonical params on focus_probe_cases.json

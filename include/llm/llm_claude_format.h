@@ -32,96 +32,32 @@
 #include "llm/llm_tools.h"
 
 /**
- * @brief Check if conversation history has tool_use blocks without thinking blocks
- *
- * Claude requires that when thinking is enabled, assistant messages with tool_use
- * must start with a thinking block. This checks for incompatible history that would
- * cause Claude API to reject the request.
- *
- * @param conversation OpenAI-format conversation history
- * @return true if history has tool_use without thinking (incompatible with thinking mode)
- */
-bool claude_history_has_tool_use_without_thinking(struct json_object *conversation);
-
-/**
- * @brief Check if conversation history contains any thinking blocks
- *
- * Used to detect if thinking was previously enabled for this conversation.
- * If history has thinking blocks, we cannot disable thinking mid-conversation or
- * Claude will reject with "assistant message cannot contain thinking".
- *
- * @param conversation OpenAI-format conversation history
- * @return true if history contains thinking blocks
- */
-bool claude_history_has_thinking_blocks(struct json_object *conversation);
-
-/**
- * @brief Check if conversation history contains OpenAI-format tool_calls.
- *
- * These appear when the user switched providers mid-conversation (gpt-5.x or
- * gemini turn produced an OpenAI-shaped `tool_calls` field rather than a Claude
- * `tool_use` content block). Distinct from the catch-all
- * claude_history_has_tool_use_without_thinking() — useful for log severity:
- * Claude follow-ups after a tool_result legitimately omit thinking, so that
- * shape isn't a real concern; OpenAI tool_calls in a Claude conversation
- * usually are.
- *
- * @param conversation OpenAI-format conversation history
- * @return true if any assistant message carries a non-empty `tool_calls` array
- */
-bool claude_history_has_openai_tool_calls(struct json_object *conversation);
-
-/**
  * @brief Convert OpenAI-format conversation to Claude's native format
  *
  * Transforms conversation history from OpenAI's message format to Claude's format:
  * - Extracts system messages for Claude's system parameter
  * - Converts role names and content structure
  * - Handles tool calls and results
- * - Adds vision content if provided
  * - Handles thinking blocks for extended thinking mode
  *
  * @param openai_conversation OpenAI-format conversation array
  * @param input_text Current user input (may be NULL if already in conversation)
- * @param vision_images Array of base64-encoded image data (may be NULL)
- * @param vision_image_sizes Array of image sizes (may be NULL)
- * @param vision_image_count Number of images (0 if not used)
  * @param model Model name (NULL to use config default)
+ * @param carrier The request's carrier (llm_request_carrier): whose stored
+ *                reasoning goes back
  * @param iteration Tool iteration count (0 for initial call, >0 for follow-ups).
  *                  Orphaned tool_use filtering only runs on iteration 0.
+ * @param inline_tools Whether the request may send the conversation's stored
+ *                     inline tool changes in place (claude_betas_render_inline):
+ *                     the rows and the conversation's record decide the rest
  * @return json_object containing Claude-format request, or NULL on error
  *         Caller must json_object_put() when done
  */
 json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *input_text,
-                                      const char **vision_images,
-                                      const size_t *vision_image_sizes,
-                                      int vision_image_count,
                                       const char *model,
-                                      int iteration);
-
-/**
- * @brief Detect an image's MIME type from its base64-encoded magic bytes
- *
- * Checks the leading base64 characters against known PNG/JPEG/GIF/WebP
- * signatures. Falls back to "image/jpeg" when the data is too short or
- * unrecognized.
- *
- * @param base64_data Base64-encoded image data
- * @return MIME type string (static, do not free)
- */
-const char *llm_claude_detect_image_mime_type(const char *base64_data);
-
-/**
- * @brief Build a Claude-format image content block
- *
- * Wraps base64 image data as {"type":"image","source":{"type":"base64",
- * "media_type":<detected>,"data":<base64_data>}}. MIME type is
- * auto-detected via llm_claude_detect_image_mime_type().
- *
- * @param vision_image Base64-encoded image data
- * @return json_object owned by the caller (json_object_put() when done)
- */
-json_object *llm_claude_create_image_block(const char *vision_image);
+                                      const char *carrier,
+                                      int iteration,
+                                      bool inline_tools);
 
 #endif  // LLM_CLAUDE_FORMAT_H

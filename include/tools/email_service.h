@@ -27,11 +27,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/turn_origin.h"
 #include "tools/email_client.h"
 #include "tools/email_db.h"
 
 /* Draft / pending action limits */
-#define EMAIL_MAX_DRAFTS 4
+#define EMAIL_MAX_DRAFTS 16
 #define EMAIL_DRAFT_EXPIRY_SEC 300
 /* Outbound (send/draft) body cap — bounded by the fixed email_draft_t.body[4096]
  * buffer; must stay well under 4096 to avoid silent truncation on send.
@@ -40,8 +41,9 @@
 #define EMAIL_MAX_SUBJECT_LEN 250
 #define EMAIL_CONFIRM_MAX_FAILURES 3
 #define EMAIL_CONFIRM_LOCKOUT_SEC 60
-#define EMAIL_MAX_PENDING_TRASH 10
+#define EMAIL_MAX_PENDING_TRASH 16
 #define EMAIL_PENDING_TRASH_EXPIRY_SEC 300
+
 
 typedef struct {
    char draft_id[16]; /* hex-encoded randombytes_buf() */
@@ -51,7 +53,8 @@ typedef struct {
    char to_name[64];
    char subject[256];
    char body[4096];
-   time_t created_at;
+   turn_origin_t origin; /* where it was made (turn_origin_check) */
+   time_t created_at;    /* pending_slots_now(), not wall time */
    bool used;
 } email_draft_t;
 
@@ -62,7 +65,8 @@ typedef struct {
    char account_name[128]; /* Resolved account name for confirm step */
    char subject[256];      /* For confirmation display */
    char from[128];         /* For confirmation display */
-   time_t created_at;
+   turn_origin_t origin;   /* where it was made (turn_origin_check) */
+   time_t created_at;      /* pending_slots_now(), not wall time */
    bool used;
 } email_pending_trash_t;
 
@@ -81,6 +85,18 @@ typedef struct {
 #define EMAIL_RC_INVALID_FOLDER 12  /* folder name failed validation */
 #define EMAIL_RC_NOT_FOUND 13       /* message id not found in the mailbox (stale/wrong/deleted) */
 #define EMAIL_RC_TIMEOUT 14 /* op timed out (large mailbox / slow server); hint to bound it */
+#define EMAIL_RC_INVALID_PAGE_TOKEN 15 /* page_token malformed, from another account, or stale */
+#define EMAIL_RC_NO_TRASH 16 /* the account has no Trash folder: nothing was moved or deleted */
+#define EMAIL_RC_FOLDER_MISSING 17 /* the account has no Archive folder: nothing was moved */
+#define EMAIL_RC_ALREADY_THERE 18  /* trash/archive: the message is already in that folder */
+/* trash/archive: copied and marked \Deleted, left in its folder (the server has
+ * neither MOVE nor UIDPLUS, so removing it would purge other mail too) */
+#define EMAIL_RC_LEFT_FLAGGED 19
+/* trash/archive: copied, but removing the original failed (a transient error;
+ * the original is still in its folder, and a retry may copy it again) */
+#define EMAIL_RC_NOT_REMOVED 20
+/* send / trash: every slot holds another session's live item (none is pushed out) */
+#define EMAIL_RC_PENDING_FULL 22
 
 /* Two-step action codes (compose/send + trash prep/confirm; archive shares the
  * account-resolution set).  0/1 reuse EMAIL_RC_OK / EMAIL_RC_FAILURE above, and
@@ -91,9 +107,26 @@ typedef struct {
 /* account read-only (create_draft / create_pending_trash / archive) */
 #define EMAIL_ACCT_RC_READONLY 2
 
-#define EMAIL_CONFIRM_RC_NOT_FOUND 3    /* draft/pending not found or expired */
-#define EMAIL_CONFIRM_RC_THROTTLED 4    /* too many failed confirmations */
-#define EMAIL_CONFIRM_RC_ACCOUNT_GONE 5 /* account gone/read-only at confirm time */
+#define EMAIL_CONFIRM_RC_NOT_FOUND 3     /* draft/pending not found or expired */
+#define EMAIL_CONFIRM_RC_THROTTLED 4     /* too many failed confirmations */
+#define EMAIL_CONFIRM_RC_ACCOUNT_GONE 5  /* account gone/read-only at confirm time */
+#define EMAIL_CONFIRM_RC_OTHER_SESSION 8 /* confirmed from another session than the draft's */
+#define EMAIL_CONFIRM_RC_SAME_TURN 9     /* confirmed in the turn that prepared it */
+#define EMAIL_CONFIRM_RC_NOT_NEXT 21     /* confirmed later than the turn right after it */
+
+/** A refused turn_origin_check as this module's confirm code. */
+static inline int email_confirm_rc(turn_origin_rc_t rc) {
+   switch (rc) {
+      case TURN_ORIGIN_OK:
+         return EMAIL_RC_OK;
+      case TURN_ORIGIN_SAME_TURN:
+         return EMAIL_CONFIRM_RC_SAME_TURN;
+      case TURN_ORIGIN_NOT_NEXT:
+         return EMAIL_CONFIRM_RC_NOT_NEXT;
+      default:
+         return EMAIL_CONFIRM_RC_OTHER_SESSION;
+   }
+}
 
 /* add_account: an account with this identity already exists */
 #define EMAIL_ADD_RC_DUPLICATE 6
@@ -183,6 +216,17 @@ bool email_service_is_gmail_account(const email_account_t *acct);
  * account label, or stamp account_name itself.
  * ============================================================================= */
 
+/**
+ * @brief Newest-first messages from one account's folder.
+ * @param count            Rows wanted; <= 0 uses the account's max_recent setting.
+ * @param page_token       Continuation cursor from a previous call's @p next_page_token
+ *                         (NULL/empty = first page).  Opaque and backend-specific: a Gmail
+ *                         token on an IMAP account (or a stale IMAP cursor) returns
+ *                         EMAIL_RC_INVALID_PAGE_TOKEN.
+ * @param next_page_token  Filled when more (older) messages remain; empty otherwise.
+ * @note @p page_token and @p next_page_token may be the same buffer (the input is
+ *       copied before the output is cleared).
+ */
 int email_service_recent(int user_id,
                          const char *account_name,
                          const char *folder,
@@ -195,10 +239,22 @@ int email_service_recent(int user_id,
                          char *next_page_token,
                          size_t npt_len);
 
+/**
+ * @brief Read a message (email_service_read.c)
+ *
+ * With no account named, each enabled account is tried until one has it.
+ * opts->max_text_chars <= 0 takes the account's own body cap.
+ *
+ * @param err Why it failed (may be NULL)
+ * @return EMAIL_RC_OK, EMAIL_RC_NOT_FOUND, EMAIL_RC_NO_ACCOUNTS, an account-lookup
+ *         code, or EMAIL_RC_FAILURE; free a success with email_message_free()
+ */
 int email_service_read(int user_id,
                        const char *account_name,
                        const char *message_id,
-                       email_message_t *out);
+                       const email_read_opts_t *opts,
+                       email_message_t *out,
+                       email_err_t *err);
 
 /**
  * @brief Search email across one or (when account_name is NULL) all enabled accounts.
@@ -208,6 +264,8 @@ int email_service_read(int user_id,
  *                  flagged distinctly) so the caller can tell the user results are
  *                  partial instead of the failure being silent. Empty when all
  *                  searched accounts were reached.
+ * @note Paging (params->page_token / next_page_token) applies to a single-account
+ *       search only; a multi-account search always returns the first page.
  */
 int email_service_search(int user_id,
                          const char *account_name,
@@ -236,7 +294,9 @@ int email_service_search(int user_id,
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on generic failure (bad input
  *         / empty account), EMAIL_ACCT_RC_READONLY if the named account is
  *         read-only, or a forwarded EMAIL_RC_UNKNOWN_ACCOUNT / EMAIL_RC_NO_ACCOUNTS
- *         from account resolution (no name match / no configured accounts)
+ *         from account resolution (no name match / no configured accounts);
+ *         EMAIL_RC_FAILURE too when @p origin is NULL or has no turn (only a running
+ *         turn the user started prepares a draft)
  */
 int email_service_create_draft(int user_id,
                                const char *account_name,
@@ -247,7 +307,8 @@ int email_service_create_draft(int user_id,
                                char *draft_id_out,
                                size_t draft_id_len,
                                char *from_account_out,
-                               size_t from_account_len);
+                               size_t from_account_len,
+                               const turn_origin_t *origin);
 
 /**
  * @brief Confirm and send a draft.
@@ -256,9 +317,39 @@ int email_service_create_draft(int user_id,
  *         found/expired, EMAIL_CONFIRM_RC_THROTTLED if throttled,
  *         EMAIL_CONFIRM_RC_ACCOUNT_GONE if the draft's bound sending account is
  *         no longer available or writable (deleted/disabled/read-only since the
- *         draft was prepared — prepare a new draft)
+ *         draft was prepared — prepare a new draft), EMAIL_CONFIRM_RC_OTHER_SESSION
+ *         / _SAME_TURN / _NOT_NEXT when @p origin isn't the turn right after the
+ *         draft's, in its session (turn_origin_check; the draft stays)
  */
-int email_service_confirm_send(int user_id, const char *draft_id);
+int email_service_confirm_send(int user_id, const char *draft_id, const turn_origin_t *origin);
+
+/**
+ * @brief What confirming a draft sends, in one line for a text asking the
+ *        user to approve it: the recipient's address, the account, the
+ *        subject and the start of the body; @p valid_for_sec receives how
+ *        long the draft has left (may be NULL)
+ * @param session_id The session asking: only a draft made in it is described
+ *                   (its confirm is refused anywhere else)
+ * @return EMAIL_RC_OK, or EMAIL_RC_FAILURE when the session has no such draft
+ */
+int email_service_describe_draft(int user_id,
+                                 uint32_t session_id,
+                                 const char *draft_id,
+                                 char *out,
+                                 size_t out_len,
+                                 int *valid_for_sec);
+
+/**
+ * @brief What confirming a pending trash moves, in one line (only one made
+ *        in @p session_id)
+ * @return EMAIL_RC_OK, or EMAIL_RC_FAILURE when the session has no such pending trash
+ */
+int email_service_describe_pending_trash(int user_id,
+                                         uint32_t session_id,
+                                         const char *pending_id,
+                                         char *out,
+                                         size_t out_len,
+                                         int *valid_for_sec);
 
 /**
  * @brief Get access summary for read-only indication.
@@ -284,8 +375,8 @@ int email_service_list_folders(int user_id, const char *account_name, char *out,
  * @brief Create a pending trash action for two-step delete.
  * Fetches message metadata for confirmation display.
  * @param pending_id_out  Output: hex pending ID string
- * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
- *         EMAIL_ACCT_RC_READONLY if the account is read-only
+ * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure (also for a NULL
+ *         or turn-less @p origin), EMAIL_ACCT_RC_READONLY if the account is read-only
  */
 int email_service_create_pending_trash(int user_id,
                                        const char *account_name,
@@ -295,23 +386,30 @@ int email_service_create_pending_trash(int user_id,
                                        char *subject_out,
                                        size_t subject_len,
                                        char *from_out,
-                                       size_t from_len);
+                                       size_t from_len,
+                                       const turn_origin_t *origin);
 
 /**
  * @brief Confirm and execute a pending trash action.
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
+ *         EMAIL_RC_NOT_FOUND (the message is gone), EMAIL_RC_NO_TRASH,
+ *         EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED, EMAIL_RC_NOT_REMOVED
+ *         (IMAP; see email_trash_message),
  *         EMAIL_CONFIRM_RC_NOT_FOUND if not found/expired,
  *         EMAIL_CONFIRM_RC_THROTTLED if throttled,
  *         EMAIL_CONFIRM_RC_ACCOUNT_GONE if the account is no longer available or
- *         writable since the pending action was prepared
+ *         writable since the pending action was prepared, EMAIL_CONFIRM_RC_OTHER_SESSION
+ *         / _SAME_TURN / _NOT_NEXT as for email_service_confirm_send
  */
-int email_service_confirm_trash(int user_id, const char *pending_id);
+int email_service_confirm_trash(int user_id, const char *pending_id, const turn_origin_t *origin);
 
 /**
- * @brief Archive a message (remove from inbox, keep in All Mail/Archive).
- * Single-step operation — no confirmation needed.
+ * @brief Archive a message: move it to the account's archive folder (Gmail
+ * API: remove the INBOX label).  Single-step operation — no confirmation needed.
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
- *         EMAIL_ACCT_RC_READONLY if the account is read-only
+ *         EMAIL_ACCT_RC_READONLY if the account is read-only, EMAIL_RC_NOT_FOUND,
+ *         EMAIL_RC_FOLDER_MISSING, EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED,
+ *         EMAIL_RC_NOT_REMOVED (IMAP; see email_archive_message)
  */
 int email_service_archive(int user_id, const char *account_name, const char *message_id);
 

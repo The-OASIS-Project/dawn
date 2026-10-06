@@ -28,6 +28,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -115,6 +116,46 @@ int auth_db_get_user(const char *username, auth_user_t *user_out) {
 
    OLOG_ERROR("auth_db_get_user: failed: %s", sqlite3_errmsg(s_db.db));
    return AUTH_DB_FAILURE;
+}
+
+int auth_db_user_get_categories_backfilled_at(int user_id, int64_t *ts_out) {
+   if (!ts_out || user_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   *ts_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, "SELECT categories_backfilled_at FROM users WHERE id = ?",
+                               -1, &stmt, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(stmt, 1, user_id);
+      rc = sqlite3_step(stmt);
+      if (rc == SQLITE_ROW) {
+         *ts_out = sqlite3_column_int64(stmt, 0);
+      }
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int auth_db_user_set_categories_backfilled_at(int user_id, int64_t ts) {
+   if (user_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "UPDATE users SET categories_backfilled_at = ? WHERE id = ?", -1,
+                               &stmt, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(stmt, 1, ts);
+      sqlite3_bind_int(stmt, 2, user_id);
+      rc = sqlite3_step(stmt);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
 int auth_db_user_count(int *count_out) {
@@ -384,6 +425,20 @@ int auth_db_delete_user(const char *username) {
    sqlite3_step(stmt_del_sessions);
    sqlite3_finalize(stmt_del_sessions);
 
+   /* The user's per-call usage rows (llm_usage_log has no foreign keys). */
+   sqlite3_stmt *stmt_del_usage = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "DELETE FROM llm_usage_log WHERE user_id = ?", -1,
+                          &stmt_del_usage, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(stmt_del_usage, 1, user_id);
+      rc = sqlite3_step(stmt_del_usage);
+   }
+   sqlite3_finalize(stmt_del_usage);
+   if (rc != SQLITE_DONE) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
    /* Delete the user */
    const char *sql_del = "DELETE FROM users WHERE username = ?";
    sqlite3_stmt *stmt_del = NULL;
@@ -405,11 +460,15 @@ int auth_db_delete_user(const char *username) {
 
    sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
    AUTH_DB_UNLOCK();
+   auth_sessions_changed(); /* their logins went with them */
 
+   /* The frozen prompts of their conversations hold their identity and
+    * settings: gone with them, not at the next maintenance. */
+   (void)conv_db_prompt_blobs_gc(NULL);
    return AUTH_DB_SUCCESS;
 }
 
-int auth_db_update_password(const char *username, const char *new_hash) {
+int auth_db_update_password(const char *username, const char *new_hash, const char *keep_token) {
    if (!username || !new_hash) {
       return AUTH_DB_INVALID;
    }
@@ -462,8 +521,10 @@ int auth_db_update_password(const char *username, const char *new_hash) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Invalidate all sessions for this user */
-   const char *sql_del = "DELETE FROM sessions WHERE user_id = ?";
+   /* End the account's logins: all of them, or all but the one that made the
+    * change (the user changing their own password stays signed in there). */
+   const char *sql_del = keep_token ? "DELETE FROM sessions WHERE user_id = ? AND token != ?"
+                                    : "DELETE FROM sessions WHERE user_id = ?";
    sqlite3_stmt *stmt_del = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql_del, -1, &stmt_del, NULL);
    if (rc != SQLITE_OK) {
@@ -472,11 +533,21 @@ int auth_db_update_password(const char *username, const char *new_hash) {
       return AUTH_DB_FAILURE;
    }
    sqlite3_bind_int(stmt_del, 1, user_id);
-   sqlite3_step(stmt_del);
+   if (keep_token) {
+      sqlite3_bind_text(stmt_del, 2, keep_token, -1, SQLITE_STATIC);
+   }
+   rc = sqlite3_step(stmt_del);
    sqlite3_finalize(stmt_del);
+   if (rc != SQLITE_DONE) {
+      /* The password must not change while the old logins survive it. */
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
 
    sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
    AUTH_DB_UNLOCK();
+   auth_sessions_changed(); /* the change ended the account's logins */
 
    return AUTH_DB_SUCCESS;
 }
@@ -518,4 +589,8 @@ int auth_db_unlock_user(const char *username) {
    AUTH_DB_UNLOCK();
 
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+/* Replaced by the WebUI (webui_login_sweep.c); nothing to do without it. */
+__attribute__((weak)) void auth_sessions_changed(void) {
 }

@@ -49,10 +49,11 @@ an LLM + web search, and "is this report good?" is a judgment call, not a metric
    `smoke_queries.json`, tell Friday (WebUI text, voice, or a chat channel)
    something like:
 
-   > Do a deep-research run on: *«brief»*. Show me the plan and cost, then go ahead.
+   > Do a deep-research run on: *«brief»*. Show me the plan and cost.
 
-   She'll propose (plan + cost envelope), you confirm, and the run starts in the
-   background. Repeat for all 8. They run concurrently under the `[jobs]` caps; let
+   She'll propose (plan + cost envelope); reply "yes" and the run starts in the
+   background. The yes has to be its own reply: a run starts only on the user's
+   next message after the proposal. Repeat for all 8. They run concurrently under the `[jobs]` caps; let
    them finish (watch the sidebar / `deep_research status`).
 3. **Capture the baseline:**
 

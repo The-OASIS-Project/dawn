@@ -24,6 +24,7 @@
 #include "core/str_fuzzy.h"
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "utils/string_utils.h"
@@ -124,4 +125,82 @@ int str_fuzzy_ratio(const char *a_lower, const char *b_lower) {
       ratio = 100;
    }
    return ratio;
+}
+
+static bool phonetic_vowel(char c) {
+   return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' || c == 'y';
+}
+
+void str_phonetic_key(const char *word, char *out, size_t out_len) {
+   if (!out || out_len == 0) {
+      return;
+   }
+   out[0] = '\0';
+   if (!word) {
+      return;
+   }
+   /* The word's letters, lowercased (other ASCII dropped; UTF-8 bytes kept). */
+   char w[STR_PHONETIC_MAXLEN + 1];
+   size_t n = 0;
+   for (const unsigned char *p = (const unsigned char *)word; *p && *p != ' ' && n < sizeof(w) - 1;
+        p++) {
+      if (*p >= 0x80) {
+         w[n++] = (char)*p;
+      } else if (isalpha(*p)) {
+         w[n++] = (char)tolower(*p);
+      }
+   }
+   w[n] = '\0';
+
+   size_t o = 0;
+   char last = '\0';
+   for (size_t i = 0; i < n && o < out_len - 1; i++) {
+      const char c = w[i];
+      const char next = i + 1 < n ? w[i + 1] : '\0';
+      const char prev = i > 0 ? w[i - 1] : '\0';
+      char k;
+      if (c == 'p' && next == 'h') {
+         k = 'f';
+         i++;
+      } else if ((c == 's' && next == 'h') || (c == 'c' && next == 'h')) {
+         k = c == 's' ? 's' : 'k';
+         i++;
+      } else if (c == 'c' && next == 'k') {
+         k = 'k';
+         i++;
+      } else if (c == 'c') {
+         k = (next == 'e' || next == 'i' || next == 'y') ? 's' : 'k';
+      } else if (c == 'k' && next == 'n' && i == 0) {
+         continue; /* kn- */
+      } else if (c == 'w' && next == 'r' && i == 0) {
+         continue; /* wr- */
+      } else if (c == 'h' && i > 0) {
+         continue; /* silent after the first letter */
+      } else if ((c == 'w' || c == 'y') && i > 0 && phonetic_vowel(prev)) {
+         continue; /* part of the vowel before it */
+      } else if (phonetic_vowel(c)) {
+         if (o == 0 && last == '\0') {
+            k = 'a'; /* a leading vowel, whichever it is */
+         } else {
+            last = 'a'; /* a vowel between consonants separates doubles */
+            continue;
+         }
+      } else if (c == 'q') {
+         k = 'k';
+      } else if (c == 'z') {
+         k = 's';
+      } else if (c == 'v') {
+         k = 'f';
+      } else if (c == 'g' && (next == 'e' || next == 'i')) {
+         k = 'j';
+      } else {
+         k = c;
+      }
+      if (k == last) {
+         continue; /* doubled */
+      }
+      out[o++] = k;
+      last = k;
+   }
+   out[o] = '\0';
 }

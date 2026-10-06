@@ -35,8 +35,12 @@
 #include <strings.h> /* strcasecmp */
 #include <time.h>
 
+#include "auth/auth_db_withdraw.h"
 #include "core/embedding_engine.h"
+#include "core/pending_slots.h"
+#include "core/session_prefix.h"
 #include "core/strbuf.h"
+#include "core/turn_origin.h"
 #include "dawn_error.h"
 #include "llm/llm_tools.h" /* LLM_TOOLS_ARGS_LEN — the upstream tool-arg cap DOCMGMT_SAVE_TEXT_MAX mirrors */
 #include "logging.h"
@@ -45,7 +49,9 @@
 #include "tools/document_index_pipeline.h"
 #include "tools/document_manage.h"
 #include "tools/toml.h"
+#include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Config — TOOL_CAP_DANGEROUS tools must supply a config struct + parser, and
@@ -72,16 +78,16 @@ static void doc_manage_parse_config(toml_table_t *table, void *config) {
 }
 
 /* =============================================================================
- * Two-step delete approval — per-user staged pending deletion
+ * Two-step delete approval — a staged deletion per session, named by its id
  * ============================================================================= */
 
-#define DOCMGMT_MAX_PENDING 8
-#define DOCMGMT_PENDING_EXPIRY_SEC 120
+#define DOCMGMT_MAX_PENDING 16
+#define DOCMGMT_PENDING_EXPIRY_SEC 300 /* as long as a reply code, when one confirms it */
 /* Upper bound on the save_text overwrite sweep — how many same-named duplicate
  * documents we'll delete before re-indexing.  A backstop against a delete that
  * keeps reporting success without removing the row; in practice 1-2. */
 #define DOCMGMT_MAX_OVERWRITE_SWEEP 64
-#define DOCMGMT_CONFIRM_MSG_MAX 512 /* prompt text + up to DOC_FILENAME_MAX label */
+#define DOCMGMT_CONFIRM_MSG_MAX 768 /* prompt text + up to DOC_FILENAME_MAX label */
 
 /* Max text accepted by save_note/save_text.  save_text stores MULTI-chunk
  * documents, so the per-chunk DOC_CHUNK_TEXT_MAX (4096) would silently clip
@@ -145,17 +151,23 @@ _Static_assert(DOCMGMT_SAVE_TEXT_BUDGET < LLM_TOOLS_ARGS_LEN,
                                  "one piece of writing across "                                      \
                                  "separate records."
 
+/* A deletion awaiting its confirm, one per session (core/pending_slots.h):
+ * the confirm must come from that session, in the user's next turn. */
+#define DOCMGMT_PENDING_DELETE 1
+
 typedef struct {
-   int user_id;
+   pending_slot_t hdr;
    int64_t doc_id;
    char label[DOC_FILENAME_MAX];
    bool is_note;
-   time_t created_at;
-   bool active;
 } docmgmt_pending_t;
 
+PENDING_ITEM_CHECK(docmgmt_pending_t);
 static docmgmt_pending_t s_pending[DOCMGMT_MAX_PENDING];
 static pthread_mutex_t s_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
+PENDING_ARRAY_CHECK(s_pending);
+static const pending_slots_t s_pending_slots = PENDING_SLOTS_TABLE(s_pending,
+                                                                   DOCMGMT_PENDING_EXPIRY_SEC);
 
 /* Serializes edit/append read→modify→write so two concurrent edits of the same
  * note can't clobber each other (the tool worker + a WebUI editor are different
@@ -164,59 +176,162 @@ static pthread_mutex_t s_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
  * B1b CAS-by-hash upgrade. */
 static pthread_mutex_t s_edit_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* Stage (or replace) the pending deletion for a user.  Caller-locked. */
-static void stage_pending_locked(int user_id, int64_t doc_id, const char *label, bool is_note) {
-   time_t now = time(NULL);
-   int slot = -1;
-   /* Reuse the user's existing slot first, else a free/expired one, else slot 0. */
-   for (int i = 0; i < DOCMGMT_MAX_PENDING; i++) {
-      if (s_pending[i].active && s_pending[i].user_id == user_id) {
-         slot = i;
-         break;
-      }
-   }
-   if (slot < 0) {
-      for (int i = 0; i < DOCMGMT_MAX_PENDING; i++) {
-         if (!s_pending[i].active || now - s_pending[i].created_at > DOCMGMT_PENDING_EXPIRY_SEC) {
-            slot = i;
-            break;
-         }
-      }
-   }
-   if (slot < 0)
-      slot = 0;
-   s_pending[slot].user_id = user_id;
-   s_pending[slot].doc_id = doc_id;
-   snprintf(s_pending[slot].label, sizeof(s_pending[slot].label), "%s", label ? label : "");
-   s_pending[slot].is_note = is_note;
-   s_pending[slot].created_at = now;
-   s_pending[slot].active = true;
-}
-
-/* Take (consume) a non-expired pending deletion for a user.  Returns true and
- * fills *out_id / *out_label / *out_is_note on success; clears the slot. */
-static bool take_pending(int user_id,
-                         int64_t *out_id,
-                         char *out_label,
-                         size_t label_sz,
-                         bool *out_is_note) {
-   bool found = false;
-   time_t now = time(NULL);
+/* Stage (replace) this session's pending deletion.  Its pending_id, or 0
+ * when it wasn't staged (@p rc says why). */
+static uint32_t stage_pending(const turn_origin_t *origin,
+                              int user_id,
+                              int64_t doc_id,
+                              const char *label,
+                              bool is_note,
+                              pending_stage_rc_t *rc) {
    pthread_mutex_lock(&s_pending_mutex);
-   for (int i = 0; i < DOCMGMT_MAX_PENDING; i++) {
-      if (s_pending[i].active && s_pending[i].user_id == user_id) {
-         if (now - s_pending[i].created_at <= DOCMGMT_PENDING_EXPIRY_SEC) {
-            *out_id = s_pending[i].doc_id;
-            snprintf(out_label, label_sz, "%s", s_pending[i].label);
-            *out_is_note = s_pending[i].is_note;
-            found = true;
-         }
-         memset(&s_pending[i], 0, sizeof(s_pending[i])); /* consume either way */
-         break;
-      }
+   docmgmt_pending_t *p = (docmgmt_pending_t *)pending_slots_stage(&s_pending_slots, origin,
+                                                                   user_id, DOCMGMT_PENDING_DELETE,
+                                                                   pending_slots_now(), rc);
+   const uint32_t pending_id = p ? p->hdr.item_id : 0;
+   if (p) {
+      p->doc_id = doc_id;
+      snprintf(p->label, sizeof(p->label), "%s", label ? label : "");
+      p->is_note = is_note;
    }
    pthread_mutex_unlock(&s_pending_mutex);
-   return found;
+   return pending_id;
+}
+
+/* Take this session's pending deletion, the one the confirm names, for its
+ * confirm: copied to @p out and consumed.  NULL on success, else the message
+ * to return (one named wrong, or confirmed in the wrong turn, stays). */
+static char *take_pending(const turn_origin_t *origin,
+                          int user_id,
+                          uint32_t pending_id,
+                          docmgmt_pending_t *out) {
+   if (pending_id == 0)
+      return tool_pending_missing_id("deletion");
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   pthread_mutex_lock(&s_pending_mutex);
+   const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id,
+                                                   DOCMGMT_PENDING_DELETE, pending_id,
+                                                   pending_slots_now(), out, sizeof(*out), &orc);
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (rc == PENDING_FOUND)
+      return NULL;
+   if (rc == PENDING_NOT_NOW)
+      OLOG_WARNING("document_manage: confirm_delete refused (%s)", turn_origin_refusal(orc));
+   return tool_pending_take_refusal(rc, orc, "deletion");
+}
+
+static int resolve_owned_doc(int user_id, const char *label, int64_t id, document_t *out);
+
+/* The note or document a write acts on, named as execution resolves it (an
+ * id first, else the exact label): "the note 'X' (#42)", and whether a save
+ * replaces one.  Refused (with why in @p out) when nothing resolves. */
+static int describe_write_target(int user_id,
+                                 const char *action,
+                                 const char *label,
+                                 int64_t id,
+                                 char *out,
+                                 size_t out_len) {
+   int n;
+   if (strcmp(action, "save_note") == 0 || strcmp(action, "save_text") == 0) {
+      if (!label[0]) {
+         snprintf(out, out_len, "it doesn't name the note or document to save");
+         return FAILURE;
+      }
+      /* As do_save_note / do_save_text decide: a save over the user's own
+       * item of that name (a note; a document that isn't one) replaces it. */
+      const bool note = strcmp(action, "save_note") == 0;
+      document_t existing;
+      const bool overwrite = document_db_find_by_label_exact(user_id, label, note, &existing) ==
+                                 SUCCESS &&
+                             existing.user_id == user_id &&
+                             (note || strcmp(existing.filetype, "note") != 0);
+      n = snprintf(out, out_len, "%s %s '%s'", overwrite ? "overwrite the" : "save a new",
+                   note ? "note" : "document", label);
+      return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+   }
+   /* The item it acts on, shown by its own name: an id wins over a label, as
+    * in execution. */
+   document_t doc;
+   if (resolve_owned_doc(user_id, label, id, &doc) == SUCCESS) {
+      const bool is_note = strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1;
+      /* recover on a live item undoes its last change (do_recover). */
+      n = snprintf(out, out_len, "%s the %s '%s' (#%lld)",
+                   strcmp(action, "recover") == 0 ? "undo the last change to" : action,
+                   is_note ? "note" : "document", doc.filename, (long long)doc.id);
+   } else if (strcmp(action, "recover") == 0 && label[0]) {
+      n = snprintf(out, out_len, "recover the deleted note or document '%s'", label);
+   } else {
+      snprintf(out, out_len, "no note or document of the user's matches it");
+      return FAILURE;
+   }
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
+/* What a call that waits for the user's reply code does (tool_metadata_t
+ * describe_call): a confirm_delete from the deletion it carries out; a write
+ * with the item it acts on and what it writes (its text, the change, the new
+ * name). */
+static int doc_manage_describe_call(const char *action,
+                                    const char *value,
+                                    char *out,
+                                    size_t out_len,
+                                    int *valid_for_sec) {
+   const int user_id = tool_get_current_user_id();
+   int n = -1;
+   if (strcmp(action, "confirm_delete") == 0) {
+      char id_str[16] = "";
+      long long id = 0;
+      if (tool_param_extract_custom(value, "pending_id", id_str, sizeof(id_str)) && id_str[0]) {
+         id = strtoll(id_str, NULL, 10);
+      }
+      turn_origin_t origin;
+      if (id <= 0 || id > UINT32_MAX || !turn_origin_capture(&origin)) {
+         return FAILURE;
+      }
+      pthread_mutex_lock(&s_pending_mutex);
+      pending_slot_t *slot = NULL;
+      if (pending_slots_find(&s_pending_slots, &origin, user_id, DOCMGMT_PENDING_DELETE,
+                             (uint32_t)id, pending_slots_now(), &slot) == PENDING_FOUND) {
+         const docmgmt_pending_t *p = (const docmgmt_pending_t *)slot;
+         n = snprintf(out, out_len, "delete the %s '%s' (#%lld)", p->is_note ? "note" : "document",
+                      p->label, (long long)p->doc_id);
+         *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
+      }
+      pthread_mutex_unlock(&s_pending_mutex);
+   } else {
+      char label[DOC_FILENAME_MAX] = "";
+      tool_param_extract_base(value, label, sizeof(label));
+      char id_str[24] = "";
+      int64_t id = 0;
+      if (tool_param_extract_custom(value, "id", id_str, sizeof(id_str)) && id_str[0]) {
+         id = (int64_t)strtoll(id_str, NULL, 10);
+      }
+      char target[DOC_FILENAME_MAX + 128];
+      if (describe_write_target(user_id, action, label, id, target, sizeof(target)) != SUCCESS) {
+         snprintf(out, out_len, "%s", target);
+         return FAILURE;
+      }
+      /* What it writes: the one field its action reads (a decoy in another
+       * field never shows). */
+      const char *field_name = strcmp(action, "edit") == 0      ? "change"
+                               : strcmp(action, "rename") == 0  ? "new_name"
+                               : strcmp(action, "recover") == 0 ? NULL
+                                                                : "text";
+      char what[320] = "";
+      if (field_name) {
+         char *field = malloc(LLM_TOOLS_ARGS_LEN);
+         if (!field) {
+            return FAILURE;
+         }
+         if (tool_param_extract_custom(value, field_name, field, LLM_TOOLS_ARGS_LEN) && field[0]) {
+            str_excerpt_line(field, 200, what, sizeof(what));
+         }
+         free(field);
+      }
+      n = snprintf(out, out_len, "%s%s%s%s", target, what[0] ? ": \"" : "", what,
+                   what[0] ? "\"" : "");
+   }
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
 }
 
 /* =============================================================================
@@ -277,6 +392,15 @@ static const treg_param_t doc_manage_params[] = {
        .field_name = "id",
    },
    {
+       .name = "pending_id",
+       .description = "Required by 'confirm_delete': the pending_id the 'delete' preview "
+                      "returned. Only that deletion is carried out.",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "pending_id",
+   },
+   {
        .name = "new_name",
        .description = "Required by 'rename': the new name/label to give the note or document. "
                       "The content is unchanged — only the name changes.",
@@ -308,8 +432,18 @@ static const treg_param_t doc_manage_params[] = {
    },
 };
 
+static const tool_action_kind_entry_t s_doc_manage_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "list_deleted", TOOL_KIND_READ, NULL },
+   { "delete", TOOL_KIND_PREPARE, "confirm_delete" },
+   { "confirm_delete", TOOL_KIND_ACT, NULL },
+};
+
 static const tool_metadata_t doc_manage_metadata = {
    .name = "document_manage",
+   .describe_call = doc_manage_describe_call,
+   .action_kinds = s_doc_manage_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_doc_manage_action_kinds),
    .device_string = "document manager",
    .description =
        "Save, edit, list, and delete the user's stored documents and notes. Use 'save_note' to "
@@ -327,7 +461,7 @@ static const tool_metadata_t doc_manage_metadata = {
        "the WebUI). To READ or SEARCH stored content, use document_read / document_search "
        "instead.",
    .params = doc_manage_params,
-   .param_count = 6,
+   .param_count = TOOL_PARAM_COUNT(doc_manage_params),
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_DANGEROUS, /* mutates + deletes user data */
    .default_local = true,
@@ -423,6 +557,9 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
     * duplicates).  Scoped tight: a same-named note (different kind, owns a gloss)
     * and global/other-user docs are never touched.  The bound guards against a
     * delete that keeps failing. */
+   /* The replaced document is the user removing it: its passages leave the
+    * conversations they were sent into. */
+   conv_db_withdraw_intent_begin(user_id);
    for (int guard = 0; guard < DOCMGMT_MAX_OVERWRITE_SWEEP; guard++) {
       if (document_db_find_by_label_exact(user_id, title, false, &existing) != SUCCESS ||
           existing.user_id != user_id || strcmp(existing.filetype, "note") == 0)
@@ -430,6 +567,10 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
       if (document_db_delete_indexed(existing.id) != SUCCESS)
          break;
       overwrite = true;
+   }
+   conv_db_withdraw_intent_end();
+   if (overwrite) {
+      session_withdraw_forgotten_async(user_id, false);
    }
 
    doc_index_result_t res;
@@ -536,9 +677,8 @@ static char *commit_edit(int user_id,
 }
 
 /* edit: find/replace in a note.  `change` is a JSON object given as a string:
- * {"find": "...", "replace": "..."}.  Carried as the terminal tail param so its
- * content (incl. "::", newlines) survives the ::field::value flattening intact —
- * the JSON escaping is what makes find/replace safe regardless of content. */
+ * {"find": "...", "replace": "..."}; the JSON escaping is what makes
+ * find/replace safe regardless of content. */
 static char *do_edit(int user_id, const char *label, int64_t id, const char *change_json) {
    if (!change_json || !change_json[0])
       return strdup("To edit, provide 'change' as {\"find\": \"...\", \"replace\": \"...\"}.");
@@ -773,7 +913,10 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
 
 /* delete: resolve the target and STAGE it — never deletes here.  The user must
  * approve, after which the model calls confirm_delete. */
-static char *do_delete_request(int user_id, const char *label, int64_t id) {
+static char *do_delete_request(int user_id,
+                               const char *label,
+                               int64_t id,
+                               const turn_origin_t *origin) {
    if (id <= 0 && (!label || !label[0]))
       return strdup("To delete, give the exact label/name (or the id from 'list').");
 
@@ -787,29 +930,37 @@ static char *do_delete_request(int user_id, const char *label, int64_t id) {
                     "No note or document by that name was found (it may not be yours).");
 
    bool is_note = (strcmp(doc.filetype, "note") == 0);
-   pthread_mutex_lock(&s_pending_mutex);
-   stage_pending_locked(user_id, doc.id, doc.filename, is_note);
-   pthread_mutex_unlock(&s_pending_mutex);
+   pending_stage_rc_t src = PENDING_STAGED;
+   const uint32_t pending_id = stage_pending(origin, user_id, doc.id, doc.filename, is_note, &src);
+   if (pending_id == 0)
+      return tool_pending_stage_refusal(src, "deletion");
 
    char msg[DOCMGMT_CONFIRM_MSG_MAX]; /* base copy + up to DOC_FILENAME_MAX label */
    snprintf(msg, sizeof(msg),
             "This will delete the %s '%s' (recoverable with 'recover' for a short window if "
-            "version history is on). Ask the user to confirm, then call document_manage with "
-            "action 'confirm_delete' to proceed.",
-            is_note ? "note" : "document", doc.filename);
+            "version history is on). Ask the user to confirm; if they say yes in their reply, call "
+            "document_manage with action 'confirm_delete' and pending_id %u (this deletion only).",
+            is_note ? "note" : "document", doc.filename, (unsigned)pending_id);
    return strdup(msg);
 }
 
-static char *do_confirm_delete(int user_id) {
-   int64_t doc_id = 0;
-   char label[DOC_FILENAME_MAX] = "";
-   bool is_note = false;
-   if (!take_pending(user_id, &doc_id, label, sizeof(label), &is_note))
-      return strdup("There's nothing staged to delete (the request may have expired). Run "
-                    "'delete' again first.");
+static char *do_confirm_delete(int user_id, const turn_origin_t *origin, const char *value) {
+   char id_str[16] = "";
+   uint32_t pending_id = 0;
+   if (tool_param_extract_custom(value, "pending_id", id_str, sizeof(id_str)) && id_str[0]) {
+      const long long n = strtoll(id_str, NULL, 10);
+      pending_id = (n > 0 && n <= UINT32_MAX) ? (uint32_t)n : 0;
+   }
+   docmgmt_pending_t pending;
+   char *err = take_pending(origin, user_id, pending_id, &pending);
+   if (err)
+      return err;
+   const int64_t doc_id = pending.doc_id;
+   const char *label = pending.label;
+   const bool is_note = pending.is_note;
 
    /* Re-validate ownership at confirm time: the staged doc could have been
-    * deleted and its rowid reused by a DIFFERENT doc in the up-to-120s window
+    * deleted and its rowid reused by a DIFFERENT doc in the up-to-5-minute window
     * (documents.id is not AUTOINCREMENT).  Confirm we still own this exact id
     * before deleting (TOCTOU / CWE-367 guard). */
    document_t doc;
@@ -819,11 +970,15 @@ static char *do_confirm_delete(int user_id) {
    /* Drop the memory→note bridge gloss BEFORE the note row is deleted (the FK
     * nulls note_doc_id on delete, after which the gloss can't be found by it).
     * Best-effort + harmless for non-note docs (no gloss exists). */
+   conv_db_withdraw_intent_begin(user_id); /* the user removing it, its gloss too */
    (void)memory_note_bridge_delete_gloss(user_id, doc_id);
-
-   if (document_db_delete_indexed(doc_id) != SUCCESS)
+   const int deleted = document_db_delete_indexed(doc_id);
+   conv_db_withdraw_intent_end();
+   if (deleted != SUCCESS)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "The deletion failed — the item may have already been removed.");
+   /* Its passages leave the conversations they were sent into. */
+   session_withdraw_forgotten_async(user_id, false);
 
    char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "Deleted the %s '%s'.", is_note ? "note" : "document", label);
@@ -888,6 +1043,8 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
    (void)action;
    *should_respond = 1;
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    char act[32] = "";
    if (action)
@@ -895,8 +1052,18 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
 
    if (strcmp(act, "list") == 0)
       return do_list(user_id);
+   /* Deleting needs the user in a live conversation (not a background job, a
+    * re-engaged turn or an MQTT message), and its confirm their next turn in
+    * the session that staged it. */
+   turn_origin_t origin = { 0 };
+   const bool deletes = strcmp(act, "delete") == 0 || strcmp(act, "confirm_delete") == 0;
+   if (deletes && !turn_origin_capture(&origin))
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Deleting needs the user in a live conversation, and this request came from "
+                    "a background job or an automated turn. Tell the user what you would delete, "
+                    "and let them ask for it.");
    if (strcmp(act, "confirm_delete") == 0)
-      return do_confirm_delete(user_id);
+      return do_confirm_delete(user_id, &origin, value);
    if (strcmp(act, "list_deleted") == 0)
       return do_list_deleted(user_id);
 
@@ -915,7 +1082,7 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
       return do_recover(user_id, label, id);
 
    if (strcmp(act, "delete") == 0)
-      return do_delete_request(user_id, label, id);
+      return do_delete_request(user_id, label, id, &origin);
 
    if (strcmp(act, "rename") == 0) {
       char new_name[DOC_FILENAME_MAX] = "";
@@ -923,26 +1090,26 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
       return do_rename(user_id, label, id, new_name);
    }
 
-   /* edit: the JSON 'change' object is the terminal (tail) param. */
+   /* edit: the JSON 'change' object. */
    if (strcmp(act, "edit") == 0) {
       char *change = malloc(DOCMGMT_SAVE_TEXT_MAX);
       if (!change)
          return strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
       change[0] = '\0';
-      tool_param_extract_custom_tail(value, "change", change, DOCMGMT_SAVE_TEXT_MAX);
+      tool_param_extract_custom(value, "change", change, DOCMGMT_SAVE_TEXT_MAX);
       char *result = do_edit(user_id, label, id, change);
       free(change);
       return result;
    }
 
-   /* save_note / save_text / append: text is the terminal (tail) param.  Buffer
-    * sized to DOCMGMT_SAVE_TEXT_MAX (the tool-arg ceiling), NOT the per-chunk
-    * size, so a multi-chunk save_text document isn't clipped at 4 KB. */
+   /* save_note / save_text / append: the text, in a buffer of
+    * DOCMGMT_SAVE_TEXT_MAX (the tool-arg ceiling), NOT the per-chunk size, so a
+    * multi-chunk save_text document isn't clipped at 4 KB. */
    char *text = malloc(DOCMGMT_SAVE_TEXT_MAX);
    if (!text)
       return strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
    text[0] = '\0';
-   tool_param_extract_custom_tail(value, "text", text, DOCMGMT_SAVE_TEXT_MAX);
+   tool_param_extract_custom(value, "text", text, DOCMGMT_SAVE_TEXT_MAX);
 
    char *result;
    if (strcmp(act, "save_note") == 0)

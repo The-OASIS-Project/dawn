@@ -32,6 +32,7 @@
 
 #include "core/curl_buffer.h"
 #include "core/session_manager.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -397,7 +398,9 @@ static int summarize_with_default_llm(const char *prompt, char **out_summary) {
    // Call cloud LLM (non-streaming for summarization)
    // Pass allow_fallback=false to prevent summarizer failures from triggering
    // global LLM fallback (which would switch to local LLM and play TTS notification)
-   char *response = llm_chat_completion(conversation, prompt, NULL, NULL, 0, false);
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SUMMARIZER);
+   char *response = llm_chat_completion(conversation, prompt, false);
+   llm_cache_monitor_pop_kind(kind_prev);
 
    // Restore tools
    llm_tools_suppress_pop();
@@ -425,7 +428,6 @@ static int summarize_with_default_llm(const char *prompt, char **out_summary) {
  * For WebUI sessions: Sends status update to display in UI
  */
 static void notify_summarization_starting(void) {
-#ifdef ENABLE_MULTI_CLIENT
    session_t *session = session_get_command_context();
 
    if (!session || session->session_id == 0) {
@@ -437,10 +439,6 @@ static void notify_summarization_starting(void) {
       /* WebUI session - send status update */
       webui_send_state_with_detail(session, "summarizing", "Processing search results...");
    }
-#endif
-#else
-   /* Local-only mode - use TTS */
-   text_to_speech((char *)"Summarizing the results, please standby.");
 #endif
 }
 

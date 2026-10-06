@@ -29,7 +29,7 @@
  * queue FIFO and are chained one at a time as each finishes.  The module owns
  * ONLY ordering + the per-session in-flight gate + one leaf mutex; it never
  * executes a turn (execution is a producer-supplied closure).  Sibling of
- * input_queue.c / pending_system_msg.c.
+ * input_queue.c.
  *
  * SAFETY INVARIANT: a turn is never spawned onto a session that already has a
  * turn in flight — this is what guarantees any two truly-concurrent turns run on
@@ -93,6 +93,21 @@ int turn_queue_enqueue(uint32_t session_id,
  * @param session_id Session whose in-flight turn just completed.
  */
 void turn_queue_turn_done(uint32_t session_id);
+
+/**
+ * @brief Drop @p session_id's QUEUED turns that one producer enqueued
+ *
+ * For a producer whose newest turn makes its older queued ones pointless (a
+ * satellite query supersedes the one before it).  Removes every queued (not
+ * in-flight) turn whose free_work closure is @p free_work, and hands each to
+ * @p discard (no lock held) instead of free_work, so the producer can drop it
+ * quietly.
+ *
+ * @return Number of turns dropped.
+ */
+int turn_queue_discard_queued(uint32_t session_id,
+                              void (*free_work)(void *work),
+                              void (*discard)(void *work));
 
 /**
  * @brief Mark @p session_id as closing and drop every QUEUED (not in-flight)

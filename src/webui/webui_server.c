@@ -43,15 +43,17 @@
 #include <sys/random.h>
 #include <unistd.h>
 
+#include "core/build_focus_block.h"
 #include "core/focus/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
 #include "core/focus/focus_source.h"            /* focus_compose_result_t */
-#include "memory/memory_db_aliases.h"           /* memory_db_proposal_count_pending */
-#include "webui/build_focus_block.h"
-#include "webui/webui_image_rehydrate.h"
+#include "core/image_rehydrate.h"
+#include "memory/memory_db_aliases.h" /* memory_db_proposal_count_pending */
 #include "webui/webui_internal.h"
+#include "webui/webui_protocol.h"
 
 #ifdef ENABLE_WEBUI_AUDIO
 #include "webui/webui_audio.h"
+#include "webui/webui_music_server.h"
 #endif
 
 #include "config/config_env.h"
@@ -75,12 +77,16 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "state_machine.h"
+#include "tools/tool_registry.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
 #include "version.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_music.h"
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+#include "webui/webui_stocks.h"
+#endif
 
 #ifdef ENABLE_AUTH
 #include "auth/auth_crypto.h"
@@ -875,6 +881,8 @@ static int callback_websocket(struct lws *wsi,
             if (closing_session->client_data == conn) {
                session_mark_disconnected(closing_session);
                closing_session->client_data = NULL;
+               /* Nobody is viewing anything on it until a connection attaches. */
+               atomic_store(&closing_session->viewed_conversation_id, 0);
             } else {
                OLOG_INFO("WebUI: Superseded connection closing — session %u owned by another "
                          "connection, leaving its state intact",
@@ -933,6 +941,10 @@ static int callback_websocket(struct lws *wsi,
       }
 
       case LWS_CALLBACK_RECEIVE: {
+         /* Its login ended: it is closing, and nothing it sends is handled. */
+         if (conn->logged_out) {
+            break;
+         }
          /* Message received from client.
           * Atomic load: maintenance thread may have NULLed conn->session
           * via webui_detach_session() on session expiry. */
@@ -941,6 +953,13 @@ static int callback_websocket(struct lws *wsi,
              * or the conversation session expired while the WS connection stayed alive.
              * If already authenticated, auto-create a new session so the user
              * doesn't have to log in again. */
+            if (conn->is_satellite) {
+               /* A satellite's session ended (expired or destroyed): it isn't
+                * recreated here as a browser's would be; closing makes the
+                * satellite register again. */
+               OLOG_INFO("WebUI: satellite's session ended; closing so it re-registers");
+               return LWS_CLOSE_CONNECTION;
+            }
             if (conn->authenticated) {
                OLOG_INFO("WebUI: Session expired for authenticated connection, auto-creating");
                if (!webui_conn_create_session(conn)) {
@@ -977,6 +996,7 @@ static int callback_websocket(struct lws *wsi,
                json_object_object_get_ex(root, "payload", &payload);
 
                OLOG_INFO("WebUI: Init message received, type=%s", type ? type : "(null)");
+               webui_protocol_note_client(payload, &conn->client_noted);
 
                bool is_reconnect = false;
                session_t *existing_session = NULL;
@@ -988,15 +1008,30 @@ static int callback_websocket(struct lws *wsi,
                      const char *token = json_object_get_string(token_obj);
                      if (token && strlen(token) > 0) {
                         existing_session = lookup_session_by_token(token);
+                        if (existing_session &&
+                            (!webui_session_owned_by(existing_session, conn->auth_user_id) ||
+                             !webui_conn_may_resume(conn, existing_session) ||
+                             !webui_conn_attach_session(conn, existing_session))) {
+                           /* Another user's or another login's session (a token that
+                            * outlived a user switch or a logout), or one being
+                            * destroyed: never attach to it; start a fresh one. */
+                           OLOG_WARNING("WebUI: reconnect token's session isn't this "
+                                        "login's (or is ending); not attaching");
+                           session_release(existing_session); /* the lookup's reference */
+                           existing_session = NULL;
+                        }
                         if (existing_session) {
                            is_reconnect = true;
                            /* Evict any other connection that still owns this session
                             * BEFORE taking ownership, so the superseded tab backs off
-                            * (WS 4001) instead of fighting to re-steal it. */
+                            * (WS 4001) instead of fighting to re-steal it.  (This
+                            * connection is attached already; the session's owner,
+                            * client_data, is still the other one.) */
                            webui_evict_session_owner(existing_session, conn);
-                           conn->session = existing_session;
                            conn->session_was_reconnected = true;
                            existing_session->client_data = conn;
+                           webui_conn_publish_view(
+                               conn); /* the session shows what this connection does */
                            existing_session->disconnected = false;
                            safe_strscpy(conn->session_token, token);
 
@@ -1109,12 +1144,10 @@ static int callback_websocket(struct lws *wsi,
 
                   /* Set user_id for metrics and memory extraction */
                   session_set_metrics_user(conn->session, conn->auth_user_id);
-                  /* Build personalized prompt with user settings + memory context */
-                  char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-                  session_init_system_prompt(conn->session,
-                                             prompt ? prompt : get_remote_command_prompt());
-                  free(prompt);
+                  /* A new context: its first turn freezes the prompt it runs under. */
+                  session_clear_history(conn->session);
                   conn->session->client_data = conn;
+                  webui_conn_publish_view(conn); /* the session shows what this connection does */
                   conn->session_was_reconnected = false; /* brand-new session, not a reconnect */
 
                   /* Check for Opus codec support */
@@ -1316,6 +1349,11 @@ static int callback_websocket(struct lws *wsi,
       }
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
+         /* A connection whose login ended closes now, its force_logout sent
+          * (lws_close_reason carries WEBUI_CLOSE_LOGGED_OUT). */
+         if (conn && conn->logged_out) {
+            return LWS_CLOSE_CONNECTION;
+         }
          /* Ready to send more data - process next queued response */
          process_one_response();
          break;
@@ -1323,6 +1361,7 @@ static int callback_websocket(struct lws *wsi,
       case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
          /* lws_cancel_service() was called - process response queue */
          process_response_queue();
+         webui_login_sweep_run_pending();
          break;
 
       default:
@@ -1730,11 +1769,15 @@ static void webui_tool_execution_callback(void *session_ptr,
    /* Tool execution completed - remove from active list */
    session_remove_active_tool(session, display_name);
 
-   /* If the tool result contains a <dawn-visual> tag, send the full result
-    * as a visible transcript entry (not debug-only). The WebUI visual renderer
-    * extracts and renders the tag as a sandboxed iframe. The result may exceed
-    * the debug_msg buffer size (8KB), so we send the raw result directly. */
-   if (success && result && strstr(result, "<dawn-visual") != NULL) {
+   /* A visual tool's result (render_visual: tool_metadata_t.result_whole)
+    * goes out whole as a visible transcript entry (not debug-only); the WebUI
+    * renders its <dawn-visual> tag as a sandboxed iframe. It may exceed the
+    * debug_msg buffer size (8KB), so the raw result is sent directly. Keyed on
+    * the tool, never the content: a page, email or MCP result that contains
+    * the tag is not a visual. */
+   const tool_metadata_t *tool_meta = tool_registry_find(tool_name);
+   if (success && result && tool_meta && tool_meta->result_whole &&
+       strstr(result, "<dawn-visual") != NULL) {
       webui_send_transcript(session, "visual", result);
 
       /* Stash visual content on the session so it gets appended to the
@@ -1814,6 +1857,7 @@ static void webui_lws_log_emit(int level, const char *line) {
       OLOG_INFO("lws: %s", buf);
    }
 }
+
 
 int webui_server_init(int port, const char *www_path) {
    struct lws_context_creation_info info;
@@ -1970,6 +2014,11 @@ int webui_server_init(int port, const char *www_path) {
       OLOG_WARNING("WebUI: Music streaming subsystem not available");
    }
 
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+   /* Stocks panel refresher thread (owner's Schwab portfolio push). */
+   webui_stocks_start();
+#endif
+
    /* Register tool execution callback for debug display */
    llm_tools_set_execution_callback(webui_tool_execution_callback);
 
@@ -1984,6 +2033,9 @@ int webui_server_init(int port, const char *www_path) {
    if (pthread_create(&s_webui_thread, NULL, webui_thread_func, NULL) != 0) {
       OLOG_ERROR("WebUI: Failed to create server thread");
       llm_silent_observe_set_event_listener(NULL);
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+      webui_stocks_stop();
+#endif
       webui_music_cleanup();
 #ifdef ENABLE_WEBUI_AUDIO
       webui_audio_cleanup();
@@ -1993,6 +2045,10 @@ int webui_server_init(int port, const char *www_path) {
       s_running = 0;
       return WEBUI_ERROR_THREAD;
    }
+
+   /* A turn that finds another conversation loaded reloads its own through the
+    * canonical restore (see session_turn_begin). */
+   session_set_history_loader(webui_turn_history_loader);
 
    OLOG_INFO("WebUI: Server started successfully on port %d", port);
 
@@ -2019,6 +2075,8 @@ void webui_server_shutdown(void) {
    OLOG_INFO("WebUI: Shutting down server...");
    s_running = 0;
    pthread_mutex_unlock(&s_mutex);
+
+   session_set_history_loader(NULL);
 
    /* Tear down silent-observe listener so post-shutdown calls don't dispatch
     * into freed/closing connection state.  Pairs with the registration in
@@ -2063,6 +2121,11 @@ void webui_server_shutdown(void) {
    } else {
       OLOG_INFO("WebUI: Server thread exited cleanly");
    }
+
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+   /* Join the stocks refresher before tearing down (it fans via queue_response). */
+   webui_stocks_stop();
+#endif
 
    /* Destroy context */
    if (s_lws_context) {
@@ -2146,6 +2209,11 @@ void webui_send_transcript_ex(session_t *session,
                               .conversation_id = session->stream_conversation_id,
                               .message_id = message_id,
                           } };
+   /* The user's own echo names the turn it echoes (its client_ref). */
+   if (role && strcmp(role, "user") == 0 && webui_turn_ref_get()) {
+      snprintf(resp.transcript.client_ref, sizeof(resp.transcript.client_ref), "%s",
+               webui_turn_ref_get());
+   }
 
    if (!resp.transcript.role || !resp.transcript.text) {
       free(resp.transcript.role);
@@ -2162,6 +2230,17 @@ void webui_send_transcript(session_t *session, const char *role, const char *tex
 }
 
 void webui_send_state_with_detail(session_t *session, const char *state, const char *detail) {
+   if (!session) {
+      return;
+   }
+   webui_send_state_for_conversation(session, state, detail,
+                                     atomic_load(&session->stream_conversation_id));
+}
+
+void webui_send_state_for_conversation(session_t *session,
+                                       const char *state,
+                                       const char *detail,
+                                       int64_t conversation_id) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
@@ -2171,7 +2250,7 @@ void webui_send_state_with_detail(session_t *session, const char *state, const c
                           .state = {
                               .state = strdup(state),
                               .detail = detail ? strdup(detail) : NULL,
-                              .conversation_id = session->stream_conversation_id,
+                              .conversation_id = conversation_id,
                           } };
 
    if (!resp.state.state) {
@@ -2258,6 +2337,10 @@ void webui_send_error_ex(session_t *session,
                               .message = strdup(message),
                               .severity = severity,
                           } };
+   /* An error raised while a text turn is handled belongs to it. */
+   if (webui_turn_ref_get()) {
+      snprintf(resp.error.client_ref, sizeof(resp.error.client_ref), "%s", webui_turn_ref_get());
+   }
 
    if (!resp.error.code || !resp.error.message) {
       free(resp.error.code);
@@ -2270,6 +2353,7 @@ void webui_send_error_ex(session_t *session,
 }
 
 void webui_send_compaction_complete(session_t *session,
+                                    int64_t conversation_id,
                                     int tokens_before,
                                     int tokens_after,
                                     int messages_summarized,
@@ -2287,6 +2371,7 @@ void webui_send_compaction_complete(session_t *session,
                               .messages_summarized = messages_summarized,
                               .level = level,
                               .summary = summary ? strdup(summary) : NULL,
+                              .conversation_id = conversation_id,
                           } };
 
    queue_response(&resp);
@@ -2876,9 +2961,8 @@ void webui_fanout_job_stream_response(ws_response_t *resp) {
       if (conn->auth_user_id != user_id || conn->session->type != SESSION_TYPE_WEBUI) {
          continue;
       }
-      /* Read this connection's view directly — webui_get_active_conversation_id()
-       * resolves via session->client_data, which collapses to a single connection
-       * when two tabs share one session, mis-targeting the other tab. */
+      /* This connection's own view (on the handler thread, which writes it):
+       * the per-connection question is whether *this* tab shows the job. */
       if (conn->active_conversation_id != conv_id) {
          continue; /* not looking at this job — it'll replay from the ring on open */
       }
@@ -2959,6 +3043,12 @@ void webui_detach_session(session_t *session) {
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
 
+#ifdef ENABLE_WEBUI_AUDIO
+   /* Its music socket closes on the music thread, which alone releases the
+    * reference that socket holds. */
+   webui_music_server_close_session(session);
+#endif
+
    if (detached > 0) {
       OLOG_INFO("WebUI: Detached %d connection(s) from expiring session %u", detached,
                 session->session_id);
@@ -2976,10 +3066,48 @@ void webui_detach_session(session_t *session) {
  * ============================================================================= */
 
 int64_t webui_get_active_conversation_id(session_t *session) {
-   if (!session || session->type != SESSION_TYPE_WEBUI || !session->client_data)
+   /* The session's copy (webui_conn_set_active_conversation): readable from any
+    * thread without touching the connection, which a disconnect can free. */
+   if (!session || session->type != SESSION_TYPE_WEBUI)
       return 0;
-   ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   return conn->active_conversation_id;
+   return atomic_load(&session->viewed_conversation_id);
+}
+
+bool webui_session_tts_enabled(session_t *session) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
+      return false;
+   }
+   const ws_connection_t *conn = (const ws_connection_t *)session->client_data;
+   return conn != NULL && conn->tts_enabled;
+}
+
+bool webui_session_owned_by(const session_t *session, int user_id) {
+   /* A session with no user yet (not logged in) is anyone's to resume. */
+   return session && (session->metrics.user_id <= 0 || (int)session->metrics.user_id == user_id);
+}
+
+/* The session's view is its owning connection's: a connection that no longer
+ * owns the session (evicted by a reconnect) must not change it. */
+static bool conn_owns_session(const ws_connection_t *conn) {
+   return conn && conn->session && conn->session->client_data == conn;
+}
+
+void webui_conn_publish_view(ws_connection_t *conn) {
+   if (conn_owns_session(conn)) {
+      atomic_store(&conn->session->viewed_conversation_id,
+                   conn->active_conversation_id > 0 ? conn->active_conversation_id : 0);
+   }
+}
+
+void webui_conn_set_active_conversation(ws_connection_t *conn, int64_t conv_id) {
+   if (!conn) {
+      return;
+   }
+   conn->active_conversation_id = conv_id;
+   atomic_store(&conn->pending_private, false); /* applied by the create, or moot */
+   if (conn_owns_session(conn)) {
+      atomic_store(&conn->session->viewed_conversation_id, conv_id > 0 ? conv_id : 0);
+   }
 }
 
 void webui_broadcast_plan_progress(session_t *session, const char *json_str) {
@@ -3022,93 +3150,21 @@ void webui_send_metrics_update(session_t *session,
    resp.metrics.ttft_ms = ttft_ms;
    resp.metrics.token_rate = token_rate;
    resp.metrics.context_pct = context_percent;
+   /* Per-session cache figures from the last completed LLM sub-call. Meaningful on
+    * the terminal "idle" frame (emitted after usage is parsed); the mid-stream
+    * "thinking" frames carry the prior turn's value — the client gates on state.
+    * input_tokens is the denominator for the cache-hit rate; cache_saved_tokens is
+    * the provider-discounted net input-token saving. */
+   llm_cache_snapshot_t cache = { 0 };
+   llm_context_get_last_cache(session->session_id, &cache);
+   resp.metrics.input_tokens = cache.prompt_tokens;
+   resp.metrics.cached_tokens = cache.cached_tokens;
+   resp.metrics.cache_write_tokens = cache.cache_write_tokens;
+   resp.metrics.cache_saved_tokens = cache.saved_input_tokens;
+   safe_strscpy(resp.metrics.cache_state, cache.cache_state);
    resp.metrics.conversation_id = atomic_load(&session->stream_conversation_id);
 
    queue_response(&resp);
-}
-
-
-/* =============================================================================
- * Force Logout (for session revocation)
- *
- * Finds all WebSocket connections with matching auth_session_token prefix
- * and sends them a force_logout message.
- * ============================================================================= */
-
-int webui_force_logout_by_auth_token(const char *auth_token_prefix) {
-   if (!auth_token_prefix || strlen(auth_token_prefix) < AUTH_TOKEN_PREFIX_LEN) {
-      return 0;
-   }
-
-   int count = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (conn && conn->wsi && conn->authenticated) {
-         /* Check if auth token prefix matches */
-         if (strncmp(conn->auth_session_token, auth_token_prefix, AUTH_TOKEN_PREFIX_LEN) == 0) {
-            OLOG_INFO("WebUI: Forcing logout for connection with auth token %.4s...",
-                      auth_token_prefix);
-            send_force_logout_impl(conn->wsi, "Session revoked");
-            /* Mark as unauthenticated to prevent further requests */
-            conn->authenticated = false;
-            count++;
-         }
-      }
-   }
-
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   if (count > 0) {
-      OLOG_INFO("WebUI: Sent force_logout to %d connection(s)", count);
-   }
-
-   return count;
-}
-
-int webui_destroy_sessions_by_auth_token(const char *auth_token_prefix) {
-   if (!auth_token_prefix || strlen(auth_token_prefix) < AUTH_TOKEN_PREFIX_LEN)
-      return 0;
-
-   /* Collect matching session IDs under the conn mutex, then destroy after
-    * releasing (session_destroy blocks on ref_count and itself calls
-    * webui_detach_session → s_conn_registry_mutex; recursive would deadlock). */
-   uint32_t ids[MAX_ACTIVE_CONNECTIONS];
-   int n = 0;
-
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session)
-         continue;
-      if (strncmp(conn->auth_session_token, auth_token_prefix, AUTH_TOKEN_PREFIX_LEN) != 0)
-         continue;
-      /* Skip satellites — their session lifecycle is managed by the satellite
-       * protocol, not the auth cookie. */
-      if (conn->is_satellite)
-         continue;
-      uint32_t sid = conn->session->session_id;
-      bool dup = false;
-      for (int j = 0; j < n; j++) {
-         if (ids[j] == sid) {
-            dup = true;
-            break;
-         }
-      }
-      if (!dup && n < MAX_ACTIVE_CONNECTIONS)
-         ids[n++] = sid;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   for (int i = 0; i < n; i++) {
-      session_destroy(ids[i]);
-   }
-
-   if (n > 0)
-      OLOG_INFO("WebUI: Destroyed %d session slot(s) for auth token %.4s...", n, auth_token_prefix);
-
-   return n;
 }
 
 
@@ -3200,288 +3256,6 @@ void webui_force_disconnect_satellite(const char *uuid) {
  * JSON Message Handler Implementation
  * ============================================================================= */
 
-/* Skip leading ASCII whitespace; returns the first non-whitespace char. */
-static const char *restore_skip_ws(const char *s) {
-   while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
-      s++;
-   }
-   return s;
-}
-
-/* If @p s begins with "<dawn:" then (optional whitespace) @p kw, return a pointer just past
- * @p kw; else NULL.  Whitespace-tolerant so a malformed imitated marker ("<dawn: reasoning")
- * still matches. */
-static const char *restore_match_dawn_open(const char *s, const char *kw) {
-   static const char prefix[] = "<dawn:";
-   if (strncmp(s, prefix, sizeof(prefix) - 1) != 0) {
-      return NULL;
-   }
-   const char *p = restore_skip_ws(s + sizeof(prefix) - 1);
-   size_t klen = strlen(kw);
-   return (strncmp(p, kw, klen) == 0) ? p + klen : NULL;
-}
-
-/* Find the position just past the next "</dawn:" (ws?) "thinking" (ws?) ">" close tag, or
- * NULL if none.  Whitespace-tolerant to match the imitated-marker variants. */
-static const char *restore_find_dawn_close_thinking(const char *s) {
-   for (const char *c = strstr(s, "</dawn:"); c; c = strstr(c + 1, "</dawn:")) {
-      const char *p = restore_skip_ws(c + 7); /* strlen("</dawn:") */
-      if (strncmp(p, "thinking", 8) != 0) {
-         continue;
-      }
-      p = restore_skip_ws(p + 8);
-      if (*p == '>') {
-         return p + 1;
-      }
-   }
-   return NULL;
-}
-
-/*
- * Strip ONLY leading legacy display markers from assistant content before it enters the
- * session's LLM-facing history.  The pre-E3 client persistence path prepended
- * "<dawn:reasoning .../>" and "<dawn:thinking ...>...</dawn:thinking>" blocks to assistant
- * content; they are a DISPLAY artifact (the reload path extracts them into a panel) and must
- * never reach the LLM — a reasoning model restored onto such a conversation imitates the
- * marker format in its own output (observed 2026-06-04 after a provider switch, where the
- * model emitted a fabricated "<dawn: reasoning tokens=...">).
- *
- * Scope is deliberately tight: only the LEADING marker block(s) (the legacy prepend
- * position), and the caller applies this to ASSISTANT messages only.  A mid-message mention
- * of these tags (e.g. discussing DAWN's code) is left untouched.  Returns a newly-allocated
- * cleaned copy, or NULL if nothing was stripped (caller keeps the original pointer).
- */
-static char *restore_strip_leading_dawn_markers(const char *content) {
-   if (!content) {
-      return NULL;
-   }
-   const char *p = content;
-   for (;;) {
-      const char *q = restore_skip_ws(p);
-      if (restore_match_dawn_open(q, "reasoning")) {
-         /* Self-closing tag: advance past its '>'. */
-         const char *gt = strchr(q, '>');
-         if (!gt) {
-            break; /* malformed/unterminated — stop, keep the remainder intact */
-         }
-         p = gt + 1;
-         continue;
-      }
-      if (restore_match_dawn_open(q, "thinking")) {
-         const char *close = restore_find_dawn_close_thinking(q);
-         if (!close) {
-            break; /* unterminated block — stop, don't eat the real answer */
-         }
-         p = close;
-         continue;
-      }
-      break;
-   }
-   if (p == content) {
-      return NULL; /* no leading markers */
-   }
-   return strdup(restore_skip_ws(p)); /* trim the blank line before the real answer */
-}
-
-/**
- * @brief Message callback for session context restoration.
- * Builds JSON objects with role + content for iterating into session_add_message.
- */
-static int webui_session_restore_msg_cb(const conversation_message_t *msg, void *context) {
-   json_object *arr = (json_object *)context;
-   json_object *obj = json_object_new_object();
-   json_object_object_add(obj, "role", json_object_new_string(msg->role));
-   json_object_object_add(obj, "content", json_object_new_string(msg->content ? msg->content : ""));
-   /* Carry structured tool fields so the restore loop can rebuild OpenAI-canonical
-    * tool messages (assistant tool_calls / role:tool) for the LLM (E2). */
-   if (msg->tool_calls && msg->tool_calls[0]) {
-      json_object *tc = json_tokener_parse(msg->tool_calls);
-      if (tc) {
-         json_object_object_add(obj, "tool_calls", tc);
-      }
-   }
-   if (msg->tool_call_id && msg->tool_call_id[0]) {
-      json_object_object_add(obj, "tool_call_id", json_object_new_string(msg->tool_call_id));
-   }
-   json_object_array_add(arr, obj);
-   return 0;
-}
-
-/**
- * @brief Restore conversation context into a session from DB
- *
- * Shared implementation used by both session expiry recovery and sidebar load.
- */
-int webui_restore_conversation_context(ws_connection_t *conn,
-                                       const conversation_t *conv,
-                                       int64_t conv_id,
-                                       json_object *preloaded_msgs) {
-   json_object *all_msgs = NULL;
-   bool owns_msgs = false;
-
-   if (preloaded_msgs) {
-      all_msgs = preloaded_msgs;
-   } else {
-      all_msgs = json_object_new_array();
-      owns_msgs = true;
-      int rc;
-      if (conv->context_watermark_msg_id > 0) {
-         /* v67: bound restored context to messages after the compaction watermark;
-          * the injected summary (below) stands in for the compacted prefix. The
-          * full transcript is still shown in the UI (display load is unbounded). */
-         rc = conv_db_get_messages_after(conv_id, conn->auth_user_id,
-                                         conv->context_watermark_msg_id,
-                                         webui_session_restore_msg_cb, all_msgs);
-      } else {
-         rc = conv_db_get_messages(conv_id, conn->auth_user_id, webui_session_restore_msg_cb,
-                                   all_msgs);
-      }
-      if (rc != AUTH_DB_SUCCESS) {
-         json_object_put(all_msgs);
-         return LWS_CLOSE_CONNECTION;
-      }
-   }
-
-   int count = json_object_array_length(all_msgs);
-
-   /* Check if stored messages include a system prompt */
-   bool has_system = false;
-   if (count > 0) {
-      json_object *first = json_object_array_get_idx(all_msgs, 0);
-      json_object *role_obj;
-      if (json_object_object_get_ex(first, "role", &role_obj)) {
-         const char *role = json_object_get_string(role_obj);
-         if (role && strcmp(role, "system") == 0)
-            has_system = true;
-      }
-   }
-
-   session_clear_history(conn->session);
-
-   if (!has_system) {
-      /* Phase 1f: SESSION_START builder boundary — clear dedup state
-       * so the next PER_TURN admits all candidates fresh. */
-      session_injected_set_clear(conn->session);
-      char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-      session_add_message(conn->session, "system", prompt ? prompt : get_remote_command_prompt());
-      free(prompt);
-   }
-
-   if (conv->compaction_summary && strlen(conv->compaction_summary) > 0) {
-      /* v67: prepend a reconstructed [COMPACTED ...] marker (when a summary node
-       * exists) so the reloaded LLM keeps a context_expand handle to the
-       * compacted originals — not just the summary text.
-       *
-       * ASSISTANT role, NOT system: session_update_system_messages rebuilds the
-       * leading context into exactly two system messages (stable prefix + volatile
-       * focus block) every turn and DROPS any other system message — so a
-       * system-role summary never reaches the LLM. The live compaction marker
-       * (llm_context.c) is an assistant message for the same reason; matching it
-       * here makes the summary survive the per-turn rebuild. */
-      char summary[CONV_SUMMARY_MAX];
-      conv_db_format_compaction_context(conv_id, conv->compaction_summary, summary,
-                                        sizeof(summary));
-      session_add_message(conn->session, "assistant", summary);
-   }
-
-   for (int i = 0; i < count; i++) {
-      json_object *msg = json_object_array_get_idx(all_msgs, i);
-      json_object *role_obj, *content_obj;
-      if (json_object_object_get_ex(msg, "role", &role_obj) &&
-          json_object_object_get_ex(msg, "content", &content_obj)) {
-         const char *role = json_object_get_string(role_obj);
-         const char *content = json_object_get_string(content_obj);
-
-         /* Strip leading legacy <dawn:reasoning/>/<dawn:thinking> display markers from
-          * assistant content so the LLM never sees them (and stops imitating the format).
-          * Assistant-only, leading-only — see restore_strip_leading_dawn_markers. */
-         char *stripped_content = NULL;
-         if (role && strcmp(role, "assistant") == 0) {
-            stripped_content = restore_strip_leading_dawn_markers(content);
-            if (stripped_content) {
-               content = stripped_content;
-            }
-         }
-
-         json_object *tc_obj, *tcid_obj;
-         bool has_tc = json_object_object_get_ex(msg, "tool_calls", &tc_obj);
-         bool has_tcid = json_object_object_get_ex(msg, "tool_call_id", &tcid_obj);
-         if (has_tc || has_tcid) {
-            /* Rebuild the OpenAI-canonical tool message in-memory so the LLM sees the
-             * structured call/result on reload.  Orphans (a tool result whose call
-             * didn't restore, etc.) are dropped later by filter_orphaned_tool_messages
-             * at request-build time. */
-            json_object *m = json_object_new_object();
-            json_object_object_add(m, "role", json_object_new_string(role));
-            json_object_object_add(m, "content", json_object_new_string(content ? content : ""));
-            if (has_tc) {
-               json_object_object_add(m, "tool_calls", json_object_get(tc_obj));
-            }
-            if (has_tcid) {
-               json_object_object_add(m, "tool_call_id", json_object_get(tcid_obj));
-            }
-            session_add_message_multipart(conn->session, m);
-         } else {
-            /* Rehydrate [IMAGE:img_id] markers into LLM-faithful image_url content
-             * (owner-checked); no-marker messages fall back to a plain text add. */
-            webui_rehydrate_message_into_session(conn->session, conn->auth_user_id, role, content);
-         }
-         free(stripped_content);
-      }
-   }
-
-   /* Restore LLM config from conversation DB (reflects last-used settings).
-    * tools_mode is a retired dead column — no longer hydrated. */
-   if (conv->llm_type[0] != '\0') {
-      session_llm_config_t cfg;
-      session_get_llm_config(conn->session, &cfg);
-
-      if (conv->llm_type[0] != '\0') {
-         if (strcmp(conv->llm_type, "local") == 0)
-            cfg.type = LLM_LOCAL;
-         else if (strcmp(conv->llm_type, "cloud") == 0)
-            cfg.type = LLM_CLOUD;
-      }
-      if (conv->cloud_provider[0] != '\0') {
-         if (strcmp(conv->cloud_provider, "openai") == 0)
-            cfg.cloud_provider = CLOUD_PROVIDER_OPENAI;
-         else if (strcmp(conv->cloud_provider, "claude") == 0)
-            cfg.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-         else if (strcmp(conv->cloud_provider, "gemini") == 0)
-            cfg.cloud_provider = CLOUD_PROVIDER_GEMINI;
-         else if (strcmp(conv->cloud_provider, "openrouter") == 0)
-            cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      }
-      if (conv->model[0] != '\0') {
-         safe_strscpy(cfg.model, conv->model);
-
-         /* Infer provider from model name if not explicitly stored. OpenRouter IDs are
-          * "vendor/model" slugs and match none of the bare prefixes below, so an
-          * OpenRouter conversation's provider/model are left as stored. */
-         if (conv->cloud_provider[0] == '\0') {
-            if (strncmp(conv->model, "gpt-", 4) == 0 || strncmp(conv->model, "o1-", 3) == 0 ||
-                strncmp(conv->model, "o3-", 3) == 0) {
-               cfg.cloud_provider = CLOUD_PROVIDER_OPENAI;
-            } else if (strncmp(conv->model, "claude-", 7) == 0) {
-               cfg.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-            } else if (strncmp(conv->model, "gemini-", 7) == 0) {
-               cfg.cloud_provider = CLOUD_PROVIDER_GEMINI;
-            }
-         }
-      }
-
-      /* Fix #6: Restore thinking_mode from conversation DB */
-      if (conv->thinking_mode[0] != '\0') {
-         safe_strscpy(cfg.thinking_mode, conv->thinking_mode);
-      }
-      session_set_llm_config(conn->session, &cfg);
-   }
-
-   if (owns_msgs)
-      json_object_put(all_msgs);
-   return count;
-}
-
 /**
  * @brief Create a new conversation session for an authenticated connection.
  *
@@ -3493,14 +3267,25 @@ int webui_restore_conversation_context(ws_connection_t *conn,
  * @return true if session was created, false on failure (error sent to client)
  */
 static bool webui_conn_create_session(ws_connection_t *conn) {
+   /* A satellite's session comes only from its registration. */
+   if (conn->is_satellite) {
+      return false;
+   }
+   /* Only for a login that still exists: one ended since this connection
+    * opened is ended here too (the connection closes). */
+   if (!webui_conn_login_valid(conn)) {
+      return false;
+   }
    conn->session = session_create(SESSION_TYPE_WEBUI, -1);
    if (!conn->session) {
       send_error_impl(conn->wsi, "SESSION_LIMIT", "Maximum sessions reached");
       return false;
    }
+   webui_conn_own_session(conn, conn->session); /* new: this login's */
 
    session_set_metrics_user(conn->session, conn->auth_user_id);
    conn->session->client_data = conn;
+   webui_conn_publish_view(conn); /* the session shows what this connection does */
    /* Fresh/throwaway session — NOT the client's own reconnected one, so the
     * session frame reports reconnected:false and the client load_conversations. */
    conn->session_was_reconnected = false;
@@ -3534,9 +3319,9 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
       int rc = conv_db_get(conn->active_conversation_id, conn->auth_user_id, &conv);
       if (rc == AUTH_DB_SUCCESS) {
          if (!conv.is_archived) {
-            int count = webui_restore_conversation_context(conn, &conv,
-                                                           conn->active_conversation_id, NULL);
-            if (count >= 0) {
+            int count = 0;
+            if (webui_restore_conversation_context(conn, &conv, conn->active_conversation_id,
+                                                   &count) == SUCCESS) {
                restored = true;
                OLOG_INFO("WebUI: Restored conversation %lld (%d messages) into new session %u",
                          (long long)conn->active_conversation_id, count, conn->session->session_id);
@@ -3546,11 +3331,10 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
       }
    }
 
-   /* If no conversation was restored, initialize with the user's system prompt */
+   /* No conversation restored: a new context (its first turn freezes the
+    * prompt it runs under). */
    if (!restored) {
-      char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-      session_init_system_prompt(conn->session, prompt ? prompt : get_remote_command_prompt());
-      free(prompt);
+      session_clear_history(conn->session);
    }
 
    return true;
@@ -3559,10 +3343,8 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
 void handle_text_message(ws_connection_t *conn,
                          const char *text,
                          size_t len,
-                         const char **vision_images,
-                         const size_t *vision_image_sizes,
-                         const char **vision_mimes,
-                         int vision_image_count,
+                         const char image_ids[][IMAGE_ID_LEN],
+                         int image_id_count,
                          const char *persist_content) {
    (void)len; /* Length already validated by caller */
 
@@ -3580,24 +3362,17 @@ void handle_text_message(ws_connection_t *conn,
       }
    }
 
-   if (vision_image_count > 0) {
-      size_t total_bytes = 0;
-      for (int i = 0; i < vision_image_count; i++) {
-         total_bytes += vision_image_sizes[i];
-      }
-      OLOG_INFO("WebUI: Text+Vision input from session %u: %s (%d images, %zu total bytes)",
-                conn->session->session_id, text, vision_image_count, total_bytes);
-   } else {
-      OLOG_INFO("WebUI: Text input from session %u: %s", conn->session->session_id, text);
-   }
+   OLOG_INFO("WebUI: Text input from session %u: %zu bytes (%d image(s))",
+             conn->session->session_id, strlen(text), image_id_count);
 
    /* Typed input (not ASR): pass input_was_voice=false so the worker stamps the
     * flag right before dispatch and the prompt builder omits the ASR hint. */
-   int ret = webui_process_text_input_with_vision(conn->session, text, vision_images,
-                                                  vision_image_sizes, vision_mimes,
-                                                  vision_image_count, persist_content,
+   int ret = webui_process_text_input_with_images(conn->session, text, image_ids, image_id_count,
+                                                  persist_content,
                                                   /*input_was_voice=*/false);
-   if (ret != 0) {
+   /* A refusal the processing already reported (a full queue) is one error,
+    * not two. */
+   if (ret != 0 && ret != WEBUI_TEXT_INPUT_REPORTED) {
       send_error_impl(conn->wsi, "PROCESSING_ERROR", "Failed to process text input");
    }
 }

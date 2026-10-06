@@ -44,11 +44,14 @@
 #include "core/buf_printf.h"
 #include "core/memory_filter.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_extraction_input.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_types.h"
 
@@ -106,6 +109,7 @@ static int count_missing_locked(int user_id, int *out_count) {
    const char *sql = "SELECT COUNT(*) FROM conversations c "
                      "WHERE c.user_id = ? "
                      "  AND c.is_private = 0 "
+                     "  AND c.job_status IS NULL "
                      "  AND c.message_count >= 2 "
                      "  AND NOT EXISTS ("
                      "    SELECT 1 FROM memory_summaries s "
@@ -138,6 +142,7 @@ static int list_missing_after_locked(int user_id,
    const char *sql = "SELECT c.id, c.message_count FROM conversations c "
                      "WHERE c.user_id = ? "
                      "  AND c.is_private = 0 "
+                     "  AND c.job_status IS NULL "
                      "  AND c.message_count >= 2 "
                      "  AND c.id > ? "
                      "  AND NOT EXISTS ("
@@ -353,6 +358,18 @@ static int process_one_conv(int user_id,
       return FAILURE;
    }
 
+   /* What extraction would send: the rows checked to be this conversation's,
+    * DAWN's injected context and a turn's reasoning left out. */
+   struct json_object *input = memory_extraction_build_input(user_id, conv_id, history, 0);
+   json_object_put(history);
+   history = input ? llm_history_strip_internal(input) : NULL;
+   json_object_put(input);
+   if (history == NULL) {
+      OLOG_WARNING("memory_summarize_missing: conv %lld refused for summarizing",
+                   (long long)conv_id);
+      return FAILURE;
+   }
+
    const char *history_json = json_object_to_json_string_ext(history, JSON_C_TO_STRING_PLAIN);
    if (history_json == NULL) {
       OLOG_WARNING("memory_summarize_missing: history JSON encode failed for conv %lld",
@@ -364,9 +381,9 @@ static int process_one_conv(int user_id,
    char anchor_line[64] = "";
    build_anchor_line(conv_id, anchor_line, sizeof(anchor_line));
 
-   /* The canonical extraction prompt expects three %s args: anchor,
-    * conversation, existing-profile.  We pass an empty profile because
-    * we're not doing fact dedup — only the summary matters here. */
+   /* The canonical extraction prompt takes four %s args: anchor, conversation,
+    * existing profile, expiry block.  The profile is empty and the expiry
+    * block left out: only the summary matters here. */
    const char *empty_profile = "(none)";
    size_t prompt_sz = strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
                       strlen(history_json) + strlen(empty_profile) + 100;
@@ -377,7 +394,7 @@ static int process_one_conv(int user_id,
       return FAILURE;
    }
    snprintf(prompt, prompt_sz, MEMORY_EXTRACTION_PROMPT_TEMPLATE, anchor_line, history_json,
-            empty_profile);
+            empty_profile, "");
 
    /* Build a one-message wrapper for llm_chat_completion_with_config. */
    struct json_object *llm_history = json_object_new_array();
@@ -386,7 +403,9 @@ static int process_one_conv(int user_id,
    json_object_object_add(user_msg, "content", json_object_new_string(prompt));
    json_object_array_add(llm_history, user_msg);
 
-   char *response = llm_chat_completion_with_config(llm_history, prompt, NULL, NULL, 0, cfg);
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
+   char *response = llm_chat_completion_with_config(llm_history, prompt, cfg);
+   llm_cache_monitor_pop_kind(kind_prev);
 
    json_object_put(llm_history);
    free(prompt);

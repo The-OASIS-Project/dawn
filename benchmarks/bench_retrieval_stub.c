@@ -32,6 +32,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
+#include "core/tool_result_store.h"
 
 /* g_config and g_secrets are now defined by src/config/config_defaults.c
  * (linked into the bench for memory-pipeline mode). Pre-memory-pipeline the
@@ -56,11 +57,78 @@
  * leaves the symbols undefined.  Define them as no-ops with sane returns. */
 #include "core/session_manager.h"
 
+/* Test hooks (tests/test_memory_remember.c sets them); the bench leaves them at
+ * their defaults: no command context, and no turn to record a source for. */
+session_t *g_stub_command_context = NULL;
+int g_stub_defer_result = 1; /* FAILURE */
+int64_t g_stub_defer_conv = 0;
+
+/* No live conversations here: nothing to withdraw a forgotten memory from. */
+int session_withdraw_forgotten(int user_id, bool memory_bodies) {
+   (void)user_id;
+   (void)memory_bodies;
+   return 0;
+}
+bool session_prefix_tag(session_t *session, char *out, size_t size) {
+   (void)session;
+   if (out && size) {
+      out[0] = '\0';
+   }
+   return false;
+}
+char *session_prefix_mask_secret(session_t *session, char *text) {
+   (void)session;
+   return text;
+}
+void session_prefix_inline_tools_rejected(session_t *session) {
+   (void)session;
+}
+void session_withdraw_forgotten_async(int user_id, bool memory_bodies) {
+   (void)user_id;
+   (void)memory_bodies;
+}
+
 session_t *session_get_command_context(void) {
-   return NULL;
+   return g_stub_command_context;
 }
 void session_set_command_context(session_t *session) {
    (void)session;
+}
+/* With a command context set, the harness's tool calls run as the user's
+ * turn (core/tool_call_policy.h); with none, as an unattended one. */
+bool session_turn_user_originated(session_t *session) {
+   (void)session;
+   return true;
+}
+bool session_turn_is_background(session_t *session) {
+   (void)session;
+   return false;
+}
+static __thread bool s_stub_code_redeemed;
+bool session_call_code_redeemed(void) {
+   return s_stub_code_redeemed;
+}
+void session_set_call_code_redeemed(bool redeemed) {
+   s_stub_code_redeemed = redeemed;
+}
+/* The session layer's user rule (session_effective_user_id): its user, the
+ * default voice user for the local mic, else a guest (0). */
+int session_default_voice_user_id(void) {
+   return g_config.memory.default_voice_user_id > 0 ? g_config.memory.default_voice_user_id : 1;
+}
+int session_effective_user_id(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   if (session->metrics.user_id > 0) {
+      return session->metrics.user_id;
+   }
+   return session->type == SESSION_TYPE_LOCAL ? session_default_voice_user_id() : 0;
+}
+/* No scheduled briefing runs in the bench. */
+bool scheduled_context_get(int *user_id_out) {
+   (void)user_id_out;
+   return false;
 }
 void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    (void)session;
@@ -278,8 +346,67 @@ int64_t webui_get_active_conversation_id(session_t *s) {
    (void)s;
    return 0;
 }
-void webui_send_compaction_complete(session_t *s) {
+void webui_send_compaction_complete(session_t *s,
+                                    int64_t conversation_id,
+                                    int tokens_before,
+                                    int tokens_after,
+                                    int messages_summarized,
+                                    const char *summary,
+                                    int level) {
    (void)s;
+   (void)conversation_id;
+   (void)tokens_before;
+   (void)tokens_after;
+   (void)messages_summarized;
+   (void)summary;
+   (void)level;
+}
+/* Headless bench: no session history to attribute. */
+int64_t session_history_conversation_of(session_t *s, struct json_object *history) {
+   (void)s;
+   (void)history;
+   return 0;
+}
+uint64_t session_turn_token(void) {
+   return 0;
+}
+int64_t session_turn_conversation(session_t *session) {
+   (void)session;
+   return 0;
+}
+bool session_turn_is_caller(session_t *session) {
+   (void)session;
+   return false;
+}
+int session_defer_fact_source(session_t *session,
+                              int64_t fact_id,
+                              int user_id,
+                              bool created,
+                              int64_t *conv_out) {
+   (void)session;
+   (void)fact_id;
+   (void)user_id;
+   (void)created;
+   *conv_out = g_stub_defer_conv;
+   return g_stub_defer_result;
+}
+void session_set_turn_token(uint64_t token) {
+   (void)token;
+}
+void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config) {
+   (void)session;
+   (void)config;
+}
+void session_history_append(struct json_object *history, struct json_object *msg) {
+   json_object_array_add(history, msg);
+}
+void session_history_replace_contents(struct json_object *history, struct json_object *from) {
+   for (int i = (int)json_object_array_length(history) - 1; i >= 0; i--) {
+      json_object_array_del_idx(history, i, 1);
+   }
+   for (size_t i = 0; i < json_object_array_length(from); i++) {
+      json_object_array_add(history, json_object_get(json_object_array_get_idx(from, i)));
+   }
 }
 void webui_send_metrics_update(session_t *s) {
    (void)s;
@@ -343,8 +470,6 @@ struct mosquitto *worker_pool_get_mosq(void) {
 }
 bool component_status_is_hud_online(void) {
    return false;
-}
-void session_manager_refresh_all_prompts(void) {
 }
 
 /* Tool device-type lookup — registry has empty table in bench */
@@ -447,4 +572,57 @@ int memory_db_entity_alias_link(int user_id,
       *out_link_id = 0;
    }
    return MEMORY_DB_NOT_FOUND;
+}
+
+/* The turn-end compaction trigger (session_compaction.c): nothing to summarize here. */
+void session_compaction_trigger(struct session *session,
+                                struct json_object *hist,
+                                llm_type_t type,
+                                cloud_provider_t provider,
+                                const char *model) {
+   (void)session;
+   (void)hist;
+   (void)type;
+   (void)provider;
+   (void)model;
+}
+
+/* The tool loop's view stage (llm_tool_views_apply.c): the bench keeps no
+ * results, so a view carries no handle. */
+int tool_result_store_put(struct session *session,
+                          const char *tool_name,
+                          const char *tool_call_id,
+                          const char *text,
+                          size_t len,
+                          bool is_json,
+                          char id_out[TOOL_RESULTS_ID_LEN],
+                          bool *cut_out) {
+   (void)session;
+   (void)tool_name;
+   (void)tool_call_id;
+   (void)text;
+   (void)len;
+   (void)is_json;
+   if (id_out) {
+      id_out[0] = '\0';
+   }
+   if (cut_out) {
+      *cut_out = false;
+   }
+   return TOOL_RESULT_STORE_NO_USER;
+}
+
+void tool_result_store_tree_seed(struct session *session,
+                                 const char *id,
+                                 struct json_object *tree,
+                                 size_t text_bytes) {
+   (void)session;
+   (void)id;
+   (void)text_bytes;
+   json_object_put(tree);
+}
+
+void tool_result_store_set_read_budget(struct session *session, size_t chars) {
+   (void)session;
+   (void)chars;
 }

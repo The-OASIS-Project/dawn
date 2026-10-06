@@ -47,6 +47,10 @@ typedef struct {
    const float *chunk_embeddings[EXT_MOCK_MAX_CHUNKS]; /* fixture-owned */
    int chunk_count;
    int chunk_dim; /* per-fixture; honors expected_dims contract */
+   /* Keyword channel: a chunk with a score > 0 is returned by
+    * document_db_chunk_search_bm25 with that normalized score. */
+   float chunk_bm25[EXT_MOCK_MAX_CHUNKS];
+   int call_count_bm25;
 
    /* Calendar accounts. */
    calendar_account_t accounts[EXT_MOCK_MAX_ACCOUNTS];
@@ -73,16 +77,25 @@ typedef struct {
    bool fail_account_list; /* force account_list FAILURE */
    bool fail_occurrences_in_range;
    bool fail_occurrences_search;
+   bool fail_events_nearest;
 
    /* Call-counting counters for the network-invariant assertions —
     * the test asserts that ONLY the expected DB-layer calls fired
     * during a compose, never a service-layer call (which would
     * fail to link in the first place — counters are belt-and-suspenders). */
    int call_count_chunk_search_load;
+
+   /* Chunk generation: when pinned, document_db_chunk_generation returns
+    * `generation` (so the real embedding cache can be reused); otherwise a
+    * new value every call. */
+   bool pin_generation;
+   int64_t generation;
    int call_count_account_list;
    int call_count_calendar_list;
    int call_count_occurrences_in_range;
    int call_count_occurrences_search;
+   int call_count_events_nearest;
+   int call_count_allday_in_range;
 } ext_mock_state_t;
 
 extern ext_mock_state_t s_ext_mock;

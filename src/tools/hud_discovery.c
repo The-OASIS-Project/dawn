@@ -32,7 +32,6 @@
 #include <time.h>
 
 #include "core/ocp_helpers.h"
-#include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
@@ -75,115 +74,167 @@ static time_t s_modes_timestamp = 0;
 static bool s_elements_received = false;
 static bool s_modes_received = false;
 
+/* The changes discovery made to the sets (and so to every conversation's
+ * standing directions) in the current window, and the newest set held back
+ * past the bound: applied by the next discovery message once the window
+ * turns (the helmet re-announces on reconnect and on request). */
+static time_t s_window_start = 0;
+static int s_window_changes = 0;
+static bool s_window_logged = false;
+static bool s_dropped_logged = false;
+
 /* =============================================================================
  * Internal Helpers
  * ============================================================================= */
 
+bool hud_discovery_name_ok(const char *name) {
+   size_t n = 0;
+   for (; name && name[n]; n++) {
+      const char c = name[n];
+      if (n >= HUD_DISCOVERY_NAME_MAX ||
+          !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == ' ' || c == '-')) {
+         return false;
+      }
+   }
+   return n > 0;
+}
+
 /**
- * @brief Parse a JSON array of strings into local storage
- *
- * @param array JSON array object
- * @param storage 2D char array to store strings
- * @param ptrs Array of pointers for tool registry
- * @param max_items Maximum items to parse
- * @return Number of items parsed, or -1 on error
+ * @brief The names a discovery message lists, into @p storage: only those
+ *        hud_discovery_name_ok() accepts (they reach every conversation's
+ *        standing directions), each once, up to @p max_items
+ * @return How many (0 when @p array isn't an array)
  */
 static int parse_string_array(struct json_object *array,
                               char storage[][TOOL_NAME_MAX],
-                              const char **ptrs,
                               int max_items) {
    if (!json_object_is_type(array, json_type_array)) {
-      return FAILURE;
+      return 0;
    }
-
-   int count = (int)json_object_array_length(array);
-   if (count > max_items) {
-      OLOG_WARNING("HUD discovery: Truncating array from %d to %d items", count, max_items);
-      count = max_items;
-   }
-
-   for (int i = 0; i < count; i++) {
+   const int total = (int)json_object_array_length(array);
+   int count = 0;
+   int dropped = 0;
+   for (int i = 0; i < total; i++) {
       struct json_object *item = json_object_array_get_idx(array, i);
-      if (item && json_object_is_type(item, json_type_string)) {
-         const char *str = json_object_get_string(item);
-         safe_strncpy(storage[i], str, TOOL_NAME_MAX);
-         ptrs[i] = storage[i];
-      } else {
-         storage[i][0] = '\0';
-         ptrs[i] = NULL;
+      const char *str = json_object_is_type(item, json_type_string) ? json_object_get_string(item)
+                                                                    : NULL;
+      if (!hud_discovery_name_ok(str)) {
+         dropped++;
+         continue;
       }
+      bool seen = false;
+      for (int j = 0; j < count && !seen; j++) {
+         seen = strcmp(storage[j], str) == 0;
+      }
+      if (seen) {
+         continue;
+      }
+      if (count == max_items) {
+         OLOG_WARNING("HUD discovery: more than %d names; the rest left out", max_items);
+         break;
+      }
+      safe_strncpy(storage[count++], str, TOOL_NAME_MAX);
    }
-
-   /* Clear remaining slots */
-   for (int i = count; i < max_items; i++) {
-      storage[i][0] = '\0';
-      ptrs[i] = NULL;
+   if (dropped > 0 && !s_dropped_logged) {
+      s_dropped_logged = true;
+      OLOG_WARNING("HUD discovery: %d name(s) left out: a name is 1-%d letters, digits, spaces, "
+                   "'_' or '-' (further ones are not logged)",
+                   dropped, HUD_DISCOVERY_NAME_MAX);
    }
-
    return count;
 }
 
-/**
- * @brief Update hud_control tool with discovered elements
- */
-/* Returns true on success; caller is responsible for running the post-update
- * tool-refresh + cache-invalidate + session-refresh sequence
- * (hud_capability_changed_unlocked) AFTER releasing s_discovery_mutex.  The
- * refresh in particular MUST run outside the mutex: llm_tools_refresh()
- * consults hud_control_is_available(), which re-locks s_discovery_mutex —
- * doing it here would self-deadlock the discovery (MQTT loop) thread. */
-static bool update_hud_control_elements(void) {
-   if (s_element_count <= 0) {
+/* Whether the first @p n of @p list are @p storage's @p count, in order. */
+static bool same_set(char storage[][TOOL_NAME_MAX], int count, const char *list[], int n) {
+   if (count != n) {
       return false;
    }
-
-   int rc = tool_registry_update_param_enum("hud_control", "element", s_element_ptrs,
-                                            s_element_count);
-   if (rc == TREG_ENUM_RC_OK) {
-      OLOG_INFO("HUD discovery: Updated hud_control with %d elements", s_element_count);
-      return true;
+   for (int i = 0; i < n; i++) {
+      if (!list[i] || strcmp(list[i], storage[i]) != 0) {
+         return false;
+      }
    }
-   OLOG_WARNING("HUD discovery: Failed to update hud_control elements (rc=%d)", rc);
-   return false;
+   return true;
 }
 
-/**
- * @brief Update hud_mode tool with discovered modes
- */
-/* Returns true on success; see update_hud_control_elements() for why the
- * post-update invalidate+refresh is deferred to the caller. */
-static bool update_hud_mode_modes(void) {
-   if (s_mode_count <= 0) {
+/* Whether a change may be applied now (the window's bound); counts it.
+ * Caller holds the mutex. */
+static bool change_allowed_locked(time_t now) {
+   if (now - s_window_start >= HUD_DISCOVERY_CHANGE_WINDOW_SEC) {
+      s_window_start = now;
+      s_window_changes = 0;
+      s_window_logged = false;
+   }
+   if (s_window_changes >= HUD_DISCOVERY_CHANGES_PER_WINDOW) {
+      if (!s_window_logged) {
+         s_window_logged = true;
+         OLOG_WARNING("HUD discovery: the HUD's elements or modes changed %d times this hour; "
+                      "the sets in force stay until the hour is up",
+                      s_window_changes);
+      }
       return false;
    }
-
-   int rc = tool_registry_update_param_enum("hud_mode", "mode", s_mode_ptrs, s_mode_count);
-   if (rc == TREG_ENUM_RC_OK) {
-      OLOG_INFO("HUD discovery: Updated hud_mode with %d modes", s_mode_count);
-      return true;
-   }
-   OLOG_WARNING("HUD discovery: Failed to update hud_mode modes (rc=%d)", rc);
-   return false;
+   s_window_changes++;
+   return true;
 }
+
+/* Apply a discovered set to @p dest (@p ptrs, *@p count, *@p stamp,
+ * *@p received).  The same set again only refreshes its time; a different
+ * one is a capability change, within the window's bound.  Caller holds the
+ * mutex.  @return true when the set changed. */
+static bool apply_set_locked(char parsed[][TOOL_NAME_MAX],
+                             int n,
+                             char dest[][TOOL_NAME_MAX],
+                             const char **ptrs,
+                             int *count,
+                             time_t *stamp,
+                             bool *received) {
+   const time_t now = time(NULL);
+   if (same_set(parsed, n, ptrs, *count)) {
+      *stamp = now;
+      *received = true;
+      return false;
+   }
+   if (!change_allowed_locked(now)) {
+      return false;
+   }
+   for (int i = 0; i < HUD_DISCOVERY_MAX_ITEMS; i++) {
+      if (i < n) {
+         safe_strncpy(dest[i], parsed[i], TOOL_NAME_MAX);
+         ptrs[i] = dest[i];
+      } else {
+         dest[i][0] = '\0';
+         ptrs[i] = NULL;
+      }
+   }
+   *count = n;
+   *stamp = now;
+   *received = true;
+   return true;
+}
+
+/* The discovered elements and modes are not written into the tools' schemas: a
+ * conversation freezes its tool schemas, and a value list that changes as the
+ * helmet connects would change them every time.  The live sets reach the model
+ * in the turn's standing directions (hud_discovery_describe), and a call naming
+ * one not discovered is refused (hud_tools.c).  What changed is announced by
+ * the caller (hud_capability_changed_unlocked), outside s_discovery_mutex. */
 
 /* Cache-invalidate + session-refresh sequence run AFTER s_discovery_mutex is
  * released. Kept in one helper so elements / modes paths don't diverge. */
 static void hud_capability_changed_unlocked(void) {
    /* Refresh tool availability first — enables/disables armor tools now that the
-    * discovered enum changed.  MUST run outside s_discovery_mutex:
+    * discovered sets changed.  MUST run outside s_discovery_mutex:
     * llm_tools_refresh() consults each armor tool's is_available() callback, and
     * hud_control_is_available()/hud_mode_is_available() re-lock s_discovery_mutex
     * (via the element/mode count getters).  Calling it while the discovery mutex
     * is held self-deadlocks the MQTT loop thread that drives discovery. */
    llm_tools_refresh();
-   /* Schema cache is regenerated with the new enum values on next tool call */
    llm_tools_invalidate_cache();
-   /* Rebuild system-prompt hint so it reflects the new availability */
+   /* Each conversation's next turn tells the model what is available now
+    * (its standing directions: hud_discovery_describe). */
    invalidate_system_instructions();
-   /* Propagate the refreshed prompt to every active session.
-    * Takes session_manager_rwlock (read) then per-session locks + DB I/O;
-    * must run OUTSIDE s_discovery_mutex. */
-   session_manager_refresh_all_prompts();
 }
 
 /**
@@ -196,25 +247,20 @@ static void process_elements_discovery(struct json_object *root) {
       OLOG_WARNING("HUD discovery: Elements message missing 'elements' field");
       return;
    }
-
-   pthread_mutex_lock(&s_discovery_mutex);
-
-   bool capability_changed = false;
-   int count = parse_string_array(elements_array, s_elements, s_element_ptrs,
-                                  HUD_DISCOVERY_MAX_ITEMS);
-   if (count > 0) {
-      s_element_count = count;
-      s_elements_timestamp = time(NULL);
-      s_elements_received = true;
-
-      capability_changed = update_hud_control_elements();
+   char parsed[HUD_DISCOVERY_MAX_ITEMS][TOOL_NAME_MAX];
+   const int count = parse_string_array(elements_array, parsed, HUD_DISCOVERY_MAX_ITEMS);
+   if (count <= 0) {
+      return;
    }
 
+   pthread_mutex_lock(&s_discovery_mutex);
+   const bool capability_changed = apply_set_locked(parsed, count, s_elements, s_element_ptrs,
+                                                    &s_element_count, &s_elements_timestamp,
+                                                    &s_elements_received);
    pthread_mutex_unlock(&s_discovery_mutex);
 
-   /* Post-update refresh runs OUTSIDE s_discovery_mutex — it acquires
-    * session_manager_rwlock + per-session history_mutex and may do DB I/O
-    * via the registered user-prompt builder. */
+   /* Post-update refresh runs OUTSIDE s_discovery_mutex: llm_tools_refresh()
+    * re-locks it through the armor tools' availability callbacks. */
    if (capability_changed) {
       hud_capability_changed_unlocked();
    }
@@ -231,19 +277,16 @@ static void process_modes_discovery(struct json_object *root) {
       OLOG_WARNING("HUD discovery: Modes message missing 'huds' field");
       return;
    }
-
-   pthread_mutex_lock(&s_discovery_mutex);
-
-   bool capability_changed = false;
-   int count = parse_string_array(modes_array, s_modes, s_mode_ptrs, HUD_DISCOVERY_MAX_ITEMS);
-   if (count > 0) {
-      s_mode_count = count;
-      s_modes_timestamp = time(NULL);
-      s_modes_received = true;
-
-      capability_changed = update_hud_mode_modes();
+   char parsed[HUD_DISCOVERY_MAX_ITEMS][TOOL_NAME_MAX];
+   const int count = parse_string_array(modes_array, parsed, HUD_DISCOVERY_MAX_ITEMS);
+   if (count <= 0) {
+      return;
    }
 
+   pthread_mutex_lock(&s_discovery_mutex);
+   const bool capability_changed = apply_set_locked(parsed, count, s_modes, s_mode_ptrs,
+                                                    &s_mode_count, &s_modes_timestamp,
+                                                    &s_modes_received);
    pthread_mutex_unlock(&s_discovery_mutex);
 
    if (capability_changed) {
@@ -319,6 +362,9 @@ void hud_discovery_shutdown(void) {
    s_modes_timestamp = 0;
    s_elements_received = false;
    s_modes_received = false;
+   s_window_start = 0;
+   s_window_changes = 0;
+   s_window_logged = false;
    s_initialized = false;
 
    pthread_mutex_unlock(&s_discovery_mutex);
@@ -412,6 +458,71 @@ int hud_discovery_get_mode_count(void) {
    return count;
 }
 
+/* Whether @p name is one of the first @p n of @p list.  Caller holds the mutex. */
+static bool listed_locked(const char *list[], int n, const char *name) {
+   for (int i = 0; name && name[0] && i < n; i++) {
+      if (list[i] && strcmp(list[i], name) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+bool hud_discovery_has_element(const char *name) {
+   pthread_mutex_lock(&s_discovery_mutex);
+   const bool found = listed_locked(s_element_ptrs, s_element_count, name);
+   pthread_mutex_unlock(&s_discovery_mutex);
+   return found;
+}
+
+bool hud_discovery_has_mode(const char *name) {
+   pthread_mutex_lock(&s_discovery_mutex);
+   const bool found = listed_locked(s_mode_ptrs, s_mode_count, name);
+   pthread_mutex_unlock(&s_discovery_mutex);
+   return found;
+}
+
+/* Append "<label>: a, b." for the first @p n of @p list to @p out at *len. */
+static void describe_list_locked(char *out,
+                                 size_t size,
+                                 size_t *len,
+                                 const char *label,
+                                 const char *list[],
+                                 int n) {
+   if (n <= 0 || *len >= size) {
+      return;
+   }
+   /* Each name quoted, as data: a name holds no quote (hud_discovery_name_ok). */
+   int w = snprintf(out + *len, size - *len, "%s%s: ", *len ? " " : "", label);
+   for (int i = 0; w > 0 && i < n; i++) {
+      *len = *len + (size_t)w < size ? *len + (size_t)w : size - 1;
+      w = snprintf(out + *len, size - *len, "%s\"%s\"", i ? ", " : "", list[i] ? list[i] : "");
+   }
+   if (w > 0) {
+      *len = *len + (size_t)w < size ? *len + (size_t)w : size - 1;
+      w = snprintf(out + *len, size - *len, ".");
+      *len = *len + (size_t)w < size ? *len + (size_t)w : size - 1;
+   }
+}
+
+size_t hud_discovery_describe(char *out, size_t size) {
+   if (!out || size == 0) {
+      return 0;
+   }
+   out[0] = '\0';
+   size_t len = 0;
+   pthread_mutex_lock(&s_discovery_mutex);
+   describe_list_locked(out, size, &len, "HUD elements available now (hud_control)", s_element_ptrs,
+                        s_element_count);
+   /* One mode is no choice (hud_mode stays unavailable). */
+   if (s_mode_count > 1) {
+      describe_list_locked(out, size, &len, "HUD modes available now (hud_mode)", s_mode_ptrs,
+                           s_mode_count);
+   }
+   pthread_mutex_unlock(&s_discovery_mutex);
+   return len;
+}
+
 /* =============================================================================
  * Manual Control
  * ============================================================================= */
@@ -458,10 +569,6 @@ void hud_discovery_apply_defaults(void) {
    s_mode_count = s_default_mode_count;
 
    pthread_mutex_unlock(&s_discovery_mutex);
-
-   /* Update tool registry with defaults (mutex already released above) */
-   update_hud_control_elements();
-   update_hud_mode_modes();
 
    /* Refresh availability + rebuild schema/prompts — runs outside the mutex. */
    hud_capability_changed_unlocked();

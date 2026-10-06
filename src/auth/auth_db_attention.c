@@ -203,18 +203,14 @@ int auth_db_attention_rule_delete(int user_id, int64_t id) {
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
-int auth_db_attention_rule_list(int user_id, sage_watch_t *out, int max, int *out_count) {
+/* @p user_id 0 = every user's (only through auth_db_attention_rule_list_all). */
+static int rule_list(int user_id, sage_watch_t *out, int max, int *out_count) {
    if (!out || max <= 0) {
       return AUTH_DB_INVALID;
    }
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* user_id == 0 => all users (cache load); else one user.  SECURITY: 0 is a
-    * trusted-caller-only sentinel — only attention_reload() (in-process, not
-    * user-driven) passes it.  Every tool/WebUI path resolves the caller's real
-    * user_id (>= 1 via tool_get_current_user_id), so an untrusted caller can
-    * never reach the all-users branch.  Do not plumb an untrusted value here. */
    const char *sql =
        (user_id > 0)
            ? "SELECT id, user_id, name, metric, rule_type, direction, threshold, hysteresis, "
@@ -272,6 +268,19 @@ int auth_db_attention_rule_list(int user_id, sage_watch_t *out, int max, int *ou
       *out_count = n;
    }
    return AUTH_DB_SUCCESS;
+}
+
+int auth_db_attention_rule_list(int user_id, sage_watch_t *out, int max, int *out_count) {
+   /* One user's only: a user_id of 0 (a guest) is refused, never read as
+    * "everyone". */
+   if (user_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   return rule_list(user_id, out, max, out_count);
+}
+
+int auth_db_attention_rule_list_all(sage_watch_t *out, int max, int *out_count) {
+   return rule_list(0, out, max, out_count);
 }
 
 int auth_db_attention_rule_count(int user_id, int *out_count) {

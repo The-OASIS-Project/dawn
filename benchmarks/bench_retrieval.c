@@ -163,6 +163,58 @@ static const char *DDL =
    ");";
 /* clang-format on */
 
+/* Loads every chunk with its text and embedding.  The bench scores the whole
+ * corpus itself (category filter, temporal boost, session-neighbor boost), so
+ * it keeps its own loader rather than the daemon's ranked lookup. */
+static sqlite3_stmt *s_bench_chunk_load;
+
+static void bench_col_text(char *dst, size_t dst_size, sqlite3_stmt *stmt, int col) {
+   const char *src = (const char *)sqlite3_column_text(stmt, col);
+   size_t len = src ? strlen(src) : 0;
+   if (len >= dst_size)
+      len = dst_size - 1;
+   if (len)
+      memcpy(dst, src, len);
+   dst[len] = '\0';
+}
+
+static int bench_chunk_load(int user_id,
+                            document_chunk_t *chunks,
+                            float *embedding_buf,
+                            int dims,
+                            int max_count,
+                            int *count_out) {
+   *count_out = 0;
+   if (!s_bench_chunk_load || !chunks || !embedding_buf || dims <= 0 || max_count <= 0)
+      return FAILURE;
+   sqlite3_stmt *stmt = s_bench_chunk_load;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int(stmt, 2, max_count);
+   const int expected = dims * (int)sizeof(float);
+   int count = 0;
+   while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
+      if (sqlite3_column_bytes(stmt, 3) != expected)
+         continue;
+      document_chunk_t *c = &chunks[count];
+      c->id = sqlite3_column_int64(stmt, 0);
+      c->chunk_index = sqlite3_column_int(stmt, 1);
+      bench_col_text(c->text, sizeof(c->text), stmt, 2);
+      float *emb = embedding_buf + (size_t)count * (size_t)dims;
+      memcpy(emb, sqlite3_column_blob(stmt, 3), (size_t)expected);
+      c->embedding = emb;
+      c->embedding_norm = (float)sqlite3_column_double(stmt, 4);
+      c->document_id = sqlite3_column_int64(stmt, 5);
+      bench_col_text(c->doc_filename, sizeof(c->doc_filename), stmt, 6);
+      bench_col_text(c->doc_filetype, sizeof(c->doc_filetype), stmt, 7);
+      c->created_at = sqlite3_column_int64(stmt, 8);
+      count++;
+   }
+   sqlite3_reset(stmt);
+   *count_out = count;
+   return SUCCESS;
+}
+
 static int prepare_statements(void) {
    int rc;
 
@@ -237,7 +289,7 @@ static int prepare_statements(void) {
                            "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
                            "WHERE d.user_id = ? OR d.is_global = 1 "
                            "LIMIT ?",
-                           -1, &s_db.stmt_doc_chunk_search, NULL);
+                           -1, &s_bench_chunk_load, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -309,8 +361,10 @@ static void teardown_db(void) {
       sqlite3_finalize(s_db.stmt_doc_count_user);
    if (s_db.stmt_doc_chunk_create)
       sqlite3_finalize(s_db.stmt_doc_chunk_create);
-   if (s_db.stmt_doc_chunk_search)
-      sqlite3_finalize(s_db.stmt_doc_chunk_search);
+   if (s_bench_chunk_load) {
+      sqlite3_finalize(s_bench_chunk_load);
+      s_bench_chunk_load = NULL;
+   }
    if (s_db.stmt_doc_find_by_name)
       sqlite3_finalize(s_db.stmt_doc_find_by_name);
    if (s_db.stmt_doc_chunk_read)
@@ -554,8 +608,8 @@ static int handle_query(struct json_object *cmd) {
    }
 
    int chunk_count = 0;
-   if (document_db_chunk_search_load(BENCH_USER_ID, chunks, emb_buf, dims, max_chunks,
-                                     &chunk_count) != SUCCESS) {
+   if (bench_chunk_load(BENCH_USER_ID, chunks, emb_buf, dims, max_chunks, &chunk_count) !=
+       SUCCESS) {
       chunk_count = 0;
    }
    if (chunk_count <= 0) {

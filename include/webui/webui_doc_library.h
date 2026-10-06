@@ -81,6 +81,15 @@ void handle_doc_library_note_save(ws_connection_t *conn, json_object *payload);
 void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload);
 
 /**
+ * @brief Replace a multi-chunk document's full text in place — stable id (v63).
+ * Payload: { "id": <doc_id>, "text": "..." }
+ * Response type: doc_library_doc_update_response
+ * Refuses single-chunk notes (use note_update); archives the prior content so the
+ * edit is undoable via doc_library_version_restore.
+ */
+void handle_doc_library_doc_update(ws_connection_t *conn, json_object *payload);
+
+/**
  * @brief List a document/note's archived versions, newest first (v62).
  * Payload: { "id": <doc_id> }.  Response type: doc_library_version_list_response
  */

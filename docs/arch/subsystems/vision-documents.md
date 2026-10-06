@@ -60,8 +60,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 │  ┌───────────────────────────────────────────────────────────────┐    │
 │  │ LLM Vision Integration                                        │    │
 │  │                                                               │    │
-│  │  llm_openai.c: data:image/jpeg;base64,... format              │    │
-│  │  llm_claude.c: source.type="base64", source.media_type=...    │    │
+│  │  history image_url parts (data:<mime>;base64,...) → per       │    │
+│  │  provider: Claude source.type="base64" + real media_type      │    │
 │  └───────────────────────────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────────────────────────┘
 ```
@@ -116,25 +116,31 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    ↓
 7. Browser caches in localStorage, shows preview
    ↓
-8. On send: turn frame carries BOTH the full base64 `images[]` (sent to the LLM this
-   turn) AND `image_ids[]` (the /api/images ids, ordered to match)
+8. On send: the turn frame carries `image_ids[]` (the /api/images ids) — never the
+   image bytes
    ↓
-9. Daemon persists the user turn itself (server-authoritative): it builds
-   `text` + `[IMAGE:<id>]` markers from image_ids and writes the row, promotes those
+9. Daemon builds `text` + `[IMAGE:<id>]` markers from image_ids; the turn's worker
+   builds the question's history message from them with `image_rehydrate_question`
+   (the stored files, owner-checked) — exactly what a reload rebuilds. A missing or
+   foreign id, an inline `data:` image, or too many images fails the turn with an
+   `error` frame (`IMAGE_UNAVAILABLE` / `IMAGE_LIMIT` / `IMAGE_ERROR`): nothing enters
+   the history or the database, and nothing is sent degraded
+   ↓
+10. Daemon persists the user turn itself (server-authoritative), promotes those
    images to permanent retention (post-persist, so only persisted turns pin images),
    and echoes `server_saved: true` so the client does NOT client-save the row
    ↓
-10. On reload, `[IMAGE:<id>]` markers rehydrate into image_url content (owner-checked)
+11. On reload, `[IMAGE:<id>]` markers rehydrate into image_url content (owner-checked)
 ```
 
 > **Persistence ownership (hard cut-over):** the daemon is the sole writer of user rows —
 > text and image turns alike. Previously the browser client-saved image turns (it held the
 > ids); now it sends the ids on the turn frame and the daemon owns persistence. `image_ids`
-> is therefore **mandatory** on an image turn — without it the turn persists text-only and
-> the images are lost on reload (no client-save fallback). Core stays image-agnostic: the
-> marker grammar and image-store calls live in the WebUI layer
-> (`webui_message_dispatch.c`, `webui_image_rehydrate.c`); `text_input_dispatch.c` just
-> persists a caller-supplied string via `persist_content_override`.
+> is the **only** way to attach an image: the frame's old base64 `images[]` is no longer
+> read. Core stays image-agnostic: the marker grammar and image-store calls live in
+> `image_rehydrate.c`, called from the WebUI layer (`webui_message_dispatch.c`,
+> `webui_text_processing.c`); `text_input_dispatch.c` just adds the caller's prebuilt
+> `question_message` and persists `persist_content_override`.
 
 ### Vision Model Support
 
@@ -151,8 +157,9 @@ The system auto-detects vision capability based on model name:
 ### Security Measures
 
 - **SVG exclusion**: SVG files explicitly blocked to prevent XSS via embedded scripts
-- **Data URI validation**: only `data:image/{jpeg,png,gif,webp};base64,` prefixes accepted
-- **Base64 character validation**: only `[A-Za-z0-9+/=]` allowed in base64 portion
+- **Images only by id**: a turn's images are stored ones it names in `image_ids`, each
+  owner-checked when the question is built; no image bytes are accepted on the socket
+- **Upload validation**: `POST /api/images` checks type and magic bytes before storing
 - **Authentication required**: all image endpoints require valid session
 - **Per-user limits**: configurable maximum images per user
 

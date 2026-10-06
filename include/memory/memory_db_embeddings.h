@@ -58,43 +58,58 @@ int memory_db_fact_update_embedding(int user_id,
                                     int dims,
                                     float norm);
 
+/* Which facts the in-memory cache keeps when a user has more than it holds:
+ * first any used in the last MEMORY_CACHE_RECENT_USE_SEC (recalled or cited)
+ * and memory→note links, then by confidence / (1 + age / scale), where age runs
+ * from the fact's last use or creation, so a year-old untouched fact counts at
+ * half its confidence. */
+#define MEMORY_CACHE_RECENT_USE_SEC (90 * 24 * 60 * 60)
+#define MEMORY_CACHE_RECENCY_SCALE_SEC (365 * 24 * 60 * 60)
+
+/** One fact memory_db_fact_foreach_embedding() loads. */
+typedef struct {
+   int64_t id;
+   const void *embedding; /* dims floats; valid only during the callback (memcpy it) */
+   float norm;
+   int64_t created_at;
+   int64_t note_doc_id; /* >0: a memory→note bridge gloss */
+} memory_fact_embedding_row_t;
+
 /**
- * @brief Load all embeddings for a user (for in-memory cache)
- *
- * Returns fact IDs, embedding BLOBs, and pre-computed norms.
- * Skips rows where embedding dimensions don't match expected_dims.
- *
- * @param user_id User ID
- * @param expected_dims Expected embedding dimensions (for validation)
- * @param out_ids Output: array of fact IDs (caller allocates)
- * @param out_embeddings Output: flat float array (caller allocates, count * dims)
- * @param out_norms Output: array of norms (caller allocates)
- * @param out_created_ats Optional output: per-fact creation timestamps; pass NULL
- *                       when not needed (temporal-query scoring is the only
- *                       consumer today)
- * @param out_note_doc_ids Optional output: per-fact note_doc_id (v61); >0 marks a
- *                       memory→note bridge gloss.  Pass NULL when gloss-awareness
- *                       isn't needed.
- * @param max_count Maximum entries to return
- * @param count_out Output: number of embeddings loaded
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ * @brief Called per fact; @p total is how many facts matched before the limit.
+ * @return SUCCESS to continue, anything else to stop (the load then fails)
  */
-int memory_db_fact_get_embeddings(int user_id,
-                                  int expected_dims,
-                                  int64_t *out_ids,
-                                  float *out_embeddings,
-                                  float *out_norms,
-                                  int64_t *out_created_ats,
-                                  int64_t *out_note_doc_ids,
-                                  int max_count,
-                                  int *count_out);
+typedef int (*memory_fact_embedding_fn)(const memory_fact_embedding_row_t *row,
+                                        int total,
+                                        void *ctx);
+
+/**
+ * @brief Stream a user's current facts' embeddings for the cache
+ *
+ * Current (not superseded, not expired) facts whose embedding has
+ * @p expected_dims dimensions.  All of them when there are at most @p limit;
+ * otherwise the best @p limit as described at MEMORY_CACHE_RECENT_USE_SEC.
+ * Rows come in no particular order.  @p fn runs under the auth_db lock, so it
+ * must not call back into the database.
+ *
+ * @return MEMORY_DB_SUCCESS, or MEMORY_DB_FAILURE on a database error or when
+ *         @p fn stopped the load
+ */
+int memory_db_fact_foreach_embedding(int user_id,
+                                     int expected_dims,
+                                     int limit,
+                                     memory_fact_embedding_fn fn,
+                                     void *ctx);
 
 /**
  * @brief List facts that need embedding (backfill)
  *
- * Returns facts with NULL embedding or mismatched dimensions.
+ * Returns non-empty facts with NULL embedding or mismatched dimensions, in id order,
+ * starting after @p after_id (pass 0 for the first page, then the last id seen),
+ * so a caller can page past facts it could not embed instead of re-listing them.
  *
  * @param user_id User ID
+ * @param after_id Only return facts with id > after_id
  * @param expected_dims Expected embedding dimensions
  * @param out_ids Output: array of fact IDs
  * @param out_texts Output: array of fact text strings (caller allocates char[][512])
@@ -103,9 +118,31 @@ int memory_db_fact_get_embeddings(int user_id,
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_list_without_embedding(int user_id,
+                                          int64_t after_id,
                                           int expected_dims,
                                           int64_t *out_ids,
                                           char out_texts[][512],
+                                          int max_count,
+                                          int *count_out);
+
+/**
+ * @brief List users that need an embedding-backfill pass
+ *
+ * A user qualifies if they have a live, non-empty fact with a NULL or
+ * wrong-dimension embedding, or if their one-shot category pass has not run
+ * (users.categories_backfilled_at = 0) and they have any live fact.  Paged by
+ * user id so a sweep larger than the backfill queue can resume.
+ *
+ * @param expected_dims Expected embedding dimensions
+ * @param after_user_id Only return users with id > after_user_id (0 = from start)
+ * @param out_user_ids Output: user IDs (ascending)
+ * @param max_count Capacity of out_user_ids
+ * @param count_out Output: number of users found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_users_needing_backfill(int expected_dims,
+                                          int after_user_id,
+                                          int *out_user_ids,
                                           int max_count,
                                           int *count_out);
 

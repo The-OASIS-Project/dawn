@@ -16,7 +16,7 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Messaging driver contract (Layer 2).
+ * Messaging driver contract (Layer 3, with the engine).
  *
  * Each chat-app provider (Telegram, Discord, Slack) and the existing SMS
  * path implements this contract.  The engine
@@ -37,30 +37,46 @@
 extern "C" {
 #endif
 
+/** Whether a chat holds one person (with the bot) or several. */
+typedef enum {
+   MESSAGING_CHAT_ONE_TO_ONE = 0,
+   MESSAGING_CHAT_SHARED = 1,
+} messaging_chat_kind_t;
+
+/**
+ * @brief One inbound message, as a driver hands it to the engine.
+ *
+ * A channel is linked to the person who linked it, not to the chat: the
+ * engine answers a message only when `sender_id` is that person.  So
+ * `sender_id` must come from the provider's own record of who sent the
+ * message (Telegram `from.id`, Discord `author.id`, Slack `event.user`),
+ * never from text the message carries.  A driver drops what has no single,
+ * provider-known person behind it (anonymous group admins, posts in a chat's
+ * name, bots, forwarded or inline-bot content).  Any later way of approving
+ * something from a chat (a button press, say) must go through the same check.
+ */
+typedef struct {
+   const char *provider;         /**< Driver name ("telegram" / "discord" / ...) */
+   const char *provider_address; /**< The chat: chat_id / channel_id / phone */
+   const char *sender_id;        /**< Provider id of the person; NULL if unknown */
+   const char *sender_display;   /**< Human-readable sender name (may be NULL) */
+   const char *body;             /**< UTF-8 text */
+   int64_t timestamp;            /**< Unix seconds the provider claims (0 = unknown) */
+   messaging_chat_kind_t chat_kind;
+} messaging_inbound_t;
+
 /**
  * @brief Callback invoked by a driver when an inbound message arrives.
  *
  * The driver runs this on its listener thread (do NOT block — the
  * engine's bound queue absorbs back-pressure on the worker drain).
  *
- * @param provider          Driver name ("telegram" / "discord" / ...).
- * @param provider_address  Typed provider primary key (chat_id /
- *                          channel_id / phone) as a string.
- * @param sender_display    Human-readable sender name (may be NULL).
- * @param body              Message body (UTF-8 text only — v1 is text-only).
- * @param timestamp         Unix epoch seconds when the provider claims
- *                          the message was sent (0 if unknown).
- *
  * @return SUCCESS if the engine accepted the event, FAILURE if it
  *         couldn't enqueue (queue full, body too long, gate rejected,
  *         etc.).  Drivers MAY ignore the return — the engine's
  *         response semantics are downstream of enqueue.
  */
-typedef int (*messaging_inbound_fn)(const char *provider,
-                                    const char *provider_address,
-                                    const char *sender_display,
-                                    const char *body,
-                                    int64_t timestamp);
+typedef int (*messaging_inbound_fn)(const messaging_inbound_t *msg);
 
 /**
  * @brief Time/cursor window for a read_history() fetch.
@@ -93,6 +109,13 @@ typedef struct messaging_driver_s {
    /** Driver name — used as the `provider` column value
     *  ("telegram" / "discord" / "slack" / "sms"). */
    const char *name;
+
+   /** The provider vouches for who sent each message: a chat app's sender id
+    *  comes from the provider's own record (true for Telegram, Discord,
+    *  Slack).  False for SMS: the sender number can be forged, so a channel
+    *  can't be owned by a sender and a new link is proven by a code texted
+    *  to the number. */
+   bool authenticates_sender;
 
    /** Wire format this driver consumes.  The engine renders every outbound
     *  message into this dialect (via messaging_deliver / engine_send_async)
@@ -147,6 +170,21 @@ typedef struct messaging_driver_s {
                     const char *provider_address,
                     const char *address_json,
                     const char *text);
+
+   /**
+    * OPTIONAL — send a code text (a link or reply code), whose content must
+    * not be kept.  A driver that records what it sends records `log_text`
+    * instead.  It must not be dropped by the driver's own send limits (its
+    * callers cap codes themselves): a dropped code strands what waits for it.
+    * Drivers that keep no copy may leave this NULL; send_text is used for a
+    * link code.  A reply code is sent only through this hook (it fails closed
+    * without it): a driver whose senders it can't verify must provide it.
+    */
+   int (*send_text_unlogged)(int user_id,
+                             const char *provider_address,
+                             const char *address_json,
+                             const char *text,
+                             const char *log_text);
 
    /**
     * Build the canonical address_json blob for this driver given a

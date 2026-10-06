@@ -93,10 +93,13 @@ static void sms_shutdown_impl(void) {
     * down. */
 }
 
-static int sms_send_text(int user_id,
-                         const char *provider_address,
-                         const char *address_json,
-                         const char *text) {
+/* Send @p text: an ordinary text when @p log_text is NULL, else a code text
+ * logged as @p log_text. */
+static int sms_send_text_logged_as(int user_id,
+                                   const char *provider_address,
+                                   const char *address_json,
+                                   const char *text,
+                                   const char *log_text) {
    char e164[32];
    e164[0] = '\0';
    /* Prefer typed provider_address (the E.164 string); fall back to
@@ -129,12 +132,34 @@ static int sms_send_text(int user_id,
       effective_user_id = SMS_FALLBACK_USER_ID;
    }
    char result[256] = { 0 };
-   int rc = phone_service_send_sms(effective_user_id, e164, text, result, sizeof(result));
+   int rc = log_text
+                ? phone_service_send_code_sms(effective_user_id, e164, text, log_text, result,
+                                              sizeof(result))
+                : phone_service_send_sms(effective_user_id, e164, text, result, sizeof(result));
    if (rc != SUCCESS) {
       OLOG_WARNING("sms: phone_service_send_sms failed (rc=%d): %s", rc, result);
       return FAILURE;
    }
    return SUCCESS;
+}
+
+static int sms_send_text(int user_id,
+                         const char *provider_address,
+                         const char *address_json,
+                         const char *text) {
+   return sms_send_text_logged_as(user_id, provider_address, address_json, text, NULL);
+}
+
+/* Code texts (link and reply codes): their content isn't kept (the user's SMS
+ * log, readable through the phone tool, gets `log_text`), and they aren't held
+ * to the SMS rate limits (phone_service_send_code_sms). */
+static int sms_send_text_unlogged(int user_id,
+                                  const char *provider_address,
+                                  const char *address_json,
+                                  const char *text,
+                                  const char *log_text) {
+   return sms_send_text_logged_as(user_id, provider_address, address_json, text,
+                                  log_text ? log_text : "(not kept)");
 }
 
 static void sms_build_address_json(const char *provider_address, char *buf, size_t buf_size) {
@@ -183,10 +208,12 @@ static int sms_reconnect(void) {
 
 static const messaging_driver_t s_sms_driver = {
    .name = "sms",
+   .authenticates_sender = false, /* a sender number can be forged */
    .out_format = MSG_FMT_PLAIN,
    .init = sms_init,
    .shutdown = sms_shutdown_impl,
    .send_text = sms_send_text,
+   .send_text_unlogged = sms_send_text_unlogged,
    .build_address_json = sms_build_address_json,
    .register_inbound_cb = sms_register_inbound_cb,
    .validate_address = sms_validate_address,

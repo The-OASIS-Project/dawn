@@ -104,6 +104,25 @@ void test_exact_label_ranks_first(void) {
    TEST_ASSERT_TRUE(scores[0] > 0.0f);
 }
 
+/* A repeated word doesn't change the score: it would otherwise count toward
+ * the query length that picks the score normalization. */
+void test_repeated_words_score_the_same(void) {
+   doc_bm25_hit_t once[10], twice[10];
+   float s_once[10], s_twice[10];
+   int n_once = 0, n_twice = 0;
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, document_db_chunk_search_bm25(1, "public bio", TEST_BM25_LABEL_WEIGHT,
+                                              TEST_BM25_BODY_WEIGHT, once, s_once, 10, &n_once));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunk_search_bm25(1, "public bio public bio bio",
+                                                                TEST_BM25_LABEL_WEIGHT,
+                                                                TEST_BM25_BODY_WEIGHT, twice,
+                                                                s_twice, 10, &n_twice));
+   TEST_ASSERT_EQUAL_INT(n_once, n_twice);
+   TEST_ASSERT_GREATER_THAN_INT(0, n_once);
+   TEST_ASSERT_EQUAL_INT64(once[0].id, twice[0].id);
+   TEST_ASSERT_FLOAT_WITHIN(1e-5f, s_once[0], s_twice[0]);
+}
+
 /* A label query for a different note returns that note rank-1 — confirms the
  * label channel discriminates between the near-twins rather than collapsing. */
 void test_other_label_ranks_first(void) {
@@ -534,6 +553,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_exact_label_ranks_first);
    RUN_TEST(test_other_label_ranks_first);
+   RUN_TEST(test_repeated_words_score_the_same);
    RUN_TEST(test_body_term_retrieves);
    RUN_TEST(test_note_update_stable_id);
    RUN_TEST(test_note_delete_indexed);

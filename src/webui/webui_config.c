@@ -54,12 +54,14 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_rate_limit.h"
 #include "logging.h"
+#include "memory/memory_embeddings.h"
 #include "tools/messaging_tool.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
 #include "webui/webui_phone_config.h"
+#include "webui/webui_reasoning.h"
 #include "webui/webui_server.h" /* For WEBUI_MAX_THUMBNAIL_SIZE */
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
 #include "tools/homeassistant_service.h"
@@ -245,16 +247,16 @@ void handle_get_config(ws_connection_t *conn) {
    if (ctx_max > 0) {
       json_object_object_add(llm_runtime, "context_max", json_object_new_int(ctx_max));
    }
-   /* Session's actual reasoning settings, so a client shows the real per-session
-    * value instead of the config default. Sourced from `resolved` to match every
-    * sibling field in this object (type/provider/model/context_max). llm_state_update
-    * only fires on a switch_llm tool call, so this is the only place a fresh
-    * connection learns them. */
-   json_object_object_add(llm_runtime, "thinking_mode",
-                          json_object_new_string(resolved.thinking_mode));
-   json_object_object_add(llm_runtime, "reasoning_effort",
-                          json_object_new_string(resolved.reasoning_effort));
+   /* The session's reasoning as its model is actually sent, with that model's
+    * capabilities, so a client shows the real value and only the options the
+    * model takes.  llm_state_update only fires on a switch_llm tool call, so
+    * this is the only place a fresh connection learns them. */
+   webui_reasoning_stamp(llm_runtime, &session_config);
    json_object_object_add(payload, "llm_runtime", llm_runtime);
+
+   /* Every configured cloud model's reasoning capabilities (local models come
+    * with list_llm_models_response). */
+   json_object_object_add(payload, "reasoning_capabilities", webui_reasoning_cloud_capabilities());
 
    /* Add auth state for frontend UI visibility control */
    json_object_object_add(payload, "authenticated", json_object_new_boolean(conn->authenticated));
@@ -396,6 +398,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_DOUBLE(section, "end_of_speech_duration", config->vad.end_of_speech_duration);
       JSON_TO_CONFIG_DOUBLE(section, "max_recording_duration", config->vad.max_recording_duration);
       JSON_TO_CONFIG_INT(section, "preroll_ms", config->vad.preroll_ms);
+      JSON_TO_CONFIG_STR(section, "adaptive_endpoint", config->vad.adaptive_endpoint);
+      config_clamp_vad(&config->vad); /* same bounds as the file path */
 
       struct json_object *chunking;
       if (json_object_object_get_ex(section, "chunking", &chunking)) {
@@ -634,7 +638,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_STR(section, "compact_provider", config->llm.compact_provider);
       JSON_TO_CONFIG_STR(section, "compact_model", config->llm.compact_model);
 
-      JSON_TO_CONFIG_BOOL(section, "conversation_logging", config->llm.conversation_logging);
       JSON_TO_CONFIG_BOOL(section, "rate_limit_enabled", config->llm.rate_limit_enabled);
       JSON_TO_CONFIG_INT(section, "rate_limit_rpm", config->llm.rate_limit_rpm);
       llm_rate_limit_set_rpm(config->llm.rate_limit_enabled ? config->llm.rate_limit_rpm : 0);
@@ -785,32 +788,14 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_BOOL(section, "expire_enabled", config->memory.expire_enabled);
       JSON_TO_CONFIG_INT(section, "expire_grace_days", config->memory.expire_grace_days);
       JSON_TO_CONFIG_INT(section, "prune_expired_days", config->memory.prune_expired_days);
-      /* Clamp expiry windows (mirror config_parser) */
-      if (config->memory.expire_grace_days < 0) {
-         config->memory.expire_grace_days = 0;
-      } else if (config->memory.expire_grace_days > 365) {
-         config->memory.expire_grace_days = 365;
-      }
-      if (config->memory.prune_expired_days < 0) {
-         config->memory.prune_expired_days = 0;
-      } else if (config->memory.prune_expired_days > 365) {
-         config->memory.prune_expired_days = 365;
-      }
       JSON_TO_CONFIG_INT(section, "conversation_idle_timeout_min",
                          config->memory.conversation_idle_timeout_min);
-      /* Clamp conversation idle timeout (0 = disabled, else 10-60 min) */
-      if (config->memory.conversation_idle_timeout_min < 0) {
-         config->memory.conversation_idle_timeout_min = 0;
-      } else if (config->memory.conversation_idle_timeout_min > 0 &&
-                 config->memory.conversation_idle_timeout_min < 10) {
-         config->memory.conversation_idle_timeout_min = 10;
-      } else if (config->memory.conversation_idle_timeout_min > 60) {
-         config->memory.conversation_idle_timeout_min = 60;
-      }
       JSON_TO_CONFIG_INT(section, "default_voice_user_id", config->memory.default_voice_user_id);
-      /* Default voice user ID must be positive */
-      if (config->memory.default_voice_user_id < 1) {
-         config->memory.default_voice_user_id = 1;
+      const int prev_fact_cache_mb = config->memory.fact_cache_mb;
+      JSON_TO_CONFIG_INT(section, "fact_cache_mb", config->memory.fact_cache_mb);
+      config_clamp_memory(&config->memory); /* the same bounds as the file path */
+      if (config->memory.fact_cache_mb != prev_fact_cache_mb) {
+         memory_embeddings_invalidate_cache(); /* the next search reloads at the new size */
       }
       /* Decay settings */
       JSON_TO_CONFIG_BOOL(section, "decay_enabled", config->memory.decay_enabled);
@@ -961,6 +946,10 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          JSON_TO_CONFIG_INT(focus_obj, "focus_budget_bytes", fi->focus_budget_bytes);
          JSON_TO_CONFIG_INT(focus_obj, "top_k", fi->top_k);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "min_score", fi->min_score);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "document_min_relevance", fi->document_min_relevance);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "fact_min_relevance", fi->fact_min_relevance);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "entity_min_relevance", fi->entity_min_relevance);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "summary_min_relevance", fi->summary_min_relevance);
          JSON_TO_CONFIG_BOOL(focus_obj, "classifier_enabled", fi->classifier_enabled);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_semantic", fi->weight_semantic);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_recency", fi->weight_recency);
@@ -979,12 +968,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
             JSON_TO_CONFIG_DOUBLE(src_obj, "dawn_background", fi->source_weights.dawn_background);
          }
 
-         json_object *dedup_obj = NULL;
-         if (json_object_object_get_ex(focus_obj, "dedup", &dedup_obj)) {
-            JSON_TO_CONFIG_INT(dedup_obj, "recent_window_turns", fi->dedup.recent_window_turns);
-            JSON_TO_CONFIG_DOUBLE(dedup_obj, "score_uplift_factor", fi->dedup.score_uplift_factor);
-         }
-
          json_object *dth_obj = NULL;
          if (json_object_object_get_ex(focus_obj, "dominant_token_heuristic", &dth_obj)) {
             JSON_TO_CONFIG_BOOL(dth_obj, "enabled", fi->dominant_token_heuristic.enabled);
@@ -996,6 +979,10 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          CONFIG_CLAMP(fi->focus_budget_bytes, 1024, 65536);
          CONFIG_CLAMP(fi->top_k, 1, 64);
          CONFIG_CLAMP(fi->min_score, 0.0f, 1.0f);
+         CONFIG_CLAMP(fi->document_min_relevance, 0.0f, 1.0f);
+         CONFIG_CLAMP(fi->fact_min_relevance, 0.0f, 1.0f);
+         CONFIG_CLAMP(fi->entity_min_relevance, 0.0f, 1.0f);
+         CONFIG_CLAMP(fi->summary_min_relevance, 0.0f, 1.0f);
          CONFIG_CLAMP(fi->weight_semantic, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->weight_recency, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->weight_importance, 0.0f, 5.0f);
@@ -1008,8 +995,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          CONFIG_CLAMP(fi->source_weights.calendar_event, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->source_weights.recent_email, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->source_weights.dawn_background, 0.0f, 5.0f);
-         CONFIG_CLAMP(fi->dedup.recent_window_turns, 0, 100);
-         CONFIG_CLAMP(fi->dedup.score_uplift_factor, 1.0f, 5.0f);
          /* Lower bound at 0.01 mirrors config_validate.c — runtime
           * self-guard silently no-ops at ≤ 0.0; disable via the
           * `enabled` flag instead so the slider can't lie. */
@@ -1126,11 +1111,9 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "max_image_size_kb", config->vision.max_image_size_kb);
       JSON_TO_CONFIG_INT(section, "max_dimension", config->vision.max_dimension);
       JSON_TO_CONFIG_INT(section, "max_images", config->vision.max_images);
-      JSON_TO_CONFIG_INT(section, "capture_history_count", config->vision.capture_history_count);
       CONFIG_CLAMP(config->vision.max_image_size_kb, 512, 16384);
       CONFIG_CLAMP(config->vision.max_dimension, 256, 4096);
       CONFIG_CLAMP(config->vision.max_images, 1, 10);
-      CONFIG_CLAMP(config->vision.capture_history_count, 0, 50);
    }
 
    /* [scheduler] */
@@ -1351,17 +1334,6 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    /* Track tools enable/disable changes for prompt rebuild */
    bool old_tools_enabled = g_config.llm.tools.enabled;
 
-   /* Track voice-directive changes.  These feed the cached LOCAL-mic prompt
-    * (initialize_command_prompt), which only rebuilds on
-    * invalidate_system_instructions(); satellites/WebUI rebuild per turn and
-    * pick up edits automatically, but the local static prompt would otherwise
-    * stay stale until the next capability change or restart.  voice_directive_webui
-    * is NOT tracked here — it only rides the per-turn WebUI volatile block. */
-   char old_voice_directive[CONFIG_DESCRIPTION_MAX];
-   char old_disambiguation_hint[CONFIG_DESCRIPTION_MAX];
-   safe_strscpy(old_voice_directive, g_config.tts.voice_directive);
-   safe_strscpy(old_disambiguation_hint, g_config.asr.disambiguation_hint);
-
    /* Track local endpoint changes for provider cache invalidation */
    char old_local_endpoint[128];
    safe_strscpy(old_local_endpoint, g_config.llm.local.endpoint);
@@ -1374,14 +1346,6 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    dawn_config_t *mutable_config = (dawn_config_t *)config_get();
    apply_config_from_json(mutable_config, payload);
    bool tools_mode_changed = (old_tools_enabled != g_config.llm.tools.enabled);
-   /* Name reflects intent: gates the LOCAL static-prompt rebuild.  Both fields
-    * baked into that prompt are tracked (tts.voice_directive AND the [asr]
-    * disambiguation_hint); a new field baked into the local prompt must be added
-    * here too or its edit won't apply without a restart.  voice_directive_webui
-    * is intentionally excluded — it only rides the per-turn WebUI volatile block. */
-   bool local_prompt_directives_changed =
-       (strcmp(old_voice_directive, g_config.tts.voice_directive) != 0 ||
-        strcmp(old_disambiguation_hint, g_config.asr.disambiguation_hint) != 0);
    int result = config_write_toml(mutable_config, config_path);
    pthread_rwlock_unlock(&s_config_rwlock);
 
@@ -1502,33 +1466,12 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
       }
 #endif
 
-      /* If tool calling was toggled on/off, rebuild system prompt for current session */
+      /* Tool calling toggled on/off: the prompt's rules change (a running
+       * conversation gets them with its next turn, appended). */
       if (tools_mode_changed) {
          invalidate_system_instructions();
          OLOG_INFO("Tool calling %s, rebuilding prompt",
                    g_config.llm.tools.enabled ? "enabled" : "disabled");
-
-         /* Update current session's system prompt so change takes effect immediately */
-         if (conn->session) {
-            /* Phase 1f: SESSION_START builder boundary — clear dedup state. */
-            session_injected_set_clear(conn->session);
-            char *new_prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
-            if (new_prompt) {
-               session_update_system_prompt(conn->session, new_prompt);
-               OLOG_INFO("WebUI: Updated session prompt for tools mode change");
-               free(new_prompt);
-            }
-         }
-      }
-
-      /* Voice-directive edits: rebuild the cached local-mic prompt so the change
-       * applies without a restart.  invalidate_system_instructions() drops the
-       * cached command_prompt; refresh_all_prompts re-installs every session's
-       * system prompt (including the local mic) from the rebuilt source. */
-      if (local_prompt_directives_changed) {
-         invalidate_system_instructions();
-         session_manager_refresh_all_prompts();
-         OLOG_INFO("WebUI: Voice directive changed, rebuilt prompts");
       }
 
       /* Nudge other admin browsers (a second tab, Aurora) to re-pull config so
@@ -2350,6 +2293,7 @@ void handle_list_llm_models(ws_connection_t *conn) {
          json_object *model_obj = json_object_new_object();
          json_object_object_add(model_obj, "name", json_object_new_string(models[i].name));
          json_object_object_add(model_obj, "loaded", json_object_new_boolean(models[i].loaded));
+         webui_reasoning_add_local(model_obj, models[i].name);
          json_object_array_add(models_arr, model_obj);
       }
    }

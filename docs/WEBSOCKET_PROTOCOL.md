@@ -18,7 +18,29 @@ WebUI browser clients, and DAP2 satellite devices. All connections use the
   `tests/tools/tail_conversation.py`.
 - **Authentication**: HTTP cookie set during login (see `webui_http.c`). Obtain it
   with `GET /api/auth/csrf` then `POST /api/auth/login`; the WebUI is TLS-only when
-  `[webui] ssl_cert_path` is set, so use `wss://`.
+  `[webui] ssl_cert_path` is set, so use `wss://`. A session belongs to the login
+  that created it: a `reconnect` token only reattaches from that same login.
+- **One login per app** (feature `app_logins`): a front-end other than the WebUI names
+  itself on login (`"app": "aurora"` in the JSON body; `[a-z0-9_]`, 1-16 characters)
+  and gets its own cookie, `__Host-dawn_session_<app>` (the WebUI's is
+  `__Host-dawn_session`; the `__Host-` prefix means the browser only accepts it from
+  this host, over HTTPS, with `Path=/` and no `Domain`). Every
+  other request says which app it is from with **`?app=<app>` on its URL**: the
+  WebSocket and music-socket upgrade URLs, fetches, image and document links. No `app`
+  means the WebUI; an invalid or unreadable one means no login, never the WebUI's.
+  URLs DAWN sends (image and document links in frames) carry no `app`: a front-end
+  adds its own `app=` to each one (merged with `&` when there is a query already).
+  So the WebUI and another front-end
+  open in the same browser keep separate logins: logging out of or into one never
+  touches the other.
+- **Logging out**: `POST /api/auth/logout` (with `?app=<app>` for another front-end;
+  same-origin: `Origin`, or a `Referer` whose `scheme://host[:port]` is exactly this
+  server's or on `[webui] allowed_origins`) **with the socket open**. It ends that app's
+  login only. The reply is immediate: `200 {"success":true}`, that app's cookie cleared
+  (`Max-Age=0`), `Cache-Control: no-store`. Every connection on that
+  login gets `force_logout` and is closed with **`4002`**, its music socket is closed
+  by the server, and its sessions are destroyed, connected or not. A login over an
+  existing one of the same app in the same browser ends the old one the same way.
 
 ## Binary Message Types
 
@@ -35,6 +57,42 @@ Audio format: 16-bit PCM at 16kHz mono (raw), Opus-encoded for WebSocket transpo
 Music format: Opus-encoded at 48kHz stereo.
 
 ---
+
+## Protocol version and feature flags
+
+DAWN advertises what its protocol does, so a client can adapt to the server it meets
+instead of guessing from the version string. Both carriers say the same thing: the
+`config` frame (sent on every connect and reconnect) and `GET /api/auth/status`
+(logged in or not, for decisions made before a socket opens):
+
+- `protocol` (integer): the protocol version. Bumped **only** when something is removed
+  or changes incompatibly, after a deprecation window. A client that doesn't speak the
+  server's version says so ("this DAWN is newer/older than this client") rather than
+  half-working.
+- `features` (array of strings): behaviours a client must know about to use them.
+  Names are stable snake_case; a flag isn't removed while the protocol version stands.
+  **A missing `features` array means a DAWN from before flags existed:** assume only
+  the legacy behaviour.
+
+When to add what:
+
+- A new optional field: nothing. Clients detect it by its presence.
+- A new or changed behaviour, or a new request a client must opt into: a feature flag.
+- A removal, or a field whose meaning changed incompatibly: a protocol bump, after a
+  deprecation window.
+
+| Flag | Since | Meaning |
+|------|-------|---------|
+| `document_attachments` | 2026-10-02 | A `text` frame may carry its documents as `attachments` (`[{filename, size, content, blob_id?}]`): the daemon defuses each body and filename and builds the `[ATTACHED DOCUMENT: …]…[END DOCUMENT]` text itself, so a document can't end its own span. Without it, inline the documents into `text` as before. Every daemon with it also has `turn_refs`. |
+| `turn_refs` | 2026-10-02 | A `text` frame may carry `client_ref`: the turn's own user `transcript` echo and every `error` raised for that turn (refused at receipt, refused or failed when it runs) carry it back unchanged, so a client knows which of its turns an error belongs to. Without it, refusals name no turn. |
+| `image_only_turns` | 2026-10-01 | A `text` turn with no words (empty, absent or whitespace `text`) but at least one `image_ids` entry runs with just the images; one with neither is refused with `EMPTY_MESSAGE` instead of being dropped silently. Without it, require text with an image: older daemons drop a turn with no text without a reply. |
+| `image_turns_by_id` | 2026-10-01 | A `text` turn takes images only through `image_ids`; `images[]` is ignored. A malformed, missing or foreign id, or too many, refuses the whole turn with `IMAGE_UNAVAILABLE` / `IMAGE_LIMIT` / `IMAGE_ERROR` and saves nothing (see `text`). Without it, send `images[]` with `image_ids` as before: older daemons send the model only `images[]`. |
+| `app_logins` | 2026-09-30 | One login per app: `"app"` on login, `?app=` on every other request, a cookie per app (see Connection Lifecycle). Without it, all front-ends in a browser share one login. |
+| `logout_closes_sockets` | 2026-09-30 | `POST /api/auth/logout` with the socket open is safe: the login's connections get `force_logout` and close with `4002`, the server closes the music socket, and the reply comes at once with the cookie cleared (see Connection Lifecycle, Logging out). Without it, close the socket before logging out. |
+
+A client says who it is in its `init` / `reconnect` payload:
+`"client": {"name": "aurora", "version": "1.4.0", "protocol": 1}`. DAWN logs it once per
+connection (and warns on a protocol it doesn't speak); nothing is enforced on it.
 
 ## Connection Lifecycle
 
@@ -59,25 +117,70 @@ Music format: Opus-encoded at 48kHz stereo.
 ### Core
 
 #### `text`
-Send a text message to the AI (with optional vision images).
+Send a text message to the AI, with the images attached to it by id.
 ```json
 {
    "type": "text",
    "payload": {
-      "text": "What is the weather?",
-      "images": [
-         {
-            "data": "<base64-encoded image>",
-            "mime_type": "image/jpeg"
-         }
-      ],
-      "image_ids": ["img_a1b2c3d4e5f6"]
+      "text": "What is in this picture?",
+      "image_ids": ["img_a1b2c3d4e5f6"],
+      "client_ref": "17",
+      "attachments": [{"filename": "report.pdf", "size": 52113,
+                       "content": "<extracted text>", "blob_id": "blb_a1b2c3d4e5f6"}]
    }
 }
 ```
-- `images` is optional, max 5 images, max 4MB each — the base64 data sent to the LLM for this turn.
-- Supported MIME types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
-- `image_ids` — the ids for those images returned by the `POST /api/images` HTTP upload (see `docs/arch/subsystems/vision-documents.md`), **ordered to match `images[]`**. The daemon is authoritative for user-turn persistence: it builds `[IMAGE:<id>]` markers from these ids and persists the turn itself, then echoes `server_saved: true` on the transcript so the client does **not** save the user row. **Mandatory on any image turn** — an image turn sent without `image_ids` persists text-only and the images will not re-render on reload (there is no client-save fallback). Omit for text-only turns.
+- `attachments` — optional (flag `document_attachments`); the documents the turn attaches,
+  from the `POST /api/documents` upload: `filename` (1–255 bytes, no line break), `size` (the
+  original file's bytes, a non-negative integer), `content` (the extracted text), and
+  `blob_id` (the upload's `original_blob_id`; omit it when there is none, never `null`). At
+  most `[documents] max_documents` (default 5) per turn, each `content` at most
+  `[documents] max_extracted_size_kb` KB (default 1024). The daemon defuses DAWN's markers in
+  each body and filename (they are someone else's text), quotes any document-marker line
+  inside a body, and builds the turn's text as clients used to inline it: one
+  `[ATTACHED DOCUMENT: <filename> (<size> bytes)[ blob:<blob_id>]]\n<content>\n[END DOCUMENT]`
+  block per document, separated by a blank line, then a blank line and the words. The echo,
+  the saved row and a reload carry that text. `text` holds only the words, and may be empty
+  when the turn has attachments. A malformed entry, too many or too large, or a `blob_id` that
+  is malformed or names no stored original of the user's refuses the turn with
+  `ATTACHMENT_INVALID`. A client without the flag inlines the documents into `text` itself;
+  the daemon still accepts that, defusing what it finds between the markers.
+- `client_ref` — optional (flag `turn_refs`); an opaque tag of 1 to 64 printable ASCII
+  characters (0x20–0x7e). The turn's own user `transcript` echo carries it as
+  `payload.client_ref`, and so does every `error` raised for the turn, whatever its code: on
+  receipt (e.g. `EMPTY_MESSAGE`, `IMAGE_*`, `TURN_QUEUE_FULL`, `UNAUTHORIZED`, `SESSION_LIMIT`)
+  and while it runs (e.g. `IMAGE_*`, `LLM_ERROR`, `PERSIST_ERROR`). An error with the ref
+  isn't always a failed turn: `PERSIST_ERROR` comes after the reply was shown (it wasn't
+  saved), so read the code, and `severity`, not just the ref. Other frames of the turn (stream
+  deltas, the reply, other viewers' copies) don't carry it. A `client_ref` that isn't a
+  string of that shape (`null`, a number, empty, too long, or with other characters) refuses
+  the frame with `INVALID_CLIENT_REF` (that error carries no ref).
+- `image_ids` — optional; the ids the `POST /api/images` HTTP upload returned (see
+  `docs/arch/subsystems/vision-documents.md`), at most `[vision] max_images` (default 5).
+  **The only way to attach an image:** the daemon reads the stored files, sends them to the
+  model, persists the turn as `text` + `[IMAGE:<id>]` markers, and echoes
+  `server_saved: true` on the transcript so the client does **not** save the user row.
+  Omit for a text-only turn.
+- The turn is sent with every image it names or not at all. It fails with an `error` frame,
+  and nothing is added to the conversation, when an id is malformed, names no image of the
+  user's (deleted, another user's, unreadable), or there are too many:
+  `IMAGE_UNAVAILABLE` (bad/missing/foreign id), `IMAGE_LIMIT` (more than `max_images`, or past
+  the per-message size ceiling), `IMAGE_ERROR` (the server couldn't build the message).
+  An inline `[IMAGE:data:...]` marker in `text` on an image turn also fails it
+  (`IMAGE_UNAVAILABLE`): images come only from `image_ids`.
+- `images` (base64 `[{data, mime_type}]`) is **no longer read** (since 2026-10): a frame that
+  still carries it is processed as if it didn't; its images reach the model only through
+  `image_ids`.
+- `text` may be empty (or absent, or only whitespace) when `image_ids` has at least one id: the
+  turn is just the images (flag `image_only_turns`), or when `attachments` has at least one
+  document (the turn is the documents). With no words, images or attachments, the turn is
+  refused with `EMPTY_MESSAGE`. The sender's own `transcript` echo carries the text the daemon built (the words, after any
+  documents), never `[IMAGE:]` markers: for an image-only turn it is empty and the client shows
+  the images it attached. Other
+  viewers and a reload get the images from the saved row.
+- A refused turn gets exactly one `error` frame: `TURN_QUEUE_FULL` when too many messages are
+  already queued for the session, `EMPTY_MESSAGE`, `ATTACHMENT_INVALID`, an `IMAGE_*` code, or
+  `PROCESSING_ERROR` for anything else.
 - Requires authentication
 
 #### `cancel`
@@ -110,6 +213,8 @@ Reconnect to an existing session using a stored token.
   `tool_step` fan (see `tool_step` under Server → Client). Default off preserves the origin-excluded
   behavior for clients that render tool steps inline from the stream. **The same fields are
   accepted on the initial connect handshake**, not only on `reconnect`.
+- `client` (optional): who the client is, `{name, version, protocol}` (see Protocol
+  version and feature flags). Logged; accepted on `init` too.
 - `session_keepalive` (optional, default false): a per-browser **"always on"** hint that this
   client has session-keepalive enabled. **Hint only** — it is NOT the authorization to extend the
   session (an attacker holding a token could otherwise set it). The authoritative state is the
@@ -522,7 +627,10 @@ Create a new conversation (clears current session context).
    }
 }
 ```
-Response: `new_conversation_response`
+Response: `new_conversation_response` — `{success, conversation_id, is_private}`. The
+conversation is private from its first row when `set_private` with `conversation_id: 0` came
+first. A voice turn that creates the conversation sends the same frame unsolicited, with
+`server_initiated: true`.
 
 #### `load_conversation`
 Load a saved conversation into the current session.
@@ -592,6 +700,54 @@ Mark a conversation as private (hidden from admin view).
 }
 ```
 Response: `set_private_response`
+
+With `conversation_id: 0`, it applies to the connection's active conversation when there is
+one (a voice turn may have created it meanwhile) and replies as above. With no conversation
+yet, it sets the privacy of the next conversation this connection creates, typed or voice, and
+gets no reply. That lasts until a conversation is created or loaded or the session is cleared,
+and lives on the connection: send it again after a reconnect.
+
+When marking private, the response also carries `also_private`: the ids of the conversation's
+continuations, which went private with it. Then, once any memory extraction in flight has
+finished, a `conversation_learned` frame reports what the conversation already taught, so the
+client can offer to forget it.
+
+#### `conversation_learned_request`
+Ask again what a private conversation taught (the same report `set_private` sends).
+```json
+{"type": "conversation_learned_request", "payload": {"conversation_id": 42}}
+```
+Response: `conversation_learned`
+```json
+{
+   "type": "conversation_learned",
+   "payload": {
+      "conversation_id": 42,
+      "success": true,
+      "memories": 5,
+      "facts": 3,
+      "outdated": 1,
+      "summaries": 1,
+      "preferences": 1,
+      "relations": 2
+   }
+}
+```
+- `memories` is what the Memory panel lists (facts, summaries and preferences); `outdated` are
+  superseded facts it doesn't show; `relations` are links in the entity graph.
+- A conversation that isn't the user's, or isn't private, gets `success: false` with `error`.
+  `success: false` with `busy: true` means another of the user's memory requests is still
+  running: ask again shortly. `success: false` can also come with neither (the count couldn't
+  be made or started).
+
+#### `forget_conversation_memories`
+Forget what a conversation taught (private or not; the user's own conversations only).
+```json
+{"type": "forget_conversation_memories", "payload": {"conversation_id": 42}}
+```
+Response: `forget_conversation_memories_response`, with `conversation_id`, `success`, and on
+success the counts removed (the same fields as `conversation_learned`); on failure `error`
+says why (memory still being saved from the conversation, too many continuations, busy).
 
 #### `reassign_conversation`
 Reassign a conversation to a different user. **Admin only.**
@@ -845,6 +1001,14 @@ Response: `delete_all_memories_response`
 
 Music messages are accessible to both authenticated WebUI users and registered
 satellites.
+
+The audio itself goes over the separate music socket (`music_port`), which
+authenticates with `{"type":"auth","token":<session token>}`. A browser's music
+socket must also carry the login cookie of the login that owns that session (its
+upgrade URL names the app, `?app=<app>`, as every request does) (a
+browser sends it: the cookie is same-site whatever the port); otherwise it gets
+`auth_failed`. When the session is destroyed (logout, expiry) the server closes the
+music socket.
 
 #### `music_subscribe`
 Subscribe to music streaming for this connection.
@@ -1198,6 +1362,11 @@ The answer reaches a client by **either** route: this frame (turn completes whil
 attached) or the message batch on attach (already-finished job). `complete` carries
 `final_message_id` to correlate the two.
 
+A user message sent from the WebUI is fanned out the same way (`"role": "user"`, its saved
+text) to every browser of its user. The copy sent to the connection that sent it also carries
+`client_ref` when the `text` frame had one (flag `turn_refs`), so that connection can match it
+to its turn even if its `transcript` echo was dropped. Other connections' copies don't carry it.
+
 ### Background-Job List Frames (Phase 2)
 
 Job state reaches a client through three frames **split by object lifetime**. The
@@ -1336,7 +1505,9 @@ WebUI configuration (sent after session).
       "audio_chunk_ms": 200,
       "music_enabled": true,
       "music_port": 3001,
-      "version": "2.0.0"
+      "version": "2.0.0",
+      "protocol": 1,
+      "features": ["logout_closes_sockets"]
    }
 }
 ```
@@ -1346,6 +1517,8 @@ WebUI configuration (sent after session).
   Advertised so clients don't have to assume `main_port + 1`.
 - `version`: The DAWN daemon version (`VERSION_NUMBER`, compile-time). Advertised so
   clients can detect the daemon version for compatibility/telemetry.
+- `protocol`, `features`: the protocol version and feature flags (see
+  [Protocol version and feature flags](#protocol-version-and-feature-flags)).
 
 #### `state`
 State machine update.
@@ -1396,17 +1569,32 @@ Error or informational notification.
   `INFO_THINKING_DISABLED`, severity `"info"`). A client should route/style on
   `severity` rather than the code prefix. Absent field ⇒ treat as `"error"`.
 - `recoverable`: Legacy field, currently always `true`. Prefer `severity`.
+- A `text` turn refused for its images carries `IMAGE_UNAVAILABLE`, `IMAGE_LIMIT` or
+  `IMAGE_ERROR`; one with neither text nor images, `EMPTY_MESSAGE`; one refused because too
+  many are queued, `TURN_QUEUE_FULL` (see `text`). The turn did not run and nothing was saved;
+  each refusal is one frame.
+- `client_ref`: on an error raised for a `text` turn that carried one (flag `turn_refs`), the
+  same string, unchanged; absent otherwise.
 
 #### `force_logout`
-Server-initiated logout (session revoked).
+This connection's login ended: a logout (from this or another tab), a login over it
+in the same browser, a revoke (WebUI or `dawn-admin`), a password change, a deleted
+user, or the login expiring. Sent **immediately before** the server closes the socket
+with WS close code **`4002` "logged out"** (skipped only if a large frame is still
+being sent: then the close code alone says it). Frames the client sends in between
+are ignored.
 ```json
 {
    "type": "force_logout",
    "payload": {
-      "reason": "Session revoked"
+      "reason": "Signed out"
    }
 }
 ```
+- Both signals, as with `session_superseded`: a reverse proxy strips the close code.
+- Client contract: on this frame **or** `close.code === 4002`, drop the session token
+  and per-user state, do **not** reconnect, and go to the login screen. The login is
+  gone: a new connection is unauthenticated until the user logs in again.
 
 ---
 
@@ -1430,6 +1618,8 @@ Complete message (non-streaming, or replayed history).
   the row (the normal case — the daemon owns user-turn persistence). The client uses it to
   skip its own save. The echo `text` is the clean user text; any `[IMAGE:<id>]` markers were
   persisted server-side, not sent here.
+- `client_ref`: on the user-turn echo of a `text` frame that carried one (flag `turn_refs`),
+  the same string, unchanged.
 
 #### `stream_start`
 Start of LLM token stream.
@@ -1593,24 +1783,50 @@ Notification after automatic context compaction.
       "tokens_before": 7500,
       "tokens_after": 2000,
       "messages_summarized": 12,
+      "level": 1,
+      "conversation_id": 1703,
       "summary": "Summary of compacted messages..."
    }
 }
 ```
+`conversation_id` (absent when the conversation isn't saved yet) names the conversation that
+was compacted; a client showing another conversation ignores the frame.
 
 #### `metrics_update`
-Real-time metrics for UI visualization (rings/gauges).
+Real-time metrics for UI visualization (rings/gauges), and the turn's prompt-cache figures.
 ```json
 {
    "type": "metrics_update",
    "payload": {
-      "state": "thinking",
+      "state": "idle",
       "ttft_ms": 450,
       "token_rate": 42.5,
-      "context_percent": 35
+      "context_percent": 35,
+      "input_tokens": 48832,
+      "cached_tokens": 48640,
+      "cache_write_tokens": 192,
+      "cache_saved_tokens": 43536,
+      "cache_state": "warm",
+      "conversation_id": 1703
    }
 }
 ```
+- The cache fields describe the session's **last completed LLM call**, and every frame carries
+  them: a `"thinking"` frame repeats the previous call's figures, and one call's figures can
+  arrive on several `"idle"` frames (each idle state change sends one). Read them from an
+  `"idle"` frame, and to total across turns count one per turn (the first `"idle"` after its
+  `stream_end`), never every frame.
+- `input_tokens` is the whole prompt (the hit-rate denominator), `cached_tokens` what was read
+  from the provider's cache (0 = a miss), `cache_write_tokens` only when non-zero,
+  `cache_saved_tokens` the input tokens' worth saved (list prices; negative on a write-heavy call).
+- `cache_state` (optional; absent before any call) says how the call should have cached:
+  `warm` (read what the previous call left), `warm_miss` (should have and didn't: a
+  regression worth reporting, or for OpenAI three warm calls in a row that read nothing),
+  `first`, `ttl` (expired), `model`, `tools` (the tools or `tool_choice`), `system`, `thinking`
+  (that part changed), `images` (the conversation's first image),
+  `rewritten` (the history was compacted, a forgotten item withdrawn, or a turn taken back),
+  `shared` (a local server another conversation used in between), or `untracked` (not judged:
+  Gemini, other OpenRouter vendors, a local server other than llama.cpp).
 
 #### `conversation_reset`
 Notification that conversation context was reset (via tool).
@@ -1716,6 +1932,7 @@ only to the user's session(s) currently viewing `conversation_id`.
          "score": 0.82,
          "score_breakdown": { "semantic": 0.5, "recency": 0.1, "importance": 0.2, "source": 0.02 },
          "applied_source_weight": 1.0,
+         "item_timestamp": 1787500000,
          "provenance": { "conversation_id": 1000, "msg_id_start": 12, "msg_id_end": 14 }
       }
    ],
@@ -1723,6 +1940,8 @@ only to the user's session(s) currently viewing `conversation_id`.
 }
 ```
 - `source_type`: `internal`, `external`, or `user-content`
+- `item_timestamp`: unix seconds the item was learned, saved or happens (the date the model
+  sees after the item's source); omitted when it has none
 - `provenance`: omitted entirely when unavailable (never a zero-stub)
 
 #### `memory_extraction_notice`
@@ -1730,6 +1949,25 @@ DAWN stored or updated a memory during a turn.
 ```json
 { "type": "memory_extraction_notice", "payload": { "level": "info", "message": "Saved: prefers metric units." } }
 ```
+
+#### `cache_alert`
+A DAWN bug a person should report: the Anthropic API dropped earlier reasoning because a
+request's prefix changed (`prefix_binding_mismatch`).  **Admin-only, browsers only**, once per
+conversation per daemon run.  `message` is DAWN's own plain-language text (show it via
+`textContent`); the WebUI keeps it as a toast until dismissed.
+```json
+{
+   "type": "cache_alert",
+   "payload": {
+      "kind": "reasoning_dropped",
+      "drops": 2,
+      "model": "claude-opus-5-5",
+      "message": "Earlier reasoning was dropped in a conversation: ..."
+   }
+}
+```
+The conversation isn't named (it may be another user's, or private); the daemon log's
+`LLM binding` line names it.
 
 #### `memory_proposals_changed`
 The count of pending memory proposals changed (signal to refresh a proposals view).
@@ -1769,7 +2007,9 @@ and the `ha_entities_response` per-domain `attributes` shape are documented cons
 
 #### `phone_call_notification`
 Inbound/outbound call state, for a transient call banner. Owner's browser sessions
-only (carries caller PII); also sent as a per-connection snapshot on connect.
+only (carries caller PII). Also sent in reply to `phone_status`, which a client sends
+after connecting to pick up a call already ringing or active; when no call is in
+progress, `phone_status` gets no reply.
 ```json
 {
    "type": "phone_call_notification",
@@ -1949,7 +2189,8 @@ Registration confirmation for satellite.
 }
 ```
 - `reconnect_secret`: Client must save and provide on reconnection
-- `session_token`: Used for music WebSocket authentication
+- `session_token`: Used for music WebSocket authentication (a satellite's music
+  socket needs no cookie: its session is bound by the device registration)
 
 #### `satellite_pong`
 Response to `satellite_ping`.
@@ -2009,6 +2250,8 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `delete_conversation` | `delete_conversation_response` |
 | `rename_conversation` | `rename_conversation_response` |
 | `set_private` | `set_private_response` |
+| `conversation_learned_request` | `conversation_learned` |
+| `forget_conversation_memories` | `forget_conversation_memories_response` |
 | `reassign_conversation` | `reassign_conversation_response` |
 | `search_conversations` | `search_conversations_response` |
 | `save_message` | `save_message_response` |

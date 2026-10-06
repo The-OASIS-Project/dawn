@@ -178,6 +178,11 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_FLOAT("DAWN_VAD_END_OF_SPEECH_DURATION", config->vad.end_of_speech_duration);
    ENV_FLOAT("DAWN_VAD_MAX_RECORDING_DURATION", config->vad.max_recording_duration);
    ENV_INT("DAWN_VAD_PREROLL_MS", config->vad.preroll_ms);
+   ENV_STRING("DAWN_VAD_ADAPTIVE_ENDPOINT", config->vad.adaptive_endpoint);
+   /* Re-clamp: env overlay runs after the parser's clamp, so coerce a bad env
+    * value to "off" here too — same bounds as the file and WebUI POST paths
+    * (otherwise a garbage env value would fail validation and refuse to boot). */
+   config_clamp_vad(&config->vad);
 
    /* [vad.chunking] */
    ENV_BOOL("DAWN_VAD_CHUNKING_ENABLED", config->vad.chunking.enabled);
@@ -355,6 +360,7 @@ void config_dump(const dawn_config_t *config) {
    printf("  end_of_speech_duration = %.1f\n", config->vad.end_of_speech_duration);
    printf("  max_recording_duration = %.1f\n", config->vad.max_recording_duration);
    printf("  preroll_ms = %d\n", config->vad.preroll_ms);
+   printf("  adaptive_endpoint = \"%s\"\n", config->vad.adaptive_endpoint);
 
    printf("\n[vad.chunking]\n");
    printf("  enabled = %s\n", config->vad.chunking.enabled ? "true" : "false");
@@ -671,6 +677,11 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_INT("preroll_ms", config->vad.preroll_ms, "DAWN_VAD_PREROLL_MS",
                      detect_source_int(config->vad.preroll_ms, defaults.vad.preroll_ms,
                                        "DAWN_VAD_PREROLL_MS"));
+   PRINT_SETTING_STR("adaptive_endpoint", config->vad.adaptive_endpoint,
+                     "DAWN_VAD_ADAPTIVE_ENDPOINT",
+                     detect_source_str(config->vad.adaptive_endpoint,
+                                       defaults.vad.adaptive_endpoint,
+                                       "DAWN_VAD_ADAPTIVE_ENDPOINT"));
 
    /* [vad.chunking] */
    printf("[vad.chunking]\n");
@@ -986,6 +997,7 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("end_of_speech_duration = %.1f\n", config->vad.end_of_speech_duration);
    printf("max_recording_duration = %.1f\n", config->vad.max_recording_duration);
    printf("preroll_ms = %d\n", config->vad.preroll_ms);
+   printf("adaptive_endpoint = \"%s\"\n", config->vad.adaptive_endpoint);
 
    printf("\n[vad.chunking]\n");
    printf("enabled = %s\n", config->vad.chunking.enabled ? "true" : "false");
@@ -1132,6 +1144,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(vad, "max_recording_duration",
                           json_object_new_double(config->vad.max_recording_duration));
    json_object_object_add(vad, "preroll_ms", json_object_new_int(config->vad.preroll_ms));
+   json_object_object_add(vad, "adaptive_endpoint",
+                          json_object_new_string(config->vad.adaptive_endpoint));
 
    /* [vad.chunking] */
    json_object *chunking = json_object_new_object();
@@ -1282,8 +1296,6 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(llm, "compact_model",
                              json_object_new_string(config->llm.compact_model));
    }
-   json_object_object_add(llm, "conversation_logging",
-                          json_object_new_boolean(config->llm.conversation_logging));
    json_object_object_add(llm, "rate_limit_enabled",
                           json_object_new_boolean(config->llm.rate_limit_enabled));
    json_object_object_add(llm, "rate_limit_rpm", json_object_new_int(config->llm.rate_limit_rpm));
@@ -1507,6 +1519,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->memory.conversation_idle_timeout_min));
    json_object_object_add(memory, "default_voice_user_id",
                           json_object_new_int(config->memory.default_voice_user_id));
+   json_object_object_add(memory, "fact_cache_mb",
+                          json_object_new_int(config->memory.fact_cache_mb));
    json_object_object_add(memory, "decay_enabled",
                           json_object_new_boolean(config->memory.decay_enabled));
    json_object_object_add(memory, "decay_hour", json_object_new_int(config->memory.decay_hour));
@@ -1601,6 +1615,14 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(focus, "top_k", json_object_new_int(fi->top_k));
       json_object_object_add(focus, "summary_max_scan", json_object_new_int(fi->summary_max_scan));
       json_object_object_add(focus, "min_score", json_object_new_double(fi->min_score));
+      json_object_object_add(focus, "document_min_relevance",
+                             json_object_new_double(fi->document_min_relevance));
+      json_object_object_add(focus, "fact_min_relevance",
+                             json_object_new_double(fi->fact_min_relevance));
+      json_object_object_add(focus, "entity_min_relevance",
+                             json_object_new_double(fi->entity_min_relevance));
+      json_object_object_add(focus, "summary_min_relevance",
+                             json_object_new_double(fi->summary_min_relevance));
       json_object_object_add(focus, "classifier_enabled",
                              json_object_new_boolean(fi->classifier_enabled));
       json_object_object_add(focus, "weight_semantic", json_object_new_double(fi->weight_semantic));
@@ -1627,13 +1649,6 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(src, "dawn_background",
                              json_object_new_double(fi->source_weights.dawn_background));
       json_object_object_add(focus, "source_weights", src);
-
-      json_object *dedup = json_object_new_object();
-      json_object_object_add(dedup, "recent_window_turns",
-                             json_object_new_int(fi->dedup.recent_window_turns));
-      json_object_object_add(dedup, "score_uplift_factor",
-                             json_object_new_double(fi->dedup.score_uplift_factor));
-      json_object_object_add(focus, "dedup", dedup);
 
       json_object *dth = json_object_new_object();
       json_object_object_add(dth, "enabled",
@@ -1745,8 +1760,6 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(vision, "max_dimension",
                           json_object_new_int(config->vision.max_dimension));
    json_object_object_add(vision, "max_images", json_object_new_int(config->vision.max_images));
-   json_object_object_add(vision, "capture_history_count",
-                          json_object_new_int(config->vision.capture_history_count));
    json_object_object_add(root, "vision", vision);
 
    /* [scheduler] */
@@ -2165,6 +2178,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "end_of_speech_duration = %.1f\n", config->vad.end_of_speech_duration);
    fprintf(fp, "max_recording_duration = %.1f\n", config->vad.max_recording_duration);
    fprintf(fp, "preroll_ms = %d\n", config->vad.preroll_ms);
+   write_toml_string(fp, "adaptive_endpoint", config->vad.adaptive_endpoint);
 
    fprintf(fp, "\n[vad.chunking]\n");
    fprintf(fp, "enabled = %s\n", config->vad.chunking.enabled ? "true" : "false");
@@ -2199,7 +2213,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       write_toml_string(fp, "compact_provider", config->llm.compact_provider);
    if (config->llm.compact_model[0])
       write_toml_string(fp, "compact_model", config->llm.compact_model);
-   fprintf(fp, "conversation_logging = %s\n", config->llm.conversation_logging ? "true" : "false");
 
    fprintf(fp, "\n[llm.cloud]\n");
    write_toml_string(fp, "provider", config->llm.cloud.provider);
@@ -2467,6 +2480,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "conversation_idle_timeout_min = %d\n",
            config->memory.conversation_idle_timeout_min);
    fprintf(fp, "default_voice_user_id = %d\n", config->memory.default_voice_user_id);
+   fprintf(fp, "fact_cache_mb = %d\n", config->memory.fact_cache_mb);
 
    fprintf(fp, "\n[memory.decay]\n");
    fprintf(fp, "enabled = %s\n", config->memory.decay_enabled ? "true" : "false");
@@ -2551,6 +2565,10 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "top_k = %d\n", fi->top_k);
       fprintf(fp, "summary_max_scan = %d\n", fi->summary_max_scan);
       fprintf(fp, "min_score = %.2f\n", fi->min_score);
+      fprintf(fp, "document_min_relevance = %.2f\n", fi->document_min_relevance);
+      fprintf(fp, "fact_min_relevance = %.2f\n", fi->fact_min_relevance);
+      fprintf(fp, "entity_min_relevance = %.2f\n", fi->entity_min_relevance);
+      fprintf(fp, "summary_min_relevance = %.2f\n", fi->summary_min_relevance);
       fprintf(fp, "classifier_enabled = %s\n", fi->classifier_enabled ? "true" : "false");
       fprintf(fp, "weight_semantic = %.2f\n", fi->weight_semantic);
       fprintf(fp, "weight_recency = %.2f\n", fi->weight_recency);
@@ -2566,10 +2584,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "calendar_event = %.2f\n", fi->source_weights.calendar_event);
       fprintf(fp, "recent_email = %.2f\n", fi->source_weights.recent_email);
       fprintf(fp, "dawn_background = %.2f\n", fi->source_weights.dawn_background);
-
-      fprintf(fp, "\n[memory.focus_injection.dedup]\n");
-      fprintf(fp, "recent_window_turns = %d\n", fi->dedup.recent_window_turns);
-      fprintf(fp, "score_uplift_factor = %.2f\n", fi->dedup.score_uplift_factor);
 
       fprintf(fp, "\n[memory.focus_injection.dominant_token_heuristic]\n");
       fprintf(fp, "enabled = %s\n", fi->dominant_token_heuristic.enabled ? "true" : "false");
@@ -2632,7 +2646,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_image_size_kb = %d\n", config->vision.max_image_size_kb);
    fprintf(fp, "max_dimension = %d\n", config->vision.max_dimension);
    fprintf(fp, "max_images = %d\n", config->vision.max_images);
-   fprintf(fp, "capture_history_count = %d\n", config->vision.capture_history_count);
 
    fprintf(fp, "\n[music]\n");
    fprintf(fp, "scan_interval_minutes = %d\n", config->music.scan_interval_minutes);

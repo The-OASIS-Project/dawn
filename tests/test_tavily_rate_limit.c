@@ -48,6 +48,10 @@ struct session *session_get_command_context(void) {
 struct session *session_get_local(void) {
    return NULL;
 }
+int session_effective_user_id(struct session *session) {
+   (void)session;
+   return 0;
+}
 struct json_object;
 struct json_object *json_object_new_array(void) {
    return NULL;

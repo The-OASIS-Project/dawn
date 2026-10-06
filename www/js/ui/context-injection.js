@@ -47,6 +47,12 @@
  *   @property {{semantic:number,recency:number,importance:number,source:number}}
  *            score_breakdown
  *   @property {number} applied_source_weight
+ *   @property {"new"|"changed"|"in_context"|"referenced"|"left_out"} [state]
+ *                                          -- sent this turn (new / changed), already
+ *                                             shown by an earlier turn (named again, or
+ *                                             not), or due to be sent but left out
+ *   @property {number} [item_timestamp]    -- unix seconds the item was learned, saved or
+ *                                             happens; omitted when it has none
  *   @property {{conversation_id:number,msg_id_start:number,msg_id_end:number}}
  *            [provenance]                  -- omitted entirely when unavailable
  */
@@ -152,6 +158,25 @@
       }
    }
 
+   /** What happened to the item this turn: sent, or already in context.
+    *  Allowlisted — the wire value never reaches the DOM as-is. */
+   function stateLabel(state) {
+      switch (state) {
+         case 'new':
+            return 'Sent';
+         case 'changed':
+            return 'Sent again (changed)';
+         case 'referenced':
+            return 'Already in context, named';
+         case 'in_context':
+            return 'Already in context';
+         case 'left_out':
+            return 'Not sent (left out)';
+         default:
+            return '';
+      }
+   }
+
    function fmtScore(n) {
       const v = Number(n);
       if (!Number.isFinite(v)) return '0.00';
@@ -178,12 +203,23 @@
       );
    }
 
+   /** The item's date as the model sees it (YYYY-MM-DD, local), or '' without
+    *  a valid timestamp. */
+   function itemDate(ts) {
+      if (typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) return '';
+      const d = new Date(ts * 1000);
+      if (Number.isNaN(d.getTime())) return '';
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+   }
+
    /** Cache derived strings on the item so we don't re-sanitize/re-format on
     *  every render path (M2 + M3). */
    function decorate(item) {
       if (!item || typeof item !== 'object') return item;
       if (item._decorated) return item;
       item._safeSourceId = sanitizeSourceId(item.source_id || 'unknown');
+      item._date = itemDate(item.item_timestamp);
       item._safeText = sanitizeText(item.text || '');
       item._previewLine = previewLine(item._safeText);
       item._scoreTitle = buildScoreTitle(item);
@@ -209,7 +245,9 @@
       const sourceLabel = document.createElement('span');
       sourceLabel.className = 'dawn-context-injection-source';
       /* M9: bracket the identifier so it reads as a key, not as content. */
-      sourceLabel.textContent = `[${item._safeSourceId}]`;
+      sourceLabel.textContent = item._date
+         ? `[${item._safeSourceId} ${item._date}]`
+         : `[${item._safeSourceId}]`;
       header.appendChild(sourceLabel);
 
       /* M6: trust-tier label is a plain span — dawn-badge defaults conflict
@@ -219,6 +257,14 @@
       trustLabel.className = 'dawn-context-injection-trust';
       trustLabel.textContent = trustTierLabel(trust);
       header.appendChild(trustLabel);
+
+      const state = stateLabel(item.state);
+      if (state) {
+         const stateEl = document.createElement('span');
+         stateEl.className = 'dawn-context-injection-trust';
+         stateEl.textContent = state;
+         header.appendChild(stateEl);
+      }
 
       /* H6: drop the per-row raw score number (no comparative context — score
        * breakdown moved entirely into the modal).  Tooltip remains on the

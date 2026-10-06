@@ -38,6 +38,7 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_history_loader.h"
@@ -89,6 +90,22 @@ struct json_object *memory_history_load_from_db(int64_t conv_id,
    (void)user_id;
    if (text_len_out)
       *text_len_out = 0;
+   return NULL;
+}
+
+struct json_object *memory_extraction_build_input(int user_id,
+                                                  int64_t conversation_id,
+                                                  struct json_object *conversation_history,
+                                                  int64_t last_msg_id) {
+   (void)user_id;
+   (void)conversation_id;
+   (void)conversation_history;
+   (void)last_msg_id;
+   return NULL;
+}
+
+struct json_object *llm_history_strip_internal(struct json_object *history) {
+   (void)history;
    return NULL;
 }
 
@@ -163,20 +180,22 @@ int memory_filter_check(const char *text) {
    return 0;
 }
 
+/* Call-kind tags for the cache telemetry: not under test here. */
+int llm_cache_monitor_push_kind(llm_call_kind_t kind) {
+   (void)kind;
+   return -1;
+}
+void llm_cache_monitor_pop_kind(int previous) {
+   (void)previous;
+}
+
 /* llm_chat_completion_with_config — abort guard.  Signature must match the
- * header exactly (const char ** + const size_t * for the attachments
- * tuple) or the linker / compiler rejects the redeclaration. */
+ * header exactly or the linker / compiler rejects the redeclaration. */
 char *llm_chat_completion_with_config(struct json_object *conversation_history,
                                       const char *prompt,
-                                      const char **image_paths,
-                                      const size_t *image_sizes,
-                                      int num_images,
                                       const llm_resolved_config_t *cfg) {
    (void)conversation_history;
    (void)prompt;
-   (void)image_paths;
-   (void)image_sizes;
-   (void)num_images;
    (void)cfg;
    fprintf(stderr, "llm_chat_completion_with_config stub invoked\n");
    abort();

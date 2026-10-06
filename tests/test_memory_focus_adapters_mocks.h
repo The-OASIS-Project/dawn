@@ -32,7 +32,7 @@
 #include "memory/memory_types.h"
 
 #define MOCK_MAX_FACTS 32
-#define MOCK_MAX_ENTITIES 16
+#define MOCK_MAX_ENTITIES 600 /* past the entity cache's first read (512) */
 #define MOCK_MAX_RELATIONS 32
 #define MOCK_MAX_SUMMARIES 16
 #define MOCK_MAX_HYBRID 16
@@ -57,6 +57,7 @@ typedef struct {
    float entity_norms[MOCK_MAX_ENTITIES];
    const char *entity_photo_ids[MOCK_MAX_ENTITIES]; /* NULL = no photo */
    int entity_count;
+   int call_count_entity_embeddings; /* loads of the entity cache */
    int entity_dim;
 
    /* Relations */
@@ -70,6 +71,13 @@ typedef struct {
    memory_summary_t summaries[MOCK_MAX_SUMMARIES];
    memory_provenance_t summary_provenance[MOCK_MAX_SUMMARIES];
    int summary_count;
+   /* Semantic path: a summary with a score > 0 is returned by
+    * memory_db_summary_search_semantic with that cosine; the pool the search
+    * reports is summary_pool_scored rows summing to summary_pool_sum. */
+   float summary_sem_score[MOCK_MAX_SUMMARIES];
+   int summary_pool_scored;
+   double summary_pool_sum;
+   bool summary_keyword_off; /* keyword search finds nothing */
 
    /* Embedding engine */
    bool embeddings_available;

@@ -645,28 +645,36 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
 /**
  * @brief Broadcast queue state to all tabs for the same user
  *
- * Collects matching connections under conn_registry_mutex, releases it,
- * then sends state to each. This avoids holding conn_registry_mutex
- * while send_state acquires queue_mutex (would invert lock hierarchy).
+ * Sends to each matching connection WHILE HOLDING s_conn_registry_mutex, so a
+ * conn cannot be freed by the lws thread mid-iteration (the lws CLOSED handler's
+ * unregister_connection takes this same lock). This is what makes the broadcast
+ * safe when called from a NON-lws thread — the LLM tool-execution worker
+ * (webui_music_tool.c) among them; the previous collect-then-send-off-lock raced
+ * connection teardown and could deref a freed conn (use-after-free).
+ *
+ * Deadlock-safe: s_conn_registry_mutex is the OUTERMOST lock here. webui_music_
+ * send_state acquires uq->queue_mutex / state->state_mutex and ultimately
+ * queue_response's s_queue_mutex, and NONE of those paths ever re-acquire the
+ * registry lock (verified: webui_music.c and webui_send.c never lock it), and
+ * every caller releases uq->queue_mutex before broadcasting. So registry →
+ * {queue_mutex, state_mutex, s_queue_mutex} never inverts.
  */
 void webui_music_broadcast_queue_state(user_music_queue_t *uq, ws_connection_t *exclude) {
    if (!uq || uq->user_id <= 0) {
       return; /* Private queues don't broadcast */
    }
 
-   /* Collect connections outside the send loop */
-   ws_connection_t *conns[MAX_USER_QUEUES * 4]; /* Generous upper bound */
-   int count = webui_collect_conns_by_user(uq->user_id, conns,
-                                           (int)(sizeof(conns) / sizeof(conns[0])));
-
-   for (int i = 0; i < count && i < (int)(sizeof(conns) / sizeof(conns[0])); i++) {
-      if (conns[i] != exclude) {
-         session_music_state_t *s = (session_music_state_t *)conns[i]->music_state;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (conn && conn != exclude && conn->authenticated && conn->auth_user_id == uq->user_id) {
+         session_music_state_t *s = (session_music_state_t *)conn->music_state;
          if (s) {
-            webui_music_send_state(conns[i], s);
+            webui_music_send_state(conn, s);
          }
       }
    }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
 }
 
 /* =============================================================================
@@ -1737,12 +1745,11 @@ static int queue_music_direct(session_music_state_t *state, const uint8_t *data,
    state->write_ring_tail = (state->write_ring_tail + 1) % WEBUI_MUSIC_WRITE_RING;
    state->write_ring_count++;
 
-   /* Request writeable callback */
-   lws_callback_on_writable(state->music_wsi);
-
-   /* Wake up the music server's event loop to process the writeable request */
-   webui_music_server_wake();
-
+   struct lws *music_wsi = state->music_wsi;
    pthread_mutex_unlock(&state->write_mutex);
+
+   /* The music thread arms the writeable callback itself (lws calls belong on
+    * the service thread; this runs on the stream thread). */
+   webui_music_server_request_write(music_wsi);
    return 0;
 }

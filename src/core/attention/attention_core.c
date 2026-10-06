@@ -158,17 +158,13 @@ static void deliver_event(const sage_event_t *ev, sage_delivery_mode_t mode, int
          break;
    }
 
-   /* Optionally make an active conversation aware of the alert so DAWN can
-    * reference it in chat (config-gated, default off).  Scoped to the owner:
-    * session_broadcast_system_message fans out to ALL interactive sessions with
-    * no per-user filter, so injecting a non-owner's alert would leak it across
-    * users.  P0 is single-owner; a per-user broadcast folds in with multi-user
-    * routing. */
-   if (delivered_at > 0 && g_config.attention.inject_into_sessions &&
-       ev->user_id == ATTENTION_OWNER_USER_ID) {
+   /* Optionally make the watch owner's conversations aware of the alert so DAWN
+    * can reference it in chat (config-gated).  Only the owner's surfaces: another
+    * household member's conversation never sees it. */
+   if (delivered_at > 0 && g_config.attention.inject_into_sessions) {
       char note[SAGE_SUMMARY_LEN + 32];
       snprintf(note, sizeof(note), "[proactive alert] %s", ev->summary);
-      session_broadcast_system_message(note);
+      session_broadcast_notice_for_user(ev->user_id, note);
    }
 
    attention_db_log_event(ev, mode, NULL, delivered_at);
@@ -283,7 +279,7 @@ int attention_reload(void) {
 
    /* Load out-of-lock (auth_db is its own leaf lock — never nest). */
    int count = 0;
-   if (auth_db_attention_rule_list(0, loaded, SAGE_MAX_WATCHES_TOTAL, &count) != AUTH_DB_SUCCESS) {
+   if (auth_db_attention_rule_list_all(loaded, SAGE_MAX_WATCHES_TOTAL, &count) != AUTH_DB_SUCCESS) {
       OLOG_ERROR("attention: failed to load watches from DB");
       free(loaded);
       free(new_states);

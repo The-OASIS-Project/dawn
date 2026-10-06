@@ -24,11 +24,13 @@
 #include "tools/email_parse.h"
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "core/buf_printf.h"
 
@@ -45,142 +47,6 @@ static time_t tm_with_offset_to_utc(struct tm *tm) {
    return utc > 0 ? utc : 0;
 }
 
-/* =============================================================================
- * RFC 2047 encoded-word decoder (=?charset?Q?..?= / =?charset?B?..?=)
- *
- * Shared by both email backends for header display names / subjects.  NOTE: the
- * decoded bytes are emitted as-is — correct for UTF-8 (the modern norm), lossy
- * for legacy ISO-8859-x charsets (no transcoding).  Pre-existing behavior.
- * ============================================================================= */
-
-/* Keep a decoded byte only if it is not a C0 control (tab excepted): an attacker
- * fully controls the decoded bytes via base64/QP, and an embedded NUL would
- * truncate the field while other control/CR-LF bytes would bleed into the
- * LLM/user context.  UTF-8 continuation bytes (>= 0x80) are preserved. */
-static inline bool decoded_byte_ok(char c) {
-   unsigned char u = (unsigned char)c;
-   return u >= 0x20 || u == '\t';
-}
-
-/** Decode a single RFC 2047 quoted-printable encoded word.  Precondition:
- * dst_len >= 1 (guarded here defensively). */
-static size_t decode_qp_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
-   if (dst_len == 0)
-      return 0;
-   size_t j = 0;
-   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
-      char c;
-      if (src[i] == '_') {
-         c = ' ';
-      } else if (src[i] == '=' && i + 2 < src_len && isxdigit((unsigned char)src[i + 1]) &&
-                 isxdigit((unsigned char)src[i + 2])) {
-         char hex[3] = { src[i + 1], src[i + 2], '\0' };
-         c = (char)strtol(hex, NULL, 16);
-         i += 2;
-      } else {
-         c = src[i];
-      }
-      if (decoded_byte_ok(c))
-         dst[j++] = c;
-   }
-   dst[j] = '\0';
-   return j;
-}
-
-/** Simple base64 decode (RFC 2045 alphabet).  Precondition: dst_len >= 1
- * (guarded here defensively). */
-static size_t decode_b64_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
-   if (dst_len == 0)
-      return 0;
-   static const int8_t b64_table[256] = {
-      [0 ... 255] = -1, ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,  ['F'] = 5,
-      ['G'] = 6,        ['H'] = 7,  ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11, ['M'] = 12,
-      ['N'] = 13,       ['O'] = 14, ['P'] = 15, ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19,
-      ['U'] = 20,       ['V'] = 21, ['W'] = 22, ['X'] = 23, ['Y'] = 24, ['Z'] = 25, ['a'] = 26,
-      ['b'] = 27,       ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31, ['g'] = 32, ['h'] = 33,
-      ['i'] = 34,       ['j'] = 35, ['k'] = 36, ['l'] = 37, ['m'] = 38, ['n'] = 39, ['o'] = 40,
-      ['p'] = 41,       ['q'] = 42, ['r'] = 43, ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47,
-      ['w'] = 48,       ['x'] = 49, ['y'] = 50, ['z'] = 51, ['0'] = 52, ['1'] = 53, ['2'] = 54,
-      ['3'] = 55,       ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61,
-      ['+'] = 62,       ['/'] = 63,
-   };
-
-   size_t j = 0;
-   uint32_t accum = 0;
-   int bits = 0;
-
-   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
-      int8_t val = b64_table[(unsigned char)src[i]];
-      if (val < 0)
-         continue; /* skip padding and whitespace */
-      accum = (accum << 6) | val;
-      bits += 6;
-      if (bits >= 8) {
-         bits -= 8;
-         char c = (char)((accum >> bits) & 0xFF);
-         if (decoded_byte_ok(c))
-            dst[j++] = c;
-      }
-   }
-   dst[j] = '\0';
-   return j;
-}
-
-void email_decode_rfc2047(const char *src, char *dst, size_t dst_len) {
-   if (!dst || dst_len == 0)
-      return;
-   dst[0] = '\0';
-   if (!src)
-      return;
-
-   size_t out = 0;
-   const char *p = src;
-   while (*p && out < dst_len - 1) {
-      if (strncmp(p, "=?", 2) != 0) {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      /* Parse =?charset?encoding?text?= */
-      const char *charset_start = p + 2;
-      const char *q1 = strchr(charset_start, '?');
-      if (!q1 || !q1[1] || q1[2] != '?') {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      char encoding = q1[1];
-      const char *text_start = q1 + 3;
-      const char *end = strstr(text_start, "?=");
-      if (!end) {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      size_t text_len = (size_t)(end - text_start);
-
-      if (encoding == 'Q' || encoding == 'q') {
-         out += decode_qp_word(text_start, text_len, dst + out, dst_len - out);
-      } else if (encoding == 'B' || encoding == 'b') {
-         out += decode_b64_word(text_start, text_len, dst + out, dst_len - out);
-      } else {
-         /* Unknown encoding, copy literally. */
-         dst[out++] = *p++;
-         continue;
-      }
-
-      p = end + 2;
-
-      /* RFC 2047 §6.2: whitespace between adjacent encoded words is ignored. */
-      const char *ws = p;
-      while (*ws == ' ' || *ws == '\t')
-         ws++;
-      if (strncmp(ws, "=?", 2) == 0)
-         p = ws;
-   }
-   dst[out] = '\0';
-}
-
 /** Strip CR/LF from a header value to prevent SMTP header injection.  Shared by
  * both backends' send paths. */
 void email_sanitize_header_value(const char *src, char *dst, size_t dst_len) {
@@ -194,6 +60,69 @@ void email_sanitize_header_value(const char *src, char *dst, size_t dst_len) {
       }
    }
    dst[j] = '\0';
+}
+
+void email_format_mailbox(const char *name, const char *addr, char *dst, size_t dst_len) {
+   if (!dst || dst_len == 0)
+      return;
+   if (!name || !name[0]) {
+      snprintf(dst, dst_len, "%s", addr ? addr : "");
+      return;
+   }
+   char quoted[192];
+   size_t j = 0;
+   size_t i = 0;
+   quoted[j++] = '"';
+   for (; name[i] && j < sizeof(quoted) - 3; i++) {
+      if (name[i] == '"' || name[i] == '\\') {
+         if (j >= sizeof(quoted) - 4)
+            break;
+         quoted[j++] = '\\';
+      }
+      quoted[j++] = name[i];
+   }
+   if (name[i]) {
+      /* Cut short: never end inside a UTF-8 character. */
+      size_t start = j;
+      while (start > 1 && ((unsigned char)quoted[start - 1] & 0xC0) == 0x80)
+         start--;
+      if (start > 1 && ((unsigned char)quoted[start - 1] & 0xC0) == 0xC0) {
+         const unsigned char lead = (unsigned char)quoted[start - 1];
+         const size_t want = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+         if (j - (start - 1) < want)
+            j = start - 1;
+      }
+   }
+   quoted[j++] = '"';
+   quoted[j] = '\0';
+   if (addr && addr[0])
+      snprintf(dst, dst_len, "%s <%s>", quoted, addr);
+   else
+      snprintf(dst, dst_len, "%s", quoted); /* a From with no address */
+}
+
+void email_display_mailbox(const char *name, const char *addr, char *dst, size_t dst_len) {
+   if (!dst || dst_len == 0)
+      return;
+   const bool has_addr = addr && addr[0];
+   /* A name that is itself an address shows as the address it claims to be;
+    * keep only the real one (or say there is none). */
+   /* '@' or a lookalike: fullwidth U+FF20, small U+FE6B. */
+   const bool name_is_addr = name &&
+                             (strchr(name, '@') || strstr(name, "\xEF\xBC\xA0") ||
+                              strstr(name, "\xEF\xB9\xAB")) &&
+                             !(has_addr && strcasecmp(name, addr) == 0);
+   if (name_is_addr)
+      name = NULL;
+   if (has_addr) {
+      email_format_mailbox(name, addr, dst, dst_len);
+   } else if (name && name[0]) {
+      char quoted[200];
+      email_format_mailbox(name, NULL, quoted, sizeof(quoted));
+      snprintf(dst, dst_len, "%s (no address)", quoted);
+   } else {
+      snprintf(dst, dst_len, "(no address)");
+   }
 }
 
 time_t email_parse_rfc822_date(const char *date_str) {
@@ -294,9 +223,11 @@ void email_imap_append_quoted(char *buf, size_t *off, size_t *rem, const char *v
          BUF_PRINTF(buf, *off, *rem, "%%25");
          continue;
       }
-      /* Emit the escaping backslash (for " and \) and the char in ONE append so a
-       * buffer-boundary truncation can never leave a lone trailing backslash that
-       * would escape the closing quote. */
+      /* Emit the escaping backslash (for " and \) and the char in one append.  NOTE:
+       * this does not make truncation safe — BUF_PRINTF keeps snprintf's partial
+       * output, so a nearly full buffer can still end in a lone backslash (or a cut
+       * "%25").  Callers size the buffer for the worst case and refuse to send a
+       * command that filled it (see email_search / imap_windowed_search). */
       BUF_PRINTF(buf, *off, *rem, (c == '"' || c == '\\') ? "\\%c" : "%c", (char)c);
    }
    BUF_PRINTF(buf, *off, *rem, "\"");
@@ -597,4 +528,255 @@ const char *email_imap_next_fetch(const char *p,
       return resume;
    }
    return NULL;
+}
+
+/* =============================================================================
+ * IMAP UID selection + paging cursor (pure; unit-tested in test_email_parse.c)
+ * ============================================================================= */
+
+/* Restore the min-heap property below index i (heap[0] is the smallest kept UID). */
+static void uid_heap_sift_down(uint32_t *heap, int n, int i) {
+   for (;;) {
+      int smallest = i;
+      int l = 2 * i + 1;
+      int r = l + 1;
+      if (l < n && heap[l] < heap[smallest])
+         smallest = l;
+      if (r < n && heap[r] < heap[smallest])
+         smallest = r;
+      if (smallest == i)
+         return;
+      uint32_t t = heap[i];
+      heap[i] = heap[smallest];
+      heap[smallest] = t;
+      i = smallest;
+   }
+}
+
+static void uid_heap_sift_up(uint32_t *heap, int i) {
+   while (i > 0) {
+      int parent = (i - 1) / 2;
+      if (heap[parent] <= heap[i])
+         return;
+      uint32_t t = heap[i];
+      heap[i] = heap[parent];
+      heap[parent] = t;
+      i = parent;
+   }
+}
+
+static int cmp_uid_asc(const void *a, const void *b) {
+   uint32_t x = *(const uint32_t *)a;
+   uint32_t y = *(const uint32_t *)b;
+   return (x > y) - (x < y);
+}
+
+/* Case-insensitive "* SEARCH" at the start of a line. */
+static bool line_is_search(const char *line) {
+   static const char kSearch[] = "* SEARCH";
+   for (size_t i = 0; i < sizeof(kSearch) - 1; i++) {
+      if (toupper((unsigned char)line[i]) != kSearch[i])
+         return false;
+   }
+   return true;
+}
+
+int email_imap_select_newest_uids(const char *response, uint32_t *out, int wanted, int *total_out) {
+   int total = 0;
+   int n = 0;
+   if (total_out)
+      *total_out = 0;
+   if (!response || !out)
+      return 0;
+
+   const char *line = response;
+   while (*line) {
+      const char *eol = line;
+      while (*eol && *eol != '\r' && *eol != '\n')
+         eol++;
+
+      if (line_is_search(line)) {
+         const char *p = line + 8;
+         while (p < eol) {
+            while (p < eol && *p == ' ')
+               p++;
+            if (p >= eol || !isdigit((unsigned char)*p))
+               break; /* end of the number list (or a trailing non-numeric token) */
+            uint64_t v = 0;
+            bool overflow = false;
+            while (p < eol && isdigit((unsigned char)*p)) {
+               v = v * 10 + (uint64_t)(*p - '0');
+               if (v > UINT32_MAX)
+                  overflow = true;
+               p++;
+            }
+            if (overflow || v == 0)
+               continue; /* not a valid UID; skip, don't count */
+            total++;
+            if (wanted <= 0)
+               continue;
+            if (n < wanted) {
+               out[n] = (uint32_t)v;
+               uid_heap_sift_up(out, n);
+               n++;
+            } else if ((uint32_t)v > out[0]) {
+               out[0] = (uint32_t)v;
+               uid_heap_sift_down(out, n, 0);
+            }
+         }
+      }
+
+      line = eol;
+      while (*line == '\r' || *line == '\n')
+         line++;
+   }
+
+   if (n > 1)
+      qsort(out, (size_t)n, sizeof(*out), cmp_uid_asc);
+   /* A buggy or hostile server may repeat UIDs; FETCHing one twice would show the
+    * message twice, so collapse duplicates (the list is sorted). */
+   int w = 0;
+   for (int i = 0; i < n; i++) {
+      if (w == 0 || out[i] != out[w - 1])
+         out[w++] = out[i];
+   }
+   total -= n - w; /* repeats aren't more mail; don't let them imply another page */
+   n = w;
+   if (total_out)
+      *total_out = total;
+   return n;
+}
+
+bool email_imap_page_token_format(uint32_t before_uid,
+                                  uint32_t uidvalidity,
+                                  char *out,
+                                  size_t out_len) {
+   if (!out || out_len == 0 || before_uid < 2)
+      return false;
+   int w = uidvalidity ? snprintf(out, out_len, "u%u.%u", before_uid, uidvalidity)
+                       : snprintf(out, out_len, "u%u", before_uid);
+   if (w < 0 || (size_t)w >= out_len) {
+      out[0] = '\0';
+      return false;
+   }
+   return true;
+}
+
+/* Parse 1-10 digits with no leading zero into a uint32; advances *pp. */
+static bool parse_u32_strict(const char **pp, uint32_t *out) {
+   const char *p = *pp;
+   if (!isdigit((unsigned char)*p) || *p == '0')
+      return false;
+   uint64_t v = 0;
+   int digits = 0;
+   while (isdigit((unsigned char)*p)) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(*p - '0');
+      p++;
+   }
+   if (v > UINT32_MAX)
+      return false;
+   *out = (uint32_t)v;
+   *pp = p;
+   return true;
+}
+
+bool email_imap_page_token_parse(const char *tok, uint32_t *before_uid, uint32_t *uidvalidity) {
+   if (!tok || tok[0] != 'u' || !before_uid || !uidvalidity)
+      return false;
+   const char *p = tok + 1;
+   uint32_t uid = 0;
+   uint32_t v = 0;
+   if (!parse_u32_strict(&p, &uid) || uid < 2)
+      return false;
+   if (*p == '.') {
+      p++;
+      if (!parse_u32_strict(&p, &v))
+         return false;
+   }
+   if (*p != '\0')
+      return false;
+   *before_uid = uid;
+   *uidvalidity = v;
+   return true;
+}
+
+bool email_imap_parse_uidvalidity(const char *line, size_t len, uint32_t *out) {
+   static const char kPrefix[] = "* OK [UIDVALIDITY ";
+   const size_t plen = sizeof(kPrefix) - 1;
+   if (!line || !out || len <= plen)
+      return false;
+   for (size_t i = 0; i < plen; i++) {
+      if (toupper((unsigned char)line[i]) != kPrefix[i])
+         return false;
+   }
+   size_t i = plen;
+   uint64_t v = 0;
+   int digits = 0;
+   while (i < len && isdigit((unsigned char)line[i])) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(line[i] - '0');
+      i++;
+   }
+   if (digits == 0 || v == 0 || v > UINT32_MAX || i >= len || line[i] != ']')
+      return false;
+   *out = (uint32_t)v;
+   return true;
+}
+
+bool email_imap_parse_exists(const char *line, size_t len, uint32_t *out) {
+   static const char kSuffix[] = " EXISTS";
+   const size_t slen = sizeof(kSuffix) - 1;
+   if (!line || !out || len < 3 || line[0] != '*' || line[1] != ' ')
+      return false;
+   size_t i = 2;
+   uint64_t v = 0;
+   int digits = 0;
+   while (i < len && isdigit((unsigned char)line[i])) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(line[i] - '0');
+      i++;
+   }
+   if (digits == 0 || v > UINT32_MAX || len - i < slen)
+      return false;
+   for (size_t k = 0; k < slen; k++) {
+      if (toupper((unsigned char)line[i + k]) != kSuffix[k])
+         return false;
+   }
+   i += slen;
+   if (i < len && line[i] != '\r' && line[i] != '\n')
+      return false;
+   *out = (uint32_t)v;
+   return true;
+}
+
+bool email_imap_id_parse(const char *message_id, char *folder, size_t folder_size, uint32_t *uid) {
+   if (!message_id || !folder || folder_size == 0 || !uid)
+      return false;
+   const char *uid_str = message_id;
+   const char *last_colon = strrchr(message_id, ':');
+   if (last_colon && last_colon > message_id) {
+      const size_t len = (size_t)(last_colon - message_id);
+      if (len >= folder_size)
+         return false;
+      memcpy(folder, message_id, len);
+      folder[len] = '\0';
+      uid_str = last_colon + 1;
+   } else {
+      if (snprintf(folder, folder_size, "INBOX") >= (int)folder_size)
+         return false;
+      if (last_colon)
+         uid_str = last_colon + 1;
+   }
+   if (!isdigit((unsigned char)uid_str[0]))
+      return false;
+   char *end = NULL;
+   const unsigned long v = strtoul(uid_str, &end, 10);
+   if (!end || *end != '\0' || v == 0 || v > UINT32_MAX)
+      return false;
+   *uid = (uint32_t)v;
+   return true;
 }

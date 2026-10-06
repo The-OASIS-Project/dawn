@@ -90,6 +90,12 @@ extern "C" {
  * of its near-duplicate band (and as the fallback when the config is invalid). */
 #define MEMORY_PARAPHRASE_DEDUP_DEFAULT 0.92f
 
+/* [memory] fact_cache_mb: default and bounds.  A fact takes dims * 4 + 28 bytes,
+ * so the default holds about 50,000 at 384 dims and 13,000 at 1536. */
+#define MEMORY_FACT_CACHE_MB_DEFAULT 80
+#define MEMORY_FACT_CACHE_MB_MIN 8
+#define MEMORY_FACT_CACHE_MB_MAX 1024
+
 /* =============================================================================
  * General Configuration
  * ============================================================================= */
@@ -177,6 +183,8 @@ typedef struct {
    float end_of_speech_duration; /* Seconds of silence to end recording */
    float max_recording_duration; /* Maximum recording length (seconds) */
    int preroll_ms;               /* Audio buffer before VAD trigger */
+   char adaptive_endpoint[16];   /* adaptive end-of-speech: "off"|"shadow"|"on" (default off).
+                                    Speculative-decode overlap. */
    vad_chunking_config_t chunking;
 } vad_config_t;
 
@@ -327,14 +335,18 @@ typedef struct llm_tools_config {
 #define LLM_THINKING_BUDGET_HIGH_DEFAULT 16384
 #define LLM_THINKING_BUDGET_XHIGH_DEFAULT 32768
 
+/* The thinking mode and effort when nothing sets one.  Each request resolves
+ * them against what its model accepts (models.toml [thinking.*]): "disabled" on
+ * a model that can't turn reasoning off runs it at its lowest effort. */
+#define LLM_THINKING_MODE_DEFAULT "disabled"
+#define LLM_REASONING_EFFORT_DEFAULT "medium"
+
 typedef struct {
-   char mode[16];            /* "disabled", "enabled" (legacy "auto" also accepted) */
-   char reasoning_effort[8]; /* "none"/"low"/"medium"/"high"/"xhigh" for reasoning models
-                              * OpenAI gpt-5.4+ and gpt-5.2: full range incl. none/xhigh.
-                              * OpenAI gpt-5/5.1 + Gemini OpenAI-compat: clamps xhigh→high
-                              *   and (for non-5.1+) none→low at request-build time.
-                              * Claude: maps to budget_low/medium/high/xhigh via budget switch
-                              *   (see llm_get_effective_budget_tokens). */
+   char mode[16];            /* "disabled", "adaptive", "enabled" (legacy "auto" = on) */
+   char reasoning_effort[8]; /* "none"/"minimal"/"low"/"medium"/"high"/"xhigh"/"max".
+                              * Resolved per request to the nearest level the model
+                              * offers (models.toml [thinking.*]); a Claude or local
+                              * "enabled" budget maps low..xhigh to budget_*. */
    int budget_low;           /* Token budget for "low"   effort (default: 1024)  */
    int budget_medium;        /* Token budget for "medium" effort (default: 8192)  */
    int budget_high;          /* Token budget for "high"  effort (default: 16384) */
@@ -365,9 +377,8 @@ typedef struct {
    char compact_provider[32];    /* Compaction provider: openai/claude/gemini/openrouter/local */
    char compact_model[128]; /* Compaction model; a "vendor/model" slug when provider = "openrouter"
                              */
-   bool conversation_logging; /* Save chat history to log files (default: false) */
-   bool rate_limit_enabled;   /* Throttle cloud API calls (default: true) */
-   int rate_limit_rpm;        /* Max cloud API calls per minute (default: 40) */
+   bool rate_limit_enabled; /* Throttle cloud API calls (default: true) */
+   int rate_limit_rpm;      /* Max cloud API calls per minute (default: 40) */
 } llm_config_t;
 
 /* =============================================================================
@@ -544,13 +555,9 @@ typedef struct {
  * Vision Configuration (per-upload image size and dimension limits)
  * ============================================================================= */
 typedef struct {
-   int max_image_size_kb;     /* Max image upload size in KB (default: 4096, range: 512-16384) */
-   int max_dimension;         /* Max image dimension in px (default: 1024, range: 256-4096) */
-   int max_images;            /* Max images per message (default: 5, range: 1-10) */
-   int capture_history_count; /* Tool-captured images (e.g. the `viewing` camera tool) retained
-                               * in conversation history for follow-up questions. 0 = unlimited
-                               * (bounded only by context compaction, not per-capture eviction),
-                               * default: 1, range: 0-50. */
+   int max_image_size_kb; /* Max image upload size in KB (default: 4096, range: 512-16384) */
+   int max_dimension;     /* Max image dimension in px (default: 1024, range: 256-4096) */
+   int max_images;        /* Max images per message (default: 5, range: 1-10) */
 } vision_config_t;
 
 /* =============================================================================
@@ -581,22 +588,29 @@ typedef struct {
    float dawn_background;
 } focus_source_weights_t;
 
-/* Dedup bookkeeping for per-turn focus.  Read by the parser into the
- * struct in Phase 1b — actual per-session enforcement lives in 1f. */
 typedef struct {
-   int recent_window_turns;   /* Re-inject only if not seen in last N turns */
-   float score_uplift_factor; /* Re-inject if current score > previous * factor */
-} focus_dedup_config_t;
-
-typedef struct {
-   bool enabled;            /* Master enable; default false until 1c/1d ship */
-   int focus_budget_bytes;  /* Byte cap on the assembled focus block (per turn) */
-   int top_k;               /* Maximum candidates retained after ranking */
-   float min_score;         /* Floor — anything below is dropped */
-   bool classifier_enabled; /* RAGRoute-style source classifier;
-                               default false (off, opt-in after probe) */
-   float weight_semantic;   /* Cross-source ranker weights — Generative
-                               Agents / CrewAI three-factor formula */
+   bool enabled;                 /* Master enable (default off) */
+   int focus_budget_bytes;       /* Byte cap on the assembled focus block (per turn) */
+   int top_k;                    /* Maximum candidates retained after ranking */
+   float min_score;              /* Floor — anything below is dropped */
+   float fact_min_relevance;     /* Facts: same corpus-relative measure against the user's
+                                    other facts; injection only (not the memory tool).
+                                    0 disables. */
+   float summary_min_relevance;  /* Conversation summaries found by meaning: same measure
+                                    against the user's summaries of the last 30 days.
+                                    Keyword matches aren't gated.  0 disables. */
+   float entity_min_relevance;   /* Entities: same measure against the user's other entities,
+                                    for those the query doesn't name (a named entity always
+                                    counts).  Injection, recall and the memory tool.
+                                    0 disables. */
+   float document_min_relevance; /* Document chunks: minimum similarity measured from the
+                                    corpus-typical level toward identical,
+                                    (cos - pool_mean) / (1 - pool_mean).  Model-independent;
+                                    0 disables. */
+   bool classifier_enabled;      /* RAGRoute-style source classifier;
+                                    default false (off, opt-in after probe) */
+   float weight_semantic;        /* Cross-source ranker weights — Generative
+                                    Agents / CrewAI three-factor formula */
    float weight_recency;
    float weight_importance;
    float weight_source;  /* Multiplier on per-source weights below */
@@ -605,7 +619,6 @@ typedef struct {
                             Bump above 4096 only if a user's corpus
                             grows past that and the cliff causes drops. */
    focus_source_weights_t source_weights;
-   focus_dedup_config_t dedup;
    /* Dominant-token over-inclusion heuristic (Phase 1j re-bench + Phase B
     * reranker workstream).  Mitigates the failure mode where a query has
     * a low-IDF dominant token (e.g. "favorite restaurant", "doctor blood
@@ -670,7 +683,15 @@ typedef struct {
 
    /* Voice conversation idle timeout */
    int conversation_idle_timeout_min; /* Minutes before auto-save (default: 15, 0=disabled) */
-   int default_voice_user_id;         /* User ID for local/DAP conversations (default: 1) */
+   int default_voice_user_id;         /* User the local mic speaks for while the Local Device
+                                       * is unassigned (default: 1); an unmapped satellite is
+                                       * a guest, not this user */
+
+   /* RAM (MB) for the facts held for semantic search (one user's at a time).
+    * When a user's facts need more, the load keeps recently used facts and note
+    * links first, then the best by confidence and recency; the rest are still
+    * found by keyword search. */
+   int fact_cache_mb;
 
    /* Decay settings (Phase 5) */
    bool decay_enabled;               /* Enable nightly confidence decay */
@@ -1303,6 +1324,27 @@ void config_set_secrets_defaults(secrets_config_t *secrets);
  * @param config Jobs config to clamp in place (NULL-safe).
  */
 void config_clamp_jobs(jobs_config_t *config);
+
+/**
+ * @brief Clamp [memory] settings to their valid ranges.
+ *
+ * Shared by the TOML parse path and the WebUI settings POST handler so the two
+ * entry points cannot drift.
+ *
+ * @param config Memory config to clamp in place (NULL-safe).
+ */
+void config_clamp_memory(memory_config_t *config);
+
+/**
+ * @brief Clamp [vad] enum settings to their valid values.
+ *
+ * Shared by the TOML parse path and the WebUI settings POST handler so the two
+ * entry points cannot drift — adaptive_endpoint is coerced to "off" unless it is
+ * exactly "off", "shadow", or "on".
+ *
+ * @param config VAD config to clamp in place (NULL-safe).
+ */
+void config_clamp_vad(vad_config_t *config);
 
 /**
  * @brief Clamp [research] budgets to their safe bounds.

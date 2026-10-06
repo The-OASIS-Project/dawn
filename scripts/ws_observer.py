@@ -45,7 +45,7 @@ except ImportError as e:
     sys.exit(f"Missing dependency: {e}. Install with: pip install requests websocket-client")
 
 # Mirrors AUTH_COOKIE_NAME in include/webui/webui_internal.h
-COOKIE_NAME = "dawn_session"
+COOKIE_NAME = "__Host-dawn_session"
 SUBPROTOCOL = "dawn-1.0"
 
 # ANSI colors (disabled when not a tty)
@@ -68,7 +68,7 @@ def stamp():
 
 
 def login(base, user, password, verify):
-    """CSRF -> login. Returns a requests.Session carrying the dawn_session cookie."""
+    """CSRF -> login. Returns a requests.Session carrying the login cookie."""
     s = requests.Session()
     s.verify = verify
     r = s.get(f"{base}/api/auth/csrf", timeout=10)

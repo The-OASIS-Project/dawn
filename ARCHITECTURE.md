@@ -4,7 +4,7 @@
 
 This document is the **architectural map**: directory layout, the cross-cutting rules every subsystem obeys (layering, threading, lock ordering, error handling, configuration), and a one-paragraph summary of each subsystem with a link to its detail doc. For the internals of any single subsystem — its components, data flow, DB schema, and tuning — open the linked file in [`docs/arch/subsystems/`](docs/arch/subsystems/).
 
-**Last updated**: June 2026.
+**Last updated**: October 2026.
 
 ## Table of Contents
 
@@ -123,9 +123,9 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 
 | Subsystem | Role | Detail doc |
 |---|---|---|
-| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`LOG_INFO/WARNING/ERROR`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
+| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`OLOG_INFO/WARNING/ERROR/DEBUG`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
 | **ASR** | Speech recognition abstraction (Strategy pattern) over Whisper and Vosk, plus Silero VAD and chunking for long utterances. Whisper on Jetson GPU is the default; Vosk is retained for CPU-only builds. | [asr.md](docs/arch/subsystems/asr.md) |
-| **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one OpenAI-compatible key/endpoint), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. System prompts are composed in two segments — a stable prefix + a volatile tail (`src/core/prompt_compose.c`) — so providers can cache the prefix across turns. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
+| **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one key; its `anthropic/` models use its Anthropic Messages endpoint on the Claude path, the rest its OpenAI-compatible one), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. A conversation's request is append-only (`src/core/session_prefix.c`): its system prompt and tool set are frozen on its first turn, and later changes (instructions, the surface's directions, each turn's context) are appended where they happen, so providers cache the whole conversation and signed reasoning stays replayable. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
 | **TTS** | Piper + ONNX Runtime with preprocessing for natural phrasing. Mutex-protected so the main loop, network server, and streaming buffer can all synthesize safely. | [tts.md](docs/arch/subsystems/tts.md) |
 | **DAP2 Satellite** | WebSocket protocol for all remote clients: WebUI browser (Opus), Tier 1 Raspberry Pi (local ASR/TTS, text-only), and Tier 2 ESP32 (raw PCM). A single server on port 3000 serves all three — adding a new client type means a new registration handler, not a new server. | [satellite.md](docs/arch/subsystems/satellite.md) |
 | **Satellite OTA** | Signed over-the-air updates for Tier 1 Pi (.deb) and Tier 2 ESP32 (device-apply). Releases are libsodium-signed binary manifests (TweetNaCl verify on the ESP32); the signing key lives offline and never on the daemon (`tools/ota_keytool.c`). Fleet rollout does a canary wave then deferred fan-out, driven off the main-loop 1-second heartbeat (no dedicated thread). WebUI fleet panel + `dawn-admin ota` CLI + runtime release rescan. | [OTA_DESIGN.md](docs/OTA_DESIGN.md) |
@@ -137,9 +137,9 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 | **Notes / Reference Text** | First-class **notes** document kind (`DOC_KIND_NOTES`) on the same `document_db`/`embedding_engine` foundation: user- or LLM-authored reference text with hybrid lexical (BM25/FTS5 + Porter2 stemming, `libstemmer`) plus semantic search, surgical edit/append, version history with one-step undo (`document_versions`), and a notes↔memory bridge so fuzzy recall resolves to the right note. Filed note bodies are kept **out** of semantic memory by default (`note_extraction_guard`) so the canonical text lives only in the note store. | shares [rag.md](docs/arch/subsystems/rag.md) + [vision-documents.md](docs/arch/subsystems/vision-documents.md) |
 | **Deep Research** (`src/tools/research_*`, `src/core/research_worker.c`) | **P0 shipped 2026-08-13; P1 (controller-driven convergence) shipped 2026-08-14, live-validated.** Confirmation-gated `deep_research` tool spawns a detached **`research_worker`** (a background-job sibling — reuses `job_manager_*`, its own spawn path, NOT `job_worker.c`) that runs an **IterResearch** loop on a **bare, memory-free** session: each round resets history to a bounded digest + top open questions, plans sub-questions, does web `search`/`url_fetch` under a **read-only tool allowlist** (enforced at advertise AND execute), and records injection-gated evidence **claims** to a SQLite ledger (`research_runs/questions/claims/report_revisions`, schema v75; v76 adds `resolution_reason`). A **deterministic C stop-controller** ends it — natural-end reasons first (`concluded` via the agent's `research_conclude` signal → distinct-source `coverage`, with `research_mark_unanswerable` + **P1 stale-question auto-retirement** clearing dead questions → `saturation` after N dry rounds) then the **input-token budget as a high runaway backstop** (a per-round overshoot guard keeps it honest) — so a run stops on why it's actually done, not on spend. P1 adds **plan-freeze** (no new top-level questions after round K) and a **fresh-context completeness critic** (§6 item 4) that may re-arm a stop-eligible run at an untried angle up to `critic_max_rearm` times (each re-arm resets the saturation streak so a multi-round gap gets a fresh window). A final **no-tools synthesis turn** writes the answer (exec summary + direct answer/recommendation + honest gaps) over the **claims evidence** (a view over `research_claims` — the ledger retains every recorded claim, so synthesis works from evidence rather than a lossy running summary; the render is bounded by a generous per-report claim cap with an explicit truncation marker beyond it), so every terminal path yields a real answer; it's filed to notes and persisted to the job conversation (never re-entering a tool session or `reinvoke_parent` — the untrusted-content boundary, §11). A voice/WebUI run posts a JARVIS-style **completion take** back into the originating conversation (`completion_commentary`). Off by default (`[research] enabled`). P2–P4 (parallel fan-out, attach/replay specialization, TUI) remain design-only. | [DEEP_RESEARCH_DESIGN.md](docs/DEEP_RESEARCH_DESIGN.md) |
 | **CalDAV Calendar** | Multi-account RFC 4791 client with offline-first SQLite cache, pre-expanded RRULE occurrences, and background sync. Tested with Google, iCloud, Nextcloud, Radicale. | [calendar.md](docs/arch/subsystems/calendar.md) |
-| **Email** | Dual backend — IMAP/SMTP for anything, Gmail REST API for OAuth accounts. Two-step confirmation on send and trash. Recipients resolved against the contacts system. | [email.md](docs/arch/subsystems/email.md) |
-| **Messaging Channels** (`src/messaging/`) | Bidirectional text chat over Telegram, Discord, Slack, and SMS. Each provider is a `messaging_driver_t` with its own background listener thread; inbound messages bind to a per-channel "forever conversation" (`SESSION_TYPE_MESSAGING`, exempt from idle cleanup) with per-conversation LLM settings, and scheduler briefings can deliver to a channel via `deliver_to`. Discord additionally supports read-only channel read/summarize (`list_readable_channels`/`read_history`, `messaging_engine_read.c`). Engine split into core + `_session`/`_channels`/`_link`/`_inbound`/`_read` behind `messaging_engine_internal.h`. WebUI channel-management panel + `dawn-admin messaging` CLI. | [MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
-| **Phone & SMS** (`src/tools/phone_*.c`) | Cellular calls and SMS via the external **ECHO** modem daemon (SIM7600G-H) over MQTT. `phone_tool.c` is the LLM interface; `phone_service.c` runs the call state machine (RINGING/ANSWERING/ACTIVE, atomic first-wins answer claim) + TTS announcements + HUD/WebUI banner; `phone_db.c` logs calls/SMS. Incoming-call context is fanned to every interactive session via `session_broadcast_system_message()`; a WebUI incoming-call banner + persistent in-call panel let any surface answer/reject/hang up. Two-way call **audio** bridge (Phase 5) is not yet shipped. | [PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
+| **Email** | Dual backend — IMAP/SMTP for anything, Gmail REST API for OAuth accounts — read through one MIME reader (`email_mime.c`, GMime): bounded fetches, a pre-scan against parser bombs, charsets to UTF-8, attachments listed, sender text sanitized. Trash/archive move exactly one message to the server-marked folder, never a bare EXPUNGE. Two-step confirmation on send and trash. Recipients resolved against the contacts system. | [email.md](docs/arch/subsystems/email.md) |
+| **Messaging Channels** (`src/messaging/`) | Bidirectional text chat over Telegram, Discord, Slack, and SMS. Each provider is a `messaging_driver_t` with its own background listener thread; a channel answers only the person who linked it (the provider's sender id; several DAWN users can each link one group chat, each with their own session), an SMS link completes with a code texted to the number, and inbound messages bind to a per-channel "forever conversation" (`SESSION_TYPE_MESSAGING`, exempt from idle cleanup) with per-conversation LLM settings, and scheduler briefings can deliver to a channel via `deliver_to`. Discord additionally supports read-only channel read/summarize (`list_readable_channels`/`read_history`, `messaging_engine_read.c`). Engine split into core + `_session`/`_channels`/`_link`/`_inbound`/`_codes`/`_read` behind `messaging_engine_internal.h`. WebUI channel-management panel + `dawn-admin messaging` CLI. | [MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
+| **Phone & SMS** (`src/tools/phone_*.c`) | Cellular calls and SMS via the external **ECHO** modem daemon (SIM7600G-H) over MQTT. `phone_tool.c` is the LLM interface; `phone_service.c` runs the call state machine (RINGING/ANSWERING/ACTIVE, atomic first-wins answer claim) + TTS announcements + HUD/WebUI banner; `phone_db.c` logs calls/SMS. Incoming-call context is posted to every interactive session via `session_broadcast_notice()` (rendered into each turn's volatile prompt block for 10 minutes, never written into a conversation history); a WebUI incoming-call banner + persistent in-call panel let any surface answer/reject/hang up. Two-way call **audio** bridge (Phase 5) is not yet shipped. | [PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **OAuth 2.0 & Crypto** | Shared OAuth client with PKCE S256 and `crypto_store.c` (libsodium `crypto_secretbox`) for encrypted token and password storage. Used by email and calendar. | [oauth-crypto.md](docs/arch/subsystems/oauth-crypto.md) |
 | **Scheduler** | Timers, alarms, reminders, and scheduled tool execution. Background thread polls every second, fires with chime audio + WebUI banner notifications, supports recurrence and snooze/dismiss. | [scheduler.md](docs/arch/subsystems/scheduler.md) |
 | **Home Assistant** | REST API client with entity cache, fuzzy name matching, and satellite area-awareness (`HomeAssistant_Area=[X]` injected into the LLM system prompt). 16 tool actions spanning lights, climate, locks, covers, media, scenes, scripts, automations. | [homeassistant.md](docs/arch/subsystems/homeassistant.md) |
@@ -151,75 +151,69 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 
 To prevent circular dependencies and maintain clean architecture, modules are organized into layers. **Modules may only depend on modules in lower layers.**
 
+This map lists the layers and the exceptions to them, not every file: a file is named here only when it carries a rule you could break without knowing it. To find a file, grep, or open the subsystem's detail doc (see the [Subsystem Index](#subsystem-index)).
+
 ```
-Layer 0 (Foundation)
-├── common/src/logging.c           - Logging macros (shared with satellite, no deps)
-├── include/dawn_error.h           - SUCCESS/FAILURE return codes (no deps)
-├── src/config/                    - Configuration parsing and defaults
-│   ├── config_parser.c
-│   ├── config_defaults.c
-│   ├── config_env.c
-│   └── config_validate.c
-└── include/config/dawn_config.h   - Config struct definitions
+Layer 0 (Foundation) — no DAWN dependencies
+├── common/src/logging.c, include/dawn_error.h   Logging (OLOG_*), SUCCESS/FAILURE codes
+└── src/config/, include/config/                  Config structs, defaults, parsing, validation
 
-Layer 1 (Core Infrastructure)
-├── src/tools/tool_registry.c/h    - Tool registration and lookup (deps: logging, config)
-├── src/core/command_router.c/h    - Request/response routing (deps: logging)
-├── src/core/command_executor.c/h  - Unified command executor (deps: tool_registry)
-├── src/core/session_manager.c/h   - Session lifecycle (deps: logging, config)
-├── src/core/worker_pool.c/h       - Concurrent tool execution (deps: logging)
-├── src/core/wake_word.c/h         - Wake-word matching (shared daemon + satellites)
-├── src/core/time_query_parser.c/h - Stateless temporal-expression recognizer (deps: libc, math)
-├── src/core/utterance_dedup.c/h   - Cross-device utterance dedup (leaf lock, deps: logging)
-├── src/core/text_input_dispatch.c - Shared text-input → LLM entry path (deps: session_manager)
-├── src/core/prompt_compose.c      - Two-segment prompt composer (stable prefix + volatile tail)
-├── src/core/ws_reconnect.c/h      - Reconnect/backoff helper for persistent WS clients (deps: none; consumers: Discord, Slack, HA realtime WS)
-└── src/input_queue.c/h            - Thread-safe input queue (deps: logging)
+Layer 1 (Core infrastructure) — deps: Layer 0
+├── src/tools/tool_registry.c   Tool registration and lookup, and each action's kind (read, fetch, state,
+│                               device, prepare, act), checked at registration and at build time
+├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
+│                               dedup, reply codes, text-input dispatch, prompt sections, input queue
+├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
+│                               session, on the next turn
+├── src/core/pending_slots.c    What a tool staged for the user's confirm: one item per session and kind, each
+│                               with a new id its confirm must name; never evicts another session's item
+├── src/core/tool_call_challenge.c  An action asked for by text, waiting for its reply code: one per channel,
+│                               handed over once on the right code
+└── src/core/session_reaper.c   session_destroy() only ends a session and never waits; the reaper joins its
+                                compaction worker, waits for its last reference, then frees it
 
-Layer 2 (Services)
-├── src/llm/                       - LLM providers and tools
-│   ├── llm_interface.c            - Provider abstraction (deps: Layer 0-1)
-│   ├── llm_openai.c               - OpenAI/Ollama/llama.cpp (deps: llm_interface)
-│   ├── llm_claude.c               - Anthropic Claude (deps: llm_interface)
-│   └── llm_tools.c                - Tool execution (deps: tool_registry)
-├── src/core/embedding_engine.c    - Shared embedding infrastructure (deps: Layer 0-1)
-├── src/core/crypto_store.c        - Shared libsodium encryption (deps: Layer 0)
-├── src/core/scheduler.c           - Scheduler engine + background thread (deps: Layer 0-1)
-├── src/core/session_manager_llm.c - LLM-call orchestration extracted from session_manager (deps: Layer 0-1, llm)
-├── src/core/ota*.c                - OTA release store, signed manifests, fleet rollout (deps: Layer 0-1, crypto_store; rollout pushes via a registered fn pointer to avoid a Layer-4 dep)
-├── src/tts/                       - Text-to-speech (deps: Layer 0-1)
-├── src/asr/                       - Daemon-side ASR interface, Vosk, chunking (deps: Layer 0-1)
-├── common/src/asr/                - Shared ASR engines (Whisper, VAD) used by daemon + satellite
-├── src/mosquitto_comms.c          - MQTT integration (deps: Layer 0-1, tool_registry)
-├── src/memory/                    - Persistent memory + contacts (deps: Layer 0-1, embedding_engine)
-└── src/auth/                      - User auth, settings, per-user prefs (deps: Layer 0-1)
+Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
+├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views
+├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
+│                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
+├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
+│                               background job, unattended) against the action's kind; decided once per call
+├── src/memory/                 Persistent memory, contacts, extraction, forgetting
+├── src/auth/                   Users, settings, conversations and messages; auth_db_messages.c is the one
+│                               message insert (and the LLM replay read)
+├── src/tts/, src/asr/, common/src/asr/   Speech in and out (shared engines in common/)
+└── src/mosquitto_comms.c       MQTT
 
-Layer 3 (Tools)
-├── src/tools/weather_tool.c           - Weather API (deps: Layer 0-2)
-├── src/tools/music_tool.c             - Music playback (deps: Layer 0-2)
-├── src/tools/search_tool.c            - Web search (deps: Layer 0-2)
-├── src/tools/memory_tool.c            - Memory commands (deps: Layer 0-2, memory/)
-├── src/tools/document_search.c        - RAG semantic search (deps: Layer 0-2, embedding_engine)
-├── src/tools/document_read.c          - Paginated doc reader (deps: Layer 0-2, document_db)
-├── src/tools/document_db.c            - Document SQLite CRUD (deps: Layer 0-1, auth_db)
-├── src/tools/email_service.c          - Email routing + two-step confirm (deps: Layer 0-2, oauth_client)
-├── src/tools/email_client.c           - IMAP/SMTP backend (deps: Layer 0-1, crypto_store)
-├── src/tools/gmail_client.c           - Gmail REST API backend (deps: Layer 0-1, oauth_client)
-├── src/tools/oauth_client.c           - OAuth 2.0 + PKCE (deps: Layer 0-1, crypto_store)
-├── src/tools/homeassistant_service.c  - HA REST API + entity cache (deps: Layer 0-1)
-├── src/tools/calendar_service.c       - CalDAV business logic (deps: Layer 0-2, oauth_client)
-├── src/messaging/messaging_engine.c   - Channel engine: sessions, binding, dispatch (deps: Layer 0-2, session_manager, auth_db, scheduler)
-├── src/messaging/messaging_{telegram,slack,discord,sms}.c - Provider drivers behind messaging_driver_t (deps: curl/lws)
-├── src/tools/research_run.c           - Deep-research deterministic controller (ledger→stop decision; deps: Layer 0-2, research_db, document store)
-├── src/tools/research_run_loop.c      - Deep-research live round loop + synthesis (session/dispatch-coupled; deps: Layer 0-2)
-├── src/tools/research_tools.c         - In-loop research tools (plan/record/conclude; deps: Layer 0-2)
-└── src/tools/*.c                      - All other tools (deps: Layer 0-2)
+Layer 3 (Tools and channels) — deps: Layers 0-2
+├── src/tools/                  Every tool and its service (email, calendar, Home Assistant, music, stocks,
+│                               documents, research, MCP bridge, ...); email_mime.c is the only file that uses
+│                               GMime
+└── src/messaging/              Channel engine and provider drivers (Telegram, Slack, Discord, SMS)
 
-Layer 4 (Application)
-├── src/dawn.c                     - Main entry + voice state machine (deps: all layers)
-├── src/webui/                     - Web interface + WebSocket server (deps: Layer 0-3)
-└── src/core/{job_worker,research_worker}.c - Detached background-job sequencers* (deps: Layer 0-3)
+Layer 4 (Application) — deps: everything below
+├── src/dawn.c                  Main entry, local voice state machine
+├── src/webui/                  Web interface and WebSocket server.  Optional (ENABLE_WEBUI): without it,
+│                               webui_absent.c supplies the WebUI entry points the rest of DAWN calls, as
+│                               no-ops, and the WebUI-only pieces are left out (messaging channels, the job and
+│                               deep_research tools, the OAuth and code-project handlers, Home Assistant's
+│                               realtime connection)
+└── src/core/{job_worker,research_worker}.c   Detached background-job sequencers*
 ```
+
+**The session unit.** `session_manager.c` (the dispatch), `session_history.c` (history lifecycle),
+`session_prefix.c` (the append-only request: frozen prefix, appended changes and turn context, live withdrawal),
+`session_compaction.c`, `session_focus.c`, `prompt_builder.c` and `session_image_hold.c` call into each other: read
+them as one Layer-2 unit, not as separate modules with a direction between them.
+
+**Deliberate upward calls.** Each goes through a weak symbol or a registered function pointer, never an `#include`:
+
+| From (lower) | To (higher) | How |
+|---|---|---|
+| `src/image_store.c` | `session_image_hold.c` (which unbound images a live session still holds) | weak `session_images_held` |
+| `session_compaction.c` | the WebUI's compaction marker | weak `session_compaction_client_notice` |
+| `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
+| `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
+| lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -228,6 +222,11 @@ They therefore include and call *upward* into Layer 3 (e.g. `research_worker.c` 
 This is a deliberate, **acyclic** exception to "downward only" — the Layer-3 controllers do not depend
 back on the workers — mirroring how `dawn.c` (Layer 4) reaches every layer. Read them as Layer-4
 sequencers that happen to sit in `src/core/` beside the job pool they build on, not as Layer-2 modules.
+
+**Every build has sessions.** The session unit, turn queue, job pool and workers, prompt builder and worker pool
+are compiled whether or not the WebUI is: the local microphone runs its turns on them, and the WebUI only adds the
+server. The tools that start a background job (`job`, `deep_research`) are WebUI-only, since a job delivers its
+result through the WebUI (the conversation it reports into, the missed-notification replay).
 
 ### Dependency Rules
 
@@ -254,6 +253,23 @@ tool_registry_register(&weather_metadata);  // Passes function pointer up
 // In llm_tools.h — avoid including full tool_registry.h
 struct tool_metadata;  // Forward declaration
 ```
+
+### Build-time invariant checks
+
+Some rules can't be expressed in types, so scripts in `scripts/` enforce them. Each is a CMake target that `dawn`
+depends on, so every build runs them, and they fail the build when broken:
+
+| Target | Script | Rule |
+|---|---|---|
+| `no_ws_direct_write_check` | `check_no_ws_direct_write.sh` | Every WebSocket data frame goes through the WebUI's response queue, never a direct `lws_write()` |
+| `messaging_send_funnel_check` | `check_messaging_send_funnel.sh` | Every messaging driver send goes through `messaging_deliver` (per-provider formatting and escaping) |
+| `tool_action_kinds_check` | `check_tool_action_kinds.sh` | Every tool's action-kinds table names its own actions, and each prepare names a listed confirm |
+| `llm_blocks_confined_check` | `check_llm_blocks_confined.sh` | Stored turn blocks (`messages.llm_blocks`) are read only to rebuild an LLM request |
+| `message_kind_confined_check` | `check_message_kind_confined.sh` | Request-context rows (a `messages.kind`) are never shown, searched, counted or extracted |
+| `user_removal_marked_check` | `check_user_removal_marked.sh` | A delete a user makes is marked as their removal, so it is withdrawn from conversations |
+| `blob_marker_sync_check` | `check_blob_marker_sync.sh` | The chat-attachment blob marker agrees across its producer, parser and orphan sweep |
+| `no_raw_strncpy_check` | `check_no_raw_strncpy.sh` | No raw `strncpy`/`strncat` in directories moved to `safe_strscpy` |
+| `no_process_mgmt_check` | `check_no_process_mgmt.sh` | No process-management calls in the MCP bridge or code-project sources |
 
 ---
 
@@ -289,6 +305,31 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    turn via the turn queue or detached) │
 │  Job notify      — transient detached delivery of job  │
 │                    completions (chime/banner/voice)     │
+│  Compaction      — one per session, joinable: a long   │
+│                    history summarized ahead of its turn │
+│  DB storage      — auth.db's checkpoints (own connection,│
+│                    off the global mutex) + free pages  │
+│                    returned to the disk in chunks      │
+│  Session reaper  — finishes destroyed sessions once    │
+│                    their last reference is released    │
+│  Forget/withdraw — on demand: removes a user's         │
+│                    forgotten items from live and stored│
+│                    conversations                       │
+│  Embed backfill  — embeds facts stored without an      │
+│                    embedding (request queue + startup  │
+│                    sweep)                              │
+│  Spec decode     — always-on WebUI, shadow mode only: a│
+│                    decode at a pause, logged for       │
+│                    agreement, never used               │
+│  Satellite remap — detached per remap: saves the       │
+│                    previous user's conversation,       │
+│                    applies the new user                │
+│  Conv memory     — detached: counts/forgets memories   │
+│                    learned from a conversation made    │
+│                    private                             │
+│  Stocks refresh  — pushes quotes to open stocks panels │
+│                    (every 30s in market hours); idle   │
+│                    when no panel is open               │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -369,7 +410,6 @@ Global daemon locks (src/dawn.c):
   llm_mutex              — LLM worker thread ↔ main thread buffer transfer
   tts_mutex              — TTS engine (Piper) serialization
   conversation_mutex     — conversation history list
-  direct_mode_prompt_mutex — direct-mode prompt reload
 
 Per-session locks (src/core/session_manager.c):
   session->history_mutex    — session conversation history
@@ -377,6 +417,9 @@ Per-session locks (src/core/session_manager.c):
   session->fd_mutex         — WebSocket file-descriptor state
   session->ref_mutex        — session reference counting
   session->llm_config_mutex — per-session LLM config overrides
+  session->tools_mutex      — the tools running now, and a render_visual result waiting for the reply to save
+  (llm_config_mutex, history_mutex, metrics_mutex and tools_mutex are leaves: never two held at once,
+   copy under the lock; the order is session_manager_rwlock, ref_mutex, fd_mutex, then one of these)
 
 Per-module locks (scoped to a single subsystem):
   auth_db mutex (src/auth/auth_db_core.c)         — SQLite serialization
@@ -388,8 +431,43 @@ Per-module locks (scoped to a single subsystem):
   utterance_dedup::s_mutex (utterance_dedup.c)    — cross-device dedup slots (leaf)
   attention::s_mutex (src/core/attention/attention_core.c) — SAGE watch cache + event queue + metrics (leaf)
   turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
+  focus_source::s_registry_mutex (src/core/focus/focus_source.c) — the retrieval-adapter registry (LEAF: held only to
+                                                                     register or clear an adapter; adapters register once at
+                                                                     startup, so a turn's focus_compose reads the registry
+                                                                     without it)
+  llm_tools::llm_tools_mutex (src/llm/llm_tools*.c)         — the LLM tool table + cached schema hashes; taken BEFORE the tool registry's own mutex (schemas are built from registry lookups), never after it
+  session_prefix::s_withdraw_mutex (src/core/session_prefix.c) — the withdraw worker's queue (LEAF: never held across a withdrawal)
+  auth_db_storage::s_wake_mutex (src/auth/auth_db_storage.c) — wakes the storage thread (LEAF: taken by the WAL hook inside a
+                                                                     commit, the auth_db mutex held; the thread never holds it while taking the auth_db mutex)
+  llm_cache_monitor::s_keys_mutex + s_alert_mutex (src/llm/llm_cache_monitor.c) — cache keys, warning times, queued
+                                                                     alerts (LEAVES: taken under history_mutex by a history
+                                                                     rewrite; no other lock or callout while held)
+  llm_cache_monitor::s_queue_mutex (src/llm/llm_cache_monitor.c) — usage records waiting for the 1-second flush (LEAF: held
+                                                                     only to queue, copy out or remove rows; never across the
+                                                                     database write)
+  tool_call_challenge::s_mutex (src/core/tool_call_challenge.c) — actions waiting for a reply code (LEAF: held only to find,
+                                                                     add, hand out or drop an entry; never across a tool call or a send)
+  session_reaper::s_mutex (src/core/session_reaper.c)          — the reaper's list of destroyed sessions (LEAF: never held while
+                                                                     finishing one; a release to zero wakes it after dropping ref_mutex)
+  webui_music_server::s_registry_mutex (src/webui/webui_music_server.c) — authenticated music sockets (taken after
+                                                                     s_conn_registry_mutex, before s_music_teardown_mutex; other threads only mark a
+                                                                     socket to close and wake the music thread, which alone releases its session reference)
+  tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
+                                                                     history_mutex; held only to find, pin, insert and release a slot, never across a render)
+  tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that
+                                                                     read's render; takes no other lock, never taken under history_mutex or the auth_db lock)
+  image sweep (src/blob_store.c → src/core/session_image_hold.c) — no lock of its own: the unbound-image sweep chooses a batch under the
+                                                                     auth_db lock, RELEASES it, asks what holds the batch (the session registry's
+                                                                     rwlock and then job_manager::s_pool_mutex, each only to snapshot ids, released;
+                                                                     then each owner's session history_mutex in turn), and takes the auth_db lock
+                                                                     again to delete.  Never run image_store_cleanup / image_store_reclaim_unbound
+                                                                     while holding a history_mutex or the auth_db lock
   job_manager::s_pool_mutex (src/core/job_manager.c)       — background-job session pool (REGISTRY tier, like session_manager_rwlock: released before any ref-cond wait, session_free, or conv_db_*/scheduler_* callout)
   job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
+  memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)
+  document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (LEAF: never held across a database call; a rebuild reads pages outside it, then installs; scoring holds only this)
+  memory_embeddings_entity::s_ent.mutex (src/memory/memory_embeddings_entity.c) — per-user entity-embedding copies (LEAF: held only to look up, score and install; a copy is read from the DB and name-stemmed with no cache lock held; invalidation is lock-free atomics, safe under the auth_db lock)
+  memory_extraction::s_extraction_mutex + s_extraction_cond (src/memory/memory_extraction.c) — per-user extraction slots (leaf); the cond var lets a forget wait out a user's in-flight extraction (memory_extraction_hold_user)
   ...and similar per-tool mutexes in src/tools/*.c
 ```
 
@@ -443,7 +521,7 @@ static int16_t audio_buffer[AUDIO_BUFFER_SIZE];
 ```c
 char *response = malloc(response_len);
 if (response == NULL) {
-   LOG_ERROR("Failed to allocate response buffer");
+   OLOG_ERROR("Failed to allocate response buffer");
    return FAILURE;
 }
 // ... use response ...
@@ -509,7 +587,7 @@ Modules define specific error codes > 1 in their own headers (e.g., `AUTH_DB_FAI
 ```c
 int asr_process_audio(ASRContext *ctx, int16_t *audio, size_t samples) {
    if (ctx == NULL || audio == NULL) {
-      LOG_ERROR("Invalid parameters");
+      OLOG_ERROR("Invalid parameters");
       return FAILURE;
    }
    // ... processing ...
@@ -523,7 +601,7 @@ int asr_process_audio(ASRContext *ctx, int16_t *audio, size_t samples) {
 int retry_count = 0;
 while (retry_count < MAX_RETRIES) {
    if (send_packet(packet) == SUCCESS) break;
-   LOG_WARNING("Send failed, retry %d/%d", retry_count + 1, MAX_RETRIES);
+   OLOG_WARNING("Send failed, retry %d/%d", retry_count + 1, MAX_RETRIES);
    sleep(1 << retry_count);  // 1s, 2s, 4s
    retry_count++;
 }
@@ -535,7 +613,7 @@ while (retry_count < MAX_RETRIES) {
 if (gpu_available) {
    ctx = asr_whisper_init(model_path);
 } else {
-   LOG_WARNING("GPU not available, using CPU-only ASR");
+   OLOG_WARNING("GPU not available, using CPU-only ASR");
    ctx = asr_vosk_init(model_path);
 }
 ```
@@ -650,7 +728,7 @@ claude_api_key = "sk-ant-..."
 gemini_api_key = "..."
 ```
 
-**`dawn.h`** — compile-time fallbacks: `AI_NAME`, `AI_DESCRIPTION`, `DEFAULT_PCM_PLAYBACK_DEVICE`, `DEFAULT_PCM_CAPTURE_DEVICE`, `MQTT_IP`, `MQTT_PORT`.
+**`dawn.h`** — compile-time fallbacks: `APPLICATION_NAME`, `AI_NAME`, the default persona (`AI_PERSONA`, `AI_PERSONA_TRAITS`), the default voice-output directives (`DEFAULT_VOICE_OUTPUT_DIRECTIVE`, `_WEBUI`) and the ASR disambiguation hint. Audio devices and MQTT broker defaults live in `src/config/config_defaults.c`.
 
 **`models.toml`** — model context-window registry (per-model-prefix → max input tokens for OpenAI/Anthropic/Gemini). Read-only reference data loaded once by `llm_context.c` at startup; **exempt from the `dawn.toml` settings round-trip** (never rewritten). Edit + restart to update; no rebuild. OpenRouter/local windows are fetched live and not listed. See [MODELS_TOML_DESIGN.md](docs/MODELS_TOML_DESIGN.md).
 
@@ -739,8 +817,8 @@ and prompt processing costs ~nothing — its 0.75 s median total is essentially
 generation time alone. Production is not so lucky: the same logs show 1,749
 full re-process events from cache misses, and that is why the production median
 is 3.8 s while a benchmark at a *larger* prompt finishes in under a second.
-DAWN's two-segment prompt design (`prompt_compose.c`, stable prefix + volatile
-tail) exists precisely to keep that prefix cacheable. Full detail, per-model rates and the
+DAWN's append-only conversation requests (`session_prefix.c`: a frozen system
+prompt, later changes appended) exist precisely to keep that prefix cacheable. Full detail, per-model rates and the
 measured size→TTFT curve live in
 [services/llama-server/README.md](services/llama-server/README.md#latency-what-actually-governs-perceived-speed).
 

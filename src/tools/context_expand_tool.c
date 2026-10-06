@@ -18,8 +18,8 @@
  *
  * Context Expand Tool — retrieve original messages from compacted summaries
  *
- * LCM Phase 3: when compaction summarizes messages, the summary includes a
- * [COMPACTED conv=N msgs=X-Y] tag. This tool retrieves the original messages
+ * When compaction summarizes messages, the history holds a CONVERSATION
+ * SUMMARY block in their place. This tool retrieves the original messages
  * by querying the database, making compaction non-destructive from the model's
  * perspective.
  */
@@ -41,6 +41,60 @@
 #define EXPAND_TOKEN_BUDGET 4000
 #define EXPAND_CHAR_BUDGET (EXPAND_TOKEN_BUDGET * 4)
 
+/* Whether @p target is @p turn_conv or one it continues (following
+ * continued_from up, as far as a continuation chain can go). */
+static bool in_turn_lineage(int64_t target, int64_t turn_conv, int user_id) {
+   int64_t c = turn_conv;
+   for (int i = 0; c > 0 && i < CONV_CHAIN_MAX; i++) {
+      if (c == target) {
+         return true;
+      }
+      conversation_t conv = { 0 };
+      if (conv_db_get(c, user_id, &conv) != AUTH_DB_SUCCESS) {
+         conv_free(&conv);
+         return false;
+      }
+      c = conv.continued_from;
+      conv_free(&conv);
+   }
+   return false;
+}
+
+/* Whether conversation @p conv_id's private text may come back into this turn
+ * (in conversation @p turn_conv): only into the conversation itself or its
+ * continuations; named from anywhere else it would carry private text into a
+ * conversation that is not private (and on into memory).  A continuation made
+ * public on its own must not pull its private parent's text into itself. */
+static bool private_readable(int64_t conv_id, int64_t turn_conv, int user_id) {
+   if (!in_turn_lineage(conv_id, turn_conv, user_id)) {
+      return false;
+   }
+   if (conv_id == turn_conv) {
+      return true;
+   }
+   bool target_private = false;
+   bool turn_private = false;
+   return conv_db_is_private(conv_id, user_id, &target_private) == AUTH_DB_SUCCESS &&
+          conv_db_is_private(turn_conv, user_id, &turn_private) == AUTH_DB_SUCCESS &&
+          (!target_private || turn_private);
+}
+
+/* Whether a summary of conversation @p conv_id may be shown in this turn: the
+ * user's, and not private text leaving its lineage. */
+static bool summary_readable(int64_t conv_id, int64_t turn_conv, int user_id) {
+   bool is_private = false;
+   if (conv_db_is_private(conv_id, user_id, &is_private) != AUTH_DB_SUCCESS) {
+      return false; /* not the user's */
+   }
+   return !is_private || private_readable(conv_id, turn_conv, user_id);
+}
+
+/* This turn's conversation (not the one being viewed), or 0. */
+static int64_t turn_conversation(void) {
+   session_t *session = session_get_command_context();
+   return session ? session_turn_conversation(session) : 0;
+}
+
 static char *context_expand_callback(const char *action, char *value, int *should_respond);
 
 static const treg_param_t context_expand_params[] = {
@@ -55,9 +109,8 @@ static const treg_param_t context_expand_params[] = {
    },
    {
        .name = "start_id",
-       .description = "First message ID from the [COMPACTED] tag. "
-                      "Required for raw message retrieval (with end_id). "
-                      "Not needed when using node_id.",
+       .description = "First message ID of a range to show (with end_id). "
+                      "Omit every ID to show what this conversation's summary replaced.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -65,9 +118,7 @@ static const treg_param_t context_expand_params[] = {
    },
    {
        .name = "end_id",
-       .description = "Last message ID from the [COMPACTED] tag. "
-                      "Required for raw message retrieval (with start_id). "
-                      "Not needed when using node_id.",
+       .description = "Last message ID of a range to show (with start_id).",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -75,9 +126,8 @@ static const treg_param_t context_expand_params[] = {
    },
    {
        .name = "conversation_id",
-       .description = "Conversation ID from the [COMPACTED] tag. "
-                      "Omit to use the current conversation or its parent. "
-                      "Not needed when using node_id.",
+       .description = "Conversation of the range. "
+                      "Omit to use the current conversation or its parent.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -85,9 +135,8 @@ static const treg_param_t context_expand_params[] = {
    },
    {
        .name = "node_id",
-       .description = "Summary node ID from the [COMPACTED] tag. "
-                      "When provided alone, returns the summary hierarchy for "
-                      "multi-resolution drill-down. No other parameters needed.",
+       .description = "A summary node's ID (from an earlier expand): returns it and the "
+                      "summary before it, for drill-down.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -97,17 +146,18 @@ static const treg_param_t context_expand_params[] = {
 
 static const tool_metadata_t context_expand_metadata = {
    .name = "context_expand",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "context_expand",
    .topic = "dawn",
    .aliases = { NULL },
    .alias_count = 0,
 
-   .description = "Retrieve original messages that were compacted into a summary. "
-                  "Look for [COMPACTED conv=N msgs=X-Y node=Z depth=D] tags. "
-                  "Use start_id/end_id for raw messages, or node_id for multi-resolution "
-                  "drill-down (shows the prior summary level).",
+   .description = "Show the original messages a CONVERSATION SUMMARY block replaced. "
+                  "Call it with no IDs for the latest summary's messages; use "
+                  "start_id/end_id for a range of message IDs, or node_id to drill down "
+                  "through earlier summaries.",
    .params = context_expand_params,
-   .param_count = 5,
+   .param_count = TOOL_PARAM_COUNT(context_expand_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
@@ -146,24 +196,64 @@ static int expand_message_cb(const conversation_message_t *msg, void *ctx) {
    return 0;
 }
 
+/* The range of the latest summary of this turn's conversation (or of the one
+ * it continues); false when there is none. */
+static bool latest_summary_range(int64_t *conv_out, int64_t *start_out, int64_t *end_out) {
+   int64_t conv_id = turn_conversation();
+   const int user_id = tool_get_current_user_id();
+   if (conv_id <= 0 || user_id <= 0) {
+      return false;
+   }
+   for (int hop = 0; hop < 2 && conv_id > 0; hop++) {
+      conversation_t conv = { 0 };
+      if (conv_db_get(conv_id, user_id, &conv) != AUTH_DB_SUCCESS) {
+         conv_free(&conv);
+         return false; /* not the user's */
+      }
+      const int64_t parent = conv.continued_from;
+      conv_free(&conv);
+      summary_node_t node = { 0 };
+      if (summary_node_get_latest(conv_id, &node) == AUTH_DB_SUCCESS && node.msg_id_start > 0 &&
+          node.msg_id_end >= node.msg_id_start) {
+         *conv_out = conv_id;
+         *start_out = node.msg_id_start;
+         *end_out = node.msg_id_end;
+         summary_node_free(&node);
+         return true;
+      }
+      summary_node_free(&node);
+      conv_id = parent;
+   }
+   return false;
+}
+
 static char *context_expand_callback(const char *action, char *value, int *should_respond) {
    (void)action;
    *should_respond = 1;
 
-   if (!value || value[0] == '\0')
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: no message range provided.");
-
    char tmp[32];
    int64_t start_id = 0, end_id = 0, conv_id = 0, node_id = 0;
 
-   if (tool_param_extract_custom(value, "start_id", tmp, sizeof(tmp)))
+   if (value && tool_param_extract_custom(value, "start_id", tmp, sizeof(tmp)))
       start_id = atoll(tmp);
-   if (tool_param_extract_custom(value, "end_id", tmp, sizeof(tmp)))
+   if (value && tool_param_extract_custom(value, "end_id", tmp, sizeof(tmp)))
       end_id = atoll(tmp);
-   if (tool_param_extract_custom(value, "conversation_id", tmp, sizeof(tmp)))
+   if (value && tool_param_extract_custom(value, "conversation_id", tmp, sizeof(tmp)))
       conv_id = atoll(tmp);
-   if (tool_param_extract_custom(value, "node_id", tmp, sizeof(tmp)))
+   if (value && tool_param_extract_custom(value, "node_id", tmp, sizeof(tmp)))
       node_id = atoll(tmp);
+
+   /* Nothing named: the messages this conversation's summary replaced (the
+    * CONVERSATION SUMMARY block carries no ids; its range is the latest
+    * summary's).  The output budget bounds it, not the span of ids (global and
+    * sparse). */
+   bool latest_summary = false;
+   if (node_id <= 0 && start_id <= 0 && end_id <= 0) {
+      if (!latest_summary_range(&conv_id, &start_id, &end_id)) {
+         return strdup("This conversation has no summary to expand.");
+      }
+      latest_summary = true;
+   }
 
    /* Node-based expansion: return the node's prior summary for multi-resolution drill-down */
    if (node_id > 0) {
@@ -172,22 +262,31 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
          return strdup(TOOL_RESULT_ERROR_MARK "Error: no authenticated user.");
 
       summary_node_t node = { 0 };
-      if (summary_node_get(node_id, &node) != AUTH_DB_SUCCESS)
-         return strdup(TOOL_RESULT_ERROR_MARK "Error: summary node not found.");
-
-      /* Verify ownership via the node's conversation */
-      conversation_t conv_check = { 0 };
-      if (conv_db_get(node.conversation_id, user_id, &conv_check) != AUTH_DB_SUCCESS) {
+      /* One answer for a node that isn't there and one that isn't the user's:
+       * node ids are sequential, and whose exist is not the model's to learn. */
+      if (summary_node_get(node_id, &node) != AUTH_DB_SUCCESS) {
          summary_node_free(&node);
-         return strdup(TOOL_RESULT_ERROR_MARK "Error: access denied to that summary node.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: summary node not found.");
       }
-      conv_free(&conv_check);
+
+      /* The user's own, and no private summary leaving its lineage (the prior
+       * node may be another conversation's: the one this continues). */
+      const int64_t turn_conv = turn_conversation();
+      if (!summary_readable(node.conversation_id, turn_conv, user_id)) {
+         summary_node_free(&node);
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: summary node not found.");
+      }
 
       /* Pre-fetch prior node to right-size the buffer */
       summary_node_t prior = { 0 };
       bool has_prior = false;
-      if (node.prior_node_id > 0)
+      if (node.prior_node_id > 0) {
          has_prior = (summary_node_get(node.prior_node_id, &prior) == AUTH_DB_SUCCESS);
+         if (has_prior && !summary_readable(prior.conversation_id, turn_conv, user_id)) {
+            summary_node_free(&prior);
+            has_prior = false;
+         }
+      }
 
       size_t summary_len = node.summary_text ? strlen(node.summary_text) : 0;
       size_t prior_len = (has_prior && prior.summary_text) ? strlen(prior.summary_text) : 0;
@@ -241,19 +340,21 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
                     "Error: start_id and end_id are required (positive integers).");
    if (end_id < start_id)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: end_id must be >= start_id.");
-   if (end_id - start_id > 500)
+   if (!latest_summary && end_id - start_id > 500)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: range too large (max 500 messages).");
 
    int user_id = tool_get_current_user_id();
    if (user_id <= 0)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: no authenticated user.");
 
+   /* The conversation this turn belongs to, and whether the model named one. */
+   const int64_t turn_conv = turn_conversation();
+
    /* If conversation_id not provided, use current or its parent */
    if (conv_id <= 0) {
-#ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
       if (session) {
-         conv_id = webui_get_active_conversation_id(session);
+         conv_id = session_turn_conversation(session); /* this turn's, not the view */
          if (conv_id > 0) {
             conversation_t conv = { 0 };
             if (conv_db_get(conv_id, user_id, &conv) == AUTH_DB_SUCCESS) {
@@ -263,7 +364,6 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
             }
          }
       }
-#endif
       if (conv_id <= 0)
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: conversation_id required (could not determine from context).");
@@ -287,11 +387,11 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
       header_len = ec.capacity - 1;
    ec.offset = header_len;
 
-   /* include_private = true: user is expanding a [COMPACTED ...] block from
-    * their own active session, which may itself be a private conversation.
-    * Privacy is intra-conversation; ownership check still applies. */
+   /* A private conversation's messages come back only into its own lineage
+    * (private_readable); ownership is checked either way. */
+   const bool include_private = private_readable(conv_id, turn_conv, user_id);
    int rc = conv_db_get_messages_by_range(conv_id, user_id, start_id, end_id, /*max_rows=*/0,
-                                          /*include_private=*/true, expand_message_cb, &ec);
+                                          include_private, expand_message_cb, &ec);
 
    if (rc == AUTH_DB_FORBIDDEN) {
       free(ec.buf);

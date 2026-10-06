@@ -66,41 +66,156 @@ void ext_mock_reset(void) {
  * document_db stubs
  * ============================================================================= */
 
-int document_db_chunk_search_load(int user_id,
-                                  document_chunk_t *chunks,
-                                  float *embedding_buf,
-                                  int dims,
-                                  int max_count,
-                                  int *count_out) {
-   s_ext_mock.call_count_chunk_search_load++;
-   if (s_ext_mock.fail_chunk_search) {
-      if (count_out)
-         *count_out = 0;
+/* A new generation every call unless a test pins it: tests reconfigure the mock
+ * chunk set between cases, so the real document_embed_cache must not reuse a
+ * copy across them. */
+int document_db_chunk_generation(int user_id, document_chunk_gen_t *gen_out) {
+   static int64_t gen;
+   (void)user_id;
+   if (!gen_out)
       return FAILURE;
-   }
-   if (chunks == NULL || embedding_buf == NULL || count_out == NULL || dims <= 0)
+   gen_out->own = s_ext_mock.pin_generation ? s_ext_mock.generation : ++gen;
+   gen_out->shared = 0;
+   return SUCCESS;
+}
+
+int document_db_chunk_count(int user_id, int *count_out) {
+   if (!count_out)
       return FAILURE;
-
-   /* Honor expected_dims contract — production returns SUCCESS with
-    * count=0 on dim mismatch. */
-   if (s_ext_mock.chunk_dim != 0 && s_ext_mock.chunk_dim != dims) {
-      *count_out = 0;
-      return SUCCESS;
-   }
-
    int n = 0;
-   for (int i = 0; i < s_ext_mock.chunk_count && n < max_count; i++) {
-      if (s_ext_mock.chunk_user_id[i] != user_id)
-         continue;
-      if (s_ext_mock.chunk_embeddings[i] == NULL)
-         continue;
-      chunks[n] = s_ext_mock.chunks[i];
-      memcpy(&embedding_buf[n * dims], s_ext_mock.chunk_embeddings[i],
-             (size_t)dims * sizeof(float));
-      chunks[n].embedding = &embedding_buf[n * dims];
-      n++;
+   for (int i = 0; i < s_ext_mock.chunk_count; i++) {
+      if (s_ext_mock.chunk_user_id[i] == user_id)
+         n++;
    }
    *count_out = n;
+   return SUCCESS;
+}
+
+/* Counts scans (a page starting from the beginning), not pages.  The mock is
+ * one document: the cursor's chunk id is the position. */
+int document_db_chunk_embeddings_page(int user_id,
+                                      int dims,
+                                      document_chunk_cursor_t *cursor,
+                                      int max,
+                                      int64_t *ids_out,
+                                      float *norms_out,
+                                      float *embs_out,
+                                      int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!cursor || !ids_out || !norms_out || !embs_out || !count_out || dims <= 0)
+      return FAILURE;
+   if (cursor->done)
+      return SUCCESS;
+   if (cursor->chunk_id == 0)
+      s_ext_mock.call_count_chunk_search_load++;
+   if (s_ext_mock.fail_chunk_search)
+      return FAILURE;
+   /* Production skips chunks whose stored embedding size differs. */
+   const bool dims_ok = s_ext_mock.chunk_dim == 0 || s_ext_mock.chunk_dim == dims;
+   int n = 0;
+   int read = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && read < max; i++) {
+      const int64_t id = s_ext_mock.chunks[i].id;
+      if (s_ext_mock.chunk_user_id[i] != user_id || id <= cursor->chunk_id)
+         continue;
+      read++;
+      cursor->chunk_id = id;
+      if (!dims_ok || s_ext_mock.chunk_embeddings[i] == NULL)
+         continue;
+      ids_out[n] = id;
+      norms_out[n] = s_ext_mock.chunks[i].embedding_norm;
+      memcpy(embs_out + (size_t)n * (size_t)dims, s_ext_mock.chunk_embeddings[i],
+             (size_t)dims * sizeof(float));
+      n++;
+   }
+   if (read < max)
+      cursor->done = true;
+   *count_out = n;
+   return SUCCESS;
+}
+
+int document_db_chunks_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  document_chunk_t *out,
+                                  int *count_out) {
+   if (ids == NULL || out == NULL || count_out == NULL || n <= 0)
+      return FAILURE;
+   int count = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && count < n; i++) {
+      if (s_ext_mock.chunk_user_id[i] != user_id)
+         continue;
+      for (int k = 0; k < n; k++) {
+         if (ids[k] == s_ext_mock.chunks[i].id) {
+            out[count] = s_ext_mock.chunks[i];
+            out[count].embedding = NULL;
+            count++;
+            break;
+         }
+      }
+   }
+   *count_out = count;
+   return SUCCESS;
+}
+
+int document_db_chunks_meta_by_ids(int user_id,
+                                   const int64_t *ids,
+                                   int n,
+                                   doc_chunk_meta_t *out,
+                                   int *count_out) {
+   if (ids == NULL || out == NULL || count_out == NULL || n <= 0)
+      return FAILURE;
+   int count = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && count < n; i++) {
+      if (s_ext_mock.chunk_user_id[i] != user_id)
+         continue;
+      for (int k = 0; k < n; k++) {
+         if (ids[k] == s_ext_mock.chunks[i].id) {
+            const document_chunk_t *c = &s_ext_mock.chunks[i];
+            doc_chunk_meta_t *m = &out[count++];
+            memset(m, 0, sizeof(*m));
+            m->id = c->id;
+            m->chunk_index = c->chunk_index;
+            m->document_id = c->document_id;
+            m->created_at = c->created_at;
+            snprintf(m->filename, sizeof(m->filename), "%s", c->doc_filename);
+            break;
+         }
+      }
+   }
+   *count_out = count;
+   return SUCCESS;
+}
+
+int document_db_chunk_search_bm25(int user_id,
+                                  const char *query,
+                                  float label_weight,
+                                  float body_weight,
+                                  doc_bm25_hit_t *out,
+                                  float *out_scores,
+                                  int max_hits,
+                                  int *count_out) {
+   (void)query;
+   (void)label_weight;
+   (void)body_weight;
+   s_ext_mock.call_count_bm25++;
+   int count = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && count < max_hits; i++) {
+      if (s_ext_mock.chunk_user_id[i] != user_id || s_ext_mock.chunk_bm25[i] <= 0.0f)
+         continue;
+      const document_chunk_t *c = &s_ext_mock.chunks[i];
+      doc_bm25_hit_t *h = &out[count];
+      memset(h, 0, sizeof(*h));
+      h->id = c->id;
+      h->chunk_index = c->chunk_index;
+      h->document_id = c->document_id;
+      h->created_at = c->created_at;
+      snprintf(h->filename, sizeof(h->filename), "%s", c->doc_filename);
+      out_scores[count] = s_ext_mock.chunk_bm25[i];
+      count++;
+   }
+   *count_out = count;
    return SUCCESS;
 }
 
@@ -184,9 +299,65 @@ int calendar_db_occurrences_in_range(const int64_t *calendar_ids,
    for (int i = 0; i < s_ext_mock.occurrence_count && n < max_count; i++) {
       if (!calendar_id_in_set(s_ext_mock.occurrence_calendar_id[i], calendar_ids, calendar_count))
          continue;
-      if (!occ_in_range(&s_ext_mock.occurrences[i], range_start, range_end))
+      if (s_ext_mock.occurrences[i].all_day ||
+          !occ_in_range(&s_ext_mock.occurrences[i], range_start, range_end))
          continue;
       out[n++] = s_ext_mock.occurrences[i];
+   }
+   *count_out = n;
+   return SUCCESS;
+}
+
+/* Mirrors the production query: per event, the occurrence nearest to now
+ * within the range; nearest first; at most max_count. */
+int calendar_db_events_nearest(const int64_t *calendar_ids,
+                               int calendar_count,
+                               time_t range_start,
+                               time_t range_end,
+                               time_t now,
+                               calendar_occurrence_t *out,
+                               int max_count,
+                               int *count_out) {
+   s_ext_mock.call_count_events_nearest++;
+   if (s_ext_mock.fail_events_nearest) {
+      if (count_out)
+         *count_out = 0;
+      return FAILURE;
+   }
+   if (out == NULL || count_out == NULL)
+      return FAILURE;
+   int n = 0;
+   for (int i = 0; i < s_ext_mock.occurrence_count; i++) {
+      const calendar_occurrence_t *o = &s_ext_mock.occurrences[i];
+      if (!calendar_id_in_set(s_ext_mock.occurrence_calendar_id[i], calendar_ids, calendar_count) ||
+          !occ_in_range(o, range_start, range_end))
+         continue;
+      const time_t d = o->dtstart > now ? o->dtstart - now : now - o->dtstart;
+      int slot = -1;
+      for (int j = 0; j < n; j++)
+         if (out[j].event_id == o->event_id)
+            slot = j;
+      if (slot < 0) {
+         if (n >= max_count)
+            continue;
+         out[n++] = *o;
+      } else {
+         const time_t ds = out[slot].dtstart > now ? out[slot].dtstart - now
+                                                   : now - out[slot].dtstart;
+         if (d < ds)
+            out[slot] = *o;
+      }
+   }
+   /* Nearest first (insertion sort; mock sizes are tiny). */
+   for (int i = 1; i < n; i++) {
+      calendar_occurrence_t key = out[i];
+      const time_t dk = key.dtstart > now ? key.dtstart - now : now - key.dtstart;
+      int j = i - 1;
+      while (j >= 0 && (out[j].dtstart > now ? out[j].dtstart - now : now - out[j].dtstart) > dk) {
+         out[j + 1] = out[j];
+         j--;
+      }
+      out[j + 1] = key;
    }
    *count_out = n;
    return SUCCESS;
@@ -334,6 +505,8 @@ int calendar_db_occurrence_delete_for_event(int64_t id) {
    (void)id;
    abort();
 }
+/* Mirrors the production date-keyed query: all-day, not cancelled, and
+ * dtstart_date < end, dtend_date > start (ISO dates compare as strings). */
 int calendar_db_allday_occurrences_in_range(const int64_t *ids,
                                             int n,
                                             const char *s,
@@ -341,14 +514,20 @@ int calendar_db_allday_occurrences_in_range(const int64_t *ids,
                                             calendar_occurrence_t *o,
                                             int m,
                                             int *c) {
-   (void)ids;
-   (void)n;
-   (void)s;
-   (void)e;
-   (void)o;
-   (void)m;
-   (void)c;
-   abort();
+   s_ext_mock.call_count_allday_in_range++;
+   if (!o || !c)
+      return FAILURE;
+   int k = 0;
+   for (int i = 0; i < s_ext_mock.occurrence_count && k < m; i++) {
+      const calendar_occurrence_t *occ = &s_ext_mock.occurrences[i];
+      if (!occ->all_day || occ->is_cancelled ||
+          !calendar_id_in_set(s_ext_mock.occurrence_calendar_id[i], ids, n) ||
+          strcmp(occ->dtstart_date, e) >= 0 || strcmp(occ->dtend_date, s) <= 0)
+         continue;
+      o[k++] = *occ;
+   }
+   *c = k;
+   return SUCCESS;
 }
 int calendar_db_next_occurrence(const int64_t *ids, int n, time_t a, calendar_occurrence_t *o) {
    (void)ids;
@@ -486,6 +665,20 @@ float memory_embeddings_cosine_with_norms(const float *a,
       return 1.0f;
    return (float)cosine;
 }
+
+/* embedding_engine_* (the real document_embed_cache links against these). */
+float embedding_engine_l2_norm(const float *vec, int dims) {
+   return memory_embeddings_l2_norm(vec, dims);
+}
+
+float embedding_engine_cosine_with_norms(const float *a,
+                                         const float *b,
+                                         int dims,
+                                         float norm_a,
+                                         float norm_b) {
+   return memory_embeddings_cosine_with_norms(a, b, dims, norm_a, norm_b);
+}
+
 
 /* memory_filter — production blocklist NOT linked.  Tests never inject
  * blocklist payloads through the adapter path; framework filter-on-

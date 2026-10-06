@@ -212,6 +212,18 @@ static void test_cancel_with_punctuation(void) {
    TEST_ASSERT_TRUE_MESSAGE(r.is_cancel, "stop with punctuation detected");
 }
 
+/* The phrases the local mic alone used to stop on: every surface does now. */
+static void test_cancel_phrases_shared_by_every_surface(void) {
+   TEST_ASSERT_TRUE(wake_word_check("Shut up.").is_cancel);
+   TEST_ASSERT_TRUE(wake_word_check("That's enough!").is_cancel);
+   TEST_ASSERT_TRUE(wake_word_check("stop right there").is_cancel);
+   TEST_ASSERT_TRUE(wake_word_is_cancel(" Silence."));
+   TEST_ASSERT_TRUE(wake_word_is_cancel("Say no more "));
+   TEST_ASSERT_FALSE(wake_word_is_cancel("stop the music"));
+   TEST_ASSERT_FALSE(wake_word_is_cancel(""));
+   TEST_ASSERT_FALSE(wake_word_is_cancel(NULL));
+}
+
 static void test_ignore_empty(void) {
    /* Empty string after normalization matches the "" ignore word,
     * but wake_word_check returns early for empty input */
@@ -222,6 +234,14 @@ static void test_ignore_empty(void) {
 static void test_ignore_nevermind(void) {
    wake_word_result_t r = wake_word_check("nevermind");
    TEST_ASSERT_TRUE_MESSAGE(r.is_ignore, "nevermind detected as ignore");
+}
+
+/* Spaces ASR puts around a phrase don't hide it: goodbye and ignore match like cancel. */
+static void test_spaced_goodbye_and_ignore(void) {
+   wake_word_result_t r = wake_word_check(" Goodbye.");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_goodbye, "\" Goodbye.\" is a goodbye");
+   r = wake_word_check(" Never mind. ");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_ignore, "\" Never mind. \" is ignored");
 }
 
 static void test_not_goodbye(void) {
@@ -421,8 +441,10 @@ int main(void) {
    RUN_TEST(test_cancel_stop);
    RUN_TEST(test_cancel_never_mind);
    RUN_TEST(test_cancel_with_punctuation);
+   RUN_TEST(test_cancel_phrases_shared_by_every_surface);
    RUN_TEST(test_ignore_empty);
    RUN_TEST(test_ignore_nevermind);
+   RUN_TEST(test_spaced_goodbye_and_ignore);
    RUN_TEST(test_not_goodbye);
 
    /* Command Extraction Edge Cases */

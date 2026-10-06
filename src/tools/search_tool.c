@@ -104,6 +104,7 @@ static const treg_param_t search_params[] = {
 
 static const tool_metadata_t search_metadata = {
    .name = "search",
+   .default_kind = TOOL_KIND_FETCH,
    .device_string = "search",
    .topic = "dawn",
    .aliases = { NULL },
@@ -125,7 +126,7 @@ static const tool_metadata_t search_metadata = {
        "QUERY STYLE: use short keyword phrases (3-6 words), NOT full sentences. "
        "Social/Reddit search returns ZERO results on long natural-language queries.",
    .params = search_params,
-   .param_count = 3,
+   .param_count = TOOL_PARAM_COUNT(search_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE | TOOL_CAP_REQUIRES_VALUE |

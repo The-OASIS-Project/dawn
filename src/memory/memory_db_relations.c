@@ -166,17 +166,33 @@ int memory_db_relation_create(int user_id,
    }
    memory_db_internal_bind_provenance(s_db.stmt_memory_relation_create, 10, prov);
 
+   /* The relation and its source commit together (a savepoint nests inside a
+    * caller's transaction). */
+   const bool sp = sqlite3_exec(s_db.db, "SAVEPOINT relation_create", NULL, NULL, NULL) ==
+                   SQLITE_OK;
+
    /* v49 upsert: RETURNING id, mention_count.  First step yields SQLITE_ROW
     * (whether INSERT or ON CONFLICT path); drain to SQLITE_DONE.  No need to
     * consume the returned values here — observability of mention_count belongs
     * at the supersede call site where extraction can log dedup-hits. */
    int rc = sqlite3_step(s_db.stmt_memory_relation_create);
    bool ok = (rc == SQLITE_ROW || rc == SQLITE_DONE);
+   if (rc == SQLITE_ROW && prov) {
+      memory_db_internal_source_add_locked(
+          MEMORY_SOURCE_RELATION, sqlite3_column_int64(s_db.stmt_memory_relation_create, 0),
+          prov->conv_id);
+   }
    while (rc == SQLITE_ROW) {
       rc = sqlite3_step(s_db.stmt_memory_relation_create);
    }
    ok = ok && (rc == SQLITE_DONE);
    sqlite3_reset(s_db.stmt_memory_relation_create);
+   if (sp) {
+      if (!ok) {
+         sqlite3_exec(s_db.db, "ROLLBACK TO relation_create", NULL, NULL, NULL);
+      }
+      sqlite3_exec(s_db.db, "RELEASE relation_create", NULL, NULL, NULL);
+   }
    AUTH_DB_UNLOCK();
 
    return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
@@ -386,11 +402,13 @@ int memory_db_relation_supersede(int user_id,
    if (rc == SQLITE_ROW) {
       upsert_id = sqlite3_column_int64(create_stmt, 0);
       upsert_mention_count = sqlite3_column_int(create_stmt, 1);
+      if (prov) {
+         memory_db_internal_source_add_locked(MEMORY_SOURCE_RELATION, upsert_id, prov->conv_id);
+      }
       do {
          rc = sqlite3_step(create_stmt);
       } while (rc == SQLITE_ROW);
    }
-   (void)upsert_id; /* read only by the OLOG_DEBUG below (a no-op unless built -DDEBUG) */
    sqlite3_reset(create_stmt);
    if (rc != SQLITE_DONE) {
       int xrc = sqlite3_extended_errcode(s_db.db);

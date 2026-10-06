@@ -290,13 +290,27 @@ int satellite_db_ensure_local_pseudo(void) {
    satellite_mapping_t existing;
    int rc = satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &existing);
    if (rc == AUTH_DB_SUCCESS) {
+      /* A remote client could once register under the reserved id and rename
+       * the row: restore its name, location and tier (the upsert keeps its
+       * owner, room and enabled state). */
+      if (strcmp(existing.name, LOCAL_PSEUDO_SATELLITE_NAME) != 0 || existing.location[0] ||
+          existing.tier != LOCAL_PSEUDO_SATELLITE_TIER) {
+         safe_strscpy(existing.name, LOCAL_PSEUDO_SATELLITE_NAME);
+         existing.location[0] = '\0';
+         existing.tier = LOCAL_PSEUDO_SATELLITE_TIER;
+         rc = satellite_db_upsert(&existing);
+         if (rc == AUTH_DB_SUCCESS) {
+            OLOG_INFO("satellite: restored the local pseudo-satellite's name and tier");
+         }
+         return rc;
+      }
       return AUTH_DB_SUCCESS;
    }
 
    satellite_mapping_t m;
    memset(&m, 0, sizeof(m));
    safe_strscpy(m.uuid, LOCAL_PSEUDO_SATELLITE_UUID);
-   safe_strscpy(m.name, "Local Device");
+   safe_strscpy(m.name, LOCAL_PSEUDO_SATELLITE_NAME);
    m.location[0] = '\0';
    m.ha_area[0] = '\0';
    m.user_id = 0; /* unassigned → backward-compat default (plays for all) */

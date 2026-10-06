@@ -316,6 +316,16 @@ static const state_entry_t state_abbreviations[] = {
 
 static constexpr size_t STATE_COUNT = 51;
 
+// State codes that collide with common English words / acronyms. These expand to
+// the state name ONLY with positive context (a city + comma, or a comma-gated
+// ZIP); bare, they fall through so espeak speaks the letters or word — e.g.
+// "your ID" -> "eye dee" (not "Idaho"), "OK, here's the plan" -> "okay" (not
+// "Oklahoma"). Non-colliders (CA, TX, FL, ...) keep expanding unconditionally.
+static const char STATE_COLLIDERS[][3] = {
+   "AL", "HI", "ID", "IN", "LA", "MA", "MD", "ME", "MO", "MS",
+   "OH", "OK", "OR", "PA", "CT", "SD", "AR", "NE", "VA", "DE",
+};
+
 // Generic abbreviation entry structure
 struct abbrev_entry_t {
    const char *abbrev;
@@ -378,6 +388,66 @@ static inline bool is_valid_abbrev_before(const char *src, size_t pos) {
    return (pos == 0) || is_abbrev_boundary(src[pos - 1]);
 }
 
+// Capitalized words that precede a comma in prose but are NOT cities — so a
+// following state code must not expand ("Yes, OK" is not "Yes, Oklahoma").
+static const char *const state_interjections[] = { "Yes",  "No", "Oh",    "OK",     "Okay",  "Sure",
+                                                   "Well", "Hi", "Hello", "Thanks", "Right", "So" };
+
+static bool word_is_interjection(const char *w, size_t wlen) {
+   for (const char *s : state_interjections) {
+      if (std::strlen(s) == wlen && std::strncmp(s, w, wlen) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+// Context signal A: the code at @pos is preceded by "<Capitalized city>, " — a
+// capitalized word (>= 2 letters, not a prose interjection) then a comma and an
+// optional space. Matches "Boise, ID", "St. Louis, MO", "New York, NY".
+static bool state_city_comma_before(const char *src, size_t pos) {
+   size_t p = pos;
+   if (p == 0)
+      return false;
+   if (src[p - 1] == ' ')
+      p--; /* optional single space between the comma and the code */
+   if (p == 0 || src[p - 1] != ',')
+      return false;
+   p--; /* p now indexes the comma; the city word ends just before it */
+   size_t wend = p;
+   if (wend == 0 || !std::isalpha((unsigned char)src[wend - 1]))
+      return false;
+   size_t ws = wend;
+   while (ws > 0 && std::isalpha((unsigned char)src[ws - 1]))
+      ws--;
+   size_t wlen = wend - ws;
+   if (wlen < 2 || !std::isupper((unsigned char)src[ws]))
+      return false;
+   return !word_is_interjection(src + ws, wlen);
+}
+
+// Context signal B (comma-gated ZIP): the code at @pos is preceded by a comma and
+// followed by exactly a 5-digit ZIP ("Apt 4, ID 83702"). The comma gate keeps
+// "order ID 83702" from reading "order Idaho 83702".
+static bool state_comma_zip(const char *src, size_t pos, size_t len) {
+   size_t p = pos;
+   if (p == 0)
+      return false;
+   if (src[p - 1] == ' ')
+      p--;
+   if (p == 0 || src[p - 1] != ',')
+      return false;
+   size_t q = pos + 2; /* char after the 2-letter code */
+   if (q < len && src[q] == ' ')
+      q++;
+   size_t digits = 0;
+   while (q + digits < len && std::isdigit((unsigned char)src[q + digits]))
+      digits++;
+   /* exactly 5 digits, and not run into a letter ("12345x" is not a ZIP; a '-'
+    * for ZIP+4 is a fine boundary). */
+   return digits == 5 && (q + digits >= len || !std::isalnum((unsigned char)src[q + digits]));
+}
+
 // ============================================================================
 // Lookup Functions
 // ============================================================================
@@ -387,6 +457,7 @@ static inline bool is_valid_abbrev_before(const char *src, size_t pos) {
  * Built once at startup via build_state_lookup_table().
  */
 static const state_entry_t *state_lookup[26][26] = {};
+static bool state_needs_context[26][26] = {};
 static bool state_lookup_built = false;
 
 static void build_state_lookup_table() {
@@ -399,7 +470,17 @@ static void build_state_lookup_table() {
          state_lookup[c1 - 'A'][c2 - 'A'] = &state_abbreviations[i];
       }
    }
+   for (const auto &code : STATE_COLLIDERS) {
+      state_needs_context[(unsigned char)(code[0] - 'A')][(unsigned char)(code[1] - 'A')] = true;
+   }
    state_lookup_built = true;
+}
+
+/** @brief True if this 2-letter state code needs positive context to expand. */
+static inline bool state_code_needs_context(char c1, char c2) {
+   if (c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z')
+      return false;
+   return state_needs_context[(unsigned char)(c1 - 'A')][(unsigned char)(c2 - 'A')];
 }
 
 /**
@@ -645,6 +726,68 @@ static inline size_t find_url_end(const char *src, size_t start, size_t len) {
  * @param domain_end Output: end of domain (before path)
  * @return Spoken form size (with dots expanded to " dot ")
  */
+/* If [start,end) begins with an IPv4 literal (4 dot-separated octets 0-255,
+ * optionally followed by ':' + port), returns the index just past the dotted-quad
+ * so the octets can be spelled; otherwise returns start (not an IP host). */
+static inline size_t domain_ipv4_end(const char *src, size_t start, size_t end) {
+   size_t i = start;
+   for (int octet = 0; octet < 4; octet++) {
+      if (octet > 0) {
+         if (i >= end || src[i] != '.')
+            return start;
+         i++;
+      }
+      int val = 0, nd = 0;
+      while (i < end && nd < 3 && std::isdigit((unsigned char)src[i])) {
+         val = val * 10 + (src[i] - '0');
+         i++;
+         nd++;
+      }
+      if (nd == 0 || val > 255)
+         return start;
+   }
+   if (i != end && src[i] != ':') /* clean host: nothing, or a ':port' follows */
+      return start;
+   return i;
+}
+
+/* Render a URL domain to spoken form. When @out is non-null it writes and returns
+ * the byte count; when null it only computes the size — so extract_domain_info
+ * (size) and write_spoken_domain (write) share ONE implementation and cannot
+ * diverge under the two-pass invariant. Dots become " dot "; an IPv4 host's
+ * octets are spelled digit-by-digit ("1 9 2 dot 1 6 8 dot 1 dot 1"), matching how
+ * a bare IP is read; any ':port' tail and normal-domain letters are copied. */
+static inline size_t render_spoken_domain(const char *src, size_t start, size_t end, char *out) {
+   const size_t ip_end = domain_ipv4_end(src, start, end); /* == start if not an IP */
+   size_t pos = 0;
+   bool first_digit = true;
+   for (size_t i = start; i < end; i++) {
+      char c = src[i];
+      if (c == '.') {
+         if (out)
+            std::memcpy(out + pos, " dot ", 5);
+         pos += 5;
+         first_digit = true;
+      } else if (i < ip_end && std::isdigit((unsigned char)c)) {
+         if (!first_digit) {
+            if (out)
+               out[pos] = ' ';
+            pos++;
+         }
+         if (out)
+            out[pos] = c;
+         pos++;
+         first_digit = false;
+      } else {
+         if (out)
+            out[pos] = c;
+         pos++;
+         first_digit = false;
+      }
+   }
+   return pos;
+}
+
 static inline size_t extract_domain_info(const char *src,
                                          size_t url_start,
                                          size_t url_end,
@@ -665,35 +808,17 @@ static inline size_t extract_domain_info(const char *src,
    *domain_start = start;
    *domain_end = end;
 
-   // Calculate spoken size: each '.' becomes " dot " (5 chars instead of 1)
-   size_t spoken_size = 0;
-   for (size_t i = start; i < end; i++) {
-      if (src[i] == '.') {
-         spoken_size += 5;  // " dot "
-      } else {
-         spoken_size += 1;
-      }
-   }
-   return spoken_size;
+   return render_spoken_domain(src, start, end, nullptr); /* size only */
 }
 
 /**
- * @brief Write domain in spoken form (dots -> " dot ")
+ * @brief Write domain in spoken form (dots -> " dot "; IPv4 host spelled).
  */
 static inline size_t write_spoken_domain(const char *src,
                                          size_t domain_start,
                                          size_t domain_end,
                                          char *out) {
-   size_t out_pos = 0;
-   for (size_t i = domain_start; i < domain_end; i++) {
-      if (src[i] == '.') {
-         std::memcpy(out + out_pos, " dot ", 5);
-         out_pos += 5;
-      } else {
-         out[out_pos++] = src[i];
-      }
-   }
-   return out_pos;
+   return render_spoken_domain(src, domain_start, domain_end, out);
 }
 
 // ============================================================================
@@ -914,12 +1039,45 @@ template<PassMode mode> static size_t process_text_impl(const char *src, size_t 
 
             if (valid_before && valid_after) {
                const state_entry_t *state = lookup_state(src[i], src[i + 1]);
-               if (state) {
+               // Codes that collide with common words/acronyms (ID, OK, OR, ...)
+               // expand only with positive context; otherwise fall through so
+               // espeak speaks the letters/word. Pure functions of src => both
+               // size-calc and generate passes decide identically.
+               bool ctx_ok = state &&
+                             (!state_code_needs_context(src[i], src[i + 1]) ||
+                              state_city_comma_before(src, i) || state_comma_zip(src, i, len));
+               if (ctx_ok) {
                   if constexpr (mode == PassMode::GenerateOutput) {
                      std::memcpy(out + out_pos, state->full_name, state->full_len);
                   }
                   out_pos += state->full_len;
                   i += 2;
+                  // A 5-digit ZIP right after a state is an address ZIP: spell it
+                  // digit-by-digit ("Idaho 8 3 7 0 2"), not a cardinal. Pure src
+                  // decision, so both passes advance out_pos identically.
+                  size_t sp = (i < len && src[i] == ' ') ? 1 : 0;
+                  size_t zd = i + sp;
+                  int nd = 0;
+                  while (zd + nd < len && nd < 6 && std::isdigit((unsigned char)src[zd + nd]))
+                     nd++;
+                  if (nd == 5 && (zd + 5 >= len || !std::isalnum((unsigned char)src[zd + 5]))) {
+                     if (sp) {
+                        if constexpr (mode == PassMode::GenerateOutput)
+                           out[out_pos] = ' ';
+                        out_pos++;
+                     }
+                     for (int k = 0; k < 5; k++) {
+                        if (k) {
+                           if constexpr (mode == PassMode::GenerateOutput)
+                              out[out_pos] = ' ';
+                           out_pos++;
+                        }
+                        if constexpr (mode == PassMode::GenerateOutput)
+                           out[out_pos] = src[zd + k];
+                        out_pos++;
+                     }
+                     i = zd + 5;
+                  }
                   continue;
                }
             }
@@ -1164,8 +1322,8 @@ static inline size_t generate_output(const char *src, size_t len, char *out) {
 // Phone-number expansion (pre-pass)
 // ============================================================================
 
-/* Phone numbers must be read digit-by-digit ("+14045550142" -> "1 6 7 8 ...")
- * rather than as one cardinal ("sixteen billion ...").  A dedicated pre-pass
+/* Phone numbers must be read digit-by-digit ("+14045550142" -> "1 4 0 4 5 5 5 0 1 4 2")
+ * rather than as one cardinal ("fourteen billion ...").  A dedicated pre-pass
  * (rather than a branch in the two-pass core) keeps that delicate size-calc /
  * generate symmetry untouched: it rewrites the input string first, and the
  * rest of the pipeline runs on the result.
@@ -1337,6 +1495,164 @@ static bool expand_phone_numbers_for_tts(const std::string &input, std::string &
 }
 
 // ============================================================================
+// IPv4 verbalization pre-pass
+// ============================================================================
+
+/* Match a strict dotted-quad at @start: exactly 4 dot-separated groups of 1-3
+ * digits, each 0-255. Rejected if it runs into more digits/letters or a 5th
+ * ".<digit>" group (so "1.2.3.4.5", "999.1.1.1", "1.2.3", "3.14", "1.2.3.4x" are
+ * NOT IPs). On success sets *end_out just past the last octet. */
+static bool scan_ipv4(const std::string &s, size_t start, size_t *end_out) {
+   const size_t n = s.size();
+   size_t i = start;
+   for (int octet = 0; octet < 4; octet++) {
+      if (octet > 0) {
+         if (i >= n || s[i] != '.')
+            return false;
+         i++;
+      }
+      int val = 0, ndig = 0;
+      while (i < n && ndig < 3 && std::isdigit((unsigned char)s[i])) {
+         val = val * 10 + (s[i] - '0');
+         i++;
+         ndig++;
+      }
+      if (ndig == 0 || val > 255)
+         return false;
+   }
+   if (i < n) {
+      if (std::isalnum((unsigned char)s[i]))
+         return false; /* octet ran into a longer number/word */
+      if (s[i] == '.' && i + 1 < n && std::isdigit((unsigned char)s[i + 1]))
+         return false; /* a 5th group -> not an IP */
+   }
+   *end_out = i;
+   return true;
+}
+
+/* Rewrite IPv4 literals so espeak reads them the way people say IPs: each octet's
+ * digits spelled out individually and each '.' spoken as "dot" ("192.168.1.100"
+ * -> "1 9 2 dot 1 6 8 dot 1 dot 1 0 0"). Runs before the phone pass and the main
+ * loop. Does NOT fire when the digits are preceded by '/', ':' or '@' (an IP
+ * inside a URL/host is left for the URL pass, which speaks the domain).
+ * Zero-alloc when no IP is present. */
+static bool expand_ips_for_tts(const std::string &input, std::string &out) {
+   const size_t n = input.size();
+   bool started = false;
+   size_t i = 0;
+   while (i < n) {
+      unsigned char c = (unsigned char)input[i];
+      char prev = (i == 0) ? '\0' : input[i - 1];
+      bool boundary = (i == 0) || (!std::isalnum((unsigned char)prev) && prev != '.' &&
+                                   prev != '-' && prev != '/' && prev != ':' && prev != '@');
+      if (boundary && std::isdigit(c)) {
+         size_t end = 0;
+         if (scan_ipv4(input, i, &end)) {
+            if (!started) {
+               out.clear();
+               out.reserve(n + 24);
+               out.append(input, 0, i);
+               started = true;
+            }
+            /* Spell each octet's digits ("1 9 2"), "dot" between octets. */
+            bool first_digit = true;
+            for (size_t p = i; p < end; p++) {
+               if (input[p] == '.') {
+                  out.append(" dot ");
+                  first_digit = true;
+               } else {
+                  if (!first_digit)
+                     out.push_back(' ');
+                  out.push_back(input[p]);
+                  first_digit = false;
+               }
+            }
+            i = end;
+            continue;
+         }
+      }
+      if (started)
+         out.push_back((char)c);
+      i++;
+   }
+   return started;
+}
+
+// ============================================================================
+// Acronym / term override pre-pass
+// ============================================================================
+
+/* Exact-case, whole-token substitutions for tokens Piper's espeak MIS-reads.
+ * espeak already spells unknown all-caps as letter names (FBI -> "eff bee eye")
+ * and reads dictionary acronyms as words (NASA, JSON, RAM), so this is NOT a
+ * general speller — only the specific misreads. Spoken values use dotted
+ * uppercase to force letter names (espeak reads a bare spaced "A" as the article
+ * schwa, so never space letters), a plain lowercase word to force a word reading
+ * (mac/sim), or a full expansion for units. Verify any new row with the phoneme
+ * probe against Piper's espeak before adding it. */
+struct tts_override_t {
+   const char *term;
+   uint8_t term_len;
+   const char *spoken;
+};
+
+static const tts_override_t tts_overrides[] = {
+   { "IPv4", 4, "I.P.v. four" },   /* dot-before-digit says "dot"; spell the number */
+   { "IPv6", 4, "I.P.v. six" },    /* likewise                                      */
+   { "GPIO", 4, "G.P.I.O." },      /* espeak: "jee pee oh"    */
+   { "AWS", 3, "A.W.S." },         /* espeak: "oz"            */
+   { "ETA", 3, "E.T.A." },         /* espeak: "eeta"          */
+   { "ASR", 3, "A.S.R." },         /* espeak: "assa"          */
+   { "OTA", 3, "O.T.A." },         /* espeak: "ota"           */
+   { "FAQ", 3, "F.A.Q." },         /* espeak: "fack"          */
+   { "MPH", 3, "miles per hour" }, /* unit expansion          */
+   { "kHz", 3, "kilohertz" },      /* espeak: "kay aitch zed" */
+   { "mAh", 3, "milliamp hours" }, /* espeak: "em ar"         */
+   { "MAC", 3, "mac" },            /* force word, not letters */
+   { "SIM", 3, "sim" },            /* force word              */
+   { "UX", 2, "U.X." },            /* espeak: "ucks"          */
+   { "CI", 2, "C.I." },            /* espeak: "sigh"          */
+};
+
+/* Replace whole-token override terms. A term matches only at a token boundary
+ * (prev + next char non-alphanumeric), so "IPv4" matches in "(IPv4)"/"IPv4-only"
+ * but "CI" never matches inside "CIRCUS". Case-sensitive. Zero-alloc on no match. */
+static bool expand_tts_overrides(const std::string &input, std::string &out) {
+   const size_t n = input.size();
+   bool started = false;
+   size_t i = 0;
+   while (i < n) {
+      char prev = (i == 0) ? '\0' : input[i - 1];
+      bool boundary = (i == 0) || !std::isalnum((unsigned char)prev);
+      if (boundary) {
+         const tts_override_t *match = nullptr;
+         for (const auto &o : tts_overrides) {
+            if (i + o.term_len <= n && input.compare(i, o.term_len, o.term) == 0 &&
+                (i + o.term_len == n || !std::isalnum((unsigned char)input[i + o.term_len]))) {
+               match = &o;
+               break;
+            }
+         }
+         if (match) {
+            if (!started) {
+               out.clear();
+               out.reserve(n + 32);
+               out.append(input, 0, i);
+               started = true;
+            }
+            out.append(match->spoken);
+            i += match->term_len;
+            continue;
+         }
+      }
+      if (started)
+         out.push_back(input[i]);
+      i++;
+   }
+   return started;
+}
+
+// ============================================================================
 // Main Preprocessing Function (Optimized Two-Pass)
 // ============================================================================
 
@@ -1346,13 +1662,21 @@ std::string preprocess_text_for_tts(const std::string &input) {
    if (input.empty())
       return input;
 
-   /* Pre-pass: rewrite phone numbers to spaced digits before the number/currency
-    * passes so they read digit-by-digit instead of as a giant cardinal.  When
-    * there is no phone number (the common case) the pass allocates nothing and
-    * we run the pipeline directly on `input`. */
+   /* Pre-passes (each zero-alloc when it doesn't match): IPv4 literals -> spoken
+    * octets + "dot", then phone numbers -> spaced digits, before the number/
+    * currency passes. IP runs first so it owns the dotted-quad; phone rejects IP
+    * shapes anyway. */
+   std::string ip_buf;
+   const std::string &ip_expanded = expand_ips_for_tts(input, ip_buf) ? ip_buf : input;
+
+   std::string ovr_buf;
+   const std::string &ovr_expanded = expand_tts_overrides(ip_expanded, ovr_buf) ? ovr_buf
+                                                                                : ip_expanded;
+
    std::string phone_buf;
-   const std::string &phone_expanded = expand_phone_numbers_for_tts(input, phone_buf) ? phone_buf
-                                                                                      : input;
+   const std::string &phone_expanded = expand_phone_numbers_for_tts(ovr_expanded, phone_buf)
+                                           ? phone_buf
+                                           : ovr_expanded;
 
    const char *src = phone_expanded.data();
    const size_t len = phone_expanded.length();

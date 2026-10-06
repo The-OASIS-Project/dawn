@@ -133,12 +133,49 @@ static void test_truncated_three_byte(void) {
    TEST_ASSERT_EQUAL_INT(0, (int)(strchr(buf, '\xE2') != NULL));
 }
 
+/* RFC 3629 forms a byte-pattern check alone lets through. */
+static void test_overlong_and_out_of_range(void) {
+   char buf[32];
+   /* C0 AF: an overlong '/' (the classic path-filter bypass) */
+   strcpy(buf, "a\xC0\xAF"
+               "b");
+   sanitize_utf8_for_json(buf);
+   TEST_ASSERT_EQUAL_STRING("a??b", buf);
+   /* E0 80 AF: overlong 3-byte '/' */
+   strcpy(buf, "\xE0\x80\xAF");
+   sanitize_utf8_for_json(buf);
+   TEST_ASSERT_EQUAL_STRING("???", buf);
+   /* F0 80 80 AF: overlong 4-byte */
+   strcpy(buf, "\xF0\x80\x80\xAF");
+   sanitize_utf8_for_json(buf);
+   TEST_ASSERT_EQUAL_STRING("????", buf);
+   /* F4 90 80 80: U+110000, past the last code point */
+   strcpy(buf, "\xF4\x90\x80\x80");
+   sanitize_utf8_for_json(buf);
+   TEST_ASSERT_EQUAL_STRING("????", buf);
+   /* F5 lead never valid */
+   strcpy(buf, "\xF5\x80");
+   sanitize_utf8_for_json(buf);
+   TEST_ASSERT_EQUAL_STRING("??", buf);
+   /* The boundaries just inside stay: U+0080, U+0800, U+10000, U+10FFFF */
+   strcpy(buf, "\xC2\x80\xE0\xA0\x80\xF0\x90\x80\x80\xF4\x8F\xBF\xBF");
+   sanitize_utf8_for_json(buf);
+   TEST_ASSERT_EQUAL_STRING("\xC2\x80\xE0\xA0\x80\xF0\x90\x80\x80\xF4\x8F\xBF\xBF", buf);
+   /* DEL is a control character */
+   strcpy(buf, "a\x7F"
+               "b");
+   sanitize_utf8_for_json(buf);
+   TEST_ASSERT_EQUAL_STRING("ab", buf);
+}
+
 static void test_surrogate_replaced(void) {
-   /* ED A0 80 encodes U+D800, a UTF-16 surrogate — illegal in UTF-8. */
+   /* ED A0 80 encodes U+D800, a UTF-16 surrogate — illegal in UTF-8.  ED
+    * accepts only 80-9F next, so no prefix is valid: one '?' per byte (the
+    * Unicode "maximal subpart" rule). */
    char buf[] = "x\xED\xA0\x80"
                 "y";
    sanitize_utf8_for_json(buf);
-   TEST_ASSERT_EQUAL_STRING("x?y", buf);
+   TEST_ASSERT_EQUAL_STRING("x???y", buf);
    TEST_ASSERT_TRUE(is_valid_utf8(buf));
 }
 
@@ -215,6 +252,29 @@ static void test_safe_strscpy_truncates(void) {
    TEST_ASSERT_TRUE(r >= sizeof(dst)); /* truncation detectable via sizeof(dst) */
 }
 
+/* utf8_trim_incomplete / utf8_truncate: never leave a split character. */
+static void test_utf8_trim_incomplete(void) {
+   char a[] = "caf\xC3"; /* é cut after its lead byte */
+   utf8_trim_incomplete(a);
+   TEST_ASSERT_EQUAL_STRING("caf", a);
+   char b[] = "x\xE2\x82"; /* € cut after two of three bytes */
+   utf8_trim_incomplete(b);
+   TEST_ASSERT_EQUAL_STRING("x", b);
+   char c[] = "caf\xC3\xA9"; /* complete: unchanged */
+   utf8_trim_incomplete(c);
+   TEST_ASSERT_EQUAL_STRING("caf\xC3\xA9", c);
+   utf8_trim_incomplete(NULL);
+}
+
+static void test_utf8_truncate(void) {
+   char a[] = "ab\xE2\x82\xAC"; /* "ab€" (5 bytes) */
+   utf8_truncate(a, 4);         /* would split the € */
+   TEST_ASSERT_EQUAL_STRING("ab", a);
+   char b[] = "abc";
+   utf8_truncate(b, 10);
+   TEST_ASSERT_EQUAL_STRING("abc", b);
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -242,6 +302,9 @@ int main(void) {
    RUN_TEST(test_truncated_two_byte);
    RUN_TEST(test_truncated_three_byte);
    RUN_TEST(test_surrogate_replaced);
+   RUN_TEST(test_overlong_and_out_of_range);
+   RUN_TEST(test_utf8_trim_incomplete);
+   RUN_TEST(test_utf8_truncate);
 
    return UNITY_END();
 }

@@ -63,7 +63,8 @@ typedef enum {
    HA_ERR_ENTITY_NOT_FOUND,
    HA_ERR_INVALID_PARAM,
    HA_ERR_RATE_LIMITED,
-   HA_ERR_MEMORY
+   HA_ERR_MEMORY,
+   HA_ERR_AMBIGUOUS /* the name could mean more than one entity, or a lock/cover too loosely */
 } ha_error_t;
 
 /* =============================================================================
@@ -267,16 +268,24 @@ bool homeassistant_copy_entity(const char *entity_id, ha_entity_t *out);
 ha_error_t homeassistant_snapshot_entities(ha_entity_list_t *out, bool force_refresh);
 
 /**
- * @brief Find entity by name with domain-aware fuzzy matching
+ * @brief Find the one entity a name means, with domain-aware fuzzy matching
+ *
+ * Never picks among equals: two entities tied for the best match, or a lock
+ * or cover matched by less than its whole name (or a name containing what was
+ * said), are HA_ERR_AMBIGUOUS with the candidates listed.
  *
  * @param name Friendly name, entity_id, or partial match
  * @param domain_hint Filter to specific domain (HA_DOMAIN_UNKNOWN for any)
- * @param entity Output entity pointer (points into cache, do not free)
- * @return HA_OK on success, HA_ERR_ENTITY_NOT_FOUND if no match
+ * @param out The entity, copied from the cache (HA_OK)
+ * @param candidates "Name (entity_id); ..." for HA_ERR_AMBIGUOUS (may be NULL)
+ * @param candidates_len Size of @p candidates
+ * @return HA_OK, HA_ERR_ENTITY_NOT_FOUND, HA_ERR_AMBIGUOUS, or a connection error
  */
 ha_error_t homeassistant_find_entity(const char *name,
                                      ha_domain_t domain_hint,
-                                     const ha_entity_t **entity);
+                                     ha_entity_t *out,
+                                     char *candidates,
+                                     size_t candidates_len);
 
 /**
  * @brief Get fresh state for a specific entity

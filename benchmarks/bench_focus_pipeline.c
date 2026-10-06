@@ -44,7 +44,8 @@
  *     "config": {
  *       "top_k": 8,                       -- focus_injection.top_k
  *       "min_score": 0.40,                -- focus_injection.min_score
- *       "focus_budget_tokens": 1024,
+ *       "focus_budget_bytes": 10240,      -- focus_injection.focus_budget_bytes
+ *                                            ("focus_budget_tokens" accepted, x4)
  *       "weight_semantic": 1.0,
  *       "weight_recency":  0.30,
  *       "weight_importance": 0.20,
@@ -125,14 +126,24 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/build_focus_block.h"
 #include "core/focus/focus_candidate_helpers.h"
+#include "core/focus/focus_handles.h"
+#include "core/focus/focus_incremental.h"
 #include "core/focus/focus_source.h"
 #include "core/focus/focus_source_internal.h"
+#include "core/session_focus.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
-#include "webui/build_focus_block.h"
+
+/* The session a turn runs on: the prompt builder's argument (build_focus_block
+ * reads the conversation's item handles from it). */
+static session_t *s_dispatch;
+static void set_dispatch(session_t *session) {
+   s_dispatch = session;
+}
 
 /* =============================================================================
  * Synthetic embeddings — deterministic FNV-1a → xorshift float vector
@@ -491,16 +502,36 @@ static void captured_release(void) {
    memset(&s_captured, 0, sizeof(s_captured));
 }
 
-/* Latent stub: build_focus_block.c calls webui_get_active_conversation_id()
- * to refresh the broadcast conv_id from a live dispatch pointer.  In the
- * bench, session_get_dispatch_session() returns NULL (no dispatch
- * published), so this stub never actually fires — but the symbol must
- * resolve at link time.  Signature mirrors the canonical declaration
- * in include/webui/webui_server.h:566 so a future LTO/static-analysis
- * pass can't trip on the prior ABI-mismatched stub.  Mirrors the
- * same shape used in tests/test_prompt_builder_stub.c. */
+/* The session's stable citation handles (core/focus/focus_handles.c needs the
+ * database): each call numbers its items 1, 2, 3, the old per-turn numbering. */
+int focus_handles_assign(struct session *session,
+                         int64_t conv_id,
+                         int user_id,
+                         conv_focus_handle_t *items,
+                         int count) {
+   (void)session;
+   (void)conv_id;
+   (void)user_id;
+   for (int i = 0; i < count; i++) {
+      items[i].handle = i + 1;
+      items[i].is_new = true;
+   }
+   return 0;
+}
+
+/* Latent stub: build_focus_block.c calls session_turn_conversation() to
+ * refresh the broadcast conv_id from a live dispatch pointer.  In the bench,
+ * no session is passed (NULL), so this
+ * stub never actually fires — but the symbol must resolve at link time.
+ * Signature mirrors the declaration in include/core/session_manager.h.  Same
+ * shape as tests/test_prompt_builder_stub.c. */
 struct session;
-int64_t webui_get_active_conversation_id(struct session *session) {
+char *session_previous_question_dup(struct session *session) {
+   (void)session;
+   return NULL;
+}
+
+int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
 }
@@ -508,7 +539,9 @@ int64_t webui_get_active_conversation_id(struct session *session) {
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result) {
+                                       const focus_compose_result_t *result,
+                                       const char *const *states) {
+   (void)states;
    captured_release(); /* idempotent if first call */
    s_captured.fired = true;
    s_captured.user_id = user_id;
@@ -605,20 +638,12 @@ int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
 dawn_config_t g_config;
 
 /* =============================================================================
- * Log-capture for dedup_suppressed (H4 from 1i.C fix-pass)
+ * Log-capture for dedup_suppressed
  *
- * apply_dedup_locked is a static helper inside build_focus_block.c — we
- * cannot read its `dedup_suppressed` counter directly.  The counter IS
- * exposed in the privacy-safe summary line build_focus_block emits via
- * OLOG_INFO at line ~87 ("dedup_suppressed=N").  We capture that line by
- * pointing the daemon logger at a temp file, then regex it back after
- * build_focus_block returns.  No production code touch needed.
- *
- * Coordinator pin H4 surfaced two implementation paths; this is the
- * "logger-based capture" option (the alternative was a 2-line
- * production change adding `dedup_suppressed_count` to
- * focus_compose_result_t — flagged as "needs sign-off" in the prior
- * report, so we take the no-touch route here).
+ * The builder no longer drops items it sent on earlier turns (a turn's seam
+ * decides that, against the conversation), so its summary line carries no
+ * "dedup_suppressed=N" and the field reads 0.  The capture and the field stay
+ * so the probe scripts that read them keep working.
  * ============================================================================= */
 
 static char s_log_path[64];
@@ -746,14 +771,11 @@ static const char *json_get_string(struct json_object *obj, const char *key) {
  * a real result). */
 #define BENCH_TOP_K_MIN 1
 #define BENCH_TOP_K_MAX 64
-#define BENCH_BUDGET_TOKENS_MIN 0
-#define BENCH_BUDGET_TOKENS_MAX 65536
+/* Same range config_validate.c enforces on the production knob. */
+#define BENCH_BUDGET_BYTES_MIN 1024
+#define BENCH_BUDGET_BYTES_MAX 65536
 #define BENCH_WEIGHT_MIN 0.0f
 #define BENCH_WEIGHT_MAX 10.0f
-#define BENCH_DEDUP_WINDOW_MIN 0
-#define BENCH_DEDUP_WINDOW_MAX 256
-#define BENCH_DEDUP_UPLIFT_MIN 0.5f
-#define BENCH_DEDUP_UPLIFT_MAX 10.0f
 
 static int validate_int_range(const char *field, int v, int lo, int hi) {
    if (v < lo || v > hi) {
@@ -778,7 +800,13 @@ static int parse_config(struct json_object *cfg) {
    fi->enabled = true;
    fi->top_k = json_get_int(cfg, "top_k", 8);
    fi->min_score = (float)json_get_double(cfg, "min_score", 0.4);
-   fi->focus_budget_tokens = json_get_int(cfg, "focus_budget_tokens", 1024);
+   /* The budget is bytes; "focus_budget_tokens" is the deprecated estimated-token
+    * name, converted x4 exactly as config_parser.c does for dawn.toml. */
+   fi->focus_budget_bytes = json_get_int(cfg, "focus_budget_bytes", 10240);
+   struct json_object *legacy_budget = NULL;
+   if (!json_object_object_get_ex(cfg, "focus_budget_bytes", NULL) &&
+       json_object_object_get_ex(cfg, "focus_budget_tokens", &legacy_budget))
+      fi->focus_budget_bytes = json_object_get_int(legacy_budget) * 4;
    fi->weight_semantic = (float)json_get_double(cfg, "weight_semantic", 1.0);
    fi->weight_recency = (float)json_get_double(cfg, "weight_recency", 0.3);
    fi->weight_importance = (float)json_get_double(cfg, "weight_importance", 0.2);
@@ -788,8 +816,8 @@ static int parse_config(struct json_object *cfg) {
    /* M4: clamp untrusted fields. */
    if (validate_int_range("top_k", fi->top_k, BENCH_TOP_K_MIN, BENCH_TOP_K_MAX) != SUCCESS)
       return FAILURE;
-   if (validate_int_range("focus_budget_tokens", fi->focus_budget_tokens, BENCH_BUDGET_TOKENS_MIN,
-                          BENCH_BUDGET_TOKENS_MAX) != SUCCESS)
+   if (validate_int_range("focus_budget_bytes", fi->focus_budget_bytes, BENCH_BUDGET_BYTES_MIN,
+                          BENCH_BUDGET_BYTES_MAX) != SUCCESS)
       return FAILURE;
    if (validate_float_range("min_score", fi->min_score, 0.0f, 1.0f) != SUCCESS)
       return FAILURE;
@@ -828,19 +856,8 @@ static int parse_config(struct json_object *cfg) {
       fi->source_weights.dawn_background = (float)json_get_double(sw, "dawn_background", 0.8);
    }
 
-   struct json_object *dedup = NULL;
-   fi->dedup.recent_window_turns = 8;
-   fi->dedup.score_uplift_factor = 1.5f;
-   if (json_object_object_get_ex(cfg, "dedup", &dedup)) {
-      fi->dedup.recent_window_turns = json_get_int(dedup, "recent_window_turns", 8);
-      fi->dedup.score_uplift_factor = (float)json_get_double(dedup, "score_uplift_factor", 1.5);
-   }
-   if (validate_int_range("dedup.recent_window_turns", fi->dedup.recent_window_turns,
-                          BENCH_DEDUP_WINDOW_MIN, BENCH_DEDUP_WINDOW_MAX) != SUCCESS)
-      return FAILURE;
-   if (validate_float_range("dedup.score_uplift_factor", fi->dedup.score_uplift_factor,
-                            BENCH_DEDUP_UPLIFT_MIN, BENCH_DEDUP_UPLIFT_MAX) != SUCCESS)
-      return FAILURE;
+   /* A "dedup" object is accepted and ignored: which items a turn sends is
+    * decided against the conversation at the turn's seam, not here. */
 
    /* Dominant-token over-inclusion heuristic — Phase B-ii.  Mirrors
     * production defaults (config_defaults.c): enabled=true,
@@ -1162,12 +1179,24 @@ int main(int argc, char *argv[]) {
    memset(&s, 0, sizeof(s));
    s.session_id = 1;
    pthread_mutex_init(&s.history_mutex, NULL);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
 
-   /* conv_id > 0 (validated above) so build_focus_block fires the
-    * broadcast we capture. */
+   /* The turn's items, rendered as a conversation that shows none of them
+    * yet would send them; conv_id > 0 (validated above) so the panel hook
+    * fires the broadcast we capture. */
+   composed_prompt_t cp = { 0 };
+   const int rc = build_focus_block(s_dispatch, user_id, conv_id, turn_id, query, &cp);
    char *block = NULL;
-   const int rc = build_focus_block(user_id, conv_id, turn_id, query, &block);
+   if (rc == SUCCESS) {
+      focus_scan_t none = { 0 };
+      focus_selection_t sel;
+      if (focus_incremental_select(cp.focus_items, cp.n_focus_items, NULL, &none, &sel) == 0) {
+         block = focus_incremental_render(cp.focus_items, &sel, false);
+      }
+      focus_selection_free(&sel);
+      session_focus_client_notice(s_dispatch, &cp, NULL, 0);
+   }
+   composed_prompt_free(&cp);
 
    /* H4: extract dedup_suppressed from the captured log file.  Must run
     * BEFORE emit_json_result because the JSON shape carries the value. */
@@ -1181,7 +1210,7 @@ int main(int argc, char *argv[]) {
    }
 
    free(block);
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
    pthread_mutex_destroy(&s.history_mutex);
    focus_unregister_all();
    captured_release();

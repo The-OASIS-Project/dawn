@@ -60,8 +60,19 @@
 /** @brief Default retention days (90 days, 0 = forever) */
 #define IMAGE_RETENTION_DAYS_DEFAULT 90
 
+/** @brief Default per-user cap on a tool's captures (IMAGE_SOURCE_CAPTURE),
+ *  counted apart from max_per_user */
+#define IMAGE_CAPTURE_MAX_PER_USER_DEFAULT 1000
+
 /** @brief Default cache size cap in MB for RETAIN_CACHE images */
 #define IMAGE_CACHE_SIZE_MB_DEFAULT 200
+
+/** @brief How long an unbound image (IMAGE_RETAIN_UNBOUND) is kept for the row
+ *  that will name it: a voice conversation is saved when it goes idle, and
+ *  retried later when that fails.  Counted from the capture; one a live
+ *  session still holds past it is kept until that session saves (a voice
+ *  session that never idles for a day: session_images_held). */
+#define IMAGE_UNBOUND_GRACE_SEC (24 * 60 * 60)
 
 /* =============================================================================
  * Error Codes
@@ -88,6 +99,7 @@ typedef enum {
    IMAGE_SOURCE_SEARCH = 2,    /* Web image search cache */
    IMAGE_SOURCE_MMS = 3,       /* Received MMS */
    IMAGE_SOURCE_DOCUMENT = 4,  /* Extracted from document */
+   IMAGE_SOURCE_CAPTURE = 5,   /* An image a tool returned (a camera capture): owner-only */
 } image_source_t;
 
 /**
@@ -97,6 +109,9 @@ typedef enum {
    IMAGE_RETAIN_DEFAULT = 0,   /* Global retention_days applies */
    IMAGE_RETAIN_PERMANENT = 1, /* Never auto-delete */
    IMAGE_RETAIN_CACHE = 2,     /* LRU eviction at size cap */
+   IMAGE_RETAIN_UNBOUND = 3,   /* No row refers to it yet: reclaimed after
+                                  IMAGE_UNBOUND_GRACE_SEC unless a row binds it
+                                  (made PERMANENT with the row that names it) */
 } image_retention_t;
 
 /**
@@ -118,11 +133,13 @@ typedef struct {
  * @brief Image store configuration
  */
 typedef struct {
-   size_t max_size;      /**< Maximum image size in bytes */
-   int max_per_user;     /**< Maximum images per user */
-   int retention_days;   /**< Auto-delete DEFAULT images after N days (0 = forever) */
-   int cache_size_mb;    /**< LRU cache cap for RETAIN_CACHE images in MB */
-   const char *data_dir; /**< Base data directory (images stored in <data_dir>/images/) */
+   size_t max_size;           /**< Maximum image size in bytes */
+   int max_per_user;          /**< Maximum images per user (a tool's captures aside) */
+   int max_captures_per_user; /**< Maximum IMAGE_SOURCE_CAPTURE images per user
+                               *   (0 = IMAGE_CAPTURE_MAX_PER_USER_DEFAULT) */
+   int retention_days;        /**< Auto-delete DEFAULT images after N days (0 = forever) */
+   int cache_size_mb;         /**< LRU cache cap for RETAIN_CACHE images in MB */
+   const char *data_dir;      /**< Base data directory (images stored in <data_dir>/images/) */
 } image_store_config_t;
 
 /* =============================================================================
@@ -238,7 +255,7 @@ int image_store_delete(const char *id, int user_id);
 int image_store_update_retention(const char *id, int user_id, image_retention_t retention);
 
 /**
- * @brief Count images for a user
+ * @brief Count images for a user (every source, captures included)
  *
  * @param user_id   User ID
  * @param count_out Output: number of images (may be NULL)
@@ -257,6 +274,13 @@ int image_store_count_user(int user_id, int *count_out);
  * @return IMAGE_STORE_SUCCESS (best-effort), IMAGE_STORE_INVALID, or IMAGE_STORE_FAILURE.
  */
 int image_store_delete_user(int user_id);
+
+/**
+ * @brief Unlink an image's file whose row the caller deleted in its own
+ *        transaction (conv_db_delete_ex); call with no database lock held.
+ * @return IMAGE_STORE_SUCCESS, IMAGE_STORE_INVALID or IMAGE_STORE_FAILURE.
+ */
+int image_store_unlink_file(const char *filename);
 
 /* =============================================================================
  * Validation
@@ -293,6 +317,7 @@ bool image_store_validate_mime(const char *mime_type);
  * - RETAIN_DEFAULT: delete images older than retention_days
  * - RETAIN_CACHE: LRU eviction when total cache exceeds cache_size_mb
  * - RETAIN_PERMANENT: never deleted
+ * - RETAIN_UNBOUND: reclaimed after IMAGE_UNBOUND_GRACE_SEC (image_store_reclaim_unbound)
  *
  * Deletes both files and metadata within a transaction.
  *
@@ -300,6 +325,23 @@ bool image_store_validate_mime(const char *mime_type);
  * @return IMAGE_STORE_SUCCESS or IMAGE_STORE_FAILURE
  */
 int image_store_cleanup(int *deleted_out);
+
+/**
+ * @brief Reclaim unbound images (IMAGE_RETAIN_UNBOUND) older than @p grace_sec
+ *        (rows + files): stored for a turn whose row never named them (a
+ *        cancelled or taken-back turn, a save that failed for good, a crash)
+ *
+ * Runs at init (with IMAGE_UNBOUND_GRACE_SEC) and in image_store_cleanup().
+ * One a live session of its owner still holds stays (session_images_held: a
+ * voice session is saved only when it goes idle, which a busy one may not do
+ * within the grace; a job's history too); one bound while the sweep runs stays
+ * too.  Call with no lock held: the hold check takes the session registry's
+ * and each session's history lock.
+ *
+ * @param deleted_out Output: number reclaimed (may be NULL)
+ * @return IMAGE_STORE_SUCCESS or IMAGE_STORE_FAILURE
+ */
+int image_store_reclaim_unbound(int grace_sec, int *deleted_out);
 
 /**
  * @brief Get storage statistics

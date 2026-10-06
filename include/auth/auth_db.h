@@ -254,6 +254,20 @@ int auth_db_create_user(const char *username, const char *password_hash, bool is
 int auth_db_get_user(const char *username, auth_user_t *user_out);
 
 /**
+ * @brief When the user's one-shot fact-category pass ran (0 = not yet)
+ *
+ * @return AUTH_DB_SUCCESS (ts 0 also for an unknown user) or AUTH_DB_FAILURE
+ */
+int auth_db_user_get_categories_backfilled_at(int user_id, int64_t *ts_out);
+
+/**
+ * @brief Record when the user's one-shot fact-category pass ran
+ *
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_user_set_categories_backfilled_at(int user_id, int64_t ts);
+
+/**
  * @brief Get total user count
  *
  * Useful for checking if any users exist (first-run detection).
@@ -338,13 +352,16 @@ int auth_db_count_admins(int *count_out);
 int auth_db_delete_user(const char *username);
 
 /**
- * @brief Update user password (atomically invalidates all sessions)
+ * @brief Update a user's password, ending the account's logins in the same
+ *        transaction (auth_sessions_changed() then signs them out).
  *
  * @param username Username
  * @param new_hash New password hash from auth_hash_password()
+ * @param keep_token The login to keep: the one a user changes their own
+ *        password from.  NULL ends them all (an admin reset, dawn-admin).
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
-int auth_db_update_password(const char *username, const char *new_hash);
+int auth_db_update_password(const char *username, const char *new_hash, const char *keep_token);
 
 /**
  * @brief Unlock a user account
@@ -571,6 +588,27 @@ int auth_db_delete_session(const char *token);
 int auth_db_delete_session_by_prefix(const char *prefix);
 
 /**
+ * @brief Whether a login (an unexpired session) has this 16-character token
+ *        prefix.
+ *
+ * @param prefix 16-character token prefix
+ * @param exists_out Set to whether one does
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE (@p exists_out
+ *         untouched: a failed lookup says nothing)
+ */
+int auth_db_session_prefix_exists(const char *prefix, bool *exists_out);
+
+/**
+ * @brief Logins changed in the database: deleted, revoked, a password
+ *        changed, a user deleted, expired sessions removed.
+ *
+ * Callers that change sessions call it afterwards, on any thread.  A no-op
+ * here (weak); the WebUI replaces it to end the connections and sessions of
+ * logins that no longer exist.
+ */
+void auth_sessions_changed(void);
+
+/**
  * @brief Check if a session belongs to a specific user
  *
  * Efficiently checks if a session with the given prefix belongs to the user.
@@ -791,14 +829,13 @@ int auth_db_run_cleanup(void);
 int auth_db_checkpoint(void);
 
 /**
- * @brief Passive WAL checkpoint (non-blocking).
+ * @brief Warn about any statement left mid-read on the connection (it keeps
+ *        the WAL from being checkpointed past its snapshot).
  *
- * Checkpoints as much of the WAL as possible without waiting.
- * Suitable for background maintenance as it won't block other operations.
- *
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ * Routine checkpoints run on the storage thread (auth_db_storage.h), off the
+ * global mutex; the maintenance loop calls this instead.
  */
-int auth_db_checkpoint_passive(void);
+void auth_db_check_leaked_reads(void);
 
 /* ============================================================================
  * Satellite Mappings
@@ -830,6 +867,7 @@ int auth_db_checkpoint_passive(void);
  */
 #define LOCAL_PSEUDO_SATELLITE_UUID "00000000-0000-0000-0000-000000000000"
 #define LOCAL_PSEUDO_SATELLITE_TIER 0
+#define LOCAL_PSEUDO_SATELLITE_NAME "Local Device"
 
 /**
  * @brief True if the given UUID is the reserved local pseudo-satellite.
@@ -1224,6 +1262,19 @@ int conv_db_create_with_origin(int user_id,
                                const char *title,
                                const char *origin,
                                int64_t *conv_id_out);
+
+/**
+ * @brief Create a conversation, private from its first row when @p is_private
+ *        (conv_db_create and conv_db_create_with_origin create public ones)
+ *
+ * @param origin "webui" (or NULL), "voice", "briefing", ...
+ * @return AUTH_DB_SUCCESS, AUTH_DB_LIMIT_EXCEEDED, or AUTH_DB_FAILURE
+ */
+int conv_db_create_ex(int user_id,
+                      const char *title,
+                      const char *origin,
+                      bool is_private,
+                      int64_t *conv_id_out);
 
 /**
  * @brief Reassign a conversation to a different user (admin only)
@@ -1949,7 +2000,11 @@ int conv_db_rename(int64_t conv_id, int user_id, const char *new_title);
 /**
  * @brief Set private mode for a conversation
  *
- * Private conversations are excluded from memory extraction.
+ * Private conversations are excluded from memory extraction.  Making one private
+ * also makes every conversation that continues it private (continued_from,
+ * transitively): a continuation's context opens with a summary of the parent, so
+ * a public continuation would leak the parent's content into memory.  Making one
+ * public changes only that conversation.
  *
  * @param conv_id Conversation ID
  * @param user_id User ID (for authorization check)
@@ -1957,6 +2012,29 @@ int conv_db_rename(int64_t conv_id, int user_id, const char *new_title);
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
  */
 int conv_db_set_private(int64_t conv_id, int user_id, bool is_private);
+
+/** Upper bound on conv_db_continuation_chain() results. */
+#define CONV_CHAIN_MAX 256
+
+/**
+ * @brief A conversation and every conversation that continues it
+ *
+ * @p conv_id first, then its continuations (continued_from, transitively), all
+ * owned by @p user_id.
+ *
+ * @param conv_id   Root conversation
+ * @param user_id   Owner
+ * @param ids_out   Receives the ids
+ * @param max       Capacity of @p ids_out
+ * @param count_out Receives the count (0 when @p conv_id isn't the user's)
+ * @return AUTH_DB_SUCCESS; AUTH_DB_LIMIT_EXCEEDED if the chain has more than
+ *         @p max conversations (nothing returned); or AUTH_DB_FAILURE
+ */
+int conv_db_continuation_chain(int64_t conv_id,
+                               int user_id,
+                               int64_t *ids_out,
+                               int max,
+                               int *count_out);
 
 /**
  * @brief Pin or unpin a conversation
@@ -1984,6 +2062,30 @@ int conv_db_set_pinned(int64_t conv_id, int user_id, bool is_pinned);
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out);
+
+/** Which conversations a set of message rows belongs to (conv_db_messages_ownership). */
+typedef struct {
+   int matched;        /**< rows found among the given ids, owned by the user */
+   int distinct_convs; /**< number of distinct conversations those rows are in */
+   int64_t conv_id;    /**< the conversation, when distinct_convs == 1 */
+   bool any_private;   /**< any of those conversations is private */
+   bool any_job;       /**< any of those conversations is a background job */
+} conv_msg_ownership_t;
+
+/**
+ * @brief Resolve which conversations a set of message ids belongs to
+ *
+ * Used by memory extraction to verify, from the rows themselves, that the
+ * messages it is about to extract belong to the conversation it was told they
+ * do, and that none of them sits in a private or background-job conversation.
+ * Rows not owned by @p user_id are not counted as matched.
+ *
+ * @param user_id  Owner the rows must belong to
+ * @param ids_json JSON array of message ids, e.g. "[12,13,15]"
+ * @param out      Result
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out);
 
 /**
  * Sentinel value for "no anchor recorded" on conversations.anchor_date.
@@ -2097,7 +2199,8 @@ int conv_db_update_context(int64_t conv_id, int user_id, int context_tokens, int
  *
  * @param conv_id Conversation id (> 0).
  * @param user_id Owner id (ownership-checked in the UPDATE).
- * @param summary Latest compaction summary (may be NULL).
+ * @param summary Latest compaction summary (may be NULL); stored neutralized
+ *        (llm_context_neutralize), as it will be sent.
  * @param watermark_msg_id Last compacted message id (> 0; <= 0 returns AUTH_DB_INVALID).
  * @return AUTH_DB_SUCCESS (incl. benign no-op), AUTH_DB_INVALID, or AUTH_DB_FAILURE.
  */
@@ -2105,25 +2208,6 @@ int conv_db_set_compaction_watermark(int64_t conv_id,
                                      int user_id,
                                      const char *summary,
                                      int64_t watermark_msg_id);
-
-/**
- * @brief Format the reload context line for a (watermarked) conversation.
- *
- * Writes a `[COMPACTED conv=N msgs=X-Y node=Z depth=D] Previous conversation
- * context (summarized): <summary>` marker into @out when a summary node exists
- * (so a reloaded LLM keeps a context_expand handle to the compacted originals),
- * else a plain summary line. @out is always NUL-terminated. Empty @summary
- * yields an empty string.
- *
- * @param conv_id Conversation id (for summary-node lookup + the marker).
- * @param summary The conversation's compaction_summary text (may be NULL).
- * @param out Output buffer.
- * @param out_len Size of @out.
- */
-void conv_db_format_compaction_context(int64_t conv_id,
-                                       const char *summary,
-                                       char *out,
-                                       size_t out_len);
 
 /**
  * @brief Lock LLM settings for a conversation
@@ -2204,15 +2288,6 @@ int conv_db_fill_llm_settings_if_empty(int64_t conv_id,
  */
 int conv_db_delete(int64_t conv_id, int user_id);
 
-/**
- * @brief Delete a conversation (admin only, no ownership check)
- *
- * For admin CLI tools that need to delete any conversation.
- *
- * @param conv_id Conversation ID
- * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
- */
-int conv_db_delete_admin(int64_t conv_id);
 
 /**
  * @brief Search conversations by title
@@ -2358,20 +2433,6 @@ int conv_db_get_messages_after(int64_t conv_id,
 int conv_db_get_messages_admin(int64_t conv_id, message_callback_t callback, void *ctx);
 
 /**
- * @brief Get message IDs for a conversation (ordered by creation)
- *
- * Returns an array of message database IDs. Used by LCM Phase 3 to map
- * in-memory array indices to DB IDs at compaction time.
- *
- * @param conv_id Conversation ID
- * @param user_id User ID (for ownership check)
- * @param ids_out Output: heap-allocated array of message IDs (caller frees)
- * @param count_out Output: number of IDs in the array
- * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
- */
-int conv_db_get_message_ids(int64_t conv_id, int user_id, int64_t **ids_out, int *count_out);
-
-/**
  * @brief Get messages by ID range (for context expansion).
  *
  * Same as conv_db_get_messages but filtered to a specific ID range.
@@ -2441,14 +2502,6 @@ typedef struct {
    time_t created_at;
 } summary_node_t;
 
-/**
- * @brief Create a summary node after compaction
- *
- * @param node Node data (id field is ignored, set on output)
- * @param node_id_out Output: inserted node ID
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
- */
-int summary_node_create(const summary_node_t *node, int64_t *node_id_out);
 
 /**
  * @brief Get a summary node by ID
@@ -2462,9 +2515,8 @@ int summary_node_get(int64_t node_id, summary_node_t *node_out);
 /**
  * @brief Get the most recent summary node for a conversation
  *
- * Queries summary_nodes for the given conversation ID only.
- * The caller (llm_context_compact) handles continuation chain
- * traversal via continued_from if no node is found.
+ * Queries summary_nodes for the given conversation ID only (the
+ * conversation it continues isn't searched).
  *
  * @param conv_id Conversation ID to query
  * @param node_out Output: latest node (summary_text is heap-allocated, caller frees)
@@ -2528,6 +2580,74 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len);
  * @brief Default retention period for session metrics (90 days)
  */
 #define SESSION_METRICS_RETENTION_DAYS 90
+
+/* ============================================================================
+ * LLM usage log (schema v90): one row per LLM call
+ * ============================================================================ */
+
+/** Days a per-call usage row is kept. */
+#define LLM_USAGE_RETENTION_DAYS 90
+
+/** One LLM call's usage, as recorded by the cache monitor. */
+typedef struct {
+   int64_t created_at; /**< Unix seconds */
+   int user_id;        /**< 0 = none */
+   int64_t conversation_id;
+   char provider[16]; /**< "local", "claude", "openai", ... */
+   char model[64];
+   char kind[16]; /**< "turn", "tool_iter", "extraction", ... */
+   int iteration;
+   int prompt_tokens;
+   int cache_read_tokens;
+   int cache_write_tokens;
+   int uncached_tokens;
+   int output_tokens;
+   int expected_read;    /**< -1 = not computed (stored as NULL) */
+   char cache_state[12]; /**< "" = not judged (stored as NULL) */
+   int64_t gap_ms;
+   uint32_t tools_hash;
+   uint32_t system_hash;
+   char thinking[32];
+   bool images;
+   char cache_miss_reason[32]; /**< Anthropic cache diagnostics ("" = none) */
+   int cache_missed_tokens;
+   bool binding_reported;    /**< Anthropic returned input_transformations */
+   int binding_prefix_drops; /**< prefix_binding_mismatch drops (a harness bug) */
+   int binding_model_drops;  /**< model_binding_mismatch drops (a model switch) */
+   int binding_other_drops;  /**< Entries this build doesn't classify */
+} llm_usage_row_t;
+
+/**
+ * @brief Insert @p count usage rows in one transaction
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (none inserted)
+ */
+int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count);
+
+/** Usage totals for one (provider, model, kind) since a time. */
+typedef struct {
+   char provider[16];
+   char model[64];
+   char kind[16];
+   int calls;
+   int64_t prompt_tokens;
+   int64_t cache_read_tokens;
+   int64_t cache_write_tokens;
+   int warm_misses;       /**< calls with cache_state 'warm_miss' */
+   int64_t binding_drops; /**< thinking blocks dropped for a prefix change (a DAWN bug) */
+} llm_usage_stat_t;
+
+/**
+ * @brief Usage totals per (provider, model, kind) since @p since, the largest
+ *        prompt volume first
+ * @param provider Only this provider ("claude", "local", ...); NULL = all
+ * @param out Up to @p max rows; @p count gets how many
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_llm_usage_stats(int64_t since,
+                            const char *provider,
+                            llm_usage_stat_t *out,
+                            int max,
+                            int *count);
 
 /**
  * @brief Maximum session type string length

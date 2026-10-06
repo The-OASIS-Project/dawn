@@ -28,8 +28,8 @@
  *   1. recency        — newer item ranks above older when other dims tied
  *   2. importance     — higher importance ranks first when other dims tied
  *   3. source-weight  — per-source weights reorder items via the ranker
- *   4. dedup-suppress — re-injected within window+score-flat → suppressed
- *   5. dedup-uplift   — re-injected with score >= prior * uplift → admitted
+ *   4. shown-once     — an item a conversation shows, unchanged, is named, not re-sent
+ *   5. changed        — the same item with new text is sent again, same handle
  *   6. budget (C5)    — over-budget pool: force-keep FIRST only (case 4)
  *   7. combo          — recency + importance simultaneously
  *
@@ -39,14 +39,15 @@
  * public surface instead: a fake adapter (`fake_query`) emits a
  * programmable synthetic pool, and tests assert on the surfaced result.
  *
- * Dedup tests go through `build_focus_block()` because dedup is owned
- * by `apply_dedup_locked` (static in build_focus_block.c).  The test
- * links the real implementation + a real session_t fixture + stubs for
- * the embedding engine and the WebSocket broadcast — same link shape
- * test_prompt_builder uses, just with REAL focus_compose instead of
+ * Properties 4 and 5 go through `build_focus_block()` and then the seam's
+ * own choice (focus_incremental.h) against a history holding the earlier
+ * turn's context: the real implementation + a real session_t fixture +
+ * stubs for the embedding engine and the WebSocket broadcast — same link
+ * shape test_prompt_builder uses, just with REAL focus_compose instead of
  * stubs so the ranker is exercised end-to-end.
  */
 
+#include <json-c/json.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -56,13 +57,22 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/build_focus_block.h"
 #include "core/focus/focus_candidate_helpers.h"
+#include "core/focus/focus_incremental.h"
 #include "core/focus/focus_source.h"
 #include "core/focus/focus_source_internal.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_history_kind.h"
 #include "unity.h"
-#include "webui/build_focus_block.h"
+
+/* The session a turn runs on: the prompt builder's argument (build_focus_block
+ * reads the conversation's item handles from it). */
+static session_t *s_dispatch;
+static void set_dispatch(session_t *session) {
+   s_dispatch = session;
+}
 
 /* =============================================================================
  * Fake adapter — emits a programmable synthetic pool.  Replaces real
@@ -265,17 +275,14 @@ void setUp(void) {
    g_config.memory.focus_injection.source_weights.calendar_event = 1.0f;
    g_config.memory.focus_injection.source_weights.recent_email = 1.0f;
    g_config.memory.focus_injection.source_weights.dawn_background = 1.0f;
-   g_config.memory.focus_injection.dedup.recent_window_turns = 8;
-   g_config.memory.focus_injection.dedup.score_uplift_factor = 1.5f;
 
-   /* Dedup tests publish a session here; ranker tests leave it NULL so
-    * build_focus_block (when used) skips dedup entirely. */
-   session_set_dispatch_session(NULL);
+   /* Properties 4 and 5 publish a session here; ranker tests leave it NULL. */
+   set_dispatch(NULL);
 }
 
 void tearDown(void) {
    focus_unregister_all();
-   session_set_dispatch_session(NULL);
+   set_dispatch(NULL);
 }
 
 static fake_seed_t *seed_add(const char *source_id,
@@ -373,84 +380,100 @@ static void test_source_weight_reorders(void) {
 }
 
 /* =============================================================================
- * Property 4 — dedup-suppress: same item within recent_window + score flat
- *                              → second turn drops it
+ * Properties 4 + 5 — an item is sent once; a changed one again
  *
- * Goes through build_focus_block so apply_dedup_locked runs.  Uses a
- * session_t fixture (history_mutex inited) published into the dispatch
- * TLS slot so the per-session dedup state is reachable.
+ * Each turn's items are built (build_focus_block), then chosen against a
+ * history holding the earlier turns' contexts, as the seam does
+ * (focus_incremental_scan / _select / _render).
  * ============================================================================= */
 
-static void test_dedup_suppress_within_window(void) {
+/* One turn: build its items, choose them against @p hist, append its framed
+ * context there; returns the items part sent (heap, or NULL) and @p states[0]. */
+static char *probe_turn(struct json_object *hist, int64_t turn_id, focus_item_state_t *state0) {
+   composed_prompt_t cp = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(s_dispatch, 1, 7, turn_id, "turn", &cp));
+   TEST_ASSERT_TRUE(cp.n_focus_items > 0);
+   focus_scan_t scan;
+   TEST_ASSERT_EQUAL_INT(0, focus_incremental_scan(hist, NULL, NULL, 0, &scan));
+   focus_selection_t sel;
+   TEST_ASSERT_EQUAL_INT(0, focus_incremental_select(cp.focus_items, cp.n_focus_items, NULL, &scan,
+                                                     &sel));
+   char *items = focus_incremental_render(cp.focus_items, &sel, false);
+   *state0 = sel.states[0];
+   char frame[8192];
+   snprintf(frame, sizeof(frame),
+            "--- TURN CONTEXT ---\n[system_time] now\n%s--- END TURN CONTEXT ---\n",
+            items ? items : "");
+   struct json_object *parts = json_object_new_array();
+   json_object_array_add(parts, llm_history_context_part(frame, MESSAGE_KIND_TURN_CONTEXT));
+   struct json_object *q = json_object_new_object();
+   json_object_object_add(q, "role", json_object_new_string("user"));
+   json_object_array_add(parts, llm_history_context_part("question", MESSAGE_KIND_NONE));
+   json_object_object_add(q, "content", parts);
+   json_object_array_add(hist, q);
+   focus_selection_free(&sel);
+   focus_scan_free(&scan);
+   composed_prompt_free(&cp);
+   return items;
+}
+
+static void test_shown_item_is_not_sent_again(void) {
    fake_register("memory_fact", FOCUS_SOURCE_INTERNAL, false);
    seed_add("memory_fact", FOCUS_SOURCE_INTERNAL, "stable text", "fact:42", 1700000000, 0.5f, 0.5f,
             0.5f);
-
-   /* Drive only weight_semantic so the score is 0.5 stable across both
-    * turns; uplift_factor = 1.5 means the second turn would need
-    * score ≥ 0.75 to beat. */
    g_config.memory.focus_injection.weight_semantic = 1.0f;
 
    session_t s;
    memset(&s, 0, sizeof(s));
    s.session_id = 42;
    pthread_mutex_init(&s.history_mutex, NULL);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
+   struct json_object *hist = json_object_new_array();
 
-   /* First turn — admits cleanly. */
-   char *block1 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(/*user_id*/ 1, /*conv_id*/ 7, /*turn_id*/ 100,
-                                                    "first turn", &block1));
-   TEST_ASSERT_NOT_NULL(block1);
-   TEST_ASSERT_NOT_NULL(strstr(block1, "stable text"));
-   free(block1);
+   focus_item_state_t state;
+   char *t1 = probe_turn(hist, 100, &state);
+   TEST_ASSERT_EQUAL_INT(FOCUS_ITEM_NEW, state);
+   TEST_ASSERT_NOT_NULL(strstr(t1, "stable text"));
+   free(t1);
 
-   /* Second turn — same fact, same score, within window → suppressed. */
-   char *block2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 101, "second turn", &block2));
-   TEST_ASSERT_NULL_MESSAGE(block2,
-                            "dedup must suppress the only candidate within the recent window");
-
+   /* Every later turn: still relevant, already shown, so named only. */
+   for (int turn = 0; turn < 12; turn++) {
+      char *t = probe_turn(hist, 101 + turn, &state);
+      TEST_ASSERT_EQUAL_INT(FOCUS_ITEM_REFERENCED, state);
+      TEST_ASSERT_EQUAL_STRING_MESSAGE("[still relevant: M1]\n", t, "named, not sent again");
+      free(t);
+   }
+   json_object_put(hist);
+   set_dispatch(NULL);
    pthread_mutex_destroy(&s.history_mutex);
 }
 
-/* =============================================================================
- * Property 5 — dedup-uplift: same item, score >= prior * uplift_factor
- *                            → admits despite recent injection
- * ============================================================================= */
-
-static void test_dedup_uplift_admits(void) {
+static void test_changed_item_is_sent_again(void) {
    fake_register("memory_fact", FOCUS_SOURCE_INTERNAL, false);
-   /* Index 0 — used by both turns with different per-call score. */
-   seed_add("memory_fact", FOCUS_SOURCE_INTERNAL, "uplifting text", "fact:99", 1700000000,
-            /*semantic*/ 0.4f, 0.5f, 0.5f);
-
+   seed_add("memory_fact", FOCUS_SOURCE_INTERNAL, "the old text", "fact:99", 1700000000, 0.4f, 0.5f,
+            0.5f);
    g_config.memory.focus_injection.weight_semantic = 1.0f;
 
    session_t s;
    memset(&s, 0, sizeof(s));
    s.session_id = 43;
    pthread_mutex_init(&s.history_mutex, NULL);
-   session_set_dispatch_session(&s);
+   set_dispatch(&s);
+   struct json_object *hist = json_object_new_array();
 
-   /* First turn — admits with low score (0.4 → final 0.4). */
-   char *block1 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 200, "turn one", &block1));
-   TEST_ASSERT_NOT_NULL(block1);
-   TEST_ASSERT_NOT_NULL(strstr(block1, "uplifting text"));
-   free(block1);
+   focus_item_state_t state;
+   free(probe_turn(hist, 200, &state));
+   TEST_ASSERT_EQUAL_INT(FOCUS_ITEM_NEW, state);
 
-   /* Mutate the seed's semantic_score to clear the uplift threshold
-    * (0.4 * 1.5 = 0.6, set to 0.7).  The seed pool is shared state —
-    * fake_query reads it on every call. */
-   s_fake.seeds[0].semantic_score = 0.7f;
-
-   char *block2 = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build_focus_block(1, 7, 201, "turn two", &block2));
-   TEST_ASSERT_NOT_NULL_MESSAGE(block2, "uplift score >= prior * 1.5 must re-admit");
-   TEST_ASSERT_NOT_NULL(strstr(block2, "uplifting text"));
-   free(block2);
-
+   /* The item's text changes (the fake pool is shared state). */
+   s_fake.seeds[0].text = "the new text";
+   char *t2 = probe_turn(hist, 201, &state);
+   TEST_ASSERT_EQUAL_INT(FOCUS_ITEM_CHANGED, state);
+   TEST_ASSERT_NOT_NULL(strstr(t2, "[M1 memory_fact"));
+   TEST_ASSERT_NOT_NULL(strstr(t2, "the new text"));
+   free(t2);
+   json_object_put(hist);
+   set_dispatch(NULL);
    pthread_mutex_destroy(&s.history_mutex);
 }
 
@@ -543,8 +566,8 @@ int main(void) {
    RUN_TEST(test_recency_promotes_newer);
    RUN_TEST(test_importance_promotes_higher);
    RUN_TEST(test_source_weight_reorders);
-   RUN_TEST(test_dedup_suppress_within_window);
-   RUN_TEST(test_dedup_uplift_admits);
+   RUN_TEST(test_shown_item_is_not_sent_again);
+   RUN_TEST(test_changed_item_is_sent_again);
    RUN_TEST(test_budget_force_keep_first_only);
    RUN_TEST(test_combo_recency_plus_importance);
    return UNITY_END();

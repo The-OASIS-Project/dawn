@@ -184,6 +184,7 @@ static const treg_param_t stat_params[] = {
 
 static const tool_metadata_t stat_metadata = {
    .name = "system_status",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "system_status",
    .topic = "dawn",
    .aliases = { "telemetry", "diagnostics" },
@@ -203,7 +204,7 @@ static const tool_metadata_t stat_metadata = {
        "sensor. If STAT is offline or the data is stale, that is reported instead of guessed "
        "values.",
    .params = stat_params,
-   .param_count = 3,
+   .param_count = TOOL_PARAM_COUNT(stat_params),
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_SCHEDULABLE | TOOL_CAP_INFORMATIONAL,

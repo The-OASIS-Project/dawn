@@ -21,6 +21,7 @@
 
 #include "tools/recall_format.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,14 +31,10 @@
 #include "memory/memory_citation.h" /* record_tool_fact_current + memory_citation_enabled (Option B) */
 #include "utils/string_utils.h"
 
-/* Per-line one-liner cap — keeps a single candidate from dominating the budget
- * the engine already bounded; the read-pointer tells the LLM where the full
- * text lives. */
-#define RECALL_LINE_TEXT_MAX 240
-
-/* Stack buffer for a parsed document/note label.  DOC_FILENAME_MAX is 256 in
- * document_db.h; 300 leaves margin without coupling this file to that header. */
-#define RECALL_FNAME_MAX 300
+/* RECALL_LINE_TEXT_MAX (recall_format.h): the per-line one-liner cap, so one
+ * candidate can't dominate the result; the read-pointer tells the LLM where the
+ * full text lives.  RECALL_FNAME_MAX: a parsed document/note label
+ * (DOC_FILENAME_MAX is 256; 300 leaves margin without coupling to that header). */
 
 /* Source families, in render order. */
 typedef enum {
@@ -97,14 +94,21 @@ static bool filename_from_text(const char *text, char *buf, size_t buflen) {
    return true;
 }
 
-/* Append `text` as a single line: collapse any CR/LF/tab to spaces and cap at
- * RECALL_LINE_TEXT_MAX bytes (with an ellipsis when truncated). */
-static void append_oneline(strbuf_t *sb, const char *text) {
+/* Longest line one candidate prints: text, ellipsis, NUL. */
+#define ONELINE_BUF (RECALL_LINE_TEXT_MAX + 4)
+/* Longest read-pointer: the document form, with its label. */
+#define POINTER_BUF (32 + RECALL_FNAME_MAX)
+/* The bullet before each line ("  • " is 6 bytes in UTF-8) and its newline. */
+#define BULLET_BYTES 6
+#define NEWLINE_BYTES 1
+
+/* @p text as a single line in @p line (ONELINE_BUF bytes): CR/LF/tab become
+ * spaces, runs of whitespace collapse, capped at RECALL_LINE_TEXT_MAX bytes
+ * with an ellipsis when truncated.  Returns its length. */
+static size_t oneline(const char *text, char *line) {
    if (text == NULL) {
-      (void)strbuf_append(sb, "(no text)");
-      return;
+      return (size_t)snprintf(line, ONELINE_BUF, "(no text)");
    }
-   char line[RECALL_LINE_TEXT_MAX + 4];
    size_t w = 0;
    bool prev_space = false;
    const char *p = text;
@@ -121,13 +125,15 @@ static void append_oneline(strbuf_t *sb, const char *text) {
       }
       line[w++] = c;
    }
-   line[w] = '\0';
-   (void)strbuf_append(sb, line);
    /* `*p` non-NUL ⇒ the loop stopped at the cap, not the terminator: truncated.
     * (Tracking the loop exit avoids a full strlen rescan and is also correct
     * under whitespace collapse, which a raw strlen>cap test is not.) */
-   if (*p)
-      (void)strbuf_append(sb, "...");
+   if (*p) {
+      memcpy(line + w, "...", 3);
+      w += 3;
+   }
+   line[w] = '\0';
+   return w;
 }
 
 static bool is_injected(const char *item_id, const char *const *injected_ids, int n) {
@@ -140,25 +146,28 @@ static bool is_injected(const char *item_id, const char *const *injected_ids, in
    return false;
 }
 
-/* Emit one candidate's bullet line (without leading marker), including its
- * source-appropriate read-pointer. */
-static void append_candidate_line(strbuf_t *sb, const focus_candidate_t *c, recall_family_t fam) {
-   append_oneline(sb, c->text);
+/* The fact id a memory_fact candidate carries, or 0.  Only facts carry a
+ * directly-fetchable id; entities/relations are self-describing context. */
+static long long fact_id_of(const focus_candidate_t *c) {
+   if (!c->source_id || strcmp(c->source_id, "memory_fact") != 0)
+      return 0;
+   const char *id = id_after_colon(c->item_id);
+   return id ? atoll(id) : 0;
+}
+
+/* The read-pointer after candidate @p c's line, in @p buf (POINTER_BUF
+ * bytes); empty when its family has none.  Returns its length. */
+static size_t read_pointer(const focus_candidate_t *c, recall_family_t fam, char *buf) {
+   buf[0] = '\0';
+   int n = 0;
    switch (fam) {
-      case FAM_MEMORY:
-         /* Only facts carry a directly-fetchable id; entities/relations are
-          * self-describing context, no precise fetch verb. */
-         if (c->source_id && strcmp(c->source_id, "memory_fact") == 0) {
-            const char *id = id_after_colon(c->item_id);
-            if (id) {
-               /* One marker for both memory renderers (SURFACED_ID_FMT), and record
-                * the fact as citeable this turn (Option B). */
-               long long fid = atoll(id);
-               (void)strbuf_appendf(sb, "   " SURFACED_ID_FMT, fid);
-               memory_citation_record_tool_fact_current(fid);
-            }
-         }
+      case FAM_MEMORY: {
+         /* One marker for both memory renderers (SURFACED_ID_FMT). */
+         const long long fid = fact_id_of(c);
+         if (fid)
+            n = snprintf(buf, POINTER_BUF, "   " SURFACED_ID_FMT, fid);
          break;
+      }
       case FAM_SUMMARY:
          /* No fetch pointer: summary item_ids are `summary:<id>`, a different
           * id space than facts, and `memory get` resolves only fact ids — an
@@ -168,15 +177,39 @@ static void append_candidate_line(strbuf_t *sb, const focus_candidate_t *c, reca
       case FAM_DOC: {
          char fname[RECALL_FNAME_MAX];
          if (filename_from_text(c->text, fname, sizeof(fname)))
-            (void)strbuf_appendf(sb, "   -> document_read \"%s\"", fname);
+            n = snprintf(buf, POINTER_BUF, "   -> document_read \"%s\"", fname);
          break;
       }
       case FAM_CALENDAR:
-         (void)strbuf_append(sb, "   -> calendar (query by date/title)");
+         n = snprintf(buf, POINTER_BUF, "   -> calendar (query by date/title)");
          break;
       default:
          break;
    }
+   return (n > 0) ? strlen(buf) : 0;
+}
+
+int recall_format_item_bytes(const focus_candidate_t *c) {
+   char line[ONELINE_BUF];
+   char pointer[POINTER_BUF];
+   const recall_family_t fam = family_of(c->source_id);
+   return (int)(BULLET_BYTES + oneline(c->text, line) + read_pointer(c, fam, pointer) +
+                NEWLINE_BYTES);
+}
+
+/* Emit one candidate's line (without leading marker), including its
+ * source-appropriate read-pointer, and record a surfaced fact as citeable
+ * this turn (Option B). */
+static void append_candidate_line(strbuf_t *sb, const focus_candidate_t *c, recall_family_t fam) {
+   char line[ONELINE_BUF];
+   char pointer[POINTER_BUF];
+   oneline(c->text, line);
+   (void)strbuf_append(sb, line);
+   if (read_pointer(c, fam, pointer) > 0)
+      (void)strbuf_append(sb, pointer);
+   const long long fid = (fam == FAM_MEMORY) ? fact_id_of(c) : 0;
+   if (fid)
+      memory_citation_record_tool_fact_current(fid);
 }
 
 char *recall_format_result(const char *query,
@@ -288,7 +321,7 @@ char *recall_format_result(const char *query,
    char *out = strbuf_steal(&sb);
    strbuf_free(&sb);
    /* Guarantee the tool result is valid UTF-8.  The per-line byte-count caps
-    * (append_oneline / filename_from_text) can stop mid-codepoint, leaving a
+    * (oneline / filename_from_text) can stop mid-codepoint, leaving a
     * lone lead byte — one such byte 400s the Claude request ("surrogates not
     * allowed") AND wedges the WebUI socket ("Invalid UTF-8 in text frame") into
     * a reconnect loop.  sanitize repairs any partial/invalid sequence in place. */

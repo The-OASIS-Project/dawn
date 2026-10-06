@@ -18,7 +18,7 @@
  *
  * Messaging engine — session-slot map.
  *
- * The in-memory (provider, provider_address) -> session_t* slot table: LRU
+ * The in-memory channel row -> session_t* slot table: LRU
  * eviction, get-or-create with post-restart history restore + per-turn name
  * refresh, the cross-channel staleness reload, and the self-reset deferral
  * probe.  Split out of messaging_engine.c; see messaging_engine_internal.h
@@ -49,15 +49,14 @@
 /* messaging_conv_get_max_msg_id and history_array_max_msg_id are file-local
  * helpers (used only by the staleness reload + history restore below). */
 
-/* Find the in-memory session slot for (provider, provider_address) and
- * evict it.  Eviction triggers memory extraction on the closing
- * conversation via session_destroy's existing extraction hook.  No-op
+/* Find the in-memory session slot for a channel row and evict it.  Eviction triggers memory
+ * extraction on the closing conversation via session_destroy's existing extraction hook.  No-op
  * when no slot matches (channel never received an inbound this
  * daemon-uptime).  Drops s_session_slots_mutex before calling
  * session_destroy per the same lock-order rule the LRU path follows
  * (per-module → global is forbidden). */
-void evict_session_slot(const char *provider, const char *provider_address) {
-   if (!provider || !provider_address) {
+void evict_session_slot(int64_t channel_id) {
+   if (channel_id <= 0) {
       return;
    }
 
@@ -65,8 +64,7 @@ void evict_session_slot(const char *provider, const char *provider_address) {
    session_t *evictee = NULL;
    uint32_t evictee_session_id = 0;
    for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
-      if (s_session_slots[i].session && strcmp(s_session_slots[i].provider, provider) == 0 &&
-          strcmp(s_session_slots[i].provider_address, provider_address) == 0) {
+      if (s_session_slots[i].session && s_session_slots[i].channel_id == channel_id) {
          evictee = s_session_slots[i].session;
          evictee_session_id = evictee->session_id;
          memset(&s_session_slots[i], 0, sizeof(session_slot_t));
@@ -76,8 +74,8 @@ void evict_session_slot(const char *provider, const char *provider_address) {
    pthread_mutex_unlock(&s_session_slots_mutex);
 
    if (evictee) {
-      OLOG_INFO("messaging: evicting session slot for %s:%s (session_id=%u)", provider,
-                provider_address, evictee_session_id);
+      OLOG_INFO("messaging: evicting session slot for channel %lld (session_id=%u)",
+                (long long)channel_id, evictee_session_id);
       /* Drop the engine's retain so session_destroy's ref-count wait
        * converges immediately.  session_destroy fires memory extraction
        * for the closing conversation. */
@@ -90,7 +88,9 @@ void evict_session_slot(const char *provider, const char *provider_address) {
  * lock failure or an empty conversation.  Used by the staleness check
  * in process_inbound to detect external writers (WebUI conversation
  * panel, voice session, MCP) appending to the same conv between
- * messaging-channel turns. */
+ * messaging-channel turns.  Request-context rows count too: one another
+ * surface wrote (a directive, a changed instruction) is part of what a reload
+ * replays, so this session must pick it up. */
 static int64_t messaging_conv_get_max_msg_id(int64_t conv_id) {
    if (conv_id <= 0) {
       return 0;
@@ -98,6 +98,7 @@ static int64_t messaging_conv_get_max_msg_id(int64_t conv_id) {
    AUTH_DB_LOCK_OR_RETURN(0);
    sqlite3_stmt *stmt = NULL;
    int64_t max_id = 0;
+   /* kind-rows: see above. */
    const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(stmt, 1, conv_id);
@@ -199,18 +200,13 @@ void reload_session_history_if_stale(session_t *session,
              provider, provider_address, (long long)db_max, (long long)slot_last_known);
 
    size_t restored_chars = 0;
-   struct json_object *loaded = memory_history_load_from_db(conv_id, user_id, &restored_chars);
+   struct json_object *loaded = memory_history_load_for_llm(conv_id, user_id, &restored_chars);
    if (!loaded) {
       return;
    }
    size_t restored_count = (size_t)json_object_array_length(loaded);
 
-   pthread_mutex_lock(&session->history_mutex);
-   if (session->conversation_history) {
-      json_object_put(session->conversation_history);
-   }
-   session->conversation_history = loaded;
-   pthread_mutex_unlock(&session->history_mutex);
+   session_replace_history(session, loaded, conv_id);
 
    int64_t new_high = history_array_max_msg_id(loaded);
    slot_bump_last_known_msg_id(session, new_high);
@@ -229,11 +225,11 @@ void reload_session_history_if_stale(session_t *session,
  *
  * Detection: session_get_command_context() returns the session
  * currently executing tool callbacks on this thread.  We compare its
- * session_id against the slot's session for (provider, address).  A
+ * session_id against the slot's session for the channel.  A
  * match means the LLM tool is running on THIS slot's session — exact
  * self-reset case.  Non-match (or no command context, or no slot
  * yet) → immediate reset is safe. */
-bool mark_pending_reset_if_self(const char *provider, const char *provider_address) {
+bool mark_pending_reset_if_self(int64_t channel_id) {
    session_t *caller = session_get_command_context();
    if (!caller) {
       return false;
@@ -243,14 +239,13 @@ bool mark_pending_reset_if_self(const char *provider, const char *provider_addre
    pthread_mutex_lock(&s_session_slots_mutex);
    bool self_reset = false;
    for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
-      if (s_session_slots[i].session && strcmp(s_session_slots[i].provider, provider) == 0 &&
-          strcmp(s_session_slots[i].provider_address, provider_address) == 0) {
+      if (s_session_slots[i].session && s_session_slots[i].channel_id == channel_id) {
          if (s_session_slots[i].session->session_id == caller_id) {
             s_session_slots[i].pending_reset = true;
             self_reset = true;
-            OLOG_INFO("messaging: /new on %s:%s deferred — caller IS the target session "
+            OLOG_INFO("messaging: /new on channel %lld deferred — caller IS the target session "
                       "(session_id=%u), processing after dispatch completes",
-                      provider, provider_address, caller_id);
+                      (long long)channel_id, caller_id);
          }
          break;
       }
@@ -269,41 +264,37 @@ bool mark_pending_reset_if_self(const char *provider, const char *provider_addre
  * acquiring helpers are called outside the per-module mutex.  See
  * the inline release/re-acquire dance in the eviction branch and the
  * create-new-session branch. */
-session_t *get_or_create_messaging_session(const char *provider,
+session_t *get_or_create_messaging_session(const channel_ref_t *ref,
+                                           const char *provider,
                                            const char *provider_address,
-                                           int user_id,
                                            int64_t conversation_id) {
+   if (!ref || ref->channel_id <= 0 || ref->user_id <= 0) {
+      return NULL;
+   }
+   const int user_id = ref->user_id;
    pthread_mutex_lock(&s_session_slots_mutex);
 
-   /* Find existing slot. */
+   /* Find existing slot.  One per channel row: two users who each linked
+    * the same group chat get separate sessions (history, tools, memory).
+    * A row's user never changes, so the session's user is fixed. */
    for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
-      if (s_session_slots[i].session && strcmp(s_session_slots[i].provider, provider) == 0 &&
-          strcmp(s_session_slots[i].provider_address, provider_address) == 0) {
+      if (s_session_slots[i].session && s_session_slots[i].channel_id == ref->channel_id) {
          s_session_slots[i].last_used = time(NULL);
          session_t *s = s_session_slots[i].session;
-         /* Re-stamp user_id in case it changed (e.g., admin re-linked
-          * the same address to a different DAWN user). */
-         if (user_id > 0) {
-            s->metrics.user_id = user_id;
-         }
          session_retain(s);
          pthread_mutex_unlock(&s_session_slots_mutex);
-         /* Refresh the cached display_name from the DB so a mid-session
-          * rename is reflected in the next prompt build — the current-channel
-          * injection reads messaging_identity.channel_name, and a stale name
-          * would make the LLM emit the wrong scheduler `deliver_to`.  Done
-          * AFTER releasing the slots mutex (lookup_channel_user takes the
-          * auth_db leaf lock — must not nest under a per-module lock) and on
-          * the worker thread that builds the prompt downstream, so the write
-          * has a single thread and races with no reader.  Steady-state (no
-          * rename) re-writes the identical name, so the cached stable prefix
-          * stays byte-identical and the Anthropic cache holds; a real rename
-          * changes it once and the drift detector logs the reset. */
-         char cur_name[sizeof(s->messaging_identity.channel_name)] = { 0 };
-         if (lookup_channel_user(provider, provider_address, cur_name, sizeof(cur_name)) > 0 &&
-             cur_name[0] != '\0') {
+         /* Refresh the cached display_name so a mid-session rename is
+          * reflected in the next prompt build — the current-channel injection
+          * reads messaging_identity.channel_name, and a stale name would make
+          * the LLM emit the wrong scheduler `deliver_to`.  `ref` was read this
+          * turn (resolve_channel_conversation_id).  Written on the worker
+          * thread that builds the prompt downstream, so the write has a single
+          * thread and races with no reader.  Steady-state (no rename)
+          * re-writes the identical name, so the cached stable prefix stays
+          * byte-identical. */
+         if (ref->display_name[0] != '\0') {
             snprintf(s->messaging_identity.channel_name, sizeof(s->messaging_identity.channel_name),
-                     "%s", cur_name);
+                     "%s", ref->display_name);
          }
          return s;
       }
@@ -424,18 +415,19 @@ session_t *get_or_create_messaging_session(const char *provider,
 
    /* Stamp messaging identity so the prompt build path can surface
     * "you are responding through this channel" context to the LLM —
-    * mirrors how dap2_identity_t.location surfaces Room.  Resolved via
-    * the same lookup_channel_user used during inbound dispatch, so
-    * display_name reflects the user's current display_name for this
-    * channel.  Safe to set without locking: session_t isn't visible
-    * to any other thread yet. */
+    * mirrors how dap2_identity_t.location surfaces Room.  The display
+    * name comes from the channel row the inbound resolved to.  Safe to
+    * set without locking: session_t isn't visible to any other thread
+    * yet. */
    snprintf(s->messaging_identity.provider, sizeof(s->messaging_identity.provider), "%s",
             provider ? provider : "");
-   char channel_name[sizeof(s->messaging_identity.channel_name)] = { 0 };
-   (void)lookup_channel_user(provider, provider_address, channel_name, sizeof(channel_name));
-   if (channel_name[0]) {
+   /* A sender the provider can't vouch for (SMS) reads and prepares but
+    * doesn't act (core/tool_call_policy.h). */
+   s->messaging_identity.sender_unverified = !ref->authenticates_sender;
+   s->messaging_identity.channel_id = ref->channel_id;
+   if (ref->display_name[0]) {
       snprintf(s->messaging_identity.channel_name, sizeof(s->messaging_identity.channel_name), "%s",
-               channel_name);
+               ref->display_name);
    }
 
    /* Post-restart history restore.  Without this, daemon restart
@@ -453,7 +445,7 @@ session_t *get_or_create_messaging_session(const char *provider,
    int64_t restored_max_msg_id = 0;
    if (conversation_id > 0 && user_id > 0) {
       size_t restored_chars = 0;
-      struct json_object *loaded = memory_history_load_from_db(conversation_id, user_id,
+      struct json_object *loaded = memory_history_load_for_llm(conversation_id, user_id,
                                                                &restored_chars);
       if (loaded) {
          size_t restored_count = (size_t)json_object_array_length(loaded);
@@ -463,12 +455,7 @@ session_t *get_or_create_messaging_session(const char *provider,
              * last_known_msg_id so the cross-channel staleness check
              * in process_inbound knows what we've seen. */
             restored_max_msg_id = history_array_max_msg_id(loaded);
-            pthread_mutex_lock(&s->history_mutex);
-            if (s->conversation_history) {
-               json_object_put(s->conversation_history);
-            }
-            s->conversation_history = loaded;
-            pthread_mutex_unlock(&s->history_mutex);
+            session_replace_history(s, loaded, conversation_id);
             OLOG_INFO("messaging: restored %zu messages (%zu chars) into session %u from conv %lld",
                       restored_count, restored_chars, s->session_id, (long long)conversation_id);
          } else {
@@ -499,6 +486,7 @@ session_t *get_or_create_messaging_session(const char *provider,
     * without engine locks: session_t is thread-private here, and
     * session_set_llm_config takes only the leaf llm_config_mutex. */
    s->messaging_identity.conversation_id = conversation_id;
+   session_bind_history_conversation(s, conversation_id);
    if (conversation_id > 0 && user_id > 0) {
       conversation_t conv;
       if (conv_db_get(conversation_id, user_id, &conv) == AUTH_DB_SUCCESS) {
@@ -561,6 +549,7 @@ session_t *get_or_create_messaging_session(const char *provider,
       }
    }
 
+   s_session_slots[target].channel_id = ref->channel_id;
    snprintf(s_session_slots[target].provider, sizeof(s_session_slots[target].provider), "%s",
             provider);
    snprintf(s_session_slots[target].provider_address,

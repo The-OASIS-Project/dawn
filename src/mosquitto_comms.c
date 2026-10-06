@@ -37,9 +37,12 @@
 #include "core/component_status.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
+#include "core/tool_call_policy.h"
 #include "dawn.h"
 #include "input_queue.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
@@ -224,14 +227,20 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
     * input): it gains per-turn memory/focus context + native tool-calling, is
     * subject to utterance dedup, and lands in the session history that feeds
     * end-of-session memory extraction. Device data on MQTT is operator-trusted
-    * (see the MQTT-auth hardening TODO); the explicit [DEVICE DATA] delimiter is
-    * retained. A burst of relays during one long turn can exceed the 8-slot queue
-    * (drop-oldest). Revisit tool-scoping / extraction-tagging for relays if the
-    * MQTT LOCAL PATH sees heavy use. */
+    * (broker auth is the admin's); the explicit [DEVICE DATA] delimiter is
+    * retained, and its turn only reads and changes session state: a device's
+    * data can carry outside text, so it never acts, fetches or works a device
+    * (dawn.c marks it unattended).  A burst of relays during one long turn can
+    * exceed the 8-slot queue (drop-oldest). */
    (void)mosq; /* command chaining + TTS now handled by the main pipeline */
+   /* A callback's result can be text from anywhere (a search): what imitates
+    * DAWN's framing or carries a tag is defused before it becomes input. */
+   char *safe = session_prefix_mask_secret(session_get_local(),
+                                           llm_context_neutralize(pending_command_result));
    snprintf(gpt_response, sizeof(gpt_response),
             "[DEVICE DATA] Speak this information naturally to the user: %s",
-            pending_command_result);
+            safe ? safe : "(the device's data couldn't be read)");
+   free(safe);
    input_queue_push(INPUT_SOURCE_MQTT, gpt_response);
 
    free(pending_command_result);
@@ -490,11 +499,10 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
       OLOG_INFO("Viewing response using file path: %s", value ? value : "(null)");
    }
 
-   // Get session_id if present (for per-session LLM config)
+   // Get session_id if present: the command runs in that session as its user,
+   // unattended (reads and session state only; see the gate below).
    // Note: session_get() returns NULL for disconnected sessions, which means
-   // commands from disconnected clients fall back to global config. This is
-   // intentional - there's no value in changing config for a disconnected client,
-   // and they can't see the result anyway.
+   // the command runs with no session, as one that names none.
    struct json_object *session_id_obj = NULL;
    session_t *session = NULL;
    if (json_object_object_get_ex(parsed_json, "session_id", &session_id_obj)) {
@@ -507,8 +515,32 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
 
    // Look up and execute callback for this device type
    device_callback_fn dev_callback = get_device_callback(deviceName);
-   if (dev_callback) {
-      callback_result = dev_callback(actionName, (char *)value, &should_respond);
+   /* A message naming a session acts in it as its user, but with no turn
+    * running: unattended, whatever the session (core/tool_call_policy.h).  It
+    * may read, not act, and the callback gets the action that was checked. */
+   tool_call_verdict_t verdict = { 0 };
+   const char *run_action = actionName;
+   if (dev_callback && session) {
+      if (tool_call_policy_check(tool_registry_find(deviceName), deviceName, actionName, value,
+                                 TOOL_CALLER_UNATTENDED, false, &verdict) != TOOL_CALL_ALLOW) {
+         OLOG_WARNING("MQTT: refused '%s' action '%s' (%s) naming session %u", deviceName,
+                      actionName ? actionName : "", tool_action_kind_name(verdict.kind),
+                      session->session_id);
+         callback_result = strdup(verdict.message);
+         should_respond = 1;
+         dev_callback = NULL;
+      } else {
+         run_action = verdict.action;
+      }
+   }
+   if (dev_callback && session) {
+      const tool_call_scope_t outer = tool_call_policy_enter(verdict.kind, TOOL_CALLER_UNATTENDED,
+                                                             false);
+      callback_result = dev_callback(run_action, (char *)value, &should_respond);
+      tool_call_policy_leave(outer);
+      tool_result_strip_error_mark(callback_result);
+   } else if (dev_callback) {
+      callback_result = dev_callback(run_action, (char *)value, &should_respond);
       /* Strip the opt-in tool error-marker before the result reaches the AI. */
       tool_result_strip_error_mark(callback_result);
    }
@@ -553,7 +585,13 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
    }
 #endif
 
-   OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
+   /* The phone's topics carry texts (a reply code received or sent, a /link
+    * code, anyone's message): the phone service logs what may be kept. */
+   if (strncmp(msg->topic, "echo/", 5) == 0) {
+      OLOG_INFO("%s %d (%d bytes)", msg->topic, msg->qos, msg->payloadlen);
+   } else {
+      OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
+   }
 
    /* Check for component status messages (hud/status) */
    if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0) {

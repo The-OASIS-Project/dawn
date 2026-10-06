@@ -118,6 +118,36 @@ void memory_db_internal_bind_provenance(sqlite3_stmt *stmt,
  * with backslash; callers SHOULD pair this with `ESCAPE '\\'` on the SQL side
  * (most existing call sites omit ESCAPE because their queries don't expect a
  * literal %/_ in user input — defense-in-depth either way). */
+void memory_db_internal_source_add_locked(memory_source_kind_t kind,
+                                          int64_t row_id,
+                                          int64_t conv_id) {
+   sqlite3_stmt *stmt = kind == MEMORY_SOURCE_FACT       ? s_db.stmt_memory_fact_source_add
+                        : kind == MEMORY_SOURCE_RELATION ? s_db.stmt_memory_relation_source_add
+                                                         : s_db.stmt_memory_pref_source_add;
+   if (row_id <= 0 || conv_id <= 0) {
+      return;
+   }
+   if (!stmt) {
+      /* The v89 tables are missing (a failed migration): a forget would then
+       * see only the row's latest source.  Say so once. */
+      static bool warned;
+      if (!warned) {
+         warned = true;
+         OLOG_WARNING("memory_db: memory source tables unavailable; forgetting a conversation "
+                      "can only see each memory's latest source");
+      }
+      return;
+   }
+   sqlite3_reset(stmt);
+   sqlite3_bind_int64(stmt, 1, row_id);
+   sqlite3_bind_int64(stmt, 2, conv_id);
+   if (sqlite3_step(stmt) != SQLITE_DONE) {
+      OLOG_WARNING("memory_db: recording source of memory row %lld (kind %d) failed: %s",
+                   (long long)row_id, (int)kind, sqlite3_errmsg(s_db.db));
+   }
+   sqlite3_reset(stmt);
+}
+
 void memory_db_internal_build_like_pattern(const char *keywords,
                                            char *out_pattern,
                                            size_t max_len) {

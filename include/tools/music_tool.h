@@ -24,6 +24,7 @@
 #ifndef MUSIC_TOOL_H
 #define MUSIC_TOOL_H
 
+
 /**
  * @brief Register the music tool with the tool registry
  *

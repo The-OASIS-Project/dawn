@@ -32,13 +32,19 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/pending_slots.h"
+#include "core/tool_call_challenge.h"
+#include "core/tool_call_policy.h"
+#include "core/turn_origin.h"
 #include "logging.h"
 #include "tools/phone_audio_config.h"
 #include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
 #include "tools/phone_service.h"
 #include "tools/toml.h"
+#include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants
@@ -74,7 +80,7 @@ static bool s_audio_parsed = false;
  * Tool callbacks can run concurrently across WebUI worker threads — adding
  * "phone" to SEQUENTIAL_TOOLS only serializes within a single tool-call
  * batch from one session, not across sessions. This lock guards:
- *   - s_pending_call_number / s_pending_sms_* / s_pending_delete_*
+ *   - s_pending[] (calls, texts and deletes awaiting their confirm)
  *   - s_delete_buckets[]
  * Critical sections are short (string copies, timestamp records) so a
  * single coarse-grained mutex is appropriate. */
@@ -158,54 +164,111 @@ static bool check_delete_rate_limit(int user_id) {
    return true;
 }
 
-/* Pending confirmation state (per-session would be ideal, but single user for now).
- * Timestamps bound the replay window — matches the delete pending-state TTL below. */
-static char s_pending_call_number[24] = "";
-static time_t s_pending_call_at = 0;
-static char s_pending_sms_number[24] = "";
-static char s_pending_sms_body[1024] = "";
-static time_t s_pending_sms_at = 0;
+/* What awaits the user's confirm: a call, a text, or a delete of SMS or call
+ * records, one of each per session (core/pending_slots.h).  The confirm must
+ * come from the session that staged it, in the user's next turn
+ * (turn_origin_check).  The TTL bounds the replay window if the user walks
+ * away after the preview. */
+#define PHONE_TOOL_PENDING_TTL_SEC 300 /* as long as a reply code, when one confirms it */
+#define PHONE_PENDING_MAX 32           /* 4 kinds for each of 8 sessions */
 
-/* Pending deletion state with TTL.
- *
- * Matches the email-tool pattern: preview arms pending state, next-turn
- * confirm_delete_* executes. The 120s TTL bounds replay windows if the user
- * walks away after the preview. Rate-limit caps are applied at confirm time.
- */
-#define PHONE_TOOL_PENDING_TTL_SEC 120
+enum {
+   PHONE_PENDING_CALL = 1,
+   PHONE_PENDING_SMS,
+   PHONE_PENDING_DELETE_SMS,
+   PHONE_PENDING_DELETE_CALL,
+};
 
-static char s_pending_delete_kind[16] = "";   /* "sms" or "call" */
-static int s_pending_delete_user_id = -1;     /* user that armed it */
-static int64_t s_pending_delete_id = -1;      /* used if criteria=by-id */
-static char s_pending_delete_number[24] = ""; /* used if criteria=by-number */
-static time_t s_pending_delete_cutoff = 0;    /* used if criteria=older-than */
-static int s_pending_delete_count = 0;        /* preview count shown to user */
-static time_t s_pending_delete_at = 0;        /* arm time for TTL */
+typedef struct {
+   pending_slot_t hdr;
+   char number[24];   /* call / text: the resolved number; delete: by-number criterion */
+   char name[64];     /* call / text: the contact's name ("" for a number) */
+   char body[1024];   /* text: what is sent */
+   int64_t id;        /* delete by id (-1 otherwise) */
+   time_t cutoff;     /* delete older than (0 otherwise) */
+   int preview_count; /* delete: the count shown to the user */
+} phone_pending_t;
 
-/* Caller must hold s_phone_tool_mutex. */
-static void clear_pending_delete_locked(void) {
-   s_pending_delete_kind[0] = '\0';
-   s_pending_delete_user_id = -1;
-   s_pending_delete_id = -1;
-   s_pending_delete_number[0] = '\0';
-   s_pending_delete_cutoff = 0;
-   s_pending_delete_count = 0;
-   s_pending_delete_at = 0;
+PENDING_ITEM_CHECK(phone_pending_t);
+static phone_pending_t s_pending[PHONE_PENDING_MAX];
+PENDING_ARRAY_CHECK(s_pending);
+static const pending_slots_t s_pending_slots = PENDING_SLOTS_TABLE(s_pending,
+                                                                   PHONE_TOOL_PENDING_TTL_SEC);
+
+/* Stage (replace) this session's pending item of @p kind.  NULL when every
+ * slot holds another session's live item.  Caller holds s_phone_tool_mutex. */
+static phone_pending_t *stage_pending_locked(const turn_origin_t *origin,
+                                             int user_id,
+                                             int kind,
+                                             pending_stage_rc_t *rc) {
+   return (phone_pending_t *)pending_slots_stage(&s_pending_slots, origin, user_id, kind,
+                                                 pending_slots_now(), rc);
 }
 
-static void clear_pending_delete(void) {
+/* Drop this session's pending item of @p kind (nothing armed). */
+static void drop_pending(const turn_origin_t *origin, int user_id, int kind) {
    pthread_mutex_lock(&s_phone_tool_mutex);
-   clear_pending_delete_locked();
+   pending_slots_drop(&s_pending_slots, origin, user_id, kind);
    pthread_mutex_unlock(&s_phone_tool_mutex);
 }
 
+/* A preview's closing line: the id the confirm must name. */
+static char *with_pending_id(const char *preview, const char *confirm, uint32_t item_id) {
+   static const char fmt[] = "%s\nIf the user says yes in their reply, call %s with pending_id "
+                             "%u (this item only).";
+   const size_t len = strlen(preview) + strlen(confirm) + sizeof(fmt) + 16;
+   char *buf = malloc(len);
+   if (buf) {
+      snprintf(buf, len, fmt, preview, confirm, (unsigned)item_id);
+   }
+   return buf;
+}
+
+/* The pending_id a confirm names (0 when missing or not a number). */
+static uint32_t pending_id_arg(struct json_object *details) {
+   struct json_object *v = NULL;
+   if (!details || !json_object_object_get_ex(details, "pending_id", &v) || !v) {
+      return 0;
+   }
+   const int64_t id = json_object_get_int64(v);
+   return (id > 0 && id <= UINT32_MAX) ? (uint32_t)id : 0;
+}
+
+/* Take this session's pending item of @p kind, the one the confirm names, for
+ * its confirm: copied to @p out and cleared.  NULL on success, else the error
+ * to return (one named wrong, or confirmed in the wrong turn, stays). */
+static char *take_pending(const turn_origin_t *origin,
+                          int user_id,
+                          int kind,
+                          uint32_t item_id,
+                          const char *what,
+                          phone_pending_t *out) {
+   if (item_id == 0) {
+      return tool_pending_missing_id(what);
+   }
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   pthread_mutex_lock(&s_phone_tool_mutex);
+   const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id, kind, item_id,
+                                                   pending_slots_now(), out, sizeof(*out), &orc);
+   pthread_mutex_unlock(&s_phone_tool_mutex);
+   if (rc == PENDING_FOUND) {
+      return NULL;
+   }
+   if (rc == PENDING_NOT_NOW) {
+      OLOG_WARNING("phone_tool: confirm of %s refused (%s)", what, turn_origin_refusal(orc));
+   }
+   return tool_pending_take_refusal(rc, orc, what);
+}
+
 /* Forward decl — used in the delete-preview handlers before the definition. */
-static void arm_pending_delete(int user_id,
-                               const char *kind,
-                               int64_t id,
-                               const char *number,
-                               time_t cutoff,
-                               int preview_count);
+static uint32_t arm_pending_delete(const turn_origin_t *origin,
+                                   int user_id,
+                                   int kind,
+                                   int64_t id,
+                                   const char *number,
+                                   time_t cutoff,
+                                   int preview_count,
+                                   pending_stage_rc_t *rc);
 
 /* =============================================================================
  * JSON Helpers
@@ -316,61 +379,99 @@ static char *phone_service_result_dup(int rc, const char *result) {
    return out;
 }
 
-static char *handle_call(struct json_object *details, int user_id) {
+/* Whether a call or text previews (and waits for its confirm) rather than
+ * going at once: as the call was classified at the gate, so a settings save
+ * between the two can't turn a preview into a dial.  confirm_outbound outside
+ * the gate. */
+static bool phone_previews(void) {
+   tool_action_kind_t kind = TOOL_KIND_ACT;
+   if (tool_call_policy_decided(&kind)) {
+      return kind == TOOL_KIND_PREPARE;
+   }
+   return s_config.confirm_outbound;
+}
+
+/* A call or text's recipient for this turn: NULL with @p rez ready (a number,
+ * one contact, or one to confirm: *confirm), else the question to ask. */
+static char *resolve_recipient(const char *target,
+                               int user_id,
+                               const turn_origin_t *origin,
+                               int kind,
+                               phone_resolve_t *rez,
+                               bool *confirm) {
+   phone_contacts_resolve(user_id, target, rez);
+   /* Approved by the user's reply code: the code's text named them. */
+   if (rez->kind == PHONE_RESOLVE_CONFIRM && session_call_code_redeemed()) {
+      rez->kind = PHONE_RESOLVE_UNIQUE;
+   }
+   *confirm = rez->kind == PHONE_RESOLVE_CONFIRM;
+   if (rez->kind == PHONE_RESOLVE_NUMBER || rez->kind == PHONE_RESOLVE_UNIQUE || *confirm) {
+      return NULL;
+   }
+   drop_pending(origin, user_id, kind); /* disambiguate first */
+   char buf[sizeof(rez->question)];
+   phone_contacts_format_disambiguation(target, rez, buf, sizeof(buf));
+   return strdup(buf);
+}
+
+static char *handle_call(struct json_object *details, int user_id, const turn_origin_t *origin) {
    const char *target = json_get_str(details, "target");
    if (!target || target[0] == '\0') {
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: 'target' is required (phone number or contact name)");
    }
 
-   if (s_config.confirm_outbound) {
-      /* Resolve the contact NOW (at preview) so the user confirms a real,
-       * verified number — not a name we haven't checked.  Ambiguous or
-       * fuzzy-only matches surface candidates instead of arming a call. */
-      phone_resolve_t rez;
-      phone_contacts_resolve(user_id, target, &rez);
-      if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
-         s_pending_call_number[0] = '\0'; /* nothing armed — model must disambiguate first */
-         char buf[512];
-         phone_contacts_format_disambiguation(target, &rez, buf, sizeof(buf));
-         return strdup(buf);
-      }
-
+   phone_resolve_t rez;
+   bool confirm = false;
+   char *ask = resolve_recipient(target, user_id, origin, PHONE_PENDING_CALL, &rez, &confirm);
+   if (ask) {
+      return ask;
+   }
+   /* A preview when previews are on, and always for a recipient to confirm:
+    * the user's yes to it is the confirmation. */
+   if (phone_previews() || confirm) {
       /* Arm the resolved number so confirm dials exactly what was previewed. */
-      snprintf(s_pending_call_number, sizeof(s_pending_call_number), "%s", rez.number);
-      s_pending_call_at = time(NULL);
-      char buf[256];
-      if (rez.name[0]) {
-         snprintf(buf, sizeof(buf), "About to call %s at %s. Say 'confirm' to proceed.", rez.name,
-                  rez.number);
-      } else {
-         snprintf(buf, sizeof(buf), "About to call %s. Say 'confirm' to proceed.", rez.number);
+      pthread_mutex_lock(&s_phone_tool_mutex);
+      pending_stage_rc_t src = PENDING_STAGED;
+      phone_pending_t *p = stage_pending_locked(origin, user_id, PHONE_PENDING_CALL, &src);
+      const uint32_t pending_id = p ? p->hdr.item_id : 0;
+      if (p) {
+         snprintf(p->number, sizeof(p->number), "%s", rez.number);
+         snprintf(p->name, sizeof(p->name), "%s", rez.name);
       }
-      return strdup(buf);
+      pthread_mutex_unlock(&s_phone_tool_mutex);
+      if (pending_id == 0) {
+         return tool_pending_stage_refusal(src, "call");
+      }
+      /* Room for the whole question the resolver asks. */
+      char buf[sizeof(rez.name) + sizeof(rez.number) + sizeof(rez.question) + 32];
+      if (rez.name[0]) {
+         snprintf(buf, sizeof(buf), "About to call %s at %s. %s", rez.name, rez.number,
+                  confirm ? rez.question : "Say 'confirm' to proceed.");
+      } else {
+         snprintf(buf, sizeof(buf), "About to call %s. %s", rez.number,
+                  confirm ? rez.question : "Say 'confirm' to proceed.");
+      }
+      return with_pending_id(buf, "confirm_call", pending_id);
    }
 
-   /* No confirmation — dial immediately (service layer applies the same guard) */
+   /* No confirmation: dial the number resolved above. */
    char result[RESULT_BUF_SIZE];
-   int rc = phone_service_call(user_id, target, result, sizeof(result));
+   int rc = phone_service_call(user_id, rez.number, result, sizeof(result));
    return phone_service_result_dup(rc, result);
 }
 
-static char *handle_confirm_call(int user_id) {
-   if (s_pending_call_number[0] == '\0') {
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending call to confirm");
+static char *handle_confirm_call(struct json_object *details,
+                                 int user_id,
+                                 const turn_origin_t *origin) {
+   phone_pending_t p;
+   char *err = take_pending(origin, user_id, PHONE_PENDING_CALL, pending_id_arg(details), "call",
+                            &p);
+   if (err) {
+      return err;
    }
-   if (time(NULL) - s_pending_call_at > PHONE_TOOL_PENDING_TTL_SEC) {
-      s_pending_call_number[0] = '\0';
-      s_pending_call_at = 0;
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: confirmation expired. Please retry the call request.");
-   }
-
    char result[RESULT_BUF_SIZE];
-   int rc = phone_service_call(user_id, s_pending_call_number, result, sizeof(result));
-
-   s_pending_call_number[0] = '\0';
-   s_pending_call_at = 0;
+   int rc = phone_service_call(user_id, p.number, result, sizeof(result));
    return phone_service_result_dup(rc, result);
 }
 
@@ -386,7 +487,9 @@ static char *handle_hang_up(int user_id) {
    return phone_service_result_dup(rc, result);
 }
 
-static char *handle_send_sms(struct json_object *details, int user_id) {
+static char *handle_send_sms(struct json_object *details,
+                             int user_id,
+                             const turn_origin_t *origin) {
    const char *target = json_get_str(details, "target");
    const char *body = json_get_str(details, "body");
 
@@ -397,64 +500,72 @@ static char *handle_send_sms(struct json_object *details, int user_id) {
    if (!body || body[0] == '\0') {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: 'body' is required (message text)");
    }
-
-   if (s_config.confirm_outbound) {
-      /* Resolve the recipient NOW (at preview) — same guard as calls, so the
-       * user confirms a verified number rather than an unchecked name. */
-      phone_resolve_t rez;
-      phone_contacts_resolve(user_id, target, &rez);
-      if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
-         s_pending_sms_number[0] = '\0'; /* nothing armed — disambiguate first */
-         s_pending_sms_body[0] = '\0';
-         char buf[512];
-         phone_contacts_format_disambiguation(target, &rez, buf, sizeof(buf));
-         return strdup(buf);
-      }
-
-      /* Arm the resolved number so confirm sends exactly what was previewed. */
-      snprintf(s_pending_sms_number, sizeof(s_pending_sms_number), "%s", rez.number);
-      snprintf(s_pending_sms_body, sizeof(s_pending_sms_body), "%s", body);
-      s_pending_sms_at = time(NULL);
-
-      const char *recipient = rez.name[0] ? rez.name : rez.number;
-      int segs = s_config.warn_on_multi_segment ? estimate_sms_segments(body) : 1;
-      char buf[768];
-      if (segs > 1) {
-         snprintf(buf, sizeof(buf),
-                  "About to send SMS to %s: \"%s\". This will send as %d text messages. "
-                  "Say 'confirm' to send.",
-                  recipient, body, segs);
-      } else {
-         snprintf(buf, sizeof(buf), "About to send SMS to %s: \"%s\". Say 'confirm' to send.",
-                  recipient, body);
-      }
-      return strdup(buf);
+   phone_resolve_t rez;
+   bool confirm = false;
+   char *ask = resolve_recipient(target, user_id, origin, PHONE_PENDING_SMS, &rez, &confirm);
+   if (ask) {
+      return ask;
+   }
+   /* A preview when previews are on, and always for a recipient to confirm. */
+   const bool previews = phone_previews() || confirm;
+   if (previews && strlen(body) >= sizeof(((phone_pending_t *)0)->body)) {
+      /* Stored cut short, the text sent wouldn't be the one previewed. */
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: the message is too long to preview; keep it "
+                                           "under about 1000 bytes (fewer with emoji or "
+                                           "non-Latin text), or send it as two messages.");
    }
 
+   if (previews) {
+      /* Arm the resolved number so confirm sends exactly what was previewed. */
+      pthread_mutex_lock(&s_phone_tool_mutex);
+      pending_stage_rc_t src = PENDING_STAGED;
+      phone_pending_t *p = stage_pending_locked(origin, user_id, PHONE_PENDING_SMS, &src);
+      const uint32_t pending_id = p ? p->hdr.item_id : 0;
+      if (p) {
+         snprintf(p->number, sizeof(p->number), "%s", rez.number);
+         snprintf(p->name, sizeof(p->name), "%s", rez.name);
+         snprintf(p->body, sizeof(p->body), "%s", body);
+      }
+      pthread_mutex_unlock(&s_phone_tool_mutex);
+      if (pending_id == 0) {
+         return tool_pending_stage_refusal(src, "text");
+      }
+
+      char recipient[96];
+      if (rez.name[0]) {
+         snprintf(recipient, sizeof(recipient), "%s (%s)", rez.name, rez.number);
+      } else {
+         snprintf(recipient, sizeof(recipient), "%s", rez.number);
+      }
+      int segs = s_config.warn_on_multi_segment ? estimate_sms_segments(body) : 1;
+      /* Room for the whole body: the preview shows exactly what is sent. */
+      char buf[sizeof(((phone_pending_t *)0)->body) + 768];
+      char multi[64] = "";
+      if (segs > 1) {
+         snprintf(multi, sizeof(multi), " This will send as %d text messages.", segs);
+      }
+      snprintf(buf, sizeof(buf), "About to send SMS to %s: \"%s\".%s %s", recipient, body, multi,
+               confirm ? rez.question : "Say 'confirm' to send.");
+      return with_pending_id(buf, "confirm_sms", pending_id);
+   }
+
+   /* No confirmation: text the number resolved above. */
    char result[RESULT_BUF_SIZE];
-   int rc = phone_service_send_sms(user_id, target, body, result, sizeof(result));
+   int rc = phone_service_send_sms(user_id, rez.number, body, result, sizeof(result));
    return phone_service_result_dup(rc, result);
 }
 
-static char *handle_confirm_sms(int user_id) {
-   if (s_pending_sms_number[0] == '\0') {
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending SMS to confirm");
+static char *handle_confirm_sms(struct json_object *details,
+                                int user_id,
+                                const turn_origin_t *origin) {
+   phone_pending_t p;
+   char *err = take_pending(origin, user_id, PHONE_PENDING_SMS, pending_id_arg(details), "text",
+                            &p);
+   if (err) {
+      return err;
    }
-   if (time(NULL) - s_pending_sms_at > PHONE_TOOL_PENDING_TTL_SEC) {
-      s_pending_sms_number[0] = '\0';
-      s_pending_sms_body[0] = '\0';
-      s_pending_sms_at = 0;
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: confirmation expired. Please retry the send request.");
-   }
-
    char result[RESULT_BUF_SIZE];
-   int rc = phone_service_send_sms(user_id, s_pending_sms_number, s_pending_sms_body, result,
-                                   sizeof(result));
-
-   s_pending_sms_number[0] = '\0';
-   s_pending_sms_body[0] = '\0';
-   s_pending_sms_at = 0;
+   int rc = phone_service_send_sms(user_id, p.number, p.body, result, sizeof(result));
    return phone_service_result_dup(rc, result);
 }
 
@@ -499,17 +610,17 @@ static char *handle_read_sms(int user_id) {
 }
 
 /* =============================================================================
- * Delete Handlers — two-step confirmation with TTL + nonce.
+ * Delete Handlers — two-step confirmation.
  *
  * Flow:
  *   1. LLM calls delete_sms / delete_call with {id} OR {number} OR
  *      {older_than_days}. Exactly one criterion required.
  *   2. Handler looks up match count (0 → immediate error, don't arm pending).
- *   3. Preview is returned with a generated 4-digit confirmation code.
- *      Pending state is armed with criteria + timestamp + nonce.
- *   4. LLM calls confirm_delete_sms / confirm_delete_call with
- *      {confirm_code: "NNNN"}. Handler checks TTL (120s) and nonce match,
- *      executes DELETE, audit-logs, clears pending.
+ *   3. Preview is returned; this session's pending deletion of that kind is
+ *      armed with the criteria (stage_pending_locked).
+ *   4. LLM calls confirm_delete_sms / confirm_delete_call in the user's next
+ *      turn.  Handler takes the session's pending item (TTL + turn origin,
+ *      take_pending), checks the hourly rate limit, executes DELETE.
  * ============================================================================= */
 
 /* Convert timestamp → compact yyyy-mm-dd string for previews. */
@@ -519,7 +630,9 @@ static void format_short_date(time_t t, char *out, size_t out_size) {
    strftime(out, out_size, "%Y-%m-%d", &tm_buf);
 }
 
-static char *handle_delete_sms(struct json_object *details, int user_id) {
+static char *handle_delete_sms(struct json_object *details,
+                               int user_id,
+                               const turn_origin_t *origin) {
    if (!details)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: delete_sms requires one of {id, number, older_than_days}.");
@@ -545,12 +658,12 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
       phone_sms_log_t match;
       int rc = phone_db_sms_log_get_by_id(user_id, id, &match);
       if (rc == PHONE_DB_NOT_FOUND) {
-         clear_pending_delete();
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
          snprintf(buf, sizeof(buf), "Error: SMS record #%lld not found.", (long long)id);
          return strdup(buf);
       }
       if (rc != PHONE_DB_SUCCESS) {
-         clear_pending_delete();
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
          return strdup(TOOL_RESULT_ERROR_MARK "Error: database error looking up SMS record.");
       }
 
@@ -568,60 +681,80 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
       const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
       const char *name = match.contact_name[0] ? match.contact_name : match.number;
 
-      arm_pending_delete(user_id, "sms", id, NULL, 0, 1);
+      pending_stage_rc_t src = PENDING_STAGED;
+      const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_SMS, id,
+                                                     NULL, 0, 1, &src);
+      if (pending_id == 0) {
+         return tool_pending_stage_refusal(src, "deletion");
+      }
 
       snprintf(buf, sizeof(buf),
                "About to delete SMS #%lld [%s %s, %s]: \"%s\". Say 'confirm' to delete.",
                (long long)id, dir, name, date, preview);
-      return strdup(buf);
+      return with_pending_id(buf, "confirm_delete_sms", pending_id);
    }
 
    if (num_obj) {
       const char *number = json_object_get_string(num_obj);
       if (!number || !*number) {
-         clear_pending_delete();
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
          return strdup(TOOL_RESULT_ERROR_MARK "Error: 'number' must be a non-empty phone number.");
+      }
+      if (strlen(number) >= sizeof(((phone_pending_t *)0)->number)) {
+         /* Stored cut short, the confirm would delete by another string. */
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: 'number' is too long for a phone number.");
       }
       int match_count = 0;
       if (phone_db_sms_log_count_by_number(user_id, number, &match_count) != PHONE_DB_SUCCESS) {
-         clear_pending_delete();
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
          return strdup(TOOL_RESULT_ERROR_MARK "Error: database error counting SMS by number.");
       }
       if (match_count == 0) {
-         clear_pending_delete();
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
          snprintf(buf, sizeof(buf), "No SMS records match number %s.", number);
          return strdup(buf);
       }
 
-      arm_pending_delete(user_id, "sms", -1, number, 0, match_count);
+      pending_stage_rc_t src = PENDING_STAGED;
+      const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_SMS, -1,
+                                                     number, 0, match_count, &src);
+      if (pending_id == 0) {
+         return tool_pending_stage_refusal(src, "deletion");
+      }
 
       snprintf(buf, sizeof(buf),
                "About to delete %d SMS message(s) matching number %s. "
                "Say 'confirm' to delete all %d.",
                match_count, number, match_count);
-      return strdup(buf);
+      return with_pending_id(buf, "confirm_delete_sms", pending_id);
    }
 
    /* older_than_days */
    int days = json_object_get_int(older_obj);
    if (days <= 0) {
-      clear_pending_delete();
+      drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: 'older_than_days' must be a positive integer.");
    }
    time_t cutoff = time(NULL) - (time_t)days * 86400;
 
    int match_count = 0;
    if (phone_db_sms_log_count_older_than(user_id, cutoff, &match_count) != PHONE_DB_SUCCESS) {
-      clear_pending_delete();
+      drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: database error counting older SMS.");
    }
    if (match_count == 0) {
-      clear_pending_delete();
+      drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
       snprintf(buf, sizeof(buf), "No SMS records older than %d days.", days);
       return strdup(buf);
    }
 
-   arm_pending_delete(user_id, "sms", -1, NULL, cutoff, match_count);
+   pending_stage_rc_t src = PENDING_STAGED;
+   const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_SMS, -1,
+                                                  NULL, cutoff, match_count, &src);
+   if (pending_id == 0) {
+      return tool_pending_stage_refusal(src, "deletion");
+   }
 
    char cutoff_date[32];
    format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
@@ -629,87 +762,52 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
             "About to delete %d SMS record(s) older than %d days (before %s). "
             "Say 'confirm' to delete.",
             match_count, days, cutoff_date);
-   return strdup(buf);
+   return with_pending_id(buf, "confirm_delete_sms", pending_id);
 }
 
-/* Arm pending deletion for the given user. Takes the mutex for the assignment
- * so an in-flight confirm sees a consistent snapshot. */
-static void arm_pending_delete(int user_id,
-                               const char *kind,
-                               int64_t id,
-                               const char *number,
-                               time_t cutoff,
-                               int preview_count) {
+/* Arm this session's pending deletion of @p kind.  Its pending_id, or 0 when
+ * every slot holds another session's live item. */
+static uint32_t arm_pending_delete(const turn_origin_t *origin,
+                                   int user_id,
+                                   int kind,
+                                   int64_t id,
+                                   const char *number,
+                                   time_t cutoff,
+                                   int preview_count,
+                                   pending_stage_rc_t *rc) {
    pthread_mutex_lock(&s_phone_tool_mutex);
-   snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "%s", kind);
-   s_pending_delete_user_id = user_id;
-   s_pending_delete_id = id;
-   if (number) {
-      snprintf(s_pending_delete_number, sizeof(s_pending_delete_number), "%s", number);
-   } else {
-      s_pending_delete_number[0] = '\0';
-   }
-   s_pending_delete_cutoff = cutoff;
-   s_pending_delete_count = preview_count;
-   s_pending_delete_at = time(NULL);
-   pthread_mutex_unlock(&s_phone_tool_mutex);
-}
-
-/* Shared confirm logic for sms / call. Returns non-NULL error message if any
- * precondition fails; caller proceeds to execute DELETE on NULL return.
- * Validates that the confirming user matches the user that armed pending —
- * defense against cross-session state corruption. */
-static char *validate_pending_delete(const char *expected_kind, int user_id) {
-   pthread_mutex_lock(&s_phone_tool_mutex);
-
-   if (!s_pending_delete_kind[0]) {
-      pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending deletion to confirm.");
-   }
-   if (s_pending_delete_user_id != user_id) {
-      /* Don't clear — another user's pending; leave it alone. */
-      pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending deletion to confirm.");
-   }
-   if (strcmp(s_pending_delete_kind, expected_kind) != 0) {
-      clear_pending_delete_locked();
-      pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: pending deletion is for a different record type.");
-   }
-   if (time(NULL) - s_pending_delete_at > PHONE_TOOL_PENDING_TTL_SEC) {
-      clear_pending_delete_locked();
-      pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: confirmation expired. Please retry the delete request.");
+   phone_pending_t *p = stage_pending_locked(origin, user_id, kind, rc);
+   const uint32_t pending_id = p ? p->hdr.item_id : 0;
+   if (p) {
+      p->id = id;
+      snprintf(p->number, sizeof(p->number), "%s", number ? number : "");
+      p->cutoff = cutoff;
+      p->preview_count = preview_count;
    }
    pthread_mutex_unlock(&s_phone_tool_mutex);
-   return NULL;
+   return pending_id;
 }
 
-static char *handle_confirm_delete_sms(int user_id) {
-   char *err = validate_pending_delete("sms", user_id);
+static char *handle_confirm_delete_sms(struct json_object *details,
+                                       int user_id,
+                                       const turn_origin_t *origin) {
+   phone_pending_t p;
+   char *err = take_pending(origin, user_id, PHONE_PENDING_DELETE_SMS, pending_id_arg(details),
+                            "SMS deletion", &p);
    if (err)
       return err;
 
    if (!check_delete_rate_limit(user_id)) {
       OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,
                    s_config.delete_rate_limit_per_hour);
-      clear_pending_delete();
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: too many deletions in the last hour. Try again later.");
    }
 
-   /* Snapshot pending state under the mutex so a concurrent arm can't alter
-    * the criteria mid-execute. */
-   int64_t snap_id;
-   char snap_number[24];
-   time_t snap_cutoff;
-   pthread_mutex_lock(&s_phone_tool_mutex);
-   snap_id = s_pending_delete_id;
-   snprintf(snap_number, sizeof(snap_number), "%s", s_pending_delete_number);
-   snap_cutoff = s_pending_delete_cutoff;
-   pthread_mutex_unlock(&s_phone_tool_mutex);
+   /* The staged criteria, taken from the slot (a later arm can't alter them). */
+   const int64_t snap_id = p.id;
+   const char *snap_number = p.number;
+   const time_t snap_cutoff = p.cutoff;
 
    char buf[256];
    int deleted = 0;
@@ -749,11 +847,12 @@ static char *handle_confirm_delete_sms(int user_id) {
       snprintf(buf, sizeof(buf), "Error: pending state is inconsistent.");
    }
 
-   clear_pending_delete();
    return strdup(buf);
 }
 
-static char *handle_delete_call(struct json_object *details, int user_id) {
+static char *handle_delete_call(struct json_object *details,
+                                int user_id,
+                                const turn_origin_t *origin) {
    if (!details)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: delete_call requires one of {id, older_than_days}.");
@@ -776,12 +875,12 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
       phone_call_log_t match;
       int rc = phone_db_call_log_get_by_id(user_id, id, &match);
       if (rc == PHONE_DB_NOT_FOUND) {
-         clear_pending_delete();
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_CALL);
          snprintf(buf, sizeof(buf), "Error: call record #%lld not found.", (long long)id);
          return strdup(buf);
       }
       if (rc != PHONE_DB_SUCCESS) {
-         clear_pending_delete();
+         drop_pending(origin, user_id, PHONE_PENDING_DELETE_CALL);
          return strdup(TOOL_RESULT_ERROR_MARK "Error: database error looking up call record.");
       }
 
@@ -790,33 +889,43 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
       const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
       const char *name = match.contact_name[0] ? match.contact_name : match.number;
 
-      arm_pending_delete(user_id, "call", id, NULL, 0, 1);
+      pending_stage_rc_t src = PENDING_STAGED;
+      const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_CALL, id,
+                                                     NULL, 0, 1, &src);
+      if (pending_id == 0) {
+         return tool_pending_stage_refusal(src, "deletion");
+      }
 
       snprintf(buf, sizeof(buf),
                "About to delete call #%lld [%s %s, %s, %ds]. Say 'confirm' to delete.",
                (long long)id, dir, name, date, match.duration_sec);
-      return strdup(buf);
+      return with_pending_id(buf, "confirm_delete_call", pending_id);
    }
 
    /* older_than_days */
    int days = json_object_get_int(older_obj);
    if (days <= 0) {
-      clear_pending_delete();
+      drop_pending(origin, user_id, PHONE_PENDING_DELETE_CALL);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: 'older_than_days' must be a positive integer.");
    }
    time_t cutoff = time(NULL) - (time_t)days * 86400;
    int match_count = 0;
    if (phone_db_call_log_count_older_than(user_id, cutoff, &match_count) != PHONE_DB_SUCCESS) {
-      clear_pending_delete();
+      drop_pending(origin, user_id, PHONE_PENDING_DELETE_CALL);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: database error counting older calls.");
    }
    if (match_count == 0) {
-      clear_pending_delete();
+      drop_pending(origin, user_id, PHONE_PENDING_DELETE_CALL);
       snprintf(buf, sizeof(buf), "No call records older than %d days.", days);
       return strdup(buf);
    }
 
-   arm_pending_delete(user_id, "call", -1, NULL, cutoff, match_count);
+   pending_stage_rc_t src = PENDING_STAGED;
+   const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_CALL, -1,
+                                                  NULL, cutoff, match_count, &src);
+   if (pending_id == 0) {
+      return tool_pending_stage_refusal(src, "deletion");
+   }
 
    char cutoff_date[32];
    format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
@@ -824,29 +933,28 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
             "About to delete %d call record(s) older than %d days (before %s). "
             "Say 'confirm' to delete.",
             match_count, days, cutoff_date);
-   return strdup(buf);
+   return with_pending_id(buf, "confirm_delete_call", pending_id);
 }
 
-static char *handle_confirm_delete_call(int user_id) {
-   char *err = validate_pending_delete("call", user_id);
+static char *handle_confirm_delete_call(struct json_object *details,
+                                        int user_id,
+                                        const turn_origin_t *origin) {
+   phone_pending_t p;
+   char *err = take_pending(origin, user_id, PHONE_PENDING_DELETE_CALL, pending_id_arg(details),
+                            "call-record deletion", &p);
    if (err)
       return err;
 
    if (!check_delete_rate_limit(user_id)) {
       OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,
                    s_config.delete_rate_limit_per_hour);
-      clear_pending_delete();
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: too many deletions in the last hour. Try again later.");
    }
 
-   /* Snapshot pending state under the mutex. */
-   int64_t snap_id;
-   time_t snap_cutoff;
-   pthread_mutex_lock(&s_phone_tool_mutex);
-   snap_id = s_pending_delete_id;
-   snap_cutoff = s_pending_delete_cutoff;
-   pthread_mutex_unlock(&s_phone_tool_mutex);
+   /* The staged criteria, taken from the slot (a later arm can't alter them). */
+   const int64_t snap_id = p.id;
+   const time_t snap_cutoff = p.cutoff;
 
    char buf[256];
    int deleted = 0;
@@ -876,7 +984,6 @@ static char *handle_confirm_delete_call(int user_id) {
       snprintf(buf, sizeof(buf), "Error: pending state is inconsistent.");
    }
 
-   clear_pending_delete();
    return strdup(buf);
 }
 
@@ -998,10 +1105,50 @@ static char *handle_status(void) {
  * Main Callback
  * ============================================================================= */
 
+static const tool_action_kind_entry_t s_phone_action_kinds[] = {
+   { "read_sms", TOOL_KIND_READ, NULL },
+   { "call_log", TOOL_KIND_READ, NULL },
+   { "sms_log", TOOL_KIND_READ, NULL },
+   { "status", TOOL_KIND_READ, NULL },
+   { "call", TOOL_KIND_PREPARE, "confirm_call" },
+   { "send_sms", TOOL_KIND_PREPARE, "confirm_sms" },
+   { "delete_sms", TOOL_KIND_PREPARE, "confirm_delete_sms" },
+   { "delete_call", TOOL_KIND_PREPARE, "confirm_delete_call" },
+   { "confirm_call", TOOL_KIND_ACT, NULL },
+   { "confirm_sms", TOOL_KIND_ACT, NULL },
+   { "confirm_delete_sms", TOOL_KIND_ACT, NULL },
+   { "confirm_delete_call", TOOL_KIND_ACT, NULL },
+};
+
+/* The actions that call, answer, hang up, text or delete: every listed action
+ * that isn't a read, and answer / hang_up (unlisted, so they act). */
+static bool phone_action_acts(const char *action) {
+   for (int i = 0; i < TOOL_KIND_COUNT(s_phone_action_kinds); i++) {
+      if (strcmp(action, s_phone_action_kinds[i].action) == 0)
+         return s_phone_action_kinds[i].kind != TOOL_KIND_READ;
+   }
+   return strcmp(action, "answer") == 0 || strcmp(action, "hang_up") == 0;
+}
+
 static char *phone_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
+
+   /* What calls, texts or deletes needs the user in a live conversation, with
+    * or without confirm_outbound: not a background job, a re-engaged turn or
+    * an MQTT message, where the request may come from content the model read.
+    * A confirm must come from the session that staged it, in the user's next
+    * turn (turn_origin_t). */
+   turn_origin_t origin = { 0 };
+   if (phone_action_acts(action) && !turn_origin_capture(&origin)) {
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: calls, texts and deletes need the user in a live conversation, and "
+                    "this request came from a background job or an automated turn. Tell the "
+                    "user what you would do, and let them ask for it.");
+   }
    struct json_object *details = NULL;
    if (value && value[0]) {
       details = json_tokener_parse(value);
@@ -1010,17 +1157,17 @@ static char *phone_tool_callback(const char *action, char *value, int *should_re
    char *result = NULL;
 
    if (strcmp(action, "call") == 0) {
-      result = handle_call(details, user_id);
+      result = handle_call(details, user_id, &origin);
    } else if (strcmp(action, "confirm_call") == 0) {
-      result = handle_confirm_call(user_id);
+      result = handle_confirm_call(details, user_id, &origin);
    } else if (strcmp(action, "answer") == 0) {
       result = handle_answer(user_id);
    } else if (strcmp(action, "hang_up") == 0) {
       result = handle_hang_up(user_id);
    } else if (strcmp(action, "send_sms") == 0) {
-      result = handle_send_sms(details, user_id);
+      result = handle_send_sms(details, user_id, &origin);
    } else if (strcmp(action, "confirm_sms") == 0) {
-      result = handle_confirm_sms(user_id);
+      result = handle_confirm_sms(details, user_id, &origin);
    } else if (strcmp(action, "read_sms") == 0) {
       result = handle_read_sms(user_id);
    } else if (strcmp(action, "call_log") == 0) {
@@ -1028,13 +1175,13 @@ static char *phone_tool_callback(const char *action, char *value, int *should_re
    } else if (strcmp(action, "sms_log") == 0) {
       result = handle_sms_log(details, user_id);
    } else if (strcmp(action, "delete_sms") == 0) {
-      result = handle_delete_sms(details, user_id);
+      result = handle_delete_sms(details, user_id, &origin);
    } else if (strcmp(action, "confirm_delete_sms") == 0) {
-      result = handle_confirm_delete_sms(user_id);
+      result = handle_confirm_delete_sms(details, user_id, &origin);
    } else if (strcmp(action, "delete_call") == 0) {
-      result = handle_delete_call(details, user_id);
+      result = handle_delete_call(details, user_id, &origin);
    } else if (strcmp(action, "confirm_delete_call") == 0) {
-      result = handle_confirm_delete_call(user_id);
+      result = handle_confirm_delete_call(details, user_id, &origin);
    } else if (strcmp(action, "status") == 0) {
       result = handle_status();
    } else {
@@ -1210,24 +1357,30 @@ static const treg_param_t phone_params[] = {
            "JSON object of the action's arguments, passed as a JSON-encoded string.  "
            "Omit entirely for an action that takes no arguments; never fill it with a "
            "description or rationale.\n"
-           "call {target}, confirm_call {}, answer {}, hang_up {},\n"
-           "send_sms {target, body}, confirm_sms {}, read_sms {},\n"
+           "call {target}, confirm_call {pending_id}, answer {}, hang_up {},\n"
+           "send_sms {target, body}, confirm_sms {pending_id}, read_sms {},\n"
            "call_log {count?} (default 10; rows show [id=N] for delete_call),\n"
            "sms_log {count?} (default 10; rows show [id=N] for delete_sms),\n"
            "delete_sms {id?, number?, older_than_days?} (exactly one; returns preview — "
            "call confirm_delete_sms on the NEXT user turn after they agree),\n"
-           "confirm_delete_sms {} (expires 120s after preview),\n"
+           "confirm_delete_sms {pending_id} (expires 5 minutes after preview),\n"
            "delete_call {id?, older_than_days?} (exactly one; returns preview),\n"
-           "confirm_delete_call {},\n"
+           "confirm_delete_call {pending_id},\n"
            "status {}.\n"
            "  target: E.164 phone number ('+16785551212') OR a contact name resolvable via "
            "the contacts system. Bare digits ('6785551212') are also accepted and normalized. "
-           "The tool checks contacts itself before dialing: pass the name the user said and let "
-           "the tool resolve it — you do NOT need the number. If the name is ambiguous or only a "
-           "near-miss (e.g. a mis-heard surname), the tool returns candidates ('did you mean…') "
-           "instead of dialing; relay them and pass the user's choice back on the next turn.\n"
+           "The tool checks contacts itself before dialing: pass the name exactly as the user "
+           "said it (never a correction or a guess of yours; for a relationship such as 'my "
+           "wife', the name of the person you know it means; with the label if the user gave one, "
+           "'Bob Smith mobile') and let the tool resolve it — you do NOT need the number, so "
+           "don't look the person up first. If the name is ambiguous or only a near-miss (e.g. a "
+           "mis-heard surname), the tool returns candidates ('did you mean…') instead of "
+           "dialing; relay them and pass the user's choice back on the next turn. If the "
+           "preview asks whether it's the right person, ask the user.\n"
            "  body: SMS message text. Concatenated SMS (multi-segment) is supported "
            "automatically; concise messages save segments.\n"
+           "  pending_id: the number a preview (call, send_sms, delete_*) returns; its confirm "
+           "must name it, and only in the user's reply to that preview.\n"
            "  IMPORTANT: after 'call' or 'send_sms' returns a preview, the LLM MUST stop "
            "and wait for the user's next turn before calling confirm_call/confirm_sms. "
            "Do not auto-confirm in the same turn.",
@@ -1237,8 +1390,171 @@ static const treg_param_t phone_params[] = {
    },
 };
 
+
+/* A call or a text is a preview only while confirm_outbound is on; with it off,
+ * it dials or sends at once.  Read once, here: the handler follows the kind
+ * decided at the gate (phone_previews), not the flag. */
+static tool_action_kind_t phone_classify_call(const char *device,
+                                              const char *action,
+                                              const char *value,
+                                              tool_action_kind_t listed) {
+   (void)device;
+   (void)value;
+   if (listed == TOOL_KIND_PREPARE && !s_config.confirm_outbound && action &&
+       (strcmp(action, "call") == 0 || strcmp(action, "send_sms") == 0)) {
+      return TOOL_KIND_ACT;
+   }
+   return listed;
+}
+
+/* A staged item, described from the item itself (the slot the confirm names). */
+static int describe_pending(struct json_object *details,
+                            int kind,
+                            char *out,
+                            size_t out_len,
+                            int *valid_for_sec) {
+   turn_origin_t origin;
+   if (!turn_origin_capture(&origin)) {
+      return FAILURE;
+   }
+   const int user_id = tool_get_current_user_id();
+   int n = -1;
+   pthread_mutex_lock(&s_phone_tool_mutex);
+   pending_slot_t *slot = NULL;
+   if (pending_slots_find(&s_pending_slots, &origin, user_id, kind, pending_id_arg(details),
+                          pending_slots_now(), &slot) == PENDING_FOUND &&
+       pending_id_arg(details) != 0) {
+      const phone_pending_t *p = (const phone_pending_t *)slot;
+      char text[320];
+      if (valid_for_sec) {
+         *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
+      }
+      char date[32];
+      switch (kind) {
+         case PHONE_PENDING_CALL:
+            n = snprintf(out, out_len, "call %s%s%s%s", p->name, p->name[0] ? " (" : "", p->number,
+                         p->name[0] ? ")" : "");
+            break;
+         case PHONE_PENDING_SMS:
+            str_excerpt_line(p->body, 200, text, sizeof(text));
+            n = snprintf(out, out_len, "text %s%s%s%s: \"%s\"", p->name, p->name[0] ? " (" : "",
+                         p->number, p->name[0] ? ")" : "", text);
+            break;
+         default: {
+            const char *what = kind == PHONE_PENDING_DELETE_SMS ? "text message" : "call";
+            if (p->id >= 0) {
+               n = snprintf(out, out_len, "delete %s record #%lld", what, (long long)p->id);
+            } else if (p->number[0]) {
+               n = snprintf(out, out_len, "delete %d %s records with %s", p->preview_count, what,
+                            p->number);
+            } else {
+               format_short_date(p->cutoff, date, sizeof(date));
+               n = snprintf(out, out_len, "delete %d %s records from before %s", p->preview_count,
+                            what, date);
+            }
+            break;
+         }
+      }
+   }
+   pthread_mutex_unlock(&s_phone_tool_mutex);
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
+/* What a call that waits for the user's reply code does (tool_metadata_t
+ * describe_call): a confirm from the item it carries out; a call or text
+ * that goes at once (confirm_outbound off) from its target and body. */
+static int phone_describe_call(const char *action,
+                               const char *value,
+                               char *out,
+                               size_t out_len,
+                               int *valid_for_sec) {
+   struct json_object *details = value && value[0] ? json_tokener_parse(value) : NULL;
+   int rc = FAILURE;
+   int n = -1;
+   bool handled = true;
+   char text[320];
+   if (strcmp(action, "confirm_call") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_CALL, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "confirm_sms") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_SMS, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "confirm_delete_sms") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_DELETE_SMS, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "confirm_delete_call") == 0) {
+      rc = describe_pending(details, PHONE_PENDING_DELETE_CALL, out, out_len, valid_for_sec);
+   } else if (strcmp(action, "answer") == 0 || strcmp(action, "hang_up") == 0) {
+      /* The call it acts on, so a code can't answer or end another one. */
+      phone_call_notif_status_t status;
+      char number[64] = "";
+      char name[128] = "";
+      int64_t call_id = 0;
+      if (phone_service_get_call_snapshot(&status, number, sizeof(number), name, sizeof(name),
+                                          &call_id, NULL) &&
+          (strcmp(action, "hang_up") == 0 || status == PHONE_CALL_NOTIF_RINGING)) {
+         /* A ring doesn't last: the code goes with it. */
+         if (strcmp(action, "answer") == 0) {
+            *valid_for_sec = TOOL_CALL_CHALLENGE_MIN_SEC;
+         }
+         n = snprintf(out, out_len, "%s the call %s %s%s%s%s (#%lld)",
+                      strcmp(action, "answer") == 0 ? "answer" : "hang up",
+                      strcmp(action, "answer") == 0 ? "from" : "with", name[0] ? name : "",
+                      name[0] ? " (" : "", number[0] ? number : "an unknown number",
+                      name[0] ? ")" : "", (long long)call_id);
+      } else if (strcmp(action, "hang_up") == 0 &&
+                 phone_service_get_state() == PHONE_STATE_DIALING) {
+         n = snprintf(out, out_len, "hang up the call being dialed");
+      } else {
+         snprintf(out, out_len, "there's no %s call",
+                  strcmp(action, "answer") == 0 ? "ringing" : "current");
+      }
+   } else if ((strcmp(action, "call") == 0 || strcmp(action, "send_sms") == 0) && details) {
+      /* Going at once (confirm_outbound off): the number the target resolves
+       * to, as the handler will dial or text it.  One the user should confirm
+       * is fine here: the code's text is that confirmation. */
+      const char *target = json_get_str(details, "target");
+      phone_resolve_t rez;
+      memset(&rez, 0, sizeof(rez));
+      if (target && target[0]) {
+         phone_contacts_resolve(tool_get_current_user_id(), target, &rez);
+      }
+      if (target && target[0] &&
+          (rez.kind == PHONE_RESOLVE_NUMBER || rez.kind == PHONE_RESOLVE_UNIQUE ||
+           rez.kind == PHONE_RESOLVE_CONFIRM)) {
+         char who[160];
+         snprintf(who, sizeof(who), "%s%s%s%s", rez.name[0] ? rez.name : "",
+                  rez.name[0] ? " (" : "", rez.number, rez.name[0] ? ")" : "");
+         if (strcmp(action, "call") == 0) {
+            n = snprintf(out, out_len, "call %s", who);
+         } else {
+            str_excerpt_line(json_get_str(details, "body"), 200, text, sizeof(text));
+            n = snprintf(out, out_len, "text %s: \"%s\"", who, text);
+         }
+      } else if (target && target[0]) {
+         /* What the voice path says too: which contacts it could be. */
+         phone_contacts_format_disambiguation(target, &rez, out, out_len);
+      } else {
+         snprintf(out, out_len, "it doesn't say who to %s",
+                  strcmp(action, "call") == 0 ? "call" : "text");
+      }
+   } else {
+      handled = false;
+   }
+   if (n >= 0) {
+      rc = ((size_t)n < out_len) ? SUCCESS : FAILURE;
+   } else if (!handled) {
+      rc = TOOL_DESCRIBE_DEFAULT;
+   }
+   if (details) {
+      json_object_put(details);
+   }
+   return rc;
+}
+
 static const tool_metadata_t phone_metadata = {
    .name = "phone",
+   .action_kinds = s_phone_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_phone_action_kinds),
+   .classify_call = phone_classify_call,
+   .describe_call = phone_describe_call,
    .device_string = "phone",
    .topic = "dawn",
    .aliases = { "telephone", "call", "sms", "text" },
@@ -1254,7 +1570,7 @@ static const tool_metadata_t phone_metadata = {
        "Use 'call_log' or 'sms_log' to view recent history. "
        "Use 'delete_sms' or 'delete_call' to remove records — these return a preview. "
        "Call confirm_delete_sms/confirm_delete_call on the next turn if the user agrees. "
-       "Pending state expires after 120 seconds. "
+       "Pending state expires after 5 minutes. "
        "To delete multiple messages from one sender, use delete_sms with 'number' "
        "(e.g. {number: '+14045550142'}) — it's one call that deletes them all. "
        "Do NOT loop over individual ids; do NOT wrap deletes in execute_plan — "
@@ -1263,7 +1579,7 @@ static const tool_metadata_t phone_metadata = {
        "Calls and SMS require confirmation before executing (say 'confirm' after review). "
        "The 'target' field can be a contact name (resolved via contacts) or a phone number.",
    .params = phone_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(phone_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_DANGEROUS,

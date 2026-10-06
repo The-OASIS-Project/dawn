@@ -1,0 +1,265 @@
+{
+  "_comment": "Scripted multi-turn conversations for the DAWN request-layout A/B. Each stresses a place where moving the per-turn context block (time + retrieval) out of the system prompt could change behavior: follow-ups after tool use, memory recall and citation, [system_time] awareness, long tool loops, and back-references across turns. expect_tools: every listed tool must be called during that turn. rubric: what the judge checks (pass/fail). needs_date: the judge is given the turn's wall-clock date/time. expect_citation: a memory-recall turn, counted in cite-rate. expect_answer: regexes that must all match the answer (case-insensitive), a deterministic ground-truth check graded without the judge. opt_in: the scenario runs only when named in --only.",
+  "scenarios": [
+    {
+      "id": "tool_followup",
+      "why": "Cross-turn continuity after tool-use turns (the exact turn shape that 400s on enforced accounts).",
+      "turns": [
+        {
+          "text": "Use the calculator: what is 17.5% of 2,340?",
+          "expect_tools": [
+            "calculator"
+          ],
+          "rubric": "States 409.5."
+        },
+        {
+          "text": "Now use the calculator to add that to 1,200 and divide the result by 3.",
+          "expect_tools": [
+            "calculator"
+          ],
+          "rubric": "States 536.5 (i.e. (409.5 + 1200) / 3)."
+        },
+        {
+          "text": "Which of those two results is bigger, and by how much?",
+          "expect_tools": [],
+          "rubric": "Says 536.5 is bigger than 409.5 by 127."
+        }
+      ]
+    },
+    {
+      "id": "memory_recall",
+      "why": "Retrieval injected as per-turn context; answers must use it and cite it.",
+      "turns": [
+        {
+          "text": "What's my dog's name, and what breed is he?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Answers Biscuit, a beagle."
+        },
+        {
+          "text": "I'm booking a flight to go see my sister. Which city am I flying to, and what seat should I pick?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Says Denver and recommends an aisle seat (the user's stated preference)."
+        },
+        {
+          "text": "Suggest a type of restaurant for our anniversary dinner that's safe for me. When is the anniversary again?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Gives June 14 as the anniversary and suggests something that avoids shellfish (flags or avoids the shellfish allergy; Thai is a plus but not required)."
+        }
+      ]
+    },
+    {
+      "id": "time_awareness",
+      "why": "[system_time] lives in the per-turn block; after a tool turn the model must still read the current time correctly.",
+      "turns": [
+        {
+          "text": "Quick one, use the calculator: what's 12 times 12?",
+          "expect_tools": [
+            "calculator"
+          ],
+          "rubric": "States 144."
+        },
+        {
+          "text": "What day of the week is it today, and what's the date?",
+          "expect_tools": [],
+          "needs_date": true,
+          "rubric": "Gives the correct current weekday and date (see the provided wall-clock time)."
+        },
+        {
+          "text": "How many days from today until December 25 this year?",
+          "expect_tools": [],
+          "needs_date": true,
+          "rubric": "Gives the correct number of days from the provided current date to December 25 of the same year (off-by-one tolerated only if the answer states whether today is counted)."
+        }
+      ]
+    },
+    {
+      "id": "long_tool_loop",
+      "why": "Several tool iterations inside one turn, then a follow-up that depends on them (intra-turn cache span + thinking replay).",
+      "turns": [
+        {
+          "text": "Compute each of these separately with the calculator: 3 to the 7th power, 2 to the 15th power, and 17 times 23 times 29. Then give me the sum of all three.",
+          "expect_tools": [
+            "calculator"
+          ],
+          "rubric": "Gives 2187, 32768 and 11339, and the sum 46294."
+        },
+        {
+          "text": "Divide that sum by the second result, to three decimal places.",
+          "expect_tools": [],
+          "rubric": "Gives 1.413 (46294 / 32768 = 1.4128...)."
+        }
+      ]
+    },
+    {
+      "id": "recall_plus_tool",
+      "why": "A tool call whose argument comes from injected memory, then a follow-up combining the tool result with more memory.",
+      "turns": [
+        {
+          "text": "What's the weather like today where my sister lives?",
+          "expect_tools": [
+            "weather"
+          ],
+          "expect_citation": true,
+          "rubric": "Identifies Denver and reports current Denver weather from the tool result."
+        },
+        {
+          "text": "Would that be decent weather for me to take Biscuit on a long walk if I visited?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Gives a yes/no-style judgment grounded in the Denver weather just reported; correctly treats Biscuit as the user's dog; bonus if it accounts for the user disliking cold, windy weather."
+        }
+      ]
+    },
+    {
+      "id": "chat_chain",
+      "why": "A longer pure-chat chain with back-references; exercises cross-turn history reuse with no retrieval dependence.",
+      "turns": [
+        {
+          "text": "For this chat only (don't save it to memory): the code number is 4471. Just acknowledge.",
+          "expect_tools": [],
+          "forbid_tools": [
+            "memory"
+          ],
+          "rubric": "Acknowledges briefly without saving to memory."
+        },
+        {
+          "text": "What's that number times 3?",
+          "expect_tools": [],
+          "rubric": "States 13413."
+        },
+        {
+          "text": "And what was the original number I gave you?",
+          "expect_tools": [],
+          "rubric": "States 4471."
+        },
+        {
+          "text": "Summarize this whole conversation in one sentence.",
+          "expect_tools": [],
+          "rubric": "One sentence that mentions the number 4471 and the multiplication by 3 (13413)."
+        }
+      ]
+    },
+    {
+      "id": "doc_questions",
+      "why": "Questions answered by an uploaded (global) document: the relevant-document side of focus-injection calibration, and a document-retrieval regression check.",
+      "turns": [
+        {
+          "text": "According to the DAWN memory system design doc, why does DAWN extract memories in a batch after the session instead of in real time?",
+          "expect_tools": [],
+          "rubric": "Explains the batch/'sleep' choice as the doc does: extraction happens at session end rather than during the conversation so chat latency isn't affected (and it sees the whole conversation)."
+        },
+        {
+          "text": "In that design, do the local mic and DAP interfaces store memories by default?",
+          "expect_tools": [],
+          "rubric": "Says no: by default they run as guest sessions that do not store memories (users can optionally map them to an authenticated user)."
+        },
+        {
+          "text": "What's the default session inactivity timeout it gives for ending a memory session?",
+          "expect_tools": [],
+          "rubric": "Says 15 minutes (session_timeout_minutes = 15)."
+        }
+      ]
+    },
+    {
+      "id": "long_single_topic",
+      "why": "One topic over 12 turns with the same remembered facts relevant early, mid and late, and a model switch at turn 10. Measures what retained context costs per turn and whether the answers still use a fact shown many turns back (the incremental-context change sends an item once, not every turn).",
+      "turns": [
+        {
+          "text": "I'm thinking about visiting my sister next month. Remind me where she lives and what she does.",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Says the sister (Priya) lives in Denver, Colorado, and works as a veterinarian."
+        },
+        {
+          "text": "Roughly how long is a nonstop flight from Chicago to Denver?",
+          "expect_tools": [],
+          "rubric": "Gives a plausible nonstop duration of about 2.5 hours (anything from about 2 to 3 hours is fine)."
+        },
+        {
+          "text": "When I book that flight, what kind of seat should I pick for myself?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Recommends an aisle seat because the user prefers aisle seats."
+        },
+        {
+          "text": "Use the calculator: the fare is $289 each way and a checked bag is $35 each way. What's the round-trip total?",
+          "expect_tools": [
+            "calculator"
+          ],
+          "rubric": "States $648 (2 x 289 + 2 x 35)."
+        },
+        {
+          "text": "What's the weather in Denver right now?",
+          "expect_tools": [
+            "weather"
+          ],
+          "rubric": "Reports current Denver conditions grounded in a weather lookup; no invented specifics beyond the tool's data."
+        },
+        {
+          "text": "Given what you know about me, what should I pack for that, and is there anything about Denver weather I'd want to watch out for?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Packing advice ties to the user's dislike of cold, windy weather (e.g. a wind layer, warm layers); mentions wind or cold as something the user specifically dislikes."
+        },
+        {
+          "text": "Suggest a kind of restaurant for dinner with my sister one night.",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Suggests Thai food (the user's favorite cuisine) and flags avoiding shellfish because of the user's allergy."
+        },
+        {
+          "text": "Actually, could I drive instead and bring my dog? What would I be driving, and is that car a good fit for the trip?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Names the dog Biscuit (a beagle) and the user's blue 2019 Subaru Outback, and says it suits a long drive with a dog."
+        },
+        {
+          "text": "I don't want to lose ground on my training while I'm there. What should I plan for?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Ties the advice to the user's half-marathon training (e.g. keep long runs, adjust for Denver's altitude)."
+        },
+        {
+          "text": "Give me a three-bullet recap of the plan so far.",
+          "expect_tools": [],
+          "switch_to_alternate": true,
+          "rubric": "Three bullets consistent with the conversation: visiting Priya in Denver, travel (flight with an aisle seat or driving the Subaru with Biscuit), and at least one of: Thai dinner without shellfish, packing for cold/wind, keeping up half-marathon training."
+        },
+        {
+          "text": "Remind me what my sister does for work; I want to bring her a useful gift.",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Says she is a veterinarian and suggests a gift that fits that work."
+        },
+        {
+          "text": "If she wants to take us on a windy hike and then cook seafood for dinner, what should I tell her?",
+          "expect_tools": [],
+          "expect_citation": true,
+          "rubric": "Mentions both: the user dislikes cold, windy weather, and the user is allergic to shellfish (so seafood dinners need to avoid shellfish)."
+        }
+      ]
+    },
+    {
+      "id": "large_page_view",
+      "opt_in": true,
+      "why": "A tool result too big for the model's share of the context is sent as a view (head and tail) with a handle; the answer sits in the omitted middle, so the model must read more of the stored result (result_read) or fail honestly. The page is a pinned Wikipedia revision, so the ground truth never changes. Needs web access. url_fetch keeps up to 24,000 characters, so the view only fires on a model whose window gives a smaller share (about 200K tokens or less, e.g. claude:claude-sonnet-4-5); on a 1M-window model the whole page fits and this is a plain tool question.",
+      "turns": [
+        {
+          "text": "Fetch https://en.wikipedia.org/w/index.php?title=Apollo_11&oldid=1371120273 with url_fetch. From the fetched page text only: how many people does it say attended Kennedy's September 1962 speech at Rice University's football stadium, and which citation numbers follow that sentence? Answer from the page, not from memory.",
+          "expect_tools": [
+            "url_fetch"
+          ],
+          "expect_answer": [
+            "40,?000",
+            "23",
+            "24"
+          ],
+          "rubric": "Says about 40,000 people and citations 23 and 24, taken from the fetched page (or says honestly that it couldn't find it in the page)."
+        }
+      ]
+    }
+  ]
+}

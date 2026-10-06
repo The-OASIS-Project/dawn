@@ -34,7 +34,9 @@
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_tool_results.h"
 #include "logging.h"
+#include "memory/contacts_db.h"
 
 /* =============================================================================
  * Prepared Statement Management
@@ -244,16 +246,6 @@ int auth_db_prepare_statements(void) {
     * temporal phrases.  Production passes time(NULL); bench passes session date. */
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "INSERT INTO conversations (user_id, title, created_at, updated_at, anchor_date) "
-       "VALUES (?, ?, ?, ?, ?)",
-       -1, &s_db.stmt_conv_create, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare conv_create failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
-
-   rc = sqlite3_prepare_v2(
-       s_db.db,
        "SELECT id, user_id, title, created_at, updated_at, message_count, is_archived, "
        "context_tokens, context_max, continued_from, compaction_summary, "
        "llm_type, cloud_provider, model, tools_mode, thinking_mode, is_private, origin, "
@@ -313,7 +305,7 @@ int auth_db_prepare_statements(void) {
                            "c.continued_from, c.compaction_summary, c.is_private, c.origin "
                            "FROM conversations c "
                            "INNER JOIN messages m ON m.conversation_id = c.id "
-                           "WHERE c.user_id = ? AND m.content LIKE ? "
+                           "WHERE c.user_id = ? AND m.content LIKE ? AND m.kind IS NULL "
                            "ORDER BY c.updated_at DESC LIMIT ? OFFSET ?",
                            -1, &s_db.stmt_conv_search_content, NULL);
    if (rc != SQLITE_OK) {
@@ -379,24 +371,13 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
-       "reasoning, created_at, is_error) "
-       "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
-       "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ? AND user_id = ?)",
-       -1, &s_db.stmt_msg_add, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare msg_add failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
 
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
        "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
-       "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.id ASC",
+       "WHERE m.conversation_id = ? AND c.user_id = ? AND m.kind IS NULL ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get failed: %s", sqlite3_errmsg(s_db.db));
@@ -411,7 +392,8 @@ int auth_db_prepare_statements(void) {
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
        "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
-       "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? ORDER BY m.id ASC",
+       "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? AND m.kind IS NULL "
+       "ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get_after, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get_after failed: %s", sqlite3_errmsg(s_db.db));
@@ -422,7 +404,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, "
                            "reasoning, created_at, "
-                           "is_error FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+                           "is_error FROM messages WHERE conversation_id = ? AND kind IS NULL "
+                           "ORDER BY id ASC",
                            -1, &s_db.stmt_msg_get_admin, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get_admin failed: %s", sqlite3_errmsg(s_db.db));
@@ -447,23 +430,11 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* v67: compaction watermark + summary, on the same conversation row (no fork).
-    * The trailing `? >= context_watermark_msg_id` is a monotonic guard so a stale
-    * async compaction can't rewind a watermark already advanced by a later pass. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "UPDATE conversations SET compaction_summary = ?, context_watermark_msg_id = ? "
-       "WHERE id = ? AND user_id = ? AND ? >= context_watermark_msg_id",
-       -1, &s_db.stmt_conv_set_watermark, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare conv_set_watermark failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
 
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "INSERT INTO conversations (user_id, title, created_at, updated_at, origin, anchor_date) "
-       "VALUES (?, ?, ?, ?, ?, ?)",
+       "INSERT INTO conversations (user_id, title, created_at, updated_at, origin, anchor_date, "
+       "is_private) VALUES (?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_conv_create_origin, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_create_origin failed: %s", sqlite3_errmsg(s_db.db));
@@ -593,6 +564,13 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   rc = sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*) FROM images WHERE user_id = ? AND source = ?",
+                           -1, &s_db.stmt_image_count_user_source, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare image_count_user_source failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    rc = sqlite3_prepare_v2(
        s_db.db,
        "DELETE FROM images WHERE retention_policy = 0 AND created_at < ? "
@@ -642,6 +620,28 @@ int auth_db_prepare_statements(void) {
                            &s_db.stmt_image_stats, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare image_stats failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Unbound images (retention 3: IMAGE_RETAIN_UNBOUND) no row named in time,
+    * oldest first past the sweep's cursor (blob_store.h, get_orphan_ids). */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, filename, created_at, user_id FROM images "
+                           "WHERE retention_policy = 3 AND created_at < ?1 "
+                           "AND (created_at, id) > (?2, ?3) "
+                           "ORDER BY created_at ASC, id ASC LIMIT 100",
+                           -1, &s_db.stmt_image_get_unbound_ids, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare image_get_unbound_ids failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* One of those, deleted only while still unbound (the sweep asks what
+    * holds them with the lock released; a row bound meanwhile stays). */
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM images WHERE id = ? AND retention_policy = 3", -1,
+                           &s_db.stmt_image_delete_unbound, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare image_delete_unbound failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -779,14 +779,17 @@ int auth_db_prepare_statements(void) {
         * marker is "...bytes) blob:<id>]", so anchor the match with the trailing
         * ']' — blob ids are fixed-length validated tokens, so this can't match a
         * different blob, and the anchor avoids pinning a blob on stray prose.
-        * This "blob:<id>]" marker is mirrored by the JS producer (dawn.js) and
+        * This "blob:<id>]" marker is mirrored by the producer (src/webui/webui_attachments.c) and
         * parser (documents.js); kept in sync by scripts/check_blob_marker_sync.sh
-        * — a drift here silently reclaims still-attached files (data loss). */
-       "SELECT b.id, b.filename FROM blobs b "
-       "WHERE b.kind = 0 AND b.retention_policy != 1 AND b.created_at < ? "
+        * — a drift here silently reclaims still-attached files (data loss).
+        * Oldest first past the sweep's cursor (blob_store.h, get_orphan_ids). */
+       "SELECT b.id, b.filename, b.created_at, b.user_id FROM blobs b "
+       "WHERE b.kind = 0 AND b.retention_policy != 1 AND b.created_at < ?1 "
+       "AND (b.created_at, b.id) > (?2, ?3) "
        "AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.original_blob_id = b.id) "
+       /* kind-rows: every row counts, so a file is kept while anything names it. */
        "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.content LIKE '%blob:' || b.id || ']%') "
-       "LIMIT 100",
+       "ORDER BY b.created_at ASC, b.id ASC LIMIT 100",
        -1, &s_db.stmt_blob_get_orphan_ids, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare blob_get_orphan_ids failed: %s", sqlite3_errmsg(s_db.db));
@@ -806,8 +809,9 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
                            "category, created_at, normalized_hash, "
-                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end, "
+                           "origin_unsourced) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL)",
                            -1, &s_db.stmt_memory_fact_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -959,6 +963,60 @@ int auth_db_prepare_statements(void) {
                    sqlite3_errmsg(s_db.db));
       s_db.stmt_memory_facts_fts_insert = NULL;
    }
+   /* v89: record a conversation a fact was learned from.  Soft: until the
+    * migration has run the table is missing and sources simply aren't recorded. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_fact_sources (fact_id, conversation_id) "
+                           "SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM conversations WHERE "
+                           "id = ?2)",
+                           -1, &s_db.stmt_memory_fact_source_add, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_fact_source_add failed: %s", sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_fact_source_add = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_relation_sources (relation_id, "
+                           "conversation_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM "
+                           "conversations WHERE id = ?2)",
+                           -1, &s_db.stmt_memory_relation_source_add, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_relation_source_add failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_relation_source_add = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_preference_sources (preference_id, "
+                           "conversation_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM "
+                           "conversations WHERE id = ?2)",
+                           -1, &s_db.stmt_memory_pref_source_add, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_pref_source_add failed: %s", sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_pref_source_add = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, value FROM memory_preferences WHERE user_id = ? AND "
+                           "category = ?",
+                           -1, &s_db.stmt_memory_pref_current, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_pref_current failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_preference_sources WHERE preference_id = ?",
+                           -1, &s_db.stmt_memory_pref_sources_clear, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_pref_sources_clear failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_pref_sources_clear = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT COALESCE((SELECT gen FROM doc_chunk_generation WHERE owner = "
+                           "?1), 0), COALESCE((SELECT gen FROM doc_chunk_generation WHERE "
+                           "owner = 0), 0)",
+                           -1, &s_db.stmt_doc_chunk_generation, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare doc_chunk_generation failed: %s", sqlite3_errmsg(s_db.db));
+      s_db.stmt_doc_chunk_generation = NULL;
+   }
    /* Contentless FTS5 requires the 'delete' command rather than DELETE FROM
     * (which would leave the index out of sync because there's no content
     * column to read the prior value from). */
@@ -1064,7 +1122,9 @@ int auth_db_prepare_statements(void) {
     * pointing superseded_by at a foreign row, AND a foreign old_fact_id
     * would let a caller corrupt another user's fact chain. */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_facts SET superseded_by = ? WHERE id = ? AND user_id = ? "
+                           "UPDATE memory_facts SET superseded_by = ?, "
+                           "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                           "WHERE id = ? AND user_id = ? "
                            "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {
@@ -1105,8 +1165,11 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(
        s_db.db,
+       /* A retention window after the merge (superseded_at), never after
+        * creation: an old fact merged today stays recoverable for the window.
+        * Without a merge time it is kept. */
        "DELETE FROM memory_facts WHERE user_id = ? AND superseded_by IS NOT NULL "
-       "AND created_at < ?",
+       "AND superseded_at IS NOT NULL AND superseded_at < ?",
        -1, &s_db.stmt_memory_fact_prune_superseded, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_prune_superseded failed: %s",
@@ -1141,9 +1204,14 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO memory_preferences (user_id, category, value, confidence, source, created_at, "
-       "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+       "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end, "
+       "origin_unsourced) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL) "
        "ON CONFLICT(user_id, category) DO UPDATE SET "
+       /* A new value comes only from where it was set; the same value keeps
+        * every origin it had. */
+       "origin_unsourced = CASE WHEN excluded.value != value THEN excluded.origin_unsourced "
+       "ELSE MAX(origin_unsourced, excluded.origin_unsourced) END, "
        "value=excluded.value, confidence=excluded.confidence, updated_at=excluded.updated_at, "
        "source_conversation_id=excluded.source_conversation_id, "
        "source_msg_id_start=excluded.source_msg_id_start, "
@@ -1415,27 +1483,13 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* fact_get_embeddings: created_at appended last (col 3) for temporal-query
-    * scoring (#3).  Cache loader reads it and stores per-fact for boost computation.
-    * note_doc_id (col 4, v61) flags memory→note bridge glosses: they stay in the
-    * cache so semantic retrieval can still surface them, but the paraphrase-dedup
-    * consumer (nearest_fact) skips them so a gloss never merges with a real fact. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, embedding, embedding_norm, created_at, note_doc_id FROM memory_facts "
-       "WHERE user_id = ? AND superseded_by IS NULL AND embedding IS NOT NULL "
-       "ORDER BY confidence DESC LIMIT ?",
-       -1, &s_db.stmt_memory_fact_get_embeddings, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare fact_get_embeddings failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, fact_text FROM memory_facts "
-                           "WHERE user_id = ? AND superseded_by IS NULL "
+                           "WHERE user_id = ? AND superseded_by IS NULL AND id > ? "
+                           "AND fact_text != '' "
                            "AND (embedding IS NULL OR length(embedding)/4 != ?) "
-                           "ORDER BY created_at ASC LIMIT ?",
+                           "ORDER BY id ASC LIMIT ?",
                            -1, &s_db.stmt_memory_fact_list_without_embedding, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare fact_list_without_embedding failed: %s",
@@ -1542,13 +1596,17 @@ int auth_db_prepare_statements(void) {
     * excluded from the entity-embedding cache so the resolver / focus
     * adapter pools do not double-count surface-form variants of the same
     * real-world entity.  Bind position 2 = include_aliases (0 = filter
-    * aliases out, 1 = include).  See docs/ENTITY_MERGE_DESIGN.md §15. */
+    * aliases out, 1 = include).  See docs/ENTITY_MERGE_DESIGN.md §15.
+    * Position 4 = the embedding's size in bytes: only the current model's
+    * embeddings count toward the LIMIT (after a model swap, rows not yet
+    * recomputed would otherwise fill it). */
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, name, entity_type, embedding, embedding_norm "
                            "FROM memory_entities "
-                           "WHERE user_id = ? AND embedding IS NOT NULL "
-                           "  AND (? = 1 OR canonical_id IS NULL) "
-                           "ORDER BY mention_count DESC LIMIT ?",
+                           "WHERE user_id = ?1 AND embedding IS NOT NULL "
+                           "  AND length(embedding) = ?4 "
+                           "  AND (?2 = 1 OR canonical_id IS NULL) "
+                           "ORDER BY mention_count DESC LIMIT ?3",
                            -1, &s_db.stmt_memory_entity_get_embeddings, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare entity_get_embeddings failed: %s", sqlite3_errmsg(s_db.db));
@@ -1589,12 +1647,15 @@ int auth_db_prepare_statements(void) {
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
                            "object_entity_id, object_value, fact_id, confidence, created_at, "
                            "valid_from, valid_to, "
-                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?) "
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end, "
+                           "origin_unsourced) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?, "
+                           "?10 IS NULL) "
                            "ON CONFLICT(user_id, subject_entity_id, relation, "
                            "            COALESCE(object_entity_id, 0), COALESCE(object_value, '')) "
                            "WHERE valid_to IS NULL DO UPDATE SET "
                            "  mention_count = mention_count + 1, "
+                           "  origin_unsourced = MAX(origin_unsourced, excluded.origin_unsourced), "
                            "  confidence = MAX(confidence, excluded.confidence), "
                            "  source_conversation_id = excluded.source_conversation_id, "
                            "  source_msg_id_start = excluded.source_msg_id_start, "
@@ -1913,20 +1974,6 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* doc_chunk_search: created_at appended last so existing column indices in
-    * downstream populators are preserved. */
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.id, c.chunk_index, c.text, c.embedding, c.embedding_norm, "
-                           "d.id, d.filename, d.filetype, c.created_at "
-                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-                           "WHERE d.user_id = ? OR d.is_global = 1 "
-                           "LIMIT ?",
-                           -1, &s_db.stmt_doc_chunk_search, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare doc_chunk_search failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
-
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
                            "num_chunks, is_global, created_at "
@@ -2025,7 +2072,7 @@ int auth_db_prepare_statements(void) {
     * Global-IDF caveat: per-user safety is the JOIN + (user_id=? OR is_global=1)
     * filter, not the index. */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
+                           "SELECT c.id, c.chunk_index, c.document_id, d.filename, "
                            "d.filetype, d.num_chunks, c.created_at, "
                            "bm25(document_chunks_fts, ?2, ?3) AS score "
                            "FROM document_chunks_fts "
@@ -2208,7 +2255,8 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT c.id, c.account_id, c.caldav_path, c.display_name, c.color, "
-                           "c.is_active, c.ctag, c.sync_token, c.created_at, a.read_only "
+                           "c.is_active, c.ctag, c.sync_token, c.created_at, a.read_only, "
+                           "a.name "
                            "FROM calendar_calendars c "
                            "JOIN calendar_accounts a ON c.account_id = a.id "
                            "WHERE a.user_id = ? AND a.enabled = 1 AND c.is_active = 1 "
@@ -2351,6 +2399,27 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Each event's occurrence nearest to now: SQLite returns the other columns
+    * from the row holding MIN() (its bare-column rule for a lone MIN/MAX).
+    * All-day occurrences included: they carry the UTC midnight of their date
+    * in dtstart/dtend, close enough to rank by distance. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT o.id, o.event_id, o.dtstart, o.dtend, o.all_day, "
+                           "o.dtstart_date, o.dtend_date, o.summary, o.location, "
+                           "o.is_override, o.is_cancelled, o.recurrence_id, e.uid, "
+                           "e.calendar_id, MIN(ABS(o.dtstart - ?4)) AS dist "
+                           "FROM calendar_occurrences o "
+                           "JOIN calendar_events e ON o.event_id = e.id "
+                           "WHERE e.calendar_id IN (SELECT value FROM json_each(?1)) "
+                           "AND o.is_cancelled = 0 "
+                           "AND o.dtstart < ?3 AND o.dtend > ?2 "
+                           "GROUP BY o.event_id ORDER BY dist, o.id LIMIT ?5",
+                           -1, &s_db.stmt_cal_events_nearest, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_events_nearest failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT o.id, o.event_id, o.dtstart, o.dtend, o.all_day, "
                            "o.dtstart_date, o.dtend_date, o.summary, o.location, "
@@ -2449,13 +2518,7 @@ int auth_db_prepare_statements(void) {
    }
 
    /* === Contacts statements === */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label, "
-       "e.photo_id FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
-       "WHERE c.user_id = ? AND e.canonical_name LIKE ? ESCAPE '\\' "
-       "AND c.field_type LIKE ? ORDER BY e.name LIMIT ?",
-       -1, &s_db.stmt_contacts_find, NULL);
+   rc = sqlite3_prepare_v2(s_db.db, CONTACTS_FIND_SQL, -1, &s_db.stmt_contacts_find, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare contacts_find failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
@@ -2513,8 +2576,8 @@ int auth_db_prepare_statements(void) {
        "INSERT INTO email_accounts (user_id, name, imap_server, imap_port, imap_ssl, "
        "smtp_server, smtp_port, smtp_ssl, username, display_name, "
        "encrypted_password, encrypted_password_len, auth_type, oauth_account_key, "
-       "enabled, read_only, max_recent, max_body_chars, created_at) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+       "enabled, read_only, max_recent, max_body_chars, created_at, digest_depth) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_email_acct_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare email_acct_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -2526,7 +2589,7 @@ int auth_db_prepare_statements(void) {
        "SELECT id, user_id, name, imap_server, imap_port, imap_ssl, "
        "smtp_server, smtp_port, smtp_ssl, username, display_name, "
        "encrypted_password, encrypted_password_len, auth_type, oauth_account_key, "
-       "enabled, read_only, max_recent, max_body_chars, created_at "
+       "enabled, read_only, max_recent, max_body_chars, created_at, digest_depth "
        "FROM email_accounts WHERE id = ?",
        -1, &s_db.stmt_email_acct_get, NULL);
    if (rc != SQLITE_OK) {
@@ -2539,7 +2602,7 @@ int auth_db_prepare_statements(void) {
        "SELECT id, user_id, name, imap_server, imap_port, imap_ssl, "
        "smtp_server, smtp_port, smtp_ssl, username, display_name, "
        "encrypted_password, encrypted_password_len, auth_type, oauth_account_key, "
-       "enabled, read_only, max_recent, max_body_chars, created_at "
+       "enabled, read_only, max_recent, max_body_chars, created_at, digest_depth "
        "FROM email_accounts WHERE user_id = ? ORDER BY name",
        -1, &s_db.stmt_email_acct_list, NULL);
    if (rc != SQLITE_OK) {
@@ -2552,7 +2615,7 @@ int auth_db_prepare_statements(void) {
        "UPDATE email_accounts SET name=?, imap_server=?, imap_port=?, imap_ssl=?, "
        "smtp_server=?, smtp_port=?, smtp_ssl=?, username=?, display_name=?, "
        "encrypted_password=?, encrypted_password_len=?, auth_type=?, oauth_account_key=?, "
-       "max_recent=?, max_body_chars=? WHERE id=?",
+       "max_recent=?, max_body_chars=?, digest_depth=? WHERE id=?",
        -1, &s_db.stmt_email_acct_update, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare email_acct_update failed: %s", sqlite3_errmsg(s_db.db));
@@ -2580,10 +2643,16 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Message rows: the insert, the replay read and the compaction watermark. */
+   if (auth_db_messages_prepare() != AUTH_DB_SUCCESS)
+      return AUTH_DB_FAILURE;
+
    return AUTH_DB_SUCCESS;
 }
 
 void auth_db_finalize_statements(void) {
+   tool_results_db_release_locked(); /* the store's own, kept on first use */
+   auth_db_messages_finalize();
    if (s_db.stmt_create_user)
       sqlite3_finalize(s_db.stmt_create_user);
    if (s_db.stmt_get_user)
@@ -2634,8 +2703,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_set_user_settings);
 
    /* Conversation statements */
-   if (s_db.stmt_conv_create)
-      sqlite3_finalize(s_db.stmt_conv_create);
    if (s_db.stmt_conv_get)
       sqlite3_finalize(s_db.stmt_conv_get);
    if (s_db.stmt_conv_list)
@@ -2658,8 +2725,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_job_pending_followups);
    if (s_db.stmt_event_append)
       sqlite3_finalize(s_db.stmt_event_append);
-   if (s_db.stmt_msg_add)
-      sqlite3_finalize(s_db.stmt_msg_add);
    if (s_db.stmt_msg_get)
       sqlite3_finalize(s_db.stmt_msg_get);
    if (s_db.stmt_msg_get_after)
@@ -2670,8 +2735,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_conv_update_meta);
    if (s_db.stmt_conv_update_context)
       sqlite3_finalize(s_db.stmt_conv_update_context);
-   if (s_db.stmt_conv_set_watermark)
-      sqlite3_finalize(s_db.stmt_conv_set_watermark);
    if (s_db.stmt_conv_create_origin)
       sqlite3_finalize(s_db.stmt_conv_create_origin);
    if (s_db.stmt_conv_reassign)
@@ -2704,6 +2767,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_update_retention);
    if (s_db.stmt_image_count_user)
       sqlite3_finalize(s_db.stmt_image_count_user);
+   if (s_db.stmt_image_count_user_source)
+      sqlite3_finalize(s_db.stmt_image_count_user_source);
    if (s_db.stmt_image_delete_old)
       sqlite3_finalize(s_db.stmt_image_delete_old);
    if (s_db.stmt_image_cache_total_size)
@@ -2716,6 +2781,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_get_cache_lru_ids);
    if (s_db.stmt_image_stats)
       sqlite3_finalize(s_db.stmt_image_stats);
+   if (s_db.stmt_image_get_unbound_ids)
+      sqlite3_finalize(s_db.stmt_image_get_unbound_ids);
+   if (s_db.stmt_image_delete_unbound)
+      sqlite3_finalize(s_db.stmt_image_delete_unbound);
    if (s_db.stmt_blob_create)
       sqlite3_finalize(s_db.stmt_blob_create);
    if (s_db.stmt_blob_get)
@@ -2768,6 +2837,18 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_search_bm25_since);
    if (s_db.stmt_memory_facts_fts_insert)
       sqlite3_finalize(s_db.stmt_memory_facts_fts_insert);
+   if (s_db.stmt_memory_fact_source_add)
+      sqlite3_finalize(s_db.stmt_memory_fact_source_add);
+   if (s_db.stmt_memory_relation_source_add)
+      sqlite3_finalize(s_db.stmt_memory_relation_source_add);
+   if (s_db.stmt_memory_pref_source_add)
+      sqlite3_finalize(s_db.stmt_memory_pref_source_add);
+   if (s_db.stmt_memory_pref_current)
+      sqlite3_finalize(s_db.stmt_memory_pref_current);
+   if (s_db.stmt_memory_pref_sources_clear)
+      sqlite3_finalize(s_db.stmt_memory_pref_sources_clear);
+   if (s_db.stmt_doc_chunk_generation)
+      sqlite3_finalize(s_db.stmt_doc_chunk_generation);
    if (s_db.stmt_memory_facts_fts_delete)
       sqlite3_finalize(s_db.stmt_memory_facts_fts_delete);
    if (s_db.stmt_memory_fact_update_access)
@@ -2858,8 +2939,6 @@ void auth_db_finalize_statements(void) {
    /* Embedding statements */
    if (s_db.stmt_memory_fact_update_embedding)
       sqlite3_finalize(s_db.stmt_memory_fact_update_embedding);
-   if (s_db.stmt_memory_fact_get_embeddings)
-      sqlite3_finalize(s_db.stmt_memory_fact_get_embeddings);
    if (s_db.stmt_memory_fact_list_without_embedding)
       sqlite3_finalize(s_db.stmt_memory_fact_list_without_embedding);
    if (s_db.stmt_memory_summary_update_embedding)
@@ -2894,6 +2973,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_entity_search);
    if (s_db.stmt_memory_entity_delete)
       sqlite3_finalize(s_db.stmt_memory_entity_delete);
+   if (s_db.stmt_memory_entity_set_photo)
+      sqlite3_finalize(s_db.stmt_memory_entity_set_photo);
+   if (s_db.stmt_memory_entity_get_photo)
+      sqlite3_finalize(s_db.stmt_memory_entity_get_photo);
    if (s_db.stmt_memory_relation_delete_by_entity)
       sqlite3_finalize(s_db.stmt_memory_relation_delete_by_entity);
 
@@ -2932,8 +3015,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_doc_count_user);
    if (s_db.stmt_doc_chunk_create)
       sqlite3_finalize(s_db.stmt_doc_chunk_create);
-   if (s_db.stmt_doc_chunk_search)
-      sqlite3_finalize(s_db.stmt_doc_chunk_search);
    if (s_db.stmt_doc_find_by_name)
       sqlite3_finalize(s_db.stmt_doc_find_by_name);
    if (s_db.stmt_doc_chunk_read)
@@ -3014,6 +3095,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_cal_occ_delete_for_event);
    if (s_db.stmt_cal_occ_in_range)
       sqlite3_finalize(s_db.stmt_cal_occ_in_range);
+   if (s_db.stmt_cal_events_nearest)
+      sqlite3_finalize(s_db.stmt_cal_events_nearest);
    if (s_db.stmt_cal_occ_allday_in_range)
       sqlite3_finalize(s_db.stmt_cal_occ_allday_in_range);
    if (s_db.stmt_cal_occ_search)

@@ -27,24 +27,27 @@
  */
 #include "core/text_input_dispatch.h"
 
+#include <json-c/json.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
+#include "core/session_focus.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
+#include "llm/llm_history_kind.h"
 #include "logging.h"
 
 char *core_text_input_dispatch(session_t *session,
                                const char *text,
-                               const char **vision_images,
-                               const size_t *vision_image_sizes,
-                               const char (*vision_mimes)[24],
-                               int vision_image_count,
                                const text_input_dispatch_opts_t *opts) {
-   if (!session || !text || text[0] == '\0') {
+   /* A turn with no words is one only when its question carries images (an
+    * image-only turn: the caller builds the question message). */
+   if (!session || !text || (text[0] == '\0' && !(opts && opts->question_message))) {
       return NULL;
    }
 
@@ -73,14 +76,35 @@ char *core_text_input_dispatch(session_t *session,
       conv_event_emit(status_conv, status_user, CONV_EVENT_STATUS, event_payload_status(true));
    }
 
-   /* Step 1: add user message to session history.  When images are
-    * attached, store in the multi-part shape so they persist across
-    * turns. */
-   if (vision_image_count > 0 && vision_images) {
-      session_add_message_with_images(session, "user", text, (const char *const *)vision_images,
-                                      vision_image_count);
+   /* Step 1: add user message to session history: the caller's prebuilt
+    * message when it has one (an image question, built as a reload rebuilds
+    * it), else the text. */
+   /* The turn's conversation may only be resolved here (fallback to the active
+    * one) rather than at dequeue; record it before the append attributes it. */
+   if (opts && opts->is_background_turn) {
+      session_turn_mark_background(session);
+   }
+   if (opts && opts->conversation_id > 0) {
+      session_turn_set_conversation(session, opts->conversation_id, true);
+   }
+   const message_kind_t question_kind = opts ? opts->question_kind : MESSAGE_KIND_NONE;
+   struct json_object *kinded_question = NULL; /* ref kept to stamp its row's id */
+   if (question_kind != MESSAGE_KIND_NONE) {
+      struct json_object *msg = json_object_new_object();
+      if (msg) {
+         json_object_object_add(msg, "role", json_object_new_string("user"));
+         json_object_object_add(msg, "content", json_object_new_string(text));
+         llm_history_set_kind(msg, question_kind);
+         kinded_question = json_object_get(msg);
+         if (!session_add_turn_message_object(session, msg)) {
+            session_release_ref(session, kinded_question);
+            kinded_question = NULL;
+         }
+      }
+   } else if (opts && opts->question_message) {
+      session_add_turn_message_object(session, json_object_get(opts->question_message));
    } else {
-      session_add_message(session, "user", text);
+      session_add_turn_message(session, "user", text);
    }
 
    /* Step 2: persist to conv_db if requested.  The conv_db row ID is
@@ -97,16 +121,40 @@ char *core_text_input_dispatch(session_t *session,
     * double-save.  Non-WebUI callers (messaging) leave the override NULL and
     * persist plain text. */
    int64_t user_msg_id = 0;
-   if (opts && opts->conversation_id > 0) {
+   if (opts && opts->conversation_id <= 0 && opts->await_conversation) {
+      /* A new chat's first message, its conversation created after it: the
+       * turn's worker writes it once one is (session_turn_take_pending). */
+      session_turn_set_pending(
+          session, "user", opts->persist_content_override ? opts->persist_content_override : text);
+   }
+   if (opts && opts->conversation_id > 0 && kinded_question) {
+      /* Request context: saved with its kind, its id on the message itself. */
+      const conv_message_row_t row = { .role = "user",
+                                       .content = text,
+                                       .kind = message_kind_name(question_kind) };
+      int64_t row_id = 0;
+      if (conv_db_add_row(opts->conversation_id, opts->auth_user_id, &row, &row_id) ==
+          AUTH_DB_SUCCESS) {
+         session_stamp_message_id(session, kinded_question, row_id);
+         session_prefix_question_saved(session, opts->conversation_id, opts->auth_user_id, row_id);
+      } else {
+         OLOG_WARNING("text_input_dispatch: a turn's %s wasn't saved to conv %lld",
+                      message_kind_name(question_kind), (long long)opts->conversation_id);
+      }
+   } else if (opts && opts->conversation_id > 0 && question_kind == MESSAGE_KIND_NONE) {
       const char *persist_text = opts->persist_content_override ? opts->persist_content_override
                                                                 : text;
       if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", persist_text,
                                  &user_msg_id) == AUTH_DB_SUCCESS) {
          session_stamp_last_message_id(session, "user", user_msg_id);
+         session_prefix_question_saved(session, opts->conversation_id, opts->auth_user_id,
+                                       user_msg_id);
       } else {
          user_msg_id = 0;
       }
    }
+   session_release_ref(session, kinded_question); /* a message of the history now */
+   kinded_question = NULL;
 
    /* Step 3: fire the caller's user-msg-added hook BEFORE focus
     * injection + LLM call.  This preserves the existing WebUI
@@ -141,23 +189,16 @@ char *core_text_input_dispatch(session_t *session,
     * is idempotent, so the double-clear when the rebuild does run is harmless. */
    session_citation_stash_clear(session);
 
+   /* An optional channel hint (e.g. the messaging engine for SMS: "user is on
+    * SMS, outbound truncates at 670 chars") is a note for this turn only: it
+    * varies turn to turn, so it goes in the turn's context, never the
+    * conversation's system prompt. */
    if (!(opts && opts->skip_prompt_rebuild)) {
-      session_dispatch_user_turn(session, text);
+      /* What the prompt adds is saved with the question's row
+       * (session_prefix_question_saved: above, or once a new chat's
+       * conversation exists). */
+      session_dispatch_user_turn_ex(session, text, opts ? opts->channel_hint : NULL);
    }
-
-   /* Step 4.5: optional channel hint.  When the caller (e.g. the
-    * messaging engine for SMS) wants to give the LLM a one-turn
-    * instruction about channel constraints (e.g. "user is on SMS,
-    * outbound truncates at 670 chars"), we append it to the LAST
-    * system message — the volatile segment in the two-message shape
-    * produced by session_dispatch_user_turn.  Targeting volatile
-    * (NOT stable) is critical: channel hints can vary turn-to-turn
-    * (the messaging engine toggles a truncation-warning hint based
-    * on prior-turn outbound shape) so mixing them into the cacheable
-    * stable prefix would silently invalidate the Anthropic prompt
-    * cache.  See the prompt-cache split design doc. */
-   if (opts && opts->channel_hint && opts->channel_hint[0] != '\0')
-      session_append_to_volatile_segment(session, opts->channel_hint);
 
    /* Step 5: LLM call.  Uses the no_add variant because step 1
     * already added the user message; this also ensures the message
@@ -165,10 +206,9 @@ char *core_text_input_dispatch(session_t *session,
    session_sentence_callback sentence_cb = opts ? opts->sentence_cb : NULL;
    void *sentence_userdata = opts ? opts->sentence_userdata : NULL;
 
-   char *response = session_llm_call_with_tts_vision_no_add(session, text, vision_images,
-                                                            vision_image_sizes, vision_mimes,
-                                                            vision_image_count, sentence_cb,
-                                                            sentence_userdata);
+   /* The images are in the question's own history message (Step 1): every
+    * request of the turn, and every later one, sends them from there. */
+   char *response = session_llm_call_with_tts_no_add(session, text, sentence_cb, sentence_userdata);
 
    /* Turn end.  This function has a single return, and the LLM call above is
     * synchronous, so one emit here covers success, cancellation and failure

@@ -632,10 +632,18 @@
          const pendingPrivacy = DawnSettingsLlm.getPrivacyState
             ? DawnSettingsLlm.getPrivacyState()
             : false;
-         DawnSettingsLlm.setCurrentConversation(payload.conversation_id);
+         // The server creates it with the privacy set before it existed and says so
+         const serverPrivate =
+            typeof payload.is_private === 'boolean' ? payload.is_private : undefined;
+         DawnSettingsLlm.setCurrentConversation(payload.conversation_id, serverPrivate);
 
-         // If privacy was set before conversation was created, apply it now
-         if (!serverInitiated && pendingPrivacy && DawnSettingsLlm.setPrivacy) {
+         // An older server: apply privacy set before the conversation was created now
+         if (
+            serverPrivate === undefined &&
+            !serverInitiated &&
+            pendingPrivacy &&
+            DawnSettingsLlm.setPrivacy
+         ) {
             DawnSettingsLlm.setPrivacy(true);
          }
       }
@@ -811,7 +819,8 @@
             }
          };
          (async () => {
-            for (const msg of messages) {
+            for (let mi = 0; mi < messages.length; mi++) {
+               const msg = messages[mi];
                // A newer conversation load started — abandon this stale render so the two
                // don't interleave (the awaits below yield, letting a new load slip in).
                if (renderToken !== historyState.loadRenderToken) return;
@@ -842,6 +851,20 @@
                      ]);
                   }
                   tagEntries(entryStart, msg.created_at, msg.id);
+                  continue;
+               }
+
+               // A tool turn saved as text notes (older voice conversations): the same
+               // pills as a structured turn, from what the notes say.
+               const notes =
+                  typeof DawnToolNotes !== 'undefined' ? DawnToolNotes.collect(messages, mi) : null;
+               if (notes && typeof DawnToolPills !== 'undefined') {
+                  if (notes.prose.trim()) {
+                     await DawnTranscript.addEntry(msg.role, notes.prose, msg.reasoning);
+                  }
+                  DawnToolPills.renderReloadGroup(notes.items);
+                  tagEntries(entryStart, msg.created_at, msg.id);
+                  mi += notes.consumed;
                   continue;
                }
 

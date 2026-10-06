@@ -392,95 +392,6 @@ static void test_next_fetch_null_and_empty(void) {
    TEST_ASSERT_NULL(email_imap_next_fetch("no fetch here", &seg, &len, &uid));
 }
 
-/* ============================================================================
- * email_decode_rfc2047 — encoded-word decoder (shared by both backends)
- * ============================================================================ */
-
-static void test_rfc2047_base64(void) {
-   char out[64];
-   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?=", out, sizeof out); /* "Hello" */
-   TEST_ASSERT_EQUAL_STRING("Hello", out);
-}
-
-static void test_rfc2047_qp(void) {
-   char out[64];
-   email_decode_rfc2047("=?UTF-8?Q?Hello=20World?=", out, sizeof out);
-   TEST_ASSERT_EQUAL_STRING("Hello World", out);
-   email_decode_rfc2047("=?UTF-8?Q?Hello_World?=", out, sizeof out); /* '_' -> space */
-   TEST_ASSERT_EQUAL_STRING("Hello World", out);
-}
-
-/* Non-encoded text passes through; an encoded word mid-string is decoded. */
-static void test_rfc2047_mixed_and_plain(void) {
-   char out[64];
-   email_decode_rfc2047("Plain subject", out, sizeof out);
-   TEST_ASSERT_EQUAL_STRING("Plain subject", out);
-   email_decode_rfc2047("Re: =?UTF-8?B?SGVsbG8=?=", out, sizeof out);
-   TEST_ASSERT_EQUAL_STRING("Re: Hello", out);
-}
-
-/* RFC 2047 §6.2: whitespace between adjacent encoded words is dropped. */
-static void test_rfc2047_adjacent_words(void) {
-   char out[64];
-   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?= =?UTF-8?B?V29ybGQ=?=", out, sizeof out);
-   TEST_ASSERT_EQUAL_STRING("HelloWorld", out);
-}
-
-static void test_rfc2047_unknown_encoding_passthrough(void) {
-   char out[64];
-   email_decode_rfc2047("=?UTF-8?X?whatever?=", out, sizeof out);
-   TEST_ASSERT_EQUAL_STRING("=?UTF-8?X?whatever?=", out);
-}
-
-static void test_rfc2047_null_and_empty(void) {
-   char out[8] = "xx";
-   email_decode_rfc2047(NULL, out, sizeof out);
-   TEST_ASSERT_EQUAL_STRING("", out);
-   char out2[8] = "xx";
-   email_decode_rfc2047("abc", out2, 0); /* zero dst_len: no write, no crash */
-   TEST_ASSERT_EQUAL_STRING("xx", out2); /* untouched */
-}
-
-/* Whitespace between an encoded word and a following PLAIN word is preserved
- * (only whitespace between two ENCODED words is folded, §6.2). */
-static void test_rfc2047_space_before_plain(void) {
-   char out[64];
-   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?= there", out, sizeof out);
-   TEST_ASSERT_EQUAL_STRING("Hello there", out);
-}
-
-/* Decoded C0 control bytes (incl. an embedded NUL that would truncate the field)
- * are stripped so they can't corrupt the displayed value or bleed into context. */
-static void test_rfc2047_strips_control_bytes(void) {
-   char out[64];
-   email_decode_rfc2047("=?UTF-8?B?AA==?=", out, sizeof out);      /* base64 "AA==" -> 0x00 */
-   TEST_ASSERT_EQUAL_STRING("", out);                              /* NUL dropped, not truncation */
-   email_decode_rfc2047("=?UTF-8?Q?a=00b=09c?=", out, sizeof out); /* NUL dropped, tab kept */
-   TEST_ASSERT_EQUAL_STRING("ab\tc", out);
-}
-
-/* Multi-byte UTF-8 (emoji, accented letters) is DECODED and PRESERVED — not
- * reduced to ASCII, normalized, or stripped.  This is the whole point of the
- * Gmail fix: "=?UTF-8?B?..?=" -> the real glyph.  (The control-byte strip only
- * removes C0 bytes, all < 0x20; UTF-8 continuation bytes are >= 0x80.) */
-static void test_rfc2047_preserves_utf8(void) {
-   char out[64];
-   email_decode_rfc2047("=?UTF-8?B?8J+lgw==?=", out, sizeof out); /* base64 of 🥃 (F0 9F A5 83) */
-   TEST_ASSERT_EQUAL_STRING("🥃", out);
-   email_decode_rfc2047("=?UTF-8?B?Y2Fmw6k=?=", out, sizeof out); /* base64 of "café" */
-   TEST_ASSERT_EQUAL_STRING("café", out);
-   email_decode_rfc2047("=?UTF-8?Q?caf=C3=A9?=", out, sizeof out); /* Q-encoded "café" */
-   TEST_ASSERT_EQUAL_STRING("café", out);
-}
-
-/* Decoding into an undersized buffer truncates cleanly and stays NUL-terminated. */
-static void test_rfc2047_bounded_dst(void) {
-   char out[4];
-   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?=", out, sizeof out); /* "Hello" into 4 */
-   TEST_ASSERT_EQUAL_STRING("Hel", out);
-   TEST_ASSERT_EQUAL_CHAR('\0', out[3]);
-}
-
 static void test_sanitize_header_value(void) {
    char out[32];
    email_sanitize_header_value("subject\r\ninjected: x", out, sizeof out);
@@ -616,6 +527,254 @@ static void test_iso_date_empty_and_null(void) {
    TEST_ASSERT_FALSE(email_parse_valid_iso_date(NULL));
 }
 
+
+/* =============================================================================
+ * email_imap_select_newest_uids
+ * ============================================================================= */
+
+static void test_select_uids_ascending(void) {
+   uint32_t out[3];
+   int total = -1;
+   int n = email_imap_select_newest_uids("* SEARCH 1 2 3 4 5\r\nA1 OK done\r\n", out, 3, &total);
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT(5, total);
+   TEST_ASSERT_EQUAL_UINT32(3, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(4, out[1]);
+   TEST_ASSERT_EQUAL_UINT32(5, out[2]);
+}
+
+static void test_select_uids_descending_and_shuffled(void) {
+   uint32_t out[3];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 50 40 30 20 10\r\n", out, 3, &total);
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_UINT32(30, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(50, out[2]);
+
+   n = email_imap_select_newest_uids("* SEARCH 7 99 3 42 8 100 1\r\n", out, 3, &total);
+   TEST_ASSERT_EQUAL_INT(7, total);
+   TEST_ASSERT_EQUAL_UINT32(42, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(99, out[1]);
+   TEST_ASSERT_EQUAL_UINT32(100, out[2]);
+   (void)n;
+}
+
+static void test_select_uids_split_lines_and_case(void) {
+   uint32_t out[4];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 5 6\r\n* search 9 1\r\nA1 OK\r\n", out, 4,
+                                         &total);
+   TEST_ASSERT_EQUAL_INT(4, n);
+   TEST_ASSERT_EQUAL_INT(4, total);
+   TEST_ASSERT_EQUAL_UINT32(1, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(9, out[3]);
+}
+
+static void test_select_uids_fewer_than_wanted_and_empty(void) {
+   uint32_t out[10];
+   int total = -1;
+   TEST_ASSERT_EQUAL_INT(2, email_imap_select_newest_uids("* SEARCH 8 3\r\n", out, 10, &total));
+   TEST_ASSERT_EQUAL_INT(2, total);
+   TEST_ASSERT_EQUAL_UINT32(3, out[0]);
+
+   TEST_ASSERT_EQUAL_INT(0,
+                         email_imap_select_newest_uids("* SEARCH\r\nA1 OK\r\n", out, 10, &total));
+   TEST_ASSERT_EQUAL_INT(0, total);
+   TEST_ASSERT_EQUAL_INT(0, email_imap_select_newest_uids(NULL, out, 10, &total));
+   TEST_ASSERT_EQUAL_INT(0, email_imap_select_newest_uids("A1 OK\r\n", out, 10, &total));
+}
+
+static void test_select_uids_skips_invalid_values(void) {
+   uint32_t out[5];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 0 4294967296 7 4294967295\r\n", out, 5, &total);
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT(2, total);
+   TEST_ASSERT_EQUAL_UINT32(7, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(4294967295u, out[1]);
+}
+
+static void test_select_uids_wanted_zero_still_counts(void) {
+   uint32_t out[1];
+   int total = 0;
+   TEST_ASSERT_EQUAL_INT(0, email_imap_select_newest_uids("* SEARCH 1 2 3\r\n", out, 0, &total));
+   TEST_ASSERT_EQUAL_INT(3, total);
+}
+
+/* =============================================================================
+ * IMAP page token format/parse
+ * ============================================================================= */
+
+static void test_page_token_round_trip(void) {
+   char tok[32];
+   uint32_t uid = 0, v = 99;
+   TEST_ASSERT_TRUE(email_imap_page_token_format(566060, 0, tok, sizeof(tok)));
+   TEST_ASSERT_EQUAL_STRING("u566060", tok);
+   TEST_ASSERT_TRUE(email_imap_page_token_parse(tok, &uid, &v));
+   TEST_ASSERT_EQUAL_UINT32(566060, uid);
+   TEST_ASSERT_EQUAL_UINT32(0, v);
+
+   TEST_ASSERT_TRUE(email_imap_page_token_format(4294967295u, 1199169964, tok, sizeof(tok)));
+   TEST_ASSERT_EQUAL_STRING("u4294967295.1199169964", tok);
+   TEST_ASSERT_TRUE(email_imap_page_token_parse(tok, &uid, &v));
+   TEST_ASSERT_EQUAL_UINT32(4294967295u, uid);
+   TEST_ASSERT_EQUAL_UINT32(1199169964, v);
+}
+
+static void test_page_token_format_rejects(void) {
+   char tok[8];
+   TEST_ASSERT_FALSE(email_imap_page_token_format(1, 0, tok, sizeof(tok)));
+   TEST_ASSERT_FALSE(email_imap_page_token_format(0, 0, tok, sizeof(tok)));
+   TEST_ASSERT_FALSE(email_imap_page_token_format(566060, 1199169964, tok, sizeof(tok)));
+   TEST_ASSERT_EQUAL_STRING("", tok);
+}
+
+static void test_page_token_parse_rejects(void) {
+   static const char *const bad[] = {
+      "",
+      "u",
+      "u0",
+      "u1",
+      "u01",
+      "u12x",
+      "12",
+      "u+5",
+      "u 5",
+      "u5.",
+      "u5.x",
+      "u5.0",
+      "u5.01",
+      "u99999999999",
+      "U5",
+      "u5 ",
+      "u4294967296",
+      "u5.1.2",
+      "u5.4294967296",
+      "CiAKGhIYc3BhbS10b2tlbg", /* Gmail-shaped */
+   };
+   uint32_t uid = 0, v = 0;
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      TEST_ASSERT_FALSE_MESSAGE(email_imap_page_token_parse(bad[i], &uid, &v), bad[i]);
+   }
+   TEST_ASSERT_FALSE(email_imap_page_token_parse(NULL, &uid, &v));
+}
+
+
+static void test_uidvalidity_line(void) {
+   uint32_t v = 0;
+   const char *ok = "* OK [UIDVALIDITY 1199169964] UIDs valid\r\n";
+   TEST_ASSERT_TRUE(email_imap_parse_uidvalidity(ok, strlen(ok), &v));
+   TEST_ASSERT_EQUAL_UINT32(1199169964u, v);
+   const char *lower = "* ok [uidvalidity 7]";
+   TEST_ASSERT_TRUE(email_imap_parse_uidvalidity(lower, strlen(lower), &v));
+   TEST_ASSERT_EQUAL_UINT32(7, v);
+
+   static const char *const bad[] = {
+      "* OK [UIDVALIDITY 0]",  "* OK [UIDVALIDITY ]",
+      "* OK [UIDVALIDITY 12",  "* OK [UIDVALIDITY 4294967296]",
+      "* OK [UIDNEXT 5]",      "* 3 FETCH (ENVELOPE (\"* OK [UIDVALIDITY 1]\"))",
+      " * OK [UIDVALIDITY 5]", "* OK [UIDVALIDITY 12345678901]",
+   };
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      v = 99;
+      TEST_ASSERT_FALSE_MESSAGE(email_imap_parse_uidvalidity(bad[i], strlen(bad[i]), &v), bad[i]);
+      TEST_ASSERT_EQUAL_UINT32(99, v);
+   }
+   /* length-bounded: the digits run off the end of the buffer */
+   TEST_ASSERT_FALSE(email_imap_parse_uidvalidity(ok, 20, &v));
+}
+
+
+static void test_select_uids_collapses_duplicates(void) {
+   uint32_t out[5];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 4 9 9 4 7\r\n", out, 5, &total);
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_UINT32(4, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(7, out[1]);
+   TEST_ASSERT_EQUAL_UINT32(9, out[2]);
+}
+
+
+static void test_exists_line(void) {
+   uint32_t v = 99;
+   const char *ok = "* 35820 EXISTS\r\n";
+   TEST_ASSERT_TRUE(email_imap_parse_exists(ok, strlen(ok), &v));
+   TEST_ASSERT_EQUAL_UINT32(35820, v);
+   TEST_ASSERT_TRUE(email_imap_parse_exists("* 0 exists", 10, &v));
+   TEST_ASSERT_EQUAL_UINT32(0, v);
+   static const char *const bad[] = {
+      "* EXISTS",
+      "* 12 EXIST",
+      "* 12 EXISTSX",
+      "* 12 RECENT",
+      " * 12 EXISTS",
+      "* 4294967296 EXISTS",
+      "* 3 FETCH (ENVELOPE (\"* 9 EXISTS\"))",
+      "*12 EXISTS",
+   };
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      v = 99;
+      TEST_ASSERT_FALSE_MESSAGE(email_imap_parse_exists(bad[i], strlen(bad[i]), &v), bad[i]);
+      TEST_ASSERT_EQUAL_UINT32(99, v);
+   }
+   /* length-bounded: the suffix runs off the end of the buffer */
+   TEST_ASSERT_FALSE(email_imap_parse_exists(ok, 10, &v));
+}
+
+/* A sender as shown: a quoted name can't pass for an address. */
+static void test_format_mailbox(void) {
+   char out[128];
+   email_format_mailbox("Bob Smith", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Bob Smith\" <bob@example.com>", out);
+   email_format_mailbox("", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("bob@example.com", out);
+   email_format_mailbox("Some Name", "", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Some Name\"", out);
+   email_format_mailbox("boss@bank.com", "evil@x.io", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"boss@bank.com\" <evil@x.io>", out);
+   email_format_mailbox("a\"b", "c@d", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"a\\\"b\" <c@d>", out);
+   /* As shown: a name that is an address never stands for the sender's. */
+   email_display_mailbox("boss@bank.com", "evil@x.io", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("evil@x.io", out);
+   email_display_mailbox("Bob@Example.com", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Bob@Example.com\" <bob@example.com>", out);
+   email_display_mailbox("Some Name", "", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Some Name\" (no address)", out);
+   email_display_mailbox("boss@bank.com", "", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("(no address)", out);
+   email_display_mailbox("Bob Smith", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Bob Smith\" <bob@example.com>", out);
+   /* A lookalike at sign (fullwidth U+FF20) counts as one. */
+   email_display_mailbox("billing\xEF\xBC\xA0paypal.com", "x@evil.tld", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("x@evil.tld", out);
+}
+
+/* "folder:uid" ids: a folder that doesn't fit is refused, never read as INBOX
+ * or cut to another mailbox's name. */
+static void test_imap_id_parse(void) {
+   char folder[16];
+   uint32_t uid = 0;
+   TEST_ASSERT_TRUE(email_imap_id_parse("Archive:42", folder, sizeof(folder), &uid));
+   TEST_ASSERT_EQUAL_STRING("Archive", folder);
+   TEST_ASSERT_EQUAL_UINT32(42, uid);
+   TEST_ASSERT_TRUE(email_imap_id_parse("7", folder, sizeof(folder), &uid));
+   TEST_ASSERT_EQUAL_STRING("INBOX", folder);
+   TEST_ASSERT_EQUAL_UINT32(7, uid);
+   TEST_ASSERT_TRUE(email_imap_id_parse("a:b:9", folder, sizeof(folder), &uid));
+   TEST_ASSERT_EQUAL_STRING("a:b", folder);
+
+   TEST_ASSERT_FALSE(email_imap_id_parse("AVeryLongFolderName:5", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:0", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:-3", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:4294967296", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(
+       email_imap_id_parse("18c2f0a9b1", folder, sizeof(folder), &uid)); /* Gmail id */
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_rfc822_utc);
@@ -652,16 +811,6 @@ int main(void) {
    RUN_TEST(test_next_fetch_literal_truncation);
    RUN_TEST(test_next_fetch_literal_truncation_quoted_star);
    RUN_TEST(test_next_fetch_null_and_empty);
-   RUN_TEST(test_rfc2047_base64);
-   RUN_TEST(test_rfc2047_qp);
-   RUN_TEST(test_rfc2047_mixed_and_plain);
-   RUN_TEST(test_rfc2047_adjacent_words);
-   RUN_TEST(test_rfc2047_unknown_encoding_passthrough);
-   RUN_TEST(test_rfc2047_null_and_empty);
-   RUN_TEST(test_rfc2047_space_before_plain);
-   RUN_TEST(test_rfc2047_strips_control_bytes);
-   RUN_TEST(test_rfc2047_preserves_utf8);
-   RUN_TEST(test_rfc2047_bounded_dst);
    RUN_TEST(test_sanitize_header_value);
    RUN_TEST(test_quote_plain);
    RUN_TEST(test_quote_escapes_quote_and_backslash);
@@ -679,5 +828,19 @@ int main(void) {
    RUN_TEST(test_iso_date_trailing_junk_rejected);
    RUN_TEST(test_iso_date_wrong_format_rejected);
    RUN_TEST(test_iso_date_empty_and_null);
+   RUN_TEST(test_select_uids_ascending);
+   RUN_TEST(test_select_uids_descending_and_shuffled);
+   RUN_TEST(test_select_uids_split_lines_and_case);
+   RUN_TEST(test_select_uids_fewer_than_wanted_and_empty);
+   RUN_TEST(test_select_uids_skips_invalid_values);
+   RUN_TEST(test_select_uids_wanted_zero_still_counts);
+   RUN_TEST(test_page_token_round_trip);
+   RUN_TEST(test_page_token_format_rejects);
+   RUN_TEST(test_page_token_parse_rejects);
+   RUN_TEST(test_uidvalidity_line);
+   RUN_TEST(test_select_uids_collapses_duplicates);
+   RUN_TEST(test_exists_line);
+   RUN_TEST(test_imap_id_parse);
+   RUN_TEST(test_format_mailbox);
    return UNITY_END();
 }

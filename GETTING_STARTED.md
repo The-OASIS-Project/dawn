@@ -65,7 +65,7 @@ sudo apt update && sudo apt install -y \
   meson ninja-build libabsl-dev \
   libmupdf-dev libfreetype-dev libharfbuzz-dev \
   libzip-dev libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev \
-  libical-dev libxml2-dev libstemmer-dev
+  libical-dev libxml2-dev libstemmer-dev libgmime-3.0-dev
 ```
 
 > **`libstemmer-dev` note**: Provides Porter2 stemming for the memory subsystem's BM25 keyword index. Required as of May 2026 — without it the build fails to link `memory_stem.c`.
@@ -206,7 +206,7 @@ cmake --build --preset default
 
 > **Skip AEC**: If WebRTC build fails, you can disable it: `cmake --preset default -DENABLE_AEC=OFF`
 
-> **Build presets**: `default`/`full` build everything; `local` (`ENABLE_WEBUI=OFF`) is a microphone-only build with no network features; `debug` adds symbols; `server` skips local audio (see [server mode](docs/GETTING_STARTED_SERVER.md)). List them with `cmake --list-presets`. Common toggles: `-DENABLE_WEBUI=OFF`, `-DENABLE_AEC=OFF`, `-DDAWN_ENABLE_EMAIL_TOOL=ON`.
+> **Build presets**: `default`/`full` build everything; `local` (`ENABLE_WEBUI=OFF`) is a microphone-only build with no WebUI, logins, messaging channels or background jobs (conversations, tools and memory work as in a full build); `debug` adds symbols; `server` skips local audio (see [server mode](docs/GETTING_STARTED_SERVER.md)). List them with `cmake --list-presets`. Common toggles: `-DENABLE_WEBUI=OFF`, `-DENABLE_AEC=OFF`, `-DDAWN_ENABLE_EMAIL_TOOL=OFF` (drops the email tool and its `libgmime-3.0-dev` requirement).
 
 The binary will be at `build/dawn`. Build time varies by platform and optimization level.
 
@@ -849,13 +849,9 @@ The email tool is disabled by default (compile-time and runtime gates) because i
 
 #### Enable Email
 
-```bash
-# Build with email enabled
-cmake --preset debug -DDAWN_ENABLE_EMAIL_TOOL=ON
-make -C build-debug -j8
-```
-
-Enable at runtime in `dawn.toml`:
+The email tool is built by default (it needs `libgmime-3.0-dev`, which the
+dependency steps above install). It is off at runtime until you turn it on in
+`dawn.toml`:
 ```toml
 [email]
 enabled = true
@@ -903,9 +899,11 @@ Happy path:
    ./build/dawn-admin messaging generate-link-code --user <username>
    ```
    (or use the WebUI **Settings → Messaging Channels** panel).
-3. From the chat app, send `/link CODE` to the bot (Slack: `link CODE`, no slash).
+3. From the chat app, send `/link CODE` to the bot (Slack: `link CODE`, no slash). For SMS, DAWN then texts your number a 6-digit code: enter it on the new channel in the WebUI **Messaging Channels** panel to finish linking.
 
-After linking, just talk — no wake word needed. Send `/new` to reset the conversation. See **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** for per-provider bot/app creation, the SMS active-conversation window, scheduler delivery, and channel management.
+A linked chat answers only the person who linked it, even in a group. Over SMS, anyone can put your number on a text, so an action asked for by text (sending, calling, deleting, searching the web, playing music) waits until you reply with the code DAWN texts you; questions are answered right away.
+
+After linking, just talk — no wake word needed. Send `/new` to reset the conversation. See **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** for per-provider bot/app creation, the SMS link code and reply codes, the SMS active-conversation window, scheduler delivery, and channel management.
 
 ### Phone Calls & SMS (via ECHO)
 
@@ -917,10 +915,13 @@ DAWN can place and receive cellular calls and text messages on a real phone numb
    ```toml
    [phone]
    enabled = true
-   user_id = 1                 # user who owns the modem (contacts + logs scoped here)
    confirm_outbound = true     # require a spoken/typed "confirm" before dialing or texting
-   # audio_device = "hw:2,0"   # USB sound card for call audio (crossover cable from the modem jack)
+   # pcm_port = "/dev/serial/by-id/...-if06-port0"   # modem's USB audio port for call audio
    ```
+
+   The phone belongs to the user assigned to the Local Device (Settings → Satellite Management), or the *Default Voice User* (Settings → Memory) when none is: call and text notices go to that user's conversations. Call-audio tuning keys are listed under `[phone]` in `dawn.toml.example`.
+
+   DAWN and ECHO exchange calls and texts (including SMS link and reply codes) over MQTT, so run the broker with authentication and ACLs on `echo/#`, and TLS when it's on another machine; see [MQTT Security](#mqtt-security-authentication--tls). DAWN warns at startup when the broker connection isn't encrypted.
 
 3. Restart DAWN. Callers are matched against your [Contacts](#persistent-memory) for name + photo on the HUD and WebUI banner.
 

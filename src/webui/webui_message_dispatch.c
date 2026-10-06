@@ -44,11 +44,14 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/image_rehydrate.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "dawn.h"
+#include "document_original_store.h"
 #include "image_store.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
@@ -58,17 +61,22 @@
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_always_on.h"
+#include "webui/webui_attachments.h"
 #include "webui/webui_attention.h"
 #include "webui/webui_contacts.h"
 #include "webui/webui_doc_library.h"
-#include "webui/webui_image_rehydrate.h"
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "webui/webui_code_projects.h"
+#endif
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+#include "webui/webui_stocks.h"
 #endif
 #include "webui/webui_email.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
 #include "webui/webui_ota.h"
+#include "webui/webui_protocol.h"
+#include "webui/webui_reasoning.h"
 #include "webui/webui_server.h"
 
 /* handle_cancel_message and handle_ping are defined at the bottom of this TU. */
@@ -78,6 +86,193 @@ static void handle_ping(ws_connection_t *conn, struct json_object *payload);
 /* handle_always_on_enable / handle_always_on_disable moved to
  * webui_always_on.c (next to always_on_create / always_on_destroy);
  * declarations in webui_always_on.h. */
+
+/* An attachment's blob_id is an original the turn's user may read (or one
+ * that's gone, which the document goes without). */
+static int attachment_owner(const char *blob_id, int user_id) {
+   char name[WEBUI_ATTACHMENT_FILENAME_MAX + 1];
+   const int rc = document_original_get_filename(blob_id, user_id, name, sizeof(name));
+   if (rc == BLOB_STORE_SUCCESS) {
+      return SUCCESS;
+   }
+   return rc == BLOB_STORE_NOT_FOUND ? WEBUI_ATTACHMENT_BLOB_GONE : FAILURE;
+}
+
+/* The text a turn carries: its attached documents (built from the frame's
+ * `attachments`, markers inside them quoted here and the bodies defused when
+ * the turn runs), then its words.
+ * Sets *built to the new text (caller frees), or leaves it NULL when the frame
+ * has none.  False when the turn was refused (the error is sent). */
+static bool turn_text_with_attachments(ws_connection_t *conn,
+                                       struct json_object *payload,
+                                       const char *words,
+                                       char **built) {
+   *built = NULL;
+   struct json_object *arr = NULL;
+   if (!json_object_object_get_ex(payload, "attachments", &arr)) {
+      return true;
+   }
+   /* Ownership of a blob_id is the user's: refused here like any turn of an
+    * unauthenticated connection. */
+   if (!conn_require_auth(conn)) {
+      return false;
+   }
+   const int max_docs = g_config.documents.max_documents;
+   const size_t max_content = (size_t)g_config.documents.max_extracted_size_kb * 1024;
+   char *docs = NULL;
+   const int rc = webui_attachments_build(arr, conn->auth_user_id, max_docs, max_content,
+                                          attachment_owner, &docs);
+   if (rc == WEBUI_ATTACHMENTS_INVALID) {
+      send_error_impl(conn->wsi, "ATTACHMENT_INVALID",
+                      "An attached document is malformed, too large, too many, or not yours");
+      return false;
+   }
+   if (rc != SUCCESS || !docs) {
+      send_error_impl(conn->wsi, "PROCESSING_ERROR", "The attached documents couldn't be read");
+      return false;
+   }
+   /* Documents first, then the words, as clients inlined them. */
+   if (words[strspn(words, " \t\r\n")] == '\0') {
+      *built = docs;
+      return true;
+   }
+   const size_t need = strlen(docs) + 2 + strlen(words) + 1;
+   *built = malloc(need);
+   if (!*built) {
+      free(docs);
+      send_error_impl(conn->wsi, "PROCESSING_ERROR", "The attached documents couldn't be read");
+      return false;
+   }
+   snprintf(*built, need, "%s\n\n%s", docs, words);
+   free(docs);
+   return true;
+}
+
+/* A text turn's frame, @p payload its payload (non-NULL): validated, then
+ * handed to handle_text_message.  Every refusal here is one error frame. */
+static void text_turn_from_payload(ws_connection_t *conn, struct json_object *payload) {
+   /* A turn is its words, its images, or both; absent text is no words. */
+   struct json_object *text_obj = NULL;
+   const char *text = NULL;
+   if (json_object_object_get_ex(payload, "text", &text_obj)) {
+      text = json_object_get_string(text_obj);
+   }
+   if (!text) {
+      text = "";
+   }
+
+   /* Explicit target conversation (background-jobs delta routing): the
+    * client sends the conversation this message belongs to, so the
+    * server never has to infer it from the live view — robust across
+    * reconnect and multi-tab, where server-side active_conversation_id
+    * can be stale or 0.  conn_reanchor_conversation validates ownership
+    * (a client must not tag/persist into another user's conversation)
+    * then heals both the active id and its privacy flag together; a
+    * bad/foreign id is a no-op heal (the turn keeps the prior anchor). */
+   struct json_object *conv_id_obj;
+   if (json_object_object_get_ex(payload, "conversation_id", &conv_id_obj)) {
+      conn_reanchor_conversation(conn, json_object_get_int64(conv_id_obj));
+   }
+
+   /* The turn's images come only from image_ids[] (/api/images ids;
+    * the worker reads the stored files).  Base64 images[] from an
+    * older client are neither read nor validated: ignored, not
+    * rejected, so its turn still arrives as text. */
+   if (json_object_object_get_ex(payload, "images", NULL)) {
+      static atomic_bool s_images_ignored_logged = false;
+      if (!atomic_exchange(&s_images_ignored_logged, true)) {
+         OLOG_DEBUG("WebUI: ignoring a text frame's base64 images[] (only "
+                    "image_ids are read); logged once");
+      }
+   }
+
+   char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+   int image_id_count = 0;
+   int max_images = g_config.vision.max_images;
+   if (max_images > WEBUI_MAX_VISION_IMAGES_CAP) {
+      max_images = WEBUI_MAX_VISION_IMAGES_CAP;
+   }
+   const int rc = image_turn_ids_parse(payload, max_images, image_ids, &image_id_count);
+   if (rc != SUCCESS) {
+      const char *code = NULL;
+      const char *message = NULL;
+      webui_image_error_describe(rc, &code, &message);
+      send_error_impl(conn->wsi, code, message);
+      return;
+   }
+
+   /* Attached documents sent as their own field are framed into the text
+    * here (their bodies are defused when the turn runs). */
+   char *built = NULL;
+   if (!turn_text_with_attachments(conn, payload, text, &built)) {
+      return;
+   }
+   if (built) {
+      text = built;
+   }
+
+   /* Nothing to say and nothing to show is refused, never dropped
+    * silently (the client is waiting for its echo).  Words that are
+    * only whitespace count as none. */
+   if (text[strspn(text, " \t\r\n")] == '\0') {
+      if (image_id_count == 0) {
+         send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
+         return;
+      }
+      text = "";
+   }
+
+   /* Server-authoritative persisted form for an image turn: clean text
+    * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
+    * text).  Freed after the call — the worker strdup's what it needs.
+    * Retention promotion happens post-persist in the worker, so images
+    * are pinned only for turns that actually persisted. */
+   char *persist_content = NULL;
+   if (image_id_count > 0) {
+      persist_content = image_marker_build_content(text, (const char(*)[IMAGE_ID_LEN])image_ids,
+                                                   image_id_count);
+      if (!persist_content) {
+         const char *code = NULL;
+         const char *message = NULL;
+         webui_image_error_describe(IMAGE_REHYDRATE_ERR_NOMEM, &code, &message);
+         send_error_impl(conn->wsi, code, message);
+         free(built);
+         return;
+      }
+   }
+
+   handle_text_message(conn, text, strlen(text), (const char(*)[IMAGE_ID_LEN])image_ids,
+                       image_id_count, persist_content);
+   free(persist_content);
+   free(built);
+}
+
+/* A `text` frame.  Its client_ref, when it has one, is this thread's turn ref
+ * while the frame is handled, so every error the handling raises (here, the
+ * auth gate, a full queue) and the user echo name the turn. */
+static void dispatch_text_frame(ws_connection_t *conn, struct json_object *payload) {
+   if (!payload) {
+      /* No payload: no words and no images, refused like any empty turn. */
+      send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
+      return;
+   }
+   struct json_object *ref_obj = NULL;
+   if (json_object_object_get_ex(payload, "client_ref", &ref_obj)) {
+      /* Anything but a string of the allowed shape is refused, null included;
+       * a string with an embedded NUL too (it couldn't be echoed unchanged). */
+      const bool is_string = json_object_is_type(ref_obj, json_type_string);
+      const char *ref = is_string ? json_object_get_string(ref_obj) : NULL;
+      if (!webui_client_ref_valid(ref) ||
+          (size_t)json_object_get_string_len(ref_obj) != strlen(ref)) {
+         send_error_impl(conn->wsi, "INVALID_CLIENT_REF",
+                         "client_ref must be 1 to 64 printable ASCII characters");
+         return;
+      }
+      webui_turn_ref_set(ref);
+   }
+   text_turn_from_payload(conn, payload);
+   webui_turn_ref_set(NULL);
+}
 
 void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* Null-terminate for JSON parsing */
@@ -89,7 +284,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 
    struct json_object *root = json_tokener_parse(json_str);
    if (!root) {
-      OLOG_WARNING("WebUI: Invalid JSON received: %.*s", (int)len, data);
+      /* The length only: a frame can carry MBs of a user's documents. */
+      OLOG_WARNING("WebUI: Invalid JSON received (%zu bytes)", len);
       free(json_str);
       return;
    }
@@ -108,151 +304,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    json_object_object_get_ex(root, "payload", &payload);
 
    if (strcmp(type, "text") == 0) {
-      /* Text input from user (with optional vision images - supports multiple) */
-      if (payload) {
-         struct json_object *text_obj;
-         if (json_object_object_get_ex(payload, "text", &text_obj)) {
-            const char *text = json_object_get_string(text_obj);
-            if (text && strlen(text) > 0) {
-               /* Explicit target conversation (background-jobs delta routing): the
-                * client sends the conversation this message belongs to, so the
-                * server never has to infer it from the live view — robust across
-                * reconnect and multi-tab, where server-side active_conversation_id
-                * can be stale or 0.  conn_reanchor_conversation validates ownership
-                * (a client must not tag/persist into another user's conversation)
-                * then heals both the active id and its privacy flag together; a
-                * bad/foreign id is a no-op heal (the turn keeps the prior anchor). */
-               struct json_object *conv_id_obj;
-               if (json_object_object_get_ex(payload, "conversation_id", &conv_id_obj)) {
-                  conn_reanchor_conversation(conn, json_object_get_int64(conv_id_obj));
-               }
-
-               /* Extract optional images for vision (array format) */
-               const char *vision_images[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };
-               size_t vision_image_sizes[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };
-               const char *vision_mimes[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };
-               int vision_image_count = 0;
-               const int max_vision_images = g_config.vision.max_images;
-
-               struct json_object *images_obj;
-               if (json_object_object_get_ex(payload, "images", &images_obj) &&
-                   json_object_is_type(images_obj, json_type_array)) {
-                  int array_len = json_object_array_length(images_obj);
-                  if (array_len > max_vision_images) {
-                     OLOG_WARNING("WebUI: Too many images (%d), limiting to %d", array_len,
-                                  max_vision_images);
-                     array_len = max_vision_images;
-                  }
-
-                  for (int i = 0; i < array_len; i++) {
-                     struct json_object *image_obj = json_object_array_get_idx(images_obj, i);
-                     struct json_object *data_obj, *mime_obj;
-                     if (json_object_object_get_ex(image_obj, "data", &data_obj) &&
-                         json_object_object_get_ex(image_obj, "mime_type", &mime_obj)) {
-                        const char *img_data = json_object_get_string(data_obj);
-                        const char *img_mime = json_object_get_string(mime_obj);
-                        if (img_data) {
-                           size_t img_size = strlen(img_data);
-
-                           /* Validate each image BEFORE passing to handler */
-                           int val_result = validate_image_data(img_data, img_size, img_mime);
-                           if (val_result != 0) {
-                              const char *err_msg = "Image validation failed";
-                              switch (val_result) {
-                                 case 1:
-                                    err_msg = "Unsupported image type";
-                                    break;
-                                 case 2:
-                                    err_msg = "Image too large (max 4MB)";
-                                    break;
-                                 case 3:
-                                    err_msg = "Invalid image data encoding";
-                                    break;
-                                 case 4:
-                                    err_msg = "Image format doesn't match declared type";
-                                    break;
-                              }
-                              send_error_impl(conn->wsi, "INVALID_IMAGE", err_msg);
-                              json_object_put(root);
-                              free(json_str);
-                              return;
-                           }
-
-                           vision_images[vision_image_count] = img_data;
-                           vision_image_sizes[vision_image_count] = img_size;
-                           vision_mimes[vision_image_count] = img_mime;
-                           vision_image_count++;
-                        }
-                     }
-                  }
-
-                  if (vision_image_count > 0) {
-                     OLOG_INFO("WebUI: %d vision image(s) attached", vision_image_count);
-                  }
-               }
-
-               /* Parse image_ids[] — the /api/images persistence keys the client
-                * holds, ordered to match images[].  The daemon is authoritative for
-                * user-turn persistence, so it builds the [IMAGE:<id>] markers itself
-                * (no client save).  Retention promotion is NOT done here: it happens
-                * post-persist in the worker so images are pinned only for turns that
-                * actually persisted (a turn rejected before persist — queue-full,
-                * superseded — would otherwise permanently pin images that have no
-                * orphan sweep).  The images[]<->image_ids[] correspondence is a
-                * client convention (both mapped from one array, see dawn.js); the
-                * server does not cross-check them — a bad pairing only mis-persists
-                * the sender's own turn. */
-               char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
-               int image_id_count = 0;
-               struct json_object *image_ids_obj;
-               if (json_object_object_get_ex(payload, "image_ids", &image_ids_obj) &&
-                   json_object_is_type(image_ids_obj, json_type_array)) {
-                  int id_len = json_object_array_length(image_ids_obj);
-                  /* Cap at the SAME effective limit as images[] (runtime, may be <
-                   * the array bound), then belt-and-suspenders at the array bound. */
-                  if (id_len > max_vision_images) {
-                     id_len = max_vision_images;
-                  }
-                  if (id_len > WEBUI_MAX_VISION_IMAGES_CAP) {
-                     id_len = WEBUI_MAX_VISION_IMAGES_CAP;
-                  }
-                  for (int i = 0; i < id_len; i++) {
-                     const char *img_id = json_object_get_string(
-                         json_object_array_get_idx(image_ids_obj, i));
-                     if (!img_id || !image_store_validate_id(img_id)) {
-                        OLOG_WARNING("WebUI: ignoring invalid image_id in turn frame");
-                        continue;
-                     }
-                     snprintf(image_ids[image_id_count], IMAGE_ID_LEN, "%s", img_id);
-                     image_id_count++;
-                  }
-               }
-
-               /* Server-authoritative persisted form for an image turn: clean text
-                * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
-                * text).  Freed after the call — the worker strdup's what it needs. */
-               char *persist_content = NULL;
-               if (image_id_count > 0) {
-                  persist_content = webui_build_image_marker_content(text, image_ids,
-                                                                     image_id_count);
-                  if (!persist_content) {
-                     /* OOM building markers — persist plain text rather than fail the
-                      * turn.  Log loudly: the images won't re-render on reload (no
-                      * markers persisted) and won't be pinned (worker promotes only
-                      * what's in the marker string), so they LRU-evict normally — a
-                      * silent-on-reload degradation bounded to this OOM-gated turn. */
-                     OLOG_ERROR("WebUI: failed to build image markers (OOM); persisting text-only, "
-                                "%d image(s) will not re-render on reload",
-                                image_id_count);
-                  }
-               }
-
-               handle_text_message(conn, text, strlen(text), vision_images, vision_image_sizes,
-                                   vision_mimes, vision_image_count, persist_content);
-               free(persist_content);
-            }
-         }
-      }
+      /* Text input from user, with the images attached to it by id */
+      dispatch_text_frame(conn, payload);
    } else if (strcmp(type, "cancel") == 0) {
       /* Cancel current operation */
       handle_cancel_message(conn);
@@ -266,12 +319,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (!conn_require_auth(conn)) {
          return;
       }
-      /* Request current system prompt for debugging.  Uses the FULL
-       * variant so the inspector renders both segments of the two-
-       * message shape (stable prefix + volatile block joined by
-       * "\n\n").  session_get_system_prompt would show only the
-       * cached stable prefix — useful elsewhere but misleading for
-       * "what does the LLM actually see this turn?". */
+      /* The system prompt for debugging: the conversation's frozen prompt
+       * and each instruction change and standing direction since. */
       struct json_object *response = json_object_new_object();
       json_object_object_add(response, "type", json_object_new_string("system_prompt_response"));
       struct json_object *resp_payload = json_object_new_object();
@@ -294,8 +343,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
           * of the system-prompt text — so surface them here, serialized exactly as
           * the LLM receives them (descriptions post-truncation), to let the
           * inspector validate what the model actually sees. */
+         /* The conversation's frozen set when it has one, as every request of
+          * it is sent; else what this surface would get. */
          bool is_remote = (conn->session->type != SESSION_TYPE_LOCAL);
-         struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote);
+         struct json_object *frozen = session_prefix_tool_defs(conn->session);
+         struct json_object *tools = frozen ? llm_tools_render_frozen(frozen, false)
+                                            : llm_tools_get_openai_format_filtered(is_remote);
+         json_object_put(frozen);
          if (tools) {
             const char *tools_json = json_object_to_json_string_ext(tools, JSON_C_TO_STRING_PRETTY);
             json_object_object_add(resp_payload, "tools", json_object_new_string(tools_json));
@@ -460,6 +514,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       struct json_object *resp_payload = json_object_new_object();
 
       int success = 1;
+      bool reasoning_adjusted = false; /* the user's own reasoning change was adjusted */
       const char *error_msg = NULL;
 
       if (!conn->session) {
@@ -472,7 +527,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          session_llm_config_t config;
          session_get_llm_config(conn->session, &config);
          bool has_changes = false;
-         bool thinking_clamped_on = false; /* set-time thinking-disable clamp fired */
 
          /* Track old model + type for context cache invalidation */
          char old_model[LLM_MODEL_NAME_MAX];
@@ -503,11 +557,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      }
                   }
                } else if (strcmp(new_type, "reset") == 0) {
-                  /* Reset to defaults from dawn.toml */
-                  session_clear_llm_config(conn->session);
-                  OLOG_INFO("WebUI: Session %u LLM config reset to defaults",
+                  /* Reset to defaults from dawn.toml, in the working copy:
+                   * anything else this request sets applies over them, and the
+                   * one set below commits all of it or none. */
+                  llm_get_default_config(&config);
+                  has_changes = true;
+                  OLOG_INFO("WebUI: Session %u LLM config reset to defaults requested",
                             conn->session->session_id);
-                  has_changes = false; /* Already handled */
                }
             }
          }
@@ -607,40 +663,21 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             OLOG_INFO("WebUI: Corrected stale local type to cloud for model '%s'", config.model);
          }
 
-         /* Parse thinking_mode (disabled/auto/enabled) */
+         /* Parse thinking_mode.  Stored as picked; each request resolves it
+          * against what the model accepts (llm_thinking_resolve_current). */
          struct json_object *thinking_mode_obj;
+         bool sent_mode = false;   /* an accepted thinking_mode came in */
+         bool sent_effort = false; /* an accepted reasoning_effort came in */
          if (json_object_object_get_ex(payload, "thinking_mode", &thinking_mode_obj)) {
             const char *new_thinking_mode = json_object_get_string(thinking_mode_obj);
             if (new_thinking_mode) {
                /* Validate thinking mode value */
                if (strcmp(new_thinking_mode, "disabled") == 0 ||
-                   strcmp(new_thinking_mode, "auto") == 0 ||
-                   strcmp(new_thinking_mode, "enabled") == 0) {
-                  /* Native Claude rejects disabling thinking on a conversation whose
-                   * history already contains thinking blocks ("assistant message cannot
-                   * contain thinking"). Clamp the stored value to enabled at set-time so
-                   * the persisted/effective state stays consistent and the response
-                   * reflects reality to the client — the control follows the effective
-                   * value, not the unachievable pick. Only native Claude has this
-                   * constraint (OpenRouter uses the OpenAI-compatible formatter). The
-                   * request-time formatter clamp remains the safety net for non-WebUI
-                   * clients. */
-                  if (strcmp(new_thinking_mode, "disabled") == 0 && config.type == LLM_CLOUD &&
-                      config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-                     pthread_mutex_lock(&conn->session->history_mutex);
-                     bool has_thinking = claude_history_has_thinking_blocks(
-                         conn->session->conversation_history);
-                     pthread_mutex_unlock(&conn->session->history_mutex);
-                     if (has_thinking) {
-                        OLOG_INFO("WebUI: thinking disable clamped to enabled (conversation "
-                                  "already contains reasoning Claude must preserve)");
-                        new_thinking_mode = "enabled";
-                        /* Notify only after the config actually persists (below), so a
-                         * failed apply doesn't produce a "kept on" + "failed" double toast. */
-                        thinking_clamped_on = true;
-                     }
-                  }
+                   strcmp(new_thinking_mode, "adaptive") == 0 ||
+                   strcmp(new_thinking_mode, "enabled") == 0 ||
+                   strcmp(new_thinking_mode, "auto") == 0) {
                   has_changes = true;
+                  sent_mode = true;
                   safe_strscpy(config.thinking_mode, new_thinking_mode);
                   OLOG_INFO("WebUI: Session thinking_mode set to '%s'", config.thinking_mode);
                } else {
@@ -650,17 +687,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             }
          }
 
-         /* Parse reasoning_effort. The allowlist mirrors the gpt-5.4 Responses API
-          * (none/low/medium/high/xhigh); Claude maps low/medium/high to budget
-          * tokens via llm_get_effective_budget_tokens. */
+         /* Parse reasoning_effort: any effort name some model takes; each
+          * request snaps it to the nearest one its model offers. */
          struct json_object *reasoning_effort_obj;
          if (json_object_object_get_ex(payload, "reasoning_effort", &reasoning_effort_obj)) {
             const char *new_effort = json_object_get_string(reasoning_effort_obj);
             if (new_effort) {
-               if (strcmp(new_effort, "none") == 0 || strcmp(new_effort, "low") == 0 ||
-                   strcmp(new_effort, "medium") == 0 || strcmp(new_effort, "high") == 0 ||
-                   strcmp(new_effort, "xhigh") == 0) {
+               if (strcmp(new_effort, "none") == 0 || strcmp(new_effort, "minimal") == 0 ||
+                   strcmp(new_effort, "low") == 0 || strcmp(new_effort, "medium") == 0 ||
+                   strcmp(new_effort, "high") == 0 || strcmp(new_effort, "xhigh") == 0 ||
+                   strcmp(new_effort, "max") == 0) {
                   has_changes = true;
+                  sent_effort = true;
                   safe_strscpy(config.reasoning_effort, new_effort);
                   OLOG_INFO("WebUI: Session reasoning_effort set to '%s'", config.reasoning_effort);
                } else {
@@ -670,9 +708,25 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             }
          }
 
-         /* Apply config if changes were made */
+         /* A restore push carries a loaded conversation's own settings. */
+         bool from_restore = false;
+         struct json_object *restore_obj;
+         if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
+            from_restore = json_object_get_boolean(restore_obj);
+         }
+
+         /* Apply config if changes were made.  The reasoning pick is stored as
+          * picked (each request resolves it for its model); the reply says
+          * whether the user's own change was adjusted, never for a restore. */
          if (has_changes) {
             int rc = session_set_llm_config(conn->session, &config);
+            if (rc == 0) {
+               /* What the session got: a provider without a key falls back. */
+               session_get_llm_config(conn->session, &config);
+            }
+            if (rc == 0 && !from_restore) {
+               reasoning_adjusted = webui_reasoning_adjusted(&config, sent_mode, sent_effort);
+            }
             if (rc != 0) {
                success = 0;
                error_msg = "API key not configured for requested provider";
@@ -680,19 +734,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                OLOG_INFO("WebUI: Session %u LLM config updated (type=%d, provider=%d)",
                          conn->session->session_id, config.type, config.cloud_provider);
 
-               /* Set-time thinking clamp fired and persisted — tell the user why the
-                * Disabled toggle didn't take. The dropdown follows the effective value
-                * via the response's thinking_mode field. */
-               if (thinking_clamped_on) {
-                  webui_send_error_ex(
-                      conn->session, "INFO_THINKING_KEPT_ON",
-                      "Extended thinking stayed on: this conversation already contains "
-                      "reasoning, which Claude requires be preserved. Start a new "
-                      "conversation to turn thinking off.",
-                      WS_SEVERITY_INFO);
-               }
-
-               /* If local model or LLM type changed, context size may differ */
+               /* If the local model or the LLM type changed, a reset included,
+                * the context size may differ. */
                if (config.type == LLM_LOCAL &&
                    (strcmp(old_model, config.model) != 0 || old_type != config.type)) {
                   llm_context_refresh_local();
@@ -707,11 +750,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                 * NEXT conversation by the time we process this message — the
                 * cascade would then silently overwrite that conv with the
                 * previous conv's values. */
-               bool from_restore = false;
-               struct json_object *restore_obj;
-               if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
-                  from_restore = json_object_get_boolean(restore_obj);
-               }
                if (!from_restore && conn->active_conversation_id > 0) {
                   const char *type_str = config.type == LLM_LOCAL ? "local" : "cloud";
                   /* tools_mode column is retired (dead) — pass empty. */
@@ -741,35 +779,20 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                 json_object_new_string(
                                     cloud_provider_to_string(current.cloud_provider)));
 
-         /* Get model name - prefer session model, fall back to config */
-         const char *model_name = NULL;
-         if (current.model[0] != '\0') {
-            /* Session has explicit model set */
-            model_name = current.model;
-         } else {
-            /* Fall back to config default based on type/provider */
-            const dawn_config_t *cfg = config_get();
-            if (current.type == LLM_LOCAL) {
-               model_name = cfg->llm.local.model[0] ? cfg->llm.local.model : "";
-            } else if (current.cloud_provider == CLOUD_PROVIDER_OPENAI) {
-               model_name = llm_get_default_openai_model();
-            } else if (current.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-               model_name = llm_get_default_claude_model();
-            } else if (current.cloud_provider == CLOUD_PROVIDER_GEMINI) {
-               model_name = llm_get_default_gemini_model();
-            } else if (current.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-               model_name = llm_get_default_openrouter_model();
-            }
-         }
+         /* The model that runs, as get_config reports it (the resolver drops a
+          * bare id under the OpenRouter gateway, for one). */
+         llm_resolved_config_t resolved;
+         const char *model_name = llm_resolve_config(&current, &resolved) == 0
+                                      ? webui_effective_model_name(&resolved)
+                                      : current.model;
          json_object_object_add(resp_payload, "model",
                                 json_object_new_string(model_name ? model_name : ""));
 
-         /* Effective reasoning settings — so the client control reflects the real
-          * value (e.g. after a server-side thinking clamp), not the picked one. */
-         json_object_object_add(resp_payload, "thinking_mode",
-                                json_object_new_string(current.thinking_mode));
-         json_object_object_add(resp_payload, "reasoning_effort",
-                                json_object_new_string(current.reasoning_effort));
+         /* Effective reasoning, with the model's capabilities, so the client
+          * control shows what runs and only what the model takes. */
+         webui_reasoning_stamp(resp_payload, &current);
+         json_object_object_add(resp_payload, "reasoning_adjusted",
+                                json_object_new_boolean(reasoning_adjusted));
       }
 
       /* Include API key availability */
@@ -805,37 +828,59 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          }
       }
    } else if (strcmp(type, "reconnect") == 0) {
-      /* Session reconnection with stored token */
+      webui_protocol_note_client(payload, &conn->client_noted);
+      /* Session reconnection with stored token.  A login ended since this
+       * connection opened reconnects nothing (and the connection closes). */
+      if (payload && conn->authenticated && !webui_conn_login_valid(conn)) {
+         return;
+      }
       if (payload) {
          struct json_object *token_obj;
          if (json_object_object_get_ex(payload, "token", &token_obj)) {
             const char *token = json_object_get_string(token_obj);
             if (token && strlen(token) > 0) {
                session_t *existing = lookup_session_by_token(token);
-               if (existing) {
-                  /* Found existing session - switch to it */
-                  if (conn->session && conn->session != existing) {
-                     /* Destroy the abandoned session (just auto-created on
-                      * connect). session_destroy() -> webui_detach_session()
-                      * already releases the connection's single ref_count for
-                      * us (it finds this conn still attached and calls
-                      * session_release). Do NOT release it here too, or the
-                      * ref_count double-decrements (1 -> 0 -> -1), defeating the
-                      * destroy wait and freeing the session early — a
-                      * use-after-free that crashes the reconnect path. */
+               if (existing && (!webui_session_owned_by(existing, conn->auth_user_id) ||
+                                !webui_conn_may_resume(conn, existing))) {
+                  /* Another user's or another login's session: never attach to it. */
+                  OLOG_WARNING("WebUI: reconnect token's session isn't this login's; "
+                               "not attaching");
+                  session_release(existing); /* the lookup's reference */
+                  existing = NULL;
+               }
+               if (existing && existing == conn->session) {
+                  /* Already this connection's session: its own reference stays,
+                   * the lookup's goes. */
+                  session_release(existing);
+               } else if (existing) {
+                  /* Switching to it: first the abandoned session (just
+                   * auto-created on connect).  session_destroy() ->
+                   * webui_detach_session() releases the connection's reference to
+                   * it (it finds this conn still attached); releasing it here too
+                   * would double-decrement and free it early. */
+                  if (conn->session) {
                      uint32_t abandoned_id = conn->session->session_id;
                      conn->session->client_data = NULL;
                      session_destroy(abandoned_id);
                      unregister_tokens_for_session(abandoned_id);
                      OLOG_INFO("WebUI: Destroyed abandoned session %u", abandoned_id);
                   }
+                  if (!webui_conn_attach_session(conn, existing)) {
+                     /* Destroyed meanwhile: a fresh session instead (below). */
+                     OLOG_WARNING("WebUI: session %u is ending; not attaching",
+                                  existing->session_id);
+                     session_release(existing);
+                     existing = NULL;
+                  }
+               }
+               if (existing) {
                   /* Evict any other connection still owning this session BEFORE
                    * taking ownership, so the superseded tab backs off (WS 4001)
                    * rather than fighting to re-steal it. */
                   webui_evict_session_owner(existing, conn);
-                  conn->session = existing;
                   conn->session_was_reconnected = true;
                   existing->client_data = conn;
+                  webui_conn_publish_view(conn); /* the session shows what this connection does */
                   existing->disconnected = false;
                   safe_strscpy(conn->session_token, token);
 
@@ -883,15 +928,14 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   if (!conn->session) {
                      conn->session = session_create(SESSION_TYPE_WEBUI, -1);
                      if (conn->session) {
+                        webui_conn_own_session(conn, conn->session);
                         /* Set user_id for metrics and memory extraction */
                         session_set_metrics_user(conn->session, conn->auth_user_id);
-                        /* Build personalized prompt with user settings + memory context */
-                        char *prompt = session_manager_build_system_prompt_string(
-                            conn->auth_user_id);
-                        session_init_system_prompt(conn->session,
-                                                   prompt ? prompt : get_remote_command_prompt());
-                        free(prompt);
+                        /* A new context: its first turn freezes the prompt. */
+                        session_clear_history(conn->session);
                         conn->session->client_data = conn;
+                        webui_conn_publish_view(
+                            conn); /* the session shows what this connection does */
                         /* Fresh session (reconnect token stale) — not a true reconnect,
                          * so the session frame must report reconnected:false.  Enforced
                          * locally at all four fresh-create sites. */
@@ -933,6 +977,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          }
       }
    } else if (strcmp(type, "init") == 0) {
+      webui_protocol_note_client(payload, &conn->client_noted);
       /* Init message arrived on an already-authenticated connection (cookie auth
        * auto-created the session before this message was processed). Sync capabilities. */
       if (payload) {
@@ -1027,6 +1072,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_rename_channel(conn, payload);
    } else if (strcmp(type, "reenable_channel") == 0) {
       handle_reenable_channel(conn, payload);
+   } else if (strcmp(type, "verify_channel") == 0) {
+      handle_verify_channel(conn, payload);
+   } else if (strcmp(type, "resend_channel_code") == 0) {
+      handle_resend_channel_code(conn, payload);
    } else if (strcmp(type, "set_channel_llm") == 0) {
       handle_set_channel_llm(conn, payload);
    }
@@ -1106,6 +1155,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_set_private(conn, payload);
       }
+   } else if (strcmp(type, "forget_conversation_memories") == 0) {
+      handle_forget_conversation_memories(conn, payload);
+   } else if (strcmp(type, "conversation_learned_request") == 0) {
+      handle_conversation_learned_request(conn, payload);
    } else if (strcmp(type, "set_pinned") == 0) {
       if (payload) {
          handle_set_pinned(conn, payload);
@@ -1266,6 +1319,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_doc_library_note_update(conn, payload);
       }
+   } else if (strcmp(type, "doc_library_doc_update") == 0) {
+      if (payload) {
+         handle_doc_library_doc_update(conn, payload);
+      }
    } else if (strcmp(type, "doc_library_version_list") == 0) {
       if (payload) {
          handle_doc_library_version_list(conn, payload);
@@ -1293,6 +1350,24 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_code_projects_set_branch(conn, payload);
    } else if (strcmp(type, "code_projects_delete") == 0) {
       handle_code_projects_delete(conn, payload);
+   }
+#endif
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+   /* Stocks panel (owner's Schwab portfolio) */
+   else if (strcmp(type, "stocks_portfolio_subscribe") == 0) {
+      handle_stocks_portfolio_subscribe(conn, payload);
+   } else if (strcmp(type, "stocks_portfolio_unsubscribe") == 0) {
+      handle_stocks_portfolio_unsubscribe(conn, payload);
+   } else if (strcmp(type, "stocks_portfolio_get") == 0) {
+      handle_stocks_portfolio_get(conn, payload);
+   } else if (strcmp(type, "stocks_watch_subscribe") == 0) {
+      handle_stocks_watch_subscribe(conn, payload);
+   } else if (strcmp(type, "stocks_watch_unsubscribe") == 0) {
+      handle_stocks_watch_unsubscribe(conn, payload);
+   } else if (strcmp(type, "stocks_watch_get") == 0) {
+      handle_stocks_watch_get(conn, payload);
+   } else if (strcmp(type, "stocks_watch_set") == 0) {
+      handle_stocks_watch_set(conn, payload);
    }
 #endif
    /* OAuth flow (shared by calendar and email) */

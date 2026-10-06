@@ -43,6 +43,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "webui/webui_server.h"
+#include "webui/webui_turn_ref.h"
 
 /* =============================================================================
  * lws Return Convention
@@ -90,15 +91,15 @@ extern "C" {
 
 #define WS_SEND_BUFFER_SIZE 16384
 #define HTTP_MAX_POST_BODY 4096
-#define AUTH_COOKIE_NAME "dawn_session"
 #define AUTH_COOKIE_MAX_AGE (24 * 60 * 60) /* 24 hours */
 #define MAX_TOKEN_MAPPINGS 16
 #define MODEL_CACHE_TTL 60 /* Cache refresh interval in seconds */
 
 /* WebSocket text buffer limits */
 #define WEBUI_TEXT_BUFFER_INITIAL_CAP 8192
-#define WEBUI_TEXT_BUFFER_MAX_CAP \
-   (8 * 1024 * 1024) /* 8MB for vision (4MB image + base64 overhead) */
+#define WEBUI_TEXT_BUFFER_MAX_CAP                                                        \
+   (8 * 1024 * 1024) /* 8MB: attached documents' text; an older client's base64 images[] \
+                      * still arrive whole to be ignored rather than dropped */
 
 /* =============================================================================
  * Per-WebSocket Connection Data
@@ -128,6 +129,9 @@ typedef struct {
                           * in its own tool_step fan. Default off = #3 origin-excluded
                           * behavior (stock www). Set by LWS at handshake, read by worker. */
    bool is_satellite;    /* True if this is a DAP2 satellite connection */
+   bool logged_out;      /* Its login ended (webui_conn_end_login): closing, and
+                          * nothing it sends is handled */
+   bool client_noted;    /* Its `client` self-description was logged */
 
    /* Text message fragmentation support (for large JSON payloads) */
    char *text_buffer;      /* Accumulation buffer for fragmented text messages */
@@ -157,6 +161,21 @@ typedef struct {
     * the connection's user data is zero-initialized and slot reuse re-clears it. */
    bool watch_readings_subscribed;
 
+   /* Stocks panel push: while subscribed, the stocks refresher thread fans the
+    * owner's portfolio snapshot to this connection on the active cadence.
+    * stocks_ext_hours mirrors the panel's "Extended Hours" switch. Plain bools —
+    * zero-initialized user data, re-cleared on slot reuse; no teardown needed. */
+   bool stocks_subscribed;
+   bool stocks_ext_hours;
+
+   /* Watchlist panel push (independent of the portfolio subscription above): while
+    * subscribed, the refresher fans stocks_watch_update (quotes for the user's
+    * watched, not-held tickers) to this connection. stocks_watch_ext_hours opts this
+    * connection into the extended-hours price overlay (aggregated per user; the
+    * overlay is emitted only during an active pre/post window). */
+   bool stocks_watch_subscribed;
+   bool stocks_watch_ext_hours;
+
    /* Client IP address (captured at connection establishment for reliable logging) */
    char client_ip[64];
 
@@ -169,6 +188,14 @@ typedef struct {
     * text worker thread (tool-turn persistence, focus injection, auto-compaction). */
    _Atomic int64_t active_conversation_id;
    bool active_conversation_private; /* If true, skip memory extraction */
+   /* Private set before the conversation exists (set_private with no id): the
+    * next conversation this connection creates is private from its first row.
+    * Cleared when a conversation is bound.  Atomic: set on the lws thread, read
+    * by a voice turn's auto-create on the audio worker.  When voice-only
+    * surfaces get a way to go private first, this moves to session_t (their
+    * conversations are created in session_voice_save, with no connection):
+    * one flag, not two. */
+   atomic_bool pending_private;
 
    /* Music streaming state (per-session, owned by webui_music.c) */
    void *music_state; /* session_music_state_t*, NULL if not initialized */
@@ -202,6 +229,26 @@ typedef struct {
  * single-threaded LWS callback context, direct conn->session access is fine
  * after an initial atomic load confirms non-NULL.
  */
+/**
+ * @brief Set the conversation the connection shows
+ *
+ * The one writer of conn->active_conversation_id: also keeps the session's copy
+ * (session_t.viewed_conversation_id) that turn threads read.  Handler thread.
+ */
+void webui_conn_set_active_conversation(ws_connection_t *conn, int64_t conv_id);
+
+/**
+ * @brief Publish the connection's view to the session it just attached to
+ *
+ * Call wherever a connection takes a session (create, reconnect, re-anchor):
+ * a new connection shows nothing yet, so a reconnected session must not keep the
+ * evicted tab's conversation; one created for an open conversation shows it.
+ */
+void webui_conn_publish_view(ws_connection_t *conn);
+
+/** Whether @p user_id may resume @p session (its owner, or no owner yet). */
+bool webui_session_owned_by(const session_t *session, int user_id);
+
 static inline session_t *conn_get_session(ws_connection_t *conn) {
    return __atomic_load_n(&conn->session, __ATOMIC_ACQUIRE);
 }
@@ -258,11 +305,13 @@ typedef struct {
          int64_t conversation_id; /* Live-turn conversation (0 = none); routes tool/visual frames */
          int64_t message_id; /* DB row id (0 = none); lets the client stamp data-message-id so a
                               * fanned-out message_appended dedups (server-authoritative §12c) */
+         char client_ref[WEBUI_CLIENT_REF_MAX + 1]; /* the turn's client_ref ("" = none) */
       } transcript;
       struct {
          char *code;
          char *message;
-         ws_error_severity_t severity; /* Default 0 = WS_SEVERITY_ERROR */
+         ws_error_severity_t severity;              /* Default 0 = WS_SEVERITY_ERROR */
+         char client_ref[WEBUI_CLIENT_REF_MAX + 1]; /* the refused turn's client_ref ("" = none) */
       } error;
       struct {
          char *token;
@@ -289,6 +338,11 @@ typedef struct {
          int ttft_ms;      /* Time to first token (ms) */
          float token_rate; /* Tokens per second */
          int context_pct;  /* Context utilization 0-100 */
+         int input_tokens; /* This turn's prompt tokens (last sub-call) — cache-rate denominator */
+         int cached_tokens; /* Cache-read prompt tokens for this turn (last sub-call; 0 = miss) */
+         int cache_write_tokens; /* Cache-write prompt tokens for this turn (0 when unreported) */
+         int cache_saved_tokens; /* Provider-discounted net input tokens saved (may be negative) */
+         char cache_state[16];   /* The last call's cache state ("" = none to report) */
          int64_t
              conversation_id; /* turn's conversation — client gates the footer to the active view */
       } metrics;
@@ -298,6 +352,7 @@ typedef struct {
          int messages_summarized;
          int level;
          char *summary;
+         int64_t conversation_id; /* the compacted conversation; client gates on it */
       } compaction;
       struct {
          double position_sec;
@@ -449,18 +504,25 @@ void webui_broadcast_silent_observation(const char *category,
 void handle_json_message(ws_connection_t *conn, const char *data, size_t len);
 
 /**
- * @brief Handle a `text` message — text input from the user with optional
- * vision images.  Defined in webui_server.c; called from
+ * @brief Handle a `text` message — text input from the user, with the images
+ * attached to it by id (@p image_ids, @p image_id_count; persisted as
+ * @p persist_content).  Defined in webui_server.c; called from
  * handle_json_message in webui_message_dispatch.c.
  */
 void handle_text_message(ws_connection_t *conn,
                          const char *text,
                          size_t len,
-                         const char **vision_images,
-                         const size_t *vision_image_sizes,
-                         const char **vision_mimes,
-                         int vision_image_count,
+                         const char image_ids[][IMAGE_ID_LEN],
+                         int image_id_count,
                          const char *persist_content);
+
+/**
+ * @brief The `error` frame code and message for a turn whose images were
+ *        refused: @p rc an IMAGE_REHYDRATE_ERR_* code (other values: the
+ *        generic IMAGE_ERROR).  Both strings are static.  Defined in
+ *        webui_text_processing.c.
+ */
+void webui_image_error_describe(int rc, const char **code_out, const char **message_out);
 
 /**
  * @brief Handle a `get_metrics` message — emit the current session-metrics
@@ -492,6 +554,12 @@ void queue_init_messages(ws_connection_t *conn, const char *token);
  * in onclose and backs off (does NOT auto-reconnect) instead of re-stealing the
  * session, which would ping-pong two tabs.  Kept in sync with www/js client. */
 #define WEBUI_CLOSE_SUPERSEDED 4001
+
+/* Private-range WS close code sent to a connection whose login ended (logout,
+ * a revoke, a password change, expiry).  It follows a force_logout frame; the
+ * client goes to the login page and does not reconnect.  Kept in sync with
+ * www/js client. */
+#define WEBUI_CLOSE_LOGGED_OUT 4002
 
 /**
  * @brief Evict the connection currently owning @p existing so a newer reconnect
@@ -528,24 +596,6 @@ void webui_turn_persist_arm(session_t *session,
                             int auth_user_id,
                             webui_turn_persist_scope_t *scope);
 void webui_turn_persist_disarm(session_t *session, webui_turn_persist_scope_t *scope);
-
-/**
- * @brief Validate base64-encoded image data (security-hardened).
- *
- * MIME whitelist + size cap + base64-charset + magic-byte check.  Defined
- * in webui_vision_validate.c.
- *
- * INTERNAL TO THE WEBUI MODULE.  Callers MUST enforce an upstream byte cap
- * on `base64_len` (the WebSocket receive cap is the established
- * boundary).  Passing an unbounded `base64_len` up to
- * `WEBUI_MAX_BASE64_SIZE` will allocate a multi-megabyte decode buffer
- * even though only the 24-byte prefix is decoded here — the size check
- * defends amplification against the *upstream* allocation, not this
- * function's own.
- *
- * @return 0 on success, 1-5 on failure (see implementation for codes)
- */
-int validate_image_data(const char *base64_data, size_t base64_len, const char *mime_type);
 
 /* free_response moved to webui/webui_send.h */
 
@@ -744,6 +794,21 @@ bool conn_require_admin(ws_connection_t *conn);
 bool webui_is_same_origin_request(struct lws *wsi);
 
 /**
+ * @brief Build a conversation's LLM context for a turn, detached from any session
+ *
+ * session_turn_begin()'s loader (registered by webui_server_init).  Leaves every
+ * session untouched; reports the conversation's stored LLM settings (over
+ * @p base) in @p cfg_out / @p has_cfg_out.
+ *
+ * @return New history array (caller owns), or NULL
+ */
+json_object *webui_turn_history_loader(int user_id,
+                                       int64_t conv_id,
+                                       const session_llm_config_t *base,
+                                       session_llm_config_t *cfg_out,
+                                       bool *has_cfg_out);
+
+/**
  * @brief Send JSON response to WebSocket client via the response queue
  *
  * Serializes the JSON object to a string and queues it as WS_RESP_JSON.
@@ -878,6 +943,37 @@ void send_error_impl_ex(struct lws *wsi,
                         ws_error_severity_t severity);
 
 /**
+ * @brief A persisted message fanned out to every browser of its user, the
+ *        sender's own connection getting a copy that names its turn
+ * @param origin     The session whose turn wrote it (its connection gets
+ *                   payload.client_ref); NULL: every connection gets the same
+ * @param client_ref That turn's client_ref; NULL or "" sends none
+ * Otherwise as webui_broadcast_message_appended (conv_event.h).
+ */
+void webui_broadcast_message_appended_origin(int user_id,
+                                             int64_t conv_id,
+                                             int64_t msg_id,
+                                             const char *role,
+                                             const char *text,
+                                             const char *reasoning,
+                                             unsigned stream_id,
+                                             const session_t *origin,
+                                             const char *client_ref);
+
+/**
+ * @brief Send an error frame naming the text turn it refuses.
+ * @param client_ref The turn's client_ref, echoed as payload.client_ref; NULL or
+ *                   "" sends none (send_error_impl_ex uses the calling thread's
+ *                   turn ref, webui_turn_ref_get()).
+ */
+void send_error_frame(struct lws *wsi,
+                      const char *code,
+                      const char *message,
+                      ws_error_severity_t severity,
+                      const char *client_ref);
+
+
+/**
  * @brief Handle a phone_action WS message (answer / reject / hangup a call).
  *
  * Dispatches the blocking phone_service answer/hang-up onto a detached thread
@@ -893,65 +989,56 @@ void webui_phone_handle_action(ws_connection_t *conn, const char *action);
  */
 void webui_phone_send_status(ws_connection_t *conn);
 
-/**
- * @brief Force logout connections by auth session token prefix
- *
- * Finds all WebSocket connections with matching auth_session_token prefix
- * and sends them a force_logout message. Used when a session is revoked.
- *
- * @param auth_token_prefix First AUTH_TOKEN_PREFIX_LEN chars of auth token
- * @return Number of connections notified
- */
-int webui_force_logout_by_auth_token(const char *auth_token_prefix);
-
-/**
- * @brief Destroy session_manager sessions for connections with matching auth token.
- *
- * Used by the logout handler to release session slots immediately instead of
- * waiting for the 30-minute idle timeout. Detaches matching connections from
- * their sessions and destroys the sessions.
- *
- * @param auth_token_prefix First AUTH_TOKEN_PREFIX_LEN chars of auth token
- * @return Number of sessions destroyed
- */
-int webui_destroy_sessions_by_auth_token(const char *auth_token_prefix);
-
 /* =============================================================================
- * Prompt Construction Helpers
+ * Ending logins (webui_login_sweep.c)
  * ============================================================================= */
 
+/** @brief @p conn's owner key: its login cookie's public prefix, or "" (none). */
+void webui_conn_owner_key(const ws_connection_t *conn, char out[SESSION_OWNER_KEY_LEN + 1]);
+
+/** @brief A session just created for @p conn belongs to its login (if any). */
+void webui_conn_own_session(ws_connection_t *conn, session_t *session);
+
 /**
- * @brief Phase 1e structured prompt builder — matches
- *        `session_prompt_builder_t` signature.  Fills `out` with three
- *        named blocks (base + memory + focus); session_manager owns
- *        the heap allocations on SUCCESS and releases via
- *        composed_prompt_free.
- *
- * In Phase 1e BOTH refresh kinds rebuild every block — `kind` is
- * forward-compat for 1f's dedup state.  `user_turn_text` is consumed
- * only by the focus block (NULL-skipped on SESSION_START).
- *
- * @param user_id        Authenticated user (0 / negative → unauthenticated;
- *                       focus block short-circuits to NULL, base + memory
- *                       still build with the appropriate gates).
- * @param user_turn_text User's raw turn text — NULL on SESSION_START
- *                       refresh, the verbatim message on PER_TURN.  Only
- *                       the focus block consumes it.
- * @param kind           Forward-compat hint; ignored in Phase 1e.
- * @param[out] out       Caller-allocated, zero-initialized;
- *                       session_manager owns the heap allocations on
- *                       SUCCESS and releases via composed_prompt_free.
- *                       On FAILURE, builder still cleans up any
- *                       partial allocation; out's pointers are NULL.
- * @return SUCCESS on a built composed_prompt_t (any combination of
- *         non-NULL blocks; focus_block may be NULL even on SUCCESS).
- *         FAILURE only on hard error (no remote prompt source, OOM in
- *         base block).
+ * @brief May @p conn resume @p session (a reconnect token)?  Only a WebUI
+ *        session, and only the one its own login created (an unowned one only
+ *        for a connection that never logged in).
  */
-int dawn_build_prompt(int user_id,
-                      const char *user_turn_text,
-                      prompt_refresh_kind_t kind,
-                      composed_prompt_t *out);
+bool webui_conn_may_resume(ws_connection_t *conn, session_t *session);
+
+/**
+ * @brief Attach @p conn to @p session unless the session is being destroyed.
+ *        The caller's reference becomes the connection's.
+ * @return false if it is being destroyed (the caller releases its reference).
+ */
+bool webui_conn_attach_session(ws_connection_t *conn, session_t *session);
+
+/**
+ * @brief End @p conn's login: force_logout, identity cleared, closed with
+ *        WEBUI_CLOSE_LOGGED_OUT, and its session destroyed if that login
+ *        owns it.  Service thread only.
+ * @return true if it destroyed that session.
+ */
+bool webui_conn_end_login(ws_connection_t *conn, const char *reason);
+
+/**
+ * @brief Re-check @p conn's login in the database before giving it a session.
+ *        A login that no longer exists is ended (webui_conn_end_login); a
+ *        failed lookup sends an error.  Service thread only.
+ * @return true if the login is valid.
+ */
+bool webui_conn_login_valid(ws_connection_t *conn);
+
+/**
+ * @brief Ask for a login sweep on the service thread: close the browser
+ *        connections of logins the database no longer has, and destroy their
+ *        sessions, connected or not.  Any thread; requests coalesce.  auth_db
+ *        asks for one whenever it deletes a login (auth_sessions_changed).
+ */
+void webui_login_sweep_request(void);
+
+/** @brief The service thread's wake: a requested sweep runs. */
+void webui_login_sweep_run_pending(void);
 
 /* =============================================================================
  * Connection Iterator (defined in webui_server.c, used by webui_music.c)

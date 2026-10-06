@@ -99,6 +99,7 @@ static const treg_param_t doc_read_params[] = {
 
 static const tool_metadata_t doc_read_metadata = {
    .name = "document_read",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "document reader",
    .description = "Read the contents of a specific saved document or note, page by page. "
                   "Use this when you need an entire document, OR the EXACT verbatim text of a "
@@ -108,7 +109,7 @@ static const tool_metadata_t doc_read_metadata = {
                   "(or a numeric id from a 'document_manage' list to target one exact document), "
                   "then use start_chunk to read more.",
    .params = doc_read_params,
-   .param_count = 4,
+   .param_count = TOOL_PARAM_COUNT(doc_read_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
    .is_available = doc_read_is_available,
@@ -160,18 +161,9 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
          count = DOC_READ_MAX_COUNT;
    }
 
-   /* Strip custom params from value to get the document name */
-   char *sep = strstr(value, "::");
+   /* The document name is the base value, before any custom params. */
    char doc_name[DOC_FILENAME_MAX];
-   if (sep) {
-      size_t len = (size_t)(sep - value);
-      if (len >= sizeof(doc_name))
-         len = sizeof(doc_name) - 1;
-      memcpy(doc_name, value, len);
-      doc_name[len] = '\0';
-   } else {
-      snprintf(doc_name, sizeof(doc_name), "%s", value);
-   }
+   tool_param_extract_base(value, doc_name, sizeof(doc_name));
 
    /* Trim trailing whitespace from document name */
    size_t name_len = strlen(doc_name);
@@ -183,6 +175,8 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
       return strdup("Error: provide a document name/label or a numeric id.");
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    /* Resolve the document.  An explicit numeric id targets one EXACT document
     * (disambiguates same-named copies); otherwise resolve by name/label.  An

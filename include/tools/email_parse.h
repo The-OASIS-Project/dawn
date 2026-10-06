@@ -96,23 +96,28 @@ void email_imap_append_search_key(char *buf,
 bool email_imap_flags_contains(const char *flags_group, const char *flag);
 
 /**
- * Decode all RFC 2047 encoded words ("=?charset?Q?..?=" / "=?charset?B?..?=") in
- * @p src into @p dst (NUL-terminated, bounded by @p dst_len).  Non-encoded text
- * is copied through; whitespace between adjacent encoded words is folded away
- * (RFC 2047 §6.2); an unknown encoding is copied literally.  Shared by both email
- * backends for header display names / subjects.  NULL-safe.
- *
- * NOTE: decoded bytes are emitted as-is — correct for UTF-8, lossy for legacy
- * ISO-8859-x charsets (no transcoding).
- */
-void email_decode_rfc2047(const char *src, char *dst, size_t dst_len);
-
-/**
  * Copy @p src to @p dst (NUL-terminated, bounded by @p dst_len) with CR and LF
  * removed, to prevent SMTP header injection via a user-supplied header value.
  * Shared by both backends' send paths.  NULL-safe.
  */
 void email_sanitize_header_value(const char *src, char *dst, size_t dst_len);
+
+/**
+ * "Name" <addr> (RFC 5322 quoted display name; " and \ escaped), just the
+ * address with no name, or just "Name" with no address: a name with a comma
+ * ("Smith, Bob") can't split the header into two recipients, and a shown
+ * sender's name can't pass for an address.  Both are already free of CR/LF
+ * (email_sanitize_header_value).  Cut to fit on a whole character.
+ */
+void email_format_mailbox(const char *name, const char *addr, char *dst, size_t dst_len);
+
+/**
+ * A sender as shown to the user or the model (never a header): as
+ * email_format_mailbox, except a name containing '@' that isn't the address
+ * itself is dropped (it would pass for the sender's address), and a sender
+ * with no address says "(no address)".
+ */
+void email_display_mailbox(const char *name, const char *addr, char *dst, size_t dst_len);
 
 /**
  * Find the ')' matching the '(' at @p open, honoring IMAP quoted strings (so a
@@ -180,6 +185,86 @@ const char *email_imap_next_fetch(const char *p,
                                   const char **out_seg,
                                   size_t *out_seg_len,
                                   uint32_t *out_uid);
+
+/**
+ * @brief Select the @p wanted newest (largest) UIDs from an IMAP UID SEARCH response.
+ *
+ * RFC 3501/9051 give no ordering guarantee for "* SEARCH" results, and some
+ * servers/proxies split a long result across several "* SEARCH" lines, so this
+ * scans EVERY such line and keeps the N largest UIDs order-independently (a
+ * size-N min-heap).  Zero and out-of-range values are skipped.
+ *
+ * @param response   NUL-terminated raw UID SEARCH response (NULL = no results).
+ * @param out        Receives the selected UIDs in ASCENDING order (>= @p wanted slots).
+ * @param wanted     Maximum UIDs to select (<= 0 selects none).
+ * @param total_out  Receives the total number of UIDs the server matched (may be NULL).
+ * @return Number of UIDs written to @p out (min(total, wanted)).
+ */
+int email_imap_select_newest_uids(const char *response, uint32_t *out, int wanted, int *total_out);
+
+/**
+ * @brief Format an IMAP paging cursor ("return UIDs below @p before_uid").
+ *
+ * Grammar: "u<before_uid>" or, when @p uidvalidity is non-zero,
+ * "u<before_uid>.<uidvalidity>" so the next page can assert the mailbox's
+ * UIDVALIDITY epoch hasn't changed underneath the cursor.
+ *
+ * @return true on success; false if @p before_uid < 2 or @p out is too small.
+ */
+bool email_imap_page_token_format(uint32_t before_uid,
+                                  uint32_t uidvalidity,
+                                  char *out,
+                                  size_t out_len);
+
+/**
+ * @brief Strictly parse an IMAP paging cursor produced by email_imap_page_token_format().
+ *
+ * Accepts only "u" + 1-10 digits (value 2..UINT32_MAX, no leading zero), optionally
+ * followed by "." + 1-10 digits (value 1..UINT32_MAX, no leading zero), with the
+ * whole string consumed.  Anything else — including a Gmail page token handed to an
+ * IMAP account — is rejected.
+ *
+ * @param uidvalidity  Receives the epoch, or 0 when the token carries none.
+ * @return true when @p tok is a valid cursor.
+ */
+bool email_imap_page_token_parse(const char *tok, uint32_t *before_uid, uint32_t *uidvalidity);
+
+/**
+ * @brief Extract the mailbox epoch from a SELECT/EXAMINE "* OK [UIDVALIDITY n]" line.
+ *
+ * Anchored at the start of the line, case-insensitive, 1-10 digits, value
+ * 1..UINT32_MAX.  Line anchoring alone is NOT enough to trust the value: libcurl
+ * also delivers the lines inside IMAP literals (e.g. a subject containing CRLF), so
+ * callers must only apply this to lines answering a SELECT/EXAMINE.
+ *
+ * @param line  Raw server line (need not be NUL-terminated).
+ * @param len   Bytes available at @p line.
+ * @return true and sets @p out when the line carries a valid UIDVALIDITY.
+ */
+bool email_imap_parse_uidvalidity(const char *line, size_t len, uint32_t *out);
+
+/**
+ * @brief Extract the message count from a SELECT/EXAMINE "* <n> EXISTS" line.
+ *
+ * Anchored at the start of the line, 1-10 digits (0 allowed: an empty mailbox),
+ * followed by " EXISTS" and then end of line.  Same trust rule as
+ * email_imap_parse_uidvalidity: apply only to lines answering a SELECT/EXAMINE.
+ *
+ * @return true and sets @p out when the line is a valid EXISTS response.
+ */
+bool email_imap_parse_exists(const char *line, size_t len, uint32_t *out);
+
+/**
+ * @brief Split an IMAP message id, "folder:uid" (a bare uid means INBOX).
+ *
+ * Splits at the last colon.  Refuses a folder too long for @p folder rather
+ * than cutting it or falling back to INBOX: either would act on a message in
+ * another mailbox.  The folder name itself is the caller's to validate.
+ *
+ * @return true and fills @p folder and @p uid when the id is one; false when
+ *         the folder doesn't fit or the uid isn't a decimal 1..UINT32_MAX.
+ */
+bool email_imap_id_parse(const char *message_id, char *folder, size_t folder_size, uint32_t *uid);
 
 #ifdef __cplusplus
 }

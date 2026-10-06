@@ -119,6 +119,39 @@ static void test_ratio_symmetric(void) {
    TEST_ASSERT_EQUAL_INT(str_fuzzy_ratio("kersey", "curzy"), str_fuzzy_ratio("curzy", "kersey"));
 }
 
+static void same_key(const char *a, const char *b) {
+   char ka[STR_PHONETIC_MAXLEN + 1], kb[STR_PHONETIC_MAXLEN + 1];
+   str_phonetic_key(a, ka, sizeof(ka));
+   str_phonetic_key(b, kb, sizeof(kb));
+   TEST_ASSERT_EQUAL_STRING_MESSAGE(ka, kb, a);
+}
+
+static void different_key(const char *a, const char *b) {
+   char ka[STR_PHONETIC_MAXLEN + 1], kb[STR_PHONETIC_MAXLEN + 1];
+   str_phonetic_key(a, ka, sizeof(ka));
+   str_phonetic_key(b, kb, sizeof(kb));
+   TEST_ASSERT_TRUE_MESSAGE(strcmp(ka, kb) != 0, a);
+}
+
+/* Names that sound alike share a key; names that don't, don't. */
+static void test_phonetic_key(void) {
+   same_key("Cris", "Chris");
+   same_key("Jon", "John");
+   same_key("Sean", "Shawn");
+   same_key("Stephen", "Steven");
+   same_key("Katherine", "Catherine");
+   same_key("Phil", "Fill");
+   different_key("Cris", "Mark");
+   different_key("Sean", "Steve");
+   different_key("Mary", "Gary");
+   different_key("Cris", "Christine");
+   char k[STR_PHONETIC_MAXLEN + 1];
+   str_phonetic_key("Cris Kemp", k, sizeof(k)); /* one word */
+   TEST_ASSERT_EQUAL_STRING("krs", k);
+   str_phonetic_key(NULL, k, sizeof(k));
+   TEST_ASSERT_EQUAL_STRING("", k);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_tolower_basic);
@@ -136,5 +169,6 @@ int main(void) {
    RUN_TEST(test_ratio_asr_garble_is_near_miss);
    RUN_TEST(test_ratio_unrelated_is_low);
    RUN_TEST(test_ratio_symmetric);
+   RUN_TEST(test_phonetic_key);
    return UNITY_END();
 }

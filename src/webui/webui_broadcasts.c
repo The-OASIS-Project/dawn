@@ -48,21 +48,25 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "core/attention/attention.h"
 #include "core/conv_event.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
+#include "core/image_rehydrate.h" /* image_marker_collect_ids (reply-body image retention) */
 #include "core/job_manager.h"
 #include "core/job_reinvoke.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
+#include "core/session_compaction.h"
 #include "dawn_error.h"
 #include "image_store.h"
+#include "llm/llm_cache_monitor.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
-#include "webui/webui_image_rehydrate.h" /* webui_collect_image_ids (reply-body image retention) */
 #include "webui/webui_internal.h"
 #include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
@@ -422,13 +426,18 @@ int scheduler_route_tts_to_user(int user_id,
  * unlock). All conv_db_* callers reach this only after AUTH_DB_UNLOCK and hold no
  * registry lock.
  * ============================================================================= */
-static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browsers_only) {
+/* Like broadcast_json_to_user_ex, with @p origin's connection given @p origin_json
+ * instead (a copy naming its turn); takes ownership of @p root, not of the strings. */
+static int broadcast_json_to_user_origin(int user_id,
+                                         json_object *root,
+                                         bool browsers_only,
+                                         const session_t *origin,
+                                         const char *origin_json) {
    if (!root)
       return 0;
-
    const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *json_cached = json_str ? strdup(json_str) : NULL;
-   json_object_put(root); /* drop the tree before the walk */
+   json_object_put(root);
    if (!json_cached)
       return 0;
 
@@ -442,11 +451,10 @@ static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browse
          continue;
       if (browsers_only && conn->is_satellite)
          continue;
-
-      char *json_copy = strdup(json_cached);
+      const bool is_origin = origin_json && conn->session == origin;
+      char *json_copy = strdup(is_origin ? origin_json : json_cached);
       if (!json_copy)
          continue;
-
       ws_response_t resp = { .session = conn->session,
                              .type = WS_RESP_JSON,
                              .generic_json = { .json = json_copy } };
@@ -454,9 +462,12 @@ static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browse
       sent++;
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
-
    free(json_cached);
    return sent;
+}
+
+static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browsers_only) {
+   return broadcast_json_to_user_origin(user_id, root, browsers_only, NULL, NULL);
 }
 
 /* Public export of the user-scoped fan-out so other webui modules (HA control
@@ -729,6 +740,19 @@ void webui_broadcast_message_appended(int user_id,
                                       const char *text,
                                       const char *reasoning,
                                       unsigned stream_id) {
+   webui_broadcast_message_appended_origin(user_id, conv_id, msg_id, role, text, reasoning,
+                                           stream_id, NULL, NULL);
+}
+
+void webui_broadcast_message_appended_origin(int user_id,
+                                             int64_t conv_id,
+                                             int64_t msg_id,
+                                             const char *role,
+                                             const char *text,
+                                             const char *reasoning,
+                                             unsigned stream_id,
+                                             const session_t *origin,
+                                             const char *client_ref) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
       return;
    }
@@ -758,7 +782,19 @@ void webui_broadcast_message_appended(int user_id,
    /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame
     * a satellite renders nothing for — keep it strictly WEBUI, matching the
     * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP. */
-   broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+   if (!origin || !client_ref || !client_ref[0]) {
+      broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+      return;
+   }
+   /* The sender's own connection gets a copy naming its turn (client_ref): if
+    * its transcript echo is dropped, this copy still tells it which turn was
+    * saved.  Other connections, whose refs are their own, get the plain frame. */
+   json_object_object_add(p, "client_ref", json_object_new_string(client_ref));
+   const char *with_ref = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *origin_json = with_ref ? strdup(with_ref) : NULL;
+   json_object_object_del(p, "client_ref");
+   broadcast_json_to_user_origin(user_id, root, /*browsers_only=*/true, origin, origin_json);
+   free(origin_json);
 }
 
 /* Strong override of the Layer-2 weak seam (conv_event.h): the ONE server-authoritative
@@ -783,8 +819,13 @@ int webui_persist_final_answer(session_t *session,
     * stream_conversation_id.  (Deliberately different from the visual take just below,
     * which IS under tools_mutex because the render_visual tool callback writes it from a
     * tool-worker thread — do NOT "consistency-fix" the two to match.) */
-   char *reasoning = session->final_reasoning_json;
-   session->final_reasoning_json = NULL;
+   char *reasoning = session->final_answer.reasoning_json;
+   session->final_answer.reasoning_json = NULL;
+   /* The reply's own blocks, saved with its row so a reload replays the turn as
+    * the model produced it (same single-writer discipline as the reasoning). */
+   struct json_object *reply_blocks = session_take_reply_blocks(session);
+   char *stored_blocks = llm_turn_blocks_answer_stored(reply_blocks);
+   json_object_put(reply_blocks);
 
    /* Take the accumulated visual under tools_mutex, then RELEASE before the body build /
     * DB write / fan-out — never hold a leaf lock across the persist (lock-ordering). */
@@ -820,8 +861,11 @@ int webui_persist_final_answer(session_t *session,
    int64_t msg_id = 0;
    int rc = 1;
    for (int attempt = 0; attempt < 3; attempt++) {
-      rc = conv_db_add_message_with_tools(conv_id, (int)user_id, "assistant", persist_body, NULL,
-                                          NULL, reasoning, &msg_id);
+      const conv_message_row_t row = { .role = "assistant",
+                                       .content = persist_body,
+                                       .reasoning = reasoning,
+                                       .llm_blocks = stored_blocks };
+      rc = conv_db_add_row(conv_id, (int)user_id, &row, &msg_id);
       if (rc == AUTH_DB_SUCCESS) {
          break;
       }
@@ -841,8 +885,8 @@ int webui_persist_final_answer(session_t *session,
        * would otherwise LRU-evict later (invisible to a reload-now fidelity test). */
       char reply_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
       int reply_id_count = 0;
-      if (webui_collect_image_ids(persist_body, reply_ids, WEBUI_MAX_VISION_IMAGES_CAP,
-                                  &reply_id_count) == SUCCESS) {
+      if (image_marker_collect_ids(persist_body, reply_ids, WEBUI_MAX_VISION_IMAGES_CAP,
+                                   &reply_id_count) == SUCCESS) {
          for (int i = 0; i < reply_id_count; i++) {
             image_store_update_retention(reply_ids[i], (int)user_id, IMAGE_RETAIN_PERMANENT);
          }
@@ -855,6 +899,7 @@ int webui_persist_final_answer(session_t *session,
 
    free(combined);
    free(visual);
+   free(stored_blocks);
    free(reasoning);
    return rc;
 }
@@ -1247,7 +1292,8 @@ static const char *capped_text_view(const char *text, char **owned, bool *out_ow
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result) {
+                                       const focus_compose_result_t *result,
+                                       const char *const *states) {
    if (result == NULL || user_id <= 0 || conv_id <= 0) {
       OLOG_DEBUG("WebUI: context_injection broadcast skipped (user=%d conv=%lld result=%p)",
                  user_id, (long long)conv_id, (const void *)result);
@@ -1289,6 +1335,9 @@ void webui_broadcast_context_injection(int user_id,
       json_object_object_add(item, "item_id", json_object_new_string(c->item_id ? c->item_id : ""));
       json_object_object_add(item, "source_type",
                              json_object_new_string(focus_source_type_str(c->source_type)));
+      /* Sent this turn, or already shown to the model by an earlier one. */
+      json_object_object_add(item, "state",
+                             json_object_new_string(states && states[i] ? states[i] : "new"));
 
       char *owned_text = NULL;
       bool owned = false;
@@ -1297,6 +1346,12 @@ void webui_broadcast_context_injection(int user_id,
       if (owned)
          free(owned_text);
 
+      /* When the item was learned, saved or happens (the date the model sees
+       * after its source); omitted when it has none. */
+      if (c->item_timestamp > 0) {
+         json_object_object_add(item, "item_timestamp",
+                                json_object_new_int64((int64_t)c->item_timestamp));
+      }
       json_object_object_add(item, "score",
                              json_object_new_double(b != NULL ? b->final_score : 0.0));
 
@@ -1729,6 +1784,28 @@ void calendar_broadcast_events_changed(int user_id) {
    }
 }
 
+/* Strong override of the messaging engine's weak no-op: tell the user's
+ * browsers their channel list changed so the settings panel re-reads it. */
+void webui_broadcast_messaging_channels_changed(int user_id,
+                                                int64_t channel_id,
+                                                const char *change,
+                                                const char *link_code) {
+   if (user_id <= 0) {
+      return;
+   }
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("messaging_channels_changed"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "channel_id", json_object_new_int64(channel_id));
+   json_object_object_add(payload, "change", json_object_new_string(change ? change : ""));
+   if (link_code && link_code[0]) {
+      json_object_object_add(payload, "link_code", json_object_new_string(link_code));
+   }
+   json_object_object_add(root, "payload", payload);
+   /* broadcast_json_to_user_ex takes ownership of root. */
+   (void)broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+}
+
 /*
  * Strong symbol that overrides the weak stub in auth_db_conv.c.
  * Emits a per-user `conversation_list_changed` frame so every browser this user has
@@ -1782,6 +1859,19 @@ void webui_broadcast_config_changed(void) {
    }
 }
 
+/* Strong override of the weak session_compaction_client_notice: the session's
+ * browser shows its "context compacted" marker. */
+void session_compaction_client_notice(session_t *session,
+                                      int64_t conv_id,
+                                      int tokens_before,
+                                      int tokens_after,
+                                      int count,
+                                      const char *summary,
+                                      int level) {
+   webui_send_compaction_complete(session, conv_id, tokens_before, tokens_after, count, summary,
+                                  level);
+}
+
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "tools/code_project_service.h"
 
@@ -1821,3 +1911,27 @@ void code_project_broadcast_import_failed(int64_t user_id, const char *name, con
    broadcast_json_to_user_ex((int)user_id, root, false);
 }
 #endif /* DAWN_ENABLE_CODE_PROJECTS */
+
+/* Overrides the cache monitor's weak hook: reasoning dropped by the binding
+ * controls is a DAWN bug, so the admins hear of it (once per conversation,
+ * from the main loop's flush, no locks held).  Browsers only: a toast.  Not
+ * which conversation: it may be another user's, or private; the log's
+ * "LLM binding" line names it for the report. */
+void llm_cache_alert_notify(int64_t conversation_id, int drops, const char *model) {
+   char message[256];
+   snprintf(message, sizeof(message),
+            "Earlier reasoning was dropped in a conversation: %d thinking block(s) on %s. This "
+            "is a DAWN bug; please report it with today's log.",
+            drops, model && model[0] ? model : "the model");
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "kind", json_object_new_string("reasoning_dropped"));
+   json_object_object_add(payload, "drops", json_object_new_int(drops));
+   json_object_object_add(payload, "model", json_object_new_string(model ? model : ""));
+   json_object_object_add(payload, "message", json_object_new_string(message));
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("cache_alert"));
+   json_object_object_add(root, "payload", payload);
+   const int sent = broadcast_json_to_admins(root, /*browsers_only=*/true);
+   OLOG_INFO("WebUI: cache_alert (reasoning dropped, conv %lld) sent to %d admin client(s)",
+             (long long)conversation_id, sent);
+}

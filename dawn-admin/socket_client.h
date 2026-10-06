@@ -966,6 +966,13 @@ admin_resp_code_t admin_client_ota_push(int fd,
                                         char *response,
                                         size_t resp_len);
 
+/* Prompt-cache stats over the last @p hours, optionally one provider ("" = all). */
+admin_resp_code_t admin_client_cache_stats(int fd,
+                                           int hours,
+                                           const char *provider,
+                                           char *response,
+                                           size_t resp_len);
+
 /* MCP bridge (coding harness) operator commands. */
 admin_resp_code_t admin_client_mcp_list(int fd, char *response, size_t resp_len);
 admin_resp_code_t admin_client_mcp_reset(int fd, char *response, size_t resp_len);

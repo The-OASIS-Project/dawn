@@ -30,9 +30,12 @@
 #error "admin_socket_internal.h is an internal header - include auth/admin_socket.h instead"
 #endif
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "auth/admin_socket.h"
+#include "auth/auth_db.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -117,6 +120,15 @@ int handle_schwab_auth_url_cmd(int client_fd, const char *payload, uint16_t payl
 int handle_schwab_auth_complete_cmd(int client_fd, const char *payload, uint16_t payload_len);
 int handle_schwab_status_cmd(int client_fd, const char *payload, uint16_t payload_len);
 #endif
+
+/* Prompt-cache stats (admin_socket_cache.c) */
+int handle_cache_stats_cmd(int client_fd, const char *payload, uint16_t payload_len);
+/* The stats table for @p rows; @p more says the query left groups out. */
+void admin_cache_format_stats(const llm_usage_stat_t *rows,
+                              int n,
+                              bool more,
+                              char *out,
+                              size_t out_len);
 
 /* Music-DB handlers (admin_socket_music.c).  Dispatched from handle_client()
  * in admin_socket.c against ADMIN_MSG_MUSIC_* opcodes. */

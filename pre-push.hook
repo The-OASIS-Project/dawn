@@ -37,10 +37,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Find an existing build directory.  Prefer build-ci first — that's the
-# preset CI itself runs (ENABLE_WEBUI=OFF, no CUDA), and several test
-# targets are gated on -DENABLE_MULTI_CLIENT which only fires when WEBUI
-# is on.  Running the test suite against build-debug (the developer's
-# daily driver) hides those gate-induced failures; build-ci catches them.
+# preset CI itself runs (ENABLE_WEBUI=OFF, no CUDA).  Running the test
+# suite against build-debug (the developer's daily driver) hides failures
+# that only show without the WebUI; build-ci catches them.
 # build-debug stays as a fallback for developers who haven't bootstrapped
 # build-ci yet.
 BUILD_DIR=""

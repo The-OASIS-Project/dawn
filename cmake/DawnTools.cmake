@@ -62,6 +62,7 @@ endif()
 
 set(TOOL_REGISTRY_SOURCES
     src/tools/tool_registry.c
+    src/tools/tool_pending.c
     src/tools/instruction_loader.c
     src/tools/plan_executor.c
     src/tools/plan_executor_tool.c
@@ -145,7 +146,7 @@ endif()
 if(DAWN_ENABLE_HOMEASSISTANT_TOOL)
     add_definitions(-DDAWN_ENABLE_HOMEASSISTANT_TOOL)
     list(APPEND TOOL_SOURCES src/tools/homeassistant_tool.c src/tools/homeassistant_service.c
-                             src/tools/homeassistant_ws.c)
+                             src/tools/homeassistant_match.c src/tools/homeassistant_ws.c)
     message(STATUS "DAWN: Home Assistant tool ENABLED")
 else()
     message(STATUS "DAWN: Home Assistant tool DISABLED")
@@ -258,10 +259,9 @@ else()
     message(STATUS "DAWN: Scheduler tool DISABLED")
 endif()
 
-# Background Job Tool.  The job subsystem (job_manager/worker/reinvoke) compiles
-# only under ENABLE_WEBUI, and job_tool.c links against it — so gate the tool on
-# ENABLE_WEBUI too (mirrors the calendar/email tools below), keeping the WEBUI-off
-# (local) preset linking.
+# Background Job Tool.  Jobs deliver their results through the WebUI (the
+# conversation a job reports into, the missed-notification replay), so the
+# tool needs it.
 if(DAWN_ENABLE_JOB_TOOL AND ENABLE_WEBUI)
     add_definitions(-DDAWN_ENABLE_JOB_TOOL)
     list(APPEND TOOL_SOURCES src/tools/job_tool.c)
@@ -270,9 +270,7 @@ else()
     message(STATUS "DAWN: Job tool DISABLED")
 endif()
 
-# Deep-Research Tool.  Spawns the research controller via research_worker, which
-# (like the job subsystem) compiles only under ENABLE_WEBUI — so gate the tool on
-# ENABLE_WEBUI too, keeping the WEBUI-off (local) preset linking.
+# Deep-Research Tool.  A research run is a background job: needs the WebUI too.
 if(DAWN_ENABLE_DEEP_RESEARCH_TOOL AND ENABLE_WEBUI)
     add_definitions(-DDAWN_ENABLE_DEEP_RESEARCH_TOOL)
     list(APPEND TOOL_SOURCES src/tools/deep_research_tool.c)
@@ -321,6 +319,7 @@ if(DAWN_ENABLE_CALENDAR_TOOL)
         list(APPEND TOOL_SOURCES
             src/tools/calendar_tool.c
             src/tools/calendar_service.c
+            src/tools/calendar_pick.c
             src/tools/calendar_db.c
             src/tools/caldav_client.c
             src/tools/oauth_client.c)
@@ -330,18 +329,30 @@ else()
     message(STATUS "DAWN: Calendar tool DISABLED")
 endif()
 
-# Email Tool (IMAP/SMTP)
+# Email Tool (IMAP/SMTP).  GMime reads messages (MIME parts, charsets): required
+# when email is on.  A build without email doesn't need it (-DDAWN_ENABLE_EMAIL_TOOL=OFF).
 if(DAWN_ENABLE_EMAIL_TOOL)
+    pkg_check_modules(GMIME REQUIRED gmime-3.0>=3.2)
+    include_directories(${GMIME_INCLUDE_DIRS})
+    message(STATUS "GMime: Found (${GMIME_VERSION})")
     add_definitions(-DDAWN_ENABLE_EMAIL_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/email_tool.c
         src/tools/email_service.c
+        src/tools/email_service_read.c
         src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c
+        src/tools/email_imap_move.c
+        src/tools/email_imap_roles.c
         src/tools/email_instrument.c
+        src/tools/email_mime.c
+        src/tools/email_display.c
+        src/tools/email_transfer.c
         src/tools/email_parse.c
         src/tools/gmail_client.c
+        src/tools/gmail_read.c
+        src/tools/gmail_parts.c
         src/webui/webui_email.c)
     # oauth_client.c may already be included by calendar tool
     if(NOT DAWN_ENABLE_CALENDAR_TOOL)
@@ -361,6 +372,9 @@ if(DAWN_ENABLE_SCHWAB_TOOL)
         src/tools/schwab_service.c
         src/tools/schwab_stats.c
         src/tools/schwab_txn.c
+        src/tools/schwab_portfolio.c
+        src/tools/schwab_quotes.c
+        src/tools/schwab_watchlist.c
         src/tools/schwab_client.c)
     # oauth_client.c may already be included by calendar or email
     if(NOT DAWN_ENABLE_CALENDAR_TOOL AND NOT DAWN_ENABLE_EMAIL_TOOL)
@@ -394,6 +408,13 @@ if(DAWN_ENABLE_RENDER_VISUAL_TOOL)
     message(STATUS "DAWN: Render Visual tool ENABLED")
 else()
     message(STATUS "DAWN: Render Visual tool DISABLED")
+endif()
+
+# Who an action goes to (a contact, a number, an address): phone and email.
+if(DAWN_ENABLE_PHONE_TOOL OR DAWN_ENABLE_EMAIL_TOOL)
+    list(APPEND TOOL_SOURCES
+        src/tools/contact_resolve.c
+        src/tools/phone_number.c)
 endif()
 
 # Phone Tool (calls and SMS via ECHO modem daemon)
@@ -460,6 +481,7 @@ if(DAWN_ENABLE_MCP_BRIDGE_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/mcp_bridge_tool.c
         src/tools/mcp_client.c
+        src/tools/mcp_result.c
         src/tools/mcp_transport_http_sse.c
         src/tools/mcp_bridge_schema.c
         src/auth/auth_db_mcp.c

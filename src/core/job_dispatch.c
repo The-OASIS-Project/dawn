@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -72,21 +73,25 @@ const char *job_spawn_origin_string(void) {
    }
 }
 
-void job_dispatch_tool_persist_cb(void *userdata,
-                                  const char *role,
-                                  const char *content,
-                                  const char *tool_calls_json,
-                                  const char *tool_call_id,
-                                  const char *reasoning_json,
-                                  bool is_error) {
+int64_t job_dispatch_tool_persist_cb(void *userdata, const session_tool_row_t *row) {
    job_persist_ctx_t *ctx = (job_persist_ctx_t *)userdata;
-   if (ctx == NULL || role == NULL) {
-      return;
+   if (ctx == NULL || row == NULL || row->role == NULL) {
+      return 0;
    }
-   if (conv_db_add_message_with_tools_ex(ctx->conv_id, ctx->user_id, role, content ? content : "",
-                                         tool_calls_json, tool_call_id, reasoning_json, is_error,
-                                         NULL) != AUTH_DB_SUCCESS) {
-      OLOG_WARNING("job_dispatch: failed to persist tool-turn %s row to conv %lld", role,
+   const conv_message_row_t db_row = { .role = row->role,
+                                       .content = row->content ? row->content : "",
+                                       .tool_calls = row->tool_calls,
+                                       .tool_call_id = row->tool_call_id,
+                                       .reasoning = row->reasoning,
+                                       .llm_blocks = row->llm_blocks,
+                                       .kind = row->kind,
+                                       .is_error = row->is_error,
+                                       .images = row->images };
+   int64_t id = 0;
+   if (conv_db_add_row(ctx->conv_id, ctx->user_id, &db_row, &id) != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("job_dispatch: failed to persist tool-turn %s row to conv %lld", row->role,
                    (long long)ctx->conv_id);
+      return 0;
    }
+   return id;
 }

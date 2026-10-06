@@ -45,15 +45,12 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
 
 /* tool_result_content() is static inline in llm_tools.h — no stub needed */
 
-/* Session manager stubs — only needed when ENABLE_MULTI_CLIENT is defined
- * (WEBUI=ON). When WEBUI=OFF, session_manager.h provides static inline stubs. */
+/* Session manager stubs. */
 #include "core/session_manager.h"
 
-#ifdef ENABLE_MULTI_CLIENT
 session_t *session_get_command_context(void) {
    return NULL;
 }
-#endif
 
 void webui_broadcast_plan_progress(session_t *s, const char *json) {
    (void)s;

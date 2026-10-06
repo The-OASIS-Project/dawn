@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * WebUI messaging-channels handlers — user-scoped channel management
- * (list / create-link-code / unlink / rename) for the Settings panel.
+ * (list / create-link-code / unlink / rename / verify) for the Settings panel.
  *
  * Transport is WebSocket RPC (mirrors the satellite admin handlers), but
  * these are USER-scoped: conn_require_auth + conn->auth_user_id, so a
@@ -97,6 +97,11 @@ void handle_create_link_code(ws_connection_t *conn, struct json_object *payload)
 
    char code[MESSAGING_LINK_CODE_BUF_SIZE];
    int rc = messaging_engine_generate_link_code(conn->auth_user_id, provider, code, sizeof(code));
+   if (rc == MESSAGING_RATE_LIMITED) {
+      send_error_impl(conn->wsi, "RATE_LIMITED",
+                      "You have several unused link codes; use one or wait 10 minutes");
+      return;
+   }
    if (rc != MESSAGING_SUCCESS) {
       send_error_impl(conn->wsi, "SERVICE_ERROR", "Failed to generate link code");
       return;
@@ -113,6 +118,42 @@ void handle_create_link_code(ws_connection_t *conn, struct json_object *payload)
    json_object_object_add(response, "payload", payload_out);
    send_json_response(conn, response);
    json_object_put(response);
+}
+
+/* A channel operation's answer in its own response type: { success, id } or
+ * { success:false, id, code, message }.  Failures come back the same way as
+ * successes (not as the generic error frame) so the settings panel shows
+ * them where the user is. */
+static void send_channel_result(ws_connection_t *conn,
+                                const char *type,
+                                int64_t channel_id,
+                                const char *code,
+                                const char *message) {
+   struct json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string(type));
+   struct json_object *payload_out = json_object_new_object();
+   json_object_object_add(payload_out, "success", json_object_new_boolean(code == NULL));
+   json_object_object_add(payload_out, "id", json_object_new_int64(channel_id));
+   if (code) {
+      json_object_object_add(payload_out, "code", json_object_new_string(code));
+      json_object_object_add(payload_out, "message", json_object_new_string(message));
+   }
+   json_object_object_add(response, "payload", payload_out);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+static int64_t channel_id_param(ws_connection_t *conn, struct json_object *payload) {
+   struct json_object *id_obj = NULL;
+   if (!payload || !json_object_object_get_ex(payload, "id", &id_obj)) {
+      send_error_impl(conn->wsi, "INVALID_PARAM", "Missing 'id'");
+      return 0;
+   }
+   int64_t channel_id = json_object_get_int64(id_obj);
+   if (channel_id <= 0) {
+      send_error_impl(conn->wsi, "INVALID_PARAM", "Invalid 'id'");
+   }
+   return channel_id;
 }
 
 /* =============================================================================
@@ -134,24 +175,17 @@ void handle_unlink_channel(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
+   static const char type[] = "unlink_channel_response";
    int rc = messaging_engine_unlink_channel_by_id(conn->auth_user_id, channel_id);
    if (rc == MESSAGING_UNKNOWN_CHANNEL) {
-      send_error_impl(conn->wsi, "NOT_FOUND", "No such channel");
+      send_channel_result(conn, type, channel_id, "NOT_FOUND", "That channel is already unlinked.");
       return;
    }
    if (rc != MESSAGING_SUCCESS) {
-      send_error_impl(conn->wsi, "SERVICE_ERROR", "Failed to unlink channel");
+      send_channel_result(conn, type, channel_id, "SERVICE_ERROR", "Couldn't unlink the channel.");
       return;
    }
-
-   struct json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("unlink_channel_response"));
-   struct json_object *payload_out = json_object_new_object();
-   json_object_object_add(payload_out, "success", json_object_new_boolean(1));
-   json_object_object_add(payload_out, "id", json_object_new_int64(channel_id));
-   json_object_object_add(response, "payload", payload_out);
-   send_json_response(conn, response);
-   json_object_put(response);
+   send_channel_result(conn, type, channel_id, NULL, NULL);
 
    OLOG_INFO("WebUI: user %d unlinked messaging channel id %lld", conn->auth_user_id,
              (long long)channel_id);
@@ -179,33 +213,33 @@ void handle_rename_channel(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
    if (strlen(new_name) >= MESSAGING_DISPLAY_NAME_MAX) {
-      send_error_impl(conn->wsi, "INVALID_PARAM", "Name must be under 64 characters");
+      send_channel_result(conn, "rename_channel_response", channel_id, "INVALID_PARAM",
+                          "Names must be under 64 characters.");
       return;
    }
 
+   static const char type[] = "rename_channel_response";
    int rc = messaging_engine_rename_channel_by_id(conn->auth_user_id, channel_id, new_name);
    if (rc == MESSAGING_UNKNOWN_CHANNEL) {
-      send_error_impl(conn->wsi, "NOT_FOUND", "No such channel");
+      send_channel_result(conn, type, channel_id, "NOT_FOUND", "That channel isn't linked.");
       return;
    }
    if (rc == MESSAGING_NAME_TAKEN) {
-      send_error_impl(conn->wsi, "NAME_TAKEN", "A channel with that name already exists");
+      send_channel_result(conn, type, channel_id, "NAME_TAKEN",
+                          "Another channel already has that name.");
+      return;
+   }
+   if (rc == MESSAGING_INVALID_NAME) {
+      send_channel_result(conn, type, channel_id, "INVALID_PARAM",
+                          "Names can't contain quotes, angle brackets, backslashes or control "
+                          "characters.");
       return;
    }
    if (rc != MESSAGING_SUCCESS) {
-      send_error_impl(conn->wsi, "SERVICE_ERROR", "Failed to rename channel");
+      send_channel_result(conn, type, channel_id, "SERVICE_ERROR", "Couldn't rename the channel.");
       return;
    }
-
-   struct json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("rename_channel_response"));
-   struct json_object *payload_out = json_object_new_object();
-   json_object_object_add(payload_out, "success", json_object_new_boolean(1));
-   json_object_object_add(payload_out, "id", json_object_new_int64(channel_id));
-   json_object_object_add(payload_out, "name", json_object_new_string(new_name));
-   json_object_object_add(response, "payload", payload_out);
-   send_json_response(conn, response);
-   json_object_put(response);
+   send_channel_result(conn, type, channel_id, NULL, NULL);
 
    OLOG_INFO("WebUI: user %d renamed messaging channel id %lld", conn->auth_user_id,
              (long long)channel_id);
@@ -230,28 +264,34 @@ void handle_reenable_channel(ws_connection_t *conn, struct json_object *payload)
       return;
    }
 
+   static const char type[] = "reenable_channel_response";
    int rc = messaging_engine_reenable_channel_by_id(conn->auth_user_id, channel_id);
-   if (rc == MESSAGING_UNKNOWN_CHANNEL) {
-      send_error_impl(conn->wsi, "NOT_FOUND", "No such unlinked channel");
-      return;
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         send_channel_result(conn, type, channel_id, NULL, NULL);
+         break;
+      case MESSAGING_UNKNOWN_CHANNEL:
+         send_channel_result(conn, type, channel_id, "NOT_FOUND",
+                             "That channel isn't unlinked any more.");
+         return;
+      case MESSAGING_NAME_TAKEN:
+         send_channel_result(conn, type, channel_id, "NAME_TAKEN",
+                             "An active channel already has that name.");
+         return;
+      case MESSAGING_ALREADY_LINKED:
+         send_channel_result(conn, type, channel_id, "ALREADY_LINKED",
+                             "That chat is linked to another DAWN account for the same person.");
+         return;
+      case MESSAGING_NOT_VERIFIED:
+         send_channel_result(conn, type, channel_id, "NOT_VERIFIED",
+                             "This number needs linking again: make a link code and text "
+                             "/link CODE.");
+         return;
+      default:
+         send_channel_result(conn, type, channel_id, "SERVICE_ERROR",
+                             "Couldn't re-enable the channel.");
+         return;
    }
-   if (rc == MESSAGING_NAME_TAKEN) {
-      send_error_impl(conn->wsi, "NAME_TAKEN", "An enabled channel with that name already exists");
-      return;
-   }
-   if (rc != MESSAGING_SUCCESS) {
-      send_error_impl(conn->wsi, "SERVICE_ERROR", "Failed to re-enable channel");
-      return;
-   }
-
-   struct json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("reenable_channel_response"));
-   struct json_object *payload_out = json_object_new_object();
-   json_object_object_add(payload_out, "success", json_object_new_boolean(1));
-   json_object_object_add(payload_out, "id", json_object_new_int64(channel_id));
-   json_object_object_add(response, "payload", payload_out);
-   send_json_response(conn, response);
-   json_object_put(response);
 
    OLOG_INFO("WebUI: user %d re-enabled messaging channel id %lld", conn->auth_user_id,
              (long long)channel_id);
@@ -373,4 +413,92 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
        "WebUI: user %d set LLM for messaging conversation %lld (type=%s provider=%s model=%s)",
        conn->auth_user_id, (long long)conv_id, llm_type[0] ? llm_type : "(inherit)",
        cloud_provider[0] ? cloud_provider : "(inherit)", model[0] ? model : "(inherit)");
+}
+
+/* =============================================================================
+ * verify_channel — { id, code } → { success, id } | { success:false, id, code, message }
+ * resend_channel_code — { id } → the same shape
+ *
+ * Finishing an SMS link: the code DAWN texted to the number, entered here
+ * where the user is signed in.  Failures answer in the same response type
+ * (not the generic error frame) so the panel can show them on the channel.
+ * ============================================================================= */
+
+void handle_verify_channel(ws_connection_t *conn, struct json_object *payload) {
+   static const char type[] = "verify_channel_response";
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   int64_t channel_id = channel_id_param(conn, payload);
+   if (channel_id <= 0) {
+      return;
+   }
+   struct json_object *code_obj = NULL;
+   if (!json_object_object_get_ex(payload, "code", &code_obj) ||
+       !json_object_is_type(code_obj, json_type_string)) {
+      send_channel_result(conn, type, channel_id, "BAD_CODE", "Enter the 6-digit code.");
+      return;
+   }
+
+   int rc = messaging_engine_verify_channel(conn->auth_user_id, channel_id,
+                                            json_object_get_string(code_obj));
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         send_channel_result(conn, type, channel_id, NULL, NULL);
+         OLOG_INFO("WebUI: user %d verified messaging channel id %lld", conn->auth_user_id,
+                   (long long)channel_id);
+         break;
+      case MESSAGING_BAD_CODE:
+         send_channel_result(conn, type, channel_id, "BAD_CODE",
+                             "That code didn't work. A code lasts 10 minutes, and a "
+                             "number allows 10 tries a day; send a new one if you need to.");
+         break;
+      case MESSAGING_UNKNOWN_CHANNEL:
+         send_channel_result(conn, type, channel_id, "NOT_FOUND",
+                             "This channel isn't waiting for a code.");
+         break;
+      case MESSAGING_ALREADY_LINKED:
+         send_channel_result(conn, type, channel_id, "ALREADY_LINKED",
+                             "That number is linked to another account.");
+         break;
+      default:
+         send_channel_result(conn, type, channel_id, "SERVICE_ERROR",
+                             "Couldn't check the code. Try again.");
+         break;
+   }
+}
+
+void handle_resend_channel_code(ws_connection_t *conn, struct json_object *payload) {
+   static const char type[] = "resend_channel_code_response";
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   int64_t channel_id = channel_id_param(conn, payload);
+   if (channel_id <= 0) {
+      return;
+   }
+   int rc = messaging_engine_resend_verify_code(conn->auth_user_id, channel_id);
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         send_channel_result(conn, type, channel_id, NULL, NULL);
+         break;
+      case MESSAGING_RATE_LIMITED:
+         send_channel_result(conn, type, channel_id, "RATE_LIMITED",
+                             "No more codes today: a number gets 3 a day, and an account "
+                             "5. Try again tomorrow.");
+         break;
+      case MESSAGING_DRIVER_NOT_REGISTERED:
+         send_channel_result(conn, type, channel_id, "UNAVAILABLE",
+                             "Texts can't be sent right now: the phone service isn't "
+                             "running.");
+         break;
+      case MESSAGING_UNKNOWN_CHANNEL:
+         send_channel_result(conn, type, channel_id, "NOT_FOUND",
+                             "This channel isn't waiting for a code.");
+         break;
+      default:
+         send_channel_result(conn, type, channel_id, "SERVICE_ERROR",
+                             "Couldn't send a code. Try again.");
+         break;
+   }
 }

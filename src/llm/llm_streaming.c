@@ -28,7 +28,9 @@
 
 #include "core/session_manager.h"
 #include "llm/llm_context.h"
+#include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
@@ -390,6 +392,27 @@ process_remaining:
    }
 }
 
+
+/* Keep the thought signature a streamed tool call @p tc (index @p i) carries. */
+static void stream_keep_call_signature(llm_stream_context_t *ctx, json_object *tc, int i) {
+   if (i < 0 || i >= LLM_TOOLS_MAX_PARALLEL_CALLS) {
+      return;
+   }
+   json_object *extra = NULL, *google = NULL, *sig = NULL;
+   if (!(json_object_object_get_ex(tc, "extra_content", &extra) &&
+         json_object_object_get_ex(extra, "google", &google) &&
+         json_object_object_get_ex(google, "thought_signature", &sig)) &&
+       !json_object_object_get_ex(tc, "thought_signature", &sig)) {
+      return;
+   }
+   const char *value = json_object_get_string(sig);
+   if (!value || !*value ||
+       (size_t)json_object_get_string_len(sig) > LLM_REASONING_DETAILS_BYTES_MAX) {
+      return;
+   }
+   free(ctx->call_signatures[i]);
+   ctx->call_signatures[i] = strdup(value);
+}
 /**
  * @brief Emit a chunk of reasoning/thinking text to all sinks.
  *
@@ -440,12 +463,33 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
       return;
    }
 
+   /* A provider failing mid-stream (OpenRouter's upstream, a server error)
+    * sends an error object, then [DONE]: the reply is cut off. */
+   json_object *chunk_err;
+   if (json_object_object_get_ex(chunk, "error", &chunk_err) && chunk_err &&
+       !json_object_is_type(chunk_err, json_type_null)) {
+      json_object *m;
+      const char *text = json_object_object_get_ex(chunk_err, "message", &m)
+                             ? json_object_get_string(m)
+                             : NULL;
+      safe_strscpy(ctx->stream_error, text && text[0] ? text : "error in the stream");
+      OLOG_ERROR("OpenAI stream error: %s", ctx->stream_error);
+   }
+
    // Cache session lookup for WebUI notifications (avoids repeated lookups)
    session_t *ws_session = session_get_command_context();
    int has_ws_session = (ws_session && ws_session->type == SESSION_TYPE_WEBUI);
 
    // Extract choices[0].delta.content or tool_calls
    json_object *choices, *first_choice, *delta, *content;
+
+   /* The model that served this response: a router may pick another than the
+    * one asked for, and reasoning goes back only to the model that made it. */
+   json_object *served = NULL;
+   if (!ctx->served_model[0] && json_object_object_get_ex(chunk, "model", &served) &&
+       json_object_get_string(served)) {
+      safe_strscpy(ctx->served_model, json_object_get_string(served));
+   }
 
    if (json_object_object_get_ex(chunk, "choices", &choices) &&
        json_object_get_type(choices) == json_type_array && json_object_array_length(choices) > 0) {
@@ -491,6 +535,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   think = json_object_get_string(val_obj);
                }
                stream_emit_thinking(ctx, think, has_ws_session, ws_session, "openrouter");
+               llm_reasoning_details_add(&ctx->reasoning_details, entry);
             }
          } else {
             json_object *reasoning_str;
@@ -540,7 +585,8 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   tc_index = json_object_get_int(index_obj);
                }
 
-               if (tc_index >= LLM_TOOLS_MAX_PARALLEL_CALLS) {
+               /* Upstream data: an index outside the table would write outside it. */
+               if (tc_index < 0 || tc_index >= LLM_TOOLS_MAX_PARALLEL_CALLS) {
                   continue;
                }
 
@@ -570,71 +616,30 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   // complete JSON objects on each chunk.
                   if (json_object_object_get_ex(function_obj, "arguments", &args_obj)) {
                      const char *args_chunk = json_object_get_string(args_obj);
-                     if (args_chunk) {
-                        size_t cur_len = strlen(ctx->provider.openai.tool_args_buffer[tc_index]);
-                        size_t add_len = strlen(args_chunk);
-
-                        // Gemini sends complete JSON on each chunk - replace instead of append
-                        // Use explicit provider check rather than heuristic
-                        if (ctx->cloud_provider == CLOUD_PROVIDER_GEMINI && cur_len > 0) {
-                           // Replace with latest complete JSON
-                           if (add_len < LLM_TOOLS_ARGS_LEN - 1) {
-                              memcpy(ctx->provider.openai.tool_args_buffer[tc_index], args_chunk,
-                                     add_len);
-                              ctx->provider.openai.tool_args_buffer[tc_index][add_len] = '\0';
-                           } else {
-                              ctx->provider.openai.tool_args_overflow[tc_index] = true;
-                           }
-                        } else if (cur_len + add_len < LLM_TOOLS_ARGS_LEN - 1) {
-                           // OpenAI-style: append incremental delta
-                           memcpy(ctx->provider.openai.tool_args_buffer[tc_index] + cur_len,
-                                  args_chunk, add_len);
-                           ctx->provider.openai.tool_args_buffer[tc_index][cur_len + add_len] =
-                               '\0';
-                        } else {
-                           // Buffer full — the rest of this (and later) deltas are dropped.
-                           ctx->provider.openai.tool_args_overflow[tc_index] = true;
-                        }
+                     /* Some OpenAI-compatible servers stream the arguments as a JSON
+                      * object, which get_string serializes but get_string_len counts as 0. */
+                     const size_t chunk_len = json_object_is_type(args_obj, json_type_string)
+                                                  ? (size_t)json_object_get_string_len(args_obj)
+                                                  : (args_chunk ? strlen(args_chunk) : 0);
+                     size_t *cur_len = &ctx->provider.openai.tool_args_len[tc_index];
+                     /* Gemini sends the complete JSON on each chunk (an explicit
+                      * provider check, not a heuristic): replace instead of append.
+                      * An empty chunk after content replaces nothing, so a cut
+                      * stays flagged. */
+                     const bool gemini = ctx->cloud_provider == CLOUD_PROVIDER_GEMINI;
+                     if (args_chunk && !(gemini && chunk_len == 0 && *cur_len > 0)) {
+                        llm_tools_args_append(ctx->provider.openai.tool_args_buffer[tc_index],
+                                              cur_len,
+                                              &ctx->provider.openai.tool_args_overflow[tc_index],
+                                              args_chunk, chunk_len, gemini && *cur_len > 0);
                      }
                   }
                }
 
-               // Gemini 3+ models: Capture thought_signature from first tool call
-               // Required for follow-up requests when reasoning mode is enabled
-               if (ctx->cloud_provider == CLOUD_PROVIDER_GEMINI &&
-                   ctx->tool_calls.thought_signature[0] == '\0') {
-                  json_object *extra_content, *google_obj, *sig_obj;
-                  // Try extra_content.google.thought_signature (OpenAI-compatible format)
-                  if (json_object_object_get_ex(tc, "extra_content", &extra_content) &&
-                      json_object_object_get_ex(extra_content, "google", &google_obj) &&
-                      json_object_object_get_ex(google_obj, "thought_signature", &sig_obj)) {
-                     const char *sig = json_object_get_string(sig_obj);
-                     if (sig && sig[0] != '\0') {
-                        size_t sig_len = strlen(sig);
-                        safe_strscpy(ctx->tool_calls.thought_signature, sig);
-                        if (sig_len >= LLM_TOOLS_THOUGHT_SIG_LEN) {
-                           OLOG_WARNING("Gemini thought_signature truncated: %zu -> %d bytes",
-                                        sig_len, LLM_TOOLS_THOUGHT_SIG_LEN - 1);
-                        } else {
-                           OLOG_INFO("Captured Gemini thought_signature (%zu bytes)", sig_len);
-                        }
-                     }
-                  }
-                  // Also try direct thought_signature field as fallback
-                  else if (json_object_object_get_ex(tc, "thought_signature", &sig_obj)) {
-                     const char *sig = json_object_get_string(sig_obj);
-                     if (sig && sig[0] != '\0') {
-                        size_t sig_len = strlen(sig);
-                        safe_strscpy(ctx->tool_calls.thought_signature, sig);
-                        if (sig_len >= LLM_TOOLS_THOUGHT_SIG_LEN) {
-                           OLOG_WARNING("Gemini thought_signature truncated: %zu -> %d bytes",
-                                        sig_len, LLM_TOOLS_THOUGHT_SIG_LEN - 1);
-                        } else {
-                           OLOG_INFO("Captured Gemini thought_signature (%zu bytes)", sig_len);
-                        }
-                     }
-                  }
-               }
+               /* Gemini signs its reasoning per call
+                * (extra_content.google.thought_signature, or a bare
+                * thought_signature): kept with that call, to go back with it. */
+               stream_keep_call_signature(ctx, tc, tc_index);
             }
          }
       }
@@ -647,6 +652,9 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
             if (reason) {
                safe_strscpy(ctx->finish_reason, reason);
                OLOG_INFO("Stream finish_reason: %s", reason);
+               if (strcmp(reason, "error") == 0 && !ctx->stream_error[0]) {
+                  safe_strscpy(ctx->stream_error, "the provider ended the reply with an error");
+               }
             }
             ctx->stream_complete = 1;
 
@@ -716,7 +724,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
    json_object *usage_obj;
    if (json_object_object_get_ex(chunk, "usage", &usage_obj)) {
       json_object *prompt_tokens_obj, *completion_tokens_obj;
-      int input_tokens = 0, output_tokens = 0, cached_tokens = 0;
+      int input_tokens = 0, output_tokens = 0, cached_tokens = 0, cache_write_tokens = 0;
 
       if (json_object_object_get_ex(usage_obj, "prompt_tokens", &prompt_tokens_obj)) {
          input_tokens = json_object_get_int(prompt_tokens_obj);
@@ -727,11 +735,9 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
 
       // Check for cached tokens in prompt_tokens_details.  Both OpenAI
       // and Gemini-2.5+ surface implicit caching through this field
-      // (Gemini routes through our /v1beta/openai shim).  Provider
-      // label can't be derived from the streaming context (cloud_provider
-      // is CLOUD_PROVIDER_OPENAI for both), so check the active session's
-      // model string — "gemini-*" → Gemini, otherwise OpenAI.  Falls
-      // back to "OpenAI" when no session context is available.
+      // (Gemini routes through our /v1beta/openai shim); the stream
+      // context's provider comes from the endpoint, and the "LLM cache:"
+      // line reports it.
       //
       // Gemini caching footnote (investigated 2026-05-28): if cached_tokens
       // stays at 0 across many turns on Gemini, that is upstream behavior,
@@ -756,22 +762,24 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
       if (json_object_object_get_ex(usage_obj, "prompt_tokens_details", &prompt_details)) {
          json_object *cached_obj;
          if (json_object_object_get_ex(prompt_details, "cached_tokens", &cached_obj)) {
-            cached_tokens = json_object_get_int(cached_obj);
-            if (cached_tokens > 0) {
-               /* llm_config.model is protected by llm_config_mutex (per session
-                * lock-ordering rules in session_manager.h); copy the
-                * provider-prefix bytes under the lock then release before the
-                * OLOG_INFO so we never hold a leaf lock across I/O. */
-               char model_prefix[8] = { 0 };
-               if (ws_session != NULL) {
-                  pthread_mutex_lock(&ws_session->llm_config_mutex);
-                  safe_strscpy(model_prefix, ws_session->llm_config.model);
-                  pthread_mutex_unlock(&ws_session->llm_config_mutex);
-               }
-               const char *provider_label = (strncmp(model_prefix, "gemini-", 7) == 0) ? "Gemini"
-                                                                                       : "OpenAI";
-               OLOG_INFO("%s cache hit: %d tokens cached", provider_label, cached_tokens);
-            }
+            cached_tokens = json_object_get_int(cached_obj); /* on the "LLM cache:" line */
+         }
+         /* Cache writes, where an upstream reports them (OpenRouter fronting
+          * Anthropic, under either name). */
+         json_object *write_obj = NULL;
+         if (json_object_object_get_ex(prompt_details, "cache_write_tokens", &write_obj) ||
+             json_object_object_get_ex(prompt_details, "cache_creation_input_tokens", &write_obj)) {
+            cache_write_tokens = json_object_get_int(write_obj);
+         }
+      }
+      /* llama.cpp: the KV cache it reused (timings.cache_n) is the cache read,
+       * and the prompt is what it processed plus that (usage.prompt_tokens
+       * alone can leave it out). */
+      if (ctx->llm_type == LLM_LOCAL && ctx->realtime_cached_tokens > 0 && cached_tokens == 0) {
+         cached_tokens = ctx->realtime_cached_tokens;
+         const int processed_plus_reused = ctx->realtime_prompt_tokens + cached_tokens;
+         if (processed_plus_reused > input_tokens) {
+            input_tokens = processed_plus_reused;
          }
       }
 
@@ -795,7 +803,13 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
 
          // Update context usage tracking with actual session ID
          uint32_t session_id = ws_session ? ws_session->session_id : 0;
-         llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
+         llm_usage_report_t usage = { .prompt_tokens = input_tokens,
+                                      .completion_tokens = output_tokens,
+                                      .cached_tokens = cached_tokens,
+                                      .cache_write_tokens = cache_write_tokens,
+                                      .type = type,
+                                      .provider = ctx->cloud_provider };
+         llm_context_update_usage(session_id, &usage);
 
          // Calculate accurate token rate from actual output tokens and streaming duration
          // This is more accurate than counting chunks for providers like Gemini
@@ -834,6 +848,11 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
  * - message_stop: {"type":"message_stop"}
  */
 static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data) {
+   /* OpenRouter ends its Messages stream with an OpenAI-style terminator, after
+    * message_stop. */
+   if (strcmp(event_data, "[DONE]") == 0) {
+      return;
+   }
    json_object *event = json_tokener_parse(event_data);
    if (!event) {
       OLOG_WARNING("Failed to parse Claude event JSON");
@@ -864,6 +883,30 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       json_object *message_obj, *usage_obj, *tok_obj;
       ctx->provider.claude.cache_creation_input_tokens = 0;
       ctx->provider.claude.cache_read_input_tokens = 0;
+      ctx->provider.claude.message_id[0] = '\0';
+      ctx->provider.claude.cache_miss_reason[0] = '\0';
+      ctx->provider.claude.cache_missed_tokens = 0;
+      memset(&ctx->provider.claude.drops, 0, sizeof(ctx->provider.claude.drops));
+      if (json_object_object_get_ex(event, "message", &message_obj)) {
+         /* The response id (the next request's diagnostics.previous_message_id)
+          * and, with cache diagnostics on, why the cache missed. */
+         json_object *v = NULL;
+         json_object *diag = NULL;
+         json_object *miss = NULL;
+         if (json_object_object_get_ex(message_obj, "id", &v)) {
+            safe_strscpy(ctx->provider.claude.message_id, json_object_get_string(v));
+         }
+         llm_claude_drops_from_message(message_obj, &ctx->provider.claude.drops);
+         if (json_object_object_get_ex(message_obj, "diagnostics", &diag) &&
+             json_object_object_get_ex(diag, "cache_miss_reason", &miss)) {
+            if (json_object_object_get_ex(miss, "type", &v)) {
+               safe_strscpy(ctx->provider.claude.cache_miss_reason, json_object_get_string(v));
+            }
+            if (json_object_object_get_ex(miss, "cache_missed_input_tokens", &v)) {
+               ctx->provider.claude.cache_missed_tokens = json_object_get_int(v);
+            }
+         }
+      }
       if (json_object_object_get_ex(event, "message", &message_obj)) {
          if (json_object_object_get_ex(message_obj, "usage", &usage_obj)) {
             if (json_object_object_get_ex(usage_obj, "input_tokens", &tok_obj)) {
@@ -873,13 +916,13 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                int v = json_object_get_int(tok_obj);
                ctx->provider.claude.cache_creation_input_tokens = v;
                if (v > 0)
-                  OLOG_INFO("Claude cache created: %d tokens", v);
+                  OLOG_DEBUG("Claude cache created: %d tokens", v);
             }
             if (json_object_object_get_ex(usage_obj, "cache_read_input_tokens", &tok_obj)) {
                int v = json_object_get_int(tok_obj);
                ctx->provider.claude.cache_read_input_tokens = v;
                if (v > 0)
-                  OLOG_INFO("Claude cache hit: %d tokens (90%% cost savings!)", v);
+                  OLOG_DEBUG("Claude cache hit: %d tokens", v);
             }
          }
       }
@@ -889,6 +932,8 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       // Check if this is a tool_use block
       json_object *content_block, *block_type_obj;
       if (json_object_object_get_ex(event, "content_block", &content_block)) {
+         /* Every block, in order, exactly as sent: what the turn replays. */
+         llm_claude_capture_start(&ctx->provider.claude.capture, content_block);
          if (json_object_object_get_ex(content_block, "type", &block_type_obj)) {
             const char *block_type = json_object_get_string(block_type_obj);
 
@@ -947,6 +992,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       json_object *delta, *delta_type_obj, *text_obj;
 
       if (json_object_object_get_ex(event, "delta", &delta)) {
+         llm_claude_capture_delta(&ctx->provider.claude.capture, delta);
          // Check delta type
          if (json_object_object_get_ex(delta, "type", &delta_type_obj)) {
             const char *delta_type = json_object_get_string(delta_type_obj);
@@ -1000,17 +1046,10 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                if (json_object_object_get_ex(delta, "partial_json", &partial_json_obj)) {
                   const char *partial = json_object_get_string(partial_json_obj);
                   if (partial) {
-                     size_t partial_len = strlen(partial);
-                     if (ctx->provider.claude.tool_args_len + partial_len <
-                         LLM_TOOLS_ARGS_LEN - 1) {
-                        memcpy(ctx->provider.claude.tool_args + ctx->provider.claude.tool_args_len,
-                               partial, partial_len);
-                        ctx->provider.claude.tool_args_len += partial_len;
-                        ctx->provider.claude.tool_args[ctx->provider.claude.tool_args_len] = '\0';
-                     } else {
-                        /* Buffer full — this and later deltas are dropped. */
-                        ctx->provider.claude.tool_args_overflow = true;
-                     }
+                     llm_tools_args_append(ctx->provider.claude.tool_args,
+                                           &ctx->provider.claude.tool_args_len,
+                                           &ctx->provider.claude.tool_args_overflow, partial,
+                                           strlen(partial), false);
                   }
                }
 
@@ -1018,54 +1057,16 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                 * in bursts (not smoothly), so byte count and title extraction arrive
                 * too late to provide meaningful progress. The placeholder with pulsing
                 * dot + client-side timer is the best UX for this API constraint. */
-            } else if (strcmp(delta_type, "signature_delta") == 0 &&
-                       ctx->provider.claude.thinking_block_active) {
-               // Accumulate signature for thinking block (required when sending back to Claude)
-               json_object *signature_obj;
-               if (json_object_object_get_ex(delta, "signature", &signature_obj)) {
-                  const char *sig_chunk = json_object_get_string(signature_obj);
-                  if (sig_chunk) {
-                     size_t sig_len = strlen(sig_chunk);
-                     size_t needed = ctx->provider.claude.thinking_signature_len + sig_len + 1;
-
-                     /* Grow buffer if needed */
-                     if (needed > ctx->provider.claude.thinking_signature_cap) {
-                        size_t new_cap = ctx->provider.claude.thinking_signature_cap;
-                        if (new_cap == 0)
-                           new_cap = LLM_THINKING_SIGNATURE_INITIAL;
-                        while (new_cap < needed)
-                           new_cap *= 2;
-                        char *new_buf = realloc(ctx->provider.claude.thinking_signature, new_cap);
-                        if (!new_buf) {
-                           OLOG_ERROR("Claude: Failed to allocate signature buffer (%zu bytes)",
-                                      new_cap);
-                        } else {
-                           ctx->provider.claude.thinking_signature = new_buf;
-                           ctx->provider.claude.thinking_signature_cap = new_cap;
-                        }
-                     }
-
-                     if (ctx->provider.claude.thinking_signature &&
-                         needed <= ctx->provider.claude.thinking_signature_cap) {
-                        memcpy(ctx->provider.claude.thinking_signature +
-                                   ctx->provider.claude.thinking_signature_len,
-                               sig_chunk, sig_len);
-                        ctx->provider.claude.thinking_signature_len += sig_len;
-                        ctx->provider.claude
-                            .thinking_signature[ctx->provider.claude.thinking_signature_len] = '\0';
-                     }
-                  }
-               }
             }
          }
       }
    } else if (strcmp(type, "content_block_stop") == 0) {
+      llm_claude_capture_stop(&ctx->provider.claude.capture);
       // If we were in a thinking block, finalize it
       if (ctx->provider.claude.thinking_block_active) {
          ctx->provider.claude.thinking_block_active = 0;
          ctx->thinking_active = 0;
-         OLOG_INFO("Claude: Thinking block completed (%zu bytes, signature %zu bytes)",
-                   ctx->thinking_size, ctx->provider.claude.thinking_signature_len);
+         OLOG_INFO("Claude: Thinking block completed (%zu bytes)", ctx->thinking_size);
 
          // Send thinking_end to WebUI
          if (has_ws_session) {
@@ -1104,6 +1105,13 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
 
       ctx->provider.claude.content_block_active = 0;
    } else if (strcmp(type, "message_delta") == 0) {
+      /* After a mid-stream server-side fallback, the final list replaces the first.
+       * It sits beside usage on the event; delta is read too, in case it's there. */
+      llm_claude_drops_from_message(event, &ctx->provider.claude.drops);
+      json_object *drops_delta = NULL;
+      if (json_object_object_get_ex(event, "delta", &drops_delta)) {
+         llm_claude_drops_from_message(drops_delta, &ctx->provider.claude.drops);
+      }
       // Extract stop_reason
       json_object *delta_obj, *stop_reason_obj;
       if (json_object_object_get_ex(event, "delta", &delta_obj)) {
@@ -1125,13 +1133,31 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
             // so metrics + per-session usage tracking reflect the cache
             // discount (90% off on read tokens).
             int cached = ctx->provider.claude.cache_read_input_tokens;
-            metrics_record_llm_tokens(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE,
+            metrics_record_llm_tokens(LLM_CLOUD, ctx->cloud_provider,
                                       ctx->provider.claude.input_tokens, output_tokens, cached);
 
-            // Update context usage tracking with actual session ID
+            // Update context usage tracking with actual session ID.
+            // Anthropic reports input_tokens (UNCACHED), cache_read, and
+            // cache_creation as three separate additive counts, so the full
+            // prompt = their sum. Use that as prompt_tokens so cached <= prompt
+            // (the cache-hit-rate denominator) and context occupancy are correct.
             uint32_t session_id = ws_session ? ws_session->session_id : 0;
-            llm_context_update_usage(session_id, ctx->provider.claude.input_tokens, output_tokens,
-                                     cached);
+            int claude_prompt_tokens = ctx->provider.claude.input_tokens +
+                                       ctx->provider.claude.cache_read_input_tokens +
+                                       ctx->provider.claude.cache_creation_input_tokens;
+            llm_usage_report_t usage = {
+               .prompt_tokens = claude_prompt_tokens,
+               .completion_tokens = output_tokens,
+               .cached_tokens = cached,
+               .cache_write_tokens = ctx->provider.claude.cache_creation_input_tokens,
+               .type = LLM_CLOUD,
+               .provider = ctx->cloud_provider, /* Claude, or OpenRouter's Messages route */
+               .message_id = ctx->provider.claude.message_id,
+               .cache_miss_reason = ctx->provider.claude.cache_miss_reason,
+               .cache_missed_tokens = ctx->provider.claude.cache_missed_tokens,
+               .drops = &ctx->provider.claude.drops,
+            };
+            llm_context_update_usage(session_id, &usage);
 
             // Calculate accurate token rate from actual output tokens
             if (output_tokens > 0 && has_ws_session) {
@@ -1150,8 +1176,8 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                }
             }
 
-            OLOG_INFO("Claude usage: %d input, %d output tokens", ctx->provider.claude.input_tokens,
-                      output_tokens);
+            OLOG_DEBUG("Claude usage: %d input, %d output tokens",
+                       ctx->provider.claude.input_tokens, output_tokens);
          }
       }
    } else if (strcmp(type, "message_stop") == 0) {
@@ -1161,8 +1187,18 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       if (ctx->has_tool_calls) {
          OLOG_INFO("Claude stream completed with %d tool call(s)", ctx->tool_calls.count);
       }
+   } else if (strcmp(type, "error") == 0) {
+      /* An error after the 200 (an overload mid-stream): the reply is cut off. */
+      json_object *err = NULL;
+      json_object *msg = NULL;
+      const char *text = "error event";
+      if (json_object_object_get_ex(event, "error", &err) &&
+          json_object_object_get_ex(err, "message", &msg)) {
+         text = json_object_get_string(msg);
+      }
+      safe_strscpy(ctx->stream_error, text ? text : "error event");
+      OLOG_ERROR("Claude stream error: %s", ctx->stream_error);
    }
-   // Note: ping and error events are ignored
 
    json_object_put(event);
 }
@@ -1181,6 +1217,7 @@ llm_stream_context_t *llm_stream_create(llm_type_t llm_type,
       OLOG_ERROR("Failed to allocate LLM stream context");
       return NULL;
    }
+   llm_reasoning_details_init(&ctx->reasoning_details);
 
    ctx->accumulated_response = malloc(DEFAULT_ACCUMULATED_CAPACITY);
    if (!ctx->accumulated_response) {
@@ -1208,6 +1245,16 @@ llm_stream_context_t *llm_stream_create(llm_type_t llm_type,
    return ctx;
 }
 
+llm_stream_context_t *llm_stream_create_messages(cloud_provider_t cloud_provider,
+                                                 text_chunk_callback callback,
+                                                 void *userdata) {
+   llm_stream_context_t *ctx = llm_stream_create(LLM_CLOUD, cloud_provider, callback, userdata);
+   if (ctx) {
+      ctx->anthropic_wire = 1;
+   }
+   return ctx;
+}
+
 void llm_stream_free(llm_stream_context_t *ctx) {
    if (!ctx) {
       return;
@@ -1215,16 +1262,19 @@ void llm_stream_free(llm_stream_context_t *ctx) {
 
    free(ctx->accumulated_response);
    free(ctx->accumulated_thinking);
-   /* thinking_signature is a heap pointer that lives ONLY in the Claude arm of
-    * the `provider` union; it's allocated solely by the Claude SSE parser.  For
+   for (int i = 0; i < LLM_TOOLS_MAX_PARALLEL_CALLS; i++) {
+      free(ctx->call_signatures[i]);
+   }
+   llm_reasoning_details_free(&ctx->reasoning_details);
+   /* The block capture holds heap pointers that live ONLY in the Claude arm of
+    * the `provider` union; only the Claude SSE parser fills them.  For
     * OpenAI/OpenRouter/Gemini/local streams the active union member is
-    * openai.tool_args_buffer, whose bytes alias this pointer — a response with
-    * >=2 parallel tool calls writes arg JSON into tool_args_buffer[1], which
-    * overlaps thinking_signature, so freeing it unconditionally hands free() a
-    * pointer made of JSON text → SIGSEGV.  Only free it for actual Claude
-    * streams (matches the parse-routing condition in llm_stream_handle_event). */
-   if (ctx->llm_type != LLM_LOCAL && ctx->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-      free(ctx->provider.claude.thinking_signature);
+    * openai.tool_args_buffer, whose bytes alias these pointers — freeing them
+    * unconditionally hands free() a pointer made of JSON text → SIGSEGV.  Only
+    * free them for Messages streams (matches the parse-routing condition in
+    * llm_stream_handle_event). */
+   if (ctx->anthropic_wire) {
+      llm_claude_capture_reset(&ctx->provider.claude.capture);
    }
    free(ctx);
 }
@@ -1234,16 +1284,13 @@ void llm_stream_handle_event(llm_stream_context_t *ctx, const char *event_data) 
       return;
    }
 
-   // Route to provider-specific parser
-   // Local LLM (llama.cpp) uses OpenAI-compatible format
-   // Gemini and OpenRouter also use OpenAI-compatible format
-   // Cloud can be OpenAI, Gemini, OpenRouter, or Claude
-   if (ctx->llm_type == LLM_LOCAL || ctx->cloud_provider == CLOUD_PROVIDER_OPENAI ||
-       ctx->cloud_provider == CLOUD_PROVIDER_GEMINI ||
-       ctx->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-      parse_openai_chunk(ctx, event_data);
-   } else if (ctx->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+   /* By wire format, not provider: OpenRouter's anthropic/ models stream in
+    * the Messages format; everything else (local, OpenAI, Gemini, OpenRouter's
+    * Chat Completions) in the OpenAI one. */
+   if (ctx->anthropic_wire) {
       parse_claude_event(ctx, event_data);
+   } else {
+      parse_openai_chunk(ctx, event_data);
    }
 }
 
@@ -1280,6 +1327,34 @@ int llm_stream_is_complete(llm_stream_context_t *ctx) {
    return ctx->stream_complete;
 }
 
+int llm_stream_check_finished(llm_stream_context_t *ctx, const char *api) {
+   if (!ctx) {
+      return 1;
+   }
+   if (ctx->stream_complete && !ctx->stream_error[0]) {
+      return 0;
+   }
+   /* A 200 says only that the stream started: an error event, or a stream that
+    * ends without its end marker, means the reply was cut off.  (A user stop
+    * aborts the transfer and fails earlier.)  Before any output it is worth a
+    * retry; after some (text or thinking), a retry would repeat what the user
+    * already heard or saw. */
+   const char *why = ctx->stream_error[0] ? ctx->stream_error : "the response ended early";
+   /* Any text counts: a path may stream it without marking a first token. */
+   const bool shown = ctx->first_token_received || ctx->has_thinking || ctx->accumulated_size > 0;
+   OLOG_ERROR("%s: stream failed: %s", api, why);
+   if (!shown) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+   }
+#ifdef ENABLE_WEBUI
+   session_t *session = session_get_command_context();
+   if (shown && session && session->type == SESSION_TYPE_WEBUI) {
+      webui_send_error(session, "LLM_ERROR", why);
+   }
+#endif
+   return 1;
+}
+
 int llm_stream_has_tool_calls(llm_stream_context_t *ctx) {
    if (!ctx) {
       return 0;
@@ -1294,6 +1369,40 @@ const tool_call_list_t *llm_stream_get_tool_calls(llm_stream_context_t *ctx) {
    }
 
    return &ctx->tool_calls;
+}
+
+struct json_object *llm_stream_chat_blocks(llm_stream_context_t *ctx,
+                                           const char *carrier,
+                                           const char *model) {
+   if (!ctx) {
+      return NULL;
+   }
+   struct json_object *blocks = llm_turn_blocks_new();
+   if (!blocks) {
+      return NULL;
+   }
+   json_object *details = llm_reasoning_details_finish(&ctx->reasoning_details);
+   if (details && !llm_served_as_asked(ctx->served_model, model)) {
+      OLOG_INFO("LLM: reasoning from %s (asked %s) not kept for replay", ctx->served_model,
+                model ? model : "?");
+      json_object_put(details);
+      details = NULL;
+   }
+   const size_t n = details ? json_object_array_length(details) : 0;
+   for (size_t i = 0; i < n; i++) {
+      llm_turn_blocks_add_reasoning(blocks, carrier, LLM_FORMAT_OPENROUTER, model,
+                                    json_object_get(json_object_array_get_idx(details, i)));
+   }
+   json_object_put(details);
+   if (ctx->accumulated_response && ctx->accumulated_size > 0) {
+      llm_turn_blocks_add_text(blocks, ctx->accumulated_response);
+   }
+   for (int i = 0; ctx->has_tool_calls && i < ctx->tool_calls.count; i++) {
+      const tool_call_t *call = &ctx->tool_calls.calls[i];
+      llm_turn_blocks_add_signed_tool_call(blocks, call->id, call->name, call->arguments, carrier,
+                                           model, ctx->call_signatures[i]);
+   }
+   return blocks;
 }
 
 llm_stream_context_t *llm_stream_create_extended(llm_type_t llm_type,
@@ -1330,12 +1439,11 @@ char *llm_stream_get_thinking(llm_stream_context_t *ctx) {
    return strdup(ctx->accumulated_thinking);
 }
 
-char *llm_stream_get_thinking_signature(llm_stream_context_t *ctx) {
-   if (!ctx || ctx->provider.claude.thinking_signature_len == 0) {
+struct json_object *llm_stream_take_claude_content(llm_stream_context_t *ctx) {
+   if (!ctx || !ctx->anthropic_wire) {
       return NULL;
    }
-
-   return strdup(ctx->provider.claude.thinking_signature);
+   return llm_claude_capture_take(&ctx->provider.claude.capture);
 }
 
 const char *llm_stream_get_response_ref(llm_stream_context_t *ctx) {
@@ -1352,12 +1460,4 @@ const char *llm_stream_get_thinking_ref(llm_stream_context_t *ctx) {
    }
 
    return ctx->accumulated_thinking;
-}
-
-const char *llm_stream_get_thinking_signature_ref(llm_stream_context_t *ctx) {
-   if (!ctx || ctx->provider.claude.thinking_signature_len == 0) {
-      return NULL;
-   }
-
-   return ctx->provider.claude.thinking_signature;
 }

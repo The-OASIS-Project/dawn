@@ -78,6 +78,8 @@ static void *maintenance_thread_func(void *arg) {
       if (cleanup_result != AUTH_DB_SUCCESS) {
          OLOG_WARNING("auth_maintenance: cleanup failed");
       }
+      /* Expired logins end everywhere they're still in use. */
+      auth_sessions_changed();
 
       /* Clean up old images past retention period */
       if (image_store_is_ready()) {
@@ -145,11 +147,9 @@ static void *maintenance_thread_func(void *arg) {
       stat_history_flush();
 #endif
 
-      /* Passive WAL checkpoint (non-blocking) */
-      int checkpoint_result = auth_db_checkpoint_passive();
-      if (checkpoint_result != AUTH_DB_SUCCESS) {
-         OLOG_WARNING("auth_maintenance: checkpoint failed");
-      }
+      /* Checkpoints run on auth_db's storage thread; here, a statement left
+       * mid-read (it would keep the WAL from being checkpointed) is reported. */
+      auth_db_check_leaked_reads();
 
       /* Save and clear idle session conversations (satellites, WebUI) */
       session_check_idle_conversations();

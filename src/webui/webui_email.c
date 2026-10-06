@@ -92,9 +92,27 @@ void handle_email_list_accounts(ws_connection_t *conn) {
          json_object_object_add(obj, "max_recent", json_object_new_int(accounts[i].max_recent));
          json_object_object_add(obj, "max_body_chars",
                                 json_object_new_int(accounts[i].max_body_chars));
+         json_object_object_add(obj, "digest_depth", json_object_new_int(accounts[i].digest_depth));
          json_object_array_add(arr, obj);
       }
       json_object_object_add(resp_payload, "accounts", arr);
+
+      /* Numeric bounds for the account form, so the client never duplicates the
+       * server's limits as literals (the update handler below enforces the same). */
+      json_object *limits = json_object_new_object();
+      json_object_object_add(limits, "max_recent_max",
+                             json_object_new_int(EMAIL_MAX_FETCH_RESULTS));
+      json_object_object_add(limits, "max_recent_default",
+                             json_object_new_int(EMAIL_MAX_RECENT_DEFAULT));
+      json_object_object_add(limits, "digest_depth_max",
+                             json_object_new_int(EMAIL_DIGEST_DEPTH_MAX));
+      json_object_object_add(limits, "digest_depth_default",
+                             json_object_new_int(EMAIL_DIGEST_DEPTH_DEFAULT));
+      json_object_object_add(limits, "body_chars_min",
+                             json_object_new_int(EMAIL_MIN_READ_BODY_LEN));
+      json_object_object_add(limits, "body_chars_max",
+                             json_object_new_int(EMAIL_MAX_READ_BODY_LEN));
+      json_object_object_add(resp_payload, "limits", limits);
    }
 
    json_object_object_add(response, "payload", resp_payload);
@@ -209,6 +227,31 @@ done:
  * Update Account
  * ============================================================================= */
 
+/* If @p key is present, store it in @p dst when it is an integer in [lo, hi].
+ * @return false (with a user-facing message in @p err) when it is present but
+ *         out of range or not an integer; true when absent or accepted. */
+static bool take_int_in_range(json_object *payload,
+                              const char *key,
+                              const char *label,
+                              int lo,
+                              int hi,
+                              int *dst,
+                              char *err,
+                              size_t err_len) {
+   json_object *val;
+   if (!json_object_object_get_ex(payload, key, &val))
+      return true;
+   if (json_object_is_type(val, json_type_int)) {
+      int64_t v = json_object_get_int64(val);
+      if (v >= lo && v <= hi) {
+         *dst = (int)v;
+         return true;
+      }
+   }
+   snprintf(err, err_len, "%s must be a whole number from %d to %d", label, lo, hi);
+   return false;
+}
+
 void handle_email_update_account(ws_connection_t *conn, json_object *payload) {
    if (!conn_require_auth(conn))
       return;
@@ -242,29 +285,35 @@ void handle_email_update_account(ws_connection_t *conn, json_object *payload) {
       snprintf(acct.name, sizeof(acct.name), "%s", json_object_get_string(val));
    if (json_object_object_get_ex(payload, "imap_server", &val))
       snprintf(acct.imap_server, sizeof(acct.imap_server), "%s", json_object_get_string(val));
-   if (json_object_object_get_ex(payload, "imap_port", &val))
-      acct.imap_port = json_object_get_int(val);
    if (json_object_object_get_ex(payload, "imap_ssl", &val))
       acct.imap_ssl = json_object_get_boolean(val);
    if (json_object_object_get_ex(payload, "smtp_server", &val))
       snprintf(acct.smtp_server, sizeof(acct.smtp_server), "%s", json_object_get_string(val));
-   if (json_object_object_get_ex(payload, "smtp_port", &val))
-      acct.smtp_port = json_object_get_int(val);
    if (json_object_object_get_ex(payload, "smtp_ssl", &val))
       acct.smtp_ssl = json_object_get_boolean(val);
    if (json_object_object_get_ex(payload, "username", &val))
       snprintf(acct.username, sizeof(acct.username), "%s", json_object_get_string(val));
    if (json_object_object_get_ex(payload, "display_name", &val))
       snprintf(acct.display_name, sizeof(acct.display_name), "%s", json_object_get_string(val));
-   if (json_object_object_get_ex(payload, "max_recent", &val)) {
-      int mr = json_object_get_int(val);
-      if (mr >= 1 && mr <= 50)
-         acct.max_recent = mr;
-   }
-   if (json_object_object_get_ex(payload, "max_body_chars", &val)) {
-      int mb = json_object_get_int(val);
-      if (mb >= EMAIL_MIN_READ_BODY_LEN && mb <= EMAIL_MAX_READ_BODY_LEN)
-         acct.max_body_chars = mb;
+   /* Numeric settings: reject an out-of-range value outright rather than dropping
+    * it and reporting success, which would tell the user a change was saved when
+    * it wasn't. */
+   char range_err[128];
+   if (!take_int_in_range(payload, "imap_port", "IMAP port", 1, 65535, &acct.imap_port, range_err,
+                          sizeof(range_err)) ||
+       !take_int_in_range(payload, "smtp_port", "SMTP port", 1, 65535, &acct.smtp_port, range_err,
+                          sizeof(range_err)) ||
+       !take_int_in_range(payload, "max_recent", "Max recent emails", 1, EMAIL_MAX_FETCH_RESULTS,
+                          &acct.max_recent, range_err, sizeof(range_err)) ||
+       !take_int_in_range(payload, "digest_depth", "Messages checked for daily digest", 1,
+                          EMAIL_DIGEST_DEPTH_MAX, &acct.digest_depth, range_err,
+                          sizeof(range_err)) ||
+       !take_int_in_range(payload, "max_body_chars", "Longest email the AI reads",
+                          EMAIL_MIN_READ_BODY_LEN, EMAIL_MAX_READ_BODY_LEN, &acct.max_body_chars,
+                          range_err, sizeof(range_err))) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error", json_object_new_string(range_err));
+      goto done;
    }
 
    /* Only re-encrypt password if a new one was provided */

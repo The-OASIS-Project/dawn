@@ -109,6 +109,46 @@ int memory_db_fact_create_at(int user_id,
 int memory_db_fact_update_category(int64_t fact_id, int user_id, const char *category);
 
 /**
+ * @brief Page of a user's current, embedded facts still in category 'general'
+ *
+ * For the embedding-centroid category pass.  Facts with id > @p after_id, in id
+ * order; those whose embedding isn't @p dims wide are skipped (but still advance
+ * @p last_id_out, so paging always progresses).
+ *
+ * @param user_id     Owner
+ * @param after_id    Cursor: only ids greater than this
+ * @param dims        Expected embedding dimension
+ * @param max         Page size
+ * @param ids_out     [out] Up to @p max fact ids
+ * @param embs_out    [out] Their embeddings, @p max * @p dims floats
+ * @param count_out   [out] Facts written
+ * @param last_id_out [out] Highest id seen (next cursor; may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_list_general_embedded(int user_id,
+                                         int64_t after_id,
+                                         int dims,
+                                         int max,
+                                         int64_t *ids_out,
+                                         float *embs_out,
+                                         int *count_out,
+                                         int64_t *last_id_out);
+
+/**
+ * @brief Set many facts' categories in one transaction
+ *
+ * NULL or empty entries in @p categories are skipped.
+ *
+ * @param written_out [out] Facts actually updated (may be NULL)
+ * @return MEMORY_DB_SUCCESS, or MEMORY_DB_FAILURE (nothing written)
+ */
+int memory_db_fact_set_categories(int user_id,
+                                  const int64_t *ids,
+                                  const char *const *categories,
+                                  int n,
+                                  int *written_out);
+
+/**
  * @brief List facts with category='general' for a user, paginated by id.
  *
  * Used by LLM recategorization to fetch batches of uncategorized facts.
@@ -318,6 +358,16 @@ int memory_db_fact_reinforce_citation(int64_t fact_id, int user_id);
 int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confidence);
 
 /**
+ * @brief Record that a fact was also learned outside any conversation
+ *
+ * The user stated it directly ("remember", an import): forgetting what a
+ * conversation taught then keeps it (memory_facts.origin_unsourced).
+ *
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_mark_unsourced(int64_t fact_id, int user_id);
+
+/**
  * @brief Set the subject_entity_id FK on an existing fact (v47).
  *
  * Phase 0 — the extraction prompt now requires a `subject` field on every
@@ -386,6 +436,22 @@ int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id);
+
+/**
+ * @brief Merge a duplicate fact into the one kept
+ *
+ * As memory_db_fact_supersede, and in the same transaction the kept fact takes
+ * the merged one's sources (its conversations, or its having been learned
+ * outside any conversation), so forgetting a conversation only the kept fact
+ * came from doesn't take what another conversation taught.
+ *
+ * @param old_fact_id Fact merged away
+ * @param keeper_id   Fact kept
+ * @param user_id     User ID (owns both)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (either fact missing or not the
+ *         user's), or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id);
 
 /**
  * @brief Delete a fact
@@ -883,6 +949,13 @@ int memory_db_summary_update_embedding(int user_id,
  * compile-time default. */
 #define MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT 4096
 
+/** The summaries a semantic search scored: for relevance measured from the
+ * pool's mean (embedding_corpus_relevance). */
+typedef struct {
+   int scored;        /**< rows with a current-dimension embedding scored */
+   double cosine_sum; /**< sum of their cosines to the query */
+} memory_summary_pool_t;
+
 /**
  * @brief Semantic top-N search over user's embedded summaries.
  *
@@ -909,6 +982,9 @@ int memory_db_summary_update_embedding(int user_id,
  * @param out_summaries  output array of memory_summary_t (caller allocates)
  * @param out_scores     output array of cosine scores aligned with out_summaries
  * @param count_out      number of returned matches
+ * @param pool_out       [out] the rows actually scored and their cosine sum,
+ *                       for relevance measured from the pool's mean
+ *                       (embedding_corpus_relevance); may be NULL
  * @return MEMORY_DB_SUCCESS / MEMORY_DB_FAILURE
  */
 int memory_db_summary_search_semantic(int user_id,
@@ -919,7 +995,8 @@ int memory_db_summary_search_semantic(int user_id,
                                       int max_scan,
                                       memory_summary_t *out_summaries,
                                       float *out_scores,
-                                      int *count_out);
+                                      int *count_out,
+                                      memory_summary_pool_t *pool_out);
 
 /**
  * @brief List summaries missing an embedding (or with stale dimensions).

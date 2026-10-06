@@ -197,6 +197,14 @@ int config_validate(const dawn_config_t *config,
    VALIDATE_RANGE_FLOAT("memory.recall.min_score", config->memory.recall.min_score, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.min_score",
                         config->memory.focus_injection.min_score, 0.0f, 1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.document_min_relevance",
+                        config->memory.focus_injection.document_min_relevance, 0.0f, 1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.fact_min_relevance",
+                        config->memory.focus_injection.fact_min_relevance, 0.0f, 1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.entity_min_relevance",
+                        config->memory.focus_injection.entity_min_relevance, 0.0f, 1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.summary_min_relevance",
+                        config->memory.focus_injection.summary_min_relevance, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_semantic",
                         config->memory.focus_injection.weight_semantic, 0.0f, 5.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_recency",
@@ -221,10 +229,6 @@ int config_validate(const dawn_config_t *config,
                         config->memory.focus_injection.source_weights.recent_email, 0.0f, 5.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.dawn_background",
                         config->memory.focus_injection.source_weights.dawn_background, 0.0f, 5.0f);
-   VALIDATE_RANGE_INT("memory.focus_injection.dedup.recent_window_turns",
-                      config->memory.focus_injection.dedup.recent_window_turns, 0, 100);
-   VALIDATE_RANGE_FLOAT("memory.focus_injection.dedup.score_uplift_factor",
-                        config->memory.focus_injection.dedup.score_uplift_factor, 1.0f, 5.0f);
    /* Lower bound at 0.01 (not 0.0) — the runtime self-guard in
     * focus_apply_dominant_token_penalty silently no-ops at value ≤ 0.0,
     * so accepting 0.0 here would let an operator's slider lie about
@@ -246,6 +250,15 @@ int config_validate(const dawn_config_t *config,
          ADD_ERROR("commands.processing_mode",
                    "must be 'direct_only', 'llm_only', or 'direct_first' (got '%s')",
                    config->commands.processing_mode);
+      }
+   }
+
+   /* ===== VAD Adaptive Endpoint (enum) ===== */
+   {
+      const char *valid_modes[] = { "off", "shadow" };
+      if (!string_in_list(config->vad.adaptive_endpoint, valid_modes, 2)) {
+         ADD_ERROR("vad.adaptive_endpoint", "must be 'off' or 'shadow' (got '%s')",
+                   config->vad.adaptive_endpoint);
       }
    }
 

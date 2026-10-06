@@ -25,7 +25,9 @@
  * resampler, and circular audio buffer. ASR is dispatched async to
  * the worker pool to avoid blocking the LWS event loop.
  *
- * Lock hierarchy: s_conn_registry_mutex > always_on_ctx_t.mutex
+ * Lock hierarchy: s_conn_registry_mutex > always_on_ctx_t.mutex > worker_pool pool_mutex
+ * (the speculative-decode arm try-borrows an ASR context while holding ctx.mutex;
+ *  worker_pool never reaches back into always-on state, so the order is acyclic)
  *
  * Thread safety:
  * - State reads via atomic_load (lock-free from worker threads)
@@ -45,6 +47,7 @@
 
 #include "asr/vad_silero.h"
 #include "audio/resampler.h"
+#include "core/spec_slot.h"
 
 /* Forward decl — only used by handle_always_on_enable below.  Including
  * <json-c/json.h> here would pull json-c into every TU that uses
@@ -149,6 +152,14 @@ typedef struct always_on_ctx {
    /* Command transcribe async result (set by worker thread, consumed by LWS thread) */
    _Atomic int cmd_result_ready; /**< 0=none, 1=result pending */
    char *cmd_transcript;         /**< Transcribed text (malloc'd, consumed by LWS thread) */
+
+   /* Adaptive-dwell speculative-decode slot (all access under `mutex`, except the
+    * lock-free generation read; see spec_slot.h). Invalidated on every set_state
+    * and on a resumed-speech cancel. Inert unless [vad] adaptive_endpoint != off. */
+   spec_slot_t spec;
+   bool spec_pool_missed; /**< a speculative arm this utterance failed to borrow a
+                             context (for shadow miss-reason logging); reset on
+                             RECORDING entry. Under `mutex`. */
 
    /* Connection back-pointer (non-owning, for sending responses) */
    struct lws *wsi;

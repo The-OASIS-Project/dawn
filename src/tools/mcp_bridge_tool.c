@@ -196,11 +196,11 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
    }
 
    /* Fail closed: bridged MCP tools require an authenticated user session. The
-    * registry's tool_get_current_user_id() invents uid 1 (admin) when no session
-    * context is set, which would let any non-session caller bypass both gates
+    * registry's tool_get_current_user_id() falls back to the default voice user
+    * when no session context is set, which would let any non-session caller bypass both gates
     * below (sec-S1). */
    session_t *cmd_sess = session_get_command_context();
-   if (cmd_sess == NULL || cmd_sess->metrics.user_id <= 0) {
+   if (cmd_sess == NULL || session_effective_user_id(cmd_sess) <= 0) {
       return dispatch_error(should_respond, "MCP tools require an authenticated user session.");
    }
    int64_t uid = cmd_sess->metrics.user_id;
@@ -274,7 +274,10 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
    if (should_respond != NULL) {
       *should_respond = 1;
    }
-   if (rc == SUCCESS && result != NULL) {
+   /* The tool's own failure (isError) is still its text: the model reads why,
+    * marked as an error. */
+   const bool tool_error = rc == MCP_ERR_TOOL && result != NULL;
+   if ((rc == SUCCESS || tool_error) && result != NULL) {
 #ifdef DAWN_ENABLE_CODE_PROJECTS
       /* Strip cbm's graph-name prefix and absolute source_root paths out of the
        * result so no slug or filesystem layout reaches the LLM (symmetric with
@@ -287,6 +290,15 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
          }
       }
 #endif
+      if (tool_error) {
+         const size_t len = strlen(TOOL_RESULT_ERROR_MARK) + strlen(result) + 1;
+         char *marked = malloc(len);
+         if (marked != NULL) {
+            snprintf(marked, len, "%s%s", TOOL_RESULT_ERROR_MARK, result);
+         }
+         free(result);
+         return marked ? marked : strdup(TOOL_RESULT_ERROR_MARK "MCP tool reported an error.");
+      }
       return result;
    }
    free(result);
@@ -299,13 +311,31 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
  * Registration
  * -------------------------------------------------------------------------- */
 
+size_t mcp_bridge_result_size_hint(struct json_object *tool) {
+   struct json_object *meta = NULL;
+   struct json_object *hint = NULL;
+   if (!tool || !json_object_object_get_ex(tool, "_meta", &meta) ||
+       !json_object_is_type(meta, json_type_object) ||
+       !json_object_object_get_ex(meta, "anthropic/maxResultSizeChars", &hint) ||
+       !json_object_is_type(hint, json_type_int)) {
+      return 0;
+   }
+   const int64_t chars = json_object_get_int64(hint);
+   if (chars <= 0) {
+      return 0;
+   }
+   return (uint64_t)chars < MCP_BRIDGE_MAX_RESULT_CHARS ? (size_t)chars
+                                                        : MCP_BRIDGE_MAX_RESULT_CHARS;
+}
+
 int mcp_bridge_register_tool(mcp_client_t *client,
                              const char *server_alias,
                              const char *upstream_tool_name,
                              const char *dawn_tool_name,
                              const char *description,
                              mcp_param_set_t *params,
-                             bool dangerous) {
+                             bool dangerous,
+                             size_t max_result_chars) {
    if (client == NULL || server_alias == NULL || upstream_tool_name == NULL ||
        dawn_tool_name == NULL || params == NULL) {
       return FAILURE;
@@ -343,10 +373,15 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    meta.params = slot->params.params;
    meta.param_count = slot->params.param_count;
    meta.device_type = TOOL_DEVICE_TYPE_GETTER;
+   /* default_kind stays TOOL_KIND_ACT: what an upstream tool does is the
+    * server's claim, not something DAWN can check. */
    meta.capabilities = TOOL_CAP_NETWORK | (dangerous ? TOOL_CAP_DANGEROUS : TOOL_CAP_NONE);
    meta.default_local = true;
    meta.default_remote = true;
    meta.callback = s_trampolines[idx];
+   meta.max_result_chars = max_result_chars < MCP_BRIDGE_MAX_RESULT_CHARS
+                               ? max_result_chars
+                               : MCP_BRIDGE_MAX_RESULT_CHARS;
    /* enabled-first slot serves as the config struct so dangerous-tool
     * validation (needs config + parser) passes; no TOML section. */
    meta.config = slot;
@@ -458,7 +493,8 @@ static void register_server_tools(const char *alias, mcp_client_t *client) {
       snprintf(dawn_name, sizeof(dawn_name), "%s_%s", alias, upstream);
 
       if (mcp_bridge_register_tool(client, alias, upstream, dawn_name, description, &params,
-                                   is_dangerous_tool(upstream)) == SUCCESS) {
+                                   is_dangerous_tool(upstream),
+                                   mcp_bridge_result_size_hint(tool)) == SUCCESS) {
          registered++;
       } else {
          mcp_param_set_free(&params); /* register failed: reclaim (move didn't happen) */

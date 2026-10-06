@@ -8,6 +8,7 @@
  * - settings/audio.js - Audio device management
  * - settings/config.js - Config save/load/persistence
  * - settings/llm.js - LLM runtime and conversation controls
+ * - settings/forget-learned.js - offer to forget what a now-private conversation taught
  * - settings/schema.js - Settings schema and rendering
  */
 (function () {
@@ -755,6 +756,9 @@
       handleSetSessionLlmResponse: Llm.handleSetSessionLlmResponse,
       handleListLlmModelsResponse: Llm.handleListLlmModelsResponse,
       handleSetPrivateResponse: Llm.handleSetPrivateResponse,
+      handleForgetConversationMemoriesResponse: (p) =>
+         window.DawnForgetLearned.handleForgetConversationMemoriesResponse(p),
+      handleConversationLearned: (p) => window.DawnForgetLearned.handleConversationLearned(p),
 
       // LLM controls (delegated to Llm module)
       updateLlmControls: Llm.updateLlmControls,

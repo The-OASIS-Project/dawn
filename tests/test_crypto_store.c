@@ -28,6 +28,7 @@
 
 #include "config/dawn_config.h"
 #include "core/crypto_store.h"
+#include "llm/llm_key_tag.h"
 #include "unity.h"
 
 static char s_tmpdir[256];
@@ -213,6 +214,41 @@ static void test_shutdown_clears_ready(void) {
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
 
+/* ── Keyed digest / key tags ─────────────────────────────────────────────── */
+
+static void test_keyed_digest(void) {
+   unsigned char a[16], b[16], c[16], d[16];
+   TEST_ASSERT_EQUAL_INT(0, crypto_store_keyed_digest("test-ctx", "k1", 2, a, sizeof(a)));
+   TEST_ASSERT_EQUAL_INT(0, crypto_store_keyed_digest("test-ctx", "k1", 2, b, sizeof(b)));
+   TEST_ASSERT_EQUAL_MEMORY(a, b, sizeof(a));
+   TEST_ASSERT_EQUAL_INT(0, crypto_store_keyed_digest("test-ctx", "k2", 2, c, sizeof(c)));
+   TEST_ASSERT_NOT_EQUAL(0, memcmp(a, c, sizeof(a)));
+   /* Another purpose, another digest of the same input. */
+   TEST_ASSERT_EQUAL_INT(0, crypto_store_keyed_digest("other-cx", "k1", 2, d, sizeof(d)));
+   TEST_ASSERT_NOT_EQUAL(0, memcmp(a, d, sizeof(a)));
+   /* Not a plain hash: unkeyed BLAKE2b of the input differs. */
+   unsigned char plain[16];
+   crypto_generichash(plain, sizeof(plain), (const unsigned char *)"k1", 2, NULL, 0);
+   TEST_ASSERT_NOT_EQUAL(0, memcmp(a, plain, sizeof(a)));
+
+   TEST_ASSERT_EQUAL_INT(1, crypto_store_keyed_digest("short", "k1", 2, a, sizeof(a)));
+   TEST_ASSERT_EQUAL_INT(1, crypto_store_keyed_digest("test-ctx", "k1", 2, a, 8));
+   TEST_ASSERT_EQUAL_INT(1, crypto_store_keyed_digest("test-ctx", NULL, 2, a, sizeof(a)));
+}
+
+static void test_key_tag(void) {
+   char a[LLM_KEY_TAG_MAX], b[LLM_KEY_TAG_MAX], c[LLM_KEY_TAG_MAX];
+   llm_key_tag("sk-one", a, sizeof(a));
+   llm_key_tag("sk-one", b, sizeof(b));
+   llm_key_tag("sk-two", c, sizeof(c));
+   TEST_ASSERT_EQUAL_size_t(16, strlen(a));
+   TEST_ASSERT_EQUAL_STRING(a, b);
+   TEST_ASSERT_NOT_EQUAL(0, strcmp(a, c));
+   TEST_ASSERT_EQUAL_size_t(strspn(a, "0123456789abcdef"), strlen(a));
+   llm_key_tag(NULL, c, sizeof(c));
+   TEST_ASSERT_EQUAL_size_t(16, strlen(c));
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -231,6 +267,9 @@ int main(void) {
    RUN_TEST(test_encrypt_null_output);
    RUN_TEST(test_decrypt_null_input);
    RUN_TEST(test_decrypt_null_output);
+
+   RUN_TEST(test_keyed_digest);
+   RUN_TEST(test_key_tag);
 
    /* Shutdown must be last — pthread_once prevents re-init */
    RUN_TEST(test_shutdown_clears_ready);

@@ -41,6 +41,8 @@
 #include "core/focus/focus_source_internal.h"
 #include "dawn_error.h"
 #include "test_external_focus_adapters_mocks.h"
+#include "tools/document_embed_cache.h"
+#include "tools/document_rank.h"
 #include "tools/external_focus_adapters.h"
 #include "unity.h"
 
@@ -136,6 +138,7 @@ static void seed_occurrence(int idx,
       strncpy(o->event_uid, event_uid, sizeof(o->event_uid) - 1);
    o->dtstart = dtstart;
    o->dtend = dtstart + 3600;
+   o->event_id = id; /* one event per occurrence unless a test shares them */
    o->is_cancelled = false;
 }
 
@@ -230,7 +233,9 @@ static void test_document_adapter_shape(void) {
    focus_result_free(&result);
 }
 
-static void test_document_skipped_when_no_query_embedding(void) {
+/* Without a query embedding only the keyword channel runs; with no keyword hit
+ * nothing is returned. */
+static void test_document_no_embedding_without_keyword_hits(void) {
    seed_chunk(0, 1, 1, "anything", "f.txt", embed_v1, 1700000000);
    s_ext_mock.chunk_count = 1;
    s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
@@ -238,10 +243,9 @@ static void test_document_skipped_when_no_query_embedding(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   /* requires_embedding=true → framework skips the adapter. */
    TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", /*qembed*/ NULL, 0,
                                                 1700000000, 5, &result));
-   /* No chunk_search_load call should have fired. */
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_bm25);
    TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_chunk_search_load);
    for (int i = 0; i < result.candidate_count; i++)
       TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "document_chunk"));
@@ -272,6 +276,267 @@ static void test_document_cap_honoring(void) {
    focus_result_free(&result);
 }
 
+/* Relevance gate: with a corpus large enough for a baseline, only chunks that
+ * stand clearly above the corpus-typical similarity are injected. */
+static const float embed_baseline[EXT_MOCK_DIMS] = { 0.5f, 0.8660254f, 0.0f, 0.0f }; /* cos 0.5 */
+
+static void test_document_relevance_gate(void) {
+   seed_chunk(0, 500, 1, "the relevant passage", "answer.txt", embed_q, 1700000000);
+   for (int i = 1; i < EXT_MOCK_MAX_CHUNKS; i++) {
+      char text[32];
+      snprintf(text, sizeof(text), "typical chunk %d", i);
+      seed_chunk(i, 500 + i, 1, text, "other.txt", embed_baseline, 1700000000);
+   }
+   s_ext_mock.chunk_count = EXT_MOCK_MAX_CHUNKS;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   g_config.memory.focus_injection.document_min_relevance = 0.48f;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                /*per_source_max=*/5, &result));
+   int doc_count = 0;
+   const focus_candidate_t *only = NULL;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0) {
+         doc_count++;
+         only = &result.candidates[i];
+      }
+   }
+   /* 31 chunks at the corpus-typical similarity are gated out; the one that
+    * stands out is kept. */
+   TEST_ASSERT_EQUAL_INT(1, doc_count);
+   TEST_ASSERT_TRUE(strstr(only->text, "the relevant passage") != NULL);
+   focus_result_free(&result);
+
+   /* With the gate off, the typical chunks come back. */
+   g_config.memory.focus_injection.document_min_relevance = 0.0f;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                /*per_source_max=*/5, &result));
+   doc_count = 0;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         doc_count++;
+   TEST_ASSERT_TRUE(doc_count > 1);
+   focus_result_free(&result);
+}
+
+/* A corpus large enough for the semantic gate: one chunk that stands out, the
+ * rest at the corpus-typical similarity. */
+static void seed_gated_corpus(void) {
+   seed_chunk(0, 500, 1, "the relevant passage", "answer.txt", embed_q, 1700000000);
+   for (int i = 1; i < EXT_MOCK_MAX_CHUNKS; i++) {
+      char text[32];
+      snprintf(text, sizeof(text), "typical chunk %d", i);
+      seed_chunk(i, 500 + i, 1, text, "other.txt", embed_baseline, 1700000000);
+   }
+   s_ext_mock.chunk_count = EXT_MOCK_MAX_CHUNKS;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   g_config.memory.focus_injection.document_min_relevance = 0.48f;
+}
+
+static bool result_has_text(const focus_compose_result_t *r, const char *needle) {
+   for (int i = 0; i < r->candidate_count; i++) {
+      if (strcmp(r->candidates[i].source_id, "document_chunk") == 0 &&
+          strstr(r->candidates[i].text, needle) != NULL)
+         return true;
+   }
+   return false;
+}
+
+/* A note named in the query is found even when its similarity sits at the
+ * corpus-typical level (a short query's usual case), while a chunk that only
+ * shares a word in its body is still gated out. */
+static void test_document_label_match_passes_the_gate(void) {
+   seed_gated_corpus(); /* the stub pages by ascending id: keep 501/502 in place */
+   seed_chunk(1, 501, 1, "HARBOR LANE RELOCATION PROGRAM budget plan",
+              "Harbor Lane Relocation - Budget Plan", embed_baseline, 1700000000);
+   s_ext_mock.chunk_bm25[1] = 1.0f;
+   seed_chunk(2, 502, 1, "boats in the harbor during the dock relocation", "boats.txt",
+              embed_baseline, 1700000000);
+   s_ext_mock.chunk_bm25[2] = 0.9f;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "Harbor Lane Relocation", embed_q, EXT_MOCK_DIMS,
+                                       1700000000, /*per_source_max=*/5, &result));
+   TEST_ASSERT_TRUE(result_has_text(&result, "HARBOR LANE RELOCATION"));
+   TEST_ASSERT_TRUE(result_has_text(&result, "the relevant passage"));
+   TEST_ASSERT_FALSE(result_has_text(&result, "boats in the harbor"));
+   TEST_ASSERT_FALSE(result_has_text(&result, "typical chunk"));
+   focus_result_free(&result);
+}
+
+/* Without an embedding the label check still finds the named note; its
+ * semantic score is unknown rather than a made-up number. */
+static void test_document_keyword_only_finds_named_note(void) {
+   seed_chunk(0, 700, 1, "moving costs and lease details", "Harbor Lane Relocation", embed_baseline,
+              1700000000);
+   s_ext_mock.chunk_bm25[0] = 1.0f;
+   seed_chunk(1, 701, 1, "unrelated text", "other.txt", embed_baseline, 1700000000);
+   s_ext_mock.chunk_count = 2;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "harbor relocation", /*qembed*/ NULL, 0,
+                                                1700000000, 5, &result));
+   int docs = 0;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0) {
+         docs++;
+         TEST_ASSERT_TRUE(strstr(result.candidates[i].text, "moving costs") != NULL);
+         TEST_ASSERT_EQUAL_FLOAT(FOCUS_SCORE_NA, result.candidates[i].semantic_score);
+      }
+   }
+   TEST_ASSERT_EQUAL_INT(1, docs);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_chunk_search_load);
+   focus_result_free(&result);
+}
+
+/* One document can't fill every slot. */
+static void test_document_per_document_cap(void) {
+   for (int i = 0; i < 5; i++) {
+      char text[32];
+      snprintf(text, sizeof(text), "big note part %d", i);
+      seed_chunk(i, 800 + i, 1, text, "big.txt", embed_v1, 1700000000);
+      s_ext_mock.chunks[i].document_id = 80; /* all one document */
+   }
+   seed_chunk(5, 900, 1, "second document", "second.txt", embed_v1, 1700000000);
+   s_ext_mock.chunk_count = 6;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                /*per_source_max=*/6, &result));
+   int big = 0;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strstr(result.candidates[i].text, "big note part") != NULL)
+         big++;
+   }
+   TEST_ASSERT_EQUAL_INT(2, big);
+   TEST_ASSERT_TRUE(result_has_text(&result, "second document"));
+   focus_result_free(&result);
+}
+
+/* The shared ranker: fused score, a keyword-only hit scored by its real cosine
+ * (not 0), and the phrase bonus reaching a keyword hit outside the top by
+ * cosine. */
+static const float embed_mid[EXT_MOCK_DIMS] = { 0.6f, 0.8f, 0.0f, 0.0f }; /* cos 0.6 */
+
+static void test_document_rank_fuses_both_channels(void) {
+   seed_chunk(0, 10, 1, "alpha text", "a.txt", embed_q, 1700000000);
+   seed_chunk(1, 11, 1, "beta text", "b.txt", embed_v2, 1700000000);
+   seed_chunk(2, 12, 1, "quarterly budget review notes", "Budget Review", embed_mid, 1700000000);
+   s_ext_mock.chunk_bm25[2] = 0.8f;
+   s_ext_mock.chunk_count = 3;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   g_config.documents.hybrid_vector_weight = 0.7f;
+   g_config.documents.hybrid_keyword_weight = 0.3f;
+   g_config.documents.phrase_bonus_weight = 0.25f;
+
+   /* semantic_top 1: only chunk 10 comes from the semantic channel, so chunk
+    * 12 is a keyword-only hit whose cosine must still be its real 0.6. */
+   const document_rank_opts_t opts = { .semantic_top = 1,
+                                       .lexical_limit = 8,
+                                       .phrase_top = 1,
+                                       .body_phrase = false,
+                                       .temporal = false };
+   document_ranking_t r;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_rank_hybrid(1, "budget review", embed_q, EXT_MOCK_DIMS,
+                                                       &opts, &r));
+   TEST_ASSERT_EQUAL_INT(2, r.count);
+   TEST_ASSERT_EQUAL_INT(3, r.stats.pool);
+   TEST_ASSERT_EQUAL_INT(2, r.query_terms);
+
+   const document_ranked_t *kw = r.items[0].chunk_id == 12 ? &r.items[0] : &r.items[1];
+   const document_ranked_t *sem = r.items[0].chunk_id == 10 ? &r.items[0] : &r.items[1];
+   TEST_ASSERT_TRUE(kw->has_cosine);
+   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.6f, kw->cosine);
+   /* 0.7 * 0.6 + 0.3 * 0.8 + 0.25 * 1.0 (full label phrase) */
+   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.42f + 0.24f + 0.25f, kw->hybrid);
+   TEST_ASSERT_EQUAL_INT(2, kw->label_terms);
+   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.7f, sem->hybrid);
+   TEST_ASSERT_EQUAL_INT(0, sem->label_terms);
+   TEST_ASSERT_EQUAL_INT64(12, r.items[0].chunk_id); /* best fused first */
+   /* Text is read only for the chunks a caller keeps. */
+   TEST_ASSERT_NULL(r.items[0].text);
+   document_ranked_t *keep[] = { &r.items[0] };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_ranking_load_text(1, &r, keep, 1));
+   TEST_ASSERT_EQUAL_STRING("quarterly budget review notes", r.items[0].text);
+   TEST_ASSERT_NULL(r.items[1].text);
+   document_ranking_free(&r);
+   TEST_ASSERT_NULL(r.items);
+
+   /* Keywords only: no cosine, keyword + phrase still rank. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_rank_hybrid(1, "budget review", NULL, 0, &opts, &r));
+   TEST_ASSERT_EQUAL_INT(1, r.count);
+   TEST_ASSERT_FALSE(r.items[0].has_cosine);
+   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.24f + 0.25f, r.items[0].hybrid);
+   document_ranking_free(&r);
+}
+
+/* The label rule: content words only, stemmed, at least two or the only one. */
+static void test_document_label_rule(void) {
+   document_query_terms_t terms;
+   document_query_terms("What's the Harbor Lane Relocation?", &terms);
+   TEST_ASSERT_EQUAL_INT(3, terms.count); /* what / s / the are dropped */
+   TEST_ASSERT_EQUAL_INT(3, document_label_terms(&terms, "Harbor Lane Relocation - Budget"));
+   TEST_ASSERT_EQUAL_INT(1, document_label_terms(&terms, "Harbor camera notes"));
+   TEST_ASSERT_EQUAL_INT(0, document_label_terms(&terms, "Garden Planting Schedule"));
+
+   document_query_terms("relocations", &terms); /* stems match the label's */
+   TEST_ASSERT_EQUAL_INT(1, terms.count);
+   TEST_ASSERT_EQUAL_INT(1, document_label_terms(&terms, "Lane Relocation"));
+
+   /* Both sides split words the same way: underscores separate, non-ASCII
+    * letters don't. */
+   document_query_terms("tax return", &terms);
+   TEST_ASSERT_EQUAL_INT(2, document_label_terms(&terms, "Tax_Return_2024.pdf"));
+   document_query_terms("r\xc3\xa9sum\xc3\xa9 draft", &terms);
+   TEST_ASSERT_EQUAL_INT(2, terms.count);
+   TEST_ASSERT_EQUAL_INT(2, document_label_terms(&terms, "r\xc3\xa9sum\xc3\xa9 (draft)"));
+   TEST_ASSERT_EQUAL_INT(0, document_label_terms(&terms, "Sum of costs"));
+
+   /* A long message of repeated words still reaches a name at its end. */
+   {
+      char msg[8192];
+      size_t off = 0;
+      for (int i = 0; i < 1200; i++) {
+         off += (size_t)snprintf(msg + off, sizeof(msg) - off, "spam ");
+      }
+      snprintf(msg + off, sizeof(msg) - off, "harbor relocation");
+      document_query_terms(msg, &terms);
+      TEST_ASSERT_EQUAL_INT(3, terms.count);
+      TEST_ASSERT_EQUAL_INT(2, document_label_terms(&terms, "Harbor Lane Relocation"));
+   }
+
+   /* Curly quotes and dashes separate words; accented capitals fold. */
+   document_query_terms("show me \xe2\x80\x9cmarigold project plan\xe2\x80\x9d", &terms);
+   TEST_ASSERT_EQUAL_INT(3,
+                         document_label_terms(&terms, "Marigold Project Plan \xe2\x80\x94 Primer"));
+   /* Letters and digits from the Latin-1 block stay in their word. */
+   document_query_terms("m\xc2\xb2 pricing", &terms);
+   TEST_ASSERT_EQUAL_INT(2, terms.count);
+   TEST_ASSERT_EQUAL_INT(2, document_label_terms(&terms, "Office m\xc2\xb2 pricing"));
+   TEST_ASSERT_EQUAL_INT(1, document_label_terms(&terms, "m pricing"));
+   document_query_terms("R\xc3\x89SUM\xc3\x89", &terms);
+   TEST_ASSERT_EQUAL_INT(1, document_label_terms(&terms, "r\xc3\xa9sum\xc3\xa9"));
+
+   TEST_ASSERT_TRUE(document_label_matches(3, 3));
+   TEST_ASSERT_TRUE(document_label_matches(2, 5));
+   TEST_ASSERT_FALSE(document_label_matches(1, 3));
+   TEST_ASSERT_TRUE(document_label_matches(1, 1));
+   TEST_ASSERT_FALSE(document_label_matches(0, 0));
+}
+
 /* =====================================================================
  * 6-10.  Calendar adapter happy paths
  * ===================================================================== */
@@ -284,9 +549,11 @@ static void test_calendar_range_only_path(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   /* query_text NULL → search path NOT consulted. */
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   /* A schedule question: the window's pull, plus the named-event lookup. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_events_nearest);
    TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
    const focus_candidate_t *fc = NULL;
    for (int i = 0; i < result.candidate_count; i++)
@@ -299,25 +566,29 @@ static void test_calendar_range_only_path(void) {
    focus_result_free(&result);
 }
 
-static void test_calendar_search_path_assigns_semantic_score(void) {
+/* An event the message names is found outside any window it asks about, and
+ * scores by how much of its title matched ("Pepper" is one of two distinctive
+ * words in "Pepper birthday": 0.5 + 0.2 * 0.5). */
+static void test_calendar_named_event_found_beyond_the_window(void) {
    const time_t now = 1700000000;
    const int64_t cal = seed_basic_user_calendar(1);
-   /* The occurrence is OUTSIDE the 1d-past..7d-future range so the
-    * range path won't surface it; only the search path will.  The
-    * adapter then assigns the search-hit semantic score (0.7). */
    seed_occurrence(0, 5000, cal, "Pepper birthday", now + 30 * 86400, "uid-x");
    s_ext_mock.occurrence_count = 1;
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "Pepper", NULL, 0, now, 5, &result));
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_search);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when is Pepper's party?", NULL, 0, now,
+                                                5, &result));
+   /* No time asked about: the named-event lookup only. */
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_events_nearest);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
    const focus_candidate_t *fc = NULL;
    for (int i = 0; i < result.candidate_count; i++)
       if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
          fc = &result.candidates[i];
    TEST_ASSERT_NOT_NULL(fc);
-   TEST_ASSERT_TRUE(fc->semantic_score > 0.6f && fc->semantic_score < 0.8f);
+   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.6f, fc->semantic_score);
    focus_result_free(&result);
 }
 
@@ -330,8 +601,8 @@ static void test_calendar_consulted_without_query_embedding(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
    /* requires_embedding=false → adapter STILL consulted with NULL embed. */
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         focus_compose(1, false, NULL, /*qembed*/ NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", /*qembed*/ NULL,
+                                                0, now, 5, &result));
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
    bool saw = false;
    for (int i = 0; i < result.candidate_count; i++)
@@ -341,7 +612,165 @@ static void test_calendar_consulted_without_query_embedding(void) {
    focus_result_free(&result);
 }
 
-static void test_calendar_empty_query_text_takes_range_path(void) {
+static bool has_event(const focus_compose_result_t *r, const char *needle) {
+   for (int i = 0; i < r->candidate_count; i++) {
+      if (strcmp(r->candidates[i].source_id, "calendar_event") == 0 &&
+          strstr(r->candidates[i].text, needle) != NULL)
+         return true;
+   }
+   return false;
+}
+
+/* A message about something else gets no calendar, however soon the events;
+ * asked about tomorrow, it gets tomorrow's and not next week's. */
+static void test_calendar_time_aware(void) {
+   setenv("TZ", "UTC", 1);
+   tzset();
+   const time_t now = 1790769600; /* Wednesday 12:00 UTC */
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Pottery class", now + 3600, NULL);
+   seed_occurrence(1, 5001, cal, "Chiropractor", now + 86400, NULL);
+   seed_occurrence(2, 5002, cal, "Choir practice", now + 6 * 86400, NULL);
+   s_ext_mock.occurrence_count = 3;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "recall the marigold project plan", NULL,
+                                                0, now, 10, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "Pottery"));
+   TEST_ASSERT_FALSE(has_event(&result, "Chiropractor"));
+   focus_result_free(&result);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's tomorrow look like", NULL, 0, now,
+                                                10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "Chiropractor"));
+   TEST_ASSERT_FALSE(has_event(&result, "Pottery"));
+   TEST_ASSERT_FALSE(has_event(&result, "Choir practice"));
+   focus_result_free(&result);
+
+   /* Named, an event outside any window still comes back. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when is choir practice", NULL, 0, now,
+                                                10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "Choir practice"));
+   TEST_ASSERT_FALSE(has_event(&result, "Chiropractor"));
+   focus_result_free(&result);
+   unsetenv("TZ");
+   tzset();
+}
+
+/* Events created separately under one title count as one title: the nearest
+ * stands for them, and a word they share is still unique among titles. */
+static void test_calendar_shared_titles(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Choir practice", now + 9 * 86400, NULL);
+   seed_occurrence(1, 5001, cal, "Choir practice", now + 2 * 86400, NULL);
+   seed_occurrence(2, 5002, cal, "Choir fundraiser", now + 20 * 86400, NULL);
+   s_ext_mock.occurrence_count = 3;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "when is practice", NULL, 0, now, 10, &result));
+   int practices = 0;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0 &&
+          strstr(result.candidates[i].text, "Choir practice")) {
+         practices++;
+         TEST_ASSERT_EQUAL_STRING("calendar_occ:5001", result.candidates[i].item_id);
+      }
+   }
+   TEST_ASSERT_EQUAL_INT(1, practices);
+   TEST_ASSERT_FALSE(has_event(&result, "fundraiser"));
+   focus_result_free(&result);
+}
+
+/* All-day events: in a window by date, found by name, shown as a date. */
+static void test_calendar_all_day_events(void) {
+   setenv("TZ", "America/New_York", 1);
+   tzset();
+   const time_t now = 1790769600; /* Wednesday 2026-09-30 08:00 EDT */
+   const int64_t cal = seed_basic_user_calendar(1);
+   /* Stored like the sync does: dtstart/dtend at the date's UTC midnight. */
+   seed_occurrence(0, 5000, cal, "Quilt regatta", 1790812800, NULL); /* 2026-10-01 */
+   s_ext_mock.occurrences[0].all_day = true;
+   s_ext_mock.occurrences[0].dtend = 1790812800 + 86400;
+   snprintf(s_ext_mock.occurrences[0].dtstart_date, sizeof(s_ext_mock.occurrences[0].dtstart_date),
+            "2026-10-01");
+   snprintf(s_ext_mock.occurrences[0].dtend_date, sizeof(s_ext_mock.occurrences[0].dtend_date),
+            "2026-10-02");
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   /* Today's window doesn't reach it (its UTC midnight is today evening locally). */
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "what's on today", NULL, 0, now, 10, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "Quilt"));
+   focus_result_free(&result);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "anything tomorrow", NULL, 0, now, 10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "[2026-10-01 all day] Quilt regatta"));
+   focus_result_free(&result);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when is the quilt regatta", NULL, 0, now,
+                                                10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "all day] Quilt regatta"));
+   focus_result_free(&result);
+   unsetenv("TZ");
+   tzset();
+}
+
+/* The assistant named after a weekday: addressing it isn't asking about that
+ * day, placing the word as a day is.  A failed named-event lookup still
+ * leaves the window's events. */
+static void test_calendar_assistant_weekday_name(void) {
+   setenv("TZ", "UTC", 1);
+   tzset();
+   const time_t now = 1790769600; /* Wednesday 12:00 UTC */
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Pottery class", now + 2 * 86400, NULL); /* Friday */
+   s_ext_mock.occurrence_count = 1;
+   snprintf(g_config.general.ai_name, sizeof(g_config.general.ai_name), "friday");
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "friday, what's the weather", NULL, 0,
+                                                now, 10, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "Pottery"));
+   focus_result_free(&result);
+
+   s_ext_mock.fail_events_nearest = true;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "friday, anything on friday", NULL, 0,
+                                                now, 10, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "Pottery"));
+   focus_result_free(&result);
+   g_config.general.ai_name[0] = '\0';
+   unsetenv("TZ");
+   tzset();
+}
+
+/* A generic word ("call") doesn't name an event; a distinctive one does. */
+static void test_calendar_generic_title_words(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "Call with the bank", now + 20 * 86400, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "call mom", NULL, 0, now, 5, &result));
+   TEST_ASSERT_FALSE(has_event(&result, "bank"));
+   focus_result_free(&result);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "when do I talk to the bank", NULL, 0,
+                                                now, 5, &result));
+   TEST_ASSERT_TRUE(has_event(&result, "bank"));
+   focus_result_free(&result);
+}
+
+/* An empty message asks about nothing: no calendar. */
+static void test_calendar_empty_query_returns_nothing(void) {
    const time_t now = 1700000000;
    const int64_t cal = seed_basic_user_calendar(1);
    seed_occurrence(0, 5000, cal, "lunch", now + 3600, NULL);
@@ -349,10 +778,11 @@ static void test_calendar_empty_query_text_takes_range_path(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   /* "" → adapter treats as no query, takes range-only path. */
    TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "", NULL, 0, now, 5, &result));
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
-   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_events_nearest);
+   for (int i = 0; i < result.candidate_count; i++)
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "calendar_event"));
    focus_result_free(&result);
 }
 
@@ -369,7 +799,8 @@ static void test_calendar_inactive_calendar_excluded(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 10, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 10,
+                                                &result));
    bool saw_active = false, saw_inactive = false;
    for (int i = 0; i < result.candidate_count; i++) {
       if (strcmp(result.candidates[i].source_id, "calendar_event") != 0)
@@ -455,10 +886,41 @@ static void test_no_network_calls_during_compose(void) {
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_chunk_search_load);
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_account_list);
    TEST_ASSERT_TRUE(s_ext_mock.call_count_calendar_list >= 1);
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
-   /* search path also fires because query_text was non-empty. */
-   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_search);
+   /* No time asked about: only the named-event lookup reads occurrences. */
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_events_nearest);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
    focus_result_free(&result);
+}
+
+/* The chunk-embedding cache reads the database once per generation: a second
+ * turn reuses it, and a change (new generation) or another user rebuilds it. */
+static void test_document_embedding_cache_reuse(void) {
+   const time_t now = 1700000000;
+   seed_chunk(0, 1, 1, "doc", "f.txt", embed_v1, now);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   s_ext_mock.pin_generation = true;
+   s_ext_mock.generation = 1000;
+   document_embed_cache_shutdown(); /* no copy from an earlier test */
+
+   document_chunk_score_t top[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(1, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(1, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_chunk_search_load);
+
+   s_ext_mock.generation++;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(1, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(2, s_ext_mock.call_count_chunk_search_load);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(2, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(3, s_ext_mock.call_count_chunk_search_load);
+   TEST_ASSERT_EQUAL_INT(0, n); /* the chunk is user 1's */
+
+   document_embed_cache_shutdown();
 }
 
 /* =====================================================================
@@ -490,7 +952,10 @@ static void test_calendar_failure_zeros_outparams(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   /* A schedule question, so the failing window pull is reached. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
    for (int i = 0; i < result.candidate_count; i++)
       TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "calendar_event"));
    focus_result_free(&result);
@@ -516,7 +981,8 @@ static void test_calendar_multi_account_cap(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 32, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 32,
+                                                &result));
    /* Only 3 calendar_list calls fire (cap = EXTERNAL_MAX_ACCOUNTS_PER_COMPOSE). */
    TEST_ASSERT_EQUAL_INT(3, s_ext_mock.call_count_calendar_list);
    /* Only the first-3 accounts' events surface. */
@@ -571,7 +1037,8 @@ static void test_calendar_item_id_never_contains_ical_uid(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
    const focus_candidate_t *fc = NULL;
    for (int i = 0; i < result.candidate_count; i++)
       if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
@@ -597,7 +1064,8 @@ static void test_calendar_today_higher_recency_than_far_future(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 10, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 10,
+                                                &result));
    const focus_candidate_t *today = NULL, *future = NULL;
    for (int i = 0; i < result.candidate_count; i++) {
       if (strcmp(result.candidates[i].source_id, "calendar_event") != 0)
@@ -623,7 +1091,8 @@ static void test_calendar_yesterday_still_surfaces(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "what's on my calendar", NULL, 0, now, 5,
+                                                &result));
    bool saw = false;
    for (int i = 0; i < result.candidate_count; i++)
       if (strcmp(result.candidates[i].source_id, "calendar_event") == 0 &&
@@ -673,8 +1142,8 @@ static void test_end_to_end_compose_with_both_adapters(void) {
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
    focus_compose_result_t result = { 0 };
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         focus_compose(1, false, "doc", embed_q, EXT_MOCK_DIMS, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "the doc and my calendar", embed_q,
+                                                EXT_MOCK_DIMS, now, 5, &result));
    bool saw_doc = false, saw_cal = false;
    for (int i = 0; i < result.candidate_count; i++) {
       if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
@@ -826,14 +1295,25 @@ int main(void) {
 
    /* Document adapter happy paths */
    RUN_TEST(test_document_adapter_shape);
-   RUN_TEST(test_document_skipped_when_no_query_embedding);
+   RUN_TEST(test_document_no_embedding_without_keyword_hits);
    RUN_TEST(test_document_cap_honoring);
+   RUN_TEST(test_document_relevance_gate);
+   RUN_TEST(test_document_label_match_passes_the_gate);
+   RUN_TEST(test_document_keyword_only_finds_named_note);
+   RUN_TEST(test_document_per_document_cap);
+   RUN_TEST(test_document_label_rule);
+   RUN_TEST(test_document_rank_fuses_both_channels);
 
    /* Calendar adapter happy paths */
    RUN_TEST(test_calendar_range_only_path);
-   RUN_TEST(test_calendar_search_path_assigns_semantic_score);
+   RUN_TEST(test_calendar_named_event_found_beyond_the_window);
    RUN_TEST(test_calendar_consulted_without_query_embedding);
-   RUN_TEST(test_calendar_empty_query_text_takes_range_path);
+   RUN_TEST(test_calendar_empty_query_returns_nothing);
+   RUN_TEST(test_calendar_time_aware);
+   RUN_TEST(test_calendar_generic_title_words);
+   RUN_TEST(test_calendar_shared_titles);
+   RUN_TEST(test_calendar_all_day_events);
+   RUN_TEST(test_calendar_assistant_weekday_name);
    RUN_TEST(test_calendar_inactive_calendar_excluded);
 
    /* Empty-result behavior */
@@ -843,6 +1323,7 @@ int main(void) {
 
    /* Network-call invariant */
    RUN_TEST(test_no_network_calls_during_compose);
+   RUN_TEST(test_document_embedding_cache_reuse);
 
    /* Failure / partial-failure cleanup */
    RUN_TEST(test_document_failure_zeros_outparams);

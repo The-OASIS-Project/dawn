@@ -41,6 +41,7 @@
 
 #include "dawn_error.h"
 #include "logging.h"
+#include "tools/mcp_result.h"
 #include "tools/mcp_transport.h"
 
 #define MCP_PENDING_MAX 64
@@ -69,6 +70,7 @@ typedef struct {
    char *result; /* malloc'd result/error JSON (ownership moves to caller). */
    mcp_progress_fn progress_cb;
    void *progress_user;
+   bool tool_call; /* a tools/call: its result is delivered as the model reads it */
 } mcp_pending_t;
 
 struct mcp_client {
@@ -128,7 +130,11 @@ static void cond_init_monotonic(pthread_cond_t *cv) {
  * Pending table (all ops assume pending_mtx is held unless noted)
  * -------------------------------------------------------------------------- */
 
-static mcp_pending_t *pending_add(mcp_client_t *c, uint64_t id, mcp_progress_fn cb, void *user) {
+static mcp_pending_t *pending_add(mcp_client_t *c,
+                                  uint64_t id,
+                                  mcp_progress_fn cb,
+                                  void *user,
+                                  bool tool_call) {
    if (c->pending_count >= MCP_PENDING_MAX) {
       return NULL;
    }
@@ -142,6 +148,7 @@ static mcp_pending_t *pending_add(mcp_client_t *c, uint64_t id, mcp_progress_fn 
    cond_init_monotonic(&p->cv);
    p->progress_cb = cb;
    p->progress_user = user;
+   p->tool_call = tool_call;
    c->pending[c->pending_count++] = p; /* monotonic ids => append keeps sorted */
    return p;
 }
@@ -274,6 +281,15 @@ static void handle_progress_notification(mcp_client_t *c, struct json_object *pa
    dispatch_progress(c, token, percent, message);
 }
 
+/* Whether request @p id is a tools/call (false once it is gone). */
+static bool pending_is_tool_call(mcp_client_t *c, uint64_t id) {
+   pthread_mutex_lock(&c->pending_mtx);
+   int idx = 0;
+   const bool tool_call = pending_index(c, id, &idx) == SUCCESS && c->pending[idx]->tool_call;
+   pthread_mutex_unlock(&c->pending_mtx);
+   return tool_call;
+}
+
 static void client_on_message(void *user, const char *json, size_t len) {
    mcp_client_t *c = (mcp_client_t *)user;
    (void)len;
@@ -294,7 +310,14 @@ static void client_on_message(void *user, const char *json, size_t len) {
       struct json_object *err = NULL;
       if (json_object_object_get_ex(root, "error", &err)) {
          deliver_response(c, id, strdup(json_object_to_json_string(err)), MCP_ERR_RPC);
+      } else if (json_object_object_get_ex(root, "result", &res) && pending_is_tool_call(c, id)) {
+         /* A tool's result as the model reads it, made from the tree already
+          * parsed here (mcp_result.h); a tool's own failure (isError) is data. */
+         bool tool_error = false;
+         char *text = mcp_result_text(res, &tool_error);
+         deliver_response(c, id, text, !text ? FAILURE : tool_error ? MCP_ERR_TOOL : SUCCESS);
       } else if (json_object_object_get_ex(root, "result", &res)) {
+         /* Any other method: the result's JSON ("null" for a null result). */
          deliver_response(c, id, strdup(json_object_to_json_string(res)), SUCCESS);
       } else {
          deliver_response(c, id, strdup("{}"), SUCCESS);
@@ -402,7 +425,7 @@ static int do_request(mcp_client_t *c,
    const char *body = json_object_to_json_string(req);
 
    pthread_mutex_lock(&c->pending_mtx);
-   mcp_pending_t *p = pending_add(c, id, cb, cb_user);
+   mcp_pending_t *p = pending_add(c, id, cb, cb_user, strcmp(method, "tools/call") == 0);
    pthread_mutex_unlock(&c->pending_mtx);
    if (p == NULL) {
       OLOG_WARNING("MCP %s: pending table full (backpressure)", c->name);
@@ -442,7 +465,8 @@ static int do_request(mcp_client_t *c,
    pending_remove(c, p);
    pthread_mutex_unlock(&c->pending_mtx);
 
-   if (status == SUCCESS && result_out != NULL) {
+   /* A tool's own failure (MCP_ERR_TOOL) carries its text as the result. */
+   if ((status == SUCCESS || status == MCP_ERR_TOOL) && result_out != NULL) {
       *result_out = result;
       result = NULL;
    }

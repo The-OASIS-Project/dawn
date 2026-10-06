@@ -53,6 +53,10 @@
  * statements (auth_db_statements.c). */
 #define BLOB_CLEANUP_BATCH_SIZE 100
 
+/* Batches one orphan sweep walks at most (the rest wait for the next sweep):
+ * each batch asks what holds it, which walks every live session. */
+#define BLOB_ORPHAN_SWEEP_MAX_BATCHES 50
+
 /* Bind params on the create statement: 8 fixed (id, user_id, source/kind,
  * retention, mime, size, filename, created_at) plus one each for the optional
  * content_hash / filename_original columns (see blob_store_save).  Validated
@@ -257,6 +261,25 @@ int blob_store_count_user(blob_store_handle_t handle, int user_id, int *count_ou
    return BLOB_STORE_SUCCESS;
 }
 
+/** @brief A user's rows of @p source (stmts->count_user_source) into
+ *  *@p count_out.  BLOB_STORE_FAILURE when they can't be counted: a cap
+ *  that can't be checked refuses the save (fails closed). */
+static int count_user_source(blob_store_table_t *t, int user_id, int source, int *count_out) {
+   *count_out = 0;
+   AUTH_DB_LOCK_OR_RETURN(BLOB_STORE_FAILURE);
+   sqlite3_stmt *st = t->stmts->count_user_source;
+   sqlite3_reset(st);
+   sqlite3_bind_int(st, 1, user_id);
+   sqlite3_bind_int(st, 2, source);
+   const int rc = sqlite3_step(st);
+   if (rc == SQLITE_ROW) {
+      *count_out = sqlite3_column_int(st, 0);
+   }
+   sqlite3_reset(st);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_ROW ? BLOB_STORE_SUCCESS : BLOB_STORE_FAILURE;
+}
+
 /** @brief Sum of stored bytes for a user (aggregate budget); 0 if unsupported. */
 static int64_t sum_bytes_user_locked(blob_store_table_t *t, int user_id) {
    if (!t->stmts->sum_bytes_user) {
@@ -346,10 +369,30 @@ int blob_store_save(blob_store_handle_t handle,
 
    /* Caps (only on a genuine new write; skip system-wide user_id == 0). */
    if (user_id > 0) {
-      if (t->max_per_user > 0) {
+      const bool apart = t->apart_max_per_user > 0 && t->stmts->count_user_source;
+      if (apart && source == t->apart_source) {
+         int held = 0;
+         if (count_user_source(t, user_id, source, &held) != BLOB_STORE_SUCCESS) {
+            OLOG_WARNING("Blob store [%s]: user %d's count of source %d unreadable; save "
+                         "refused",
+                         t->name ? t->name : "?", user_id, source);
+            return BLOB_STORE_FAILURE;
+         }
+         if (held >= t->apart_max_per_user) {
+            return BLOB_STORE_LIMIT_EXCEEDED;
+         }
+      } else if (t->max_per_user > 0) {
          int count = 0;
          if (blob_store_count_user(handle, user_id, &count) != BLOB_STORE_SUCCESS) {
             return BLOB_STORE_FAILURE;
+         }
+         if (apart) {
+            int apart_count = 0;
+            if (count_user_source(t, user_id, t->apart_source, &apart_count) !=
+                BLOB_STORE_SUCCESS) {
+               return BLOB_STORE_FAILURE;
+            }
+            count -= apart_count;
          }
          if (count >= t->max_per_user) {
             return BLOB_STORE_LIMIT_EXCEEDED;
@@ -630,6 +673,20 @@ int blob_store_delete(blob_store_handle_t handle, const char *id, int user_id) {
    return BLOB_STORE_SUCCESS;
 }
 
+int blob_store_unlink_file(blob_store_handle_t handle, const char *filename) {
+   blob_store_table_t *t = tbl(handle);
+   if (!t || !s_blob.initialized || !filename || !blob_validate_db_filename(filename)) {
+      return BLOB_STORE_INVALID;
+   }
+   char filepath[BLOB_PATH_MAX];
+   build_filepath(s_blob.dirs[handle], filename, filepath, sizeof(filepath));
+   if (unlink(filepath) != 0 && errno != ENOENT) {
+      OLOG_WARNING("Blob store: failed to unlink %s: %s", filepath, strerror(errno));
+      return BLOB_STORE_FAILURE;
+   }
+   return BLOB_STORE_SUCCESS;
+}
+
 int blob_store_delete_user(blob_store_handle_t handle, int user_id) {
    blob_store_table_t *t = tbl(handle);
    if (!t) {
@@ -826,6 +883,40 @@ int blob_store_cleanup(blob_store_handle_t handle, int *deleted_out) {
    return BLOB_STORE_SUCCESS;
 }
 
+/* Delete the batch's rows not marked @p skip, in one transaction: through
+ * stmts->delete_orphan (which refuses a row no longer an orphan) when set,
+ * else delete_by_id.  @p gone marks those deleted.  Caller holds the lock. */
+static int delete_orphans_locked(blob_store_table_t *t,
+                                 char ids[][BLOB_ID_LEN],
+                                 const bool *skip,
+                                 bool *gone,
+                                 int batch) {
+   sqlite3_stmt *del = t->stmts->delete_orphan ? t->stmts->delete_orphan : t->stmts->delete_by_id;
+   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+      return 0;
+   }
+   int n = 0;
+   bool ok = true;
+   for (int i = 0; i < batch && ok; i++) {
+      gone[i] = false;
+      if (skip[i]) {
+         continue;
+      }
+      sqlite3_reset(del);
+      sqlite3_bind_text(del, 1, ids[i], -1, SQLITE_STATIC);
+      ok = sqlite3_step(del) == SQLITE_DONE;
+      gone[i] = ok && sqlite3_changes(s_db.db) > 0;
+      sqlite3_reset(del);
+      n += gone[i] ? 1 : 0;
+   }
+   if (!ok || sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      memset(gone, 0, (size_t)batch * sizeof(*gone));
+      return 0;
+   }
+   return n;
+}
+
 int blob_store_cleanup_orphans(blob_store_handle_t handle, int grace_sec, int *deleted_out) {
    if (deleted_out) {
       *deleted_out = 0;
@@ -837,40 +928,66 @@ int blob_store_cleanup_orphans(blob_store_handle_t handle, int grace_sec, int *d
    if (!s_blob.initialized || !t->stmts->get_orphan_ids) {
       return BLOB_STORE_SUCCESS; /* table has no orphan concept */
    }
+   /* Asking whether something still holds an orphan takes other locks: the
+    * batch is chosen, then deleted under a second hold of the lock, through
+    * a delete that refuses a row that stopped being an orphan in between. */
+   const bool ask = t->orphans_held && t->stmts->delete_orphan;
    const char *dir = s_blob.dirs[handle];
    time_t cutoff = time(NULL) - (time_t)grace_sec;
    int total_deleted = 0;
+   /* The last row seen: the next batch starts past it, so rows kept (held,
+    * or refused by the delete) are passed, not chosen again. */
+   int64_t last_ts = INT64_MIN;
+   char last_id[BLOB_ID_LEN] = "";
 
-   /* Batches of 100; loop until a pass finds none (drains a large backlog). */
-   for (;;) {
-      AUTH_DB_LOCK_OR_RETURN(BLOB_STORE_FAILURE);
-      sqlite3_reset(t->stmts->get_orphan_ids);
-      sqlite3_bind_int64(t->stmts->get_orphan_ids, 1, (int64_t)cutoff);
+   for (int pass = 0; pass < BLOB_ORPHAN_SWEEP_MAX_BATCHES; pass++) {
       char ids[BLOB_CLEANUP_BATCH_SIZE][BLOB_ID_LEN];
       char filenames[BLOB_CLEANUP_BATCH_SIZE][BLOB_FILENAME_MAX];
+      int owners[BLOB_CLEANUP_BATCH_SIZE];
+      bool held[BLOB_CLEANUP_BATCH_SIZE] = { false };
+      bool gone[BLOB_CLEANUP_BATCH_SIZE] = { false };
       int batch = 0;
-      while (sqlite3_step(t->stmts->get_orphan_ids) == SQLITE_ROW &&
-             batch < BLOB_CLEANUP_BATCH_SIZE) {
-         const char *cid = (const char *)sqlite3_column_text(t->stmts->get_orphan_ids, 0);
-         const char *fn = (const char *)sqlite3_column_text(t->stmts->get_orphan_ids, 1);
+      int rows = 0;
+
+      AUTH_DB_LOCK_OR_RETURN(BLOB_STORE_FAILURE);
+      sqlite3_stmt *st = t->stmts->get_orphan_ids;
+      sqlite3_reset(st);
+      sqlite3_bind_int64(st, 1, (int64_t)cutoff);
+      sqlite3_bind_int64(st, 2, last_ts);
+      sqlite3_bind_text(st, 3, last_id, -1, SQLITE_TRANSIENT);
+      while (rows < BLOB_CLEANUP_BATCH_SIZE && sqlite3_step(st) == SQLITE_ROW) {
+         rows++;
+         const char *cid = (const char *)sqlite3_column_text(st, 0);
+         const char *fn = (const char *)sqlite3_column_text(st, 1);
+         if (cid) {
+            last_ts = sqlite3_column_int64(st, 2);
+            safe_strscpy(last_id, cid);
+         }
          if (cid && fn && blob_validate_db_filename(fn)) {
             safe_strscpy(ids[batch], cid);
             safe_strscpy(filenames[batch], fn);
+            owners[batch] = sqlite3_column_int(st, 3);
             batch++;
          }
       }
-      sqlite3_reset(t->stmts->get_orphan_ids);
-
-      /* Delete by id only (orphan sweep has no owner handy). */
-      for (int i = 0; i < batch; i++) {
-         sqlite3_reset(t->stmts->delete_by_id);
-         sqlite3_bind_text(t->stmts->delete_by_id, 1, ids[i], -1, SQLITE_STATIC);
-         sqlite3_step(t->stmts->delete_by_id);
-         sqlite3_reset(t->stmts->delete_by_id);
+      sqlite3_reset(st);
+      sqlite3_clear_bindings(st);
+      if (ask && batch > 0) {
+         AUTH_DB_UNLOCK();
+         const char *names[BLOB_CLEANUP_BATCH_SIZE];
+         for (int i = 0; i < batch; i++) {
+            names[i] = ids[i];
+         }
+         t->orphans_held(names, owners, batch, held);
+         AUTH_DB_LOCK_OR_RETURN(BLOB_STORE_FAILURE);
       }
+      const int deleted = batch > 0 ? delete_orphans_locked(t, ids, held, gone, batch) : 0;
       AUTH_DB_UNLOCK();
 
       for (int i = 0; i < batch; i++) {
+         if (!gone[i]) {
+            continue;
+         }
          char filepath[BLOB_PATH_MAX];
          build_filepath(dir, filenames[i], filepath, sizeof(filepath));
          if (unlink(filepath) != 0 && errno != ENOENT) {
@@ -878,9 +995,14 @@ int blob_store_cleanup_orphans(blob_store_handle_t handle, int grace_sec, int *d
                          strerror(errno));
          }
       }
-      total_deleted += batch;
-      if (batch < BLOB_CLEANUP_BATCH_SIZE) {
-         break;
+      total_deleted += deleted;
+      if (rows < BLOB_CLEANUP_BATCH_SIZE) {
+         break; /* drained */
+      }
+      if (pass == BLOB_ORPHAN_SWEEP_MAX_BATCHES - 1) {
+         OLOG_INFO("Blob store [%s]: orphan sweep stopped after %d batches; the next sweep "
+                   "goes on",
+                   t->name ? t->name : "?", BLOB_ORPHAN_SWEEP_MAX_BATCHES);
       }
    }
 

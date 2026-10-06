@@ -346,6 +346,7 @@ static void parse_vad(toml_table_t *table, vad_config_t *config) {
                                              "end_of_speech_duration",
                                              "max_recording_duration",
                                              "preroll_ms",
+                                             "adaptive_endpoint",
                                              "chunking",
                                              NULL };
    warn_unknown_keys(table, "vad", known_keys);
@@ -356,6 +357,9 @@ static void parse_vad(toml_table_t *table, vad_config_t *config) {
    PARSE_DOUBLE(table, "end_of_speech_duration", config->end_of_speech_duration);
    PARSE_DOUBLE(table, "max_recording_duration", config->max_recording_duration);
    PARSE_INT(table, "preroll_ms", config->preroll_ms);
+   PARSE_STRING(table, "adaptive_endpoint", config->adaptive_endpoint);
+
+   config_clamp_vad(config);
 
    /* Parse [vad.chunking] sub-table */
    toml_table_t *chunking = toml_table_in(table, "chunking");
@@ -789,7 +793,14 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    PARSE_STRING(table, "compact_provider", config->compact_provider);
    PARSE_STRING(table, "compact_model", config->compact_model);
 
-   PARSE_BOOL(table, "conversation_logging", config->conversation_logging);
+   /* Retired: nothing wrote the log any more.  Still a known key, so an older
+    * dawn.toml that sets it gets this note once, not a typo warning. */
+   static bool s_conversation_logging_warned = false;
+   if (toml_key_exists(table, "conversation_logging") && !s_conversation_logging_warned) {
+      s_conversation_logging_warned = true;
+      OLOG_WARNING("[llm] conversation_logging is retired and ignored: conversations are kept in "
+                   "the database (see UPGRADING.md)");
+   }
    PARSE_BOOL(table, "rate_limit_enabled", config->rate_limit_enabled);
    PARSE_INT(table, "rate_limit_rpm", config->rate_limit_rpm);
 
@@ -1176,8 +1187,16 @@ static void parse_vision(toml_table_t *table, vision_config_t *config) {
    PARSE_INT(table, "max_images", config->max_images);
    CONFIG_CLAMP(config->max_images, 1, 10);
 
-   PARSE_INT(table, "capture_history_count", config->capture_history_count);
-   CONFIG_CLAMP(config->capture_history_count, 0, 50);
+   /* Retired: a tool's images stay in the history (inside its result) until a
+    * compaction summarizes them; the model's per-request image limit
+    * (models.toml [max_request_images]) bounds them.  Still a known key, so an
+    * older dawn.toml that sets it gets this note once, not a typo warning. */
+   static bool s_capture_history_warned = false;
+   if (toml_key_exists(table, "capture_history_count") && !s_capture_history_warned) {
+      s_capture_history_warned = true;
+      OLOG_WARNING("[vision] capture_history_count is retired and ignored: tool images stay in "
+                   "the conversation until compaction (see UPGRADING.md)");
+   }
 }
 
 static void parse_memory(toml_table_t *table, memory_config_t *config) {
@@ -1202,6 +1221,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "prune_expired_days",
                                              "conversation_idle_timeout_min",
                                              "default_voice_user_id",
+                                             "fact_cache_mb",
                                              "pruning",
                                              "decay",
                                              "embeddings",
@@ -1249,69 +1269,8 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    /* Parse voice conversation idle timeout settings */
    PARSE_INT(table, "conversation_idle_timeout_min", config->conversation_idle_timeout_min);
    PARSE_INT(table, "default_voice_user_id", config->default_voice_user_id);
-
-   /* Clamp context_budget_tokens to valid range */
-   if (config->context_budget_tokens < 100) {
-      config->context_budget_tokens = 100;
-   } else if (config->context_budget_tokens > 2000) {
-      config->context_budget_tokens = 2000;
-   }
-
-   /* Clamp source_budget_chars.  0 in config means "use compile-time default";
-    * otherwise clamp to the same MEMORY_SOURCE_BUDGET_MAX (32 KiB) the runtime
-    * applies in memory_action_search/_recent.  Lower bound of 0 (disabled —
-    * no source excerpts at all) is allowed so deployments can opt out of
-    * verbatim-source token cost entirely. */
-   if (config->source_budget_chars < 0) {
-      config->source_budget_chars = 0;
-   } else if (config->source_budget_chars > 32768) {
-      config->source_budget_chars = 32768;
-   }
-
-   /* Clamp pruning days to sensible values */
-   if (config->prune_superseded_days < 1) {
-      config->prune_superseded_days = 1;
-   } else if (config->prune_superseded_days > 365) {
-      config->prune_superseded_days = 365;
-   }
-   if (config->prune_stale_days < 7) {
-      config->prune_stale_days = 7;
-   } else if (config->prune_stale_days > 730) {
-      config->prune_stale_days = 730;
-   }
-   if (config->prune_stale_min_confidence < 0.0f) {
-      config->prune_stale_min_confidence = 0.0f;
-   } else if (config->prune_stale_min_confidence > 1.0f) {
-      config->prune_stale_min_confidence = 1.0f;
-   }
-
-   /* Clamp expiry windows.  Grace 0-365 days (0 = expire on the reference date).
-    * prune_expired 0-365 days (0 = hard-expire on the reference date, no buffer). */
-   if (config->expire_grace_days < 0) {
-      config->expire_grace_days = 0;
-   } else if (config->expire_grace_days > 365) {
-      config->expire_grace_days = 365;
-   }
-   if (config->prune_expired_days < 0) {
-      config->prune_expired_days = 0;
-   } else if (config->prune_expired_days > 365) {
-      config->prune_expired_days = 365;
-   }
-
-   /* Clamp conversation idle timeout (0 = disabled, otherwise 10-60 min) */
-   if (config->conversation_idle_timeout_min < 0) {
-      config->conversation_idle_timeout_min = 0;
-   } else if (config->conversation_idle_timeout_min > 0 &&
-              config->conversation_idle_timeout_min < 10) {
-      config->conversation_idle_timeout_min = 10;
-   } else if (config->conversation_idle_timeout_min > 60) {
-      config->conversation_idle_timeout_min = 60;
-   }
-
-   /* Default voice user ID must be positive */
-   if (config->default_voice_user_id < 1) {
-      config->default_voice_user_id = 1;
-   }
+   PARSE_INT(table, "fact_cache_mb", config->fact_cache_mb);
+   config_clamp_memory(config);
 
    /* Parse [memory.decay] sub-table */
    toml_table_t *decay = toml_table_in(table, "decay");
@@ -1497,6 +1456,10 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "top_k",
                                                 "summary_max_scan",
                                                 "min_score",
+                                                "document_min_relevance",
+                                                "fact_min_relevance",
+                                                "entity_min_relevance",
+                                                "summary_min_relevance",
                                                 "classifier_enabled",
                                                 "weight_semantic",
                                                 "weight_recency",
@@ -1526,6 +1489,10 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_INT(focus, "top_k", fi->top_k);
       PARSE_INT(focus, "summary_max_scan", fi->summary_max_scan);
       PARSE_DOUBLE(focus, "min_score", fi->min_score);
+      PARSE_DOUBLE(focus, "document_min_relevance", fi->document_min_relevance);
+      PARSE_DOUBLE(focus, "fact_min_relevance", fi->fact_min_relevance);
+      PARSE_DOUBLE(focus, "entity_min_relevance", fi->entity_min_relevance);
+      PARSE_DOUBLE(focus, "summary_min_relevance", fi->summary_min_relevance);
       PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);
       PARSE_DOUBLE(focus, "weight_semantic", fi->weight_semantic);
       PARSE_DOUBLE(focus, "weight_recency", fi->weight_recency);
@@ -1551,14 +1518,25 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
          PARSE_DOUBLE(src, "dawn_background", fi->source_weights.dawn_background);
       }
 
+      /* Retired: a turn now sends only the items its conversation doesn't
+       * already show (read from the history itself), so there is no window
+       * of turns to re-send after, and no score boost that re-sends.  Known
+       * so an existing file doesn't warn as a typo; said once, then ignored
+       * (and dropped from the file at the next settings save). */
       toml_table_t *dedup = toml_table_in(focus, "dedup");
       if (dedup) {
          static const char *const dedup_keys[] = { "recent_window_turns", "score_uplift_factor",
                                                    NULL };
          warn_unknown_keys(dedup, "memory.focus_injection.dedup", dedup_keys);
-
-         PARSE_INT(dedup, "recent_window_turns", fi->dedup.recent_window_turns);
-         PARSE_DOUBLE(dedup, "score_uplift_factor", fi->dedup.score_uplift_factor);
+         static bool s_dedup_retired_told;
+         if (!s_dedup_retired_told && (toml_int_in(dedup, "recent_window_turns").ok ||
+                                       toml_double_in(dedup, "score_uplift_factor").ok ||
+                                       toml_int_in(dedup, "score_uplift_factor").ok)) {
+            s_dedup_retired_told = true;
+            OLOG_WARNING("[memory.focus_injection.dedup] recent_window_turns and "
+                         "score_uplift_factor are retired and ignored: a turn sends only the "
+                         "items its conversation doesn't already show");
+         }
       }
 
       toml_table_t *dth = toml_table_in(focus, "dominant_token_heuristic");
@@ -1751,6 +1729,93 @@ static void parse_scheduler(toml_table_t *table, scheduler_config_t *config) {
  * arriving over the wire can't bypass bounds the file path enforces.  The
  * job-session pool array is sized to max_active_jobs, so a nonsense value must
  * not blow the allocation. */
+void config_clamp_vad(vad_config_t *config) {
+   if (!config) {
+      return;
+   }
+   /* adaptive_endpoint is "off" or "shadow" (measure only); anything else falls
+    * back to "off" so the file path and the WebUI POST path share bounds.
+    * "on" (use the early result) isn't built: it runs as "shadow". */
+   if (strcmp(config->adaptive_endpoint, "on") == 0) {
+      OLOG_WARNING("[vad] adaptive_endpoint 'on' isn't available yet; measuring only ('shadow')");
+      safe_strscpy(config->adaptive_endpoint, "shadow");
+   } else if (strcmp(config->adaptive_endpoint, "off") != 0 &&
+              strcmp(config->adaptive_endpoint, "shadow") != 0) {
+      OLOG_WARNING("Invalid [vad] adaptive_endpoint '%s'; using 'off'", config->adaptive_endpoint);
+      safe_strscpy(config->adaptive_endpoint, "off");
+   }
+}
+
+void config_clamp_memory(memory_config_t *config) {
+   if (!config) {
+      return;
+   }
+   CONFIG_CLAMP(config->fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN, MEMORY_FACT_CACHE_MB_MAX);
+
+   /* Clamp context_budget_tokens to valid range */
+   if (config->context_budget_tokens < 100) {
+      config->context_budget_tokens = 100;
+   } else if (config->context_budget_tokens > 2000) {
+      config->context_budget_tokens = 2000;
+   }
+
+   /* Clamp source_budget_chars.  0 in config means "use compile-time default";
+    * otherwise clamp to the same MEMORY_SOURCE_BUDGET_MAX (32 KiB) the runtime
+    * applies in memory_action_search/_recent.  Lower bound of 0 (disabled —
+    * no source excerpts at all) is allowed so deployments can opt out of
+    * verbatim-source token cost entirely. */
+   if (config->source_budget_chars < 0) {
+      config->source_budget_chars = 0;
+   } else if (config->source_budget_chars > 32768) {
+      config->source_budget_chars = 32768;
+   }
+
+   /* Clamp pruning days to sensible values */
+   if (config->prune_superseded_days < 1) {
+      config->prune_superseded_days = 1;
+   } else if (config->prune_superseded_days > 365) {
+      config->prune_superseded_days = 365;
+   }
+   if (config->prune_stale_days < 7) {
+      config->prune_stale_days = 7;
+   } else if (config->prune_stale_days > 730) {
+      config->prune_stale_days = 730;
+   }
+   if (config->prune_stale_min_confidence < 0.0f) {
+      config->prune_stale_min_confidence = 0.0f;
+   } else if (config->prune_stale_min_confidence > 1.0f) {
+      config->prune_stale_min_confidence = 1.0f;
+   }
+
+   /* Clamp expiry windows.  Grace 0-365 days (0 = expire on the reference date).
+    * prune_expired 0-365 days (0 = hard-expire on the reference date, no buffer). */
+   if (config->expire_grace_days < 0) {
+      config->expire_grace_days = 0;
+   } else if (config->expire_grace_days > 365) {
+      config->expire_grace_days = 365;
+   }
+   if (config->prune_expired_days < 0) {
+      config->prune_expired_days = 0;
+   } else if (config->prune_expired_days > 365) {
+      config->prune_expired_days = 365;
+   }
+
+   /* Clamp conversation idle timeout (0 = disabled, otherwise 5-60 min) */
+   if (config->conversation_idle_timeout_min < 0) {
+      config->conversation_idle_timeout_min = 0;
+   } else if (config->conversation_idle_timeout_min > 0 &&
+              config->conversation_idle_timeout_min < 5) {
+      config->conversation_idle_timeout_min = 5;
+   } else if (config->conversation_idle_timeout_min > 60) {
+      config->conversation_idle_timeout_min = 60;
+   }
+
+   /* Default voice user ID must be positive */
+   if (config->default_voice_user_id < 1) {
+      config->default_voice_user_id = 1;
+   }
+}
+
 void config_clamp_jobs(jobs_config_t *config) {
    if (!config) {
       return;

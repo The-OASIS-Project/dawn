@@ -216,6 +216,25 @@ static const char *SCHEMA_SQL =
      * re-dispatch the ordinary worker against a research conversation.  The
      * idx_conv_jobs_user partial index lives in the v75 migration, not here. */
     "   job_kind TEXT DEFAULT NULL,"
+    /* Frozen request prefix (v94): the conversation's system prompt and tool set
+     * as first sent, in prompt_blobs, so every later request and every reload
+     * replays them byte for byte (a changed prefix invalidates the model's
+     * earlier reasoning).  in_force_hash: which of its sections and standing
+     * directions are in force now (changes are appended, never rewritten).
+     * reasoning_floor_msg_id: reasoning stored on rows at or below it is never
+     * replayed (set at a declared boundary; only rises).  reasoning_floor_pending:
+     * the withdrawal (its place in the withdrawal sequence) that changed the
+     * stored context; until a turn built after it is saved (the floor then
+     * rises to that turn's question), no row's reasoning is replayed, a reply
+     * streamed during it included.  reasoning_floor_seq: the last withdrawal that
+     * changed it, kept after the floor settles, so a turn built before it (in
+     * another session) saves behind the floor too. */
+    "   prefix_hash TEXT DEFAULT NULL,"
+    "   tools_hash TEXT DEFAULT NULL,"
+    "   in_force_hash TEXT DEFAULT NULL,"
+    "   reasoning_floor_msg_id INTEGER NOT NULL DEFAULT 0,"
+    "   reasoning_floor_pending INTEGER NOT NULL DEFAULT 0,"
+    "   reasoning_floor_seq INTEGER NOT NULL DEFAULT 0,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (parent_id) REFERENCES conversations(id) ON DELETE SET NULL"
@@ -230,20 +249,42 @@ static const char *SCHEMA_SQL =
     /* Note: idx_conversations_continued is created during migration or post-init
      * to handle both new databases and upgrades from v6 */
 
-    /* Messages table (added in schema v4) */
-    "CREATE TABLE IF NOT EXISTS messages ("
-    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    /* Messages (schema v4; its v98 shape, the same text the v98 rebuild runs).
+     * tool_calls/tool_call_id (v56), reasoning (v57), is_error (v81),
+     * llm_blocks (v92: an assistant turn's stored blocks), kind/context_of (v94:
+     * request context the model reads and no client or search does, and the
+     * question a turn's context goes in front of), images (v98: a tool
+     * result's image ids).  Its other indexes and its triggers index or read
+     * migration-added columns, so the ladder makes them (v92, v94, v98), for a
+     * new database too. */
+    CONV_MESSAGES_TABLE_SQL CONV_MESSAGES_IDX_CONVERSATION_SQL
+
+    /* Content-addressed request prefixes (v94): a conversation's frozen system
+     * prompt and tool set, by SHA-256; shared by every conversation that sent the
+     * same bytes. */
+    "CREATE TABLE IF NOT EXISTS prompt_blobs ("
+    "   hash TEXT PRIMARY KEY,"
+    "   bytes TEXT NOT NULL,"
+    "   created_at INTEGER NOT NULL"
+    ");"
+
+    /* Stable memory citation handles (v94): [M<handle>] is assigned the first time
+     * an item is injected into a conversation and never reused there. */
+    "CREATE TABLE IF NOT EXISTS conversation_focus_handles ("
     "   conversation_id INTEGER NOT NULL,"
-    "   role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),"
-    "   content TEXT NOT NULL,"
-    "   tool_calls TEXT,"   /* assistant rows: OpenAI tool_calls JSON array (v56) */
-    "   tool_call_id TEXT," /* role='tool' rows: matching tool_call id (v56) */
-    "   reasoning TEXT,"    /* assistant rows: display-only reasoning JSON (v57) */
-    "   created_at INTEGER NOT NULL,"
-    "   is_error INTEGER NOT NULL DEFAULT 0," /* role='tool' rows: 1 = confirmed failure (v81) */
+    "   handle INTEGER NOT NULL,"
+    "   source TEXT NOT NULL,"
+    "   item_id TEXT NOT NULL,"
+    /* The item was forgotten or deleted: its copies in the conversation's
+     * stored context were withdrawn (conv_db_withdraw). */
+    "   withdrawn INTEGER NOT NULL DEFAULT 0,"
+    "   PRIMARY KEY (conversation_id, handle),"
+    "   UNIQUE (conversation_id, source, item_id),"
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
-    "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"
+    /* A removed item's handles, in whatever conversations hold it
+     * (auth_db_withdraw.c). */
+    "CREATE INDEX IF NOT EXISTS idx_focus_handles_item ON conversation_focus_handles(item_id);"
 
     /* conversation_events (v72): durable step-granular log for the background-jobs
      * observe/replay contract (status | tool_call | tool_result | terminal_chunk |
@@ -270,6 +311,9 @@ static const char *SCHEMA_SQL =
      * AUTH_DB_RESEARCH_SCHEMA_SQL (auth_db_internal.h) so fresh installs and
      * migrated DBs can never diverge.  See docs/DEEP_RESEARCH_DESIGN.md §3. */
     AUTH_DB_RESEARCH_SCHEMA_SQL
+
+        /* Tool results kept whole behind a view (v97); shared with the migration. */
+        AUTH_DB_TOOL_RESULTS_SCHEMA_SQL
 
     /* Session metrics table (added in schema v8) */
     "CREATE TABLE IF NOT EXISTS session_metrics ("
@@ -324,6 +368,8 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);"
+    /* Which conversations name which images (v98). */
+    AUTH_DB_CONVERSATION_IMAGES_SQL
 
     /* Generic blob store — original-file storage (v68).  Filesystem-backed:
      * metadata only here.  Per-user content-hash dedup; `kind` tags the consumer
@@ -432,6 +478,9 @@ static const char *SCHEMA_SQL =
      * cites, so a citation cooldown sharing that column would never fire.  The
      * reinforce UPDATE gates on (last_cited IS NULL OR now - last_cited > 3600). */
     "   last_cited             INTEGER DEFAULT NULL,"
+    /* v95: superseded_at — when the fact was merged into superseded_by; the
+     * superseded prune counts its retention window from here. */
+    "   superseded_at          INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
@@ -530,9 +579,11 @@ static const char *SCHEMA_SQL =
                                   */
     "   tool_surfaced_ids TEXT," /* v79: CSV of facts shown via a memory tool this turn,
                                     canonical "fact:x" — the tool-cite universe (Option B) */
-    "   dropped_count INTEGER DEFAULT 0,"     /* cited ordinals rejected (out-of-range/dup) */
-    "   dropped_tool_count INTEGER DEFAULT 0" /* v79: cited ID:x not in the surfaced set
-                                                 (mis-copied / hallucinated tool id) */
+    "   dropped_count INTEGER DEFAULT 0,"      /* cited ordinals rejected (out-of-range/dup) */
+    "   dropped_tool_count INTEGER DEFAULT 0," /* v79: cited ID:x not in the surfaced set
+                                                  (mis-copied / hallucinated tool id) */
+    "   referenced_ids TEXT" /* v99: CSV of items named again as still relevant (not sent);
+                                injected_ids holds only the ones sent */
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_citation_audit_user_ts ON "
     "memory_citation_audit(user_id, ts);"
@@ -746,8 +797,11 @@ static const char *SCHEMA_SQL =
     /* document_chunks.created_at added in v35 — used by temporal-query scoring to
      * boost chunks whose origin date is near the user's referenced point in time
      * (e.g., "what did we discuss in summer 2021"). 0 = unknown (no boost). */
+    /* AUTOINCREMENT (v94): a chunk's id is never reused, so a deleted chunk's
+     * id (in a conversation's stored context, or its withdrawn_items row) can't
+     * name a new one (a re-indexed document's, an edited note's). */
     "CREATE TABLE IF NOT EXISTS document_chunks ("
-    "  id INTEGER PRIMARY KEY,"
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  document_id INTEGER NOT NULL,"
     "  chunk_index INTEGER NOT NULL,"
     "  text TEXT NOT NULL,"
@@ -759,6 +813,7 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON document_chunks(document_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash);"
+
     /* idx_documents_original_blob is created by the v68 migration (auth_db_migrations_v68.c),
      * NOT here: this base SCHEMA_SQL runs before migrations, so on an existing pre-v68 DB the
      * documents.original_blob_id column doesn't exist yet and indexing it would fail.  The v68
@@ -942,7 +997,7 @@ static const char *SCHEMA_SQL =
     "  max_recent INTEGER DEFAULT 10,"
     "  max_body_chars INTEGER DEFAULT " STRINGIFY(
         EMAIL_DEFAULT_BODY_CHARS) ","
-                                  "  created_at INTEGER NOT NULL,"
+                                  "  created_at INTEGER NOT NULL," EMAIL_DIGEST_DEPTH_COLUMN_SQL
                                   "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
                                   ");"
                                   "CREATE INDEX IF NOT EXISTS idx_email_acct_user ON "
@@ -1004,6 +1059,18 @@ static const char *SCHEMA_SQL =
                                    * recovery worker extracts memory incrementally via
                                    * last_extracted_msg_id. */
                                   "  conversation_id INTEGER DEFAULT NULL,"
+                                  /* v101: owner_sender = the provider's id of the person who
+                                   * linked the channel (only they speak for it; NULL until
+                                   * known).  verified_at NULL = an SMS link waiting for the code
+                                   * DAWN texted to the number (verify_*).  The unique index on
+                                   * (provider, address, owner) is created by the v101 migration. */
+                                  "  owner_sender TEXT,"
+                                  "  verified_at INTEGER,"
+                                  "  verify_code_hash TEXT,"
+                                  "  verify_expires_at INTEGER,"
+                                  "  verify_attempts INTEGER NOT NULL DEFAULT 0,"
+                                  "  verify_sends INTEGER NOT NULL DEFAULT 0,"
+                                  "  verify_window_start INTEGER,"
                                   "  UNIQUE(user_id, provider, provider_address),"
                                   "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
                                   "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON "
@@ -1047,7 +1114,26 @@ static const char *SCHEMA_SQL =
                                   ");"
                                   "CREATE INDEX IF NOT EXISTS idx_messaging_link_attempts_recent "
                                   "  ON messaging_link_attempts(provider, sender_address, "
-                                  "created_at);";
+                                  "created_at);"
+                                  /* Per-user stocks watchlist (arbitrary not-held tickers the
+                                   * WebUI stocks panel tracks). One row per symbol; the
+                                   * (user_id, symbol) PK also serves the per-user lookup.
+                                   * `position` is reserved for future user-defined ordering —
+                                   * rows are currently returned ordered by added_at. */
+                                  "CREATE TABLE IF NOT EXISTS stocks_watchlist ("
+                                  "  user_id INTEGER NOT NULL,"
+                                  "  symbol TEXT NOT NULL,"
+                                  "  position INTEGER NOT NULL DEFAULT 0,"
+                                  "  added_at INTEGER NOT NULL,"
+                                  "  PRIMARY KEY(user_id, symbol)"
+                                  ");"
+
+    /* v90: one row per LLM call (the "LLM cache:" record),
+     * for cache coverage and cost by provider, model and
+     * kind over time.  No foreign keys: a row outlives
+     * the conversation or user it names, until the
+     * 90-day retention sweep. */
+    LLM_USAGE_LOG_SCHEMA_SQL;
 
 /* =============================================================================
  * Schema Version and Migration

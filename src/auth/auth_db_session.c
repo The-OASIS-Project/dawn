@@ -279,7 +279,11 @@ int auth_db_delete_session(const char *token) {
 
    AUTH_DB_UNLOCK();
 
-   return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+   if (rc != SQLITE_DONE) {
+      return AUTH_DB_FAILURE;
+   }
+   auth_sessions_changed();
+   return AUTH_DB_SUCCESS;
 }
 
 int auth_db_delete_session_by_prefix(const char *prefix) {
@@ -328,7 +332,11 @@ int auth_db_delete_session_by_prefix(const char *prefix) {
 
    AUTH_DB_UNLOCK();
 
-   return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+   if (rc != SQLITE_DONE) {
+      return AUTH_DB_FAILURE;
+   }
+   auth_sessions_changed();
+   return AUTH_DB_SUCCESS;
 }
 
 bool auth_db_session_belongs_to_user(const char *prefix, int user_id) {
@@ -361,6 +369,41 @@ bool auth_db_session_belongs_to_user(const char *prefix, int user_id) {
    AUTH_DB_UNLOCK();
 
    return belongs;
+}
+
+int auth_db_session_prefix_exists(const char *prefix, bool *exists_out) {
+   if (!prefix || !exists_out || strlen(prefix) < AUTH_TOKEN_PREFIX_LEN) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Unexpired only, as auth_db_get_session() judges a login. */
+   /* A range on the token (its index) rather than substr(), which scans:
+    * tokens are hex, so every token with this prefix sorts before
+    * prefix + '~'. */
+   const char *sql = "SELECT 1 FROM sessions WHERE token >= ?1 AND token < ?1 || '~' AND "
+                     "(expires_at IS NULL OR expires_at <= 0 OR expires_at >= ?2) LIMIT 1";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(stmt, 1, prefix, AUTH_TOKEN_PREFIX_LEN, SQLITE_STATIC);
+   sqlite3_bind_int64(stmt, 2, (sqlite3_int64)time(NULL));
+   const int rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (rc == SQLITE_ROW) {
+      *exists_out = true;
+      return AUTH_DB_SUCCESS;
+   }
+   if (rc == SQLITE_DONE) {
+      *exists_out = false;
+      return AUTH_DB_SUCCESS;
+   }
+   return AUTH_DB_FAILURE;
 }
 
 int auth_db_delete_sessions_by_username(const char *username, int *deleted_out) {
@@ -398,6 +441,9 @@ int auth_db_delete_user_sessions(int user_id, int *deleted_out) {
 
    if (rc != SQLITE_DONE) {
       return AUTH_DB_FAILURE;
+   }
+   if (changes > 0) {
+      auth_sessions_changed();
    }
 
    if (deleted_out) {

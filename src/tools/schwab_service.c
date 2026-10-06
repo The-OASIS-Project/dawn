@@ -25,6 +25,7 @@
 #include "tools/schwab_service.h"
 
 #include <json-c/json.h>
+#include <pthread.h> /* name cache mutex */
 #include <sodium.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -34,13 +35,22 @@
 
 #include "core/iso8601.h" /* iso8601_parse_date_utc */
 #include "core/strbuf.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/oauth_client.h"
 #include "tools/schwab_client.h"
-#include "tools/schwab_txn.h"    /* transaction classifier + aggregates */
-#include "tools/tool_registry.h" /* TOOL_RESULT_ERROR_MARK */
+#include "tools/schwab_portfolio.h" /* structured snapshot for the WebUI panel */
+#include "tools/schwab_quotes.h"    /* batch /quotes parse (fills equity names) */
+#include "tools/schwab_txn.h"       /* transaction classifier + aggregates */
+#include "tools/schwab_watchlist.h" /* SCHWAB_WATCHLIST_MAX (batch-size coupling) */
+#include "tools/tool_registry.h"    /* TOOL_RESULT_ERROR_MARK */
+#include "utils/string_utils.h"
 
 #define SCHWAB_MAX_SYMBOLS 25
+/* schwab_service_quotes sends a whole watchlist in ONE un-chunked /quotes batch, so
+ * the watchlist cap must fit the batch cap or a full list would silently truncate. */
+_Static_assert(SCHWAB_WATCHLIST_MAX <= SCHWAB_MAX_SYMBOLS,
+               "watchlist must fit in one /quotes batch");
 /* Upper bound on candles we allocate for, guarding against a pathological
  * response — legitimate price history is well under this (5y daily ~1,300). */
 #define SCHWAB_MAX_CANDLES 20000
@@ -501,6 +511,385 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
    char *out = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
    strbuf_free(&sb);
    return out ? out : result_err("Schwab portfolio formatting failed.");
+}
+
+/* ===== equity/ETF name lookup (fills descriptions /accounts omits) ===== */
+
+/* Schwab's /accounts?fields=positions omits instrument.description for EQUITY (and
+ * ETF) holdings, so the panel's per-position company/fund name must come from a
+ * separate /quotes?fields=reference call. Names are effectively static, so a small
+ * process-wide cache means the extra call fires only for symbols not yet named —
+ * not on every 30s refresh. The extended-hours price overlay uses the same
+ * schwab_quotes_parse + schwab_quotes_fetch path with a wider fields set
+ * ("quote,regular,extended") rather than a second path. */
+#define SCHWAB_NAME_CACHE_MAX 128 /* distinct symbols named over the daemon's life */
+#define SCHWAB_NAME_MISS_MAX 64   /* distinct un-named symbols resolved per snapshot */
+/* Distinct held equity/ETF symbols enriched with an ext-hours price per snapshot.
+ * Same value as the name-miss bound but a distinct concept (all held vs. just the
+ * un-named), so it carries its own name. */
+#define SCHWAB_HELD_SYMBOLS_MAX 64
+
+static struct {
+   char sym[SCHWAB_SYMBOL_MAX];
+   char name[SCHWAB_DESC_MAX];
+} s_name_cache[SCHWAB_NAME_CACHE_MAX];
+static int s_name_cache_n = 0;
+static pthread_mutex_t s_name_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Copy the cached name for @p sym into @p out; returns true on a hit. */
+static bool name_cache_get(const char *sym, char *out, size_t n) {
+   bool hit = false;
+   pthread_mutex_lock(&s_name_cache_mutex);
+   for (int i = 0; i < s_name_cache_n; i++) {
+      if (strcmp(s_name_cache[i].sym, sym) == 0) {
+         snprintf(out, n, "%s", s_name_cache[i].name);
+         hit = true;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_name_cache_mutex);
+   return hit;
+}
+
+/* Insert (sym -> name) if absent and there is room. An empty @p name is a valid,
+ * deliberate NEGATIVE entry ("resolved, no name" — e.g. a delisted/invalid ticker),
+ * so a nameless symbol is not re-queried on every refresh. Append-only, no eviction:
+ * 128 slots cover a personal account's holdings. Watchlist quotes don't use this
+ * cache: they request "reference" in the same call and carry the name themselves. */
+static void name_cache_put(const char *sym, const char *name) {
+   if (!sym[0]) {
+      return;
+   }
+   pthread_mutex_lock(&s_name_cache_mutex);
+   bool found = false;
+   for (int i = 0; i < s_name_cache_n; i++) {
+      if (strcmp(s_name_cache[i].sym, sym) == 0) {
+         found = true;
+         break;
+      }
+   }
+   if (!found && s_name_cache_n < SCHWAB_NAME_CACHE_MAX) {
+      safe_strscpy(s_name_cache[s_name_cache_n].sym, sym);
+      safe_strscpy(s_name_cache[s_name_cache_n].name, name);
+      s_name_cache_n++;
+   }
+   pthread_mutex_unlock(&s_name_cache_mutex);
+}
+
+/* Fetch one batch of quotes (<= SCHWAB_MAX_SYMBOLS of @p syms) requesting only
+ * @p fields. Builds the query CSV itself, admitting ONLY URL-safe [A-Z0-9.] symbols
+ * (anything else is skipped) so the query can't be injected regardless of the
+ * caller — the guard travels with the function, not the call site. Fills @p out (up
+ * to @p max); @p n_out set. Returns SCHWAB_RC_OK with *n_out == 0 when no symbol was
+ * URL-safe (nothing to ask). Callers (held-position names, the extended-hours
+ * overlay, watchlist quotes, symbol validation) can pass arbitrary tickers safely. */
+static schwab_rc_t schwab_quotes_fetch(int user_id,
+                                       const char *const *syms,
+                                       int n_syms,
+                                       const char *fields,
+                                       schwab_quote_t *out,
+                                       int max,
+                                       int *n_out,
+                                       char (*invalid)[SCHWAB_SYMBOL_MAX],
+                                       int inv_max,
+                                       int *n_invalid) {
+   if (n_out) {
+      *n_out = 0;
+   }
+   if (n_invalid) {
+      *n_invalid = 0;
+   }
+   char csv[SCHWAB_MAX_SYMBOLS * (SCHWAB_SYMBOL_MAX + 1)];
+   size_t off = 0;
+   csv[0] = '\0';
+   int included = 0;
+   for (int i = 0; i < n_syms && included < SCHWAB_MAX_SYMBOLS; i++) {
+      const char *s = syms[i];
+      bool safe = s && s[0];
+      for (const char *c = s; safe && *c; c++) {
+         safe = (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '.';
+      }
+      if (!safe || off >= sizeof(csv)) {
+         continue;
+      }
+      int w = snprintf(csv + off, sizeof(csv) - off, "%s%s", off ? "," : "", s);
+      if (w < 0 || (size_t)w >= sizeof(csv) - off) {
+         break; /* would truncate — stop rather than emit a malformed query */
+      }
+      off += (size_t)w;
+      included++;
+   }
+   if (included == 0) {
+      return SCHWAB_RC_OK; /* nothing URL-safe to ask about — not an error */
+   }
+
+   oauth_provider_config_t prov;
+   char bearer[OAUTH_TOKEN_BUF_SIZE];
+   char *err = NULL;
+   schwab_rc_t rc = schwab_bearer(user_id, &prov, bearer, sizeof(bearer), &err);
+   if (rc != SCHWAB_RC_OK) {
+      free(err);
+      sodium_memzero(bearer, sizeof(bearer));
+      sodium_memzero(&prov, sizeof(prov));
+      return rc;
+   }
+   char url[1024];
+   snprintf(url, sizeof(url), "%s/quotes?symbols=%s&fields=%s&indicative=false",
+            SCHWAB_MARKETDATA_BASE, csv, fields);
+   struct json_object *root = NULL;
+   rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root, NULL);
+   sodium_memzero(bearer, sizeof(bearer));
+   sodium_memzero(&prov, sizeof(prov));
+   if (rc != SCHWAB_RC_OK) {
+      return rc;
+   }
+   int prc = schwab_quotes_parse(root, out, max, n_out);
+   if (invalid && inv_max > 0) {
+      schwab_quotes_parse_invalid(root, invalid, inv_max, n_invalid);
+   }
+   json_object_put(root);
+   return prc == SUCCESS ? SCHWAB_RC_OK : SCHWAB_RC_ERROR;
+}
+
+/* Fill company/fund names for held EQUITY/ETF positions whose /accounts payload
+ * carried no description. Best-effort: cache hits fill immediately, misses are
+ * batch-quoted (chunked) then cached and applied. Any failure leaves those
+ * descriptions blank (the panel omits the tooltip) — it never fails the snapshot. */
+static void fill_position_names(int user_id, schwab_portfolio_t *p) {
+   char miss[SCHWAB_NAME_MISS_MAX][SCHWAB_SYMBOL_MAX];
+   int nmiss = 0;
+
+   for (int ai = 0; ai < p->account_count; ai++) {
+      schwab_account_t *a = &p->accounts[ai];
+      for (int pi = 0; pi < a->position_count; pi++) {
+         schwab_position_t *pos = &a->positions[pi];
+         if (pos->description[0] ||
+             (pos->asset_type != SCHWAB_ASSET_EQUITY && pos->asset_type != SCHWAB_ASSET_ETF)) {
+            continue;
+         }
+         if (name_cache_get(pos->symbol, pos->description, sizeof(pos->description))) {
+            continue; /* filled from cache (a real name, or a negative "no name" entry) */
+         }
+         bool seen = false; /* a symbol can be held in >1 account */
+         for (int m = 0; m < nmiss; m++) {
+            if (strcmp(miss[m], pos->symbol) == 0) {
+               seen = true;
+               break;
+            }
+         }
+         if (!seen && nmiss < SCHWAB_NAME_MISS_MAX) {
+            snprintf(miss[nmiss++], SCHWAB_SYMBOL_MAX, "%s", pos->symbol);
+         }
+      }
+   }
+
+   if (nmiss == 0) {
+      return;
+   }
+
+   /* Batch-fetch the misses (chunked by SCHWAB_MAX_SYMBOLS) and cache the names.
+    * schwab_quotes_fetch does its own URL-safety filtering. */
+   for (int base = 0; base < nmiss; base += SCHWAB_MAX_SYMBOLS) {
+      int chunk = nmiss - base;
+      if (chunk > SCHWAB_MAX_SYMBOLS) {
+         chunk = SCHWAB_MAX_SYMBOLS;
+      }
+      const char *syms[SCHWAB_MAX_SYMBOLS];
+      for (int i = 0; i < chunk; i++) {
+         syms[i] = miss[base + i];
+      }
+      schwab_quote_t q[SCHWAB_MAX_SYMBOLS];
+      int nq = 0;
+      if (schwab_quotes_fetch(user_id, syms, chunk, "reference", q, SCHWAB_MAX_SYMBOLS, &nq, NULL,
+                              0, NULL) != SCHWAB_RC_OK) {
+         break; /* best-effort — keep names already cached from earlier chunks */
+      }
+      /* Cache every returned symbol — including any that came back with an empty
+       * reference name, which name_cache_put stores as a negative entry so a
+       * genuinely name-less instrument isn't re-queried every refresh. A held symbol
+       * transiently ABSENT from the response is deliberately NOT negative-cached, so
+       * it self-heals on the next refresh instead of blanking until daemon restart. */
+      for (int i = 0; i < nq; i++) {
+         name_cache_put(q[i].symbol, q[i].description);
+      }
+   }
+
+   /* Second pass: fill the still-empty equity/ETF descriptions from the cache. */
+   for (int ai = 0; ai < p->account_count; ai++) {
+      schwab_account_t *a = &p->accounts[ai];
+      for (int pi = 0; pi < a->position_count; pi++) {
+         schwab_position_t *pos = &a->positions[pi];
+         if (!pos->description[0] &&
+             (pos->asset_type == SCHWAB_ASSET_EQUITY || pos->asset_type == SCHWAB_ASSET_ETF)) {
+            name_cache_get(pos->symbol, pos->description, sizeof(pos->description));
+         }
+      }
+   }
+}
+
+/* Merge extended-hours prices into held EQUITY/ETF positions from a fresh
+ * /quotes?fields=quote,regular,extended lookup — /accounts carries no pre/post price.
+ * Called only during an active pre/post window (opt-in), so unlike names these are
+ * NOT cached: every refresh re-fetches the live ext price. Best-effort — any failure
+ * (or a symbol with no extended trade) simply leaves has_ext false and the panel
+ * shows regular values only. A symbol can be held in more than one account, so a
+ * returned quote is applied to every matching position. */
+static void fill_position_ext(int user_id, schwab_portfolio_t *p) {
+   char want[SCHWAB_HELD_SYMBOLS_MAX][SCHWAB_SYMBOL_MAX];
+   int nwant = 0;
+   for (int ai = 0; ai < p->account_count; ai++) {
+      schwab_account_t *a = &p->accounts[ai];
+      for (int pi = 0; pi < a->position_count; pi++) {
+         schwab_position_t *pos = &a->positions[pi];
+         if (pos->asset_type != SCHWAB_ASSET_EQUITY && pos->asset_type != SCHWAB_ASSET_ETF) {
+            continue; /* only equities/ETFs trade in the extended session */
+         }
+         bool seen = false;
+         for (int w = 0; w < nwant; w++) {
+            if (strcmp(want[w], pos->symbol) == 0) {
+               seen = true;
+               break;
+            }
+         }
+         if (!seen && nwant < SCHWAB_HELD_SYMBOLS_MAX) {
+            snprintf(want[nwant++], SCHWAB_SYMBOL_MAX, "%s", pos->symbol);
+         }
+      }
+   }
+   if (nwant == 0) {
+      return;
+   }
+
+   /* One /quotes batch per SCHWAB_MAX_SYMBOLS (25) held equities — a personal account
+    * is one call; >25 distinct equities issues a second, still well within the limit. */
+   for (int base = 0; base < nwant; base += SCHWAB_MAX_SYMBOLS) {
+      int chunk = nwant - base;
+      if (chunk > SCHWAB_MAX_SYMBOLS) {
+         chunk = SCHWAB_MAX_SYMBOLS;
+      }
+      const char *syms[SCHWAB_MAX_SYMBOLS];
+      for (int i = 0; i < chunk; i++) {
+         syms[i] = want[base + i];
+      }
+      schwab_quote_t q[SCHWAB_MAX_SYMBOLS];
+      int nq = 0;
+      if (schwab_quotes_fetch(user_id, syms, chunk, "quote,regular,extended", q, SCHWAB_MAX_SYMBOLS,
+                              &nq, NULL, 0, NULL) != SCHWAB_RC_OK) {
+         break; /* keep any ext already merged from earlier chunks */
+      }
+      for (int i = 0; i < nq; i++) {
+         if (!q[i].has_ext) {
+            continue;
+         }
+         for (int ai = 0; ai < p->account_count; ai++) {
+            schwab_account_t *a = &p->accounts[ai];
+            for (int pi = 0; pi < a->position_count; pi++) {
+               schwab_position_t *pos = &a->positions[pi];
+               if (strcmp(pos->symbol, q[i].symbol) == 0) {
+                  pos->has_ext = true;
+                  pos->ext_last = q[i].ext_last;
+                  pos->ext_change = q[i].ext_change;
+                  pos->ext_change_pct = q[i].ext_change_pct;
+               }
+            }
+         }
+      }
+   }
+}
+
+/* Structured portfolio snapshot for the WebUI stocks panel — same one-call fetch
+ * as schwab_service_portfolio(), parsed into a struct instead of prose. Returns
+ * the schwab_rc_t so the caller maps it to a wire status (OK / NOT_LINKED /
+ * AUTH→token_expired / RATE_LIMITED / else error). On non-OK, @p out is left
+ * zeroed. Held equity/ETF names (which /accounts omits) are filled from a cached
+ * /quotes?fields=reference lookup. When @p ext_hours is set (the caller passes true
+ * only during an active pre/post window), a second /quotes lookup merges the
+ * extended-hours price onto each held equity/ETF position. */
+schwab_rc_t schwab_service_portfolio_snapshot(int user_id,
+                                              bool ext_hours,
+                                              schwab_portfolio_t *out) {
+   if (out) {
+      memset(out, 0, sizeof(*out));
+   }
+   oauth_provider_config_t prov;
+   char bearer[OAUTH_TOKEN_BUF_SIZE];
+   char *err = NULL;
+   schwab_rc_t rc = schwab_bearer(user_id, &prov, bearer, sizeof(bearer), &err);
+   if (rc != SCHWAB_RC_OK) {
+      free(err); /* the structured caller wants the code, not the prose message */
+      sodium_memzero(&prov, sizeof(prov));
+      return rc;
+   }
+
+   char url[512];
+   snprintf(url, sizeof(url), "%s/accounts?fields=positions", SCHWAB_TRADER_BASE);
+
+   struct json_object *root = NULL;
+   rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root, NULL);
+   sodium_memzero(bearer, sizeof(bearer));
+   sodium_memzero(&prov, sizeof(prov));
+   if (rc != SCHWAB_RC_OK) {
+      return rc;
+   }
+
+   if (!out || schwab_portfolio_parse(root, out) != SUCCESS) {
+      json_object_put(root);
+      if (out) {
+         schwab_portfolio_free(out); /* self-enforce the "zeroed on non-OK" contract */
+      }
+      return SCHWAB_RC_ERROR;
+   }
+   out->as_of = (int64_t)time(NULL);
+   out->ext_hours = ext_hours;
+   json_object_put(root);
+   fill_position_names(user_id, out); /* fill equity/ETF names /accounts omits (best-effort) */
+   if (ext_hours) {
+      /* Caller passes ext_hours true only during an active pre/post window (opt-in),
+       * so this second lookup runs only when there's a live extended price to show. */
+      fill_position_ext(user_id, out);
+   }
+   return SCHWAB_RC_OK;
+}
+
+int64_t schwab_service_link_expires_at(int user_id) {
+   oauth_token_set_t t;
+   if (oauth_load_tokens(user_id, "schwab", SCHWAB_ACCOUNT_KEY, &t) != 0) {
+      sodium_memzero(&t, sizeof(t)); /* self-contained hygiene, not reliant on callee zeroing */
+      return 0;                      /* not linked / not configured — caller omits the hint */
+   }
+   int64_t exp = (t.linked_at > 0) ? t.linked_at + (int64_t)SCHWAB_REFRESH_LIFETIME_DAYS * 86400
+                                   : 0;
+   sodium_memzero(&t, sizeof(t));
+   return exp;
+}
+
+schwab_rc_t schwab_service_quotes(int user_id,
+                                  const char *const *syms,
+                                  int n_syms,
+                                  bool ext_hours,
+                                  schwab_quote_t *out,
+                                  int max,
+                                  int *n_out) {
+   /* quote → price/day-change; reference → the (Schwab-capped) name. When @p ext_hours
+    * is set (an active pre/post window), regular+extended add the pre/post price the
+    * parser folds into an ext overlay. One batch, <= SCHWAB_MAX_SYMBOLS; the watchlist
+    * cap keeps a user's list within one call. */
+   const char *fields = ext_hours ? "quote,reference,regular,extended" : "quote,reference";
+   return schwab_quotes_fetch(user_id, syms, n_syms, fields, out, max, n_out, NULL, 0, NULL);
+}
+
+schwab_rc_t schwab_service_validate_symbols(int user_id,
+                                            const char *const *syms,
+                                            int n_syms,
+                                            char (*invalid)[SCHWAB_SYMBOL_MAX],
+                                            int inv_max,
+                                            int *n_invalid) {
+   /* A cheap reference-only /quotes; we want only Schwab's errors.invalidSymbols —
+    * the definitive bad-ticker signal. The parsed quotes are discarded. */
+   schwab_quote_t scratch[SCHWAB_MAX_SYMBOLS];
+   int nq = 0;
+   return schwab_quotes_fetch(user_id, syms, n_syms, "reference", scratch, SCHWAB_MAX_SYMBOLS, &nq,
+                              invalid, inv_max, n_invalid);
 }
 
 /* ===== price history + analytics ===== */

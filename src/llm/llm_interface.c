@@ -38,9 +38,11 @@
 
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
+#include "core/session_compaction.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
@@ -53,6 +55,7 @@
 // Provider implementations - include if compile-time keys exist OR if we might have runtime keys
 // Note: The actual provider files (llm_openai.c, llm_claude.c) are always compiled
 #include "llm/llm_claude.h"
+#include "llm/llm_claude_route.h"
 #include "llm/llm_openai.h"
 #include "llm/llm_rate_limit.h"
 
@@ -1024,11 +1027,17 @@ int llm_curl_progress_callback(void *clientp,
    return 0;  // Zero continues transfer
 }
 
+/* The model a call names: an OpenRouter call with none names the configured
+ * default, so its vendor (and so its wire format) is known. */
+static const char *call_model(cloud_provider_t provider, const char *model) {
+   if ((!model || !model[0]) && provider == CLOUD_PROVIDER_OPENROUTER) {
+      return llm_get_default_openrouter_model();
+   }
+   return model;
+}
+
 char *llm_chat_completion(struct json_object *conversation_history,
                           const char *input_text,
-                          const char **vision_images,
-                          const size_t *vision_image_sizes,
-                          int vision_image_count,
                           bool allow_fallback) {
    llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    char *response = NULL;
@@ -1082,31 +1091,34 @@ char *llm_chat_completion(struct json_object *conversation_history,
 
    if (type == LLM_LOCAL) {
       /* Local LLM uses OpenAI-compatible API (no API key needed) */
-      response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                            vision_image_sizes, vision_image_count, url, NULL,
-                                            model);
+      response = llm_openai_chat_completion(conversation_history, input_text, url, NULL, model);
    } else {
       /* Route to cloud provider */
       switch (provider) {
          case CLOUD_PROVIDER_OPENAI:
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, url,
-                                                  api_key, model);
+            response = llm_openai_chat_completion(conversation_history, input_text, url, api_key,
+                                                  model);
             break;
 
          case CLOUD_PROVIDER_CLAUDE:
-            response = llm_claude_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, url,
-                                                  api_key, model);
+            response = llm_claude_chat_completion(conversation_history, input_text, url, api_key,
+                                                  model);
             break;
 
          case CLOUD_PROVIDER_GEMINI:
-         case CLOUD_PROVIDER_OPENROUTER:
-            /* Gemini and OpenRouter both use the OpenAI-compatible API */
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, url,
-                                                  api_key, model);
+         case CLOUD_PROVIDER_OPENROUTER: {
+            /* The OpenAI-compatible API, but OpenRouter's anthropic/ models
+             * take its Anthropic Messages endpoint. */
+            const char *m = call_model(provider, model);
+            if (llm_uses_anthropic_messages(type, provider, m, url)) {
+               response = llm_claude_chat_completion(conversation_history, input_text, url, api_key,
+                                                     m);
+            } else {
+               response = llm_openai_chat_completion(conversation_history, input_text, url, api_key,
+                                                     model);
+            }
             break;
+         }
 
          default:
             OLOG_ERROR("No cloud provider configured");
@@ -1128,9 +1140,8 @@ char *llm_chat_completion(struct json_object *conversation_history,
          llm_set_type(LLM_LOCAL);
 
          /* Retry with local LLM (uses OpenAI-compatible API without auth) */
-         response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                               vision_image_sizes, vision_image_count, llm_url,
-                                               NULL, NULL);
+         response = llm_openai_chat_completion(conversation_history, input_text, llm_url, NULL,
+                                               NULL);
       }
    }
 
@@ -1139,9 +1150,6 @@ char *llm_chat_completion(struct json_object *conversation_history,
 
 char *llm_chat_completion_streaming(struct json_object *conversation_history,
                                     const char *input_text,
-                                    const char **vision_images,
-                                    const size_t *vision_image_sizes,
-                                    int vision_image_count,
                                     llm_text_chunk_callback chunk_callback,
                                     void *callback_userdata,
                                     bool allow_fallback) {
@@ -1200,13 +1208,15 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
    llm_single_shot_fn provider_fn;
    llm_history_format_t history_format;
 
-   if (type == LLM_CLOUD && provider == CLOUD_PROVIDER_CLAUDE) {
+   const char *messages_model = call_model(provider, model);
+   if (llm_uses_anthropic_messages(type, provider, messages_model, url)) {
+      /* Claude, and OpenRouter's anthropic/ models (its Messages endpoint) */
       provider_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
       history_format = LLM_HISTORY_CLAUDE;
+      model = messages_model;
    } else {
-      /* OpenAI, Gemini, OpenRouter, and local all use the OpenAI-compatible API
-       * (including Anthropic models served via OpenRouter — they use OpenAI wire
-       * format, not the native Claude path). */
+      /* OpenAI, Gemini, OpenRouter's other vendors, and local use the
+       * OpenAI-compatible API. */
       provider_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
       history_format = LLM_HISTORY_OPENAI;
       if (type == LLM_LOCAL) {
@@ -1218,9 +1228,6 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
    llm_tool_loop_params_t loop_params = {
       .conversation_history = conversation_history,
       .input_text = input_text,
-      .vision_images = vision_images,
-      .vision_image_sizes = vision_image_sizes,
-      .vision_image_count = vision_image_count,
       .base_url = url,
       .api_key = api_key,
       .model = model,
@@ -1229,6 +1236,9 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       .provider_fn = provider_fn,
       .history_format = history_format,
       .session_id = session_id,
+      /* A side call (a tool's summarizer, extraction) runs inside a turn but
+       * is none of its conversation: it reads and writes no session state. */
+      .has_session = session != NULL && !llm_cache_monitor_in_side_call(),
       .llm_type = type,
       .cloud_provider = provider,
       /* cancel_flag borrows &session->cancel_requested for the loop's lifetime.
@@ -1269,13 +1279,14 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       }
    }
 
-   /* Trigger async compaction for next turn (WebUI sessions) */
-   {
+   /* The turn ended: a history nearing its window is summarized ahead, applied
+    * at the next turn's seam (session_compaction.h). */
+   if (loop_params.has_session) {
       session_t *trigger_session = session_get(loop_params.session_id);
       if (trigger_session) {
-         llm_context_async_trigger(trigger_session, loop_params.conversation_history,
-                                   loop_params.llm_type, loop_params.cloud_provider,
-                                   loop_params.model);
+         session_compaction_trigger(trigger_session, loop_params.conversation_history,
+                                    loop_params.llm_type, loop_params.cloud_provider,
+                                    loop_params.model);
          session_release(trigger_session);
       }
    }
@@ -1341,9 +1352,6 @@ static void tts_sentence_callback(const char *sentence, void *userdata) {
 
 char *llm_chat_completion_streaming_tts(struct json_object *conversation_history,
                                         const char *input_text,
-                                        const char **vision_images,
-                                        const size_t *vision_image_sizes,
-                                        int vision_image_count,
                                         llm_sentence_callback sentence_callback,
                                         void *callback_userdata,
                                         bool allow_fallback) {
@@ -1362,9 +1370,8 @@ char *llm_chat_completion_streaming_tts(struct json_object *conversation_history
    ctx.user_userdata = callback_userdata;
 
    // Call streaming with chunk callback that feeds sentence buffer
-   response = llm_chat_completion_streaming(conversation_history, input_text, vision_images,
-                                            vision_image_sizes, vision_image_count,
-                                            tts_chunk_callback, &ctx, allow_fallback);
+   response = llm_chat_completion_streaming(conversation_history, input_text, tts_chunk_callback,
+                                            &ctx, allow_fallback);
 
    // Flush any remaining sentence
    sentence_buffer_flush(ctx.sentence_buffer);
@@ -1433,14 +1440,14 @@ void llm_get_default_config(session_llm_config_t *config) {
    if (g_config.llm.thinking.mode[0] != '\0') {
       safe_strscpy(config->thinking_mode, g_config.llm.thinking.mode);
    } else {
-      safe_strscpy(config->thinking_mode, "disabled");
+      safe_strscpy(config->thinking_mode, LLM_THINKING_MODE_DEFAULT);
    }
 
    // Copy reasoning effort from global config
    if (g_config.llm.thinking.reasoning_effort[0] != '\0') {
       safe_strscpy(config->reasoning_effort, g_config.llm.thinking.reasoning_effort);
    } else {
-      safe_strscpy(config->reasoning_effort, "medium");
+      safe_strscpy(config->reasoning_effort, LLM_REASONING_EFFORT_DEFAULT);
    }
 
    OLOG_INFO("Default LLM config: type=%s, provider=%s",
@@ -1551,7 +1558,7 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    } else if (g_config.llm.thinking.mode[0] != '\0') {
       safe_strscpy(resolved->thinking_mode, g_config.llm.thinking.mode);
    } else {
-      safe_strscpy(resolved->thinking_mode, "auto");
+      safe_strscpy(resolved->thinking_mode, LLM_THINKING_MODE_DEFAULT);
    }
 
    // Resolve reasoning_effort - use session config if set, otherwise global config
@@ -1560,7 +1567,7 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    } else if (g_config.llm.thinking.reasoning_effort[0] != '\0') {
       safe_strscpy(resolved->reasoning_effort, g_config.llm.thinking.reasoning_effort);
    } else {
-      safe_strscpy(resolved->reasoning_effort, "medium");
+      safe_strscpy(resolved->reasoning_effort, LLM_REASONING_EFFORT_DEFAULT);
    }
 
    /* Stabilize `model` into the config's own inline model_buf.  Until here it may
@@ -1586,9 +1593,6 @@ int llm_resolve_config(const session_llm_config_t *session_config,
 
 char *llm_chat_completion_with_config(struct json_object *conversation_history,
                                       const char *input_text,
-                                      const char **vision_images,
-                                      const size_t *vision_image_sizes,
-                                      int vision_image_count,
                                       const llm_resolved_config_t *config) {
    /* Reset per-call so callers reading llm_last_error() after a NULL return
     * see only THIS call's outcome, not a stale signal from an earlier call
@@ -1599,8 +1603,7 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
 
    if (!config) {
       // No config provided, use global (with fallback enabled)
-      return llm_chat_completion(conversation_history, input_text, vision_images,
-                                 vision_image_sizes, vision_image_count, true);
+      return llm_chat_completion(conversation_history, input_text, true);
    }
 
    char *response = NULL;
@@ -1636,41 +1639,50 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
     * session-aware llm_rate_limit_wait_ctx; these bare completions are foreground
     * / auxiliary (briefings, memory extraction) with no background-cancel need. */
    if (config->type != LLM_LOCAL) {
-      if (llm_rate_limit_wait())
-         return NULL; /* interrupted */
+      if (llm_rate_limit_wait()) {
+         /* Interrupted: this thread's state goes back as the call found it. */
+         llm_tools_set_current_config(NULL);
+         s_tl_timeout_ms = saved_tl_timeout;
+         return NULL;
+      }
    }
 
    if (config->type == LLM_LOCAL) {
       // Local LLM uses OpenAI-compatible API (no API key needed)
-      response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                            vision_image_sizes, vision_image_count, endpoint, NULL,
+      response = llm_openai_chat_completion(conversation_history, input_text, endpoint, NULL,
                                             config->model);
    } else {
       // Route to cloud provider
       switch (config->cloud_provider) {
          case CLOUD_PROVIDER_OPENAI:
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, endpoint,
+            response = llm_openai_chat_completion(conversation_history, input_text, endpoint,
                                                   config->api_key, config->model);
             break;
 
          case CLOUD_PROVIDER_CLAUDE:
-            response = llm_claude_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, endpoint,
+            response = llm_claude_chat_completion(conversation_history, input_text, endpoint,
                                                   config->api_key, config->model);
             break;
 
          case CLOUD_PROVIDER_GEMINI:
-         case CLOUD_PROVIDER_OPENROUTER:
-            /* Gemini and OpenRouter both use the OpenAI-compatible API */
-            response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, endpoint,
-                                                  config->api_key, config->model);
+         case CLOUD_PROVIDER_OPENROUTER: {
+            /* The OpenAI-compatible API, but OpenRouter's anthropic/ models
+             * take its Anthropic Messages endpoint. */
+            const char *m = call_model(config->cloud_provider, config->model);
+            if (llm_uses_anthropic_messages(config->type, config->cloud_provider, m, endpoint)) {
+               response = llm_claude_chat_completion(conversation_history, input_text, endpoint,
+                                                     config->api_key, m);
+            } else {
+               response = llm_openai_chat_completion(conversation_history, input_text, endpoint,
+                                                     config->api_key, config->model);
+            }
             break;
+         }
 
          default:
             OLOG_ERROR("No cloud provider configured in session config");
             llm_tools_set_current_config(NULL);
+            s_tl_timeout_ms = saved_tl_timeout;
             return NULL;
       }
    }
@@ -1686,9 +1698,6 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
 
 char *llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
                                                 const char *input_text,
-                                                const char **vision_images,
-                                                const size_t *vision_image_sizes,
-                                                int vision_image_count,
                                                 llm_text_chunk_callback chunk_callback,
                                                 void *callback_userdata,
                                                 const llm_resolved_config_t *config) {
@@ -1698,8 +1707,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 
    if (!config) {
       // No config provided, use global (with fallback enabled)
-      return llm_chat_completion_streaming(conversation_history, input_text, vision_images,
-                                           vision_image_sizes, vision_image_count, chunk_callback,
+      return llm_chat_completion_streaming(conversation_history, input_text, chunk_callback,
                                            callback_userdata, true);
    }
 
@@ -1721,9 +1729,13 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    llm_single_shot_fn provider_fn;
    llm_history_format_t history_format;
 
-   if (config->type == LLM_CLOUD && config->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+   const char *model = config->model;
+   const char *messages_model = call_model(config->cloud_provider, model);
+   if (llm_uses_anthropic_messages(config->type, config->cloud_provider, messages_model,
+                                   config->endpoint)) {
       provider_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
       history_format = LLM_HISTORY_CLAUDE;
+      model = messages_model;
    } else {
       provider_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
       history_format = LLM_HISTORY_OPENAI;
@@ -1733,17 +1745,17 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    llm_tool_loop_params_t loop_params = {
       .conversation_history = conversation_history,
       .input_text = input_text,
-      .vision_images = vision_images,
-      .vision_image_sizes = vision_image_sizes,
-      .vision_image_count = vision_image_count,
       .base_url = config->endpoint,
       .api_key = (config->type == LLM_LOCAL) ? NULL : config->api_key,
-      .model = config->model,
+      .model = model,
       .chunk_callback = (void *)chunk_callback,
       .callback_userdata = callback_userdata,
       .provider_fn = provider_fn,
       .history_format = history_format,
       .session_id = session_id,
+      /* A side call (a tool's summarizer, extraction) runs inside a turn but
+       * is none of its conversation: it reads and writes no session state. */
+      .has_session = session != NULL && !llm_cache_monitor_in_side_call(),
       .llm_type = config->type,
       .cloud_provider = config->cloud_provider,
       /* cancel_flag borrows &session->cancel_requested for the loop's lifetime.
@@ -1757,13 +1769,14 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 
    response = llm_tool_iteration_loop(&loop_params);
 
-   /* Trigger async compaction for next turn (WebUI sessions) */
-   {
+   /* The turn ended: a history nearing its window is summarized ahead, applied
+    * at the next turn's seam (session_compaction.h). */
+   if (loop_params.has_session) {
       session_t *trigger_session = session_get(loop_params.session_id);
       if (trigger_session) {
-         llm_context_async_trigger(trigger_session, loop_params.conversation_history,
-                                   loop_params.llm_type, loop_params.cloud_provider,
-                                   loop_params.model);
+         session_compaction_trigger(trigger_session, loop_params.conversation_history,
+                                    loop_params.llm_type, loop_params.cloud_provider,
+                                    loop_params.model);
          session_release(trigger_session);
       }
    }
@@ -1784,18 +1797,14 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 
 char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversation_history,
                                                     const char *input_text,
-                                                    const char **vision_images,
-                                                    const size_t *vision_image_sizes,
-                                                    int vision_image_count,
                                                     llm_sentence_callback sentence_callback,
                                                     void *callback_userdata,
                                                     const llm_resolved_config_t *config) {
    llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    if (!config) {
       // No config provided, use global (with fallback enabled)
-      return llm_chat_completion_streaming_tts(conversation_history, input_text, vision_images,
-                                               vision_image_sizes, vision_image_count,
-                                               sentence_callback, callback_userdata, true);
+      return llm_chat_completion_streaming_tts(conversation_history, input_text, sentence_callback,
+                                               callback_userdata, true);
    }
 
    char *response = NULL;
@@ -1813,9 +1822,7 @@ char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversa
 
    // Call streaming with chunk callback that feeds sentence buffer
    response = llm_chat_completion_streaming_with_config(conversation_history, input_text,
-                                                        vision_images, vision_image_sizes,
-                                                        vision_image_count, tts_chunk_callback,
-                                                        &ctx, config);
+                                                        tts_chunk_callback, &ctx, config);
 
    // Flush any remaining sentence
    sentence_buffer_flush(ctx.sentence_buffer);

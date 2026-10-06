@@ -263,6 +263,9 @@ static int fact_search_hybrid_impl(int user_id,
                 * still holds expiring rows — drop them here, not at cache load. */
                if (memory_db_fact_expiry_hidden(vec_fact.expires_at))
                   continue;
+               /* A superseded fact can sit in the cache until its next reload. */
+               if (vec_fact.superseded_by != 0)
+                  continue;
                out_facts[produced] = vec_fact;
                out_scores[produced] = hybrid[h].score;
                produced++;

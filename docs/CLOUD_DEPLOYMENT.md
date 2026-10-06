@@ -101,6 +101,9 @@ sudo apt install libmupdf-dev libzip-dev libxml2-dev
 
 # Calendar (CalDAV)
 sudo apt install libical-dev
+
+# Email (reading messages; required unless built with -DDAWN_ENABLE_EMAIL_TOOL=OFF)
+sudo apt install libgmime-3.0-dev
 ```
 
 ---

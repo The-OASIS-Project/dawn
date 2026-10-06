@@ -222,6 +222,7 @@ int memory_db_entity_get_embeddings(int user_id,
     * is a no-op here.  Accept the parameter for signature parity with v43
     * production. */
    (void)include_aliases;
+   s_mock.call_count_entity_embeddings++;
    if (expected_dims != s_mock.entity_dim) {
       if (count_out)
          *count_out = 0;
@@ -245,6 +246,40 @@ int memory_db_entity_get_embeddings(int user_id,
    }
    if (count_out)
       *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_embedding_count(int user_id, int expected_dims, int *count_out) {
+   if (!count_out)
+      return MEMORY_DB_FAILURE;
+   int n = 0;
+   for (int i = 0; expected_dims == s_mock.entity_dim && i < s_mock.entity_count; i++) {
+      if (s_mock.entities[i].user_id == user_id && s_mock.entity_embeddings[i] != NULL)
+         n++;
+   }
+   *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entities_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  memory_entity_t *out,
+                                  int *count_out) {
+   if (!ids || !out || !count_out || n <= 0)
+      return MEMORY_DB_FAILURE;
+   int count = 0;
+   for (int i = 0; i < s_mock.entity_count && count < n; i++) {
+      if (s_mock.entities[i].user_id != user_id)
+         continue;
+      for (int k = 0; k < n; k++) {
+         if (ids[k] == s_mock.entities[i].id) {
+            out[count++] = s_mock.entities[i];
+            break;
+         }
+      }
+   }
+   *count_out = count;
    return MEMORY_DB_SUCCESS;
 }
 
@@ -347,7 +382,8 @@ int memory_db_summary_search_since(int user_id,
                                    int *count_out) {
    (void)keywords;
    int n = 0;
-   for (int i = 0; i < s_mock.summary_count && n < max_summaries; i++) {
+   for (int i = 0; !s_mock.summary_keyword_off && i < s_mock.summary_count && n < max_summaries;
+        i++) {
       if (s_mock.summaries[i].user_id != user_id)
          continue;
       if (s_mock.summaries[i].created_at < since_ts)
@@ -531,8 +567,37 @@ int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
    return FAILURE;
 }
 
+/* The real entity embedding cache (memory_embeddings_entity.c) is linked in
+ * and reads the engine's dimension from here: the mock entity pool's. */
 int embedding_engine_dims(void) {
-   return 0;
+   return s_mock.embeddings_available ? s_mock.entity_dim : 0;
+}
+
+bool embedding_engine_available(void) {
+   return s_mock.embeddings_available;
+}
+
+int embedding_engine_embed(const char *text, float *out, int max_dims, int *out_dims) {
+   (void)text;
+   (void)out;
+   (void)max_dims;
+   if (out_dims != NULL)
+      *out_dims = 0;
+   return FAILURE;
+}
+
+
+int memory_db_entity_update_embedding(int64_t entity_id,
+                                      int user_id,
+                                      const float *embedding,
+                                      int dims,
+                                      float norm) {
+   (void)entity_id;
+   (void)user_id;
+   (void)embedding;
+   (void)dims;
+   (void)norm;
+   return MEMORY_DB_FAILURE;
 }
 
 int memory_embeddings_rescore_against_query(int user_id,
@@ -554,6 +619,24 @@ int memory_embeddings_rescore_against_query(int user_id,
    return SUCCESS;
 }
 
+/* No fact-embedding cache in this harness: the injection relevance gate is
+ * skipped (it only applies with a real baseline). */
+int memory_embeddings_fact_relevance(int user_id,
+                                     const float *query_emb,
+                                     const int64_t *ids,
+                                     int n,
+                                     float *out_rel,
+                                     int *pool_out) {
+   (void)user_id;
+   (void)query_emb;
+   (void)ids;
+   (void)n;
+   (void)out_rel;
+   if (pool_out)
+      *pool_out = 0;
+   return FAILURE;
+}
+
 int memory_search_apply_score_floor(memory_fact_t *facts,
                                     float *scores,
                                     int count,
@@ -572,17 +655,26 @@ int memory_db_summary_search_semantic(int user_id,
                                       int max_scan,
                                       memory_summary_t *out_summaries,
                                       float *out_scores,
-                                      int *count_out) {
-   (void)user_id;
+                                      int *count_out,
+                                      memory_summary_pool_t *pool_out) {
    (void)query_vec;
    (void)query_dims;
-   (void)since_ts;
-   (void)max_summaries;
    (void)max_scan;
-   (void)out_summaries;
-   (void)out_scores;
+   int n = 0;
+   for (int i = 0; i < s_mock.summary_count && n < max_summaries; i++) {
+      if (s_mock.summaries[i].user_id != user_id || s_mock.summaries[i].created_at < since_ts ||
+          s_mock.summary_sem_score[i] <= 0.0f)
+         continue;
+      out_summaries[n] = s_mock.summaries[i];
+      out_scores[n] = s_mock.summary_sem_score[i];
+      n++;
+   }
    if (count_out != NULL)
-      *count_out = 0;
+      *count_out = n;
+   if (pool_out != NULL) {
+      pool_out->scored = s_mock.summary_pool_scored;
+      pool_out->cosine_sum = s_mock.summary_pool_sum;
+   }
    return MEMORY_DB_SUCCESS;
 }
 
@@ -619,6 +711,28 @@ int memory_embeddings_rrf_search_ex(int user_id,
    (void)query_norm;
    return memory_embeddings_rrf_search(user_id, query, keyword_facts, keyword_scores, keyword_count,
                                        token_count, out_results, max_results);
+}
+
+/* Stemmer stub: words pass through unstemmed.  memory_terms (entity name
+ * matching) stems both sides with this, so names still match consistently;
+ * real stemming is covered by the document ranking tests. */
+int memory_stem_string(const char *input, char *out, size_t out_sz) {
+   if (!out || out_sz == 0)
+      return 0;
+   out[0] = '\0';
+   if (!input)
+      return 0;
+   snprintf(out, out_sz, "%s", input);
+   int n = 0;
+   for (const char *p = out; *p;) {
+      while (*p == ' ')
+         p++;
+      if (*p)
+         n++;
+      while (*p && *p != ' ')
+         p++;
+   }
+   return n;
 }
 
 /* Tokenizer stub — split on whitespace, lowercase, drop tokens shorter than

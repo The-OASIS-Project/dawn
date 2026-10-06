@@ -38,10 +38,13 @@
 #include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
+#include "core/turn_queue.h"
 #include "core/utterance_dedup.h"
+#include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
 #include "utils/string_utils.h"
+#include "webui/satellite_remap.h"
 #include "webui/webui_internal.h"
 
 /* Maximum concurrent satellite worker threads (LLM calls).
@@ -229,11 +232,27 @@ static void *satellite_worker_thread(void *arg) {
    unsigned int expected_gen = work->request_gen;
    char *response = NULL;
 
-   /* Worker count already incremented in handle_satellite_query before pthread_create */
+   /* The Tier-1/Tier-2 client keys its response_complete flag ONLY on a
+    * stream_end (or a satellite_response transcript) — never on state=idle or
+    * error (see dawn_satellite ws_client.c).  So every exit that OWNS this turn's
+    * outcome must emit exactly one terminal stream_end, or the satellite spins in
+    * VOICE_STATE_WAITING until its 50s response timeout.  A superseded exit is the
+    * one exception: its successor worker owns the terminal, so it stays silent
+    * (and if that successor fails to spawn, handle_satellite_query's
+    * satellite_reject_query still releases the client — so the hand-off is safe).
+    * This flag records "the client contract is satisfied" for both cases and lets
+    * the cleanup safety net release any future path that forgets. */
+   bool terminal_sent = false;
+   bool turn_begun = false;
 
-   /* Check if session is still valid or if this request was superseded */
+   /* Worker count already incremented in handle_satellite_query before it was queued */
+
+   /* Check if session is still valid or if this request was superseded.  Either
+    * way this worker owes no terminal frame: a disconnected session has no client
+    * to release, and a superseding query's successor worker will send it. */
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("Satellite: Session disconnected or request superseded, aborting");
+      terminal_sent = true;
       goto cleanup;
    }
 
@@ -248,6 +267,7 @@ static void *satellite_worker_thread(void *arg) {
        * timer, so it would spin until the 50s response timeout.  Send stream_end
        * (empty response = nothing spoken) to release it immediately. */
       satellite_send_stream_end(session, "complete");
+      terminal_sent = true;
       satellite_send_state(session, "idle");
       goto cleanup;
    }
@@ -257,11 +277,17 @@ static void *satellite_worker_thread(void *arg) {
    /* Send "thinking" state with detail */
    webui_send_state_with_detail(session, "thinking", "Processing your request...");
 
+   /* A turn, like every surface's: the history it runs on has one writer, and
+    * the turn queue runs one at a time.  A satellite session has no
+    * conversation of its own; the turn runs on its live history. */
+   session_turn_begin(session, 0, (int)session->metrics.user_id);
+   turn_begun = true;
+
    /* Add user message to history */
-   session_add_message(session, "user", text);
+   session_add_turn_message(session, "user", text);
 
    /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
-    * satellite_worker_thread (spawned via pthread_create from
+    * satellite_worker_thread (started by the turn queue from
     * handle_satellite_query — NEVER on the lws service thread). */
    session_dispatch_user_turn(session, text);
 
@@ -269,32 +295,43 @@ static void *satellite_worker_thread(void *arg) {
     * Tier 1 satellites have local TTS and only need the text response, but
     * Tier 2 devices need the daemon to synthesize speech and send PCM audio. */
    bool needs_server_tts = !session->capabilities.local_tts;
-   response = session_llm_call_with_tts_vision_no_add(
-       session, text, NULL, NULL, NULL, 0, needs_server_tts ? webui_sentence_audio_callback : NULL,
-       needs_server_tts ? session : NULL);
+   response = session_llm_call_with_tts_no_add(session, text,
+                                               needs_server_tts ? webui_sentence_audio_callback
+                                                                : NULL,
+                                               needs_server_tts ? session : NULL);
 
-   /* Check if request was superseded during LLM call */
+   /* Check if request was superseded during LLM call.  A superseding query has
+    * already spawned a successor worker that will emit the terminal frame, so
+    * this worker stays SILENT — sending stream_end here would release the client
+    * before the successor's real reply.  Mark the contract satisfied so the
+    * cleanup safety net does not fire. */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("Satellite: Request superseded during LLM call");
+      terminal_sent = true;
       goto cleanup;
    }
 
    if (!response) {
       satellite_send_error(session, "LLM_ERROR", "Failed to get response from AI");
+      satellite_send_stream_end(session, "error");
+      terminal_sent = true;
       satellite_send_state(session, "idle");
       goto cleanup;
    }
 
-   if (REQUEST_SUPERSEDED(session, expected_gen))
+   if (REQUEST_SUPERSEDED(session, expected_gen)) {
+      terminal_sent = true; /* successor owns the terminal frame (see above) */
       goto cleanup;
+   }
 
    /* Response is already canonical clean text (finalized centrally in
     * llm_call_finalize) — no per-seam strip needed. */
 
-   /* Send stream end if streaming was active */
-   if (atomic_load(&session->llm_streaming_active)) {
-      satellite_send_stream_end(session, "complete");
-   }
+   /* Terminate the turn.  Unconditional (not gated on llm_streaming_active): a
+    * non-streaming reply produces no stream to close, but the client still needs
+    * a stream_end to release its response_complete flag. */
+   satellite_send_stream_end(session, "complete");
+   terminal_sent = true;
 
    /* Return to idle state */
    satellite_send_state(session, "idle");
@@ -303,6 +340,14 @@ static void *satellite_worker_thread(void *arg) {
    session_update_interaction_complete(session);
 
 cleanup:
+   if (turn_begun) {
+      session_turn_end(session);
+   }
+   /* Safety net: any exit that did not already send a terminal frame (e.g. the
+    * early superseded/disconnected check above) must still release the client. */
+   if (session && !terminal_sent) {
+      satellite_send_stream_end(session, "error");
+   }
    if (session)
       session_release(session);
    free(response);
@@ -310,6 +355,91 @@ cleanup:
    free(work);
    atomic_fetch_sub(&g_active_satellite_workers, 1);
    return NULL;
+}
+
+/* =============================================================================
+ * Turn-queue integration: one satellite query runs at a time per session, like
+ * every other surface's turns, so two never share the session's history.  A new
+ * query still supersedes an older one (request_generation): the running one is
+ * cancelled, and one still queued exits without answering when it starts.
+ * ============================================================================= */
+
+/* Drop a queued query a newer one supersedes: silently, since the newer
+ * query owns the client's terminal frame. */
+static void satellite_turn_discard(void *arg) {
+   satellite_work_t *work = (satellite_work_t *)arg;
+   if (!work) {
+      return;
+   }
+   if (work->session) {
+      session_release(work->session);
+   }
+   free(work->text);
+   free(work);
+   atomic_fetch_sub(&g_active_satellite_workers, 1);
+}
+
+/* free_work closure: drop a query WITHOUT running it (purge), releasing the
+ * client, which waits for a terminal frame. */
+static void satellite_turn_free(void *arg) {
+   satellite_work_t *work = (satellite_work_t *)arg;
+   if (!work) {
+      return;
+   }
+   if (work->session) {
+      satellite_send_stream_end(work->session, "error");
+      session_release(work->session);
+   }
+   free(work->text);
+   free(work);
+   atomic_fetch_sub(&g_active_satellite_workers, 1);
+}
+
+static void *satellite_turn_entry(void *arg) {
+   satellite_work_t *work = (satellite_work_t *)arg;
+   const uint32_t sid = work->session ? work->session->session_id : 0;
+   if (work->session && atomic_load(&work->session->being_destroyed)) {
+      /* Torn down after this query was dequeued: teardown's cancel stands. */
+      satellite_turn_free(work);
+      turn_queue_turn_done(sid);
+      return NULL;
+   }
+   if (work->session) {
+      /* A cancel aimed at the query before this one (it superseded it) must
+       * not stop this one. */
+      atomic_store(&work->session->cancel_requested, false);
+      if (atomic_load(&work->session->being_destroyed)) {
+         /* Teardown began between the check above and the clear: its cancel
+          * stands. */
+         atomic_store(&work->session->cancel_requested, true);
+         satellite_turn_free(work);
+         turn_queue_turn_done(sid);
+         return NULL;
+      }
+   }
+   satellite_worker_thread(work); /* frees work, releases the session */
+   turn_queue_turn_done(sid);     /* start the next queued query, if any */
+   return NULL;
+}
+
+/* spawn closure: start the worker for a dequeued query. */
+static void satellite_turn_spawn(void *arg) {
+   pthread_t thread;
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   /* 512KB stack: the worker does the HTTP LLM call, tool execution (memory
+    * search has ~30KB stack arrays) and string processing. */
+   pthread_attr_setstacksize(&attr, 512 * 1024);
+   int ret = pthread_create(&thread, &attr, satellite_turn_entry, arg);
+   pthread_attr_destroy(&attr);
+   if (ret != 0) {
+      satellite_work_t *work = (satellite_work_t *)arg;
+      const uint32_t sid = work->session ? work->session->session_id : 0;
+      OLOG_ERROR("Satellite: failed to start a query worker (%d); dropping the query", ret);
+      satellite_turn_free(work);
+      turn_queue_turn_done(sid);
+   }
 }
 
 /* =============================================================================
@@ -359,6 +489,16 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
          send_error_impl(conn->wsi, "INVALID_MESSAGE", "UUID must be hex with dashes (8-4-4-4-12)");
          return;
       }
+   }
+
+   /* The reserved Local Device id is the daemon's own mic and speaker: a remote
+    * client registering as it would take over its owner and room. */
+   if (satellite_is_local_pseudo(uuid)) {
+      OLOG_WARNING("Satellite: refused registration as the reserved Local Device id from %s",
+                   conn->client_ip);
+      send_error_impl(conn->wsi, "INVALID_MESSAGE",
+                      "That UUID is reserved for the local device; use the satellite's own UUID");
+      return;
    }
 
    /* Validate registration key if daemon has one configured */
@@ -535,30 +675,19 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
             return;
          }
 
-         /* Apply user mapping if assigned */
+         conn->auth_user_id = mapping.user_id;
+         if (satellite_owner_changes(session, mapping.user_id)) {
+            /* Queued behind any running query, which finishes as the user it
+             * began as; it saves that user's conversation, then applies this
+             * mapping (below, otherwise). */
+            satellite_queue_remap(session, mapping.user_id);
+         } else {
+            satellite_apply_mapping(session, mapping.user_id);
+         }
          if (mapping.user_id > 0) {
-#ifdef ENABLE_MULTI_CLIENT
-            session_set_metrics_user(session, mapping.user_id);
-#endif
-            conn->auth_user_id = mapping.user_id;
-
-            /* Phase 1f: SESSION_START builder boundary on satellite
-             * rebind — clear dedup state so the next PER_TURN starts
-             * fresh against the new user's persona/memory. */
-            session_injected_set_clear(session);
-            /* Build personalized system prompt with user memories */
-            char *user_prompt = session_manager_build_system_prompt_string(mapping.user_id);
-            if (user_prompt) {
-               session_update_system_prompt(session, user_prompt);
-               free(user_prompt);
-            }
-
             OLOG_INFO("Satellite: Applied user mapping user_id=%d for %s (%s)", mapping.user_id,
                       identity.name, uuid);
          }
-
-         /* Append satellite context (room + HA area) */
-         session_append_satellite_context(session, identity.location, mapping.ha_area);
 
          /* Sync name/location if changed on satellite side (already sanitized above) */
          if (strcmp(mapping.name, identity.name) != 0 ||
@@ -584,9 +713,6 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
          new_mapping.last_seen = new_mapping.created_at;
 
          satellite_db_upsert(&new_mapping);
-
-         /* No user mapping yet — use default room context */
-         session_append_satellite_context(session, identity.location, NULL);
 
          OLOG_INFO("Satellite: Auto-registered new satellite %s (%s)", identity.name, uuid);
       }
@@ -644,6 +770,22 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    json_object_put(response);
 }
 
+/* Reject a satellite query AND release the waiting client.  The client keys its
+ * response_complete flag only on stream_end/transcript, never on an error frame,
+ * so a bare error here hangs it until the 50s response timeout.  Worse: if this
+ * query already bumped request_generation, the superseded predecessor worker
+ * stays silent (it expects THIS successor to send the terminal) — but a failed
+ * spawn means no successor runs.  Every post-registration failure therefore emits
+ * a terminal stream_end so the querying client is always released and the
+ * "successor owns the terminal" contract in satellite_worker_thread holds.
+ * Use only after the DAP2 registration guard (conn->session is a valid DAP2
+ * session); the NOT_REGISTERED rejection stays a plain error (no satellite to
+ * release). */
+static void satellite_reject_query(ws_connection_t *conn, const char *code, const char *message) {
+   send_error_impl(conn->wsi, code, message);
+   satellite_send_stream_end(conn->session, "error");
+}
+
 void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) {
    if (!conn || !payload) {
       OLOG_WARNING("Satellite: Invalid query request");
@@ -661,19 +803,19 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
    /* Extract query text */
    struct json_object *text_obj;
    if (!json_object_object_get_ex(payload, "text", &text_obj)) {
-      send_error_impl(conn->wsi, "INVALID_MESSAGE", "Missing 'text' in satellite_query");
+      satellite_reject_query(conn, "INVALID_MESSAGE", "Missing 'text' in satellite_query");
       return;
    }
 
    const char *text = json_object_get_string(text_obj);
    if (!text || strlen(text) == 0) {
-      send_error_impl(conn->wsi, "INVALID_MESSAGE", "Empty query text");
+      satellite_reject_query(conn, "INVALID_MESSAGE", "Empty query text");
       return;
    }
 
    /* Cap query length to prevent resource exhaustion (memory + LLM API cost) */
    if (strlen(text) > 8192) {
-      send_error_impl(conn->wsi, "INVALID_MESSAGE", "Query text too long (max 8192 chars)");
+      satellite_reject_query(conn, "INVALID_MESSAGE", "Query text too long (max 8192 chars)");
       return;
    }
 
@@ -683,7 +825,7 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
    /* Create work item */
    satellite_work_t *work = calloc(1, sizeof(satellite_work_t));
    if (!work) {
-      send_error_impl(conn->wsi, "INTERNAL_ERROR", "Memory allocation failed");
+      satellite_reject_query(conn, "INTERNAL_ERROR", "Memory allocation failed");
       return;
    }
 
@@ -695,9 +837,14 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
    if (!work->text) {
       session_release(session);
       free(work);
-      send_error_impl(conn->wsi, "INTERNAL_ERROR", "Memory allocation failed");
+      satellite_reject_query(conn, "INTERNAL_ERROR", "Memory allocation failed");
       return;
    }
+
+   /* Only the newest query answers: drop any older one still queued before
+    * claiming a slot, so one satellite holds at most two (running + queued). */
+   (void)turn_queue_discard_queued(session->session_id, satellite_turn_free,
+                                   satellite_turn_discard);
 
    /* Atomically claim a worker slot (prevents TOCTOU race on the limit check) */
    int prev = atomic_fetch_add(&g_active_satellite_workers, 1);
@@ -705,31 +852,28 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
       atomic_fetch_sub(&g_active_satellite_workers, 1);
       OLOG_WARNING("Satellite: Worker limit reached (%d), rejecting query from %s",
                    MAX_SATELLITE_WORKERS, session->identity.name);
-      send_error_impl(conn->wsi, "BUSY", "Server busy processing other requests");
+      satellite_reject_query(conn, "BUSY", "Server busy processing other requests");
       session_release(session);
       free(work->text);
       free(work);
       return;
    }
 
-   /* Launch worker thread (512KB stack — worker does HTTP LLM call, tool execution
-    * including memory search with ~30KB stack arrays, and string processing) */
-   pthread_t thread;
-   pthread_attr_t attr;
-   pthread_attr_init(&attr);
-   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-   pthread_attr_setstacksize(&attr, 512 * 1024);
-
-   int ret = pthread_create(&thread, &attr, satellite_worker_thread, work);
-   pthread_attr_destroy(&attr);
-
-   if (ret != 0) {
+   /* This query supersedes any still running: stop it rather than let it finish
+    * an answer no one will hear.  Queued behind it, this one starts when it
+    * ends (the queue serializes the session's turns). */
+   session_cancel_turn(session);
+   const int qrc = turn_queue_enqueue(session->session_id, TURN_SOURCE_USER, work,
+                                      satellite_turn_spawn, satellite_turn_free);
+   if (qrc != TURN_QUEUE_OK) {
       atomic_fetch_sub(&g_active_satellite_workers, 1);
-      OLOG_ERROR("Satellite: Failed to create worker thread: %d", ret);
+      OLOG_WARNING("Satellite: could not queue a query from %s (%d)", session->identity.name, qrc);
       session_release(session);
       free(work->text);
       free(work);
-      send_error_impl(conn->wsi, "INTERNAL_ERROR", "Failed to start processing");
+      satellite_reject_query(conn, qrc == TURN_QUEUE_FULL ? "BUSY" : "INTERNAL_ERROR",
+                             qrc == TURN_QUEUE_FULL ? "Too many queries queued; try again"
+                                                    : "Failed to start processing");
       return;
    }
 

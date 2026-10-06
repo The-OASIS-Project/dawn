@@ -49,10 +49,11 @@
 #include "auth/admin_socket_internal.h"
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
+#include "auth/auth_db_withdraw.h"
+#include "core/conv_images.h"
 #include "core/path_utils.h"
+#include "core/session_prefix.h"
 #include "dawn_error.h"
-#include "document_original_store.h"
-#include "image_store.h"
 #include "logging.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
@@ -1026,27 +1027,28 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
 
    /* Purge the user's images (rows + files) BEFORE the user delete: the images FK
     * cascades the rows on user delete but leaks the files, and after the cascade
-    * there are no rows left to enumerate.  Edge: if the delete is then rejected
-    * (last admin), the images are gone but the account survives — acceptable, since
-    * deleting the last admin is a blocked misuse anyway. */
+    * there are no rows left to enumerate.  Not for the last admin, whose delete is
+    * refused below: the account stays, with its images. */
    auth_user_t del_user;
-   if (auth_db_get_user(target, &del_user) == AUTH_DB_SUCCESS && del_user.id > 0) {
-      if (image_store_delete_user(del_user.id) != IMAGE_STORE_SUCCESS) {
-         /* Surface an incomplete purge — rows or files may have leaked, which matters
-          * for a deletion guarantee.  The FK cascade still removes rows on user delete. */
-         OLOG_WARNING("DELETE_USER: image purge for user %d incomplete (rows/files may remain)",
-                      del_user.id);
-      }
-      /* Same rationale for stored document originals (blobs FK cascades rows but
-       * leaks files) — purge before the user delete. */
-      if (document_originals_ready() &&
-          document_original_delete_user(del_user.id) != BLOB_STORE_SUCCESS) {
-         OLOG_WARNING("DELETE_USER: document-original purge for user %d incomplete", del_user.id);
-      }
+   int admins = 0;
+   if (auth_db_get_user(target, &del_user) == AUTH_DB_SUCCESS && del_user.id > 0 &&
+       !(del_user.is_admin && auth_db_count_admins(&admins) == AUTH_DB_SUCCESS && admins <= 1)) {
+      /* An incomplete purge is logged (rows or files may have leaked, which
+       * matters for a deletion guarantee); the FK cascade still removes rows. */
+      (void)conv_images_purge_user(del_user.id);
    }
 
-   /* Delete the user */
+   /* Delete the user: its documents (a shared one is in other users'
+    * conversations) and memories go with it, removed on its behalf and
+    * withdrawn. */
+   auth_user_t removed;
+   const int removed_id = auth_db_get_user(target, &removed) == AUTH_DB_SUCCESS ? removed.id : 0;
+   conv_db_withdraw_intent_begin(removed_id);
    int rc = auth_db_delete_user(target);
+   conv_db_withdraw_intent_end();
+   if (rc == AUTH_DB_SUCCESS && removed_id > 0) {
+      session_withdraw_forgotten_async(removed_id, false);
+   }
 
    if (rc == AUTH_DB_LAST_ADMIN) {
       OLOG_WARNING("DELETE_USER: cannot delete last admin: %s", target);
@@ -1115,7 +1117,7 @@ static int handle_change_password(int client_fd, const char *payload, uint16_t p
    auth_secure_zero(new_password, sizeof(new_password));
 
    /* Update password (also invalidates all sessions) */
-   int rc = auth_db_update_password(target, new_hash);
+   int rc = auth_db_update_password(target, new_hash, NULL); /* all its logins end */
 
    if (rc == AUTH_DB_NOT_FOUND) {
       OLOG_WARNING("CHANGE_PASSWORD: user not found: %s", target);
@@ -2092,8 +2094,9 @@ static int handle_delete_conversation(int client_fd, const char *payload, uint16
    int64_t conv_id;
    memcpy(&conv_id, payload + auth_size, 8);
 
-   /* Admin access - no ownership check */
-   int rc = conv_db_delete_admin(conv_id);
+   /* Admin access - no ownership check.  The images it owns go with it, in
+    * one transaction, as their owner's. */
+   int rc = conv_images_delete_conversation(conv_id, 0);
 
    if (rc == AUTH_DB_NOT_FOUND) {
       OLOG_WARNING("DELETE_CONVERSATION: conversation %lld not found", (long long)conv_id);
@@ -2320,6 +2323,9 @@ static int handle_client(int client_fd) {
          return handle_ota_rollout_status_cmd(client_fd);
       case ADMIN_MSG_OTA_ROLLOUT_ABORT:
          return handle_ota_rollout_abort_cmd(client_fd);
+
+      case ADMIN_MSG_CACHE_STATS:
+         return handle_cache_stats_cmd(client_fd, payload, header.payload_len);
 
 #ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL
       /* Deep-research operator commands (headless benchmark spawn path, §16). */

@@ -53,11 +53,15 @@ static const char *s_goodbye_words[] = {
 static const char *s_ignore_words[] = { "", "the", "cancel", "never mind", "nevermind", "ignore" };
 #define NUM_IGNORE (sizeof(s_ignore_words) / sizeof(s_ignore_words[0]))
 
-/* Cancel phrases */
-static const char *s_cancel_words[] = { "stop",     "stop it",    "cancel",    "hold on",
-                                        "wait",     "never mind", "abort",     "pause",
-                                        "enough",   "disregard",  "no thanks", "forget it",
-                                        "leave it", "drop it",    "stand by",  "cease" };
+/* Cancel phrases, as wake_word_normalize() leaves them ("that's" → "thats").
+ * The one list for every voice surface: the local mic, always-on WebUI and
+ * satellites all stop on the same words. */
+static const char *s_cancel_words[] = {
+   "stop",     "stop it", "cancel",   "hold on",      "wait",           "never mind",
+   "abort",    "pause",   "enough",   "disregard",    "no thanks",      "forget it",
+   "leave it", "drop it", "stand by", "cease",        "interrupt",      "say no more",
+   "shut up",  "silence", "zip it",   "thats enough", "enough already", "stop right there"
+};
 #define NUM_CANCEL (sizeof(s_cancel_words) / sizeof(s_cancel_words[0]))
 
 void wake_word_init(const char *ai_name) {
@@ -130,16 +134,32 @@ static size_t map_normalized_to_original(const char *original, size_t norm_pos) 
    return orig_i;
 }
 
-/**
- * Check if normalized text exactly matches any string in a list
- */
-static bool match_exact(const char *normalized, const char **list, size_t count) {
+/* Whether normalized text is exactly one of a list's phrases.  Spaces around
+ * it don't count: ASR text often starts with one (" Stop.", " Goodbye."). */
+static bool match_phrase(const char *normalized, const char **list, size_t count) {
+   while (*normalized == ' ') {
+      normalized++;
+   }
+   size_t n = strlen(normalized);
+   while (n > 0 && normalized[n - 1] == ' ') {
+      n--;
+   }
    for (size_t i = 0; i < count; i++) {
-      if (strcmp(normalized, list[i]) == 0) {
+      if (strlen(list[i]) == n && strncmp(normalized, list[i], n) == 0) {
          return true;
       }
    }
    return false;
+}
+
+bool wake_word_is_cancel(const char *text) {
+   char *normalized = wake_word_normalize(text);
+   if (!normalized) {
+      return false;
+   }
+   const bool cancel = match_phrase(normalized, s_cancel_words, NUM_CANCEL);
+   free(normalized);
+   return cancel;
 }
 
 /**
@@ -167,9 +187,9 @@ static wake_word_result_t wake_word_check_internal(const char *text, bool prefix
    }
 
    if (!prefix_only) {
-      result.is_goodbye = match_exact(normalized, s_goodbye_words, NUM_GOODBYE);
-      result.is_ignore = match_exact(normalized, s_ignore_words, NUM_IGNORE);
-      result.is_cancel = match_exact(normalized, s_cancel_words, NUM_CANCEL);
+      result.is_goodbye = match_phrase(normalized, s_goodbye_words, NUM_GOODBYE);
+      result.is_ignore = match_phrase(normalized, s_ignore_words, NUM_IGNORE);
+      result.is_cancel = match_phrase(normalized, s_cancel_words, NUM_CANCEL);
    }
 
    /* In prefix mode, skip any leading whitespace on the normalized

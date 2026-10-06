@@ -25,17 +25,11 @@
 #include <stddef.h>
 #include <sys/time.h>
 
+#include "llm/llm_claude_binding.h"
+#include "llm/llm_claude_blocks.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_reasoning_details.h"
 #include "llm/llm_tools.h"
-
-/**
- * @brief Initial size for Claude thinking signature buffer
- *
- * Claude's extended thinking returns a cryptographic signature that must be
- * preserved and sent back in conversation history. The buffer grows dynamically
- * since signature sizes vary across model versions.
- */
-#define LLM_THINKING_SIGNATURE_INITIAL 8192
 
 /**
  * @brief Callback function type for text chunks from LLM stream
@@ -97,8 +91,12 @@ typedef struct {
    int cache_creation_input_tokens; /**< Tokens written to the prompt cache this turn (non-zero
                                          when cache_control: ephemeral is honored and a fresh
                                          entry was created).  Populated from message_start.usage. */
-   int cache_read_input_tokens;     /**< Tokens served from cache (90% discount on these).
-                                         Populated from message_start.usage. */
+   int cache_read_input_tokens;     /**< Tokens served from cache (billed at the model's cache-read
+                                         price).  Populated from message_start.usage. */
+   char message_id[64];             /**< message_start message.id (cache diagnostics' next key) */
+   char cache_miss_reason[32]; /**< message_start diagnostics.cache_miss_reason.type ("" = none) */
+   int cache_missed_tokens;    /**< ...cache_miss_reason.cache_missed_input_tokens */
+   llm_claude_drops_t drops;   /**< input_transformations (message_start / final message_delta) */
 
    /* Tool use block tracking */
    int tool_block_active;              /**< Currently in a tool_use block */
@@ -113,10 +111,8 @@ typedef struct {
    int visual_progress_active; /**< Notify frontend when render_visual generation starts */
 
    /* Thinking block tracking (extended thinking) */
-   int thinking_block_active;     /**< Currently in a thinking block */
-   char *thinking_signature;      /**< Accumulated signature (heap, grows as needed) */
-   size_t thinking_signature_len; /**< Length of accumulated signature */
-   size_t thinking_signature_cap; /**< Capacity of signature buffer */
+   int thinking_block_active;    /**< Currently in a thinking block */
+   llm_claude_capture_t capture; /**< Every content block, in order, as sent (the turn's replay) */
 } claude_stream_state_t;
 
 /**
@@ -128,6 +124,8 @@ typedef struct {
 typedef struct {
    char tool_args_buffer[LLM_TOOLS_MAX_PARALLEL_CALLS][LLM_TOOLS_ARGS_LEN];
    bool tool_args_overflow[LLM_TOOLS_MAX_PARALLEL_CALLS]; /**< per-call: args clipped at the cap */
+   size_t tool_args_len[LLM_TOOLS_MAX_PARALLEL_CALLS];    /**< per-call length, so a delta doesn't
+                                                             re-measure the buffer */
 } openai_stream_state_t;
 
 /**
@@ -140,6 +138,7 @@ typedef struct {
    /* Provider identification */
    llm_type_t llm_type;             /**< LLM type (LOCAL or CLOUD) */
    cloud_provider_t cloud_provider; /**< Cloud provider (if CLOUD) */
+   int anthropic_wire; /**< 1: an Anthropic Messages stream (llm_stream_create_messages) */
 
    /* Callback for streaming text to caller */
    text_chunk_callback callback; /**< User callback for text chunks */
@@ -177,6 +176,7 @@ typedef struct {
 
    /* Stream completion tracking */
    int stream_complete;    /**< 1 when stream has ended */
+   char stream_error[160]; /**< A failure the stream reported; "" = none */
    char finish_reason[32]; /**< Final finish/stop reason from stream */
 
    /* TTFT (Time To First Token) tracking for metrics */
@@ -192,10 +192,22 @@ typedef struct {
    /* Tool calls output (populated by either provider) */
    tool_call_list_t tool_calls; /**< Accumulated tool calls */
    int has_tool_calls;          /**< Flag: 1 if tool_calls detected in response */
+
+   /* Chat-completions reasoning to replay (outside the provider union: a
+    * Claude stream leaves them NULL).  Gemini signs its reasoning per tool
+    * call; OpenRouter streams reasoning_details pieces, merged by type and index
+    * and type.  Both go back only to the endpoint and model that issued them
+    * (llm_stream_chat_blocks). */
+   char *call_signatures[LLM_TOOLS_MAX_PARALLEL_CALLS]; /**< heap, by tool-call index */
+   llm_reasoning_details_t reasoning_details;           /**< OpenRouter pieces, merged */
+   char served_model[128]; /**< the model the response says served it ("" = not said) */
 } llm_stream_context_t;
 
 /**
  * @brief Create a new LLM stream context
+ *
+ * An OpenAI-format stream (Chat Completions, Responses, local); an Anthropic
+ * Messages stream is llm_stream_create_messages().
  *
  * @param llm_type LLM type (LLM_LOCAL or LLM_CLOUD)
  * @param cloud_provider Cloud provider (if LLM_CLOUD)
@@ -207,6 +219,16 @@ llm_stream_context_t *llm_stream_create(llm_type_t llm_type,
                                         cloud_provider_t cloud_provider,
                                         text_chunk_callback callback,
                                         void *userdata);
+
+/**
+ * @brief Create a stream context for an Anthropic Messages stream
+ *
+ * Parsed as Messages events whoever serves it; usage books under
+ * @p cloud_provider (Claude, or OpenRouter's Messages route).
+ */
+llm_stream_context_t *llm_stream_create_messages(cloud_provider_t cloud_provider,
+                                                 text_chunk_callback callback,
+                                                 void *userdata);
 
 /**
  * @brief Free an LLM stream context
@@ -261,6 +283,17 @@ char *llm_stream_get_response(llm_stream_context_t *ctx);
 int llm_stream_is_complete(llm_stream_context_t *ctx);
 
 /**
+ * @brief Whether a stream that returned 200 actually finished
+ *
+ * A stream that reported an error, or ended without its end marker, was cut
+ * off: logged (as @p api), worth a retry if nothing was shown yet
+ * (LLM_ERR_TRANSIENT_NETWORK), and told to a WebUI session if something was.
+ *
+ * @return 0 when it finished, 1 when it was cut off
+ */
+int llm_stream_check_finished(llm_stream_context_t *ctx, const char *api);
+
+/**
  * @brief Check if stream contains tool calls instead of text
  *
  * @param ctx Stream context
@@ -275,6 +308,19 @@ int llm_stream_has_tool_calls(llm_stream_context_t *ctx);
  * @return Pointer to tool_call_list_t (do not free), or NULL if no tool calls
  */
 const tool_call_list_t *llm_stream_get_tool_calls(llm_stream_context_t *ctx);
+
+/**
+ * @brief A chat-completions stream's turn as blocks (llm_turn_blocks.h)
+ *
+ * OpenRouter reasoning_details (in order), the text, and the tool calls, each
+ * with the Gemini signature it came with.  Reasoning and signatures are bound
+ * to @p carrier and @p model, so they only ever go back there.
+ *
+ * @return New blocks (caller owns them), or NULL
+ */
+struct json_object *llm_stream_chat_blocks(llm_stream_context_t *ctx,
+                                           const char *carrier,
+                                           const char *model);
 
 /**
  * @brief Create stream context with extended thinking callback
@@ -315,15 +361,13 @@ int llm_stream_has_thinking(llm_stream_context_t *ctx);
 char *llm_stream_get_thinking(llm_stream_context_t *ctx);
 
 /**
- * @brief Get the thinking signature (Claude extended thinking)
+ * @brief Take a Claude stream's content blocks (in order, exactly as sent)
  *
- * Returns the signature that was provided with the thinking block.
- * This must be included when sending thinking content back to Claude.
- *
- * @param ctx Stream context
- * @return Signature string (caller must free), or NULL if no signature
+ * The response as the model produced it: thinking blocks with their own
+ * signatures, redacted thinking, text, tool_use.  NULL for non-Claude streams
+ * or an empty response.  Caller owns the array.
  */
-char *llm_stream_get_thinking_signature(llm_stream_context_t *ctx);
+struct json_object *llm_stream_take_claude_content(llm_stream_context_t *ctx);
 
 /**
  * @brief Get response without allocation (reference to internal buffer)
@@ -347,15 +391,5 @@ const char *llm_stream_get_response_ref(llm_stream_context_t *ctx);
  */
 const char *llm_stream_get_thinking_ref(llm_stream_context_t *ctx);
 
-/**
- * @brief Get thinking signature without allocation (reference to internal buffer)
- *
- * Returns a pointer to the internal signature buffer. Caller must NOT free.
- * Valid only while stream context exists.
- *
- * @param ctx Stream context
- * @return Signature string (do NOT free), or NULL if no signature
- */
-const char *llm_stream_get_thinking_signature_ref(llm_stream_context_t *ctx);
 
 #endif  // LLM_STREAMING_H

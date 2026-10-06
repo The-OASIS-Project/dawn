@@ -576,54 +576,101 @@ int document_db_chunk_create(int64_t document_id,
    return result;
 }
 
-int document_db_chunk_search_load(int user_id,
-                                  document_chunk_t *chunks,
-                                  float *embedding_buf,
-                                  int dims,
-                                  int max_count,
-                                  int *count_out) {
-   if (!chunks || !embedding_buf || dims <= 0 || max_count <= 0 || !count_out)
+int document_db_chunks_meta_by_ids(int user_id,
+                                   const int64_t *ids,
+                                   int n,
+                                   doc_chunk_meta_t *out,
+                                   int *count_out) {
+   if (!ids || !out || !count_out || n <= 0) {
       return FAILURE;
-
+   }
    *count_out = 0;
-   AUTH_DB_LOCK_OR_FAIL();
+   char *list = auth_db_internal_ids_json(ids, n);
+   if (!list) {
+      return FAILURE;
+   }
 
-   sqlite3_stmt *stmt = s_db.stmt_doc_chunk_search;
-   sqlite3_reset(stmt);
+   AUTH_DB_LOCK_OR_RETURN((free(list), FAILURE));
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT c.id, c.chunk_index, c.document_id, d.filename, d.filetype, "
+                          "d.num_chunks, c.created_at "
+                          "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                          "WHERE (d.user_id = ? OR d.is_global = 1) "
+                          "AND c.id IN (SELECT value FROM json_each(?))",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("document_db: prepare chunks_meta_by_ids failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      free(list);
+      return FAILURE;
+   }
    sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int(stmt, 2, max_count);
-
+   sqlite3_bind_text(stmt, 2, list, -1, SQLITE_STATIC);
    int count = 0;
-   int expected_blob_size = dims * (int)sizeof(float);
+   while (count < n && sqlite3_step(stmt) == SQLITE_ROW) {
+      doc_chunk_meta_t *m = &out[count];
+      m->id = sqlite3_column_int64(stmt, 0);
+      m->chunk_index = sqlite3_column_int(stmt, 1);
+      m->document_id = sqlite3_column_int64(stmt, 2);
+      col_text_copy(m->filename, sizeof(m->filename), stmt, 3);
+      col_text_copy(m->filetype, sizeof(m->filetype), stmt, 4);
+      m->num_chunks = sqlite3_column_int(stmt, 5);
+      m->created_at = sqlite3_column_int64(stmt, 6);
+      count++;
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   free(list);
+   *count_out = count;
+   return SUCCESS;
+}
 
-   while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
-      /* Verify embedding dimensions match */
-      int blob_size = sqlite3_column_bytes(stmt, 3);
-      if (blob_size != expected_blob_size)
-         continue;
+int document_db_chunks_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  document_chunk_t *out,
+                                  int *count_out) {
+   if (!ids || !out || !count_out || n <= 0) {
+      return FAILURE;
+   }
+   *count_out = 0;
+   char *list = auth_db_internal_ids_json(ids, n);
+   if (!list) {
+      return FAILURE;
+   }
 
-      document_chunk_t *c = &chunks[count];
+   AUTH_DB_LOCK_OR_RETURN((free(list), FAILURE));
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
+                          "d.filetype, c.created_at "
+                          "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                          "WHERE (d.user_id = ? OR d.is_global = 1) "
+                          "AND c.id IN (SELECT value FROM json_each(?))",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("document_db: prepare chunks_get_by_ids failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      free(list);
+      return FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, list, -1, SQLITE_STATIC);
+   int count = 0;
+   while (count < n && sqlite3_step(stmt) == SQLITE_ROW) {
+      document_chunk_t *c = &out[count];
+      memset(c, 0, sizeof(*c));
       c->id = sqlite3_column_int64(stmt, 0);
       c->chunk_index = sqlite3_column_int(stmt, 1);
       col_text_copy(c->text, sizeof(c->text), stmt, 2);
-
-      /* Copy embedding into the flat buffer */
-      const void *blob = sqlite3_column_blob(stmt, 3);
-      float *emb_dest = embedding_buf + (count * dims);
-      memcpy(emb_dest, blob, (size_t)blob_size);
-      c->embedding = emb_dest;
-      c->embedding_norm = (float)sqlite3_column_double(stmt, 4);
-
-      c->document_id = sqlite3_column_int64(stmt, 5);
-      col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 6);
-      col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 7);
-      c->created_at = sqlite3_column_int64(stmt, 8); /* v35 — 0 if column was NULL/0 */
-
+      c->document_id = sqlite3_column_int64(stmt, 3);
+      col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 4);
+      col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 5);
+      c->created_at = sqlite3_column_int64(stmt, 6);
       count++;
    }
-
-   sqlite3_reset(stmt);
+   sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
+   free(list);
    *count_out = count;
    return SUCCESS;
 }
@@ -953,6 +1000,41 @@ int document_db_rebuild_fts(int *count_out) {
    return SUCCESS;
 }
 
+/* Remove repeated words from a space-separated stem string, in place. */
+static void dedup_stems(char *stems) {
+   char *out = stems;
+   const char *p = stems;
+   while (*p) {
+      while (*p == ' ')
+         p++;
+      const char *start = p;
+      while (*p && *p != ' ')
+         p++;
+      const size_t len = (size_t)(p - start);
+      if (len == 0)
+         break;
+      bool seen = false;
+      for (const char *q = stems; q < out;) {
+         const char *qs = q;
+         while (q < out && *q != ' ')
+            q++;
+         if ((size_t)(q - qs) == len && memcmp(qs, start, len) == 0) {
+            seen = true;
+            break;
+         }
+         while (q < out && *q == ' ')
+            q++;
+      }
+      if (!seen) {
+         if (out != stems)
+            *out++ = ' ';
+         memmove(out, start, len);
+         out += len;
+      }
+   }
+   *out = '\0';
+}
+
 /* Lexical (BM25) chunk search — the v61 keyword candidate set.  Mirrors
  * memory_db_fact_search_bm25_since: stem the query, build the OR-of-quoted-stems
  * MATCH expression, run the column-weighted bm25() statement, and sigmoid-
@@ -975,6 +1057,9 @@ int document_db_chunk_search_bm25(int user_id,
    int n_terms = memory_stem_string(query, stems, sizeof(stems));
    if (n_terms <= 0)
       return SUCCESS; /* nothing to search; not an error */
+   /* A repeated word would count twice toward the query length that picks the
+    * score normalization (memory_bm25_get_params). */
+   dedup_stems(stems);
 
    char match_expr[DOC_CHUNK_MATCH_EXPR_MAX];
    int n_emitted = memory_bm25_build_match_expr(stems, match_expr, sizeof(match_expr));
@@ -1003,14 +1088,13 @@ int document_db_chunk_search_bm25(int user_id,
       doc_bm25_hit_t *h = &out[count];
       h->id = sqlite3_column_int64(stmt, 0);
       h->chunk_index = sqlite3_column_int(stmt, 1);
-      col_text_copy(h->text, sizeof(h->text), stmt, 2);
-      h->document_id = sqlite3_column_int64(stmt, 3);
-      col_text_copy(h->filename, sizeof(h->filename), stmt, 4);
-      col_text_copy(h->filetype, sizeof(h->filetype), stmt, 5);
-      h->num_chunks = sqlite3_column_int(stmt, 6);
-      h->created_at = sqlite3_column_int64(stmt, 7);
-      /* Column 8 = bm25(), negative-for-relevant; flip sign before sigmoid. */
-      double raw = sqlite3_column_double(stmt, 8);
+      h->document_id = sqlite3_column_int64(stmt, 2);
+      col_text_copy(h->filename, sizeof(h->filename), stmt, 3);
+      col_text_copy(h->filetype, sizeof(h->filetype), stmt, 4);
+      h->num_chunks = sqlite3_column_int(stmt, 5);
+      h->created_at = sqlite3_column_int64(stmt, 6);
+      /* Column 7 = bm25(), negative-for-relevant; flip sign before sigmoid. */
+      double raw = sqlite3_column_double(stmt, 7);
       out_scores[count] = memory_bm25_normalize((float)(-raw), midpoint, steepness);
       count++;
    }

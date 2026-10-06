@@ -93,6 +93,21 @@ add_definitions(-DGIT_SHA=\"${GIT_SHA}\")
 include_directories(include)
 include_directories(common/include)
 
+# models.toml, compiled in: the registry loader falls back to it for any table
+# the models.toml on disk lacks, so an older copy (a service install keeps its
+# own) can't silently drop a newer table (src/llm/llm_models_toml.c).
+set(DAWN_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+include_directories(${DAWN_GENERATED_DIR})
+add_custom_command(
+   OUTPUT ${DAWN_GENERATED_DIR}/models_toml_builtin.h
+   COMMAND ${CMAKE_COMMAND} -E make_directory ${DAWN_GENERATED_DIR}
+   COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_SOURCE_DIR}/models.toml
+           -DOUT=${DAWN_GENERATED_DIR}/models_toml_builtin.h -DNAME=MODELS_TOML_BUILTIN
+           -P ${CMAKE_SOURCE_DIR}/cmake/embed_text.cmake
+   DEPENDS ${CMAKE_SOURCE_DIR}/models.toml ${CMAKE_SOURCE_DIR}/cmake/embed_text.cmake
+   COMMENT "Embedding models.toml")
+add_custom_target(models_toml_builtin DEPENDS ${DAWN_GENERATED_DIR}/models_toml_builtin.h)
+
 # =============================================================================
 # Common Library (shared between daemon and satellites)
 # =============================================================================
@@ -241,13 +256,6 @@ if(NOT SODIUM_FOUND)
     endif()
     include_directories(${SODIUM_INCLUDE_DIRS})
     message(STATUS "libsodium: Found (${SODIUM_VERSION}) - required for crypto_store")
-endif()
-
-# Multi-client session support (required if WebUI is enabled)
-# Provides session manager and worker pool for concurrent client handling
-if(ENABLE_WEBUI)
-    add_definitions(-DENABLE_MULTI_CLIENT)
-    message(STATUS "Multi-client: ENABLED (session manager + worker pool)")
 endif()
 
 # Document extraction libraries (PDF, DOCX support for document upload)
@@ -550,7 +558,6 @@ set(DAWN_SOURCES
     src/core/conv_stream.c
     src/core/event_payload.c
     src/core/conv_event.c
-    src/core/pending_system_msg.c
     src/input_queue.c
     src/mosquitto_comms.c
     src/text_to_command_nuevo.c
@@ -568,6 +575,10 @@ set(DAWN_SOURCES
     src/core/strbuf.c
     src/core/wake_word.c
     src/core/utterance_dedup.c
+    src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
+    src/core/tool_call_policy.c       # who may make a tool call
+    src/core/tool_call_challenge.c    # actions from a text waiting for the user's reply code
+    src/core/reply_code.c             # codes texted to a number and texted back
 
     # ASR subsystem
     src/asr/asr_interface.c
@@ -575,6 +586,7 @@ set(DAWN_SOURCES
 
     # LLM subsystem
     src/llm/llm_interface.c
+    src/llm/llm_turn_result.c
     src/llm/llm_model_version.c
     src/llm/llm_silent_observe.c
     src/llm/llm_openai.c
@@ -585,11 +597,42 @@ set(DAWN_SOURCES
     src/llm/llm_openai_responses_input.c
     src/llm/llm_claude.c
     src/llm/llm_claude_format.c
+    src/llm/llm_claude_tools.c
+    src/llm/llm_tool_defs.c
     src/llm/llm_streaming.c
     src/llm/llm_command_parser.c
     src/llm/llm_tools.c
+    src/llm/llm_tools_reply_code.c
+    src/llm/llm_tools_filter.c
+    src/llm/llm_tools_results.c
+    src/llm/llm_tool_images.c
+    src/llm/llm_tool_images_render.c
+    src/llm/llm_tools_dup.c
     src/llm/llm_tool_loop.c
+    src/llm/llm_tool_views_plan.c
+    src/llm/llm_tool_views_apply.c
     src/llm/llm_context.c
+    src/llm/llm_cache_monitor.c
+    src/llm/llm_capabilities.c
+    src/llm/llm_model_family.c
+    src/llm/llm_models_toml.c
+    src/llm/llm_claude_betas.c
+    src/llm/llm_claude_binding.c
+    src/llm/llm_claude_blocks.c
+    src/llm/llm_turn_blocks.c
+    src/llm/llm_history_kind.c
+    src/llm/llm_context_text.c
+    src/llm/llm_turn_blocks_stored.c
+    src/llm/llm_key_tag.c
+    src/llm/llm_history_rows.c
+    src/llm/llm_claude_parts.c
+    src/llm/llm_claude_route.c
+    src/llm/llm_reasoning_details.c
+    src/llm/llm_compaction_range.c
+    src/llm/llm_compaction.c
+    src/llm/llm_tool_view.c
+    src/llm/llm_tool_view_path.c
+    src/llm/llm_pricing.c
     src/llm/llm_local_provider.c
     src/llm/sse_parser.c
     src/llm/llm_rate_limit.c
@@ -602,6 +645,8 @@ set(DAWN_SOURCES
     # Audio subsystem
     src/audio/audio_capture_thread.c
     src/audio/audio_decoder.c
+    src/audio/audio_metadata_util.c
+    src/audio/music_rank.c
     src/audio/flac_decoder.c
     src/audio/flac_playback.c
     src/audio/mic_passthrough.c
@@ -617,6 +662,8 @@ set(DAWN_SOURCES
     src/audio/phone_apm.cpp
     src/audio/audio_converter.c
     src/audio/music_db.c
+    src/audio/music_db_query.c
+    src/tools/music_search.c
     src/audio/music_scanner.c
     src/audio/music_source.c
     src/audio/plex_client.c
@@ -646,6 +693,7 @@ set(DAWN_SOURCES
     src/tools/url_snippet_cache.c
     src/tools/html_parser.c
     src/core/time_query_parser.c
+    src/core/market_hours.c
     src/core/iso8601.c
     src/core/str_fuzzy.c
     src/core/scheduled_context.c
@@ -671,29 +719,36 @@ if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/webui/webui_server.c
         src/webui/webui_text_processing.c
-        src/webui/webui_vision_validate.c
         src/webui/webui_auth_helpers.c
         src/webui/webui_broadcasts.c
         src/webui/webui_events.c
         src/webui/webui_jobs.c
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
-        src/webui/build_focus_block.c
+        src/webui/webui_turn_ref.c
+        src/webui/webui_attachments.c
         src/webui/webui_http.c
         src/webui/webui_admin.c
         src/webui/webui_messaging.c
         src/webui/webui_phone.c
         src/webui/webui_history.c
+        src/webui/webui_conv_memory.c
+        src/webui/webui_restore.c
         src/webui/webui_memory.c
         src/webui/webui_config.c
+        src/webui/webui_reasoning.c
         src/webui/webui_session.c
+        src/webui/webui_login_sweep.c
+        src/webui/webui_origin.c
+        src/webui/webui_protocol.c
+        src/webui/webui_login_cookie.c
         src/webui/webui_settings.c
         src/webui/webui_tools.c
         src/webui/webui_images.c
-        src/webui/webui_image_rehydrate.c
         src/webui/webui_documents.c
         src/webui/webui_doc_library.c
         src/webui/webui_satellite.c
+        src/webui/satellite_remap.c
         src/webui/webui_admin_satellite.c
         src/webui/webui_ota.c
         src/webui/webui_contacts.c
@@ -709,6 +764,9 @@ if(ENABLE_WEBUI)
     if(DAWN_ENABLE_PHONE_TOOL)
         list(APPEND DAWN_SOURCES src/webui/webui_phone_config.c)
     endif()
+    if(DAWN_ENABLE_SCHWAB_TOOL)
+        list(APPEND DAWN_SOURCES src/webui/webui_stocks.c)
+    endif()
     if(OPUS_FOUND)
         list(APPEND DAWN_SOURCES src/webui/webui_audio.c)
         list(APPEND DAWN_SOURCES src/webui/webui_always_on.c)
@@ -720,33 +778,52 @@ if(ENABLE_WEBUI)
     endif()
 endif()
 
-# Conditionally add session manager, LLM call orchestration, prompt
-# composition, worker pool, and related multi-client support sources.
+# Without the WebUI: its entry points that the rest of DAWN calls, as no-ops.
+if(NOT ENABLE_WEBUI)
+    list(APPEND DAWN_SOURCES src/webui/webui_absent.c)
+endif()
+
+# Sessions, turns, jobs, prompt composition and the worker pool: every build.
+# The local microphone runs its turns on them; the WebUI only adds the server.
+list(APPEND DAWN_SOURCES
+    src/core/session_manager.c
+    src/core/session_reaper.c
+    src/core/session_voice_save.c
+    src/core/session_image_hold.c
+    src/core/session_history.c
+    src/core/turn_queue.c
+    src/core/session_manager_llm.c
+    src/core/job_manager.c
+    src/core/job_worker.c
+    src/core/job_reinvoke.c
+    src/core/job_dispatch.c
+    # Deep-research live orchestration (rides on the job session + dispatch).
+    src/tools/research_run_loop.c
+    src/core/research_worker.c
+    src/core/text_input_dispatch.c
+    src/core/prompt_sections.c
+    src/core/prefix_in_force.c
+    src/core/prefix_tools.c
+    src/core/session_focus.c
+    src/core/build_focus_block.c
+    src/core/prompt_builder.c
+    src/core/session_prefix.c
+    src/core/tool_result_store.c
+    src/tools/result_read_tool.c
+    src/tools/result_read_ops.c
+    src/core/session_compaction.c
+    src/core/focus/focus_handles.c
+    src/core/focus/focus_incremental.c
+    src/core/worker_pool.c
+    src/core/text_filter.c
+    src/core/rate_limiter.c
+    # Reconnect helper (Layer 1, no DAWN deps) — shared by the Discord/Slack
+    # WS drivers and Home Assistant realtime.
+    src/core/ws_reconnect.c
+)
+
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
-        src/core/session_manager.c
-        src/core/turn_queue.c
-        src/core/session_manager_llm.c
-        src/core/job_manager.c
-        src/core/job_worker.c
-        src/core/job_reinvoke.c
-        src/core/job_dispatch.c
-        # Deep-research live orchestration (rides on the job session + dispatch).
-        # The deterministic core (research_run.c) stays in unconditional
-        # TOOL_SOURCES; only this loop half + the worker are ENABLE_WEBUI-coupled.
-        src/tools/research_run_loop.c
-        src/core/research_worker.c
-        src/core/text_input_dispatch.c
-        src/core/prompt_compose.c
-        src/core/session_dedup.c
-        src/core/worker_pool.c
-        src/core/text_filter.c
-        src/core/rate_limiter.c
-        # Reconnect helper (Layer 1, no DAWN deps) — shared by the Discord/Slack
-        # WS drivers and Home Assistant realtime. Compiled here as a build-gating
-        # convenience (all consumers are ENABLE_WEBUI-gated), NOT a layering statement;
-        # move to the unconditional core sources if a non-WEBUI core module needs it.
-        src/core/ws_reconnect.c
         # Messaging channels (Telegram, SMS, Discord, Slack)
         src/messaging/messaging_engine.c
         src/messaging/messaging_engine_session.c
@@ -754,7 +831,10 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_engine_read.c
         src/messaging/messaging_engine_link.c
         src/messaging/messaging_engine_inbound.c
+        src/messaging/messaging_engine_codes.c
         src/messaging/messaging_telegram.c
+        src/messaging/messaging_telegram_parse.c
+        src/messaging/messaging_sender_gate.c
         src/messaging/messaging_sms.c
         src/messaging/messaging_discord.c
         src/messaging/messaging_discord_read.c
@@ -791,6 +871,18 @@ list(APPEND DAWN_SOURCES
     src/core/stat_net_interpret.c
 )
 
+# Pure voice end-of-speech decision (no I/O), extracted from the dawn.c state
+# machine so the endpoint logic is unit-testable via trace replay.
+list(APPEND DAWN_SOURCES
+    src/core/endpointer.c
+)
+
+# Speculative-decode result slot (pure state machine, no I/O) for the adaptive
+# end-of-speech dwell's always-on speculative overlap. Unit-tested standalone.
+list(APPEND DAWN_SOURCES
+    src/core/spec_slot.c
+)
+
 # SAGE proactive-attention subsystem (Layer 1 core, always compiled; master
 # switch is [attention] enabled, default OFF). Ingest polls the STAT/suit
 # service caches, so it degrades gracefully when those tools are compiled out.
@@ -807,22 +899,21 @@ list(APPEND DAWN_SOURCES
 # Document DB, chunker, extraction, and indexing pipeline (RAG document search)
 list(APPEND DAWN_SOURCES
     src/tools/document_db.c
+    src/tools/document_db_embeddings.c
     src/tools/document_chunker.c
     src/tools/document_extract.c
     src/tools/document_index_pipeline.c
 )
 
-# External focus-source adapters — Phase 1d (document chunks, calendar
-# events).  Email adapter deferred to v2 — no cache layer.  Compiled
-# into the daemon binary so 1e's wiring lands as a one-line caller-side
-# change; no production caller invokes external_focus_adapters_register_all()
-# until 1e ships.  Until then, these symbols are dead-stripped from the
-# daemon binary by the linker (no callers ⇒ DCE).  The test binary
-# (tests/CMakeLists.txt::test_external_focus_adapters) pulls these in
-# directly.
+# Context sources for per-turn injection and recall: document chunks (through
+# the shared document ranker) and calendar events.  Always built: the focus
+# framework uses them in every mode, independent of which tools are enabled.
 list(APPEND DAWN_SOURCES
     src/tools/document_focus_adapter.c
+    src/tools/document_embed_cache.c
+    src/tools/document_rank.c
     src/tools/calendar_focus_adapter.c
+    src/tools/calendar_query_window.c
     src/tools/external_focus_adapters_init.c
 )
 
@@ -833,6 +924,7 @@ list(APPEND DAWN_SOURCES
 list(APPEND DAWN_SOURCES
     src/core/embedding_engine.c
     src/auth/auth_db_core.c
+    src/auth/auth_db_ids.c
     src/auth/auth_db_schema.c
     src/auth/auth_db_backup.c
     src/auth/auth_db_migrations.c
@@ -851,6 +943,22 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v73.c
     src/auth/auth_db_migrations_v74.c
     src/auth/auth_db_migrations_v75.c
+    src/auth/auth_db_migrations_v92.c
+    src/auth/auth_db_migrations_v93.c
+    src/auth/auth_db_migrations_v94.c
+    src/auth/auth_db_migrations_v95.c
+    src/auth/auth_db_migrations_v96.c
+    src/auth/auth_db_migrations_v97.c
+    src/auth/auth_db_migrations_v98.c
+    src/auth/auth_db_migrations_v99.c
+    src/auth/auth_db_migrations_v100.c
+    src/auth/auth_db_migrations_v101.c
+    src/auth/auth_db_messages.c
+    src/auth/auth_db_conv_prefix.c
+    src/auth/auth_db_focus_handles.c
+    src/auth/auth_db_tool_results.c
+    src/auth/auth_db_storage.c
+    src/auth/auth_db_withdraw.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
@@ -862,12 +970,15 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_research.c
     src/auth/auth_db_events.c
     src/auth/auth_db_user.c
+    src/auth/auth_db_metrics.c
     src/auth/auth_db_settings.c
     src/auth/auth_db_satellite.c
     src/blob_store.c
     src/blob_store_util.c
     src/document_original_store.c
     src/image_store.c
+    src/core/image_rehydrate.c
+    src/core/conv_images.c
     src/memory/memory_db.c
     src/memory/memory_citation.c
     src/memory/memory_citation_parse.c
@@ -882,6 +993,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_alias_cascade.c
     src/memory/memory_db_alias_writes.c
     src/memory/memory_db_provenance.c
+    src/memory/memory_db_forget.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -894,20 +1006,28 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_predicate_dedup.c
     src/memory/memory_bm25.c
     src/memory/memory_stem.c
+    src/memory/memory_terms.c
     src/memory/memory_note_guard.c
     src/memory/memory_note_bridge.c
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_extraction.c
+    src/memory/memory_extraction_input.c
     src/memory/memory_similarity.c
+    src/memory/memory_import.c
+    src/memory/memory_forget.c
     src/core/memory_filter.c
     src/memory/memory_maintenance.c
     src/memory/memory_recovery.c
     src/memory/memory_history_loader.c
+    src/core/prefix_message.c
     src/memory/memory_summarize_missing.c
     src/memory/memory_embeddings.c
+    src/memory/memory_embeddings_entity.c
+    src/memory/memory_embed_backfill.c
     src/memory/memory_recategorize.c
     src/memory/memory_embed_tokenizer.c
+    src/memory/memory_embed_unicode.c
     src/memory/memory_embed_onnx.c
     src/memory/memory_embed_ollama.c
     src/memory/memory_embed_openai.c
@@ -925,11 +1045,11 @@ if(ENABLE_AUTH)
         src/auth/admin_socket_ota.c
         src/auth/admin_socket_research.c
         src/auth/admin_socket_schwab.c
+        src/auth/admin_socket_cache.c
         src/auth/auth_db_session.c
         src/auth/auth_db_rate_limit.c
         src/auth/auth_db_audit.c
         src/auth/auth_db_maint.c
-        src/auth/auth_db_metrics.c
         src/auth/auth_crypto.c
         src/auth/auth_maintenance.c
     )
@@ -965,6 +1085,7 @@ if(AEC_ENABLED)
 endif()
 
 add_executable(dawn ${DAWN_SOURCES})
+add_dependencies(dawn models_toml_builtin)
 
 # Coding-harness CI invariant: forbid process-management primitives in the MCP
 # bridge / code-project sources (bridge is socket-only; git is in-process via
@@ -986,6 +1107,15 @@ add_custom_target(no_ws_direct_write_check
     COMMENT "Checking WebUI invariant: no direct WS-frame lws_write()")
 add_dependencies(dawn no_ws_direct_write_check)
 
+# Messaging send-path invariant: every driver->send_text() goes through the
+# messaging_deliver funnel (formatting and escaping per provider).  See
+# scripts/check_messaging_send_funnel.sh.
+add_custom_target(messaging_send_funnel_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_messaging_send_funnel.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking messaging invariant: send_text only through the funnel")
+add_dependencies(dawn messaging_send_funnel_check)
+
 # safe_strscpy migration guard: forbid raw strncpy()/strncat() in directories
 # already swept onto safe_strscpy()/safe_strncpy() (ratcheting COVERED_DIRS list
 # in the script).  Runs at -O0 on every build, so it catches regressions that
@@ -996,6 +1126,45 @@ add_custom_target(no_raw_strncpy_check
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Checking safe_strscpy migration invariant: no raw strncpy in swept dirs")
 add_dependencies(dawn no_raw_strncpy_check)
+
+# Stored-turn-blocks CI invariant: messages.llm_blocks holds reasoning a vendor
+# issued for itself, so it is read only to rebuild an LLM context and never
+# reaches a client, a search, an export or another model; and an assistant row
+# written without blocks says why.  See scripts/check_llm_blocks_confined.sh.
+add_custom_target(llm_blocks_confined_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_llm_blocks_confined.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking stored-turn-blocks invariant: replay path only")
+add_dependencies(dawn llm_blocks_confined_check)
+
+# Request-context CI invariant: rows of messages with a kind (turn context,
+# memory, directives, ...) are read only to rebuild an LLM request, never shown,
+# searched, counted or extracted.  See scripts/check_message_kind_confined.sh.
+add_custom_target(message_kind_confined_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_message_kind_confined.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking request-context rows invariant: replay path only")
+add_dependencies(dawn message_kind_confined_check)
+
+# User-removal CI invariant: a delete a user makes (forgetting a memory,
+# deleting a document or an account) is marked as their removal so it is
+# withdrawn from the conversations it was sent into; a maintenance delete says
+# why it isn't one.  See scripts/check_user_removal_marked.sh.
+add_custom_target(user_removal_marked_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_user_removal_marked.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking user removals are marked for withdrawal")
+add_dependencies(dawn user_removal_marked_check)
+
+# Tool kinds-of-action CI invariant: every action_kinds table names its tool's
+# own actions and a PREPARE names a listed confirm.  A tool whose table fails is
+# refused registration, so the daemon would quietly start without it.  See
+# scripts/check_tool_action_kinds.sh.
+add_custom_target(tool_action_kinds_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_tool_action_kinds.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking tool kinds-of-action tables")
+add_dependencies(dawn tool_action_kinds_check)
 
 # Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
 # in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or
@@ -1106,6 +1275,11 @@ endif()
 if(DAWN_ENABLE_CALENDAR_TOOL)
     target_link_libraries(dawn ${LIBICAL_LIBRARIES} ${LIBXML2_LIBRARIES})
     message(STATUS "Linking libical + libxml2 (CalDAV calendar)")
+endif()
+
+# GMime + GLib/GObject: the email tool's message reader
+if(DAWN_ENABLE_EMAIL_TOOL)
+    target_link_libraries(dawn ${GMIME_LINK_LIBRARIES})
 endif()
 
 # Always link SQLite3 (music metadata database)

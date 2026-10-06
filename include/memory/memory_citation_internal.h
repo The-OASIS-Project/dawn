@@ -26,7 +26,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "core/session_manager.h" /* citation_stash_t, tool_cited_set_t */
+#include "core/session_manager.h" /* citation_stash_t, citation_prior_t, tool_cited_set_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,13 +35,16 @@ extern "C" {
 /* Append @p s to a comma-separated CSV buffer, bounded (never overflows). */
 void memory_citation_csv_append(char *buf, size_t bufsz, size_t *len, const char *s);
 
+
 /**
  * @brief Parse every <cited>…</cited> tag out of @p text and resolve the citations.
  *
  * Pure (no I/O) — the unit-testable core of memory_citation_capture().  Two token
- * shapes are recognized inside a tag: `M<n>` / bare `<n>` (a focus ordinal,
- * validated against @p stash) and `ID:<n>` (a tool fact id, validated against
- * @p tool_set).  Fills:
+ * shapes are recognized inside a tag: `M<n>` / bare `<n>` (a focus handle,
+ * validated against this turn's @p stash, then the conversation's earlier
+ * items in @p prior) and `ID:<n>` (a tool fact id, validated against
+ * @p tool_set).  A cite of an earlier item counts toward @p cited_all only (it
+ * is not this turn's Context-panel row).  Fills:
  *   - @p cited_all   : CSV of every distinct cited canonical id (focus + tool) — audit.
  *   - @p cited_focus : CSV of the focus-cited subset only — Aurora broadcast.
  * and the four counts (any out-param may be NULL).  Cross-provenance de-duplicated
@@ -50,6 +53,8 @@ void memory_citation_csv_append(char *buf, size_t bufsz, size_t *len, const char
  */
 void memory_citation_resolve_cited(const char *text,
                                    const citation_stash_t *stash,
+                                   const citation_prior_t *prior,
+                                   int prior_count,
                                    const tool_cited_set_t *tool_set,
                                    char *cited_all,
                                    size_t cited_all_sz,
@@ -71,6 +76,19 @@ void memory_citation_resolve_cited(const char *text,
  * already de-duplicated by the resolver, so no extra dedup is performed here.
  */
 int memory_citation_extract_fact_ids(const char *cited_all, int64_t *out_ids, int max);
+
+/**
+ * @brief The audit's lists from a turn's stash: the items it sent
+ *        (@p injected, with their scores in @p scores, aligned) and the ones
+ *        it named again as still relevant (@p referenced), each a bounded CSV
+ */
+void memory_citation_stash_csvs(const citation_stash_t *stash,
+                                char *injected,
+                                size_t injected_sz,
+                                char *scores,
+                                size_t scores_sz,
+                                char *referenced,
+                                size_t referenced_sz);
 
 #ifdef __cplusplus
 }

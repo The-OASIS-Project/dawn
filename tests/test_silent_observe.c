@@ -32,6 +32,7 @@
 #include "config/dawn_config.h"
 #include "core/memory_filter.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "unity.h"
 
@@ -93,19 +94,22 @@ const char *llm_get_default_openrouter_model(void) {
    return "anthropic/claude-3.5-haiku";
 }
 
+/* Call-kind tags for the cache telemetry: not under test here. */
+int llm_cache_monitor_push_kind(llm_call_kind_t kind) {
+   (void)kind;
+   return -1;
+}
+void llm_cache_monitor_pop_kind(int previous) {
+   (void)previous;
+}
+
 /* Stub for llm_chat_completion_with_config — silent-observe calls this
  * directly; we don't link against the real provider stack. */
 char *llm_chat_completion_with_config(struct json_object *conversation_history,
                                       const char *input_text,
-                                      const char **vision_images,
-                                      const size_t *vision_image_sizes,
-                                      int vision_image_count,
                                       const llm_resolved_config_t *config) {
    (void)conversation_history;
    (void)input_text;
-   (void)vision_images;
-   (void)vision_image_sizes;
-   (void)vision_image_count;
    (void)config;
    s_mock_response_called++;
    if (!s_mock_response)

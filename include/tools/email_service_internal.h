@@ -1,0 +1,82 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * The email service's own helpers, shared by its modules (email_service.c,
+ * email_service_read.c).  Not for use outside the service.
+ */
+
+#ifndef EMAIL_SERVICE_INTERNAL_H
+#define EMAIL_SERVICE_INTERNAL_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "tools/email_client.h"
+#include "tools/email_db.h"
+#include "tools/email_types.h"
+
+/* email_svc_build_conn() outcomes. */
+#define EMAIL_SVC_CONN_OK 0      /* success */
+#define EMAIL_SVC_CONN_FAILURE 1 /* config/TLS refusal or internal — not a credential problem */
+#define EMAIL_SVC_CONN_AUTH 2    /* OAuth token fetch or password decrypt failed (credentials) */
+#define EMAIL_SVC_CONN_REVOKED 3 /* the OAuth grant was revoked at the provider */
+
+/** An IMAP/SMTP connection for @p acct (credentials in it: sodium_memzero after use). */
+int email_svc_build_conn(const email_account_t *acct, email_conn_t *conn);
+
+/** The user's account named @p account_name (case-insensitive), or the first enabled one. */
+int email_svc_find_account(int user_id, const char *account_name, email_account_t *out);
+
+/** The email_err_t for an account lookup's EMAIL_RC_* (NO_ACCOUNTS, UNKNOWN_ACCOUNT, ...). */
+email_err_t email_svc_account_err(int rc);
+
+/** Whether @p acct is read through the Gmail API (OAuth on gmail.com). */
+bool email_svc_is_gmail_api(const email_account_t *acct);
+
+/**
+ * @brief A Gmail API access token for @p acct (refreshed as needed)
+ * @param revoked Set when the failure was a revoked grant (may be NULL)
+ */
+int email_svc_gmail_token(const email_account_t *acct, char *token, size_t len, bool *revoked);
+
+/**
+ * @brief An IMAP message id ("folder:uid") split and checked: the folder fits
+ *        and passes the allow-list, the uid is valid.  Logged when it isn't
+ *        (at debug during a fan-out, where a Gmail id is expected).
+ * @return true when @p folder and @p uid are filled
+ */
+bool email_svc_parse_imap_id(const char *message_id,
+                             char *folder,
+                             size_t folder_size,
+                             uint32_t *uid,
+                             bool fanout);
+
+/**
+ * @brief Read @p message_id from one account (email_service_read without the fan-out)
+ * @param fanout true while probing every account: an id of the other backend's
+ *               shape is then expected, not an error
+ * @return EMAIL_RC_OK, EMAIL_RC_NOT_FOUND or EMAIL_RC_FAILURE; @p err (may be NULL) says why
+ */
+int email_svc_read_single(const email_account_t *acct,
+                          const char *message_id,
+                          const email_read_opts_t *opts,
+                          email_message_t *out,
+                          email_err_t *err,
+                          bool fanout);
+
+#endif /* EMAIL_SERVICE_INTERNAL_H */

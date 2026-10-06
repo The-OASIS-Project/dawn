@@ -40,11 +40,15 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "core/session_manager.h" /* session_fact_source_t */
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_internal.h"
+#include "utils/string_utils.h"
 
 /* SQL buffer for the batch IN-clause builder.  Sized so that
  * MAX_PROVENANCE_BATCH IDs fit with comfortable headroom for the SELECT/JOIN
@@ -315,15 +319,17 @@ int memory_db_prefs_get_sources(int user_id,
  * extractions.
  * ============================================================================= */
 
-int memory_db_fact_provenance_extend(int64_t fact_id,
-                                     int user_id,
-                                     int64_t new_conv_id,
-                                     int64_t new_msg_start,
-                                     int64_t new_msg_end) {
+/* memory_db_fact_provenance_extend() with the auth_db lock held; @p
+ * learned_here also records the fact as learned in a conversation
+ * (origin_unsourced = 0), in the same commit. */
+static int provenance_extend_locked(int64_t fact_id,
+                                    int user_id,
+                                    int64_t new_conv_id,
+                                    int64_t new_msg_start,
+                                    int64_t new_msg_end,
+                                    bool learned_here) {
    if (new_conv_id <= 0)
       return MEMORY_DB_FAILURE;
-
-   AUTH_DB_LOCK_OR_FAIL();
 
    /* Read existing provenance + ownership in one statement. */
    sqlite3_stmt *stmt = NULL;
@@ -333,14 +339,12 @@ int memory_db_fact_provenance_extend(int64_t fact_id,
                                "FROM memory_facts WHERE id = ?",
                                -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
    sqlite3_bind_int64(stmt, 1, fact_id);
    rc = sqlite3_step(stmt);
    if (rc != SQLITE_ROW) {
       sqlite3_finalize(stmt);
-      AUTH_DB_UNLOCK();
       return MEMORY_DB_NOT_FOUND;
    }
    int owner = sqlite3_column_int(stmt, 0);
@@ -353,10 +357,11 @@ int memory_db_fact_provenance_extend(int64_t fact_id,
    sqlite3_finalize(stmt);
 
    if (owner != user_id) {
-      AUTH_DB_UNLOCK();
       return MEMORY_DB_NOT_FOUND;
    }
 
+   /* Every contributing conversation is kept (memory_fact_sources), whichever
+    * one the fact's own source columns end up pointing at. */
    int64_t write_conv = cur_conv;
    int64_t write_start = cur_start;
    int64_t write_end = cur_end;
@@ -381,36 +386,186 @@ int memory_db_fact_provenance_extend(int64_t fact_id,
       write_end = new_msg_end;
    } else {
       /* Older or equal mention — keep existing provenance. */
-      AUTH_DB_UNLOCK();
+      write_conv = cur_conv;
+   }
+
+   /* Nothing to change in the fact's columns (an older mention, or the same one
+    * again) and nothing to record about where it was learned: just the source. */
+   const bool columns_change = write_conv != cur_conv || write_start != cur_start ||
+                               write_end != cur_end || !had_conv;
+   if (!columns_change && !learned_here) {
+      memory_db_internal_source_add_locked(MEMORY_SOURCE_FACT, fact_id, new_conv_id);
       return MEMORY_DB_SUCCESS;
    }
 
-   /* No-op if nothing actually changed (defensive — same-conv with start
-    * already covering and end not advanced). */
-   if (write_conv == cur_conv && write_start == cur_start && write_end == cur_end) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_SUCCESS;
-   }
-
+   /* The source and the fact's columns commit together (one commit, not two).
+    * @p learned_here marks the fact learned in a conversation on every path
+    * (the columns may already point at a newer one). */
+   const bool sp = sqlite3_exec(s_db.db, "SAVEPOINT provenance_extend", NULL, NULL, NULL) ==
+                   SQLITE_OK;
+   memory_db_internal_source_add_locked(MEMORY_SOURCE_FACT, fact_id, new_conv_id);
    sqlite3_stmt *upd = NULL;
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_facts SET source_conversation_id = ?, "
-                           "source_msg_id_start = ?, source_msg_id_end = ? "
-                           "WHERE id = ? AND user_id = ?",
+                           "UPDATE memory_facts SET source_conversation_id = ?1, "
+                           "source_msg_id_start = ?2, source_msg_id_end = ?3, "
+                           "origin_unsourced = CASE WHEN ?6 THEN 0 ELSE origin_unsourced END "
+                           "WHERE id = ?4 AND user_id = ?5",
                            -1, &upd, NULL);
-   if (rc != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(upd, 1, write_conv);
+      sqlite3_bind_int64(upd, 2, write_start);
+      sqlite3_bind_int64(upd, 3, write_end);
+      sqlite3_bind_int64(upd, 4, fact_id);
+      sqlite3_bind_int(upd, 5, user_id);
+      sqlite3_bind_int(upd, 6, learned_here ? 1 : 0);
+      rc = sqlite3_step(upd);
+      sqlite3_finalize(upd);
    }
-   sqlite3_bind_int64(upd, 1, write_conv);
-   sqlite3_bind_int64(upd, 2, write_start);
-   sqlite3_bind_int64(upd, 3, write_end);
-   sqlite3_bind_int64(upd, 4, fact_id);
-   sqlite3_bind_int(upd, 5, user_id);
-   rc = sqlite3_step(upd);
-   sqlite3_finalize(upd);
-   AUTH_DB_UNLOCK();
+   if (sp) {
+      if (rc != SQLITE_DONE) {
+         sqlite3_exec(s_db.db, "ROLLBACK TO provenance_extend", NULL, NULL, NULL);
+      }
+      sqlite3_exec(s_db.db, "RELEASE provenance_extend", NULL, NULL, NULL);
+   }
    if (rc != SQLITE_DONE)
       return MEMORY_DB_FAILURE;
    return MEMORY_DB_SUCCESS;
+}
+
+static int provenance_extend_impl(int64_t fact_id,
+                                  int user_id,
+                                  int64_t new_conv_id,
+                                  int64_t new_msg_start,
+                                  int64_t new_msg_end,
+                                  bool learned_here) {
+   AUTH_DB_LOCK_OR_FAIL();
+   const int rc = provenance_extend_locked(fact_id, user_id, new_conv_id, new_msg_start,
+                                           new_msg_end, learned_here);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+void memory_db_fact_attach_sources(const session_fact_source_t *facts, int count, int64_t conv_id) {
+   if (!facts || count <= 0 || conv_id <= 0) {
+      return;
+   }
+   AUTH_DB_LOCK_OR_RETURN_VOID();
+   /* One commit for the batch. */
+   const bool sp = sqlite3_exec(s_db.db, "SAVEPOINT attach_sources", NULL, NULL, NULL) == SQLITE_OK;
+   int checked_user = 0;
+   bool owned = false;
+   for (int i = 0; i < count; i++) {
+      const session_fact_source_t *f = &facts[i];
+      if (f->fact_id <= 0 || f->user_id <= 0) {
+         continue;
+      }
+      /* A turn's conversation can be deleted while the turn still runs: never
+       * point a fact at one that is gone (or isn't this user's). */
+      if (f->user_id != checked_user) {
+         checked_user = f->user_id;
+         owned = conv_db_owned_locked(conv_id, f->user_id) == AUTH_DB_SUCCESS;
+      }
+      if (!owned || provenance_extend_locked(f->fact_id, f->user_id, conv_id, 0, 0, f->created) !=
+                        MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("memory: could not record conversation %lld as fact %lld's source",
+                      (long long)conv_id, (long long)f->fact_id);
+      }
+   }
+   if (sp && sqlite3_exec(s_db.db, "RELEASE attach_sources", NULL, NULL, NULL) != SQLITE_OK) {
+      OLOG_WARNING("memory: could not commit conversation %lld as facts' source: %s",
+                   (long long)conv_id, sqlite3_errmsg(s_db.db));
+      sqlite3_exec(s_db.db, "ROLLBACK TO attach_sources", NULL, NULL, NULL);
+      sqlite3_exec(s_db.db, "RELEASE attach_sources", NULL, NULL, NULL);
+   }
+   AUTH_DB_UNLOCK();
+}
+
+void memory_db_fact_attach_source(int64_t fact_id, int user_id, bool created, int64_t conv_id) {
+   const session_fact_source_t f = { .fact_id = fact_id, .user_id = user_id, .created = created };
+   memory_db_fact_attach_sources(&f, 1, conv_id);
+}
+
+int memory_db_fact_provenance_extend(int64_t fact_id,
+                                     int user_id,
+                                     int64_t new_conv_id,
+                                     int64_t new_msg_start,
+                                     int64_t new_msg_end) {
+   return provenance_extend_impl(fact_id, user_id, new_conv_id, new_msg_start, new_msg_end, false);
+}
+
+/* =============================================================================
+ * Per-conversation lookups
+ *
+ * Used when a user marks a conversation private and asks to forget what was
+ * learned from it.  Rare, user-initiated calls, so ad-hoc prepares.  The
+ * conversation set binds as a JSON array (json_each).
+ * ============================================================================= */
+
+/* Run a single-int COUNT query bound to (user_id, conv_ids_json). */
+/* One-row count query bound as ?1 = user_id, ?2 = the conversation ids; the
+ * row's first column into @p out, and its second (when @p out2) into @p out2. */
+static int count_by_conversations2(const char *sql,
+                                   int user_id,
+                                   const char *ids,
+                                   int *out,
+                                   int *out2) {
+   *out = 0;
+   if (out2) {
+      *out2 = 0;
+   }
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_WARNING("memory_db: prepare learned-count failed: %s", sqlite3_errmsg(s_db.db));
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, ids, -1, SQLITE_STATIC);
+   int rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      *out = sqlite3_column_int(stmt, 0);
+      if (out2) {
+         *out2 = sqlite3_column_int(stmt, 1);
+      }
+   }
+   sqlite3_finalize(stmt);
+   return (rc == SQLITE_ROW) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+int memory_db_conversations_learned_count(int user_id,
+                                          const int64_t *conv_ids,
+                                          int n_conv,
+                                          memory_conv_learned_t *out) {
+   if (!out || user_id <= 0 || !conv_ids || n_conv <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   memset(out, 0, sizeof(*out));
+   char ids[AUTH_DB_IDS_JSON_SIZE(CONV_CHAIN_MAX)];
+   if (n_conv > CONV_CHAIN_MAX ||
+       !auth_db_internal_ids_json_into(conv_ids, n_conv, ids, sizeof(ids))) {
+      return MEMORY_DB_FAILURE;
+   }
+#define IN_CONVS " WHERE user_id = ?1 AND source_conversation_id IN " MEMORY_FORGET_IN_SET
+   AUTH_DB_LOCK_OR_FAIL();
+   /* Current and outdated (superseded) facts in one evaluation of the set. */
+   int rc = count_by_conversations2("SELECT COALESCE(SUM(superseded_by IS NULL), 0), "
+                                    "COALESCE(SUM(superseded_by IS NOT NULL), 0) FROM "
+                                    "memory_facts WHERE user_id = ?1 AND id IN "
+                                    "(" MEMORY_FORGET_FACT_IDS ")",
+                                    user_id, ids, &out->facts, &out->outdated);
+   if (rc == MEMORY_DB_SUCCESS) {
+      rc = count_by_conversations2("SELECT COUNT(*) FROM memory_summaries" IN_CONVS, user_id, ids,
+                                   &out->summaries, NULL);
+   }
+   if (rc == MEMORY_DB_SUCCESS) {
+      rc = count_by_conversations2("SELECT COUNT(*) FROM (" MEMORY_FORGET_RELATION_IDS ")", user_id,
+                                   ids, &out->relations, NULL);
+   }
+   if (rc == MEMORY_DB_SUCCESS) {
+      rc = count_by_conversations2(
+          "SELECT COUNT(*) FROM memory_preferences p WHERE " MEMORY_FORGET_PREF_WHERE, user_id, ids,
+          &out->preferences, NULL);
+   }
+#undef IN_CONVS
+   AUTH_DB_UNLOCK();
+   return rc;
 }

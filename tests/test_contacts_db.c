@@ -49,6 +49,7 @@ static const char *DDL =
     "  first_seen INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
     "  last_seen INTEGER,"
     "  mention_count INTEGER DEFAULT 1,"
+    "  canonical_id INTEGER DEFAULT NULL,"
     "  UNIQUE(user_id, canonical_name)"
     ");"
     "CREATE TABLE IF NOT EXISTS contacts ("
@@ -64,13 +65,10 @@ static const char *DDL =
     "CREATE INDEX IF NOT EXISTS idx_contacts_entity ON contacts(entity_id);"
     "CREATE INDEX IF NOT EXISTS idx_contacts_user_type ON contacts(user_id, field_type);";
 
-/* Prepared statement SQL — must match auth_db_core.c exactly */
+/* Prepared statement SQL — must match auth_db_statements.c exactly (find
+ * shares its macro). */
 
-static const char *SQL_FIND =
-    "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label, "
-    "e.photo_id FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
-    "WHERE c.user_id = ? AND e.canonical_name LIKE ? ESCAPE '\\' "
-    "AND c.field_type LIKE ? ORDER BY e.name LIMIT ?";
+static const char *SQL_FIND = CONTACTS_FIND_SQL;
 
 static const char *SQL_ADD =
     "INSERT INTO contacts (user_id, entity_id, field_type, value, label, created_at) "
@@ -442,11 +440,53 @@ static void test_pagination(void) {
  * Main
  * ============================================================================ */
 
+/* Best match first, whatever the alphabet says: the exact name, then whole
+ * words, then partial ones; an exact name is never cut by the limit.  An
+ * alias matches as whole words at most.  The name is normalized first. */
+static void test_find_ranks_matches(void) {
+   int64_t a = insert_entity(1, "Chris Adams", "chris adams");
+   int64_t b = insert_entity(1, "Christine Abbott", "christine abbott");
+   int64_t c = insert_entity(1, "Chris", "chris");
+   contacts_add(1, a, "phone", "+15550000001", "");
+   contacts_add(1, b, "phone", "+15550000002", "");
+   contacts_add(1, c, "phone", "+15550000003", "");
+
+   contact_result_t results[1];
+   int count = 0;
+   TEST_ASSERT_EQUAL_INT(0, contacts_find(1, "  CHRIS ", "phone", results, 1, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_STRING("+15550000003", results[0].value);
+   TEST_ASSERT_EQUAL_INT(CONTACT_MATCH_EXACT, results[0].match);
+
+   contact_result_t all[4];
+   TEST_ASSERT_EQUAL_INT(0, contacts_find(1, "chris", "phone", all, 4, &count));
+   TEST_ASSERT_EQUAL_INT(3, count);
+   TEST_ASSERT_EQUAL_INT(CONTACT_MATCH_EXACT, all[0].match);
+   TEST_ASSERT_EQUAL_INT(CONTACT_MATCH_WORD, all[1].match);
+   TEST_ASSERT_EQUAL_STRING("Chris Adams", all[1].entity_name);
+   TEST_ASSERT_EQUAL_INT(CONTACT_MATCH_PARTIAL, all[2].match);
+
+   /* "mom", an alias of Linda: a whole-word match, never exact. */
+   int64_t linda = insert_entity(1, "Linda Kay", "linda kay");
+   contacts_add(1, linda, "phone", "+15550000004", "");
+   char sql[256];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_entities (user_id, name, entity_type, canonical_name, "
+            "canonical_id) VALUES (1, 'Mom', 'person', 'mom', %lld)",
+            (long long)linda);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(0, contacts_find(1, "mom", "phone", all, 4, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_STRING("Linda Kay", all[0].entity_name);
+   TEST_ASSERT_EQUAL_INT(CONTACT_MATCH_WORD, all[0].match);
+}
+
 int main(void) {
    UNITY_BEGIN();
 
    RUN_TEST(test_add_contact);
    RUN_TEST(test_find_by_name);
+   RUN_TEST(test_find_ranks_matches);
    RUN_TEST(test_find_by_field_type_filter);
    RUN_TEST(test_list_all);
    RUN_TEST(test_list_with_type_filter);

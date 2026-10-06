@@ -34,12 +34,15 @@
 #define AUTH_DB_INTERNAL_ALLOWED
 #include <errno.h>
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_storage.h"
 #include "core/path_utils.h"
 #include "logging.h"
 
@@ -173,6 +176,11 @@ int auth_db_init(const char *db_path) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Busy timeout, secure_delete, the WAL size limit, and incremental
+    * auto-vacuum for a new file: before WAL mode, which writes the file's
+    * header (auth_db_storage.h). */
+   auth_db_storage_configure_locked(s_db.db);
+
    /* Enable WAL mode for better concurrency */
    char *errmsg = NULL;
    rc = sqlite3_exec(s_db.db, "PRAGMA journal_mode=WAL", NULL, NULL, &errmsg);
@@ -199,6 +207,19 @@ int auth_db_init(const char *db_path) {
       return AUTH_DB_FAILURE;
    }
 
+   /* What records a user's removals for withdrawal (after the migrations
+    * that make its table). */
+   if (auth_db_withdraw_install(s_db.db) != AUTH_DB_SUCCESS) {
+      sqlite3_close(s_db.db);
+      s_db.db = NULL;
+      pthread_mutex_unlock(&s_db.mutex);
+      return AUTH_DB_FAILURE;
+   }
+
+   /* An existing file into incremental auto-vacuum (once; before any
+    * statement is prepared, as VACUUM requires). */
+   auth_db_storage_convert_locked(s_db.db, path);
+
    /* Prepare statements */
    if (auth_db_prepare_statements() != AUTH_DB_SUCCESS) {
       auth_db_finalize_statements();
@@ -210,6 +231,9 @@ int auth_db_init(const char *db_path) {
 
    s_db.initialized = true;
    s_db.last_cleanup = time(NULL);
+
+   /* Checkpoints from here on run on the storage thread, off this mutex. */
+   (void)auth_db_storage_start_locked(s_db.db, path);
 
    OLOG_INFO("auth_db_init: initialized at %s", path);
 
@@ -226,6 +250,10 @@ int auth_db_init(const char *db_path) {
 }
 
 void auth_db_shutdown(void) {
+   /* The storage thread first, without the mutex (it takes it to drain free
+    * pages); then the last checkpoint below runs with nothing else. */
+   auth_db_storage_stop();
+
    pthread_mutex_lock(&s_db.mutex);
 
    if (!s_db.initialized) {

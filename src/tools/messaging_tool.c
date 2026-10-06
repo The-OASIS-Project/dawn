@@ -58,13 +58,16 @@ static char *handle_list_channels(int user_id) {
       return make_response(TOOL_RESULT_ERROR_MARK "Error: could not list channels.");
    }
    /* Wrap the JSON in a brief sentence so the LLM has natural framing. */
-   size_t needed = strlen(json) + 64;
+   static const char prefix[] =
+       "Linked channels (one with \"verified\": false is an SMS number waiting for its code: "
+       "it can't send or receive yet): ";
+   size_t needed = strlen(json) + sizeof(prefix);
    char *result = malloc(needed);
    if (!result) {
       free(json);
       return NULL;
    }
-   snprintf(result, needed, "Linked channels: %s", json);
+   snprintf(result, needed, "%s%s", prefix, json);
    free(json);
    return result;
 }
@@ -352,7 +355,9 @@ static char *handle_link_status(struct json_object *details) {
       case MESSAGING_LINK_STATE_PENDING:
          return make_response("Link code is pending — user has not yet sent /link to a bot.");
       case MESSAGING_LINK_STATE_CLAIMED:
-         return make_response("Link code has been claimed. Channel is now active.");
+         return make_response("Link code has been claimed. The channel is active, except an "
+                              "SMS number: it waits for the 6-digit code DAWN texted to it, "
+                              "which the user enters in WebUI Settings → Messaging Channels.");
       case MESSAGING_LINK_STATE_EXPIRED:
          return make_response(
              "Link code has expired. Generate a new one in WebUI Settings → Messaging.");
@@ -409,6 +414,8 @@ static char *messaging_callback(const char *action, char *value, int *should_res
     * separately for the fire-time gate below — "is this scheduled?" is a distinct
     * question from "who owns it?". */
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    bool is_scheduled = scheduled_context_get(NULL);
 
    /* Fire-time action-level schedulability gate: the tool carries
@@ -627,8 +634,16 @@ static void messaging_tool_cleanup(void) {
    messaging_engine_shutdown();
 }
 
+static const tool_action_kind_entry_t s_messaging_action_kinds[] = {
+   { "list_channels", TOOL_KIND_READ, NULL }, { "read_channel", TOOL_KIND_READ, NULL },
+   { "read_server", TOOL_KIND_READ, NULL },   { "list_discord_channels", TOOL_KIND_READ, NULL },
+   { "link_status", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t messaging_metadata = {
    .name = "messaging",
+   .action_kinds = s_messaging_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_messaging_action_kinds),
    .device_string = "messaging",
    .topic = "dawn",
    .aliases = { "message", "send_message", "chat" },
@@ -650,7 +665,7 @@ static const tool_metadata_t messaging_metadata = {
                   "conversation and are rejected if scheduled — do not offer to schedule them. "
                   "Each user manages their own channels via the WebUI Settings panel.",
    .params = messaging_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(messaging_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE,

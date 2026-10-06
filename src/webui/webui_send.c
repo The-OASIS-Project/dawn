@@ -52,6 +52,7 @@
 #include "webui/webui_always_on.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_server.h"
+#include "webui/webui_protocol.h"
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -399,7 +400,8 @@ void send_transcript_impl_ex(struct lws *wsi,
                              bool replay,
                              bool server_saved,
                              int64_t conversation_id,
-                             int64_t message_id) {
+                             int64_t message_id,
+                             const char *client_ref) {
    /* Escape JSON special characters in text */
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
@@ -420,6 +422,9 @@ void send_transcript_impl_ex(struct lws *wsi,
    if (server_saved) {
       json_object_object_add(payload, "server_saved", json_object_new_boolean(true));
    }
+   if (client_ref && client_ref[0]) {
+      json_object_object_add(payload, "client_ref", json_object_new_string(client_ref));
+   }
    json_object_object_add(obj, "type", json_object_new_string("transcript"));
    json_object_object_add(obj, "payload", payload);
 
@@ -436,6 +441,14 @@ void send_error_impl_ex(struct lws *wsi,
                         const char *code,
                         const char *message,
                         ws_error_severity_t severity) {
+   send_error_frame(wsi, code, message, severity, webui_turn_ref_get());
+}
+
+void send_error_frame(struct lws *wsi,
+                      const char *code,
+                      const char *message,
+                      ws_error_severity_t severity,
+                      const char *client_ref) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
@@ -448,6 +461,9 @@ void send_error_impl_ex(struct lws *wsi,
    json_object_object_add(payload, "severity", json_object_new_string(severity_str));
    /* Kept for backward compat; `severity` is the field new clients should read. */
    json_object_object_add(payload, "recoverable", json_object_new_boolean(1));
+   if (client_ref && client_ref[0]) {
+      json_object_object_add(payload, "client_ref", json_object_new_string(client_ref));
+   }
    json_object_object_add(obj, "type", json_object_new_string("error"));
    json_object_object_add(obj, "payload", payload);
 
@@ -506,11 +522,15 @@ static void build_config_json(char *json, size_t len) {
    bool music_enabled = webui_music_server_is_running();
    int music_port = webui_music_server_get_port();
    bool aurora_enabled = (s_aurora_path[0] != '\0');
+   /* The protocol members, with their comma only when there are any. */
+   char protocol[WEBUI_PROTOCOL_JSON_MAX];
+   const bool has_protocol = webui_protocol_json_members(protocol, sizeof(protocol)) > 0;
    snprintf(json, len,
             "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d,"
-            "\"music_enabled\":%s,\"music_port\":%d,\"aurora_enabled\":%s,\"version\":\"%s\"}}",
+            "\"music_enabled\":%s,\"music_port\":%d,\"aurora_enabled\":%s,\"version\":\"%s\""
+            "%s%s}}",
             g_config.webui.audio_chunk_ms, music_enabled ? "true" : "false", music_port,
-            aurora_enabled ? "true" : "false", VERSION_NUMBER);
+            aurora_enabled ? "true" : "false", VERSION_NUMBER, has_protocol ? "," : "", protocol);
 }
 
 /* Compile-time constant: feature flags sent to all clients on connect */
@@ -544,7 +564,7 @@ void queue_init_messages(ws_connection_t *conn, const char *token) {
 
    /* 2. Config — pre-serialize as JSON string */
    {
-      char json[256];
+      char json[256 + WEBUI_PROTOCOL_JSON_MAX];
       build_config_json(json, sizeof(json));
       ws_response_t resp = { 0 };
       resp.session = session;
@@ -589,18 +609,46 @@ void send_metrics_impl(struct lws *wsi,
                        int ttft_ms,
                        float token_rate,
                        int context_pct,
+                       int input_tokens,
+                       int cached_tokens,
+                       int cache_write_tokens,
+                       int cache_saved_tokens,
+                       const char *cache_state,
                        int64_t conversation_id) {
-   char json[256];
+   char json[448];
+   /* input_tokens (this turn's prompt) is the cache-rate denominator: hit% =
+    * cached_tokens / input_tokens. cached_tokens is always present (0 = miss);
+    * cache_write_tokens only when non-zero (GPT-5.6+ / Claude) so clients feature-
+    * detect it. cache_saved_tokens is the provider-discounted net input-token
+    * saving (may be negative on a cache-write turn). All cache figures are
+    * meaningful only on the final "idle" frame — the mid-stream "thinking" frames
+    * carry the prior turn's value; the client gates on state. */
+   char cache_write_field[48] = "";
+   if (cache_write_tokens > 0) {
+      snprintf(cache_write_field, sizeof(cache_write_field), ",\"cache_write_tokens\":%d",
+               cache_write_tokens);
+   }
+   /* cache_state: the call's cache state (warm, warm_miss, ttl, rewritten, ...;
+    * "untracked" where the monitor doesn't judge the provider), when there is one.
+    * A fixed vocabulary from llm_cache_state_name(), never user text. */
+   char cache_state_field[40] = "";
+   if (cache_state && cache_state[0]) {
+      snprintf(cache_state_field, sizeof(cache_state_field), ",\"cache_state\":\"%s\"",
+               cache_state);
+   }
    /* conversation_id lets the client gate the footer to the active view — a
     * background turn's tok/s/TTFT must not update the footer of an idle view. */
    snprintf(json, sizeof(json),
             "{\"type\":\"metrics_update\",\"payload\":{\"state\":\"%s\",\"ttft_ms\":%d,"
-            "\"token_rate\":%.1f,\"context_percent\":%d,\"conversation_id\":%lld}}",
-            state, ttft_ms, token_rate, context_pct, (long long)conversation_id);
+            "\"token_rate\":%.1f,\"context_percent\":%d,\"input_tokens\":%d,\"cached_tokens\":%d%s,"
+            "\"cache_saved_tokens\":%d%s,\"conversation_id\":%lld}}",
+            state, ttft_ms, token_rate, context_pct, input_tokens, cached_tokens, cache_write_field,
+            cache_saved_tokens, cache_state_field, (long long)conversation_id);
    send_json_message(wsi, json);
 }
 
 void send_compaction_impl(struct lws *wsi,
+                          int64_t conversation_id,
                           int tokens_before,
                           int tokens_after,
                           int messages_summarized,
@@ -613,6 +661,9 @@ void send_compaction_impl(struct lws *wsi,
    json_object_object_add(payload, "tokens_after", json_object_new_int(tokens_after));
    json_object_object_add(payload, "messages_summarized", json_object_new_int(messages_summarized));
    json_object_object_add(payload, "level", json_object_new_int(level));
+   if (conversation_id > 0) {
+      json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
+   }
    if (summary) {
       json_object_object_add(payload, "summary", json_object_new_string(summary));
    }
@@ -906,12 +957,14 @@ void process_one_response(void) {
       case WS_RESP_TRANSCRIPT:
          send_transcript_impl_ex(conn->wsi, resp.transcript.role, resp.transcript.text, false,
                                  resp.transcript.server_saved, resp.transcript.conversation_id,
-                                 resp.transcript.message_id);
+                                 resp.transcript.message_id, resp.transcript.client_ref);
          free(resp.transcript.role);
          free(resp.transcript.text);
          break;
       case WS_RESP_ERROR:
-         send_error_impl_ex(conn->wsi, resp.error.code, resp.error.message, resp.error.severity);
+         /* The ref the frame was built with, never this thread's. */
+         send_error_frame(conn->wsi, resp.error.code, resp.error.message, resp.error.severity,
+                          resp.error.client_ref);
          free(resp.error.code);
          free(resp.error.message);
          break;
@@ -953,12 +1006,15 @@ void process_one_response(void) {
       case WS_RESP_METRICS_UPDATE:
          send_metrics_impl(conn->wsi, resp.metrics.state, resp.metrics.ttft_ms,
                            resp.metrics.token_rate, resp.metrics.context_pct,
-                           resp.metrics.conversation_id);
+                           resp.metrics.input_tokens, resp.metrics.cached_tokens,
+                           resp.metrics.cache_write_tokens, resp.metrics.cache_saved_tokens,
+                           resp.metrics.cache_state, resp.metrics.conversation_id);
          break;
       case WS_RESP_COMPACTION_COMPLETE:
-         send_compaction_impl(conn->wsi, resp.compaction.tokens_before,
-                              resp.compaction.tokens_after, resp.compaction.messages_summarized,
-                              resp.compaction.summary, resp.compaction.level);
+         send_compaction_impl(conn->wsi, resp.compaction.conversation_id,
+                              resp.compaction.tokens_before, resp.compaction.tokens_after,
+                              resp.compaction.messages_summarized, resp.compaction.summary,
+                              resp.compaction.level);
          free(resp.compaction.summary);
          break;
       case WS_RESP_THINKING_START:

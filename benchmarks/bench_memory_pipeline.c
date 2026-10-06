@@ -250,7 +250,8 @@ static bool parse_speaker_prefix(const char *content, char *out, size_t out_cap)
 static struct json_object *build_history_for_conv(int64_t conv_id, int *count_out) {
    sqlite3_stmt *stmt = NULL;
    const char *sql =
-       "SELECT id, role, content FROM messages WHERE conversation_id = ? ORDER BY id ASC";
+       "SELECT id, role, content FROM messages WHERE conversation_id = ? AND kind IS NULL "
+       "ORDER BY id ASC";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       fprintf(stderr, "bench_mp: prepare history failed: %s\n", sqlite3_errmsg(s_db.db));
       return NULL;
@@ -547,17 +548,6 @@ int bench_mp_run_smoke(const char *locomo_path, int conv_idx) {
 static void respond_error(const char *message) {
    fprintf(stdout, "{\"status\":\"error\",\"message\":\"%s\"}\n", message ? message : "?");
    fflush(stdout);
-}
-
-/* dia_id → msg_id lookup over the in-process map. */
-static int64_t dia_map_lookup(const char *dia_id) {
-   if (!dia_id)
-      return 0;
-   for (int i = 0; i < s_dia_map_count; i++) {
-      if (strcmp(s_dia_map[i].dia_id, dia_id) == 0)
-         return s_dia_map[i].msg_id;
-   }
-   return 0;
 }
 
 /* Reverse: msg_id → dia_id (used by query_memory to compute covered_dia_ids
@@ -1165,7 +1155,7 @@ static int file_exists(const char *path) {
 static int count_messages_for_user(int user_id) {
    const char *sql = "SELECT COUNT(*) FROM messages m "
                      "JOIN conversations c ON c.id = m.conversation_id "
-                     "WHERE c.user_id = ?";
+                     "WHERE c.user_id = ? AND m.kind IS NULL";
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK)
       return 0;

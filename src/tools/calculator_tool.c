@@ -68,6 +68,7 @@ static const treg_param_t calculator_params[] = {
 
 static const tool_metadata_t calculator_metadata = {
    .name = "calculator",
+   .default_kind = TOOL_KIND_READ,
    .device_string = "calculator",
    .topic = "dawn",
    .aliases = { "calc", "math" },
@@ -83,7 +84,7 @@ static const tool_metadata_t calculator_metadata = {
        "'base' for number base conversion (hex, decimal, octal, binary), "
        "'random' for random number generation.",
    .params = calculator_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(calculator_params),
 
    /* 'random' is non-deterministic: "pick another number" legitimately repeats
     * with identical args, so it must be exempt from duplicate-call detection. */

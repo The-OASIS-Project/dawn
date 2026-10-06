@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
@@ -123,17 +124,6 @@ const char *llm_openai_parse_error_message(const char *response_body, long http_
    return error_msg;
 }
 
-bool llm_openai_is_gpt5_base_family(const char *model_name) {
-   if (!model_name)
-      return false;
-   if (strncmp(model_name, "gpt-5", 5) != 0)
-      return false;
-   /* gpt-5, gpt-5-mini, gpt-5-nano — but NOT gpt-5.1, gpt-5.2, gpt-5.4* */
-   if (model_name[5] == '\0' || model_name[5] == '-')
-      return true;
-   return false;
-}
-
 bool llm_openai_model_prefers_responses_api(const char *model_name) {
    if (!model_name)
       return false;
@@ -162,37 +152,6 @@ bool llm_openai_model_prefers_responses_api(const char *model_name) {
    return false;
 }
 
-const char *llm_openai_clamp_effort_for_model(const char *model_name, const char *effort) {
-   if (!effort || !model_name)
-      return effort;
-
-   bool is_o_series = (strncmp(model_name, "o1", 2) == 0 || strncmp(model_name, "o3", 2) == 0);
-   bool is_gpt5_base = llm_openai_is_gpt5_base_family(model_name);
-   bool is_gemini = (strncmp(model_name, "gemini-", 7) == 0);
-
-   /* xhigh: only gpt-5.2+ supports it */
-   if (strcmp(effort, "xhigh") == 0) {
-      if (is_o_series || is_gpt5_base || is_gemini)
-         return "high";
-   }
-
-   /* none: o-series and Gemini don't support it */
-   if (strcmp(effort, "none") == 0) {
-      if (is_o_series || is_gemini)
-         return "low";
-      if (is_gpt5_base)
-         return "minimal";
-   }
-
-   /* minimal: only gpt-5 base family */
-   if (strcmp(effort, "minimal") == 0) {
-      if (!is_gpt5_base)
-         return "low";
-   }
-
-   return effort;
-}
-
 /* ── Public entry points (dispatch to chat-completions or responses) ────── */
 
 /* Discard sink for the bare-completion bridge below: /v1/responses only has a
@@ -208,18 +167,14 @@ static void llm_openai_discard_text_chunk(const char *chunk, void *userdata) {
  * which has no non-streaming transport of its own. `sink` must be non-NULL. */
 static char *llm_openai_single_shot_collect_text(struct json_object *conversation_history,
                                                  const char *input_text,
-                                                 const char **vision_images,
-                                                 const size_t *vision_image_sizes,
-                                                 int vision_image_count,
                                                  const char *base_url,
                                                  const char *api_key,
                                                  const char *model,
                                                  llm_openai_text_chunk_callback sink,
                                                  void *sink_userdata) {
    llm_tool_response_t result = { 0 };
-   int rc = llm_openai_streaming_single_shot(conversation_history, input_text, vision_images,
-                                             vision_image_sizes, vision_image_count, base_url,
-                                             api_key, model, sink, sink_userdata, 0, &result);
+   int rc = llm_openai_streaming_single_shot(conversation_history, input_text, base_url, api_key,
+                                             model, sink, sink_userdata, 0, &result);
    char *text = (rc == 0 && result.text) ? strdup(result.text) : NULL;
    llm_tool_response_free(&result);
    return text;
@@ -227,9 +182,6 @@ static char *llm_openai_single_shot_collect_text(struct json_object *conversatio
 
 char *llm_openai_chat_completion(struct json_object *conversation_history,
                                  const char *input_text,
-                                 const char **vision_images,
-                                 const size_t *vision_image_sizes,
-                                 int vision_image_count,
                                  const char *base_url,
                                  const char *api_key,
                                  const char *model) {
@@ -237,45 +189,16 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
       /* Responses has no non-streaming transport; drive the streaming single-shot
        * with a discard sink so bare-completion callers (briefings, compaction,
        * memory extraction, summarizers) keep working on Responses-only models. */
-      return llm_openai_single_shot_collect_text(conversation_history, input_text, vision_images,
-                                                 vision_image_sizes, vision_image_count, base_url,
+      return llm_openai_single_shot_collect_text(conversation_history, input_text, base_url,
                                                  api_key, model, llm_openai_discard_text_chunk,
                                                  NULL);
    }
 
-   return llm_openai_cc_chat_completion(conversation_history, input_text, vision_images,
-                                        vision_image_sizes, vision_image_count, base_url, api_key,
-                                        model);
-}
-
-char *llm_openai_chat_completion_streaming(struct json_object *conversation_history,
-                                           const char *input_text,
-                                           const char **vision_images,
-                                           const size_t *vision_image_sizes,
-                                           int vision_image_count,
-                                           const char *base_url,
-                                           const char *api_key,
-                                           const char *model,
-                                           llm_openai_text_chunk_callback chunk_callback,
-                                           void *callback_userdata) {
-   if (should_dispatch_to_responses_api(api_key, base_url, model)) {
-      /* Legacy streaming entry (the Claude->OpenAI fallback path). Reuse the
-       * streaming single-shot for Responses-only models, forwarding the real TTS
-       * chunk sink so tokens still stream to the caller. */
-      return llm_openai_single_shot_collect_text(conversation_history, input_text, vision_images,
-                                                 vision_image_sizes, vision_image_count, base_url,
-                                                 api_key, model, chunk_callback, callback_userdata);
-   }
-   return llm_openai_cc_streaming(conversation_history, input_text, vision_images,
-                                  vision_image_sizes, vision_image_count, base_url, api_key, model,
-                                  chunk_callback, callback_userdata);
+   return llm_openai_cc_chat_completion(conversation_history, input_text, base_url, api_key, model);
 }
 
 int llm_openai_streaming_single_shot(struct json_object *conversation_history,
                                      const char *input_text,
-                                     const char **vision_images,
-                                     const size_t *vision_image_sizes,
-                                     int vision_image_count,
                                      const char *base_url,
                                      const char *api_key,
                                      const char *model,
@@ -294,13 +217,27 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
    }
 
    if (should_dispatch_to_responses_api(api_key, base_url, route_model)) {
-      return llm_openai_responses_streaming_single_shot(
-          conversation_history, input_text, vision_images, vision_image_sizes, vision_image_count,
-          base_url, api_key, route_model, chunk_callback, callback_userdata, iteration, result);
+      return llm_openai_responses_streaming_single_shot(conversation_history, input_text, base_url,
+                                                        api_key, route_model, chunk_callback,
+                                                        callback_userdata, iteration, result);
    }
 
-   return llm_openai_cc_streaming_single_shot(conversation_history, input_text, vision_images,
-                                              vision_image_sizes, vision_image_count, base_url,
-                                              api_key, model, chunk_callback, callback_userdata,
-                                              iteration, result);
+   return llm_openai_cc_streaming_single_shot(conversation_history, input_text, base_url, api_key,
+                                              model, chunk_callback, callback_userdata, iteration,
+                                              result);
+}
+
+void llm_openai_add_prompt_cache_key(json_object *root) {
+   session_t *session = session_get_command_context();
+   if (!root || !session) {
+      return;
+   }
+   char key[64];
+   const int64_t conv = atomic_load(&session->stream_conversation_id);
+   if (conv > 0) {
+      snprintf(key, sizeof(key), "dawn-conv-%lld", (long long)conv);
+   } else {
+      snprintf(key, sizeof(key), "dawn-sess-%u", session->session_id);
+   }
+   json_object_object_add(root, "prompt_cache_key", json_object_new_string(key));
 }

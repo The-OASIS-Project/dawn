@@ -102,7 +102,7 @@ void remove_emojis(char *str);
  * @param bytes_written Number of bytes written excluding null terminator (output, may be NULL)
  * @return 0 on success, 1 on failure
  *
- * @note Output buffer should be at least 2x input size to accommodate expansions
+ * @note Output buffer should be at least 4x input size to accommodate expansions
  */
 int preprocess_text_for_tts_c(const char *input,
                               char *output,

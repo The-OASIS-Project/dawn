@@ -1,0 +1,549 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * A session's conversation history and the turn that runs on it: which
+ * history a turn uses, the conversation it belongs to, and the writes other
+ * threads make meanwhile (src/core/session_history.c).  Included by
+ * core/session_manager.h, which defines session_t.
+ */
+
+#ifndef SESSION_HISTORY_H
+#define SESSION_HISTORY_H
+
+#include <json-c/json.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "core/session_manager.h" /* session_t (no-op when included from it) */
+#include "core/turn_origin.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** session_defer_fact_source(): kept until its conversation is known. */
+#define SESSION_FACT_SOURCE_QUEUED 2
+/** session_defer_fact_source(): in a turn, but no room to keep it (logged). */
+#define SESSION_FACT_SOURCE_DROPPED 3
+
+
+/**
+ * @brief Let go of a reference to a history message (or an array of them)
+ *
+ * A running turn reads its messages without the lock and json-c reference
+ * counts aren't atomic: from any thread but the turn's own, the release is
+ * parked for the turn to make when it ends.  Caller holds history_mutex.
+ */
+void session_release_ref_locked(struct session *session, struct json_object *obj);
+
+/** session_release_ref_locked() taking history_mutex itself. */
+void session_release_ref(struct session *session, struct json_object *obj);
+
+/**
+ * @brief Whether a turn is reading the session's history on another thread
+ *        (it reads without the lock): a change to what it reads waits for
+ *        the session's next turn.  Caller holds history_mutex.
+ */
+bool session_turn_reads_elsewhere_locked(const struct session *session);
+
+/**
+ * @brief The line heading the device events in a turn's context
+ *
+ * Plain text: the events sit inside the TURN CONTEXT block the conversation's
+ * tag marks as DAWN's (session_prefix.c), and each event is one line with
+ * DAWN's markers defused.
+ */
+const char *session_notices_header(void);
+
+/**
+ * @brief Render every unexpired device event the surface's user may see,
+ *        told or not (what a history told none would be told).
+ *
+ * Drops events older than SESSION_NOTICE_TTL_SEC, then renders, oldest first
+ * with how long ago each happened, the household's and those that are
+ * @p viewer_user_id's (the surface's user, read before taking the lock).
+ * Another user's are kept but not shown.  Caller holds history_mutex.
+ *
+ * @return Allocated text ("" when there are none; caller frees), or NULL on
+ *         allocation failure.
+ */
+char *session_render_notices_locked(session_t *session, int viewer_user_id);
+
+/**
+ * @brief The device events the session's history hasn't been told of yet
+ *
+ * For a turn's context: unexpired events, the household's and
+ * @p viewer_user_id's, oldest first with the time each happened (a turn
+ * context is kept as it was sent, so "3 min ago" would go stale).  Marks them
+ * told: each reaches a history once.  Caller holds history_mutex.
+ *
+ * @return Allocated text, or NULL when there are none (or out of memory).
+ */
+char *session_take_new_notices_locked(session_t *session, int viewer_user_id);
+
+/**
+ * @brief Add a message the caller built (it has a "role") as the running
+ *        turn's own, like session_add_turn_message()
+ *
+ * Takes @p message (released on failure).  For a question whose saved form a
+ * reload rebuilds (an image turn): built by the same function, the turn sends
+ * exactly what a reload would.
+ *
+ * @return false when the message was dropped
+ */
+bool session_add_turn_message_object(session_t *session, struct json_object *message);
+
+/** Stamp @p message (in the session's history) with its row's id, unless it
+ *  has one. */
+void session_stamp_message_id(session_t *session, struct json_object *message, int64_t row_id);
+
+/** history_conversation_id value: the history holds more than one conversation's turns */
+#define SESSION_HISTORY_CONV_MIXED ((int64_t)-1)
+
+/**
+ * @brief Record that the session's history holds @p conv_id
+ *
+ * For a session that is dedicated to one conversation and whose history already
+ * holds it (e.g. a messaging channel's conversation with nothing to restore).
+ * To install a conversation's messages use session_replace_history(), which
+ * binds in the same step.
+ *
+ * @param session Session
+ * @param conv_id Conversation the history holds (0 = none)
+ */
+void session_bind_history_conversation(session_t *session, int64_t conv_id);
+
+/**
+ * @brief Snapshot the session's live history for memory extraction
+ *
+ * Returns a deep copy (provider state stripped) taken under history_mutex, with
+ * the conversation it holds read in the same critical section, so a turn
+ * appending concurrently can neither corrupt the copy nor change its attribution.
+ *
+ * @param session   Session
+ * @param conv_out  Receives history_conversation_id (may be NULL)
+ * @param count_out Receives the copy's message count (may be NULL)
+ * @return New array (caller owns), or NULL
+ */
+struct json_object *session_snapshot_history(session_t *session, int64_t *conv_out, int *count_out);
+
+/**
+ * @brief Replace the session's history with one conversation's messages
+ *
+ * Swaps the array and binds @p conv_id in one history_mutex critical section.
+ * Takes ownership of @p history.
+ *
+ * @param session Session
+ * @param history New history array (ownership transferred)
+ * @param conv_id Conversation the history holds (0 = none)
+ */
+void session_replace_history(session_t *session, struct json_object *history, int64_t conv_id);
+
+/**
+ * @brief Builds a conversation's LLM context, detached from any session
+ *
+ * Registered by the WebUI layer (which owns the canonical restore: image
+ * rehydration, compaction watermark).  Must not touch any session.  Also
+ * reports the conversation's stored LLM settings (applied over @p base) in
+ * @p cfg_out, setting *@p has_cfg_out when it has any.
+ *
+ * @return New history array (caller owns), or NULL on failure
+ */
+typedef struct json_object *(*session_history_loader_fn)(int user_id,
+                                                         int64_t conv_id,
+                                                         const session_llm_config_t *base,
+                                                         session_llm_config_t *cfg_out,
+                                                         bool *has_cfg_out);
+
+/** Register the loader session_turn_begin() uses (NULL to unregister). */
+void session_set_history_loader(session_history_loader_fn loader);
+
+/**
+ * @brief Start a turn: pin the history it runs on
+ *
+ * For @p conv_id > 0: the live history if it holds that conversation (or it is a
+ * fresh chat and the conversation has no messages yet, which binds it);
+ * otherwise the conversation's own history, built by the registered loader and
+ * kept private to the turn.  If loading fails the turn runs on an empty private
+ * history rather than on another conversation's context.  For @p conv_id 0 the
+ * live history is pinned until session_turn_set_conversation() resolves it.
+ * Call when a turn is dequeued, before anything touches the history; pair with
+ * session_turn_end().
+ *
+ * @param session Session
+ * @param conv_id Conversation the turn belongs to (0 = not yet known)
+ * @param user_id Owner, for loading the conversation
+ */
+void session_turn_begin(session_t *session, int64_t conv_id, int user_id);
+
+/**
+ * @brief Record the running turn's conversation once it is resolved late
+ *
+ * For a turn that began with conv 0 (fresh chat before the conversation row
+ * existed, or a voice turn that adopts one after ASR).  No-op outside a turn
+ * (between session_turn_begin and _end).  If the pinned history holds this
+ * conversation or nothing but the turn's own messages, it is bound to it.
+ * Otherwise, with @p may_load, the turn moves onto the conversation's own
+ * history (loaded; the turn's messages so far are carried over, and a live
+ * history they were written into is marked SESSION_HISTORY_CONV_MIXED).
+ * Without @p may_load nothing is loaded: the turn keeps its history, while its
+ * stream tag and persistence follow @p conv_id.  This is the one writer of the
+ * turn's stream_conversation_id after session_turn_begin().
+ *
+ * @param may_load Loading allowed (the turn's own worker thread)
+ */
+void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may_load);
+
+/**
+ * @brief Release the turn's pinned history (safe when nothing is pinned)
+ *
+ * If the turn ran on its own copy of the conversation the client is showing
+ * (session_t.viewed_conversation_id) while the live history holds something
+ * else, the copy becomes the live history.  A prompt refresh another thread
+ * made while the turn held the live history is applied here.
+ */
+void session_turn_end(session_t *session);
+
+/**
+ * @brief Take the blocks of the reply the running turn produced
+ *
+ * For the writer saving that reply, on the thread running the turn, before the
+ * turn ends: they are cleared at turn begin and end, so they are always this
+ * turn's.  NULL when it produced none.  Caller owns them.
+ */
+struct json_object *session_take_reply_blocks(session_t *session);
+
+/** What a finishing turn has yet to write (session_turn_finish()); caller frees the strings. */
+typedef struct {
+   int64_t conv;      /* the conversation to write them to */
+   char *prior_user;  /* an earlier turn's exchange this turn adopted: written */
+   char *prior_reply; /* first, then stamped with session_stamp_claimed() */
+   struct json_object *prior_reply_blocks; /* its blocks (caller owns; may be NULL) */
+   char *user;                             /* this turn's own user message (persisted form) */
+   char *reply;                            /* and reply */
+} session_turn_unsaved_t;
+
+/** session_turn_finish(): the turn ended. */
+#define SESSION_TURN_ENDED 0
+/** session_turn_finish(): write what it handed out, then call it again. */
+#define SESSION_TURN_WRITE_UNSAVED 2
+
+/**
+ * @brief session_turn_end(), unless the turn has messages to save first
+ *
+ * When the turn's conversation is known and messages wait for it (its own,
+ * session_turn_set_pending(), or an adopted earlier exchange), hands them out
+ * WITHOUT ending the turn and returns SESSION_TURN_WRITE_UNSAVED: the caller
+ * writes them, in the order of the struct, so their row ids are stamped on the
+ * turn's own history, and calls again.  Otherwise ends the turn and returns
+ * SESSION_TURN_ENDED; messages still waiting for an unknown conversation then
+ * wait for it (session_bind_created_conversation).  Deciding and ending in one
+ * critical section means a conversation created at the last moment is seen by
+ * one or the other.
+ */
+int session_turn_finish(session_t *session, session_turn_unsaved_t *out);
+
+/**
+ * @brief The conversation the running turn belongs to
+ *
+ * While a turn is active, its conversation (0 until resolved); otherwise the
+ * conversation the session history holds.  Use this, not the client's view,
+ * for anything a turn writes or reads on behalf of its conversation.
+ */
+int64_t session_turn_conversation(session_t *session);
+
+/**
+ * @brief The conversation @p history holds
+ *
+ * @p history is the running turn's pinned history or the session history;
+ * returns the conversation it holds, or 0 (none, mixed, or neither array).
+ */
+int64_t session_history_conversation_of(session_t *session, struct json_object *history);
+
+/**
+ * @brief Whether the running turn works on its own history, not the live one
+ *
+ * Caller holds history_mutex.  Per-session state that describes the live context
+ * (e.g. the focus-injection dedup set) does not apply to such a turn.
+ */
+static inline bool session_turn_on_own_history_locked(const session_t *session) {
+   return session->turn_history && session->turn_history != session->conversation_history;
+}
+
+/** session_turn_on_own_history_locked(), taking history_mutex. */
+bool session_turn_on_own_history(session_t *session);
+
+/**
+ * @brief Append @p msg (ownership taken) to a turn's history under its lock
+ *
+ * The one way the LLM tool loop adds to the history it runs on: other threads
+ * (a sidebar switch's snapshot, the back-fill) read the same array under
+ * history_mutex, so the writer must take it too.  The lock is the command
+ * context session's; without one (single-threaded callers) it appends plainly.
+ */
+void session_history_append(struct json_object *history, struct json_object *msg);
+
+/**
+ * @brief Replace @p history's messages with @p from's, under the same lock
+ *
+ * Compaction's in-place rewrite of the history the turn runs on.
+ */
+void session_history_replace_contents(struct json_object *history, struct json_object *from);
+
+/**
+ * @brief Mark the running turn as waiting for a conversation created after it
+ *
+ * For a typed first message of a new chat: it is dispatched before the client
+ * creates the conversation row.  Only such a turn is bound by
+ * session_bind_created_conversation().  No-op when the turn already has one.
+ */
+void session_turn_await_conversation(session_t *session);
+
+/** Mark the running turn as background (a reinvoke, not the user's own). */
+void session_turn_mark_background(session_t *session);
+
+/**
+ * @brief Whether the caller is the session's running turn
+ *
+ * True on the turn's thread and on the tool threads carrying its token
+ * (session_turn_token()); false outside a turn and on any other thread.
+ */
+bool session_turn_is_caller(session_t *session);
+
+/** Whether a turn is running on @p session (on any thread). */
+bool session_turn_active(session_t *session);
+
+/**
+ * @brief Whether the caller is a running turn the user started
+ *
+ * True only for the running turn's own code (session_turn_is_caller()) on a
+ * turn not marked background, in a session that isn't a job's.  False outside
+ * a turn: there is no user request to attribute the effect to.  For effects
+ * that should follow only from what the user asked for, not from untrusted
+ * content a background turn read.
+ */
+bool session_turn_user_originated(session_t *session);
+
+/**
+ * @brief The number of turns begun on @p session (the running turn's number)
+ *
+ * Consecutive per session: "the next turn" of a turn numbered n is n + 1.
+ */
+uint32_t session_turn_number(session_t *session);
+
+/**
+ * @brief Whether the caller is the session's running turn and that turn is a
+ *        background one (a job's follow-up, run in the session it reports to)
+ */
+bool session_turn_is_background(session_t *session);
+
+/**
+ * @brief Mark the calling thread's tool call as approved by the user's reply
+ *        code (true), or clear it (false)
+ *
+ * Set only around the one execution of a call the user approved by code;
+ * turn_origin_capture() copies it, so a confirm run that way may come in any
+ * later turn of its session.  Thread-local, like session_turn_token().
+ */
+void session_set_call_code_redeemed(bool redeemed);
+
+/** Whether the calling thread's tool call was approved by reply code. */
+bool session_call_code_redeemed(void);
+
+
+/**
+ * @brief Keep a message the turn could not save: its conversation doesn't exist yet
+ *
+ * @p role "user" (the persisted form, [IMAGE:] markers included) or "assistant"
+ * (the reply).  The turn's own worker writes them once the conversation is known
+ * (session_turn_take_pending()).  A turn that ends still waiting hands them to
+ * session_bind_created_conversation().
+ */
+void session_turn_set_pending(session_t *session, const char *role, const char *persist_text);
+
+/**
+ * @brief Take a pending message once the turn's conversation is known
+ *
+ * Returns it (caller frees) with the conversation in @p conv_out, or NULL when
+ * there is none or the conversation is still unknown.
+ */
+char *session_turn_take_pending(session_t *session, const char *role, int64_t *conv_out);
+
+/** How long an ended turn's unsaved exchange waits for its conversation. */
+#define SESSION_UNCLAIMED_TURN_SEC 120
+
+/**
+ * @brief Hand a conversation just created to the turn it was created for
+ *
+ * For the handler creating a new chat's conversation, in one critical section:
+ * - A turn still running that waits for one (session_turn_await_conversation)
+ *   is bound to @p conv_id (history pin and stream tag; loads nothing) and
+ *   @p adopted_out is set.  Its own worker writes its messages.
+ * - A turn that ended before the conversation existed left its exchange: when
+ *   a running turn is adopted, that turn writes it ahead of its own
+ *   (session_turn_take_prior()); otherwise returns true with the user message,
+ *   the reply and the reply's blocks (any may be NULL; caller frees all three)
+ *   for the caller to write to @p conv_id, then pass the rows' ids to
+ *   session_stamp_claimed().
+ */
+bool session_bind_created_conversation(session_t *session,
+                                       int64_t conv_id,
+                                       char **user_out,
+                                       char **reply_out,
+                                       struct json_object **reply_blocks_out,
+                                       bool *adopted_out);
+
+/**
+ * @brief Stamp the rows of a claimed exchange
+ *
+ * Puts each row id (0 = not written) on the history message it was written
+ * from, wherever it now sits.  While another thread's turn is running (it reads
+ * those messages without the lock), that turn stamps them when it ends.
+ */
+void session_stamp_claimed(session_t *session, int64_t user_row_id, int64_t reply_row_id);
+
+/**
+ * @brief Take the earlier exchange a running turn adopted, to write first
+ *
+ * For the turn's own code once its conversation is known: returns true with the
+ * exchange and the reply's blocks (any may be NULL; caller frees) and the
+ * conversation.  Write the rows before the turn's own, then
+ * session_stamp_claimed().
+ */
+bool session_turn_take_prior(session_t *session,
+                             int64_t *conv_out,
+                             char **user_out,
+                             char **reply_out,
+                             struct json_object **reply_blocks_out);
+
+
+/**
+ * @brief Start a new context in the live history (caller holds history_mutex)
+ *
+ * Replaces it with an empty one (holding just @p system_prompt when given)
+ * bound to no conversation, and drops what belonged to the old context: its
+ * focus items, visual guidelines, an ended turn's unsaved exchange, and the
+ * facts waiting for its conversation.
+ */
+void session_new_context_locked(session_t *session, const char *system_prompt);
+
+/** Records a conversation as facts' source (memory_db_fact_attach_sources). */
+typedef void (*session_fact_source_fn)(const session_fact_source_t *facts,
+                                       int count,
+                                       int64_t conv_id);
+
+/** Register the recorder session_flush_fact_sources() calls. */
+void session_set_fact_source_hook(session_fact_source_fn fn);
+
+/**
+ * @brief Where a fact the running turn saved or restated was learned
+ *
+ * For the running turn's own code:
+ * - SUCCESS with @p conv_out: the turn's conversation is known; record it now.
+ * - SESSION_FACT_SOURCE_QUEUED: not known yet (a voice turn, a new chat's first
+ *   message).  Recorded when the turn learns it; if the turn ends without one,
+ *   when the live history it wrote becomes a conversation (the new chat's row,
+ *   a voice save), and forgotten if that history is discarded first.
+ * - SESSION_FACT_SOURCE_DROPPED: in a turn, but too many facts wait; nothing is
+ *   recorded (not "outside a conversation" either).
+ * - FAILURE: outside a turn (the scheduler, MQTT): no conversation.
+ */
+int session_defer_fact_source(session_t *session,
+                              int64_t fact_id,
+                              int user_id,
+                              bool created,
+                              int64_t *conv_out);
+
+/**
+ * @brief Record @p conv_id as the source of the facts ended turns left waiting
+ *
+ * For when the live history those turns wrote becomes a conversation.  Only
+ * @p owner_user_id's facts are recorded (0 = any: a WebUI session is one
+ * user's); they are taken off the list either way.  Recorded through the
+ * registered hook, outside history_mutex.
+ */
+void session_flush_fact_sources(session_t *session, int64_t conv_id, int owner_user_id);
+
+/** Take the facts ended turns left waiting (caller holds history_mutex); returns how many. */
+int session_take_fact_sources_locked(session_t *session,
+                                     session_fact_source_t out[SESSION_PENDING_FACT_SOURCES_MAX]);
+
+/** Record taken facts' source as session_flush_fact_sources() does (no lock held). */
+void session_record_fact_sources(const session_fact_source_t *facts,
+                                 int count,
+                                 int64_t conv_id,
+                                 int owner_user_id);
+
+/**
+ * @brief Reference to the history the running turn works on
+ *
+ * The pinned turn history if a turn is running, else conversation_history.
+ * Caller owns the returned reference (json_object_put).
+ */
+struct json_object *session_get_turn_history(session_t *session);
+
+/**
+ * @brief Release a reference from session_get_turn_history() / session_get_history()
+ *
+ * Under history_mutex: json-c's reference count is not atomic, and other
+ * threads take and drop references to the same array under that lock.
+ */
+void session_put_history(session_t *session, struct json_object *history);
+
+/**
+ * @brief Take the running turn's messages back out of its history
+ *
+ * For a turn abandoned (interrupted): removes its user message (the one it
+ * appended through session_add_turn_message) and everything after it — its
+ * tool calls and results — from its history.  Nothing when that message is no
+ * longer there (compacted away).  For the turn's own code.  Returns how many
+ * were removed.  The instruction and standing-direction changes it announced
+ * stay: they are the conversation's (what is in force says they were sent).
+ */
+int session_rollback_turn(session_t *session);
+
+/** The row id of the running turn's question (its user message or envelope),
+ *  or 0 when it has none saved.  For the turn's own code. */
+int64_t session_turn_question_id(session_t *session);
+
+/**
+ * @brief End a turn the user stopped, keeping their question
+ *
+ * For a reply stopped at the user's request: keeps the turn's user message,
+ * removes what followed it (tool calls and results, which the provider rejects
+ * without their pairs) and appends @p note as the assistant's reply, so a later
+ * "do that again" still has the request to refer to, and the model sees it was
+ * stopped rather than left unanswered.  For the turn's own code.  False when the
+ * question is no longer there (the caller then rolls back) or on failure.
+ */
+bool session_stop_turn(session_t *session, const char *note);
+
+/**
+ * @brief Whether a history write from this thread must wait for the running turn
+ *
+ * True while a turn runs on the live history and the caller is not that turn
+ * (it lacks its token).  Caller holds history_mutex.
+ */
+bool session_turn_defers_writes_locked(const session_t *session);
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SESSION_HISTORY_H */

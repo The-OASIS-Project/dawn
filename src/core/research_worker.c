@@ -41,10 +41,10 @@
 #include "logging.h"
 #include "tools/research_run.h"
 
-/* Strong def in webui_broadcasts.c (this worker is ENABLE_WEBUI-only, so it always
- * links).  Declared here rather than pulling in the heavy webui_server.h — the
- * job_worker.c → webui_server.h include is tracked debt we don't want to grow.
- * Signals an open WebUI chat that a conversation has new messages → refetch+render. */
+/* Defined in webui_broadcasts.c (webui_absent.c without the WebUI).  Declared here rather than
+ * pulling in the heavy webui_server.h — the job_worker.c → webui_server.h include is tracked debt
+ * we don't want to grow. Signals an open WebUI chat that a conversation has new messages →
+ * refetch+render. */
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
 
 /* Work item handed to the detached worker thread. */
@@ -118,6 +118,7 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id, const char
    }
 
    int64_t msg_id = 0;
+   /* no-blocks: DAWN's own completion note, not a model turn. */
    if (conv_db_add_message_with_tools(rec.parent_id, user_id, "assistant", msg, NULL, NULL, NULL,
                                       &msg_id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("research_worker: failed to post completion to parent conv %lld",

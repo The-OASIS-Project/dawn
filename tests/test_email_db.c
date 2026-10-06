@@ -196,6 +196,33 @@ static void test_account_update(void) {
    TEST_ASSERT_EQUAL_INT(25, out.max_recent);
 }
 
+/* digest_depth sits AFTER created_at in every statement; assert both so a
+ * column-index shift in row_to_account can't pass silently. */
+static void test_digest_depth_default_update_and_clamp(void) {
+   email_account_t a = make_account(1, "Depth", "depth@example.com");
+   int64_t id = 0;
+   time_t before = time(NULL);
+   TEST_ASSERT_EQUAL_INT(0, email_db_account_create(&a, &id));
+
+   email_account_t got;
+   TEST_ASSERT_EQUAL_INT(0, email_db_account_get(id, &got));
+   TEST_ASSERT_EQUAL_INT(EMAIL_DIGEST_DEPTH_DEFAULT, got.digest_depth);
+   TEST_ASSERT_TRUE(got.created_at >= before && got.created_at <= time(NULL) + 1);
+   TEST_ASSERT_EQUAL_INT(4000, got.max_body_chars);
+
+   got.digest_depth = 120;
+   TEST_ASSERT_EQUAL_INT(0, email_db_account_update(&got));
+   email_account_t out;
+   TEST_ASSERT_EQUAL_INT(0, email_db_account_get(id, &out));
+   TEST_ASSERT_EQUAL_INT(120, out.digest_depth);
+   TEST_ASSERT_EQUAL_INT64((int64_t)got.created_at, (int64_t)out.created_at);
+
+   out.digest_depth = EMAIL_DIGEST_DEPTH_MAX + 500;
+   TEST_ASSERT_EQUAL_INT(0, email_db_account_update(&out));
+   TEST_ASSERT_EQUAL_INT(0, email_db_account_get(id, &got));
+   TEST_ASSERT_EQUAL_INT(EMAIL_DIGEST_DEPTH_MAX, got.digest_depth);
+}
+
 /* ── Account Delete ──────────────────────────────────────────────────────── */
 
 static void test_account_delete(void) {
@@ -292,5 +319,6 @@ int main(void) {
    /* OAuth */
    RUN_TEST(test_account_oauth_type);
 
+   RUN_TEST(test_digest_depth_default_update_and_clamp);
    return UNITY_END();
 }

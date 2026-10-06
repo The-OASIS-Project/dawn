@@ -91,7 +91,8 @@ int html_extract_text_with_base(const char *html,
  *
  * Like html_extract_text but treats tables as transparent containers and
  * emits link text without URLs. Ideal for HTML emails where tables are
- * used for layout and tracking URLs add noise.
+ * used for layout and tracking URLs add noise.  Unlike the page extractors it
+ * has no minimum length: a short (or empty) result is the message's text.
  *
  * @param html Raw HTML content
  * @param html_len Length of HTML content

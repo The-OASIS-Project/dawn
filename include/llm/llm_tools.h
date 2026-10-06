@@ -47,6 +47,7 @@ typedef struct llm_tools_config llm_tools_config_t;
 extern "C" {
 #endif
 
+
 /* =============================================================================
  * History Format Hint (for dual-format duplicate detection)
  * ============================================================================= */
@@ -67,12 +68,11 @@ typedef enum {
  * ============================================================================= */
 
 #define LLM_TOOLS_MAX_TOOLS TOOL_MAX_REGISTERED /* Derived from tool_registry.h */
-#define LLM_TOOLS_MAX_PARAMS                                                             \
-   16                                  /* Maximum parameters per tool. Was 8; the memory \
-                                        * tool has 12, and params past this cap are      \
-                                        * silently dropped from the LLM-callable schema  \
-                                        * (llm_tools.c). Keep headroom above the largest \
-                                        * tool's param_count. */
+/* Maximum parameters per tool.  The memory tool has 17; a param past the cap is
+ * left out of the LLM-callable schema, with a warning at registration
+ * (llm_tools.c).  Each slot costs ~1.3 KB in every one of the
+ * LLM_TOOLS_MAX_TOOLS definitions, so raise it when a tool needs more. */
+#define LLM_TOOLS_MAX_PARAMS 20
 #define LLM_TOOLS_MAX_ENUM_VALUES 16   /* Maximum enum values per parameter */
 #define LLM_TOOLS_MAX_PARALLEL_CALLS 8 /* Maximum parallel tool calls */
 #define LLM_TOOLS_MAX_ITERATIONS 8     /* Maximum tool execution loop iterations */
@@ -148,6 +148,9 @@ typedef struct {
  * Represents a tool invocation requested by the LLM. The id is used to
  * correlate results back to the correct tool call (important for parallel calls).
  */
+/** An image id's buffer (image_store.h IMAGE_ID_LEN; llm_tool_images.c checks). */
+#define LLM_TOOLS_IMAGE_ID_LEN 17
+
 typedef struct {
    char id[LLM_TOOLS_ID_LEN];          /**< Tool call ID (for response correlation) */
    char name[LLM_TOOLS_NAME_LEN];      /**< Tool name (maps to device type) */
@@ -155,15 +158,6 @@ typedef struct {
    bool args_truncated;                /**< true if the provider's args exceeded the buffer and
                                         *   were clipped — the call must NOT execute on partial args */
 } tool_call_t;
-
-/**
- * Maximum length for Gemini thought signature.
- * Gemini 3+ models return a thought_signature with tool calls that must be
- * echoed back in tool results. Based on observed API behavior, signatures
- * are typically < 1KB but can grow with complex reasoning. 4KB provides
- * headroom. Truncation is logged as a warning if exceeded.
- */
-#define LLM_TOOLS_THOUGHT_SIG_LEN 4096
 
 /**
  * @brief List of tool calls (for parallel invocation)
@@ -174,8 +168,6 @@ typedef struct {
 typedef struct {
    tool_call_t calls[LLM_TOOLS_MAX_PARALLEL_CALLS];
    int count;
-   char thought_signature[LLM_TOOLS_THOUGHT_SIG_LEN]; /**< Gemini 3+ thought signature (first call)
-                                                       */
 } tool_call_list_t;
 
 /**
@@ -197,6 +189,10 @@ typedef struct {
    bool should_respond;      /**< If false, tool handled its own output — suppress follow-up */
    char *vision_image;       /**< Base64 vision image (caller must free) */
    size_t vision_image_size; /**< Size of vision image data */
+   char vision_image_id[LLM_TOOLS_IMAGE_ID_LEN]; /**< The image as stored (llm_tool_images.h);
+                                                  *   "" when kept in memory only */
+   int vision_image_owner;                       /**< Its owner, when stored */
+   bool finished; /**< Neutralized and announced (llm_tools_finish_result) */
 } tool_result_t;
 
 /**
@@ -234,14 +230,13 @@ typedef struct llm_tool_response {
    bool has_tool_calls;         /**< true if tool_calls.count > 0 */
    char finish_reason[32];      /**< "stop", "tool_calls", "tool_use", etc. */
    /* Extended thinking fields (Claude/Gemini) */
-   char *thinking_content;   /**< Extended thinking text (caller must free) */
-   char *thinking_signature; /**< Thinking signature for follow-up (caller must free) */
-   int reasoning_tokens;     /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
+   char *thinking_content;     /**< Extended thinking text (caller must free) */
+   struct json_object *blocks; /**< The turn's provider-neutral blocks, in order
+                                *   (llm_turn_blocks.h; NULL if the path has none).
+                                *   Freed with the response. */
+   int reasoning_tokens; /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
    /* OpenAI Responses API round-trip fields (NULL for chat-completions / Claude paths) */
-   char *response_id;         /**< response.id from /v1/responses (Mode A future use) */
-   char *provider_state_json; /**< Opaque JSON blob to attach as _provider_state on the
-                               *   resulting assistant message (e.g. encrypted reasoning
-                               *   items for the next turn). Caller must free. */
+   char *response_id; /**< response.id from /v1/responses (Mode A future use) */
 } llm_tool_response_t;
 
 /* =============================================================================
@@ -331,12 +326,70 @@ struct json_object *llm_tools_get_openai_format_filtered(bool is_remote_session)
 struct json_object *llm_tools_get_claude_format(void);
 
 /**
- * @brief Generate tools array in Claude format, filtered by session type
+ * @brief Every registered tool's neutral definition (llm_tool_defs.h), in
+ *        registry order, as a JSON array (caller frees)
  *
- * @param is_remote_session true for WebUI/satellite sessions, false for local mic
- * @return JSON array (caller must json_object_put), or NULL if no tools
+ * Research's own tools excepted; every other registered tool, whether or not
+ * it is enabled, available, or allowed on any surface now: a conversation
+ * freezes what is registered, so toggling a tool or a component coming online
+ * changes nothing it sends (a tool it may not use is refused when called, and
+ * the turn's standing directions say which).  The description is the registry's (an MCP
+ * tool's wrapped and UTF-8 repaired at ingest), the parameters the schema a
+ * request sends.  A definition past the caps llm_tool_def_valid() checks is
+ * left out (logged).  Recomputed only when a tool or schema could have
+ * changed.  NULL when the registry isn't up.
+ *
+ * With each definition's canonical hash by name (a JSON object,
+ * llm_tool_defs_hashes) in @p hashes_out when given, and the set's fingerprint
+ * in @p fp_out (65 bytes: a SHA-256 in hex) when given, all three of one
+ * registry generation and hashed once per generation.
+ *
+ * @p hashes_out is NULL (and @p fp_out "") when they couldn't be computed.
+ * @return The definitions (caller frees), or NULL
  */
-struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session);
+char *llm_tools_definitions_hashed(char **hashes_out, char *fp_out);
+
+/**
+ * @brief Render @p defs (neutral definitions, llm_tool_defs.h) for a request:
+ *        Claude's shape when @p claude, else OpenAI's function shape, in
+ *        order
+ *
+ * A name in place of a definition (an older conversation's set, not yet
+ * converted) is rendered from the registry, left out when no longer
+ * registered.  NULL when nothing is left.
+ */
+struct json_object *llm_tools_render_frozen(struct json_object *defs, bool claude);
+
+/**
+ * @brief The tools a request carries
+ *
+ * None on a turn whose tools are suppressed (a no-tools synthesis turn); a
+ * research run's allowlist during one; otherwise the conversation's tools by
+ * value (llm_tool_defs_for_request: the frozen set and its later changes,
+ * those sent in place excepted when @p inline_ok), or with none frozen the
+ * tools this surface may use now.
+ *
+ * @param inline_ok Whether the request sends tool changes in place (Claude API,
+ *                  beta inline-tools-2026-09-15)
+ * @param source_out Receives what the set is, for logging (may be NULL)
+ * @return JSON array (caller puts), or NULL for no tools
+ */
+struct json_object *llm_tools_request_tools(struct json_object *history,
+                                            bool is_remote,
+                                            bool claude,
+                                            bool inline_ok,
+                                            const char **source_out);
+
+/**
+ * @brief Each registered tool's schema hash as an older build recorded it
+ *        (SHA-256 hex of its OpenAI-shaped schema), as a JSON object of name
+ *        to hash (caller frees)
+ *
+ * A conversation an older build froze by name records these: converting it
+ * to definitions keeps it whole when they still match.  NULL when the
+ * registry isn't up.
+ */
+char *llm_tools_schema_hashes(void);
 
 /* =============================================================================
  * Tool Configuration API (for WebUI)
@@ -437,6 +490,13 @@ const char *llm_tools_current_raw_args(void);
  * ============================================================================= */
 
 /**
+ * @brief Whether this thread is running a tool the LLM called (through
+ *        llm_tools_execute): a tool that serves only the model's own turn
+ *        (result_read) refuses other callers, such as MQTT.
+ */
+bool llm_tools_executing(void);
+
+/**
  * @brief Execute a single tool call
  *
  * Maps the tool call to the appropriate deviceCallback and executes it.
@@ -449,6 +509,26 @@ const char *llm_tools_current_raw_args(void);
 int llm_tools_execute(const tool_call_t *call, tool_result_t *result);
 
 /**
+ * @brief Run a call the user approved by reply code (core/tool_call_challenge.h):
+ *        through the same path as any call, decided again, once, as approved
+ *        (a call inside it is not); defined in llm_tools_reply_code.c
+ *
+ * Runs on the thread of the turn the code arrived in (its command context and
+ * turn token set), so a confirm it carries out checks that turn.
+ *
+ * @param tool    The tool's name, as stored
+ * @param args    Its arguments, as the model sent them
+ * @param binding The call as resolved when held: it runs only if it resolves
+ *                the same now (else it is refused: what was approved changed)
+ * @param result  Receives the result
+ * @return 0 on success, non-zero on error
+ */
+int llm_tools_execute_stored(const char *tool,
+                             const char *args,
+                             const char *binding,
+                             tool_result_t *result);
+
+/**
  * @brief Execute multiple tool calls with parallel optimization
  *
  * Executes tool calls with automatic parallelization for independent tools.
@@ -458,11 +538,51 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result);
  *
  * For single tool calls, executes directly without threading overhead.
  *
+ * Every result comes back finished: neutralized, the conversation's tag
+ * masked in it, and the WebUI told the call completed.  @p finish, when
+ * given, runs on the raw batch first and finishes each result itself
+ * (llm_tools_finish_result, after shaping it: the tool loop's view stage);
+ * a result it leaves unfinished is finished here, and logged.
+ *
  * @param calls List of tool calls to execute
  * @param results Output: execution results (indexed to match input calls)
+ * @param finish Shapes and finishes the batch, or NULL (each finished as it came)
+ * @param userdata Passed to @p finish
  * @return 0 if all succeeded, non-zero if any failed
  */
-int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *results);
+typedef void (*llm_tools_batch_finish_fn)(const tool_call_list_t *calls,
+                                          tool_result_list_t *results,
+                                          void *userdata);
+int llm_tools_execute_all(const tool_call_list_t *calls,
+                          tool_result_list_t *results,
+                          llm_tools_batch_finish_fn finish,
+                          void *userdata);
+
+/**
+ * @brief Finish a result of a batch (llm_tools_execute_all's @p finish):
+ *        neutralize it and mask the conversation's tag in it, put @p header
+ *        in front (DAWN's own frame, after neutralizing, so it isn't
+ *        defused), and tell the WebUI the call completed with what the model
+ *        now sees.  Once only; a finished result is left as it is.
+ *
+ * @param header A view's frame, or NULL for none
+ */
+void llm_tools_finish_result(const tool_call_t *call, tool_result_t *result, const char *header);
+
+/**
+ * @brief Put @p text (taken; freed here) in @p result as its content: in
+ *        result[] when it fits, else result_extended with a UTF-8-safe
+ *        preview in result[]
+ */
+void llm_tools_result_set_content(tool_result_t *result, char *text);
+
+/**
+ * @brief Whether the request built from @p history offers tool @p name and
+ *        would run it: in the tools it defines (the frozen set and its later
+ *        changes, llm_tool_defs_for_request) and enabled for this session (a
+ *        definition stays after its tool is gone or disabled; it is refused)
+ */
+bool llm_tools_request_offers(struct json_object *history, bool is_remote, const char *name);
 
 /**
  * @brief Check if follow-up LLM call should be skipped
@@ -537,6 +657,28 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
  * @return 0 if tool calls found, non-zero if no tool calls or error
  */
 int llm_tools_parse_claude_response(struct json_object *response, tool_call_list_t *out);
+
+/**
+ * @brief Add a piece of a tool call's arguments to its buffer
+ *
+ * Every provider path fills arguments through this, so a cut is always
+ * flagged: a call whose arguments don't fit is refused, never run.
+ * A cut lands on a whole UTF-8 character; a length already at the buffer's
+ * size only sets the flag.
+ *
+ * @param buf      Arguments buffer, LLM_TOOLS_ARGS_LEN bytes
+ * @param len      In/out: the buffer's current length
+ * @param overflow Out: set when the text didn't fit (cleared by a replace that fits)
+ * @param text     The piece (a delta, or the whole arguments when replace)
+ * @param n        Its length in bytes
+ * @param replace  true: the piece is the complete arguments, replacing the buffer
+ */
+void llm_tools_args_append(char *buf,
+                           size_t *len,
+                           bool *overflow,
+                           const char *text,
+                           size_t n,
+                           bool replace);
 
 /* =============================================================================
  * Capability Checking
@@ -614,18 +756,15 @@ const char *llm_get_current_thinking_mode(void);
 const char *llm_get_current_reasoning_effort(void);
 
 /**
- * @brief Get effective budget tokens for thinking
+ * @brief The thinking budget for a budget level
  *
- * Maps reasoning_effort to token budget using the standard levels:
- *   low    = LLM_THINKING_BUDGET_LOW    (1024)
- *   medium = LLM_THINKING_BUDGET_MEDIUM (8192)
- *   high   = LLM_THINKING_BUDGET_HIGH   (16384)
+ * "low" | "medium" | "high" | "xhigh" (and "max") name the [llm.thinking]
+ * budget_* sizes; resolve the effort first (llm_thinking_resolve).  Clamped to
+ * half the current model's context window.
  *
- * If global config budget_tokens > 0, uses that as an explicit override.
- *
- * @return Token budget for thinking/reasoning
+ * @return Token budget for a Claude "enabled" or llama.cpp thinking request
  */
-int llm_get_effective_budget_tokens(void);
+int llm_budget_tokens_for_effort(const char *effort);
 
 /**
  * @brief Check if text contains thinking trigger phrases
@@ -670,44 +809,6 @@ int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_si
 void llm_tool_response_free(llm_tool_response_t *response);
 
 /**
- * @brief Return a deep-copied history array with provider-private fields stripped.
- *
- * Currently strips `_provider_state` from each message — that's where the OpenAI
- * Responses path stashes encrypted reasoning blobs (and where future providers
- * will stash their own opaque per-turn state). Those blobs are session-bound,
- * provider-specific, and MUST NOT be:
- *   - Forwarded to a different LLM provider (e.g. memory extraction sending DAWN
- *     conversation history to a Claude/Gemini/local model for summarization).
- *   - Persisted to disk in pre-compact logs or conversation exports.
- *
- * The returned array is a new json_object with refcount 1; caller must
- * json_object_put it. Original history is unmodified. NULL on allocation failure.
- *
- * @param history JSON array of messages.
- * @return Sanitized deep-copy (caller json_object_put), or NULL on error.
- */
-struct json_object *llm_history_strip_provider_state(struct json_object *history);
-
-/**
- * @brief Strip image content blocks from conversation history
- *
- * Replaces `image_url` (OpenAI shape) / `image` (Claude shape) content parts
- * with a short text placeholder, preserving any sibling text in the same
- * message. Two callers: llm_openai_prepare_chat_history() strips vision
- * content when the active model doesn't support it; llm_context.c's
- * LLM-summarization compaction path strips it so a persisted tool-captured
- * image (see llm_tools_add_results_openai/claude) doesn't get JSON-serialized
- * whole into the summarizer prompt as literal base64 text.
- *
- * If history has no vision content, returns a new reference to the same
- * array (json_object_get) rather than copying — cheap no-op path.
- *
- * @param history JSON array of messages.
- * @return New array (caller json_object_put), or NULL on error.
- */
-struct json_object *llm_history_strip_vision_content(struct json_object *history);
-
-/**
  * @brief Check if a tool call is a duplicate of a previous call in conversation history
  *
  * Prevents infinite loops where the LLM keeps making the same tool call repeatedly.
@@ -735,12 +836,9 @@ bool llm_tools_is_duplicate_call(struct json_object *history,
  * @brief Context returned from tool execution for follow-up decisions
  */
 typedef struct {
-   bool skip_followup;         /**< True if follow-up should be skipped */
-   bool all_silent;            /**< True if all tools set should_respond=false (history-safe) */
-   bool has_pending_vision;    /**< True if viewing tool captured an image */
-   const char *pending_vision; /**< Base64 vision data (if any) */
-   size_t pending_vision_size; /**< Size of pending vision */
-   char *direct_response;      /**< Response for skip_followup (caller must free) */
+   bool skip_followup;    /**< True if follow-up should be skipped */
+   bool all_silent;       /**< True if all tools set should_respond=false (history-safe) */
+   char *direct_response; /**< Response for skip_followup (caller must free) */
 } tool_followup_context_t;
 
 /**

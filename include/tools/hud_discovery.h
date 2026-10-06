@@ -30,6 +30,7 @@
 
 #include <mosquitto.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,15 @@ extern "C" {
 #define HUD_DISCOVERY_MAX_ITEMS 16        /* Max elements/modes from discovery */
 #define HUD_DISCOVERY_STALE_THRESHOLD 300 /* 5 minutes in seconds */
 #define HUD_DISCOVERY_TIMEOUT_MS 5000     /* Initial request timeout */
+
+/* A discovered name reaches every conversation's standing directions, so it
+ * is held to a plain shape: 1-32 letters, digits, spaces, '_' or '-'. */
+#define HUD_DISCOVERY_NAME_MAX 32
+/* Changes to the discovered sets applied per window (each changes every
+ * conversation's standing directions, appended to its request); the same set
+ * announced again is no change. */
+#define HUD_DISCOVERY_CHANGES_PER_WINDOW 6
+#define HUD_DISCOVERY_CHANGE_WINDOW_SEC 3600
 
 /* MQTT Topics */
 #define HUD_DISCOVERY_TOPIC_ELEMENTS "hud/discovery/elements"
@@ -120,6 +130,29 @@ int hud_discovery_get_element_count(void);
  * @return Number of modes, or 0 if no discovery data
  */
 int hud_discovery_get_mode_count(void);
+
+/** Whether @p name has the shape a discovered name must
+ *  (HUD_DISCOVERY_NAME_MAX): only such a name is kept, or echoed back. */
+bool hud_discovery_name_ok(const char *name);
+
+/** Whether the helmet's last discovery listed HUD element @p name. */
+bool hud_discovery_has_element(const char *name);
+
+/** Whether the helmet's last discovery listed HUD mode @p name. */
+bool hud_discovery_has_mode(const char *name);
+
+/**
+ * @brief The HUD elements and modes available now, as one line for the turn's
+ *        standing directions ('HUD elements available now (hud_control): "a",
+ *        "b". HUD modes available now (hud_mode): "x", "y".'), into @p out;
+ *        each name quoted, as data
+ *
+ * The tools' schemas name no values (a conversation freezes its schemas, and
+ * these change as the helmet connects); the model learns them here.
+ *
+ * @return The line's length; 0 (and "") when nothing was discovered
+ */
+size_t hud_discovery_describe(char *out, size_t size);
 
 /* =============================================================================
  * Manual Control

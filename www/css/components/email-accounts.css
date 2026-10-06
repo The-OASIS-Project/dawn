@@ -231,3 +231,16 @@
       font-size: 0.8rem;
    }
 }
+
+/* Hide number spinners, matching the Settings panel (settings.css). */
+.email-add-form input[type='number'] {
+   -moz-appearance: textfield;
+   appearance: textfield;
+}
+
+.email-add-form input[type='number']::-webkit-inner-spin-button,
+.email-add-form input[type='number']::-webkit-outer-spin-button {
+   -webkit-appearance: none;
+   appearance: none;
+   margin: 0;
+}

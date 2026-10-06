@@ -59,6 +59,8 @@ static bool cited_all_add(char seen_ids[][64], int *n_seen, int cap, const char 
 
 void memory_citation_resolve_cited(const char *text,
                                    const citation_stash_t *stash,
+                                   const citation_prior_t *prior,
+                                   int prior_count,
                                    const tool_cited_set_t *tool_set,
                                    char *cited_all,
                                    size_t cited_all_sz,
@@ -90,7 +92,9 @@ void memory_citation_resolve_cited(const char *text,
       tool_count = MAX_TOOL_CITED_FACTS;
    }
 
-   bool seen_ord[MAX_CITATION_STASH + 1] = { false };            /* focus-ordinal dedup */
+   int seen_handles[MAX_CITATION_STASH + 1]; /* focus-handle dedup (bounded; later ones drop) */
+   int n_seen_handles = 0;
+   int cited_prior_count = 0; /* distinct earlier-turn items cited (neither focus nor tool) */
    char seen_ids[MAX_CITATION_STASH + MAX_TOOL_CITED_FACTS][64]; /* cited_all cross-dedup */
    int n_seen = 0;
    const int seen_cap = MAX_CITATION_STASH + MAX_TOOL_CITED_FACTS;
@@ -167,28 +171,48 @@ void memory_citation_resolve_cited(const char *text,
             }
          }
          if (p < end && isdigit((unsigned char)*p)) {
-            int ord = 0;
+            int handle = 0;
             int digits = 0;
             while (p < end && isdigit((unsigned char)*p) && digits < 7) {
-               ord = ord * 10 + (*p - '0');
+               handle = handle * 10 + (*p - '0');
                p++;
                digits++;
             }
             while (p < end && isdigit((unsigned char)*p)) {
                p++; /* consume an over-long tail so it can't reparse as a token */
             }
-            if (ord >= 1 && ord <= stash_count && !seen_ord[ord]) {
-               seen_ord[ord] = true;
-               /* item_id[64] is contractually NUL-terminated by its producer
-                * (build_focus_block memsets the stash + writes <=63 chars). */
-               const char *id = stash->entries[ord - 1].item_id;
-               memory_citation_csv_append(cited_focus, cited_focus_sz, &focus_len, id);
-               cited_focus_count++;
+            bool repeat = false;
+            for (int k = 0; k < n_seen_handles; k++) {
+               repeat = repeat || seen_handles[k] == handle;
+            }
+            /* This turn's item, else one an earlier turn of the conversation
+             * showed.  item_id[64] is contractually NUL-terminated by its
+             * producer (session_focus.c clears the stash + writes <=63 chars). */
+            const char *id = NULL;
+            bool this_turn = false;
+            for (int k = 0; !repeat && k < stash_count && !id; k++) {
+               if (stash->entries[k].handle == handle) {
+                  id = stash->entries[k].item_id;
+                  this_turn = true;
+               }
+            }
+            for (int k = 0; !repeat && k < prior_count && !id; k++) {
+               if (prior[k].handle == handle) {
+                  id = prior[k].item_id;
+               }
+            }
+            if (handle >= 1 && id && n_seen_handles < MAX_CITATION_STASH + 1) {
+               seen_handles[n_seen_handles++] = handle;
+               if (this_turn) {
+                  memory_citation_csv_append(cited_focus, cited_focus_sz, &focus_len, id);
+                  cited_focus_count++;
+               }
                if (cited_all_add(seen_ids, &n_seen, seen_cap, id)) {
                   memory_citation_csv_append(cited_all, cited_all_sz, &all_len, id);
+                  cited_prior_count += !this_turn;
                }
             } else {
-               dropped++; /* out-of-range (hallucinated/stale) or duplicate ordinal */
+               dropped++; /* unknown (hallucinated/stale) or repeated handle */
             }
             continue;
          }
@@ -203,7 +227,7 @@ void memory_citation_resolve_cited(const char *text,
    /* Tool cites = distinct cited ids (n_seen = |cited_all|) minus the focus-cited
     * subset.  Derived rather than incremented so a fact cited via BOTH a focus
     * ordinal and its tool id counts as focus-only, independent of token order. */
-   cited_tool_count = n_seen - cited_focus_count;
+   cited_tool_count = n_seen - cited_focus_count - cited_prior_count;
    if (cited_tool_count < 0) {
       cited_tool_count = 0; /* unreachable: every focus cite is in seen_ids */
    }
@@ -258,4 +282,39 @@ int memory_citation_extract_fact_ids(const char *cited_all, int64_t *out_ids, in
       }
    }
    return n;
+}
+
+void memory_citation_stash_csvs(const citation_stash_t *stash,
+                                char *injected,
+                                size_t injected_sz,
+                                char *scores,
+                                size_t scores_sz,
+                                char *referenced,
+                                size_t referenced_sz) {
+   size_t inj_len = 0;
+   size_t scores_len = 0;
+   size_t ref_len = 0;
+   if (injected_sz > 0) {
+      injected[0] = '\0';
+   }
+   if (scores_sz > 0) {
+      scores[0] = '\0';
+   }
+   if (referenced_sz > 0) {
+      referenced[0] = '\0';
+   }
+   const int count = stash == NULL                       ? 0
+                     : stash->count > MAX_CITATION_STASH ? MAX_CITATION_STASH
+                                                         : stash->count;
+   for (int i = 0; i < count; i++) {
+      const citation_stash_entry_t *e = &stash->entries[i];
+      if (e->referenced) {
+         memory_citation_csv_append(referenced, referenced_sz, &ref_len, e->item_id);
+         continue;
+      }
+      memory_citation_csv_append(injected, injected_sz, &inj_len, e->item_id);
+      char score[16];
+      snprintf(score, sizeof(score), "%.4f", e->final_score);
+      memory_citation_csv_append(scores, scores_sz, &scores_len, score);
+   }
 }

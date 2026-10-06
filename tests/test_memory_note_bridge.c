@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "auth/auth_db.h"
 #define AUTH_DB_INTERNAL_ALLOWED /* test seeds documents rows via the shared s_db handle */
@@ -56,6 +57,12 @@ void memory_embeddings_invalidate_cache(void) {
 void memory_embeddings_invalidate_all(void) {
 }
 void memory_embeddings_invalidate_entity_cache(void) {
+}
+void memory_embeddings_invalidate_entity_cache_for_user(int user_id) {
+   (void)user_id;
+}
+void memory_embeddings_invalidate_cache_for_user(int user_id) {
+   (void)user_id;
 }
 float memory_embeddings_l2_norm(const float *vec, int dims) {
    (void)vec;
@@ -209,6 +216,106 @@ void test_disabled_memory_is_noop(void) {
    TEST_ASSERT_EQUAL_INT64(0, fact_id); /* nothing created */
 }
 
+/* ---- fact cache load order (memory_db_fact_foreach_embedding) ---- */
+
+static void add_fact(int64_t id,
+                     int user,
+                     float confidence,
+                     long created_ago_days,
+                     long used_ago_days, /* -1: never used */
+                     int64_t note_doc_id,
+                     const char *extra_sets,
+                     const char *blob) {
+   const long now = (long)time(NULL);
+   char used[32] = "NULL";
+   if (used_ago_days >= 0) {
+      snprintf(used, sizeof(used), "%ld", now - used_ago_days * 86400);
+   }
+   char note[32] = "NULL";
+   if (note_doc_id > 0) {
+      snprintf(note, sizeof(note), "%lld", (long long)note_doc_id);
+   }
+   char sql[768];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_facts (id, user_id, fact_text, confidence, created_at, "
+            "last_accessed, embedding, embedding_norm, note_doc_id) VALUES (%lld, %d, 'fact %lld', "
+            "%f, %ld, %s, %s, 1.0, %s)",
+            (long long)id, user, (long long)id, confidence, now - created_ago_days * 86400, used,
+            blob, note);
+   char *err = NULL;
+   if (sqlite3_exec(s_db.db, sql, NULL, NULL, &err) != SQLITE_OK) {
+      TEST_FAIL_MESSAGE(err ? err : "add_fact failed");
+   }
+   if (extra_sets) {
+      snprintf(sql, sizeof(sql), "UPDATE memory_facts SET %s WHERE id = %lld", extra_sets,
+               (long long)id);
+      if (sqlite3_exec(s_db.db, sql, NULL, NULL, &err) != SQLITE_OK) {
+         TEST_FAIL_MESSAGE(err ? err : "add_fact update failed");
+      }
+   }
+}
+
+typedef struct {
+   int64_t ids[16];
+   int n;
+   int total;
+} load_seen_t;
+
+static int record_row(const memory_fact_embedding_row_t *row, int total, void *ctx) {
+   load_seen_t *seen = (load_seen_t *)ctx;
+   seen->ids[seen->n++] = row->id;
+   seen->total = total;
+   return SUCCESS;
+}
+
+static bool seen_has(const load_seen_t *seen, int64_t id) {
+   for (int i = 0; i < seen->n; i++) {
+      if (seen->ids[i] == id) {
+         return true;
+      }
+   }
+   return false;
+}
+
+#define VEC2 "x'0000803F00000000'" /* 2 floats: {1, 0} */
+
+void test_cache_load_order_live_first_then_score(void) {
+   g_config.memory.expire_enabled = true;
+   seed_doc(100);
+   add_fact(1, 1, 0.3f, 3 * 365, 10, 0, NULL, VEC2);       /* used 10 days ago: kept first */
+   add_fact(2, 1, 0.2f, 400, -1, 100, NULL, VEC2);         /* a note link: kept first */
+   add_fact(3, 1, 0.9f, 2 * 365, -1, 0, NULL, VEC2);       /* 0.9 / (1 + 2) = 0.3 */
+   add_fact(4, 1, 0.5f, 0, -1, 0, NULL, VEC2);             /* 0.5 / 1 = 0.5 */
+   add_fact(5, 1, 1.0f, 0, -1, 0, "expires_at = 1", VEC2); /* expired */
+   add_fact(6, 1, 1.0f, 0, -1, 0, NULL, "x'0000803F0000000000000000'"); /* 3 dims */
+   add_fact(7, 1, 1.0f, 0, -1, 0, "superseded_by = 4", VEC2);           /* superseded */
+   add_fact(8, 2, 1.0f, 0, -1, 0, NULL, VEC2);                          /* another user's */
+
+   /* Everything fits: all four current facts, in no particular order. */
+   load_seen_t seen = { 0 };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_foreach_embedding(1, 2, 10, record_row, &seen));
+   TEST_ASSERT_EQUAL_INT(4, seen.n);
+   TEST_ASSERT_EQUAL_INT(4, seen.total);
+   TEST_ASSERT_TRUE(seen_has(&seen, 1) && seen_has(&seen, 2) && seen_has(&seen, 3) &&
+                    seen_has(&seen, 4));
+
+   /* Over the ceiling the best are kept: live first (1, 2), then by score
+    * (4 at 0.5 before 3 at 0.3).  The total still counts them all. */
+   memset(&seen, 0, sizeof(seen));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_foreach_embedding(1, 2, 3, record_row, &seen));
+   TEST_ASSERT_EQUAL_INT(3, seen.n);
+   TEST_ASSERT_EQUAL_INT(4, seen.total);
+   TEST_ASSERT_TRUE(seen_has(&seen, 1) && seen_has(&seen, 2) && seen_has(&seen, 4));
+
+   memset(&seen, 0, sizeof(seen));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_foreach_embedding(1, 2, 2, record_row, &seen));
+   TEST_ASSERT_EQUAL_INT(2, seen.n);
+   TEST_ASSERT_TRUE(seen_has(&seen, 1) && seen_has(&seen, 2)); /* live beats score */
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_upsert_creates_gloss_linked_to_note);
@@ -217,5 +324,6 @@ int main(void) {
    RUN_TEST(test_two_notes_two_distinct_glosses);
    RUN_TEST(test_cross_user_note_link_refused);
    RUN_TEST(test_disabled_memory_is_noop);
+   RUN_TEST(test_cache_load_order_live_first_then_score);
    return UNITY_END();
 }

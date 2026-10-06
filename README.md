@@ -4,7 +4,7 @@
 
 DAWN was designed from the ground up to be the closest thing to a production-quality JARVIS that actually exists. It listens for a wake word, understands natural speech, reasons about your request, and responds in a natural voice — all in real time. It remembers you — your preferences, your routines, the people and things you care about — and gets better the more you use it. It can run entirely offline with a local LLM, or connect to cloud providers like OpenAI, Claude, and Gemini. Multi-room satellite devices bring voice control to every room in your home, just like having JARVIS in every room of 10880 Malibu Point.
 
-Unlike cloud-dependent assistants and plugin-based AI agents, DAWN runs entirely on your hardware. There is no extension marketplace, no third-party plugins, no arbitrary code execution. Every tool is compiled into the binary and audited at the source level. It can run fully offline — your voice, your data, your network, never leaving your home.
+Unlike cloud-dependent assistants and plugin-based AI agents, DAWN runs entirely on your hardware. There is no extension marketplace and no arbitrary code execution. Every built-in tool is compiled into the binary and audited at the source level. The one way to add outside tools is an MCP server that you, the operator, choose to connect, and only the users you grant can use it. It can run fully offline — your voice, your data, your network, never leaving your home.
 
 DAWN runs on platforms from a Jetson Orin to a Raspberry Pi 5 and supports multiple interfaces: a local microphone, a browser-based Web UI with voice and text input, and DAP2 satellite devices (Raspberry Pi or ESP32).
 
@@ -48,15 +48,16 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 ### Voice Intelligence
 
 - **Speech Recognition** — Whisper ASR with GPU acceleration on Jetson (2.3x–5.5x faster than real-time). Intelligent voice activity detection knows when you're speaking and when you've stopped.
-- **Multi-Provider LLM** — Cloud: OpenAI GPT-5, Anthropic Claude 4.6, Google Gemini 2.5/3, or any model via OpenRouter (one key, many vendors). Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
+- **Multi-Provider LLM** — Cloud: OpenAI GPT-5.x, Anthropic Claude (Opus 5.5, Sonnet 5, Fable 5 and earlier), Google Gemini 2.5/3, or any model via OpenRouter (one key, many vendors; its Claude models go through OpenRouter's Anthropic endpoint, so they get the same caching and thinking as direct Claude). Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
 - **Text-to-Speech** — Piper TTS with ONNX Runtime. Multiple voices included. Text preprocessing for natural phrasing.
 - **Speech-Shaped Replies** — On voice interfaces (satellites, local mic, WebUI voice) DAWN tells the model its reply will be read aloud, so answers stay concise and skip on-screen-only formatting; it also warns the model that speech-transcribed input may contain homophone mishearings to interpret from context. All three directives are editable in Settings (Text-to-Speech / Speech Recognition), and the WebUI voice variant keeps the screen free for visuals.
-- **Extended Thinking** — Deep reasoning mode for complex queries:
-   - Claude: thinking budget control with collapsible blocks
-   - OpenAI: reasoning effort (low/medium/high) for o1/o3/o4 models
-   - Gemini: thinking mode for Gemini 2.5 Flash/Pro
+- **Reasoning, Per Model** — Deep reasoning for complex queries, with each model offered exactly the controls it supports (the WebUI shows only those):
+   - Claude: adaptive thinking with effort from low to max (older models: a fixed thinking budget), in collapsible blocks
+   - OpenAI: reasoning effort for GPT-5.x (up to xhigh) and the o-series
+   - Gemini: thinking levels for Gemini 2.5 and 3
    - Local: Qwen3 thinking mode with native template support
 - **Cloud Rate Limiting** — Built-in throttling prevents you from getting rate-limited by cloud providers.
+- **Prompt Caching** — Each conversation is sent append-only: its opening instructions and tools stay fixed, and anything that changes is added at the end. Providers that cache (Claude, OpenAI, OpenRouter, llama.cpp) reuse everything before your new message instead of processing it again, so long conversations and tool-heavy turns answer faster and cost a fraction as much. Very long conversations are summarized between turns, never mid-answer. `dawn-admin cache stats` shows how well caching is working.
 - **Streaming Responses** — DAWN starts speaking while still thinking, just like a real conversation, so you hear the first sentence instead of waiting for the whole reply. With a cloud provider that's typically ~1-2s; with a local LLM it depends heavily on how long the prompt is (see [llama-server latency notes](services/llama-server/README.md#latency-what-actually-governs-perceived-speed)).
 
 ### Multi-Room Voice (DAP2 Satellites)
@@ -90,8 +91,9 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 ### Messaging Channels (Chat Apps & SMS)
 
 - **Talk to DAWN from the apps you already use** — Link a **Telegram**, **Slack**, **Discord**, or **SMS** conversation to your account and get the full assistant (tools, memory, scheduler) from your phone or desktop chat client, no WebUI required.
-- **One-time link flow** — Generate a link code in the WebUI or via `dawn-admin`, send `/link CODE` from the chat app, and you're connected. Drivers load only when their token is configured.
-- **Forever-conversations** — Each channel maps to one persistent conversation that shows up in WebUI history and feeds memory extraction like any other session. `/new` resets the thread.
+- **One-time link flow** — Generate a link code in the WebUI or via `dawn-admin`, send `/link CODE` from the chat app, and you're connected. For SMS, DAWN then texts your number a 6-digit code to enter in the WebUI, proving the number is yours. A channel answers only the person who linked it, even in a group chat. Drivers load only when their token is configured.
+- **Forever-conversations** — Each channel maps to one persistent conversation that shows up in WebUI history. Telegram, Slack and Discord conversations feed memory like any other session; SMS conversations are private, because anyone can put your number on a text. `/new` resets the thread.
+- **Texts act only with a reply code** — By SMS, DAWN answers questions and prepares things, but anything that acts (sending, calling, deleting, searching the web, playing music) waits: DAWN texts your number what was asked and a 6-digit code, and you reply with the code to go ahead or STOP to cancel.
 - **Scheduler delivery** — Briefings, reminders, and alarms can be delivered to a messaging channel instead of spoken aloud — "send me a morning briefing on Telegram."
 - **Read & summarize Discord channels** — Ask DAWN to catch you up on a server channel ("summarize the dev-chat channel from this morning") or a whole server at once. Read-only and pull-based — the bot reads history only on request or for a scheduled digest, never posts on its own.
 - **Channel management** — Rename, unlink (history preserved), and re-enable channels from the WebUI panel or the `dawn-admin messaging` operator commands.
@@ -103,31 +105,34 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 
 DAWN routes cellular calls and text messages through the **[ECHO](https://github.com/The-OASIS-Project/echo)** daemon (SIM7600G-H modem), so your assistant lives on a real phone number.
 
-- **SMS by voice** — "Text Bob that I'm running late." Send and receive texts with two-step confirmation, recipient resolution against your contacts, and a searchable message history.
+- **SMS by voice** — "Text Bob that I'm running late." Send and receive texts with two-step confirmation, recipient resolution against your contacts, and a searchable message history. A name that matches more than one contact, or sounds like another, gets a question instead of a guess.
 - **Incoming-call handling** — When a call comes in, DAWN announces it, rings on the local speaker, shows a HUD notification, and pops an **incoming-call banner in the WebUI** with the caller's name and photo (resolved from contacts).
 - **Answer from anywhere** — Accept, reject, or hang up a call by voice ("Friday, answer") or from the browser banner. A persistent in-call panel shows live call duration and rehydrates after a page reload.
-- **Call & SMS history** — Every call and message is logged to a per-user database with configurable retention.
+- **Call & SMS history** — Every call and message is logged to the phone owner's history.
 
 > **Note:** Two-way call *audio* through the browser is still in progress — today calls ring, announce, and can be answered/controlled, and SMS is fully functional. Setup lives in [docs/PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) and the [ECHO repo](https://github.com/The-OASIS-Project/echo).
 
 ### Smart Home & IoT
 
-- **Home Assistant** — Control lights (on/off/brightness/color/color temperature), climate, locks, covers, media players. Activate scenes, trigger scripts and automations. Entity status queries with area-aware responses.
-- **Fuzzy Name Matching** — "Turn on the living room light" works even if the entity is named slightly differently.
+- **Home Assistant** — Control lights (on/off/brightness/color/color temperature), climate, locks, covers, media players. Activate scenes, trigger scripts and automations. Entity status queries with area-aware responses. Unlocking, and opening a door, gate or garage door, shows a preview and waits for your "yes"; locking and closing act right away.
+- **Fuzzy Name Matching** — "Turn on the living room light" works even if the entity is named slightly differently. When two devices match equally, DAWN asks which one instead of picking.
 - **MQTT Device Control** — Extensible device callback architecture for integration with other OASIS components or external systems.
 
 ### LLM Tools
 
-DAWN's LLM automatically invokes tools and incorporates results into responses. Multiple tool calls execute concurrently for faster answers.
+DAWN's LLM automatically invokes tools and incorporates results into responses. Multiple tool calls execute concurrently for faster answers. A result too big to send whole (a long web page, a large MCP response) is kept whole with its conversation; the model gets a bounded view and reads the rest on demand, instead of the result being cut short or flooding the context.
 
 - **Web Search** — Voice-activated search via SearXNG (self-hosted, privacy-focused) or optional [Tavily](https://tavily.com) (commercial, LLM-optimized; free tier 1000 calls/month). Categories: web, news, social, science, IT, Q&A, dictionary, academic papers. Time filtering for recent results (today, this week, this month).
 - **Image Search** — Search and display images from the web. Images are fetched server-side (SSRF-protected with DNS pinning), cached locally, and served via zero-copy file serving. Click-to-enlarge lightbox in WebUI. Results displayed as inline markdown images.
 - **URL Fetcher** — Fetch and read web pages. Optional FlareSolverr (headless browser) or Tavily `/extract` (commercial, LLM-optimized) fallback for JavaScript-heavy sites. SSRF-protected. Untrusted-content framing on tool results.
 - **Deep Research** — Ask DAWN to genuinely research a topic in the background: she plans sub-questions, reads full source pages across multiple rounds, tracks per-question coverage from independent sources, and writes a **cited report to your notes** — then drops a summary back into the chat when it's done. Runs as a background job (doesn't block the conversation), on a bare memory-free session behind a read-only tool allowlist so attacker-controlled web content can't reach side-effecting tools or your private data. Confirmation-gated (proposes a plan + cost first) and off by default (`[research]`). See [DEEP_RESEARCH_DESIGN.md](docs/DEEP_RESEARCH_DESIGN.md).
+- **Background Jobs** — "Work on this in the background": DAWN runs the task as a job while you keep talking, and tells you when it's done. Follow jobs live in the WebUI Jobs panel, and cancel or resume them there or by voice. A job reads and looks things up but never acts for you (no sending, calling or deleting). A job cut off by a restart is marked interrupted and can be resumed.
+- **Stocks (Charles Schwab)** — Live quotes, price history with return and volatility, fundamentals, and your read-only Schwab portfolio, balances, watchlist and recent transactions. Also feeds a live portfolio panel (refreshed every 30 seconds in market hours) to WebSocket clients. Optional; setup: [docs/SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md).
+- **MCP Servers** — Connect external tool servers you run yourself (Model Context Protocol over HTTP+SSE). Their tools appear alongside the built-in ones, each server marked read-only or dangerous, and only users you grant (`dawn-admin mcp grant`) can use them. DAWN connects to them and never launches them. Optional; configured under `[mcp]` in `dawn.toml` (see the commented block in [dawn.toml.example](dawn.toml.example); [services/cbm-mcp/README.md](services/cbm-mcp/README.md) walks through one server end to end).
 - **Weather** — Real-time weather and forecasts via Open-Meteo API (free, no API key required).
 - **Calculator** — Expression evaluation (`+ - * / ^`, `sqrt`, trig, `factorial`) plus a digit-perfect **exact mode** for arbitrary-precision integer results — every digit of `52!` or `2^256`, no scientific-notation rounding. Also unit conversion, base conversion, and random numbers.
-- **CalDAV Calendar** — CalDAV calendar integration (Google Calendar via OAuth 2.0, iCloud, Nextcloud, Radicale). Query today's events, search by keyword, add/update/delete events across multiple accounts. Filter queries by calendar name.
-- **Email** — Multi-account IMAP/SMTP email (Gmail via OAuth 2.0, iCloud, Outlook, Fastmail, self-hosted). Check inbox, read messages, search, send with two-step confirmation, trash with confirmation, archive. Pagination for large result sets. Per-account read-only flag. Contacts system for recipient resolution.
+- **CalDAV Calendar** — CalDAV calendar integration (Google Calendar via OAuth 2.0, iCloud, Nextcloud, Radicale). Query today's events, search by keyword, add/update/delete events across multiple accounts. Filter queries by calendar name; two calendars with the same name are asked about, not guessed, and are listed with their account. Browse them in the WebUI calendar view (list and month).
+- **Email** — Multi-account IMAP/SMTP email (Gmail via OAuth 2.0, iCloud, Outlook, Fastmail, self-hosted). Check inbox, read messages, search, send with two-step confirmation, trash with confirmation, archive. Messages are read through GMime, so other character sets, HTML-only mail and attachment lists come through correctly, and sender text is cleaned of hidden characters. Trash and archive move exactly the one message to the server's own folders. Pagination for large result sets. Per-account read-only flag. Contacts system for recipient resolution.
 - **Scheduler** — Timers, alarms, reminders, and scheduled tool execution.
    - "Set a 10 minute timer", "Wake me up at 7 AM", "Remind me to call Mom at 3pm"
    - Recurring events (daily, weekdays, weekends, weekly, custom days)
@@ -153,6 +158,15 @@ DAWN's LLM automatically invokes tools and incorporates results into responses. 
 - **Code Projects (Code Analysis)** — Index your source repositories into a code graph and ask about them by voice or chat: "what calls `parse_payload`?", "where is the session manager defined?", "what changed on this branch?". Import a GitHub-style repo (in-process libgit2 clone) or link a local checkout; per-project branch tracking and refresh/rebuild. Answering runs against an **external, operator-launched** code-graph server (**cbm**) — DAWN connects to it over MCP and never spawns it. Optional; requires the cbm server plus the coding-harness build flags. Setup: [docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md).
 - **Suit & System Telemetry** — Ask about the live state of the armor and the machine DAWN runs on: environment (temperature, humidity, air quality, CO₂), helmet orientation (heading/pitch/roll), GPS position, and per-piece armor status via `suit_status`; CPU, memory, battery, power, thermals, and fault counts via `system_status`. Fed over MQTT from the AURA helmet + SPARK armor (through MIRAGE) and the STAT daemon; values age out and report staleness when a source goes quiet rather than returning stale guesses.
 
+### Actions You Approve
+
+DAWN reads and looks things up freely, but anything that acts on your behalf is yours to approve.
+
+- **Confirm in your next reply** — A call, text, email, delete or deep-research run that DAWN previews is carried out only when your reply to that preview, in the same conversation, says yes. A "yes" later, or from another device, doesn't count.
+- **Recipients are never guessed** — A partial name, a sound-alike, or a recipient you didn't name gets a question first.
+- **Background work doesn't act** — Background jobs, scheduled briefings and MQTT requests can read and look things up, but can't send, call or delete.
+- **Text messages need a reply code** — See *Messaging Channels* above.
+
 ### Persistent Memory
 
 DAWN remembers facts, preferences, and relationships about its users across sessions — and forgets them on request.
@@ -162,7 +176,7 @@ DAWN remembers facts, preferences, and relationships about its users across sess
 - **Entity Graph** — Automatically learns the people, places, pets, and projects in your life and how they relate to each other.
 - **Automated Extraction** — Facts, preferences, entities, and relations extracted at session end.
 - **Crash-Resilient Extraction** — Conversations interrupted by a daemon crash mid-extraction are picked up by a background recovery worker, configurable under `[memory.recovery]`.
-- **Privacy Toggle** — Mark conversations as private to prevent memory extraction (Ctrl+Shift+P in WebUI).
+- **Privacy Toggle** — Mark conversations as private to keep them out of memory (Ctrl+Shift+P in WebUI). Turned on before you start, it covers the very first message. Making an existing conversation private offers to forget what it already taught.
 - **Confidence Decay** — Unused memories naturally fade; accessed memories are reinforced.
 - **Contacts** — Store email addresses, phone numbers, and addresses for people DAWN knows. Upload contact photos (compressed and circular-cropped in the WebUI) that appear as thumbnails in the contact list and are sent as base64 in HUD notifications for incoming calls and SMS. Linked to the entity graph. Used by the email and phone systems for contact resolution. Managed via voice ("Save Bob's email") or the WebUI Contacts tab.
 - **Entity Merge** — Combine duplicate entities ("Dawn" + "Dawn Smith"), transferring all relations and contacts. Available via voice or WebUI.
@@ -257,6 +271,8 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **Phone Calls & SMS** | Place/receive calls and texts on a real number via the ECHO modem daemon | [docs/PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **Google OAuth** | Connect Google Calendar and Gmail via OAuth 2.0 (no app password needed) | [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md) |
 | **Home Assistant** | Control smart home devices by voice | [docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md) |
+| **Stocks (Charles Schwab)** | Live quotes and your read-only Schwab portfolio | [docs/SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md) |
+| **MCP Servers** | Add tools from external MCP servers you run, per-user grants | [dawn.toml.example](dawn.toml.example) (`[mcp]`); example: [services/cbm-mcp/README.md](services/cbm-mcp/README.md) |
 | **Code Projects** | Index repositories so the assistant can answer questions about your code (via the external cbm code-graph server) | [docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md) |
 | **SearXNG Web Search** | Privacy-focused voice-activated web search | [GETTING_STARTED.md — SearXNG](GETTING_STARTED.md#searxng-setup-for-web-search) |
 | **Plex Music Source** | Unified music library with local + Plex tracks | [GETTING_STARTED.md — Plex](GETTING_STARTED.md#plex-music-source) |
@@ -283,6 +299,9 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md)** | Tier 2 satellite (ESP32-S3, Arduino) setup |
 | **[docs/OTA_DESIGN.md](docs/OTA_DESIGN.md)** | Server→satellite over-the-air update system (design + operator guide) |
 | **[docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md)** | Google OAuth 2.0 setup for Calendar and Email |
+| **[docs/SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md)** | Charles Schwab setup for the stocks tool |
+| **[docs/SECURITY_HARDENING_GUIDE.md](docs/SECURITY_HARDENING_GUIDE.md)** | Deployment checklist, internet exposure and penetration-testing procedures |
+| **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)** | What DAWN defends against, and the known gaps |
 | **[docs/TOOL_DEVELOPMENT_GUIDE.md](docs/TOOL_DEVELOPMENT_GUIDE.md)** | Guide for adding new LLM tools |
 | **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)** | Code Projects (coding harness): import/link repos + cbm server setup |
 | **[atlas archive](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive)** | Historical design docs (memory, RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.) |
@@ -296,7 +315,8 @@ These features are not required but extend what DAWN can do. Each links to its s
 Contributions are welcome! DAWN is part of The OASIS Project and is licensed under GPLv3.
 
 - Follow the coding standards in [CODING_STYLE_GUIDE.md](CODING_STYLE_GUIDE.md)
-- Format code with `./format_code.sh` before committing
+- Run `./install-git-hooks.sh` once. The pre-commit hook checks the formatting of what you stage and, when code changes, builds and runs the CI test suite; the pre-push hook runs the suite too
+- Format code with `./format_code.sh --changed` before committing
 - Add tests for new features
 - See [ARCHITECTURE.md](ARCHITECTURE.md) for system design context
 
@@ -311,6 +331,7 @@ Contributions are welcome! DAWN is part of The OASIS Project and is licensed und
 - **[ONNX Runtime](https://github.com/microsoft/onnxruntime)** (MIT License)
 - **[espeak-ng](https://github.com/espeak-ng/espeak-ng)** (GPL v3+)
 - **[Chart.js](https://www.chartjs.org/)** (MIT License)
+- **[GMime](https://github.com/jstedfast/gmime)** (LGPL 2.1)
 
 ## License
 

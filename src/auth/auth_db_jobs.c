@@ -956,6 +956,7 @@ int conv_db_job_last_assistant_text(int64_t conv_id, int user_id, char **out) {
                           "SELECT m.content FROM messages m "
                           "JOIN conversations c ON c.id = m.conversation_id "
                           "WHERE m.conversation_id=? AND c.user_id=? AND m.role='assistant' "
+                          "AND m.kind IS NULL "
                           "ORDER BY m.id DESC LIMIT 1",
                           -1, &st, NULL) != SQLITE_OK) {
       AUTH_DB_UNLOCK();

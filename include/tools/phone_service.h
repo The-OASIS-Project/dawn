@@ -191,6 +191,21 @@ int phone_service_send_sms(int user_id,
                            size_t buf_size);
 
 /**
+ * @brief Send a code text (a link or reply code), recording `log_body` in the
+ *        user's SMS log instead of `body` (the log is readable through the
+ *        phone tool)
+ *
+ * Not held to the per-minute and per-day SMS limits: its senders cap codes
+ * themselves, and a dropped code strands what waits for it.
+ */
+int phone_service_send_code_sms(int user_id,
+                                const char *name_or_number,
+                                const char *body,
+                                const char *log_body,
+                                char *result_buf,
+                                size_t buf_size);
+
+/**
  * @brief Get the current phone state.
  */
 phone_state_t phone_service_get_state(void);

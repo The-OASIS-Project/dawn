@@ -572,10 +572,10 @@
             console.warn('localStorage cache full');
          }
 
-         const base64 = dataUrl.split(',')[1];
+         // The turn names the image by this id; the server reads the stored
+         // file (the client never sends image bytes over the socket).
          const imageData = {
-            id: uploadResult.id, // Server-assigned ID for history storage
-            data: base64, // Full image data for LLM
+            id: uploadResult.id, // Server-assigned ID: the turn's image_ids + history
             mimeType: compressed.type,
             previewUrl: dataUrl, // Keep for preview display
          };
@@ -1056,17 +1056,6 @@
    }
 
    /**
-    * Get all pending images for sending (full resolution for LLM)
-    * @returns {Array<{data: string, mimeType: string}>}
-    */
-   function getPendingImages() {
-      return DawnState.visionState.pendingImages.map((img) => ({
-         data: img.data,
-         mimeType: img.mimeType,
-      }));
-   }
-
-   /**
     * Get all image IDs for history storage
     * @deprecated Use getPendingImageIds instead
     * @returns {string[]} Array of image IDs (nulls filtered out)
@@ -1085,7 +1074,7 @@
    }
 
    /**
-    * Get image IDs from pending images for history storage
+    * Get the pending images' server ids: what a turn sends (image_ids)
     * @returns {string[]} Array of image IDs
     */
    function getPendingImageIds() {
@@ -1265,7 +1254,6 @@
       updateLimits,
       // Multi-image API
       processMultipleImages,
-      getPendingImages,
       getPendingImageIds,
       hasPendingImages,
       formatMessageWithImages,

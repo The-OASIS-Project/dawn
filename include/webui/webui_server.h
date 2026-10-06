@@ -35,6 +35,7 @@
 
 #include <stdbool.h>
 
+#include "image_store.h"       /* IMAGE_ID_LEN */
 #include "webui/webui_audio.h" /* For WEBUI_MAX_RECORDING_SECONDS */
 
 #ifdef __cplusplus
@@ -50,14 +51,15 @@ extern "C" {
 #define WEBUI_MAX_CLIENTS 4
 #define WEBUI_SUBPROTOCOL "dawn-1.0"
 
-/* Vision image limits — configurable values in vision_config_t (dawn_config.h).
- * WEBUI_MAX_BASE64_SIZE and WEBUI_MAX_VISION_IMAGES_CAP are sized for the
- * maximum configurable values and used only for array/buffer allocation.
- * Actual enforcement uses runtime config (g_config.vision.*). */
-#define WEBUI_MAX_BASE64_SIZE (16384 * 1024 * 4 / 3 + 4) /* Upper-bound buffer for base64 */
-#define WEBUI_MAX_VISION_IMAGES_CAP 10                   /* Array dim cap (max configurable) */
-#define WEBUI_MAX_CONCURRENT_VISION 2                    /* Limit concurrent (thread safety) */
-#define WEBUI_VISION_MIME_MAX 24                         /* MIME type buffer */
+/* Images per message — configurable in vision_config_t (dawn_config.h,
+ * g_config.vision.max_images); this cap, its largest value, sizes the arrays. */
+#define WEBUI_MAX_VISION_IMAGES_CAP 10
+
+/* Error codes of a turn whose images were refused (an `error` frame's
+ * payload.code; webui_image_error_describe). */
+#define WEBUI_ERR_IMAGE_UNAVAILABLE "IMAGE_UNAVAILABLE" /* an id names no image of yours */
+#define WEBUI_ERR_IMAGE_LIMIT "IMAGE_LIMIT"             /* too many / too large */
+#define WEBUI_ERR_IMAGE_ERROR "IMAGE_ERROR"             /* the server couldn't build it */
 
 /* Thumbnail limits for conversation history storage (security/DoS prevention) */
 #define WEBUI_MAX_THUMBNAIL_SIZE (150 * 1024)   /* 150KB max per thumbnail */
@@ -272,6 +274,19 @@ void webui_send_state(struct session *session, const char *state);
 void webui_send_state_with_detail(struct session *session, const char *state, const char *detail);
 
 /**
+ * @brief webui_send_state_with_detail() tagged with @p conversation_id
+ *
+ * For a state about a turn that isn't the recipient's own: a reply fanned out to
+ * every tab viewing its conversation is tagged with that conversation, not with
+ * the recipient's last turn, so a client ignoring other conversations' states
+ * still sees it.
+ */
+void webui_send_state_for_conversation(struct session *session,
+                                       const char *state,
+                                       const char *detail,
+                                       int64_t conversation_id);
+
+/**
  * @brief Send context/token usage update to WebSocket client
  *
  * @param session Session to send to (must be SESSION_TYPE_WEBUI), or NULL for all
@@ -338,10 +353,12 @@ void webui_send_error_ex(struct session *session,
  * @param messages_summarized Number of messages that were summarized
  * @param summary The generated summary text (for continuation)
  * @param level Compaction escalation level used (0=normal, 1=aggressive, 2=deterministic)
+ * @param conversation_id Conversation that was compacted (0 = unknown)
  *
  * @note Thread-safe - can be called from any thread
  */
 void webui_send_compaction_complete(struct session *session,
+                                    int64_t conversation_id,
                                     int tokens_before,
                                     int tokens_after,
                                     int messages_summarized,
@@ -521,30 +538,41 @@ void webui_send_conversation_reset(struct session *session);
  *                        false if typed.  Applied to session->input_was_voice on
  *                        the worker thread right before dispatch so the prompt
  *                        builder gates the ASR-disambiguation hint per turn.
- * @return 0 on success, non-zero on error
+ * @return 0 on success; WEBUI_TEXT_INPUT_REPORTED when the client was already
+ *         told (a full queue); other non-zero on error
  *
  * @note Called from WebUI thread when text message received
  */
 int webui_process_text_input(struct session *session, const char *text, bool input_was_voice);
 
+/** A text turn was refused and the client already told (an error frame was
+ *  sent): the caller sends nothing more.  Returned by the functions below. */
+#define WEBUI_TEXT_INPUT_REPORTED 2
+
 /**
- * @brief Process text input message with optional vision images.
+ * @brief Process a text message with the images attached to it, by id.
  *
- * Like `webui_process_text_input` but accepts up to
- * `WEBUI_MAX_VISION_IMAGES_CAP` base64-encoded images.  Pass NULL/0 for
- * the vision arrays to behave as the plain text variant.  Defined in
- * webui_text_processing.c.
+ * Like `webui_process_text_input`, for a turn sent with up to
+ * `WEBUI_MAX_VISION_IMAGES_CAP` stored images.  The worker builds the
+ * question from the stored files (image_rehydrate_question): an id that names
+ * no image of the user's fails the turn with an error frame, nothing added to
+ * the history or saved.  Defined in webui_text_processing.c.
  *
+ * @param image_ids       Validated image ids (NULL when @p image_id_count is 0).
+ * @param image_id_count  Number of ids (0 for a text-only turn).
+ * @param persist_content The persisted form: text + one `[IMAGE:<id>]` marker
+ *                        per id (image_marker_build_content); NULL for text-only.
  * @param input_was_voice True if voice (ASR) input, false if typed.  See the
  *                        wrapper above.
- * @return 0 on success, non-zero on error
+ * @return 0 on success; WEBUI_TEXT_INPUT_REPORTED when the turn was refused
+ *         and an error frame already sent (a full queue); other non-zero on
+ *         an error the caller reports.  @p text may be empty only with images;
+ *         whitespace-only text is the WebUI dispatcher's to refuse or empty.
  */
-int webui_process_text_input_with_vision(struct session *session,
+int webui_process_text_input_with_images(struct session *session,
                                          const char *text,
-                                         const char **vision_images,
-                                         const size_t *vision_image_sizes,
-                                         const char **vision_mimes,
-                                         int vision_image_count,
+                                         const char image_ids[][IMAGE_ID_LEN],
+                                         int image_id_count,
                                          const char *persist_content,
                                          bool input_was_voice);
 
@@ -609,13 +637,27 @@ void webui_broadcast_plan_progress(struct session *session, const char *json_str
 /**
  * @brief Get the active conversation ID for a WebUI session
  *
- * Returns the conversation ID from the session's WebSocket connection.
- * Returns 0 for non-WebUI sessions or if no conversation is active.
+ * The conversation the session's client is showing, kept on the session
+ * (webui_conn_set_active_conversation), so any thread may read it without
+ * touching the connection.  Returns 0 for non-WebUI sessions or if none.
  *
  * @param session Session to query
  * @return Active conversation ID, or 0 if unavailable
  */
 int64_t webui_get_active_conversation_id(struct session *session);
+
+/** Whether @p session is a WebUI session whose browser has speech on. */
+bool webui_session_tts_enabled(struct session *session);
+
+/**
+ * @brief Send response text to a satellite (non-streaming)
+ *
+ * For short responses or when streaming is not desired.
+ *
+ * @param session DAP2 session
+ * @param text Response text
+ */
+void satellite_send_response(struct session *session, const char *text);
 
 /**
  * @brief Broadcast a conversation title change to all connections for a given user
@@ -647,6 +689,21 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
  * @param conv_id Conversation that gained new messages.
  */
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
+
+/**
+ * @brief Tell a user's open WebUI browsers their messaging channel list
+ *        changed (a /link from a chat, a verified code, an unlink elsewhere),
+ *        so the settings panel re-reads it.  Overrides a weak no-op in the
+ *        messaging engine.
+ * @param channel_id  The channel that changed (0 = several).
+ * @param change      What happened ("linked", "pending", "verified", ...; see
+ *                    messaging_engine_internal.h).
+ * @param link_code   The used link code behind a "linked"/"pending" change, else NULL.
+ */
+void webui_broadcast_messaging_channels_changed(int user_id,
+                                                int64_t channel_id,
+                                                const char *change,
+                                                const char *link_code);
 
 /* The background-job frames take a ws_connection_t and are declared alongside
  * the other per-connection senders in webui_handlers.h. */
@@ -685,7 +742,8 @@ typedef struct focus_compose_result_s focus_compose_result_t;
 
 /**
  * @brief Broadcast a `context_injection` event to every WebUI session
- *        matching (user_id, conv_id) — Phase 1g-i.
+ *        matching (user_id, conv_id): the turn's retrieved items, each
+ *        with its place in the turn.
  *
  * Iterates `s_active_connections` under `s_conn_registry_mutex`,
  * matching `auth_user_id == user_id` AND
@@ -696,7 +754,8 @@ typedef struct focus_compose_result_s focus_compose_result_t;
  * user) does NOT.
  *
  * Fires unconditionally when called — the feature-flag gate lives in
- * the caller (`build_focus_block`).  Empty `result->candidate_count`
+ * the caller (the turn's seam, through session_focus_client_notice, once
+ * it has decided each item's place).  Empty `result->candidate_count`
  * is valid input: the empty `items[]` payload is the empty-state UX
  * signal "DAWN looked, found nothing" — clients still render the
  * (collapsed) frame.  When `candidate_count == 0`, `score_breakdowns`
@@ -706,7 +765,8 @@ typedef struct focus_compose_result_s focus_compose_result_t;
  * format: top-level `{type, user_id, conversation_id, turn_id,
  * items[], filter_rejections[]}`.  Each `items[i]` has the candidate's
  * source_id / source_type / text / score / score_breakdown /
- * applied_source_weight; `provenance` is omitted (not zero-stub) when
+ * applied_source_weight, and `state` (new / changed / in_context /
+ * referenced: sent this turn, or already shown); `provenance` is omitted (not zero-stub) when
  * `provenance.conversation_id == 0`.  Per-text size cap of
  * `FOCUS_TEXT_MAX_BYTES` (4096) is applied defensively before
  * serialization.
@@ -727,11 +787,14 @@ typedef struct focus_compose_result_s focus_compose_result_t;
  *                   "turn id unavailable")
  * @param result     Caller-owned compose result; this helper reads
  *                   from it and never frees it
+ * @param states     Each item's place by name, parallel to
+ *                   result->candidates; NULL: every item "new"
  */
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
-                                       const focus_compose_result_t *result);
+                                       const focus_compose_result_t *result,
+                                       const char *const *states);
 
 /**
  * @brief Push the validated cited item_ids for a turn to the browser.

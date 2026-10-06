@@ -38,6 +38,7 @@
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "memory/memory_db.h"
+#include "memory/memory_embed_backfill.h"
 #include "memory/memory_embeddings.h"
 
 /* =============================================================================
@@ -120,6 +121,9 @@ void memory_embeddings_invalidate_cache(void) {
 }
 void memory_embeddings_invalidate_entity_cache(void) {
 }
+void memory_embeddings_invalidate_entity_cache_for_user(int user_id) {
+   (void)user_id;
+}
 
 /* =============================================================================
  * memory_db stubs — not called in the config-guard test paths
@@ -149,4 +153,13 @@ int memory_db_entity_update_embedding(int64_t entity_id,
    (void)dims;
    (void)norm;
    return 1;
+}
+
+/* Re-index bracket: the recompute worker parks fact backfill while it runs.
+ * Nothing to park in this test, so both are no-ops. */
+void memory_embeddings_reindex_begin(void) {
+}
+
+void memory_embeddings_reindex_end(bool completed) {
+   (void)completed;
 }

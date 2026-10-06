@@ -2,6 +2,14 @@
 
 Inspired by the LCM paper (Ehrlich & Blackman, 2026). Four phases to make context compaction invisible, reliable, and lossless. All four phases shipped April 2026.
 
+> **Superseded in part (September 2026).** Compaction now happens only at a turn seam, never inside a tool
+> round, because a provider binds a turn's reasoning to the request as it stands. The old in-loop async
+> compaction, the mid-loop and pre-switch compaction, the `[COMPACTED ...]` tag and the separate watermark
+> write described below are gone; instead a range is summarized ahead on a per-session worker and applied
+> at a turn seam: see `src/core/session_compaction.c` and the Compaction section of
+> [arch/subsystems/llm.md](arch/subsystems/llm.md). The escalation levels (Phase 1), summary nodes and
+> `context_expand` drill-down still stand.
+
 ---
 
 ## Phase 1: Three-Level Summarization Escalation (Shipped)

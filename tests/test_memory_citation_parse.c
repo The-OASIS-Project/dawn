@@ -42,9 +42,13 @@ static void set_stash(const char *const *ids, int n) {
    memset(&g_stash, 0, sizeof(g_stash));
    for (int i = 0; i < n && i < MAX_CITATION_STASH; i++) {
       strncpy(g_stash.entries[i].item_id, ids[i], sizeof(g_stash.entries[i].item_id) - 1);
+      g_stash.entries[i].handle = i + 1;
    }
    g_stash.count = n;
 }
+
+static citation_prior_t g_prior[8];
+static int g_prior_count;
 
 static void set_tool(const int64_t *ids, int n) {
    memset(&g_tool, 0, sizeof(g_tool));
@@ -55,8 +59,9 @@ static void set_tool(const int64_t *ids, int n) {
 }
 
 static void run(const char *text) {
-   memory_citation_resolve_cited(text, &g_stash, &g_tool, g_all, sizeof(g_all), g_focus,
-                                 sizeof(g_focus), &g_fc, &g_tc, &g_dr, &g_dt);
+   memory_citation_resolve_cited(text, &g_stash, g_prior, g_prior_count, &g_tool, g_all,
+                                 sizeof(g_all), g_focus, sizeof(g_focus), &g_fc, &g_tc, &g_dr,
+                                 &g_dt);
 }
 
 /* ── focus-only (Phase-1 back-compat) ─────────────────────────────────────── */
@@ -345,8 +350,50 @@ static void test_extract_ignores_malformed(void) {
    TEST_ASSERT_EQUAL_INT64(77, ids[0]);
 }
 
+/* Handles are stable for the conversation: this turn's need not run 1, 2, 3,
+ * and an item an earlier turn showed resolves too (audited, not a focus row). */
+static void test_stable_and_earlier_handles(void) {
+   const char *ids[] = { "fact:10", "fact:20" };
+   set_stash(ids, 2);
+   g_stash.entries[0].handle = 7;
+   g_stash.entries[1].handle = 9;
+   g_prior_count = 1;
+   g_prior[0].handle = 3;
+   strncpy(g_prior[0].item_id, "fact:5", sizeof(g_prior[0].item_id) - 1);
+   set_tool(NULL, 0);
+   run("answer <cited>M9,M3,M1,M9</cited>");
+   TEST_ASSERT_EQUAL_STRING("fact:20,fact:5", g_all);
+   TEST_ASSERT_EQUAL_STRING("fact:20", g_focus);
+   TEST_ASSERT_EQUAL_INT(1, g_fc);
+   TEST_ASSERT_EQUAL_INT(0, g_tc);
+   TEST_ASSERT_EQUAL_INT(2, g_dr); /* M1 unknown, the second M9 a repeat */
+   g_prior_count = 0;
+}
+
+/* An item named again this turn ([still relevant: ...]) resolves as this
+ * turn's, and the audit lists it apart from the items sent. */
+static void test_named_items_resolve_and_audit_apart(void) {
+   const char *ids[] = { "fact:10", "fact:20", "fact:30" };
+   set_stash(ids, 3);
+   g_stash.entries[1].referenced = true;
+   g_stash.entries[0].final_score = 0.5f;
+   g_stash.entries[2].final_score = 0.25f;
+   set_tool(NULL, 0);
+   run("answer <cited>M2</cited>");
+   TEST_ASSERT_EQUAL_STRING("fact:20", g_all);
+   TEST_ASSERT_EQUAL_STRING("fact:20", g_focus);
+   char injected[128], scores[128], referenced[128];
+   memory_citation_stash_csvs(&g_stash, injected, sizeof(injected), scores, sizeof(scores),
+                              referenced, sizeof(referenced));
+   TEST_ASSERT_EQUAL_STRING("fact:10,fact:30", injected);
+   TEST_ASSERT_EQUAL_STRING("0.5000,0.2500", scores);
+   TEST_ASSERT_EQUAL_STRING("fact:20", referenced);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_stable_and_earlier_handles);
+   RUN_TEST(test_named_items_resolve_and_audit_apart);
    RUN_TEST(test_focus_ordinals);
    RUN_TEST(test_bare_numbers_are_ordinals);
    RUN_TEST(test_ordinal_out_of_range_dropped);

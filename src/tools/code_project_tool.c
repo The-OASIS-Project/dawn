@@ -127,6 +127,8 @@ static char *code_project_callback(const char *action, char *value, int *should_
       *should_respond = 1;
    }
    int64_t uid = tool_get_current_user_id();
+   if (uid <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    if (action == NULL || action[0] == '\0' || strcmp(action, "list") == 0) {
       return cp_list(uid);
@@ -159,12 +161,20 @@ static const treg_param_t s_params[] = {
    },
 };
 
+static const tool_action_kind_entry_t s_meta_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "status", TOOL_KIND_READ, NULL },
+   { "set_active", TOOL_KIND_STATE, NULL },
+};
+
 static const tool_metadata_t s_meta = {
    .name = "code_project",
+   .action_kinds = s_meta_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_meta_action_kinds),
    .description = "Manage code projects: list available repos, set the active project for code "
                   "questions, or check indexing status.",
    .params = s_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(s_params),
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
    .default_local = true,

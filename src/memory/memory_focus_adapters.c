@@ -21,10 +21,12 @@
  * Four adapters land here:
  *   - memory_fact      (requires_embedding=true) — hybrid keyword+vector via
  *                      memory_fact_search_hybrid()
- *   - memory_entity    (requires_embedding=true) — keyword + vector hybrid
- *                      with merge by entity_id; importance boosts on photo
- *                      ownership and name-keyword match
- *   - memory_relation  (requires_embedding=true) — top-3 query-similar
+ *   - memory_entity    (requires_embedding=false) — the entities the query
+ *                      names or clearly resembles, over the user's whole
+ *                      entity pool, merged by entity_id with a whole-query
+ *                      name search; importance boosts on photo ownership
+ *                      and being named
+ *   - memory_relation  (requires_embedding=false) — the top-3 relevant
  *                      entities → currently-valid relations (bitemporal
  *                      filter at as_of=now), deterministic round-robin
  *                      allocation across subjects
@@ -46,7 +48,7 @@
 
 #include "memory/memory_focus_adapters.h"
 
-#include <pthread.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -56,6 +58,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/embedding_engine.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_recency.h"
 #include "core/focus/focus_source.h"
@@ -104,11 +107,6 @@
  * subjects. */
 #define RELATION_TOP_SUBJECTS 3
 
-/* Per-entity buffer cap when loading embeddings for cosine.  Same
- * order-of-magnitude as the production `memory_embeddings_entity_search`
- * cap; bounded so the stack/heap footprint stays predictable. */
-#define ENTITY_EMBED_BUF_CAP 256
-
 /* Hard ceiling on `max_candidates` accepted by the relation adapter,
  * tied to the upper bound enforced by `config_validate.c` for
  * `memory.focus_injection.top_k` (1..64).  Preallocated stack arrays
@@ -121,63 +119,6 @@ _Static_assert(RELATION_ADAPTER_MAX_CANDIDATES_CAP >= 64,
                "relation adapter cap must cover the focus_injection top_k validate range");
 
 /* =============================================================================
- * Entity-embedding load workspace
- *
- * Both the entity adapter (cosine vs all entities) and the relation
- * adapter (top-K subject seeding) load the same four buffers from
- * `memory_db_entity_get_embeddings`.  Promoting the buffers to a single
- * file-static scratch struct guarded by a mutex avoids ~820 KB / call of
- * heap churn at production dims=384 (4 buffers × 256 entries × 4-byte
- * floats / id+name/type strings).  The mutex is uncontended in the
- * single-session compose path; if a future multi-user concurrent compose
- * lands, the cost is at most one extra adapter call serialized.
- * ============================================================================= */
-typedef struct {
-   int64_t ids[ENTITY_EMBED_BUF_CAP];
-   char names[ENTITY_EMBED_BUF_CAP][MEMORY_ENTITY_NAME_MAX];
-   char types[ENTITY_EMBED_BUF_CAP][MEMORY_ENTITY_TYPE_MAX];
-   /* embeddings + norms allocated lazily on first use because their size
-    * depends on the engine's `dims` (384 for bge-small, 1536 for
-    * OpenAI ada).  Resized in place if the engine reconfigures. */
-   float *embeddings;
-   float *norms;
-   int embeddings_dims; /* 0 = not yet allocated */
-} entity_embed_scratch_t;
-
-static entity_embed_scratch_t s_entity_scratch;
-static pthread_mutex_t s_entity_scratch_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/* Acquire the scratch buffer for `dims` floats per entity.  Caller MUST
- * call `release_entity_scratch()` before returning.  Returns SUCCESS on
- * acquisition (mutex held), FAILURE on OOM (mutex released). */
-static int acquire_entity_scratch(int dims, entity_embed_scratch_t **out_scratch) {
-   pthread_mutex_lock(&s_entity_scratch_mutex);
-   if (s_entity_scratch.embeddings_dims != dims) {
-      free(s_entity_scratch.embeddings);
-      free(s_entity_scratch.norms);
-      s_entity_scratch.embeddings = calloc(ENTITY_EMBED_BUF_CAP * (size_t)dims, sizeof(float));
-      s_entity_scratch.norms = calloc(ENTITY_EMBED_BUF_CAP, sizeof(float));
-      if (s_entity_scratch.embeddings == NULL || s_entity_scratch.norms == NULL) {
-         free(s_entity_scratch.embeddings);
-         free(s_entity_scratch.norms);
-         s_entity_scratch.embeddings = NULL;
-         s_entity_scratch.norms = NULL;
-         s_entity_scratch.embeddings_dims = 0;
-         pthread_mutex_unlock(&s_entity_scratch_mutex);
-         OLOG_ERROR("focus_adapter: OOM allocating entity scratch (dims=%d)", dims);
-         return FAILURE;
-      }
-      s_entity_scratch.embeddings_dims = dims;
-   }
-   *out_scratch = &s_entity_scratch;
-   return SUCCESS;
-}
-
-static void release_entity_scratch(void) {
-   pthread_mutex_unlock(&s_entity_scratch_mutex);
-}
-
-/* =============================================================================
  * Fact adapter
  *
  * source_id          = "memory_fact"
@@ -188,11 +129,11 @@ static void release_entity_scratch(void) {
  * post-check on each fact → batch provenance via
  * memory_db_facts_get_sources.
  *
- * include_private (1f gap): the parameter is accepted from the
- * framework but is a no-op in v1.  hybrid_search currently scopes by
- * user_id; the conversation-private boundary is enforced at conv_db_*
- * level only, not at memory_facts.  Wired in 1f.
+ * include_private: the parameter is accepted from the framework but is
+ * a no-op.  hybrid_search scopes by user_id; the conversation-private
+ * boundary is enforced at the conv_db_* level only, not at memory_facts.
  * ============================================================================= */
+
 static int fact_adapter_query(int user_id,
                               bool include_private,
                               const char *query_text,
@@ -202,7 +143,7 @@ static int fact_adapter_query(int user_id,
                               int max_candidates,
                               focus_candidate_t **out_candidates,
                               int *out_count) {
-   (void)include_private; /* 1f gap — see header comment above */
+   (void)include_private; /* No-op — see header comment above */
    *out_candidates = NULL;
    *out_count = 0;
    if (max_candidates <= 0 || query_text == NULL || query_text[0] == '\0')
@@ -238,13 +179,43 @@ static int fact_adapter_query(int user_id,
    }
 
    /* "I don't remember" gate — same configurable score floor that gates the
-    * memory tool's `search` action.  Focus-block facts are prepended to the
-    * system prompt verbatim, so the marginal-cosine fabrication surface is
-    * identical to the tool path.  Single knob (g_config.memory.search_score_floor)
-    * keeps tool-time and injection-time semantics aligned. */
+    * memory tool's `search` action.  Focus facts go verbatim into the turn's
+    * context (just before the user's message), so the marginal-cosine
+    * fabrication surface is identical to the tool path.  Single knob
+    * (g_config.memory.search_score_floor) keeps tool-time and injection-time semantics aligned. */
    kept = memory_search_apply_score_floor(facts, scores, kept, g_config.memory.search_score_floor);
    if (kept <= 0)
       return SUCCESS;
+
+   /* Relevance gate for injection only (the memory tool's search is unaffected).
+    * The search floor above sits near the embedding model's unrelated-text
+    * baseline, so it lets through facts that don't relate to the turn (an
+    * arithmetic question pulling in an anniversary).  Keep facts that stand out
+    * from the user's typical fact for this query; facts with no embedding yet
+    * matched on keywords and are kept.  Needs enough facts for a baseline. */
+   const float min_rel = g_config.memory.focus_injection.fact_min_relevance;
+   if (min_rel > 0.0f && query_embedding != NULL && embed_dim > 0) {
+      int64_t ids[10];
+      float rel[10];
+      int pool = 0;
+      for (int i = 0; i < kept; i++)
+         ids[i] = facts[i].id;
+      if (memory_embeddings_fact_relevance(user_id, query_embedding, ids, kept, rel, &pool) ==
+              SUCCESS &&
+          pool >= EMBEDDING_RELEVANCE_MIN_POOL) {
+         int k2 = 0;
+         for (int i = 0; i < kept; i++) {
+            if (isnan(rel[i]) || rel[i] >= min_rel) {
+               facts[k2] = facts[i];
+               scores[k2] = scores[i];
+               k2++;
+            }
+         }
+         kept = k2;
+         if (kept <= 0)
+            return SUCCESS;
+      }
+   }
 
    /* Batch provenance lookup. */
    int64_t fact_ids[10];
@@ -291,11 +262,11 @@ static int fact_adapter_query(int user_id,
 }
 
 /* =============================================================================
- * Entity adapter (keyword + vector hybrid)
+ * Entity adapter (named or clearly similar entities)
  *
  * source_id          = "memory_entity"
  * source_type        = FOCUS_SOURCE_INTERNAL
- * requires_embedding = true
+ * requires_embedding = false (entities the query names are found without one)
  *
  * Provenance: ENTITIES HAVE NO SOURCE LINKAGE — each entity is the
  * aggregate of N facts.  candidate.provenance stays {0,0,0} (the
@@ -315,12 +286,6 @@ static int render_entity_text(const memory_entity_t *e, char *buf, size_t buflen
       return FAILURE;
    return SUCCESS;
 }
-
-/* Embedding-dimension mismatch is an operational signal: the engine
- * was swapped but stored entity vectors haven't been recomputed yet.
- * Log ONCE per session via this file-static flag — the recompute
- * worker will eventually catch up; flooding the log buys nothing. */
-static bool s_entity_dim_mismatch_warned = false;
 
 /* Cosine-rank entries used internally by the entity adapter. */
 typedef struct {
@@ -342,6 +307,108 @@ static int entity_rank_find(entity_rank_entry_t *rows, int n, int64_t entity_id)
    return n;
 }
 
+/* Path A — the whole query as a substring of a name (aliases included).
+ * Each match contributes ENTITY_IMPORTANCE_NAMEMATCH. */
+static void add_keyword_entities(int user_id,
+                                 const char *query_text,
+                                 int cap,
+                                 entity_rank_entry_t *rows,
+                                 int *row_count,
+                                 int work_cap) {
+   memory_entity_t *kw = calloc((size_t)cap, sizeof(*kw));
+   int kw_n = 0;
+   if (!kw || memory_db_entity_search(user_id, query_text, kw, cap, &kw_n) != MEMORY_DB_SUCCESS) {
+      free(kw);
+      return;
+   }
+   for (int i = 0; i < kw_n && *row_count < work_cap; i++) {
+      /* Defense-in-depth user_id post-check (entity_search scopes already;
+       * this guards against future regression). */
+      if (kw[i].user_id != user_id) {
+         OLOG_ERROR("entity_adapter: entity_id=%lld owned by user_id=%d (expected %d) — skipping",
+                    (long long)kw[i].id, kw[i].user_id, user_id);
+         continue;
+      }
+      entity_rank_entry_t *r = &rows[(*row_count)++];
+      r->entity_id = kw[i].id;
+      r->entity = kw[i];
+      r->semantic_score = FOCUS_SCORE_NA;
+      r->importance_increment = ENTITY_IMPORTANCE_NAMEMATCH;
+      r->name_matched = true;
+   }
+   free(kw);
+}
+
+/* Path B — every entity the query names or clearly resembles
+ * (memory_embeddings_entity_matches: the user's whole entity pool, gated by
+ * entity_min_relevance), merged with path A by id.  The full records come
+ * from one batched lookup by id. */
+static void add_matched_entities(int user_id,
+                                 const char *query_text,
+                                 const float *query_embedding,
+                                 int cap,
+                                 entity_rank_entry_t *rows,
+                                 int *row_count,
+                                 int work_cap) {
+   memory_entity_match_t matches[MEMORY_ENTITY_MATCH_MAX];
+   int n = 0;
+   const bool semantic = query_embedding != NULL && memory_embeddings_available();
+   if (memory_embeddings_entity_matches(user_id, query_text, semantic ? query_embedding : NULL,
+                                        semantic ? memory_embeddings_dims() : 0,
+                                        g_config.memory.focus_injection.entity_min_relevance,
+                                        matches, cap, &n) != SUCCESS ||
+       n == 0) {
+      return; /* the keyword path still stands */
+   }
+   int64_t fetch_ids[MEMORY_ENTITY_MATCH_MAX];
+   int n_fetch = 0;
+   for (int i = 0; i < n; i++) {
+      /* Scores are 0..1; FOCUS_SCORE_NA is a negative sentinel. */
+      const float cosine = matches[i].has_cosine ? fmaxf(matches[i].cosine, 0.0f) : FOCUS_SCORE_NA;
+      const int slot = entity_rank_find(rows, *row_count, matches[i].id);
+      if (slot < *row_count) {
+         /* Found by path A too: keep max(semantic_score). */
+         if (rows[slot].semantic_score == FOCUS_SCORE_NA || cosine > rows[slot].semantic_score) {
+            rows[slot].semantic_score = cosine;
+         }
+      } else {
+         fetch_ids[n_fetch++] = matches[i].id;
+      }
+   }
+   if (n_fetch == 0) {
+      return;
+   }
+   memory_entity_t *found = calloc((size_t)n_fetch, sizeof(*found));
+   int n_found = 0;
+   if (!found || memory_db_entities_get_by_ids(user_id, fetch_ids, n_fetch, found, &n_found) !=
+                     MEMORY_DB_SUCCESS) {
+      free(found);
+      return;
+   }
+   /* In match order (most relevant first), so a full work set drops the
+    * least relevant. */
+   for (int i = 0; i < n && *row_count < work_cap; i++) {
+      const memory_entity_match_t *m = &matches[i];
+      const memory_entity_t *e = NULL;
+      for (int j = 0; j < n_found; j++) {
+         if (found[j].id == m->id) {
+            e = &found[j];
+            break;
+         }
+      }
+      if (!e || entity_rank_find(rows, *row_count, m->id) < *row_count) {
+         continue; /* deleted since it was cached, or merged above */
+      }
+      entity_rank_entry_t *r = &rows[(*row_count)++];
+      r->entity_id = e->id;
+      r->entity = *e;
+      r->semantic_score = m->has_cosine ? fmaxf(m->cosine, 0.0f) : FOCUS_SCORE_NA;
+      r->importance_increment = m->named ? ENTITY_IMPORTANCE_NAMEMATCH : 0.0f;
+      r->name_matched = m->named;
+   }
+   free(found);
+}
+
 static int entity_adapter_query(int user_id,
                                 bool include_private,
                                 const char *query_text,
@@ -351,14 +418,15 @@ static int entity_adapter_query(int user_id,
                                 int max_candidates,
                                 focus_candidate_t **out_candidates,
                                 int *out_count) {
-   (void)include_private; /* Same 1f gap as fact adapter */
+   (void)include_private; /* No-op, as in the fact adapter */
    (void)embed_dim;       /* Engine reports its own dim */
    *out_candidates = NULL;
    *out_count = 0;
    if (max_candidates <= 0 || query_text == NULL || query_text[0] == '\0')
       return SUCCESS;
 
-   const int cap = (max_candidates > ENTITY_EMBED_BUF_CAP) ? ENTITY_EMBED_BUF_CAP : max_candidates;
+   const int cap = (max_candidates > MEMORY_ENTITY_MATCH_MAX) ? MEMORY_ENTITY_MATCH_MAX
+                                                              : max_candidates;
    /* Working set bounded by `2 * cap` (worst case: keyword and vector
     * paths return disjoint top-cap sets). */
    const int work_cap = cap * 2;
@@ -369,98 +437,8 @@ static int entity_adapter_query(int user_id,
    }
    int row_count = 0;
 
-   /* Path A — keyword.  Each match contributes ENTITY_IMPORTANCE_NAMEMATCH. */
-   memory_entity_t kw_buf[ENTITY_EMBED_BUF_CAP];
-   int kw_n = 0;
-   if (memory_db_entity_search(user_id, query_text, kw_buf, cap, &kw_n) == MEMORY_DB_SUCCESS) {
-      for (int i = 0; i < kw_n && row_count < work_cap; i++) {
-         /* Defense-in-depth user_id post-check (entity_search scopes
-          * already; this guards against future regression). */
-         if (kw_buf[i].user_id != user_id) {
-            OLOG_ERROR(
-                "entity_adapter: entity_id=%lld owned by user_id=%d (expected %d) — skipping",
-                (long long)kw_buf[i].id, kw_buf[i].user_id, user_id);
-            continue;
-         }
-         rows[row_count].entity_id = kw_buf[i].id;
-         rows[row_count].entity = kw_buf[i];
-         rows[row_count].semantic_score = FOCUS_SCORE_NA;
-         rows[row_count].importance_increment = ENTITY_IMPORTANCE_NAMEMATCH;
-         rows[row_count].name_matched = true;
-         row_count++;
-      }
-   }
-
-   /* Path B — vector.  Skip if no query_embedding or engine unavailable. */
-   if (query_embedding != NULL && memory_embeddings_available()) {
-      const int dims = memory_embeddings_dims();
-      if (dims > 0) {
-         entity_embed_scratch_t *scratch = NULL;
-         if (acquire_entity_scratch(dims, &scratch) != SUCCESS) {
-            free(rows);
-            return FAILURE;
-         }
-         int loaded = 0;
-         /* Focus-adapter scratch is canonical-only (v43) — soft aliases are
-          * absent from the cosine pool so duplicate surface forms don't
-          * compete for the focus-block budget. */
-         if (memory_db_entity_get_embeddings(user_id, /* include_aliases */ false, dims,
-                                             scratch->ids, scratch->names, scratch->types,
-                                             scratch->embeddings, scratch->norms,
-                                             ENTITY_EMBED_BUF_CAP, &loaded) == MEMORY_DB_SUCCESS) {
-            if (loaded == 0 && !s_entity_dim_mismatch_warned) {
-               s_entity_dim_mismatch_warned = true;
-               OLOG_WARNING("entity_adapter: 0 entity embeddings loaded at dim=%d — possible "
-                            "model swap; recompute worker will catch up (logged once per session)",
-                            dims);
-            }
-
-            const float q_norm = memory_embeddings_l2_norm(query_embedding, dims);
-            /* Score every loaded entity, then pick top-cap.  Bounded N
-             * (≤ENTITY_EMBED_BUF_CAP) so an O(N log N) sort would be
-             * overkill — a small-K selection by repeated scan is
-             * cheaper for cap≤20 typical. */
-            for (int i = 0; i < loaded && row_count < work_cap; i++) {
-               const float cosine = memory_embeddings_cosine_with_norms(
-                   query_embedding, &scratch->embeddings[i * dims], dims, q_norm,
-                   scratch->norms[i]);
-               int slot = entity_rank_find(rows, row_count, scratch->ids[i]);
-               if (slot < row_count) {
-                  /* Merge: keep max(semantic_score). */
-                  if (rows[slot].semantic_score == FOCUS_SCORE_NA ||
-                      cosine > rows[slot].semantic_score) {
-                     rows[slot].semantic_score = cosine;
-                  }
-               } else if (row_count < work_cap) {
-                  /* Vector-only candidate; need to fetch the full
-                   * entity record to populate canonical fields the
-                   * keyword path provides. */
-                  memory_entity_t e;
-                  if (memory_db_entity_get_by_name(user_id, scratch->names[i], &e) ==
-                      MEMORY_DB_SUCCESS) {
-                     if (e.user_id != user_id) {
-                        OLOG_ERROR("entity_adapter: vector-only entity_id=%lld owned by "
-                                   "user_id=%d (expected %d) — skipping",
-                                   (long long)scratch->ids[i], e.user_id, user_id);
-                        continue;
-                     }
-                     /* Use `e.id` (post-lookup canonical) so id and
-                      * displayed record content stay paired even if
-                      * a future merge artifact ever produced two
-                      * entities sharing a canonical name. */
-                     rows[row_count].entity_id = e.id;
-                     rows[row_count].entity = e;
-                     rows[row_count].semantic_score = cosine;
-                     rows[row_count].importance_increment = 0.0f;
-                     rows[row_count].name_matched = false;
-                     row_count++;
-                  }
-               }
-            }
-         }
-         release_entity_scratch();
-      }
-   }
+   add_keyword_entities(user_id, query_text, cap, rows, &row_count, work_cap);
+   add_matched_entities(user_id, query_text, query_embedding, cap, rows, &row_count, work_cap);
 
    if (row_count == 0) {
       free(rows);
@@ -556,20 +534,20 @@ static int entity_adapter_query(int user_id,
  *
  * source_id          = "memory_relation"
  * source_type        = FOCUS_SOURCE_INTERNAL
- * requires_embedding = true
+ * requires_embedding = false (a named entity is a subject without one)
  *
  * Pipeline:
- *   1. Find top-RELATION_TOP_SUBJECTS query-similar entity IDs via
- *      cosine over `memory_db_entity_get_embeddings`.
- *   2. Sort subjects by cosine desc (similarity-desc tiebreak rule).
- *   3. Round-robin allocate `max_candidates` slots across subjects,
+ *   1. Take the top-RELATION_TOP_SUBJECTS relevant entities
+ *      (memory_embeddings_entity_matches: named first, then by cosine,
+ *      gated by entity_min_relevance).  None relevant, no relations.
+ *   2. Round-robin allocate `max_candidates` slots across subjects,
  *      with the first `max_candidates % n_subjects` subjects (in
  *      similarity-desc order) getting one extra slot.
- *   4. For each subject, call `memory_db_relation_list_by_subject_at`
+ *   3. For each subject, call `memory_db_relation_list_by_subject_at`
  *      with `as_of_ts = now` so only currently-valid relations
  *      surface (bitemporal filter handled by memory_db).
- *   5. Render "Subject Verb Object[ since YYYY-MM]".
- *   6. Batch provenance via `memory_db_relations_get_sources`.
+ *   4. Render "Subject Verb Object[ since YYYY-MM]".
+ *   5. Batch provenance via `memory_db_relations_get_sources`.
  * ============================================================================= */
 
 typedef struct {
@@ -597,8 +575,8 @@ static int format_yyyymm(time_t ts, char *out, size_t outlen) {
  * invariant in idx_memory_relations_unique_open is scoped to literal
  * entity_id, not canonical class — a canonical entity with N soft-aliased
  * members can have N open (alias_i, relation, X) rows each with their own
- * mention_count.  Per-row rendering here would show "Kris working_on DAWN ×3"
- * once per alias instead of "Kris working_on DAWN ×N" rolled up.  Display-
+ * mention_count.  Per-row rendering here would show "Alex working_on Acme ×3"
+ * once per alias instead of "Alex working_on Acme ×N" rolled up.  Display-
  * side (JS) already does the rollup; LLM-side needs to match before the
  * mention_count gets injected into the prompt. */
 static int render_relation_text(const memory_entity_t *subj,
@@ -634,72 +612,30 @@ static int relation_adapter_query(int user_id,
                                   int *out_count) {
    (void)include_private;
    (void)embed_dim;
-   (void)query_text; /* Subject seeding is purely vector-based in v1 */
    *out_candidates = NULL;
    *out_count = 0;
-   if (max_candidates <= 0 || query_embedding == NULL || !memory_embeddings_available())
+   if (max_candidates <= 0 || query_text == NULL || query_text[0] == '\0')
       return SUCCESS;
 
-   const int dims = memory_embeddings_dims();
-   if (dims <= 0)
-      return SUCCESS;
-
-   /* Load entity embeddings; pick top-RELATION_TOP_SUBJECTS by cosine.
-    * Shared file-static scratch with the entity adapter — see
-    * `acquire_entity_scratch` rationale at the top of this file. */
-   entity_embed_scratch_t *scratch = NULL;
-   if (acquire_entity_scratch(dims, &scratch) != SUCCESS)
-      return FAILURE;
-
-   int loaded = 0;
-   /* Canonical-only (v43) — see entity adapter above for rationale. */
-   memory_db_entity_get_embeddings(user_id, /* include_aliases */ false, dims, scratch->ids,
-                                   scratch->names, scratch->types, scratch->embeddings,
-                                   scratch->norms, ENTITY_EMBED_BUF_CAP, &loaded);
-   if (loaded <= 0) {
-      release_entity_scratch();
+   /* Subjects: the entities the query names or clearly resembles, most
+    * relevant first (memory_embeddings_entity_matches).  None relevant, no
+    * relations. */
+   memory_entity_match_t matches[RELATION_TOP_SUBJECTS];
+   int n_matches = 0;
+   const bool semantic = query_embedding != NULL && memory_embeddings_available();
+   if (memory_embeddings_entity_matches(user_id, query_text, semantic ? query_embedding : NULL,
+                                        semantic ? memory_embeddings_dims() : 0,
+                                        g_config.memory.focus_injection.entity_min_relevance,
+                                        matches, RELATION_TOP_SUBJECTS, &n_matches) != SUCCESS ||
+       n_matches == 0) {
       return SUCCESS;
    }
-
-   const float q_norm = memory_embeddings_l2_norm(query_embedding, dims);
    rel_subject_t subjects[RELATION_TOP_SUBJECTS] = { 0 };
-   int subject_count = 0;
-   for (int i = 0; i < loaded; i++) {
-      const float cosine = memory_embeddings_cosine_with_norms(query_embedding,
-                                                               &scratch->embeddings[i * dims], dims,
-                                                               q_norm, scratch->norms[i]);
-      if (subject_count < RELATION_TOP_SUBJECTS) {
-         subjects[subject_count].entity_id = scratch->ids[i];
-         safe_strscpy(subjects[subject_count].entity.name, scratch->names[i]);
-         subjects[subject_count].cosine = cosine;
-         subject_count++;
-      } else {
-         /* Replace the lowest-scoring subject if this one beats it. */
-         int worst = 0;
-         for (int k = 1; k < RELATION_TOP_SUBJECTS; k++)
-            if (subjects[k].cosine < subjects[worst].cosine)
-               worst = k;
-         if (cosine > subjects[worst].cosine) {
-            subjects[worst].entity_id = scratch->ids[i];
-            safe_strscpy(subjects[worst].entity.name, scratch->names[i]);
-            subjects[worst].cosine = cosine;
-         }
-      }
-   }
-   release_entity_scratch();
-
-   if (subject_count == 0)
-      return SUCCESS;
-
-   /* Sort subjects by cosine desc (deterministic input to round-robin). */
-   for (int i = 1; i < subject_count; i++) {
-      rel_subject_t tmp = subjects[i];
-      int j = i - 1;
-      while (j >= 0 && subjects[j].cosine < tmp.cosine) {
-         subjects[j + 1] = subjects[j];
-         j--;
-      }
-      subjects[j + 1] = tmp;
+   const int subject_count = n_matches;
+   for (int i = 0; i < n_matches; i++) {
+      subjects[i].entity_id = matches[i].id;
+      safe_strscpy(subjects[i].entity.name, matches[i].name);
+      subjects[i].cosine = matches[i].has_cosine ? fmaxf(matches[i].cosine, 0.0f) : FOCUS_SCORE_NA;
    }
 
    /* Round-robin allocation: floor + remainder distributed in
@@ -841,7 +777,7 @@ static int summary_adapter_query(int user_id,
                                  int max_candidates,
                                  focus_candidate_t **out_candidates,
                                  int *out_count) {
-   (void)include_private; /* Same 1f gap as fact adapter */
+   (void)include_private; /* No-op, as in the fact adapter */
    *out_candidates = NULL;
    *out_count = 0;
    if (max_candidates <= 0 || query_text == NULL || query_text[0] == '\0')
@@ -870,12 +806,14 @@ static int summary_adapter_query(int user_id,
    memory_summary_t sem_summaries[10];
    float sem_scores[10] = { 0 };
    int sem_n = 0;
+   memory_summary_pool_t pool = { 0 };
    if (query_embedding != NULL && embed_dim > 0) {
       const int scan_cap = (g_config.memory.focus_injection.summary_max_scan > 0)
                                ? g_config.memory.focus_injection.summary_max_scan
                                : MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
       int rc = memory_db_summary_search_semantic(user_id, query_embedding, (int)embed_dim, since_ts,
-                                                 cap, scan_cap, sem_summaries, sem_scores, &sem_n);
+                                                 cap, scan_cap, sem_summaries, sem_scores, &sem_n,
+                                                 &pool);
       if (rc != MEMORY_DB_SUCCESS) {
          OLOG_WARNING("summary_adapter: semantic search failed for user %d; keyword-only this turn",
                       user_id);
@@ -885,6 +823,15 @@ static int summary_adapter_query(int user_id,
 
    if (kw_n <= 0 && sem_n <= 0)
       return SUCCESS;
+
+   /* Relevance gate for summaries found only by meaning.  The semantic search
+    * always returns its top ten, related or not; like facts, entities and
+    * documents, a summary must stand out from the user's typical summary for
+    * this query: relevance = (cos - pool_mean) / (1 - pool_mean), measured over
+    * the summaries actually scored.  A keyword match keeps its floor.  A pool
+    * too small for a baseline isn't gated. */
+   const float min_rel = g_config.memory.focus_injection.summary_min_relevance;
+   const bool gated = min_rel > 0.0f && pool.scored >= EMBEDDING_RELEVANCE_MIN_POOL;
 
    /* Merge by summary id.  O(kw_n * sem_n) is fine at N <= 10 each. */
    summary_merge_entry_t merged[SUMMARY_MERGE_BUFLEN];
@@ -921,6 +868,10 @@ static int summary_adapter_query(int user_id,
       if (existing >= 0) {
          if (sem_scores[i] > merged[existing].score)
             merged[existing].score = sem_scores[i];
+         continue;
+      }
+      if (gated &&
+          embedding_corpus_relevance(sem_scores[i], pool.cosine_sum, pool.scored) < min_rel) {
          continue;
       }
       merged[m].summary = sem_summaries[i];
@@ -1004,14 +955,14 @@ static const focus_source_adapter_t k_fact_adapter = {
 static const focus_source_adapter_t k_entity_adapter = {
    .source_id = "memory_entity",
    .source_type = FOCUS_SOURCE_INTERNAL,
-   .requires_embedding = true,
+   .requires_embedding = false,
    .query = entity_adapter_query,
 };
 
 static const focus_source_adapter_t k_relation_adapter = {
    .source_id = "memory_relation",
    .source_type = FOCUS_SOURCE_INTERNAL,
-   .requires_embedding = true,
+   .requires_embedding = false,
    .query = relation_adapter_query,
 };
 

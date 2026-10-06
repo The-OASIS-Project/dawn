@@ -59,14 +59,6 @@ struct curl_slist *llm_openai_build_headers(const char *api_key, const char *bas
 const char *llm_openai_parse_error_message(const char *response_body, long http_code);
 
 /**
- * @brief Whether the model is in the GPT-5 base family.
- *
- * Only the original gpt-5 / gpt-5-mini / gpt-5-nano accept reasoning_effort=minimal.
- * gpt-5.1 and later versioned variants reject "minimal" and use "none" instead.
- */
-bool llm_openai_is_gpt5_base_family(const char *model_name);
-
-/**
  * @brief Whether the model should be routed to /v1/responses instead of /v1/chat/completions.
  *
  * Returns true for gpt-5.4* (and any future model OpenAI gates the same way), where
@@ -76,22 +68,14 @@ bool llm_openai_is_gpt5_base_family(const char *model_name);
 bool llm_openai_model_prefers_responses_api(const char *model_name);
 
 /**
- * @brief Clamp a `reasoning_effort` string to what the given model accepts on
- *        /v1/chat/completions or /v1/responses.
+ * @brief Add the prompt-cache routing key: the calling thread's conversation
+ *        ("dawn-conv-<id>"), else its session ("dawn-sess-<id>"), else nothing
  *
- * Different model families accept different value sets:
- *   gpt-5 base/-mini/-nano:  minimal | low | medium | high
- *   gpt-5.1:                 none | low | medium | high
- *   gpt-5.2 / gpt-5.4*:      none | low | medium | high | xhigh
- *   o1 / o3 series:          low | medium | high
- *   Gemini 2.5+/3.x (OAI-compat): low | medium | high (no none, no xhigh, no minimal)
- *
- * `xhigh` not supported → clamps to `high`. `none` not supported → clamps to
- * `minimal` for gpt-5 base/-mini/-nano, otherwise to `low`. `minimal` is only
- * valid on gpt-5 base; clamps to `low` elsewhere. Returns a string-literal
- * pointer; do not free.
+ * Pins a conversation's requests to one cache shard, so its long prefix stays
+ * warm across turns.  A content-neutral hint: a collision costs a miss, never
+ * another request's content.  For OpenAI and OpenRouter (which passes it on).
  */
-const char *llm_openai_clamp_effort_for_model(const char *model_name, const char *effort);
+void llm_openai_add_prompt_cache_key(struct json_object *root);
 
 /* ── History conversion (llm_openai_history.c) ──────────────────────────── */
 
@@ -102,31 +86,18 @@ const char *llm_openai_clamp_effort_for_model(const char *model_name, const char
  * Claude-format tool/image blocks to OpenAI format, and strips vision content
  * when the target LLM lacks vision support.
  *
+ * An assistant turn with blocks (llm_turn_blocks.h) is rendered from them:
+ * its text and tool calls, and the reasoning @p carrier and @p model issued
+ * (OpenRouter reasoning_details, a Gemini call's thought signature).
+ *
  * @param conversation_history Original conversation history (not modified).
+ * @param carrier The request's carrier (llm_turn_blocks_carrier).
+ * @param model   The request's model.
  * @return Converted history (new object, caller frees with json_object_put).
  */
-json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history);
-
-/**
- * @brief Return a request-private messages array with vision images applied,
- *        WITHOUT mutating @p history.
- *
- * llm_openai_prepare_chat_history may return the caller's conversation history
- * by shared reference, so the in-place "add content to the last message" pattern
- * would corrupt shared session state.  This copies-on-write: the changed message
- * is private, every other message is shared read-only.  If the last message is a
- * user turn its content becomes [text(@p input_text), image_url...]; otherwise a
- * new user message is appended.
- *
- * @return New array (caller owns — json_object_put or hand to root "messages"),
- *         or NULL on bad input / OOM (caller keeps @p history; vision dropped,
- *         never corrupted).
- */
-json_object *llm_openai_apply_vision_images(json_object *history,
-                                            const char *input_text,
-                                            const char **vision_images,
-                                            const size_t *vision_image_sizes,
-                                            int vision_image_count);
+json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history,
+                                             const char *carrier,
+                                             const char *model);
 
 /**
  * @brief Reconstruct a Claude-shaped tool message into OpenAI-canonical entries.
@@ -150,28 +121,9 @@ int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *o
  */
 char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                                     const char *input_text,
-                                    const char **vision_images,
-                                    const size_t *vision_image_sizes,
-                                    int vision_image_count,
                                     const char *base_url,
                                     const char *api_key,
                                     const char *model);
-
-/**
- * @brief Streaming /v1/chat/completions with recursive tool execution.
- *
- * Used by the legacy llm_openai_chat_completion_streaming() wrapper.
- */
-char *llm_openai_cc_streaming(struct json_object *conversation_history,
-                              const char *input_text,
-                              const char **vision_images,
-                              const size_t *vision_image_sizes,
-                              int vision_image_count,
-                              const char *base_url,
-                              const char *api_key,
-                              const char *model,
-                              llm_openai_text_chunk_callback chunk_callback,
-                              void *callback_userdata);
 
 /**
  * @brief Single-shot /v1/chat/completions streaming call (no tool loop).
@@ -183,9 +135,6 @@ char *llm_openai_cc_streaming(struct json_object *conversation_history,
  */
 int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history,
                                         const char *input_text,
-                                        const char **vision_images,
-                                        const size_t *vision_image_sizes,
-                                        int vision_image_count,
                                         const char *base_url,
                                         const char *api_key,
                                         const char *model,

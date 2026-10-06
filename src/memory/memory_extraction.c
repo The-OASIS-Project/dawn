@@ -27,6 +27,7 @@
 
 #include "memory/memory_extraction.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,18 +36,22 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/automated_event.h"
 #include "core/buf_printf.h"
 #include "core/iso8601.h"
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_extraction_input.h"
 #include "memory/memory_note_guard.h"
 #include "memory/memory_predicate_dedup.h"
 #include "memory/memory_types.h"
@@ -273,6 +278,19 @@ const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "  WRONG: \"Caroline requested a list of LGBTQ activist groups\"\n"
     "  RIGHT: \"Caroline joined 'Connected LGBTQ Activists' on 2023-07-18\" "
     "(the durable fact she shared during the exchange)\n"
+    "- THE ASSISTANT IS NOT A SOURCE of facts, relations, entities or "
+    "preferences (the summary still records what the assistant did or "
+    "found).  Extract only what the USER said, or confirmed when the "
+    "assistant asked (\"yes, that's right\").  The "
+    "assistant's messages may repeat stored memories, guess, or be wrong: "
+    "never extract a claim that appears only in an assistant message, and "
+    "never attribute one to the user (\"Jon mentioned X\" when it was the "
+    "assistant that said X).  Facts about the assistant, its replies, or "
+    "this conversation itself are not facts about the user.\n"
+    "  WRONG: \"Jon mentioned sharing his gate code at a talk last year\" "
+    "(the assistant's guess; Jon never said it)\n"
+    "  WRONG: \"Jon received the gate code 1234 from the assistant\" (the "
+    "assistant's reply, and an interaction event)\n"
     "- INTERACTION-ONLY CONVERSATIONS (test sessions, smart-home checks, "
     "timer/alarm/scheduler tests, command rehearsals, voice-control "
     "experiments) often have NO durable world-state to extract but DO "
@@ -300,10 +318,10 @@ const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "or charge levels, brightness or volume levels, live counts (\"3 "
     "lights currently on\"), sensor readings, the current time or date, "
     "and current weather — these are stale the moment they are stored.\n"
-    "  WRONG: \"Jon's Front Door Lock is locked at 98% battery\"  (live "
+    "  WRONG: \"Jon's Front Door Lock is locked at 98%% battery\"  (live "
     "state — a tool answers this, not memory)\n"
-    "  WRONG: \"Jon's home has 5 lights currently on: Living Room (89%), "
-    "Garage Overhead (90%)\"  (live counts + levels)\n"
+    "  WRONG: \"Jon's home has 5 lights currently on: Living Room (89%%), "
+    "Garage Overhead (90%%)\"  (live counts + levels)\n"
     "  WRONG: \"The current time is 11:11 PM EDT\"  (point-in-time reading)\n"
     "  RIGHT: \"Jon has a Front Door Lock and 7 Home-Assistant smart "
     "lights\"  (durable existence/config — keep)\n"
@@ -381,9 +399,23 @@ typedef struct {
 
 static struct {
    int user_ids[MAX_EXTRACTION_SLOTS]; /* User IDs with active extractions (0 = empty slot) */
-   int count;                          /* Current number of active extractions */
-} s_extraction_state = { { 0 }, 0 };
+   int count;                          /* Current number of running extractions */
+   /* Users held by memory_extraction_hold_user (no LLM call; 0 = empty). */
+   int held_user_ids[MEMORY_EXTRACTION_MAX_HOLDS];
+} s_extraction_state;
 static pthread_mutex_t s_extraction_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* Signalled whenever a slot is released (see memory_extraction_hold_user).  Uses
+ * CLOCK_MONOTONIC so a wall-clock change can't stretch or cut a timed wait. */
+static pthread_cond_t s_extraction_cond;
+static pthread_once_t s_extraction_cond_once = PTHREAD_ONCE_INIT;
+
+static void extraction_cond_init(void) {
+   pthread_condattr_t attr;
+   pthread_condattr_init(&attr);
+   pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+   pthread_cond_init(&s_extraction_cond, &attr);
+   pthread_condattr_destroy(&attr);
+}
 
 /* Last-extraction-outcome flag for the recovery/reextract orchestrator.
  * Set by the extraction thread when an LLM call signals transient failure
@@ -417,13 +449,28 @@ static int get_max_concurrent_extractions(void) {
 }
 
 /* Helper: Check if user has active extraction (must hold mutex) */
-static bool extraction_is_active_locked(int user_id) {
+static bool extraction_running_locked(int user_id) {
    for (int i = 0; i < MAX_EXTRACTION_SLOTS; i++) {
       if (s_extraction_state.user_ids[i] == user_id) {
          return true;
       }
    }
    return false;
+}
+
+/* Helper: the user's hold entry, or -1 (must hold mutex) */
+static int extraction_hold_index_locked(int user_id) {
+   for (int i = 0; i < MEMORY_EXTRACTION_MAX_HOLDS; i++) {
+      if (s_extraction_state.held_user_ids[i] == user_id) {
+         return i;
+      }
+   }
+   return -1;
+}
+
+/* Helper: an extraction is running for the user, or it is held (must hold mutex) */
+static bool extraction_is_active_locked(int user_id) {
+   return extraction_running_locked(user_id) || extraction_hold_index_locked(user_id) >= 0;
 }
 
 /* Helper: Try to acquire extraction slot for user (must hold mutex)
@@ -454,10 +501,12 @@ static bool extraction_slot_acquire_locked(int user_id) {
 
 /* Helper: Release extraction slot for user (must hold mutex) */
 static void extraction_slot_release_locked(int user_id) {
+   pthread_once(&s_extraction_cond_once, extraction_cond_init);
    for (int i = 0; i < MAX_EXTRACTION_SLOTS; i++) {
       if (s_extraction_state.user_ids[i] == user_id) {
          s_extraction_state.user_ids[i] = 0;
          s_extraction_state.count--;
+         pthread_cond_broadcast(&s_extraction_cond);
          return;
       }
    }
@@ -628,34 +677,6 @@ struct json_object *memory_extraction_parse_json(const char *response) {
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
-
-/* =============================================================================
- * Helper: UTF-8-safe truncation
- * ============================================================================= */
-
-static void utf8_truncate(char *str, size_t max_bytes) {
-   if (strlen(str) <= max_bytes)
-      return;
-   str[max_bytes] = '\0';
-   /* Back up past any UTF-8 continuation bytes (10xxxxxx) */
-   while (max_bytes > 0 && (str[max_bytes - 1] & 0xC0) == 0x80) {
-      str[--max_bytes] = '\0';
-   }
-   /* Remove the leading byte of the incomplete sequence */
-   if (max_bytes > 0 && (str[max_bytes - 1] & 0x80) != 0) {
-      int expected_len = 0;
-      unsigned char c = (unsigned char)str[max_bytes - 1];
-      if ((c & 0xE0) == 0xC0)
-         expected_len = 2;
-      else if ((c & 0xF0) == 0xE0)
-         expected_len = 3;
-      else if ((c & 0xF8) == 0xF0)
-         expected_len = 4;
-      if (expected_len > 0 && strlen(str + max_bytes - 1) < (size_t)expected_len) {
-         str[max_bytes - 1] = '\0';
-      }
-   }
-}
 
 /* =============================================================================
  * Helpers: Category validation + ISO-8601 date parsing
@@ -1108,6 +1129,11 @@ static void process_extraction_response(int user_id,
                if (new_conf > 1.0f)
                   new_conf = 1.0f;
                memory_db_fact_update_confidence(similar[0].id, user_id, new_conf);
+               /* This conversation taught it too (a forget of the other keeps it). */
+               if (prov && prov->conv_id > 0) {
+                  memory_db_fact_provenance_extend(similar[0].id, user_id, prov->conv_id,
+                                                   prov->msg_id_start, prov->msg_id_end);
+               }
                fact_id = similar[0].id;
                fact_id_origin = "like_match";
             }
@@ -1460,7 +1486,7 @@ static void process_extraction_response(int user_id,
 
    /* Invalidate entity embedding cache once after all extractions */
    if (entity_map_count > 0) {
-      memory_embeddings_invalidate_entity_cache();
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
 
    /* Process summary */
@@ -1651,8 +1677,8 @@ static void *extraction_thread(void *arg) {
     * conversation content, so bracket the call with the config-independent
     * tools-off guard (belt-and-suspenders alongside suppress_tools). */
    llm_tools_suppress_push();
-   response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
-                                              &extraction_config);
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
+   response = llm_chat_completion_with_config(extraction_history, prompt, &extraction_config);
    llm_tools_suppress_pop();
 
    /* Capture primary's transient status BEFORE any fallback runs.  The
@@ -1705,8 +1731,7 @@ static void *extraction_thread(void *arg) {
          }
 
          llm_tools_suppress_push();
-         response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
-                                                    &fallback_config);
+         response = llm_chat_completion_with_config(extraction_history, prompt, &fallback_config);
          llm_tools_suppress_pop();
          if (response) {
             used_fallback = true;
@@ -1714,12 +1739,15 @@ static void *extraction_thread(void *arg) {
       }
    }
 
+   llm_cache_monitor_pop_kind(kind_prev); /* primary and fallback both tagged */
    json_object_put(extraction_history);
 
+#ifdef ENABLE_WEBUI
    /* Recovery-triggered extractions process old, idle conversations the user
     * has long since moved on from.  Surfacing a noisy "extraction failed"
     * toast for those is just clutter — log only, don't notify. */
    bool is_recovery_run = (strncmp(ctx->session_id, "recovery_", 9) == 0);
+#endif
 
    /* Compute source range for provenance: (last_extracted_msg_id + 1, MAX(messages.id)).
     * Queried here — after LLM returns — to avoid a race with concurrent inserts. */
@@ -1736,7 +1764,33 @@ static void *extraction_thread(void *arg) {
       }
    }
 
-   if (response) {
+   /* The LLM call above can take tens of seconds; the user may have marked the
+    * conversation private (or deleted it) meanwhile.  Re-check just before
+    * anything is written, fail closed, and leave the cursor alone.  A toggle
+    * during the write below (which embeds each new row, so it can take seconds
+    * with a remote embedding provider) lets that run finish: the rows it writes
+    * count as learned, and forgetting them waits for it to end
+    * (memory_extraction_hold_user). */
+   bool revoked = false;
+#ifdef ENABLE_AUTH
+   if (response && ctx->conversation_id > 0) {
+      bool now_private = false;
+      int priv_rc = conv_db_is_private(ctx->conversation_id, ctx->user_id, &now_private);
+      if (priv_rc != AUTH_DB_SUCCESS || now_private) {
+         OLOG_INFO("memory_extraction: discarding result - conversation %lld became %s during "
+                   "extraction",
+                   (long long)ctx->conversation_id,
+                   priv_rc == AUTH_DB_SUCCESS ? "private" : "unreadable");
+         free(response);
+         response = NULL;
+         revoked = true;
+      }
+   }
+#endif
+
+   if (revoked) {
+      /* nothing written; see above */
+   } else if (response) {
       process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id, response,
                                   ctx->new_message_count, ctx->duration_seconds,
                                   prov.conv_id > 0 ? &prov : NULL);
@@ -1846,137 +1900,10 @@ cleanup:
    return NULL;
 }
 
-/* Return a message for the extraction transcript with inline base64 image data
- * replaced by a "[image]" text placeholder.  Vision turns store content as an OpenAI
- * multi-part array ({type:"image_url",image_url:{url:"data:image/...;base64,..."}});
- * serializing that verbatim into the extraction prompt injects ~250 KB of base64 per
- * image, overflowing the model context (observed: ~333K-token payload → HTTP 400) for
- * zero extraction value — extraction mines text, not pixels.
- *
- * Never mutates @p msg (it is a live reference into the session's conversation history):
- * builds a NEW object only when stripping is needed, copying top-level keys and sharing
- * immutable child refs.  Returns an owned (+1) reference in every case, so the caller
- * adds it to the array unconditionally. */
-static struct json_object *extraction_message_strip_images(struct json_object *msg) {
-   struct json_object *content = NULL;
-   if (!json_object_object_get_ex(msg, "content", &content) ||
-       !json_object_is_type(content, json_type_array)) {
-      return json_object_get(msg); /* plain-string content — no images to strip */
-   }
-
-   int part_count = json_object_array_length(content);
-   bool has_image = false;
-   for (int i = 0; i < part_count; i++) {
-      struct json_object *part = json_object_array_get_idx(content, i);
-      struct json_object *type_obj = NULL;
-      if (part != NULL && json_object_object_get_ex(part, "type", &type_obj) &&
-          strcmp(json_object_get_string(type_obj), "image_url") == 0) {
-         has_image = true;
-         break;
-      }
-   }
-   if (!has_image) {
-      return json_object_get(msg); /* multi-part but text-only — share untouched */
-   }
-
-   struct json_object *clean = json_object_new_object();
-   if (clean == NULL) {
-      return json_object_get(msg); /* OOM — fall back to original (oversized but valid) */
-   }
-
-   json_object_object_foreach(msg, key, val) {
-      if (strcmp(key, "content") == 0) {
-         struct json_object *clean_content = json_object_new_array();
-         for (int i = 0; i < part_count; i++) {
-            struct json_object *part = json_object_array_get_idx(content, i);
-            struct json_object *type_obj = NULL;
-            bool is_image = part != NULL && json_object_object_get_ex(part, "type", &type_obj) &&
-                            strcmp(json_object_get_string(type_obj), "image_url") == 0;
-            if (is_image) {
-               struct json_object *placeholder = json_object_new_object();
-               json_object_object_add(placeholder, "type", json_object_new_string("text"));
-               json_object_object_add(placeholder, "text", json_object_new_string("[image]"));
-               json_object_array_add(clean_content, placeholder);
-            } else {
-               json_object_array_add(clean_content, json_object_get(part));
-            }
-         }
-         json_object_object_add(clean, "content", clean_content);
-      } else {
-         json_object_object_add(clean, key, json_object_get(val));
-      }
-   }
-   return clean;
-}
-
-/* Per-message content budget for extraction input. A single oversized tool
- * result (observed: a runaway 705 KB graph-query dump) can push the whole
- * extraction payload past the model's context window and fail the request
- * (613K-token payload -> HTTP 400). 16 KB is generous for real conversational
- * content; tool results carry context, not user facts, so truncating them for
- * extraction is safe. */
-#define MEMORY_EXTRACTION_MAX_MSG_BYTES 16384
-
-/* Cap a single message's string content to MEMORY_EXTRACTION_MAX_MSG_BYTES.
- * Returns an owned ref: the original when within budget, else a copy with
- * UTF-8-safe-truncated content plus a "[... N bytes truncated]" marker. Array
- * (multimodal) content is not capped here — strip_images already replaces image
- * parts, and an oversized multipart *text* part is user-typed, not the runaway
- * tool-result case this guards (the observed failure class is plain strings). */
-static struct json_object *extraction_message_cap_content(struct json_object *msg,
-                                                          size_t max_bytes) {
-   struct json_object *content = NULL;
-   if (!json_object_object_get_ex(msg, "content", &content) ||
-       !json_object_is_type(content, json_type_string)) {
-      return json_object_get(msg);
-   }
-   const char *text = json_object_get_string(content);
-   size_t len = text != NULL ? strlen(text) : 0;
-   if (len <= max_bytes) {
-      return json_object_get(msg);
-   }
-
-   /* Copy a little past max_bytes so utf8_truncate can trim a split codepoint. */
-   size_t copy_len = len < max_bytes + 4 ? len : max_bytes + 4;
-   char *buf = malloc(copy_len + 1);
-   if (buf == NULL) {
-      return json_object_get(msg); /* OOM — keep original (oversized but valid) */
-   }
-   memcpy(buf, text, copy_len);
-   buf[copy_len] = '\0';
-   utf8_truncate(buf, max_bytes);
-
-   char marker[96];
-   snprintf(marker, sizeof(marker), "\n[... %zu bytes truncated for memory extraction]",
-            len - strlen(buf));
-
-   struct json_object *clean = json_object_new_object();
-   if (clean == NULL) {
-      free(buf);
-      return json_object_get(msg);
-   }
-   json_object_object_foreach(msg, key, val) {
-      if (strcmp(key, "content") == 0) {
-         size_t need = strlen(buf) + strlen(marker) + 1;
-         char *joined = malloc(need);
-         if (joined != NULL) {
-            snprintf(joined, need, "%s%s", buf, marker);
-            json_object_object_add(clean, "content", json_object_new_string(joined));
-            free(joined);
-         } else {
-            json_object_object_add(clean, "content", json_object_new_string(buf));
-         }
-      } else {
-         json_object_object_add(clean, key, json_object_get(val));
-      }
-   }
-   free(buf);
-   return clean;
-}
-
 /* =============================================================================
  * Public API
  * ============================================================================= */
+
 
 int memory_trigger_extraction(int user_id,
                               int64_t conversation_id,
@@ -1994,16 +1921,30 @@ int memory_trigger_extraction(int user_id,
    }
 
 #ifdef ENABLE_AUTH
-   /* Re-check privacy status from database (prevents race condition with set_private) */
+   /* Every caller that knows the conversation passes it, so this is the one
+    * place the "never extract" rules are enforced for all of them.  Re-read from
+    * the DB (a cached flag can lag set_private).  Fail closed: if the row can't be
+    * read (deleted, not this user's, DB error) nothing is extracted; memory
+    * recovery re-extracts eligible conversations from the DB later. */
    if (conversation_id > 0) {
       bool is_private = false;
-      conv_db_is_private(conversation_id, user_id, &is_private);
-      if (is_private) {
-         OLOG_INFO("memory_extraction: skipping - conversation %lld is private (DB check)",
-                   (long long)conversation_id);
+      int priv_rc = conv_db_is_private(conversation_id, user_id, &is_private);
+      if (priv_rc != AUTH_DB_SUCCESS || is_private) {
+         OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
+                   (long long)conversation_id,
+                   priv_rc == AUTH_DB_SUCCESS ? "private" : "unreadable");
          return 0;
       }
-      /* On error, is_private stays false — proceed with extraction */
+      /* A background job's transcript is research the model did, not what the
+       * user said; memory comes from the parent conversation it reports into. */
+      job_record_t job_rec;
+      int job_rc = conv_db_job_get(conversation_id, user_id, &job_rec);
+      if (job_rc != AUTH_DB_NOT_FOUND) {
+         OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
+                   (long long)conversation_id,
+                   job_rc == AUTH_DB_SUCCESS ? "a background job" : "unreadable (job check)");
+         return 0;
+      }
    }
 #endif
 
@@ -2083,48 +2024,32 @@ int memory_trigger_extraction(int user_id,
       ctx->fallback = *fallback;
    }
 
-   /* Note-extraction guard: collect note-filed bodies + document_read echoes
-    * from the FULL history so they can be redacted out of the extraction input
-    * (keeps reference text the user filed as a note out of semantic memory).
-    * NULL when disabled or nothing was filed → redact is a pass-through. */
-   memory_note_guard_t *note_guard = memory_note_guard_create(conversation_history);
-
-   /* ID-based filter: include messages where id > last_msg_id.
-    * Messages with missing or zero id (system messages, voice-only path,
-    * messages added before this feature shipped) are included unconditionally.
-    * System messages are always skipped by the role check. */
-   size_t arr_len = json_object_array_length(conversation_history);
-   struct json_object *filtered = json_object_new_array();
-
-   for (size_t i = 0; i < arr_len; i++) {
-      struct json_object *msg = json_object_array_get_idx(conversation_history, i);
-      struct json_object *role_obj, *id_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-      if (strcmp(json_object_get_string(role_obj), "system") == 0)
-         continue;
-      int64_t msg_id = 0;
-      if (json_object_object_get_ex(msg, "id", &id_obj))
-         msg_id = json_object_get_int64(id_obj);
-      if (msg_id == 0 || msg_id > last_msg_id) {
-         /* strip_images then guard-redact: both return an owned ref and never
-          * mutate the live history; chaining yields one redacted copy (or a
-          * shared ref when neither stage changes anything). */
-         struct json_object *stripped = extraction_message_strip_images(msg);
-         struct json_object *guarded = memory_note_guard_redact(note_guard, stripped);
-         json_object_put(stripped);
-         struct json_object *capped = extraction_message_cap_content(
-             guarded, MEMORY_EXTRACTION_MAX_MSG_BYTES);
-         json_object_put(guarded);
-         json_object_array_add(filtered, capped);
-      }
+   /* The messages to extract, verified to belong to conversation_id (see
+    * memory_extraction_build_input).  NULL: refused or out of memory; either
+    * way nothing is extracted and memory_recovery picks up anything eligible. */
+   struct json_object *filtered = memory_extraction_build_input(user_id, conversation_id,
+                                                                conversation_history, last_msg_id);
+   if (!filtered) {
+      free(ctx);
+      pthread_mutex_lock(&s_extraction_mutex);
+      extraction_slot_release_locked(user_id);
+      pthread_mutex_unlock(&s_extraction_mutex);
+      return 0;
    }
 
-   memory_note_guard_free(note_guard);
-
-   ctx->conversation_json = strdup(
-       json_object_to_json_string_ext(filtered, JSON_C_TO_STRING_PLAIN));
+   /* Every caller passes a stripped history; this is the backstop, so no
+    * reasoning a vendor issued for itself reaches the extraction model. */
+   struct json_object *safe = llm_history_strip_internal(filtered);
    json_object_put(filtered);
+   if (!safe) {
+      free(ctx);
+      pthread_mutex_lock(&s_extraction_mutex);
+      extraction_slot_release_locked(user_id);
+      pthread_mutex_unlock(&s_extraction_mutex);
+      return 1;
+   }
+   ctx->conversation_json = strdup(json_object_to_json_string_ext(safe, JSON_C_TO_STRING_PLAIN));
+   json_object_put(safe);
 
    if (!ctx->conversation_json) {
       free(ctx);
@@ -2170,6 +2095,72 @@ bool memory_extraction_in_progress(int user_id) {
    pthread_mutex_unlock(&s_extraction_mutex);
 
    return in_progress;
+}
+
+/* Deadline @p timeout_sec from now on the condition variable's clock. */
+static struct timespec extraction_deadline(int timeout_sec) {
+   struct timespec deadline;
+   clock_gettime(CLOCK_MONOTONIC, &deadline);
+   deadline.tv_sec += timeout_sec > 0 ? timeout_sec : 0;
+   return deadline;
+}
+
+bool memory_extraction_wait_idle(int user_id, int timeout_sec) {
+   if (user_id <= 0) {
+      return true;
+   }
+   pthread_once(&s_extraction_cond_once, extraction_cond_init);
+   const struct timespec deadline = extraction_deadline(timeout_sec);
+   pthread_mutex_lock(&s_extraction_mutex);
+   bool idle = true;
+   while (extraction_running_locked(user_id)) {
+      if (pthread_cond_timedwait(&s_extraction_cond, &s_extraction_mutex, &deadline) == ETIMEDOUT) {
+         idle = !extraction_running_locked(user_id);
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_extraction_mutex);
+   return idle;
+}
+
+bool memory_extraction_hold_user(int user_id, int timeout_sec) {
+   if (user_id <= 0) {
+      return false;
+   }
+   pthread_once(&s_extraction_cond_once, extraction_cond_init);
+   const struct timespec deadline = extraction_deadline(timeout_sec);
+
+   pthread_mutex_lock(&s_extraction_mutex);
+   for (;;) {
+      if (!extraction_is_active_locked(user_id)) {
+         /* A hold makes no LLM call; it only keeps one from starting for this
+          * user, so it takes an entry of its own, not an extraction slot. */
+         const int free_idx = extraction_hold_index_locked(0);
+         if (free_idx >= 0) {
+            s_extraction_state.held_user_ids[free_idx] = user_id;
+            pthread_mutex_unlock(&s_extraction_mutex);
+            return true;
+         }
+      }
+      if (pthread_cond_timedwait(&s_extraction_cond, &s_extraction_mutex, &deadline) == ETIMEDOUT) {
+         pthread_mutex_unlock(&s_extraction_mutex);
+         return false;
+      }
+   }
+}
+
+void memory_extraction_release_user(int user_id) {
+   if (user_id <= 0) {
+      return;
+   }
+   pthread_once(&s_extraction_cond_once, extraction_cond_init);
+   pthread_mutex_lock(&s_extraction_mutex);
+   const int idx = extraction_hold_index_locked(user_id);
+   if (idx >= 0) {
+      s_extraction_state.held_user_ids[idx] = 0;
+      pthread_cond_broadcast(&s_extraction_cond);
+   }
+   pthread_mutex_unlock(&s_extraction_mutex);
 }
 
 bool memory_extraction_consume_last_transient(int user_id) {

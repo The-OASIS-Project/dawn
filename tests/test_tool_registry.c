@@ -159,8 +159,7 @@ static const tool_metadata_t mock_schedulable_action_gated = {
 };
 
 
-/* Tool with an ARRAY param (declared last, per the ARRAY terminal-slot
- * contract) — exercises array schema emission. */
+/* Tool with an ARRAY param, declared last. */
 static const treg_param_t mock_array_params[] = {
    {
        .name = "action",
@@ -194,12 +193,12 @@ static const tool_metadata_t mock_tool_array = {
    .default_remote = true,
 };
 
-/* ARRAY param NOT in the last slot — must be rejected at registration time
- * (terminal-slot contract). */
-static const treg_param_t mock_array_params_bad[] = {
+/* ARRAY param declared first: its value is escaped like any other, so it
+ * needn't be last. */
+static const treg_param_t mock_array_params_first[] = {
    {
        .name = "items",
-       .description = "List of items (illegally not last)",
+       .description = "List of items (declared first)",
        .type = TOOL_PARAM_TYPE_ARRAY,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -216,14 +215,14 @@ static const treg_param_t mock_array_params_bad[] = {
    },
 };
 
-static const tool_metadata_t mock_tool_array_bad = {
-   .name = "array_bad_tool",
-   .device_string = "array bad device",
-   .description = "ARRAY param not last — should fail registration",
+static const tool_metadata_t mock_tool_array_first = {
+   .name = "array_first_tool",
+   .device_string = "array first device",
+   .description = "ARRAY param declared first",
    .callback = mock_callback,
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,
-   .params = mock_array_params_bad,
+   .params = mock_array_params_first,
    .param_count = 2,
    .default_local = true,
    .default_remote = true,
@@ -556,67 +555,225 @@ static void test_validate_null_err_buf_safe(void) {
  * tests exercised tool_registry_generate_llm_schema(), which was removed (the
  * registry no longer generates LLM schemas — llm_tools.c does, via its own
  * add_param_type_to_prop).  Those tests covered the deleted duplicate, not the
- * live path, so they were dropped rather than migrated.  The safety-critical
- * ARRAY-must-be-last rule below is unaffected. */
-static void test_array_param_must_be_last(void) {
-   /* ARRAY param declared last → registers fine. */
-   TEST_ASSERT_EQUAL_INT_MESSAGE(0, tool_registry_register(&mock_tool_array),
-                                 "ARRAY-last tool registers");
-   /* ARRAY param NOT last → rejected. */
-   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, tool_registry_register(&mock_tool_array_bad),
-                                 "ARRAY-not-last tool is rejected");
+ * live path, so they were dropped rather than migrated. */
+static void test_array_param_may_be_declared_anywhere(void) {
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&mock_tool_array));
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&mock_tool_array_first));
 }
 
-static void test_extract_custom_tail_reads_to_end(void) {
-   /* A serialized array containing a literal "::" must survive the tail
-    * extractor intact (terminal slot), whereas the plain extractor truncates. */
-   const char *encoded = "::items::[\"Song :: Reprise\",\"Plain\"]";
-   char out[256] = { 0 };
+/* Packs base + fields as llm_tools.c does: each value escaped. */
+static void pack(char *out, size_t cap, const char *base, const char *const *fields, int n) {
+   size_t len = tool_value_escape(base, strlen(base), out, cap);
+   for (int i = 0; i < n; i++) {
+      len += (size_t)snprintf(out + len, cap - len, "::%s::", fields[2 * i]);
+      len += tool_value_escape(fields[2 * i + 1], strlen(fields[2 * i + 1]), out + len, cap - len);
+   }
+}
 
-   TEST_ASSERT_TRUE(tool_param_extract_custom_tail(encoded, "items", out, sizeof(out)));
-   TEST_ASSERT_EQUAL_STRING("[\"Song :: Reprise\",\"Plain\"]", out);
+/* Any value survives the packing: "::" inside it, colons at its ends, the
+ * escape byte itself. */
+static void test_packed_values_round_trip(void) {
+   const char *const fields[] = { "text",  "line one\nratio 3::1 ends:",   "change", "",
+                                  "items", "[\"Song :: Reprise\",\":x\"]", "raw",    "a\x1Fu\x1F" };
+   char packed[512];
+   pack(packed, sizeof(packed), "Note:", fields, 4);
+   char out[256];
+   tool_param_extract_base(packed, out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("Note:", out);
+   TEST_ASSERT_TRUE(tool_param_extract_custom(packed, "text", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("line one\nratio 3::1 ends:", out);
+   TEST_ASSERT_TRUE(tool_param_extract_custom(packed, "change", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("", out);
+   TEST_ASSERT_TRUE(tool_param_extract_custom(packed, "items", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("[\"Song :: Reprise\",\":x\"]", out);
+   TEST_ASSERT_TRUE(tool_param_extract_custom(packed, "raw", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("a\x1Fu\x1F", out);
+   TEST_ASSERT_FALSE(tool_param_extract_custom(packed, "missing", out, sizeof(out)));
+   /* A single inner colon (a time, a URL) is sent as-is. */
+   TEST_ASSERT_EQUAL_size_t(5, tool_value_escape("10:30", 5, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("10:30", out);
+}
 
-   /* Plain extractor stops at the internal "::" — demonstrates why tail is needed. */
-   char trunc[256] = { 0 };
-   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "items", trunc, sizeof(trunc)));
-   TEST_ASSERT_EQUAL_STRING("[\"Song ", trunc);
+/* A value equal to a field name isn't taken for that field. */
+static void test_a_value_is_not_a_field_name(void) {
+   const char *encoded = "base::label::id::id::5";
+   char out[16];
+   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "id", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("5", out);
+   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "label", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("id", out);
+}
+
+/* A string packed without escaping (a direct command, MQTT) reads as before. */
+static void test_unescaped_strings_decode_unchanged(void) {
+   const char *encoded = "queenquery::limit::5::items::[\"a\",\"b\"]";
+   char out[64];
+   tool_param_extract_base(encoded, out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("queenquery", out);
+   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "limit", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("5", out);
+   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "items", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("[\"a\",\"b\"]", out);
+}
+
+/* Output that doesn't fit is cut whole: never half an escape, always ended. */
+static void test_escape_and_decode_truncate_safely(void) {
+   char out[4];
+   TEST_ASSERT_EQUAL_size_t(5, tool_value_escape("a::", 3, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("a\x1F"
+                            "c",
+                            out); /* the second escape didn't fit */
+   char two[2];
+   tool_value_decode_copy("abc", 3, two, sizeof(two));
+   TEST_ASSERT_EQUAL_STRING("a", two);
 }
 
 static void test_extract_zero_out_len_safe(void) {
-   /* out_len == 0 must be rejected before any length math (a SIZE_MAX underflow
-    * would otherwise drive a huge memcpy). */
+   /* out_len == 0 must be rejected before any length math. */
    const char *encoded = "base::items::[\"a\"]";
    char dummy[1] = { 'x' };
-   TEST_ASSERT_FALSE(tool_param_extract_custom_tail(encoded, "items", dummy, 0));
    TEST_ASSERT_FALSE(tool_param_extract_custom(encoded, "items", dummy, 0));
+   tool_param_extract_base(encoded, dummy, 0);
    TEST_ASSERT_EQUAL_CHAR('x', dummy[0]); /* untouched */
-}
-
-static void test_extract_base_and_custom_coexist(void) {
-   /* base value + a scalar custom before the terminal array. */
-   const char *encoded = "queenquery::limit::5::items::[\"a\",\"b\"]";
-   char base[64] = { 0 };
-   char limit[16] = { 0 };
-   char items[64] = { 0 };
-
-   tool_param_extract_base(encoded, base, sizeof(base));
-   TEST_ASSERT_EQUAL_STRING("queenquery", base);
-
-   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "limit", limit, sizeof(limit)));
-   TEST_ASSERT_EQUAL_STRING("5", limit);
-
-   TEST_ASSERT_TRUE(tool_param_extract_custom_tail(encoded, "items", items, sizeof(items)));
-   TEST_ASSERT_EQUAL_STRING("[\"a\",\"b\"]", items);
 }
 
 /* ============================================================================
  * Main
  * ============================================================================ */
 
+/* ============================================================================
+ * Kinds of action
+ * ============================================================================ */
+
+#define KINDS_TOOL(table) kinds_tool((table), TOOL_KIND_COUNT(table))
+
+static tool_metadata_t kinds_tool(const tool_action_kind_entry_t *table, int count) {
+   tool_metadata_t meta = mock_tool;
+   meta.name = "kinds_tool";
+   meta.device_string = "kinds device";
+   meta.action_kinds = table;
+   meta.action_kind_count = count;
+   return meta;
+}
+
+/* An action not listed takes the tool's default, ACT unless set; a tool that
+ * declares nothing acts. */
+static void test_kind_lookup_and_default(void) {
+   static const tool_action_kind_entry_t table[] = {
+      { "play", TOOL_KIND_DEVICE, NULL },
+      { "pause", TOOL_KIND_READ, NULL },
+   };
+   tool_metadata_t meta = KINDS_TOOL(table);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, tool_action_kinds_validate(&meta, NULL, 0));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_DEVICE, tool_action_kind(&meta, NULL, "play", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, tool_action_kind(&meta, NULL, "pause", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "stop", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&mock_tool, NULL, "play", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(NULL, NULL, "play", NULL));
+   meta.default_kind = TOOL_KIND_READ;
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, tool_action_kind(&meta, NULL, "stop", NULL));
+   TEST_ASSERT_EQUAL_STRING("device", tool_action_kind_name(TOOL_KIND_DEVICE));
+   TEST_ASSERT_EQUAL_STRING("act", tool_action_kind_name(TOOL_KIND_ACT));
+}
+
+static tool_action_kind_t kinds_classify(const char *device,
+                                         const char *action,
+                                         const char *value,
+                                         tool_action_kind_t listed) {
+   (void)device;
+   (void)action;
+   return (value && strcmp(value, "now") == 0) ? TOOL_KIND_ACT : listed;
+}
+
+static tool_action_kind_t kinds_read_all(const char *device,
+                                         const char *action,
+                                         const char *value,
+                                         tool_action_kind_t listed) {
+   (void)device;
+   (void)action;
+   (void)value;
+   (void)listed;
+   return TOOL_KIND_READ;
+}
+
+/* classify_call sees the table's kind and may change it; a confirm stays ACT
+ * whatever it says. */
+static void test_kind_classify_call(void) {
+   static const tool_action_kind_entry_t table[] = {
+      { "play", TOOL_KIND_PREPARE, "stop" },
+      { "stop", TOOL_KIND_ACT, NULL },
+   };
+   tool_metadata_t meta = KINDS_TOOL(table);
+   meta.classify_call = kinds_classify;
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_PREPARE, tool_action_kind(&meta, NULL, "play", "later"));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "play", "now"));
+   meta.classify_call = kinds_read_all;
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, tool_action_kind(&meta, NULL, "play", NULL));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_ACT, tool_action_kind(&meta, NULL, "stop", NULL));
+}
+
+/* Registration refuses a table naming an action the tool doesn't have, an
+ * action listed twice, a prepare without a listed confirm that acts, a confirm
+ * on a non-prepare entry, and a table on a tool with no ENUM action. */
+static void test_kind_table_validation(void) {
+   char why[160];
+   static const tool_action_kind_entry_t unknown[] = { { "rewind", TOOL_KIND_READ, NULL } };
+   tool_metadata_t meta = KINDS_TOOL(unknown);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+   TEST_ASSERT_NOT_EQUAL(SUCCESS, tool_registry_register(&meta));
+   TEST_ASSERT_NULL(tool_registry_lookup("kinds_tool"));
+
+   static const tool_action_kind_entry_t twice[] = {
+      { "play", TOOL_KIND_READ, NULL },
+      { "play", TOOL_KIND_ACT, NULL },
+   };
+   meta = KINDS_TOOL(twice);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t no_confirm[] = { { "play", TOOL_KIND_PREPARE, NULL } };
+   meta = KINDS_TOOL(no_confirm);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t read_confirm[] = {
+      { "play", TOOL_KIND_PREPARE, "pause" },
+      { "pause", TOOL_KIND_DEVICE, NULL },
+   };
+   meta = KINDS_TOOL(read_confirm);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t stray_confirm[] = {
+      { "play", TOOL_KIND_ACT, "pause" },
+      { "pause", TOOL_KIND_ACT, NULL },
+   };
+   meta = KINDS_TOOL(stray_confirm);
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   static const tool_action_kind_entry_t ok[] = {
+      { "play", TOOL_KIND_PREPARE, "stop" },
+      { "stop", TOOL_KIND_ACT, NULL },
+   };
+   meta = KINDS_TOOL(ok);
+   meta.param_count = 0;
+   meta.params = NULL;
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   meta = KINDS_TOOL(ok);
+   meta.default_kind = TOOL_KIND_PREPARE;
+   TEST_ASSERT_EQUAL_INT(FAILURE, tool_action_kinds_validate(&meta, why, sizeof(why)));
+
+   meta = KINDS_TOOL(ok);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, tool_action_kinds_validate(&meta, why, sizeof(why)));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, tool_registry_register(&meta));
+}
+
 int main(void) {
    UNITY_BEGIN();
 
    RUN_TEST(test_init_returns_success);
+   RUN_TEST(test_kind_lookup_and_default);
+   RUN_TEST(test_kind_classify_call);
+   RUN_TEST(test_kind_table_validation);
    RUN_TEST(test_register_returns_success);
    RUN_TEST(test_lookup_by_name);
    RUN_TEST(test_lookup_not_found);
@@ -648,11 +805,13 @@ int main(void) {
    RUN_TEST(test_validate_action_gate);
    RUN_TEST(test_validate_null_err_buf_safe);
 
-   /* ARRAY param: must-be-last rule + encode/decode contract */
-   RUN_TEST(test_array_param_must_be_last);
-   RUN_TEST(test_extract_custom_tail_reads_to_end);
+   /* The packed value's encode/decode contract */
+   RUN_TEST(test_array_param_may_be_declared_anywhere);
+   RUN_TEST(test_packed_values_round_trip);
+   RUN_TEST(test_a_value_is_not_a_field_name);
+   RUN_TEST(test_unescaped_strings_decode_unchanged);
+   RUN_TEST(test_escape_and_decode_truncate_safely);
    RUN_TEST(test_extract_zero_out_len_safe);
-   RUN_TEST(test_extract_base_and_custom_coexist);
 
    return UNITY_END();
 }

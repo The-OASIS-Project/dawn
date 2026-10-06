@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "dawn_error.h"
+#include "llm/llm_context_text.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -87,6 +88,22 @@ static size_t sanitize_into(char *dst, size_t dst_cap, const char *src, size_t m
    return di;
 }
 
+/* An MCP server's text made safe to show the model: its hidden characters
+ * stripped (at most @p max bytes kept), then DAWN's markers in what is left
+ * defused, as one line.  The order matters: stripping after defusing could
+ * join a marker's pieces back together.  Caller frees; NULL on allocation
+ * failure. */
+static char *defused_text(const char *raw, size_t max) {
+   char *clean = malloc(max + 1);
+   if (clean == NULL) {
+      return NULL;
+   }
+   sanitize_into(clean, max + 1, raw, max);
+   char *out = llm_context_neutralize_line(clean);
+   free(clean);
+   return out;
+}
+
 char *mcp_schema_wrap_description(const char *server_alias, const char *raw_description) {
    if (server_alias == NULL) {
       server_alias = "unknown";
@@ -112,9 +129,19 @@ char *mcp_schema_wrap_description(const char *server_alias, const char *raw_desc
       return out;
    }
 
-   memcpy(out, begin, bl);
+   /* An MCP server's text: its hidden characters stripped first, then DAWN's
+    * markers in what is left defused (a stripped character can't rejoin a
+    * marker after it was checked), and one line, so it can't open a line of
+    * its own inside the wrapper. */
    size_t room = TOOL_DESC_MAX - bl - el - 1;
-   size_t cl = sanitize_into(out + bl, room + 1, raw_description, room);
+   char *defused = defused_text(raw_description, room);
+   if (defused == NULL) {
+      free(out);
+      return NULL;
+   }
+   memcpy(out, begin, bl);
+   size_t cl = sanitize_into(out + bl, room + 1, defused, room);
+   free(defused);
    memcpy(out + bl + cl, end, el);
    out[bl + cl + el] = '\0';
    /* sanitize_into caps at `room` byte-wise and can stop mid-codepoint, leaving
@@ -248,11 +275,34 @@ static void mark_opaque_json(treg_param_t *p,
                 kind);
 }
 
+/* The longest property name an MCP tool may use. */
+#define MCP_SCHEMA_KEY_MAX 64
+
+/* Whether @p key is a plain identifier (letters, digits, '_', '-', '.'): what a
+ * property name is.  A name is sent back to the server as it is, so it can't
+ * be rewritten; one that isn't plain is refused instead. */
+static bool plain_key(const char *key) {
+   size_t n = 0;
+   for (const char *c = key; c && *c; c++, n++) {
+      if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') ||
+            *c == '_' || *c == '-' || *c == '.')) {
+         return false;
+      }
+   }
+   return n > 0 && n <= MCP_SCHEMA_KEY_MAX;
+}
+
 /* Translate one property schema into @p p. Returns SUCCESS or FAILURE (reject). */
 static int translate_one(const char *key,
                          struct json_object *val,
                          const char *tool_name,
                          treg_param_t *p) {
+   if (!plain_key(key)) {
+      OLOG_WARNING("MCP schema: tool '%s' has a property name that isn't a plain identifier "
+                   "-> rejected",
+                   tool_name);
+      return FAILURE;
+   }
    p->name = strdup(key);
    p->maps_to = TOOL_MAPS_TO_CUSTOM;
    p->field_name = strdup(key);
@@ -264,7 +314,12 @@ static int translate_one(const char *key,
    const char *desc = json_object_object_get_ex(val, "description", &d) ? json_object_get_string(d)
                                                                         : "";
    char dbuf[TOOL_DESC_MAX];
-   sanitize_into(dbuf, sizeof(dbuf), desc != NULL ? desc : "", sizeof(dbuf) - 1);
+   char *defused = defused_text(desc != NULL ? desc : "", sizeof(dbuf) - 1);
+   if (defused == NULL) {
+      return FAILURE;
+   }
+   sanitize_into(dbuf, sizeof(dbuf), defused, sizeof(dbuf) - 1);
+   free(defused);
    p->description = strdup(dbuf);
    if (p->description == NULL) {
       return FAILURE;
@@ -296,6 +351,19 @@ static int translate_one(const char *key,
          p->type = TOOL_PARAM_TYPE_ENUM;
          for (int i = 0; i < ec; i++) {
             const char *ev = json_object_get_string(json_object_array_get_idx(en, i));
+            /* A value goes back to the server as written, so it can't be
+             * rewritten: one that hidden characters or DAWN's markers would
+             * change is refused. */
+            char *checked = defused_text(ev != NULL ? ev : "", TOOL_DESC_MAX - 1);
+            const bool same = checked && strcmp(checked, ev != NULL ? ev : "") == 0;
+            free(checked);
+            if (!same) {
+               OLOG_WARNING("MCP schema: tool '%s' param '%s' has an enum value that isn't "
+                            "plain text -> rejected",
+                            tool_name, key);
+               p->enum_count = i; /* free_param reclaims [0,i) */
+               return FAILURE;
+            }
             p->enum_values[i] = strdup(ev != NULL ? ev : "");
             if (p->enum_values[i] == NULL) {
                p->enum_count = i; /* free_param reclaims [0,i) */

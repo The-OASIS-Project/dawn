@@ -22,16 +22,18 @@
  * rather than relying on server state via previous_response_id, so resumed
  * conversations and operator-driven history mutation continue to work.
  *
- * Cross-turn reasoning items live in-memory only on the assistant message JSON
- * under _provider_state.openai_responses.reasoning_items; they are not persisted
- * to the auth_db (consistent with how tool_calls are not persisted today).
+ * The turn's output items (reasoning, text, function calls) are captured in
+ * order as provider-neutral blocks (llm_turn_blocks.h); the next request
+ * replays OpenAI's own reasoning items from them.
  */
 
 #include "llm/llm_openai_responses.h"
 
+#include <ctype.h>
 #include <curl/curl.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,13 +42,20 @@
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
 #include "core/session_manager.h"
+#include "llm/llm_cache_monitor.h"
+#include "llm/llm_capabilities.h"
+#include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_key_tag.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
 #include "llm/llm_streaming.h"
+#include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "llm/sse_parser.h"
 #include "logging.h"
 #include "ui/metrics.h"
@@ -106,11 +115,16 @@ typedef struct {
    int fc_count;
    int active_fc_index; /* -1 when no function_call item open */
 
-   /* Reasoning items collected for cross-turn round-trip. JSON array, growable.
-    * `reasoning_items_bytes` tracks the aggregate size of stored encrypted_content
-    * payloads so we can cap and prevent payload-bloat DoS from a misbehaving upstream. */
-   struct json_object *reasoning_items;
-   size_t reasoning_items_bytes;
+   /* The turn's output items as blocks, in order (llm_turn_blocks.h).  Their
+    * sizes are capped so a misbehaving upstream can't bloat every later
+    * request: reasoning on its own, everything together as well (a turn over
+    * that keeps no blocks, and replays as plain text and tool calls). */
+   struct json_object *blocks;
+   size_t reasoning_bytes;
+   size_t block_bytes;
+   bool blocks_over;
+   const char *model;
+   char carrier[LLM_CARRIER_MAX]; /* who issued its reasoning (llm_turn_blocks_carrier) */
 
    /* Final response.id captured at response.completed */
    char response_id[64];
@@ -171,49 +185,20 @@ static struct json_object *flatten_tools_for_responses(struct json_object *cc_to
  * Reasoning effort selection
  * ============================================================================= */
 
-/**
- * @brief Validate that an effort string is one of the values gpt-5.4+ accepts.
- *
- * Per OpenAI: gpt-5.4 family accepts {none, low, medium, high, xhigh}. "minimal"
- * is gpt-5-base only; mapped to "low" before reaching this gate. Anything else
- * (including operator-supplied junk in g_config.llm.thinking.reasoning_effort)
- * is normalized to "medium" rather than passed verbatim into the JSON.
- */
-static bool effort_is_allowed_for_responses(const char *effort) {
-   if (!effort)
-      return false;
-   return strcmp(effort, "none") == 0 || strcmp(effort, "low") == 0 ||
-          strcmp(effort, "medium") == 0 || strcmp(effort, "high") == 0 ||
-          strcmp(effort, "xhigh") == 0;
-}
-
-static const char *select_reasoning_effort(const char *model_name) {
-   (void)model_name; /* Reserved for future per-model effort floors. */
-   const char *thinking_mode = llm_get_current_thinking_mode();
-
-   if (strcmp(thinking_mode, "disabled") == 0) {
-      /* gpt-5.4 (and other Responses-routed models) accept "none" as the lowest. */
+/* The request's reasoning effort: the session's mode and effort resolved
+ * against the model (models.toml [thinking.openai]).  "disabled" is effort
+ * "none"; a model that can't turn reasoning off, or a utility call, gets its
+ * lowest level.  Always explicit: an omitted effort runs OpenAI's default. */
+static const char *select_reasoning_effort(const char *model_name,
+                                           llm_thinking_resolved_t *resolved) {
+   llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name, resolved);
+   if (!resolved->controllable) {
+      return NULL;
+   }
+   if (resolved->mode == LLM_THINK_DISABLED) {
       return "none";
    }
-
-   const char *candidate = NULL;
-   if (strcmp(thinking_mode, "enabled") == 0 || strcmp(thinking_mode, "auto") == 0) {
-      candidate = g_config.llm.thinking.reasoning_effort;
-   } else if (strcmp(thinking_mode, "minimal") == 0) {
-      candidate = "low";
-   } else {
-      candidate = thinking_mode;
-   }
-
-   if (candidate && strcmp(candidate, "minimal") == 0) {
-      candidate = "low";
-   }
-   if (!effort_is_allowed_for_responses(candidate)) {
-      OLOG_WARNING("Responses: rejecting unknown reasoning effort '%s', using 'medium'",
-                   candidate ? candidate : "(null)");
-      return "medium";
-   }
-   return candidate;
+   return resolved->effort[0] ? resolved->effort : NULL;
 }
 
 /* =============================================================================
@@ -227,6 +212,7 @@ static bool is_current_session_remote_local(void) {
    return s->type != SESSION_TYPE_LOCAL;
 }
 
+
 /**
  * @brief Build the full Responses request JSON payload.
  *
@@ -236,10 +222,8 @@ static bool is_current_session_remote_local(void) {
  */
 static struct json_object *build_responses_request(struct json_object *history,
                                                    const char *input_text,
-                                                   const char **vision_images,
-                                                   const size_t *vision_image_sizes,
-                                                   int vision_image_count,
                                                    const char *model_name,
+                                                   const char *carrier,
                                                    int iteration,
                                                    const char *prior_response_id) {
    struct json_object *root = json_object_new_object();
@@ -258,33 +242,18 @@ static struct json_object *build_responses_request(struct json_object *history,
    const bool cache_explicit_supported = (cache_major > 5) ||
                                          (cache_major == 5 && cache_minor >= 6);
 
-   /* Prompt-cache routing key. Pins same-conversation turns to the same OpenAI cache
-    * shard so the large `input` prefix (conversation history) stays warm cross-turn.
-    * Without it, live measurement shows only the static instructions+tools header
-    * caches; the dynamic conversation prefix never re-hits (see
-    * docs/RESPONSES_CACHE_REORDER_PLAN.md). Stable per conversation, falling back to
-    * per-session, then omitted when no session context is on this thread. Content-
-    * neutral hint scoped to our org — a key collision only costs a cache miss on a
-    * differing prefix, it never returns another request's content. */
-   {
-      session_t *cache_sess = session_get_command_context();
-      if (cache_sess != NULL) {
-         char cache_key[64];
-         int64_t conv = atomic_load(&cache_sess->stream_conversation_id);
-         if (conv > 0)
-            snprintf(cache_key, sizeof(cache_key), "dawn-conv-%lld", (long long)conv);
-         else
-            snprintf(cache_key, sizeof(cache_key), "dawn-sess-%u", cache_sess->session_id);
-         json_object_object_add(root, "prompt_cache_key", json_object_new_string(cache_key));
-      }
-   }
+   /* Without the routing key, live measurement showed only the static
+    * instructions+tools header caching across turns. */
+   llm_openai_add_prompt_cache_key(root);
 
    /* Prompt-cache mode (GPT-5.6+ only — see cache_explicit_supported). "implicit" keeps
     * OpenAI's automatic end-of-messages breakpoint (preserves the within-turn tool-loop
-    * hit) AND honors the explicit prompt_cache_breakpoint that build_input stamps on the
-    * last stable input_text before the volatile block — that explicit breakpoint is what
-    * makes the conversation history cache CROSS-turn (the documented "a shared prefix is
-    * not always a cached prefix" fix). Raw-JSON path, so this works regardless of the
+    * hit; for an append-only conversation request it is also what caches the history
+    * across turns) AND honors the explicit prompt_cache_breakpoint that build_input
+    * stamps on the last stable input_text before a volatile block. Only a history
+    * without a frozen prefix (a research run) has a volatile block; there the explicit
+    * breakpoint is what lets the history cache across rounds (the documented "a shared
+    * prefix is not always a cached prefix" fix). Raw-JSON path, so this works regardless of the
     * Python SDK's type lag. TTL defaults to 30m on 5.6, so it is left unset.
     *
     * Deliberate cost tradeoff: implicit mode re-writes the ~2K changing volatile+question
@@ -307,18 +276,25 @@ static struct json_object *build_responses_request(struct json_object *history,
    json_object_object_add(root, "include", include_arr);
 
    /* Reasoning config */
-   if (!llm_tools_suppressed()) {
+   llm_thinking_resolved_t resolved;
+   const char *effort = select_reasoning_effort(model_name, &resolved);
+   if (effort) {
       struct json_object *reasoning = json_object_new_object();
-      json_object_object_add(reasoning, "effort",
-                             json_object_new_string(select_reasoning_effort(model_name)));
-      json_object_object_add(reasoning, "summary", json_object_new_string("auto"));
+      json_object_object_add(reasoning, "effort", json_object_new_string(effort));
+      if (resolved.mode != LLM_THINK_DISABLED) {
+         json_object_object_add(reasoning, "summary", json_object_new_string("auto"));
+      }
       json_object_object_add(root, "reasoning", reasoning);
+      OLOG_INFO("Responses: reasoning effort '%s' for %s%s", effort, model_name,
+                resolved.clamped ? " (setting resolved to what the model accepts)" : "");
    }
 
-   /* System → instructions: ONLY the stable segment, kept byte-stable across turns so
-    * [instructions][tools][history] forms a cacheable prefix. The per-turn volatile
-    * block is repositioned into `input` (below). The stable persona is always present
-    * on the live path, so the field presence is itself stable. */
+   /* System → instructions: ONLY the leading system message (a conversation's frozen
+    * prefix), kept byte-stable across turns so [instructions][tools][history] forms a
+    * cacheable prefix. A conversation's turn context is part of its question; only a
+    * history without a frozen prefix (a research run) has a per-turn volatile block,
+    * repositioned into `input` (below). The prefix is always present on the live path,
+    * so the field presence is itself stable. */
    char *instructions = llm_responses_extract_stable_instructions(history);
    if (instructions) {
       json_object_object_add(root, "instructions", json_object_new_string(instructions));
@@ -345,18 +321,23 @@ static struct json_object *build_responses_request(struct json_object *history,
          json_object_object_add(part, "type", json_object_new_string("input_text"));
          json_object_object_add(part, "text", json_object_new_string(input_text));
          json_object_array_add(content_array, part);
-         llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
-                                           vision_image_count);
          json_object_object_add(item, "content", content_array);
          json_object_array_add(input, item);
       }
       json_object_object_add(root, "input", input);
       free(volatile_ctx);
    } else {
-      struct json_object *input = llm_responses_build_input(history, input_text, vision_images,
-                                                            vision_image_sizes, vision_image_count,
-                                                            volatile_ctx, leading_run,
-                                                            cache_explicit_supported);
+      /* A model that takes no images reads a fixed text for each a tool
+       * returned (llm_tool_images_render.h). */
+      struct json_object *shown = is_vision_enabled_for_current_llm()
+                                      ? json_object_get(history)
+                                      : llm_tool_images_without(history);
+      struct json_object *input = shown ? llm_responses_build_input(shown, input_text, volatile_ctx,
+                                                                    leading_run,
+                                                                    cache_explicit_supported,
+                                                                    carrier, model_name)
+                                        : NULL;
+      json_object_put(shown);
       free(volatile_ctx);
       if (!input) {
          json_object_put(root);
@@ -368,16 +349,21 @@ static struct json_object *build_responses_request(struct json_object *history,
    /* max_output_tokens */
    json_object_object_add(root, "max_output_tokens", json_object_new_int(g_config.llm.max_tokens));
 
-   /* Tools */
-   if (llm_tools_enabled(NULL) && iteration < LLM_TOOLS_MAX_ITERATIONS) {
-      bool is_remote = is_current_session_remote_local();
-      struct json_object *cc_tools = llm_tools_get_openai_format_filtered(is_remote);
+   /* Tools.  The loop's last call (iteration at the cap), for a text answer:
+    * the tools stay (the request reads as every other did), none may be
+    * called. */
+   if (llm_tools_enabled(NULL)) {
+      struct json_object *cc_tools = llm_tools_request_tools(history,
+                                                             is_current_session_remote_local(),
+                                                             false, false, NULL);
       if (cc_tools) {
          struct json_object *flat = flatten_tools_for_responses(cc_tools);
          json_object_put(cc_tools);
          if (flat && json_object_array_length(flat) > 0) {
             json_object_object_add(root, "tools", flat);
-            json_object_object_add(root, "tool_choice", json_object_new_string("auto"));
+            json_object_object_add(root, "tool_choice",
+                                   json_object_new_string(
+                                       iteration >= LLM_TOOLS_MAX_ITERATIONS ? "none" : "auto"));
             json_object_object_add(root, "parallel_tool_calls", json_object_new_boolean(1));
          } else if (flat) {
             json_object_put(flat);
@@ -391,6 +377,142 @@ static struct json_object *build_responses_request(struct json_object *history,
 /* =============================================================================
  * SSE event handler
  * ============================================================================= */
+
+/* Largest aggregate reasoning (encrypted content and summary) a turn keeps
+ * for replay, and largest total of all its blocks. */
+#define RESPONSES_REASONING_BYTES_CAP (256 * 1024)
+#define RESPONSES_BLOCK_BYTES_CAP (4 * 1024 * 1024)
+
+/* Count @p bytes toward the turn's blocks; past the cap, keep none. */
+static bool responses_blocks_fit(responses_stream_ctx_t *rctx, size_t bytes) {
+   if (rctx->blocks_over) {
+      return false;
+   }
+   if (rctx->block_bytes + bytes > RESPONSES_BLOCK_BYTES_CAP) {
+      OLOG_WARNING("Responses: turn output over %d bytes; its blocks aren't kept (replayed as "
+                   "text and tool calls)",
+                   RESPONSES_BLOCK_BYTES_CAP);
+      rctx->blocks_over = true;
+      json_object_put(rctx->blocks);
+      rctx->blocks = NULL;
+      return false;
+   }
+   rctx->block_bytes += bytes;
+   return true;
+}
+
+/* A reasoning item's summary rebuilt from its text parts (not the upstream
+ * object as sent).  Adds the text's size to @p bytes. */
+static struct json_object *responses_summary(struct json_object *item, size_t *bytes) {
+   struct json_object *in = NULL;
+   struct json_object *out = json_object_new_array();
+   if (!out || !json_object_object_get_ex(item, "summary", &in) ||
+       !json_object_is_type(in, json_type_array)) {
+      return out;
+   }
+   const size_t n = json_object_array_length(in);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *text = NULL;
+      if (!json_object_object_get_ex(json_object_array_get_idx(in, i), "text", &text)) {
+         continue;
+      }
+      const char *t = json_object_get_string(text);
+      if (!t) {
+         continue;
+      }
+      struct json_object *part = json_object_new_object();
+      if (!part) {
+         continue;
+      }
+      json_object_object_add(part, "type", json_object_new_string("summary_text"));
+      json_object_object_add(part, "text", json_object_new_string(t));
+      json_object_array_add(out, part);
+      *bytes += strlen(t);
+   }
+   return out;
+}
+
+/* A string field of an output item, or NULL. */
+static const char *item_str(struct json_object *item, const char *key) {
+   struct json_object *v = NULL;
+   return json_object_object_get_ex(item, key, &v) ? json_object_get_string(v) : NULL;
+}
+
+/**
+ * @brief Record a finished output item as the turn's next block
+ *
+ * Reasoning keeps only what a replay needs (type, id, summary,
+ * encrypted_content); a message's output_text parts become text; a function
+ * call becomes a tool call under its call_id (the tool loop reconciles these
+ * with the calls that ran).  Other item types aren't replayed.
+ */
+static void responses_capture_item(responses_stream_ctx_t *rctx,
+                                   const char *type,
+                                   struct json_object *item) {
+   if (rctx->blocks_over) {
+      return;
+   }
+   if (!rctx->blocks) {
+      rctx->blocks = llm_turn_blocks_new();
+      if (!rctx->blocks) {
+         return;
+      }
+   }
+   if (strcmp(type, "reasoning") == 0) {
+      const char *enc = item_str(item, "encrypted_content");
+      size_t size = enc ? strlen(enc) : 0;
+      struct json_object *summary = responses_summary(item, &size);
+      if (rctx->reasoning_bytes + size > RESPONSES_REASONING_BYTES_CAP) {
+         OLOG_WARNING("Responses: reasoning items %zu+%zu bytes exceed the %d cap; not kept "
+                      "for replay",
+                      rctx->reasoning_bytes, size, RESPONSES_REASONING_BYTES_CAP);
+         json_object_put(summary);
+         return;
+      }
+      struct json_object *native = json_object_new_object();
+      if (!native || !summary || !responses_blocks_fit(rctx, size)) {
+         json_object_put(native);
+         json_object_put(summary);
+         return;
+      }
+      json_object_object_add(native, "type", json_object_new_string("reasoning"));
+      const char *id = item_str(item, "id");
+      if (id) {
+         json_object_object_add(native, "id", json_object_new_string(id));
+      }
+      json_object_object_add(native, "summary", summary);
+      if (enc) {
+         json_object_object_add(native, "encrypted_content", json_object_new_string(enc));
+      }
+      rctx->reasoning_bytes += size;
+      llm_turn_blocks_add_reasoning(rctx->blocks, rctx->carrier, LLM_FORMAT_OPENAI, rctx->model,
+                                    native);
+   } else if (strcmp(type, "message") == 0) {
+      struct json_object *content;
+      if (!json_object_object_get_ex(item, "content", &content) ||
+          !json_object_is_type(content, json_type_array)) {
+         return;
+      }
+      const size_t n = json_object_array_length(content);
+      for (size_t i = 0; i < n; i++) {
+         struct json_object *part = json_object_array_get_idx(content, i);
+         const char *ptype = item_str(part, "type");
+         const char *text = item_str(part, "text");
+         if (ptype && strcmp(ptype, "output_text") == 0 && text &&
+             responses_blocks_fit(rctx, strlen(text))) {
+            llm_turn_blocks_add_text(rctx->blocks, text);
+         }
+      }
+   } else if (strcmp(type, "function_call") == 0) {
+      const char *call_id = item_str(item, "call_id");
+      const char *name = item_str(item, "name");
+      const char *args = item_str(item, "arguments");
+      const size_t size = (args ? strlen(args) : 0) + (name ? strlen(name) : 0);
+      if (call_id && name && responses_blocks_fit(rctx, size)) {
+         llm_turn_blocks_add_tool_call(rctx->blocks, call_id, name, args);
+      }
+   }
+}
 
 /**
  * @brief Locate or create a function_call slot keyed by item_id.
@@ -438,16 +560,13 @@ static void responses_fc_append_args(responses_stream_ctx_t *rctx, int idx, cons
    if (idx < 0 || !delta)
       return;
    tool_call_t *call = &rctx->stream_ctx->tool_calls.calls[idx];
-   size_t cur = rctx->fc_args_len[idx];
-   size_t add = strlen(delta);
-   if (cur + add + 1 > sizeof(call->arguments)) {
-      OLOG_WARNING("Responses: function_call args truncated (overflow %zu+%zu vs %zu)", cur, add,
-                   sizeof(call->arguments));
-      add = sizeof(call->arguments) - cur - 1;
+   bool was_cut = call->args_truncated;
+   llm_tools_args_append(call->arguments, &rctx->fc_args_len[idx], &call->args_truncated, delta,
+                         strlen(delta), false);
+   if (call->args_truncated && !was_cut) {
+      OLOG_WARNING("Responses: function_call '%s' args cut at %d bytes", call->name,
+                   LLM_TOOLS_ARGS_LEN - 1);
    }
-   memcpy(call->arguments + cur, delta, add);
-   call->arguments[cur + add] = '\0';
-   rctx->fc_args_len[idx] = cur + add;
 }
 
 /**
@@ -468,6 +587,7 @@ static bool responses_event_is_handled(const char *event_type) {
           strcmp(event_type, "response.function_call_arguments.done") == 0 ||
           strcmp(event_type, "response.output_item.done") == 0 ||
           strcmp(event_type, "response.completed") == 0 ||
+          strcmp(event_type, "response.incomplete") == 0 ||
           strcmp(event_type, "response.failed") == 0 || strcmp(event_type, "error") == 0;
 }
 
@@ -536,7 +656,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *type_obj;
          if (json_object_object_get_ex(item, "type", &type_obj)) {
             const char *t = json_object_get_string(type_obj);
-            if (strcmp(t, "function_call") == 0) {
+            if (t && strcmp(t, "function_call") == 0) {
                struct json_object *id_obj, *call_id_obj, *name_obj;
                const char *item_id = NULL;
                if (json_object_object_get_ex(item, "id", &id_obj)) {
@@ -553,10 +673,11 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                      safe_strscpy(call->name, json_object_get_string(name_obj));
                   }
                   call->arguments[0] = '\0';
+                  call->args_truncated = false;
                   rctx->fc_args_len[idx] = 0;
                   rctx->stream_ctx->has_tool_calls = 1;
                }
-            } else if (strcmp(t, "reasoning") == 0) {
+            } else if (t && strcmp(t, "reasoning") == 0) {
                /* Reasoning items are captured on .done (encrypted_content
                 * isn't populated until the item closes). No-op here. */
             }
@@ -567,6 +688,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *type_obj, *item_inner;
          if (json_object_object_get_ex(root, "item", &item_inner) &&
              json_object_object_get_ex(item_inner, "type", &type_obj) &&
+             json_object_get_string(type_obj) &&
              strcmp(json_object_get_string(type_obj), "reasoning") == 0) {
             webui_send_thinking_start(ws, "openai");
          }
@@ -594,8 +716,12 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          tool_call_t *call = &rctx->stream_ctx->tool_calls.calls[idx];
          const char *args = json_object_get_string(args_obj);
          if (args) {
-            safe_strscpy(call->arguments, args);
-            rctx->fc_args_len[idx] = strlen(call->arguments);
+            llm_tools_args_append(call->arguments, &rctx->fc_args_len[idx], &call->args_truncated,
+                                  args, strlen(args), true);
+            if (call->args_truncated) {
+               OLOG_WARNING("Responses: function_call '%s' args cut at %d bytes", call->name,
+                            LLM_TOOLS_ARGS_LEN - 1);
+            }
          }
       }
    } else if (strcmp(event_type, "response.output_item.done") == 0) {
@@ -604,51 +730,11 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *type_obj;
          if (json_object_object_get_ex(item, "type", &type_obj)) {
             const char *t = json_object_get_string(type_obj);
-            if (strcmp(t, "reasoning") == 0) {
-               if (!rctx->reasoning_items) {
-                  rctx->reasoning_items = json_object_new_array();
-               }
-               /* Cap aggregate size of round-trip reasoning items. A misbehaving
-                * upstream proxy could feed multi-MB blobs that bloat every
-                * subsequent request payload until OpenAI rejects with HTTP 413
-                * (DoS-by-bloat). Cap is per-turn; oldest-style not necessary
-                * since reasoning_items lives only for this single response. */
-               static const size_t REASONING_ITEMS_BYTES_CAP = 256 * 1024;
-               struct json_object *enc_obj_check;
-               size_t incoming_size = 0;
-               if (json_object_object_get_ex(item, "encrypted_content", &enc_obj_check)) {
-                  const char *e = json_object_get_string(enc_obj_check);
-                  if (e)
-                     incoming_size = strlen(e);
-               }
-               if (rctx->reasoning_items_bytes + incoming_size > REASONING_ITEMS_BYTES_CAP) {
-                  OLOG_WARNING("Responses: reasoning items aggregate size %zu+%zu would exceed "
-                               "%zu cap; dropping further items this turn",
-                               rctx->reasoning_items_bytes, incoming_size,
-                               REASONING_ITEMS_BYTES_CAP);
-               } else {
-                  /* Keep id, type, summary, encrypted_content — strip everything
-                   * else to minimize wire size on the round-trip request. */
-                  struct json_object *trimmed = json_object_new_object();
-                  json_object_object_add(trimmed, "type", json_object_new_string("reasoning"));
-                  struct json_object *id_obj, *enc_obj, *sum_obj;
-                  if (json_object_object_get_ex(item, "id", &id_obj)) {
-                     json_object_object_add(trimmed, "id",
-                                            json_object_new_string(json_object_get_string(id_obj)));
-                  }
-                  if (json_object_object_get_ex(item, "encrypted_content", &enc_obj)) {
-                     json_object_object_add(trimmed, "encrypted_content",
-                                            json_object_new_string(
-                                                json_object_get_string(enc_obj)));
-                  }
-                  if (json_object_object_get_ex(item, "summary", &sum_obj)) {
-                     json_object_object_add(trimmed, "summary", json_object_get(sum_obj));
-                  }
-                  json_object_array_add(rctx->reasoning_items, trimmed);
-                  rctx->reasoning_items_bytes += incoming_size;
-               }
-            } else if (strcmp(t, "function_call") == 0) {
+            if (t && strcmp(t, "function_call") == 0) {
                rctx->active_fc_index = -1;
+            }
+            if (t) {
+               responses_capture_item(rctx, t, item);
             }
          }
       }
@@ -657,13 +743,16 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          struct json_object *item_inner, *type_obj;
          if (json_object_object_get_ex(root, "item", &item_inner) &&
              json_object_object_get_ex(item_inner, "type", &type_obj) &&
+             json_object_get_string(type_obj) &&
              strcmp(json_object_get_string(type_obj), "reasoning") == 0) {
             webui_send_thinking_end(ws, rctx->stream_ctx->thinking_size > 0);
          }
       }
 #endif
-   } else if (strcmp(event_type, "response.completed") == 0) {
-      struct json_object *resp;
+   } else if (strcmp(event_type, "response.completed") == 0 ||
+              strcmp(event_type, "response.incomplete") == 0) {
+      /* Incomplete: it stopped at the output limit, the same response shape. */
+      struct json_object *resp = NULL;
       if (json_object_object_get_ex(root, "response", &resp)) {
          struct json_object *id_obj, *usage_obj;
          if (json_object_object_get_ex(resp, "id", &id_obj)) {
@@ -714,8 +803,8 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                if (json_object_object_get_ex(in_details, "cache_write_tokens", &tok_obj))
                   cache_write_tokens = json_object_get_int(tok_obj);
                if (cached_tokens > 0 || cache_write_tokens > 0)
-                  OLOG_INFO("OpenAI Responses cache: %d read, %d write tokens", cached_tokens,
-                            cache_write_tokens);
+                  OLOG_DEBUG("OpenAI Responses cache: %d read, %d write tokens", cached_tokens,
+                             cache_write_tokens);
             }
 
             struct json_object *out_details;
@@ -735,14 +824,30 @@ static void responses_handle_event(const char *event_type, const char *event_dat
 #else
                uint32_t session_id = 0;
 #endif
-               llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
-               OLOG_INFO("Responses usage: %d input, %d output, %d cached, %d write tokens",
-                         input_tokens, output_tokens, cached_tokens, cache_write_tokens);
+               llm_usage_report_t usage = { .prompt_tokens = input_tokens,
+                                            .completion_tokens = output_tokens,
+                                            .cached_tokens = cached_tokens,
+                                            .cache_write_tokens = cache_write_tokens,
+                                            .type = LLM_CLOUD,
+                                            .provider = CLOUD_PROVIDER_OPENAI };
+               llm_context_update_usage(session_id, &usage);
+               OLOG_DEBUG("Responses usage: %d input, %d output, %d cached, %d write tokens",
+                          input_tokens, output_tokens, cached_tokens, cache_write_tokens);
             }
          }
       }
       /* Set finish_reason consistent with chat-completions semantics */
-      if (rctx->stream_ctx->has_tool_calls) {
+      if (strcmp(event_type, "response.incomplete") == 0) {
+         /* Stopped at the output limit, unless a filter stopped it. */
+         struct json_object *details = NULL, *reason = NULL;
+         const bool filtered = json_object_object_get_ex(resp, "incomplete_details", &details) &&
+                               json_object_object_get_ex(details, "reason", &reason) &&
+                               strcmp(json_object_get_string(reason)
+                                          ? json_object_get_string(reason)
+                                          : "",
+                                      "content_filter") == 0;
+         safe_strscpy(rctx->stream_ctx->finish_reason, filtered ? "content_filter" : "length");
+      } else if (rctx->stream_ctx->has_tool_calls) {
          safe_strscpy(rctx->stream_ctx->finish_reason, "tool_calls");
       } else {
          safe_strscpy(rctx->stream_ctx->finish_reason, "stop");
@@ -766,6 +871,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
       }
       OLOG_ERROR("Responses stream %s: %s", event_type, msg ? msg : "(no message)");
       safe_strscpy(rctx->stream_ctx->finish_reason, "error");
+      safe_strscpy(rctx->stream_ctx->stream_error, msg && msg[0] ? msg : event_type);
       rctx->stream_ctx->stream_complete = 1;
    }
 
@@ -800,9 +906,6 @@ static size_t responses_write_callback(void *contents, size_t size, size_t nmemb
 
 int llm_openai_responses_streaming_single_shot(struct json_object *conversation_history,
                                                const char *input_text,
-                                               const char **vision_images,
-                                               const size_t *vision_image_sizes,
-                                               int vision_image_count,
                                                const char *base_url,
                                                const char *api_key,
                                                const char *model,
@@ -825,16 +928,21 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       return 1;
    }
 
+   /* Whose reasoning this request may replay, and whose this turn's is: the
+    * endpoint and the key's organization. */
+   char carrier[LLM_CARRIER_MAX];
+   llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
+
    /* Build request JSON */
-   struct json_object *root = build_responses_request(conversation_history, input_text,
-                                                      vision_images, vision_image_sizes,
-                                                      vision_image_count, model_name, iteration,
+   struct json_object *root = build_responses_request(conversation_history, input_text, model_name,
+                                                      carrier, iteration,
                                                       /*prior_response_id=*/NULL);
    if (!root) {
       OLOG_ERROR("Responses: failed to build request");
       return 1;
    }
 
+   llm_cache_monitor_note_request(root); /* for this call's "LLM cache:" line */
    const char *payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                                   JSON_C_TO_STRING_NOSLASHESCAPE);
 
@@ -845,6 +953,8 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    responses_stream_ctx_t rctx;
    memset(&rctx, 0, sizeof(rctx));
    rctx.active_fc_index = -1;
+   rctx.model = model_name;
+   snprintf(rctx.carrier, sizeof(rctx.carrier), "%s", carrier);
    curl_buffer_init_with_max(&rctx.raw_response, RESPONSES_RAW_BUFFER_MAX);
 
    rctx.stream_ctx = llm_stream_create(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, chunk_callback,
@@ -880,8 +990,6 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          llm_stream_free(rctx.stream_ctx);
          json_object_put(root);
          curl_buffer_free(&rctx.raw_response);
-         if (rctx.reasoning_items)
-            json_object_put(rctx.reasoning_items);
          return 1;
       }
 
@@ -952,8 +1060,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       llm_stream_free(rctx.stream_ctx);
       json_object_put(root);
       curl_buffer_free(&rctx.raw_response);
-      if (rctx.reasoning_items)
-         json_object_put(rctx.reasoning_items);
+      json_object_put(rctx.blocks);
       return 1;
    }
 
@@ -977,13 +1084,21 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       llm_stream_free(rctx.stream_ctx);
       json_object_put(root);
       curl_buffer_free(&rctx.raw_response);
-      if (rctx.reasoning_items)
-         json_object_put(rctx.reasoning_items);
+      json_object_put(rctx.blocks);
       return 1;
    }
 
    curl_easy_cleanup(curl);
    curl_slist_free_all(headers);
+
+   if (llm_stream_check_finished(rctx.stream_ctx, "Responses") != 0) {
+      sse_parser_free(rctx.sse_parser);
+      llm_stream_free(rctx.stream_ctx);
+      json_object_put(root);
+      curl_buffer_free(&rctx.raw_response);
+      json_object_put(rctx.blocks);
+      return 1;
+   }
 
    /* Populate result from stream + responses-specific captures */
    if (rctx.stream_ctx->has_tool_calls && rctx.stream_ctx->tool_calls.count > 0) {
@@ -1001,20 +1116,9 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    if (rctx.response_id[0] != '\0') {
       result->response_id = strdup(rctx.response_id);
    }
-   if (rctx.reasoning_items && json_object_array_length(rctx.reasoning_items) > 0) {
-      /* Wrap as {"openai_responses": {"reasoning_items": [...]}} so the assistant
-       * message field _provider_state can hold per-provider state. */
-      struct json_object *prov = json_object_new_object();
-      struct json_object *openai_resp = json_object_new_object();
-      json_object_object_add(openai_resp, "reasoning_items", json_object_get(rctx.reasoning_items));
-      json_object_object_add(prov, "openai_responses", openai_resp);
-      const char *s = json_object_to_json_string_ext(prov, JSON_C_TO_STRING_PLAIN |
-                                                               JSON_C_TO_STRING_NOSLASHESCAPE);
-      if (s) {
-         result->provider_state_json = strdup(s);
-      }
-      json_object_put(prov);
-   }
+   /* The turn's blocks: what the next request replays. */
+   result->blocks = rctx.blocks;
+   rctx.blocks = NULL;
 
 #ifdef ENABLE_WEBUI
    if (rctx.reasoning_tokens > 0) {
@@ -1027,8 +1131,6 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
 
    sse_parser_free(rctx.sse_parser);
    llm_stream_free(rctx.stream_ctx);
-   if (rctx.reasoning_items)
-      json_object_put(rctx.reasoning_items);
    json_object_put(root);
    curl_buffer_free(&rctx.raw_response);
 

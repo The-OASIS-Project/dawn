@@ -104,6 +104,17 @@ wake_word_result_t wake_word_check(const char *text);
 wake_word_result_t wake_word_check_prefix(const char *text);
 
 /**
+ * @brief Whether text is only a cancel phrase ("stop", "never mind", "shut up")
+ *
+ * The same list wake_word_check() sets is_cancel from, so every voice surface
+ * stops on the same words.  Case, punctuation and surrounding spaces don't count.
+ *
+ * @param text The utterance (may be NULL)
+ * @return true if it is a cancel phrase
+ */
+bool wake_word_is_cancel(const char *text);
+
+/**
  * @brief Normalize text for wake word matching
  *
  * Converts to lowercase, removes all punctuation, keeps letters/digits/spaces.

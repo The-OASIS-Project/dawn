@@ -34,16 +34,28 @@
 #include <string.h>
 #include <time.h>
 
+#include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/session_manager.h"
+#include "core/tool_result_store.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
+#include "llm/llm_claude_route.h"
+#include "llm/llm_compaction.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_kind.h"
+#include "llm/llm_history_rows.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_key_tag.h"
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_rate_limit.h"
+#include "llm/llm_tool_images.h"
+#include "llm/llm_tool_views.h"
+#include "llm/llm_tool_views_apply.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_server.h"
@@ -119,32 +131,50 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
    return out;
 }
 
+/* A string field of a row object, or NULL. */
+static const char *str_field(struct json_object *obj, const char *key) {
+   struct json_object *v = NULL;
+   return json_object_object_get_ex(obj, key, &v) ? json_object_get_string(v) : NULL;
+}
+
+/* A request of this call's session is being sent: its size estimate, to
+ * calibrate its model's density when its usage comes back (llm_compaction.h). */
+static void note_request(const llm_tool_loop_params_t *params, const char *input) {
+   if (!params->has_session) {
+      return;
+   }
+   const size_t input_len = input ? strlen(input) : 0;
+   const int estimate = llm_context_estimate_tokens(params->conversation_history) +
+                        (int)(input_len / 4);
+   llm_context_note_request(params->session_id, estimate, params->llm_type, params->cloud_provider,
+                            params->model);
+}
+
+/* The session this call is for (a ref, or NULL): none for a call on no
+ * session's behalf.  @p even_detached finds one whose client has gone (its
+ * turn still runs and saves). */
+static session_t *call_session(const llm_tool_loop_params_t *params, bool even_detached) {
+   if (!params->has_session) {
+      return NULL;
+   }
+   return even_detached ? session_get_for_reconnect(params->session_id)
+                        : session_get(params->session_id);
+}
+
 /* Persist the tool messages just appended to history in [before_len, end) via the
  * session's tool-persist hook (if set), in OpenAI-canonical form.  Runs on the
  * worker thread with NO lock held, so conv_db (auth_db lock) is safe to call here.
- * OpenAI-format history is already canonical; Claude-format is normalized through the
- * shared converter so the stored shape is provider-neutral.
+ * Every format goes through llm_history_rows_append, so the stored shape is
+ * provider-neutral and an assistant row carries its turn's stored blocks.
  *
  * @p reasoning_json is the display-only reasoning JSON for THIS iteration's assistant
  * message (NULL if none).  It attaches to the single assistant row this iteration
- * appended — guaranteed unique because convert_claude_tool_to_openai() and
- * append_openai_tool_history() collapse text + all tool_use into exactly one assistant
- * row and fan out only role:tool result rows.
+ * appended — guaranteed unique because an assistant turn is always one row
+ * (llm_history_rows_append) and only role:tool result rows fan out.
  *
- * A persisted capture-image message (see llm_tools_add_results_openai/claude,
- * llm_tools.c) is DELIBERATELY excluded here: it carries neither tool_calls
- * nor tool_call_id, so it's dropped by both loops below regardless of
- * provider — Claude's convert_claude_tool_to_openai() returns 0 for it
- * (no tool_use/tool_result blocks) and OpenAI's plain passthrough still fails
- * the tool_calls/tool_call_id gate in the second loop.  This is intentional,
- * not a gap: conv_db reload expects images as `[IMAGE:id]` markers pointing
- * at the image store (see webui_image_rehydrate.c), not raw embedded base64
- * in a message row — writing the base64 JSON verbatim here would produce a
- * row the reload path can't parse back into a real image.  Wiring captures
- * through the image store's marker system is a real follow-up, not a
- * same-diff fix.  Net effect: tool-captured images stay visible for the
- * live session (in-memory conversation_history) but don't survive a WebUI
- * reconnect/reload — same as before this feature existed. */
+ * A result's images (llm_tool_images.h) go with its tool row: the row names
+ * them by id (messages.images) and binds them as it is saved, so a reload
+ * rebuilds them from the store as the live turn built them. */
 static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                        int before_len,
                                        const char *reasoning_json,
@@ -156,7 +186,7 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
     * NULL here, silently dropping the tool_calls + role:tool rows so a reload
     * shows the answer but no tool use.  The session is not torn down mid-turn
     * (turn_in_flight guards the idle sweep; the worker holds a ref). */
-   session_t *s = session_get_for_reconnect(params->session_id);
+   session_t *s = call_session(params, true);
    if (!s) {
       return;
    }
@@ -175,13 +205,12 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
       return;
    }
 
+   /* The rows each appended message saves as (llm_history_rows_append): the
+    * canonical shape the walk below reads, whatever the history's format, and
+    * for an assistant turn its stored blocks. */
    for (int i = before_len; i < after; i++) {
-      struct json_object *msg = json_object_array_get_idx(params->conversation_history, i);
-      if (params->history_format == LLM_HISTORY_CLAUDE) {
-         convert_claude_tool_to_openai(msg, canonical);
-      } else {
-         json_object_array_add(canonical, json_object_get(msg));
-      }
+      llm_history_rows_append(json_object_array_get_idx(params->conversation_history, i),
+                              canonical);
    }
 
    /* The event log is conversation-scoped; the turn's conversation was captured
@@ -257,7 +286,13 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
          if (cb) {
             /* Assistant tool_calls row — never a failure verdict itself (that rides the
              * role:tool result rows below). */
-            cb(ud, role, content ? content : "", tc_json, NULL, reasoning_json, false);
+            const session_tool_row_t row = { .role = role,
+                                             .content = content ? content : "",
+                                             .tool_calls = tc_json,
+                                             .reasoning = reasoning_json,
+                                             .llm_blocks = str_field(m,
+                                                                     LLM_HISTORY_ROW_STORED_KEY) };
+            (void)cb(ud, &row);
          }
          /* One tool_call event per call in the batch: an iteration can invoke
           * several tools, and a tailer wants them individually, not as one blob. */
@@ -294,6 +329,15 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                }
             }
          }
+      } else if (llm_history_kind_of(m) == MESSAGE_KIND_LOOP_NOTE) {
+         /* A note the loop gave the model: saved where it sat, so a reload
+          * replays the request the model answered. */
+         if (cb) {
+            const session_tool_row_t row = { .role = role,
+                                             .content = content ? content : "",
+                                             .kind = message_kind_name(MESSAGE_KIND_LOOP_NOTE) };
+            (void)cb(ud, &row);
+         }
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
          const char *tcid = json_object_get_string(tcid_obj);
          /* Result's confirmed-failure verdict — needed by BOTH the persist hook (so reload reds
@@ -305,7 +349,17 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
             r_is_error = json_object_get_boolean(eo);
          }
          if (cb) {
-            cb(ud, role, content ? content : "", NULL, tcid, NULL, r_is_error);
+            struct json_object *images = NULL;
+            json_object_object_get_ex(m, LLM_HISTORY_ROW_IMAGES_KEY, &images);
+            const session_tool_row_t row = {
+               .role = role,
+               .content = content ? content : "",
+               .tool_call_id = tcid,
+               .is_error = r_is_error,
+               .images = images ? json_object_to_json_string_ext(images, JSON_C_TO_STRING_PLAIN)
+                                : NULL
+            };
+            (void)cb(ud, &row);
          }
          if (ev_live) {
             /* Recover the tool name from the batch's tool_calls (mapped above) so
@@ -339,6 +393,30 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    session_release(s);
 }
 
+_Static_assert(LLM_TURN_CALLS_MAX >= LLM_TOOLS_MAX_PARALLEL_CALLS,
+               "a turn's blocks must be able to hold every call that runs");
+
+/* The response's blocks with their tool calls replaced by the calls that ran
+ * (llm_turn_blocks_with_calls): the calls the stream carried and the calls
+ * admitted and answered can differ (a cap, an over-long id, a stream cut
+ * short), and a replay must hold each call with its result.  NULL without
+ * blocks. */
+static json_object *blocks_as_run(const llm_tool_response_t *response, bool calls_ran) {
+   if (!response || !response->blocks) {
+      return NULL;
+   }
+   llm_turn_call_t calls[LLM_TOOLS_MAX_PARALLEL_CALLS];
+   int n = 0;
+   for (int i = 0; calls_ran && i < response->tool_calls.count && i < LLM_TOOLS_MAX_PARALLEL_CALLS;
+        i++) {
+      calls[n].id = response->tool_calls.calls[i].id;
+      calls[n].name = response->tool_calls.calls[i].name;
+      calls[n].arguments = response->tool_calls.calls[i].arguments;
+      n++;
+   }
+   return llm_turn_blocks_with_calls(response->blocks, calls, n);
+}
+
 /* Stash BOTH final-turn signals on the session in ONE lookup:
  *   - the finish/stop reason, so a background-job worker can tell a cut-off answer
  *     ("max_tokens"/"length") from a clean finish; and
@@ -349,31 +427,38 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
  *     §6c-G1).
  * Both are additive + best-effort: other callers never read last_finish_reason, a lookup
  * miss is a no-op (the worker then reads an empty reason = "not truncated"), and a turn
- * with no thinking content leaves final_reasoning_json NULL (build_reasoning_json returns
+ * with no thinking content leaves final_answer.reasoning_json NULL (build_reasoning_json returns
  * NULL; the turn-start clear in llm_call_prepare guarantees no stale inheritance).  Folded
  * from two helpers into one so a final-answer return does a single session_get_for_reconnect
  * rather than two.  TAKES ownership of the built reasoning JSON into the session (the
  * consuming persist frees it). */
-static void tool_loop_stash_final(uint32_t session_id,
+static void tool_loop_stash_final(const llm_tool_loop_params_t *params,
                                   const llm_tool_response_t *result,
                                   const char *provider_label) {
    const char *reason = result != NULL ? result->finish_reason : NULL;
    bool have_reason = (reason != NULL && reason[0] != '\0');
    char *json = build_reasoning_json(result, provider_label);
-   if (!have_reason && json == NULL) {
+   /* A final answer ran no calls: its blocks keep none. */
+   struct json_object *blocks = blocks_as_run(result, false);
+   if (!have_reason && json == NULL && blocks == NULL) {
       return; /* nothing to write — skip the lookup entirely */
    }
-   session_t *s = session_get_for_reconnect(session_id);
+   session_t *s = call_session(params, true);
    if (s == NULL) {
       free(json);
+      json_object_put(blocks);
       return;
    }
    if (have_reason) {
       snprintf(s->last_finish_reason, sizeof(s->last_finish_reason), "%s", reason);
    }
    if (json != NULL) {
-      free(s->final_reasoning_json);
-      s->final_reasoning_json = json; /* take ownership */
+      free(s->final_answer.reasoning_json);
+      s->final_answer.reasoning_json = json; /* take ownership */
+   }
+   if (blocks != NULL) {
+      json_object_put(s->final_answer.blocks);
+      s->final_answer.blocks = blocks; /* the answer's blocks (take ownership) */
    }
    session_release(s);
 }
@@ -383,7 +468,7 @@ static void tool_loop_stash_final(uint32_t session_id,
  * close the current streaming bubble — the next iteration's text then opens a fresh
  * bubble below the tool entries.  No-op for satellite / local-mic turns (hook NULL). */
 static void fire_tool_iteration_boundary(llm_tool_loop_params_t *params) {
-   session_t *s = session_get(params->session_id);
+   session_t *s = call_session(params, false);
    if (!s) {
       return;
    }
@@ -397,7 +482,8 @@ static void fire_tool_iteration_boundary(llm_tool_loop_params_t *params) {
  * @brief Add assistant message with tool calls in OpenAI format
  *
  * Appends the assistant message containing tool_calls array, then adds
- * tool result messages. Handles Gemini thought_signature if present.
+ * tool result messages.  The turn's blocks (reasoning, a call's signature)
+ * go with it; each request renders what belongs to its endpoint.
  */
 static void append_openai_tool_history(struct json_object *history,
                                        const llm_tool_response_t *response,
@@ -423,31 +509,18 @@ static void append_openai_tool_history(struct json_object *history,
                              json_object_new_string(response->tool_calls.calls[i].arguments));
       json_object_object_add(tc, "function", func);
 
-      /* Gemini 3+ models: Include thought_signature in first tool call */
-      if (i == 0 && response->tool_calls.thought_signature[0] != '\0') {
-         json_object *extra_content = json_object_new_object();
-         json_object *google_obj = json_object_new_object();
-         json_object_object_add(google_obj, "thought_signature",
-                                json_object_new_string(response->tool_calls.thought_signature));
-         json_object_object_add(extra_content, "google", google_obj);
-         json_object_object_add(tc, "extra_content", extra_content);
-         OLOG_INFO("Tool loop: Including Gemini thought_signature in follow-up request");
-      }
-
       json_object_array_add(tc_array, tc);
    }
    json_object_object_add(assistant_msg, "tool_calls", tc_array);
 
-   /* OpenAI Responses API round-trip: attach opaque per-provider state
-    * (reasoning items + response_id) so the next iteration can echo it. */
-   if (response->provider_state_json && *response->provider_state_json) {
-      json_object *prov = json_tokener_parse(response->provider_state_json);
-      if (prov) {
-         json_object_object_add(assistant_msg, "_provider_state", prov);
-      }
+   /* The turn's blocks, where the path captured them (OpenAI Responses): its
+    * reasoning items go back with the next request, its calls as they ran. */
+   json_object *blocks = blocks_as_run(response, true);
+   if (blocks) {
+      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, blocks);
    }
 
-   json_object_array_add(history, assistant_msg);
+   session_history_append(history, assistant_msg);
 
    /* Add tool results */
    llm_tools_add_results_openai(history, results);
@@ -461,26 +534,28 @@ static void append_openai_tool_history(struct json_object *history,
  */
 static void append_claude_tool_history(struct json_object *history,
                                        const llm_tool_response_t *response,
-                                       const tool_result_list_t *results) {
+                                       const tool_result_list_t *results,
+                                       const char *carrier) {
    json_object *assistant_msg = json_object_new_object();
    json_object_object_add(assistant_msg, "role", json_object_new_string("assistant"));
 
-   json_object *content_array = json_object_new_array();
-
-   /* If thinking was enabled, add the thinking block first (required by Claude API) */
-   if (response->thinking_content) {
-      json_object *thinking_block = json_object_new_object();
-      json_object_object_add(thinking_block, "type", json_object_new_string("thinking"));
-      json_object_object_add(thinking_block, "thinking",
-                             json_object_new_string(response->thinking_content));
-
-      if (response->thinking_signature) {
-         json_object_object_add(thinking_block, "signature",
-                                json_object_new_string(response->thinking_signature));
-      }
-
-      json_object_array_add(content_array, thinking_block);
+   /* The turn exactly as the model produced it: every block in order, each
+    * thinking block with its own signature (empty text or not).  The blocks
+    * travel with the message; each formatter renders them for its provider. */
+   json_object *blocks = blocks_as_run(response, true);
+   json_object *rendered = llm_turn_blocks_render_claude(blocks, carrier);
+   if (rendered) {
+      json_object_object_add(assistant_msg, "content", rendered);
+      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, blocks);
+      session_history_append(history, assistant_msg);
+      llm_tools_add_results_claude(history, results);
+      return;
    }
+   json_object_put(blocks);
+
+   /* A path without blocks: the text and tool calls (its reasoning, if any,
+    * can't be replayed without the blocks it came in). */
+   json_object *content_array = json_object_new_array();
 
    /* Preserve any text the LLM streamed before its tool_use blocks, so the follow-up
     * iteration can see what was already said and won't repeat itself. */
@@ -511,10 +586,50 @@ static void append_claude_tool_history(struct json_object *history,
    }
 
    json_object_object_add(assistant_msg, "content", content_array);
-   json_object_array_add(history, assistant_msg);
+   session_history_append(history, assistant_msg);
 
    /* Add tool results in Claude format */
    llm_tools_add_results_claude(history, results);
+}
+
+/* Append a note to the model (a user message of the loop's own), marked as
+ * request context. */
+static void append_loop_note(struct json_object *history, const char *text) {
+   json_object *note = json_object_new_object();
+   if (!note) {
+      return;
+   }
+   json_object_object_add(note, "role", json_object_new_string("user"));
+   json_object_object_add(note, "content", json_object_new_string(text));
+   llm_history_set_kind(note, MESSAGE_KIND_LOOP_NOTE);
+   session_history_append(history, note);
+}
+
+/* The turn's last word: @p note appended (and saved) after the tool results,
+ * then one call with tools disabled.  Returns the answer (caller frees), or
+ * NULL when the call fails or brings no text. */
+static char *final_answer_without_tools(llm_tool_loop_params_t *params,
+                                        const char *note,
+                                        int iteration) {
+   const int note_at = json_object_array_length(params->conversation_history);
+   append_loop_note(params->conversation_history, note);
+   persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
+
+   OLOG_INFO("Tool loop: Making final call without tools to present gathered results");
+   llm_tool_response_t result;
+   memset(&result, 0, sizeof(result));
+   note_request(params, "");
+   const int rc = params->provider_fn(params->conversation_history, "", params->base_url,
+                                      params->api_key, params->model, params->chunk_callback,
+                                      params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
+   char *text = NULL;
+   if (rc == 0 && result.text) {
+      text = strdup(result.text);
+      tool_loop_stash_final(params, &result,
+                            reasoning_provider_label(params->llm_type, params->cloud_provider));
+   }
+   llm_tool_response_free(&result);
+   return text;
 }
 
 /**
@@ -543,8 +658,9 @@ static void append_closing_message(struct json_object *history,
    } else {
       json_object_object_add(closing_msg, "content", json_object_new_string(text));
    }
+   llm_history_set_kind(closing_msg, MESSAGE_KIND_LOOP_NOTE);
 
-   json_object_array_add(history, closing_msg);
+   session_history_append(history, closing_msg);
    OLOG_INFO("Tool loop: Added closing assistant message to complete history");
 }
 
@@ -593,29 +709,27 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
    llm_history_format_t new_format = params->history_format;
    bool switched = false;
 
-   if (current_config.type == LLM_LOCAL || current_config.cloud_provider == CLOUD_PROVIDER_OPENAI ||
-       current_config.cloud_provider == CLOUD_PROVIDER_GEMINI ||
-       current_config.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-      if (params->history_format == LLM_HISTORY_CLAUDE) {
-         /* Switched from Claude to OpenAI/local/Gemini/OpenRouter */
-         new_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
-         new_format = LLM_HISTORY_OPENAI;
-         switched = true;
-         OLOG_INFO("Tool loop: Provider switched to OpenAI/local");
-      }
-   } else if (current_config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-      if (params->history_format == LLM_HISTORY_OPENAI) {
-         /* Switched from OpenAI/local/Gemini to Claude */
-         new_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
-         new_format = LLM_HISTORY_CLAUDE;
-         switched = true;
-         OLOG_INFO("Tool loop: Provider switched to Claude");
-      }
+   /* The wire format follows the route, not the provider: OpenRouter's
+    * anthropic/ models take the Messages format too. */
+   const char *endpoint = current_config.endpoint ? current_config.endpoint : params->base_url;
+   const bool messages = llm_uses_anthropic_messages(current_config.type,
+                                                     current_config.cloud_provider, params->model,
+                                                     endpoint);
+   if (!messages && params->history_format == LLM_HISTORY_CLAUDE) {
+      new_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
+      new_format = LLM_HISTORY_OPENAI;
+      switched = true;
+      OLOG_INFO("Tool loop: Provider switched to the OpenAI-compatible API");
+   } else if (messages && params->history_format == LLM_HISTORY_OPENAI) {
+      new_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
+      new_format = LLM_HISTORY_CLAUDE;
+      switched = true;
+      OLOG_INFO("Tool loop: Provider switched to the Anthropic Messages API");
    }
 
    /* Always update credentials (even if provider didn't change,
     * config may have changed model/endpoint) */
-   params->base_url = current_config.endpoint ? current_config.endpoint : params->base_url;
+   params->base_url = endpoint;
    params->api_key = current_config.api_key;
    params->llm_type = current_config.type;
    params->cloud_provider = current_config.cloud_provider;
@@ -632,7 +746,18 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
  * Central Tool Iteration Loop
  * ============================================================================= */
 
-char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
+/* A batch's finish: its images held to what the next request may carry (a
+ * loop has no seam to compact at), then the view stage. */
+static void finish_batch(const tool_call_list_t *calls, tool_result_list_t *results, void *batch) {
+   const llm_tool_views_batch_t *b = batch;
+   llm_image_limit_t limit;
+   (void)llm_tool_images_request_limit(b->params->llm_type, b->params->cloud_provider,
+                                       b->params->model, &limit);
+   (void)llm_tool_images_cap_batch(b->params->conversation_history, results, &limit);
+   llm_tool_views_finish_batch(calls, results, batch);
+}
+
+static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
    if (!params || !params->provider_fn || !params->conversation_history) {
       OLOG_ERROR("Tool loop: Invalid parameters");
       return NULL;
@@ -650,29 +775,24 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
                                       .honor_global = !params->is_background };
 
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
-      /* Step 0: Merge any completed async compaction (invisible to user).
-       * for_reconnect so a turn surviving a client disconnect still merges its
-       * compaction across iterations (session_get would skip a disconnected
-       * session and let context grow unbounded on a long survivor). */
-      session_t *loop_session = session_get_for_reconnect(params->session_id);
-      if (loop_session) {
-         llm_context_async_merge(loop_session, params->conversation_history);
-
-         /* Step 0b: cumulative-session input-token ceiling (opt-in; 0 = unlimited).
-          * Input tokens are recorded per provider response (session_record_query), so
-          * at the top of this iteration the session total reflects spend through the
-          * previous iteration.  Stopping HERE bounds overshoot to a single
-          * iteration's tokens rather than a whole multi-tool turn's (the deep-
-          * research per-round guard).  This check is only ever reached BETWEEN
-          * iterations (a completed iteration with no tool calls already returned its
-          * text at step 4), so there is no partial answer to hand back — return an
-          * empty string (never NULL barring OOM) so the caller doesn't misread a
-          * budget stop as a provider failure. */
-         if (params->cumulative_input_token_ceiling > 0) {
+      llm_cache_monitor_set_iteration(iteration); /* tags this iteration's provider call */
+      /* Step 0: cumulative-session input-token ceiling (opt-in; 0 = unlimited).
+       * Input tokens are recorded per provider response (session_record_query), so
+       * at the top of this iteration the session total reflects spend through the
+       * previous iteration.  Stopping HERE bounds overshoot to a single
+       * iteration's tokens rather than a whole multi-tool turn's (the deep-
+       * research per-round guard).  This check is only ever reached BETWEEN
+       * iterations (a completed iteration with no tool calls already returned its
+       * text at step 4), so there is no partial answer to hand back — return an
+       * empty string (never NULL barring OOM) so the caller doesn't misread a
+       * budget stop as a provider failure. */
+      if (params->cumulative_input_token_ceiling > 0) {
+         session_t *loop_session = call_session(params, true);
+         if (loop_session) {
             uint64_t tok = 0;
             session_metrics_totals(loop_session, &tok, NULL);
+            session_release(loop_session);
             if (tok >= (uint64_t)params->cumulative_input_token_ceiling) {
-               session_release(loop_session);
                OLOG_INFO("Tool loop: session input tokens %llu reached ceiling %lld at "
                          "iteration %d — stopping turn",
                          (unsigned long long)tok, (long long)params->cumulative_input_token_ceiling,
@@ -684,32 +804,57 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
                return empty;
             }
          }
-         session_release(loop_session);
       }
 
-      /* Step 1: Auto-compact if needed (hard threshold — blocking safety net).
-       * This runs EVERY iteration, not just once at the top of the entry point.
-       * Without this, context can overflow during multi-step tool iterations. */
-      llm_context_auto_compact_with_config(params->conversation_history, params->session_id,
-                                           params->llm_type, params->cloud_provider, params->model);
-
-      /* Step 1b: Hard pre-flight window guard.  Summary-based compaction keeps the
-       * most recent messages verbatim, so if a single recent tool result is itself
-       * larger than the model window it can't be shrunk — the request would still
-       * overflow and the provider rejects it with HTTP 400.  Surface that loudly
-       * (it was previously silent) instead of shipping a doomed request; trimming
-       * such oversized results at the source is the follow-up fix.
-       *
-       * This re-estimates the history *after* the compaction pass above (a distinct
-       * value from that pass's pre-compaction decision estimate); the extra walk is
-       * sub-millisecond and negligible against the per-iteration network round-trip. */
+      /* Step 1: the request this iteration sends must fit.  A history is
+       * compacted only at a turn seam (session_compaction.h), never mid tool round
+       * (its reasoning is bound to the request as it stands): past the hard
+       * threshold after tools ran, the turn closes here.  A background turn goes
+       * on in a continuation turn, compacted at its seam; a foreground one answers
+       * with what it has, or, when even that wouldn't fit, says so. */
       {
-         int est_tokens = llm_context_estimate_tokens(params->conversation_history);
-         int window = llm_context_get_size(params->llm_type, params->cloud_provider, params->model);
+         /* The request's real size: the estimate, calibrated by what this
+          * session's requests measured (llm_compaction.h). */
+         const int history_estimate = llm_context_estimate_tokens(params->conversation_history);
+         const int est_tokens = params->has_session
+                                    ? llm_context_request_tokens(params->session_id,
+                                                                 history_estimate, params->llm_type,
+                                                                 params->cloud_provider,
+                                                                 params->model)
+                                    : history_estimate;
+         const int window = llm_context_get_size(params->llm_type, params->cloud_provider,
+                                                 params->model);
+         const float hard = llm_context_hard_threshold();
+         if (window > 0 && iteration > 0 && est_tokens >= (int)((float)window * hard)) {
+            OLOG_WARNING("Tool loop: ~%d tokens reach the hard threshold of the %d window at "
+                         "iteration %d; closing the turn",
+                         est_tokens, window, iteration);
+            if (params->is_background) {
+               session_t *loop_session = call_session(params, true);
+               if (loop_session) {
+                  atomic_store(&loop_session->turn_overflowed, true);
+                  session_release(loop_session);
+               }
+               char *empty = malloc(1);
+               if (empty != NULL) {
+                  empty[0] = '\0';
+               }
+               return empty;
+            }
+            if (est_tokens < window) {
+               return final_answer_without_tools(
+                   params,
+                   "This reply has used as much of the conversation's room as it can. Answer "
+                   "the user now with what you have, and say what is left to do: the next "
+                   "message can continue it.",
+                   iteration);
+            }
+            return strdup("I've run out of room in this conversation partway through this. Send "
+                          "another message and I'll pick it up from a summary of what we have.");
+         }
          if (window > 0 && est_tokens >= window) {
-            OLOG_ERROR("Tool loop: estimated request ~%d tokens still exceeds model window %d "
-                       "after compaction (iteration %d) — provider will likely reject with 400; "
-                       "an oversized recent tool result cannot be summarized away",
+            OLOG_ERROR("Tool loop: estimated request ~%d tokens exceeds the model window %d "
+                       "(iteration %d): a single message is larger than the window",
                        est_tokens, window, iteration);
          }
       }
@@ -726,11 +871,11 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       llm_tool_response_t result;
       memset(&result, 0, sizeof(result));
 
+      note_request(params, params->input_text);
       int rc = params->provider_fn(params->conversation_history, params->input_text,
-                                   params->vision_images, params->vision_image_sizes,
-                                   params->vision_image_count, params->base_url, params->api_key,
-                                   params->model, params->chunk_callback, params->callback_userdata,
-                                   iteration, &result);
+                                   params->base_url, params->api_key, params->model,
+                                   params->chunk_callback, params->callback_userdata, iteration,
+                                   &result);
 
       /* Retry transient network failures (pre-flight unreachable, HTTP 429,
        * HTTP 5xx) with exponential backoff before bubbling up.  Each retry is
@@ -768,11 +913,11 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          }
          llm_tool_response_free(&result);
          memset(&result, 0, sizeof(result));
+         note_request(params, params->input_text);
          rc = params->provider_fn(params->conversation_history, params->input_text,
-                                  params->vision_images, params->vision_image_sizes,
-                                  params->vision_image_count, params->base_url, params->api_key,
-                                  params->model, params->chunk_callback, params->callback_userdata,
-                                  iteration, &result);
+                                  params->base_url, params->api_key, params->model,
+                                  params->chunk_callback, params->callback_userdata, iteration,
+                                  &result);
       }
 
       if (rc != 0) {
@@ -780,6 +925,9 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             OLOG_ERROR("Tool loop: transient network error at iteration %d after %d retries, "
                        "giving up",
                        iteration, LLM_TRANSIENT_RETRY_MAX);
+         } else if (llm_interrupt_ctx_triggered(&ictx)) {
+            /* The user interrupted (wake word, Stop): not a failure. */
+            OLOG_INFO("Tool loop: provider call interrupted at iteration %d", iteration);
          } else {
             OLOG_ERROR("Tool loop: Provider call failed at iteration %d", iteration);
          }
@@ -789,14 +937,32 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
 
       /* Step 4: If no tool calls, return text response.
        *
-       * A clean provider call (rc == 0) with no tool_calls and NULL text is a
-       * benign "end_turn with empty content" outcome — the LLM signalled the
-       * preceding tool result was sufficient and no further response is
-       * warranted.  Return an empty malloc'd string rather than NULL so
-       * callers (session_manager.c) do not classify it as an LLM call
-       * failure.  malloc(1) so the caller owns a heap pointer it can free()
-       * identically to the populated path. */
+       * A clean provider call (rc == 0) with no tool_calls and NULL text ends
+       * the turn without a word.  After tools ran in a turn someone is waiting
+       * on, the model is asked once for the outcome (tools off).  Otherwise, or
+       * when that brings nothing, an empty malloc'd string is returned rather
+       * than NULL so callers (session_manager.c) do not classify it as an LLM
+       * call failure.  malloc(1) so the caller owns a heap pointer it can
+       * free() identically to the populated path. */
       if (!result.has_tool_calls) {
+         if (result.text == NULL && iteration > 0 && !params->is_background &&
+             !llm_interrupt_ctx_triggered(&ictx)) {
+            /* Tools ran this turn and the model ended without a word: the user
+             * would see nothing, even when a tool failed.  Ask once for the
+             * outcome, tools off.  (A background turn has no one waiting; its
+             * empty ending is judged by its job.) */
+            OLOG_INFO("Tool loop: empty content at iteration %d after tool calls; asking for "
+                      "the outcome",
+                      iteration);
+            llm_tool_response_free(&result);
+            char *answer = final_answer_without_tools(
+                params, "Tell the user how this went: what you did, and anything that failed.",
+                iteration);
+            if (answer) {
+               return answer;
+            }
+            memset(&result, 0, sizeof(result)); /* freed above: nothing left to free */
+         }
          if (result.text == NULL) {
             OLOG_INFO("Tool loop: provider returned empty content at iteration %d "
                       "(clean end_turn, no response needed)",
@@ -810,7 +976,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             empty[0] = '\0';
             return empty;
          }
-         tool_loop_stash_final(params->session_id, &result,
+         tool_loop_stash_final(params, &result,
                                reasoning_provider_label(params->llm_type, params->cloud_provider));
          final_response = result.text;
          result.text = NULL; /* Transfer ownership to caller */
@@ -853,21 +1019,20 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
           * (no "[System:]" prefix) so a reasoning model doesn't mistake this
           * daemon control message for an injected directive and flag it; tool-
           * agnostic wording since this fires for any repeated tool, not search. */
-         json_object *hint_msg = json_object_new_object();
-         json_object_object_add(hint_msg, "role", json_object_new_string("user"));
-         json_object_object_add(
-             hint_msg, "content",
-             json_object_new_string(
-                 "You already called that tool with identical arguments and have its result. "
-                 "Answer using the information you already have — do not call it again."));
-         json_object_array_add(params->conversation_history, hint_msg);
+         const int note_at = json_object_array_length(params->conversation_history);
+         append_loop_note(
+             params->conversation_history,
+             "You already called that tool with identical arguments and have its result. "
+             "Answer using the information you already have — do not call it again.");
+         persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
 
          llm_tool_response_free(&result);
 
          /* Make one more call with tools disabled (iteration = MAX forces no tools) */
          OLOG_INFO("Tool loop: Making final call without tools to force text response");
          memset(&result, 0, sizeof(result));
-         rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0, params->base_url,
+         note_request(params, "");
+         rc = params->provider_fn(params->conversation_history, "", params->base_url,
                                   params->api_key, params->model, params->chunk_callback,
                                   params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
 
@@ -876,7 +1041,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             return NULL;
          }
 
-         tool_loop_stash_final(params->session_id, &result,
+         tool_loop_stash_final(params, &result,
                                reasoning_provider_label(params->llm_type, params->cloud_provider));
          final_response = result.text;
          result.text = NULL;
@@ -891,7 +1056,26 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          llm_tool_response_free(&result);
          return NULL;
       }
-      llm_tools_execute_all(&result.tool_calls, results);
+      /* The batch's budget, planned before it runs: a result_read answer in
+       * it is built to its fair share.  After it runs, the view stage keeps
+       * what is over its share whole and shows a view, then finishes every
+       * result (neutralized last; the WebUI told what the model sees) before
+       * anything reads them. */
+      llm_tool_views_budget_t view_budget;
+      llm_tool_views_budget_batch(params, &result.tool_calls, result.text, &view_budget);
+      session_t *view_session = call_session(params, true);
+      tool_result_store_set_read_budget(
+          view_session, llm_tool_views_read_chars(view_budget.chars, result.tool_calls.count));
+      const llm_tool_views_batch_t view_batch = {
+         .params = params,
+         .session = view_session,
+         .budget = &view_budget,
+      };
+      llm_tools_execute_all(&result.tool_calls, results, finish_batch, (void *)&view_batch);
+      if (view_session) {
+         tool_result_store_set_read_budget(view_session, 0);
+         session_release(view_session);
+      }
 
       /* Log tool results */
       for (int i = 0; i < results->count; i++) {
@@ -928,7 +1112,9 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       /* Step 8: Append assistant message + tool results to history */
       int hist_before = json_object_array_length(params->conversation_history);
       if (params->history_format == LLM_HISTORY_CLAUDE) {
-         append_claude_tool_history(params->conversation_history, &result, results);
+         char carrier[LLM_CARRIER_MAX];
+         llm_request_carrier(params->base_url, params->api_key, carrier, sizeof(carrier));
+         append_claude_tool_history(params->conversation_history, &result, results, carrier);
       } else {
          append_openai_tool_history(params->conversation_history, &result, results);
       }
@@ -943,9 +1129,11 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       /* Step 8b: All-silent check — tools handled their own output */
       if (followup.all_silent) {
          OLOG_INFO("Tool loop: All tools silent (should_respond=false), skipping follow-up");
+         const int note_at = json_object_array_length(params->conversation_history);
          append_closing_message(params->conversation_history,
                                 "[Tool execution completed without follow-up response]",
                                 params->history_format);
+         persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
          free_tool_result_resources(results);
          free(results);
          llm_tool_response_free(&result);
@@ -957,51 +1145,17 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          OLOG_WARNING("Tool loop: Max iterations (%d) reached, forcing text response",
                       LLM_TOOLS_MAX_ITERATIONS);
 
-         /* Inject a system hint telling the LLM to respond with what it has */
-         json_object *hint_msg = json_object_new_object();
-         json_object_object_add(hint_msg, "role", json_object_new_string("user"));
-         json_object_object_add(
-             hint_msg, "content",
-             json_object_new_string(
-                 "[System: Maximum tool iterations reached. Respond to the user now with "
-                 "the information you have gathered so far. Do not call any more tools.]"));
-         json_object_array_add(params->conversation_history, hint_msg);
-
          free_tool_result_resources(results);
          free(results);
          llm_tool_response_free(&result);
-
-         /* Make one final call with tools disabled */
-         OLOG_INFO("Tool loop: Making final call without tools to present gathered results");
-         memset(&result, 0, sizeof(result));
-         int final_rc = params->provider_fn(params->conversation_history, "", NULL, NULL, 0,
-                                            params->base_url, params->api_key, params->model,
-                                            params->chunk_callback, params->callback_userdata,
-                                            LLM_TOOLS_MAX_ITERATIONS, &result);
-
-         char *final_text = NULL;
-         if (final_rc == 0 && result.text) {
-            final_text = strdup(result.text);
-            /* Parity with the other final-answer paths (this one lacked even the
-             * finish-reason stash): record both so a max-iter forced answer still
-             * reports its stop reason and renders its E3 panel on reload. */
-            tool_loop_stash_final(params->session_id, &result,
-                                  reasoning_provider_label(params->llm_type,
-                                                           params->cloud_provider));
-         }
-         llm_tool_response_free(&result);
-         return final_text;
+         /* Plain wording, as the duplicate-call note: a "[System:]" prefix reads
+          * to a reasoning model as an injected directive. */
+         return final_answer_without_tools(
+             params,
+             "That is as many tool calls as this turn allows. Answer the user now with the "
+             "information you have gathered — do not call any more tools.",
+             iteration);
       }
-
-      /* Step 10: Vision images from a tool result (e.g. the `viewing` camera tool) are
-       * now persisted directly into conversation_history by
-       * llm_tools_add_results_openai/claude (Step 8), so they flow through normal
-       * history serialization on this and every future request instead of a
-       * one-shot injection. Clear the ephemeral params so a caller-supplied turn-0
-       * image (e.g. a WebUI upload) isn't resent on iteration 2+. */
-      params->vision_images = NULL;
-      params->vision_image_sizes = NULL;
-      params->vision_image_count = 0;
 
       /* Step 11: Check interrupt.  Background turns (job / research) break only
        * on their own session cancel flag; foreground turns also honor the global
@@ -1029,4 +1183,13 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
    /* Should not reach here (loop exits via returns) */
    OLOG_ERROR("Tool loop: Fell through iteration loop unexpectedly");
    return NULL;
+}
+
+char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
+   /* A side call's own loop (a compaction or summarizer run from inside a turn's
+    * iteration) hands the iteration back to the loop it interrupted. */
+   const int outer_iteration = llm_cache_monitor_get_iteration();
+   char *response = tool_iteration_loop_body(params);
+   llm_cache_monitor_set_iteration(outer_iteration);
+   return response;
 }

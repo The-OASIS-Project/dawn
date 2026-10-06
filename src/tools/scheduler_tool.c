@@ -1210,8 +1210,22 @@ static char *handle_snooze(struct json_object *details) {
    return strdup("No alarm is currently ringing to snooze.");
 }
 
-static char *handle_dismiss(struct json_object *details) {
+static char *handle_dismiss(struct json_object *details, int user_id) {
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
+
+   /* An explicit id must be the alarm ringing now (any device may silence it)
+    * or one of the caller's own (a guest has none).  Refused the same way as
+    * "nothing ringing", so it says nothing about another user's events. */
+   if (event_id > 0) {
+      sched_event_t ringing;
+      sched_event_t ev;
+      const bool is_ringing = scheduler_get_ringing(&ringing) == SUCCESS && ringing.id == event_id;
+      const bool is_own = user_id > 0 && scheduler_db_get(event_id, &ev) == 0 &&
+                          ev.user_id == user_id;
+      if (!is_ringing && !is_own) {
+         return strdup("No alarm is currently ringing to dismiss.");
+      }
+   }
 
    int result = scheduler_dismiss(event_id);
    if (result == 0)
@@ -1239,16 +1253,14 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    if (!details)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
-   /* Get user context */
-   int user_id = 1; /* Default */
+   /* Whose schedule: see tool_get_current_user_id() (0 = a guest). */
+   const int user_id = tool_get_current_user_id();
    const char *source_uuid = NULL;
    const char *source_location = NULL;
    sched_source_type_t source_client_type = SCHED_SOURCE_LOCAL;
 
-#ifdef ENABLE_MULTI_CLIENT
    session_t *ctx = session_get_command_context();
    if (ctx) {
-      user_id = ctx->metrics.user_id > 0 ? ctx->metrics.user_id : 1;
       if (ctx->type == SESSION_TYPE_DAP2) {
          source_uuid = ctx->identity.uuid;
          source_location = ctx->identity.location;
@@ -1260,7 +1272,7 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
 
    /* Schedule-mutating actions act on a specific user's schedule.  A caller with
     * no session context is an unauthenticated MQTT publish (no session_id), which
-    * resolves to user_id 1 — refuse it, mirroring job_tool's starts_work guard.
+    * resolves to the default voice user — refuse it, mirroring job_tool's starts_work guard.
     * Every legitimate path (LLM tool call incl. local voice, WebUI, authenticated
     * MQTT-with-session) sets the context.  snooze/dismiss are deliberately left
     * reachable: they act only on an already-ringing alarm, so a physical MQTT
@@ -1272,7 +1284,13 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
       OLOG_WARNING("scheduler_tool: refused '%s' from a caller with no session context", action);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: changing a schedule requires a user session.");
    }
-#endif
+
+   /* A guest has no schedule; snooze/dismiss act only on an alarm already
+    * ringing, so any device can still silence one. */
+   if (user_id <= 0 && strcmp(action, "snooze") != 0 && strcmp(action, "dismiss") != 0) {
+      json_object_put(details);
+      return strdup(TOOL_GUEST_REFUSAL);
+   }
 
    char *result = NULL;
 
@@ -1289,7 +1307,7 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    } else if (strcmp(action, "snooze") == 0) {
       result = handle_snooze(details);
    } else if (strcmp(action, "dismiss") == 0) {
-      result = handle_dismiss(details);
+      result = handle_dismiss(details, user_id);
    } else {
       char buf[256];
       snprintf(buf, sizeof(buf),
@@ -1402,8 +1420,15 @@ static const treg_param_t scheduler_params[] = {
  * Tool Metadata
  * ============================================================================= */
 
+static const tool_action_kind_entry_t s_scheduler_action_kinds[] = {
+   { "list", TOOL_KIND_READ, NULL },
+   { "query", TOOL_KIND_READ, NULL },
+};
+
 static const tool_metadata_t scheduler_metadata = {
    .name = "scheduler",
+   .action_kinds = s_scheduler_action_kinds,
+   .action_kind_count = TOOL_KIND_COUNT(s_scheduler_action_kinds),
    .device_string = "scheduler",
    .topic = "dawn",
    .aliases = { "timer", "alarm", "reminder", "schedule" },
@@ -1512,7 +1537,7 @@ static const tool_metadata_t scheduler_metadata = {
        "{\"name\":\"Morning Briefing\",\"add_steps\":[{\"tool_name\":\"search\","
        "\"tool_action\":\"news\",\"tool_value\":\"AAPL NVDA TSLA stock news today\"}]}",
    .params = scheduler_params,
-   .param_count = 2,
+   .param_count = TOOL_PARAM_COUNT(scheduler_params),
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,
