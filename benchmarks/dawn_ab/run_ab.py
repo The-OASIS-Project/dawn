@@ -522,14 +522,14 @@ def main():
         scenarios = json.load(f)["scenarios"]
     if args.only:
         wanted = set(args.only.split(","))
+        missing = wanted - {s["id"] for s in scenarios}
+        if missing:
+            sys.exit(f"unknown scenario ids: {sorted(missing)}")
         scenarios = [s for s in scenarios if s["id"] in wanted]
     else:
         # An opt-in scenario needs something a default run can't assume (web
         # access, a particular model window): it runs only when named.
         scenarios = [s for s in scenarios if not s.get("opt_in")]
-        missing = wanted - {s["id"] for s in scenarios}
-        if missing:
-            sys.exit(f"unknown scenario ids: {sorted(missing)}")
     models = parse_models(args.models)
 
     with db_connect_ro(args.db) as db:
