@@ -47,6 +47,11 @@ The ASR subsystem uses an abstraction layer (`asr_interface`) to support multipl
    - Assembles partial results into complete transcriptions
    - Prevents premature cutoff of long commands
 
+- **`src/core/endpointer.c`, `include/core/endpointer.h`**: End-of-speech decision for the local microphone (pure, unit-tested by trace replay)
+   - Fed one speech/silence flag per frame; reports a tentative end at a short pause (`[vad.chunking] pause_duration`), a cancel when speech resumes, and the commit
+   - Commits after `[vad] end_of_speech_duration` of silence, or at `max_recording_duration` (which wins over a cancel)
+   - The tentative and cancel events change no timing today; they are logged so the pauses inside commands can be measured
+
 ## Data Flow
 
 ```

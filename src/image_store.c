@@ -73,8 +73,8 @@ static blob_store_handle_t s_image_handle = -1;
 static bool s_image_ready = false;
 
 /* What still holds unbound images: a live session's unsaved history
- * (core/session_image_hold.c, a layer up; weak, so a build without sessions
- * links and holds nothing). */
+ * (core/session_image_hold.c, a layer up; weak, so the image store never
+ * includes the session layer, and a binary without it holds nothing). */
 extern void session_images_held(const char *const ids[], const int owners[], int n, bool held[])
     __attribute__((weak));
 

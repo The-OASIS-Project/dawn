@@ -47,3 +47,4 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **RRULE expansion**: recurring events are pre-expanded into `event_occurrences` so range queries are simple SQL.
 - **Background sync**: a dedicated thread periodically pulls changes from CalDAV servers using ctag/etag for efficiency.
 - **Provider compatibility**: tested with Google Calendar, Apple iCloud, Nextcloud, and Radicale.
+- **Calendars of the same name** (`calendar_pick.c`, pure): two of a user's calendars can share a display name (a "Home" in iCloud and in Google). The listing shows each with its account ("Home (iCloud)", or "Home (Google #12)" when one account has both). Adding an event to a name two writable calendars share is a question, never a guess; the label picks one. A read by display name covers every calendar of that name, and a read by label covers just that one.

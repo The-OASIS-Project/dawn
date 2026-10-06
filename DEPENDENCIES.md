@@ -45,6 +45,10 @@ This document tracks all third-party dependencies used by the DAWN project.
 | libmujs-dev, libgumbo-dev, libopenjp2-7-dev, libjbig2dec0-dev | Various (MIT/LGPL/BSD) | MuPDF static link dependencies |
 | libstemmer (Snowball) | BSD-3-Clause | Porter2 stemming for BM25 keyword indexing (`src/memory/memory_stem.c`). Install: `sudo apt install libstemmer-dev`. |
 | libgit2 (≥ 1.6) | GPLv2-with-linking-exception (GPL-compatible) | In-process git client for the coding-harness code-projects feature. The CMake *option* `DAWN_ENABLE_CODE_PROJECTS` defaults OFF, but the **default/full/debug presets enable it**, so it's a hard build dep for those builds; the installer therefore builds libgit2 **by default** (set `INSTALL_LIBGIT2=false ./scripts/install.sh` to skip for the local/server/ci presets). **Jammy apt ships 1.1 — too old**; built from source with the OpenSSL HTTPS backend (SSH off) — see `install_libgit2` in `scripts/lib/libs.sh`. |
+| SQLite3 | Public domain | All persistent state: `auth.db` (users, conversations, memory, scheduler, tool results), the music DB |
+| libuuid (util-linux) | BSD-3-Clause | Plex client identifier generation |
+| ncurses | X11/MIT-style | Terminal UI (`--tui`; optional, disabled when not found) |
+| Abseil | Apache 2.0 | Required by WebRTC Audio Processing (AEC3) when that is built |
 | mosquitto | EPL/EDL | MQTT broker (runtime dependency) |
 
 ### Audio Processing
@@ -52,6 +56,10 @@ This document tracks all third-party dependencies used by the DAWN project.
 | Library | License | Purpose |
 |---------|---------|---------|
 | PulseAudio | LGPL 2.1+ | Audio capture/playback |
+| ALSA (libasound) | LGPL 2.1+ | Audio capture/playback (selected at runtime alongside PulseAudio) |
+| libsndfile | LGPL 2.1+ | Linked by the daemon build (required to link; no DAWN source currently calls it) |
+| libmpg123 | LGPL 2.1 | MP3 decoding for music playback (`DAWN_ENABLE_MP3`, on by default; optional) |
+| libvorbis / libvorbisfile | BSD-3-Clause | Ogg Vorbis decoding for music playback (`DAWN_ENABLE_OGG`, on by default; optional) |
 | FLAC | BSD-3-Clause | FLAC audio decoding |
 | Opus | BSD-3-Clause | Audio codec for WebUI streaming |
 | libsamplerate | BSD-2-Clause | Sample rate conversion |
@@ -61,17 +69,18 @@ This document tracks all third-party dependencies used by the DAWN project.
 
 | Library | Version | License | Purpose |
 |---------|---------|---------|---------|
-| Vosk | - | Apache 2.0 | Offline speech recognition |
-| whisper.cpp | - | MIT | Alternative ASR engine |
-| Kaldi | Apache 2.0 | Vosk dependency |
+| whisper.cpp | - | MIT | Default ASR engine (CUDA on Jetson); git submodule |
+| Vosk | - | Apache 2.0 | Legacy streaming ASR, optional (`-DENABLE_VOSK=ON`, off by default) |
+| Kaldi | - | Apache 2.0 | Vosk dependency (only with Vosk) |
 
 ### Text-to-Speech (TTS)
 
 | Library | License | Purpose |
 |---------|---------|---------|
 | Piper | MIT | Neural TTS engine |
-| ONNX Runtime | MIT | ML inference for Piper |
+| ONNX Runtime | MIT | ML inference for Piper, and also the Silero VAD and the local (`onnx`) embedding provider |
 | piper-phonemize | MIT | Text-to-phoneme conversion |
+| spdlog / fmt | MIT | Logging libraries Piper links against |
 | espeak-ng | GPL 3.0 | Phonemizer backend |
 
 ### CUDA (Jetson Only)
@@ -121,9 +130,11 @@ All API key environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMIN
 
 These are model files required at runtime, not source dependencies:
 
-- `vosk-model-en-us-0.22/` - Vosk English model
-- `models/*.onnx` - Piper TTS voice models
-- `models/whisper.cpp/` - Whisper ASR models (optional)
+- `models/whisper.cpp/` - Whisper ASR models (`ggml-<size>.bin`; `[asr] model`, default `base`)
+- `models/*.onnx` - Piper TTS voice models (each with its `.onnx.json` and licence file)
+- `models/silero_vad_16k_op15.onnx` - Silero voice-activity detection
+- `models/embeddings/` - local embedding model + `vocab.txt` for memory and document search (default `bge-small-en-v1.5-int8.onnx`; not needed with the `ollama` or `openai` embedding provider)
+- `models/vosk-model/` - Vosk English model (only with `-DENABLE_VOSK=ON`)
 
 ## License Compatibility
 
@@ -134,6 +145,9 @@ All dependencies are compatible with GPLv3:
 - espeak-ng GPL 3.0 - Same license as project
 - AGPL-3.0 (MuPDF) — Compatible, project is GPLv3
 - ISC (libsodium) — Permissive, GPL-compatible
+- Public domain (SQLite) — No restrictions
+
+The Apache 2.0 licence text that the Mem0 attribution (below, and `NOTICE`) refers to is in `LICENSES/Apache-2.0.txt`.
 
 ## Updating Dependencies
 
@@ -149,7 +163,7 @@ curl -sL "https://cdn.jsdelivr.net/npm/dompurify@latest/dist/purify.min.js" -o w
 ### System Libraries
 System libraries should be updated through the package manager (apt on Ubuntu/Debian).
 
-See `README.md` for full installation instructions.
+See `GETTING_STARTED.md` for full installation instructions.
 
 ## Architectural Influences
 

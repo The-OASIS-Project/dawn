@@ -20,11 +20,11 @@
  *
  * ONNX Embedding Provider
  *
- * Local embedding generation using all-MiniLM-L6-v2 (int8 quantized).
- * Implements WordPiece tokenizer and ONNX Runtime inference with
- * mean pooling to produce 384-dimensional sentence embeddings.
+ * Local embedding generation with a 384-dimensional BERT-family model
+ * (default bge-small-en-v1.5, int8 quantized).  Implements WordPiece
+ * tokenizer and ONNX Runtime inference with mean pooling.
  *
- * Model files: models/embeddings/all-MiniLM-L6-v2-int8.onnx
+ * Model files: models/embeddings/bge-small-en-v1.5-int8.onnx (default)
  *              models/embeddings/vocab.txt
  */
 
@@ -44,7 +44,7 @@
  * ============================================================================= */
 
 #define ONNX_MAX_SEQ_LEN 256 /* Max tokens (MiniLM limit) */
-#define ONNX_HIDDEN_DIM 384  /* MiniLM output dimension */
+#define ONNX_HIDDEN_DIM 384  /* model output dimension */
 #define MODEL_PATH "models/embeddings/bge-small-en-v1.5-int8.onnx"
 #define VOCAB_PATH "models/embeddings/vocab.txt"
 

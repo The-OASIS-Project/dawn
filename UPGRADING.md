@@ -12,29 +12,42 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
-## 2026-10-06 — `conversation_logging` retired
+## 2026-10-06 — Device data relayed over MQTT is read, not acted on
 
-**What changed.** `[llm] conversation_logging` (the "Conversation File Logging"
-checkbox) is retired and ignored. It had stopped writing anything when
-compaction changed: conversations are kept in the database, where the WebUI and
-`dawn-admin` read them.
+**What changed.** When a device answers over MQTT and DAWN speaks its data to
+you (a camera description, a system status, anything sent back as device
+data), the reply to it now only reads: Friday can look things up in your own
+data and change the conversation's settings, but she can't act or prepare
+an action (send, call, schedule, play, save), fetch from the web, or work a
+device in that reply.
+Device data can carry text from outside (a sign in a camera image, a web
+page), so it no longer gets to start actions. Before, that reply had the full
+tool set.
 
-**What you need to do.** Nothing. If your `dawn.toml` sets it, DAWN logs a note
-once at startup; you can delete the line.
+**What you need to do.** Nothing, unless a device relay of yours relied on
+Friday acting on its data (for example, turning on a light because a camera
+reported someone at the door). Ask for the action yourself, or set it up as a
+Home Assistant automation. Actions you ask for by voice are unaffected.
 
 ---
 
-## 2026-10-05 — OpenRouter's Claude models use OpenRouter's Anthropic endpoint
+## 2026-10-06 — Retired settings: delete the lines
 
-**What changed.** If you run Claude models through OpenRouter (`provider =
-"openrouter"` with an `anthropic/…` model), DAWN now sends them to OpenRouter's
-Anthropic Messages endpoint instead of its OpenAI-style one. They get the same
-prompt caching and thinking as direct Claude, and requests are pinned to
-Anthropic itself (OpenRouter won't fall back to Bedrock or Vertex).
+**What changed.** These settings are ignored now. If your `dawn.toml` still sets
+one, DAWN logs a note once at startup and carries on, and the next save from the
+WebUI settings panel drops it.
+- **`[llm] conversation_logging`** (the "Conversation File Logging" checkbox). It
+  had stopped writing anything: conversations are kept in the database, where the
+  WebUI and `dawn-admin` read them.
+- **`recent_window_turns` and `score_uplift_factor`** under
+  `[memory.focus_injection.dedup]`. A conversation now sends each retrieved memory,
+  document passage or calendar event once and names it again on later turns
+  instead of re-sending it, so the "don't re-send for N turns" rule they tuned is
+  gone, along with its controls in the panel.
+- **`[vision] capture_history_count`.** Camera captures are now kept with their
+  conversation and bounded by the model (see 2026-10-01).
 
-**What you need to do.** Nothing. Existing conversations continue; their first
-turn after the upgrade starts its thinking fresh. A custom OpenRouter endpoint
-(`[llm.cloud] endpoint`) keeps the old route.
+**What you need to do.** Nothing. Delete those lines to silence the startup note.
 
 ---
 
@@ -50,30 +63,21 @@ turn after the upgrade starts its thinking fresh. A custom OpenRouter endpoint
   other conversations, and an LLM switch asked for by text lasts for that reply
   only. Telegram, Discord and Slack, which vouch for who sent each message, are
   unchanged.
+- **A WebUI conversation you mark private before typing (or speaking) is created
+  private,** so nothing from its first turn is learned either. Research started
+  from a private conversation stays out of memory too (its report is still saved
+  as a note).
 
 **What you need to do.** Nothing. What earlier texts already taught stays in
 memory; review it in the Memory panel if you want it gone.
 
 ---
 
-## 2026-10-05 — Private mode applies from the first message
+## 2026-10-05 — Friday asks before acting when she isn't sure
 
 **What changed.**
-- **Turning on private mode before you start a conversation now covers its first
-  message.** In the WebUI, a conversation you mark private before typing (or
-  speaking) is created private, so nothing from its first turn is learned.
-  Before, it was made private only after the first turn had started, and a
-  conversation started by voice ignored the setting.
-- **Research from a private conversation stays out of memory.** Its report is
-  still saved as a note you can read, without the memory entry that pointed to it.
 
-**What you need to do.** Nothing.
-
----
-
-## 2026-10-05 — Home Assistant and calendar ask instead of picking
-
-**What changed.**
+**Home Assistant and calendar**
 - **Two devices that match equally ask which.** "Turn on the lamp" with a desk
   lamp and a floor lamp now lists both instead of switching on whichever came
   first.
@@ -92,14 +96,13 @@ memory; review it in the Memory panel if you want it gone.
   that matches nothing, or more than one writable calendar, gets the list of
   your writable calendars instead of going to the first one. Every new event
   says which calendar it went to.
+- **Calendars that share a name are listed with their account** ("Home
+  (iCloud)", "Home (Google)"). Saying that label picks one, both for adding
+  and for reading; the plain name reads all of them. Two writable calendars
+  with the same name get a question instead of the first one. A read-only
+  calendar with the same name as a writable one doesn't count.
 
-**What you need to do.** Nothing.
-
----
-
-## 2026-10-04 — Friday asks before calling, texting or emailing someone she isn't sure of
-
-**What changed.**
+**Calling, texting and emailing someone**
 - **A name that's only part of a contact's asks first.** "Call Chris" with a
   Christine in your contacts used to call Christine; now Friday shows who she
   found ("Christine Lee, for 'Chris'") and asks. The whole name, or a whole
@@ -118,6 +121,21 @@ memory; review it in the Memory panel if you want it gone.
   rather than sent to all of them.
 - If you set your own `[asr] disambiguation_hint`, it keeps your wording; the
   built-in one now also says to pass names as heard.
+
+**Sending and trashing email**
+- **The assistant can no longer prepare an email and confirm it in the same
+  reply.** It drafts, reads it back, and sends only if your very next message
+  says yes. If the conversation moves on first, it prepares the email again.
+  Trash works the same way. Voice is unchanged: it asks, you say yes.
+- **A confirm counts only in the session where the draft was made**: the same
+  browser tab, device or channel. A draft prepared in the WebUI can't be
+  confirmed from a satellite, or from another tab.
+- **Background jobs, re-engaged background turns, scheduled tasks and MQTT
+  messages can't send, trash or archive email.** The assistant says what it
+  would do and leaves it to you.
+- **The read-back now ends with a fixed line**, "Sending to <address>, from
+  <account>, subject: ...". The assistant is asked to say it as written, so you
+  hear where the mail really goes.
 
 **What you need to do.** Nothing.
 
@@ -201,27 +219,6 @@ at startup when it doesn't.
 
 ---
 
-## 2026-10-02 — Sending and trashing email need your yes in a new message
-
-**What changed.**
-- **The assistant can no longer prepare an email and confirm it in the same
-  reply.** It drafts, reads it back, and sends only if your very next message
-  says yes. If the conversation moves on first, it prepares the email again.
-  Trash works the same way. Voice is unchanged: it asks, you say yes.
-- **A confirm counts only in the session where the draft was made**: the same
-  browser tab, device or channel. A draft prepared in the WebUI can't be
-  confirmed from a satellite, or from another tab.
-- **Background jobs, re-engaged background turns, scheduled tasks and MQTT
-  messages can't send, trash or archive email.** The assistant says what it
-  would do and leaves it to you.
-- **The read-back now ends with a fixed line**, "Sending to <address>, from
-  <account>, subject: ...". The assistant is asked to say it as written, so you
-  hear where the mail really goes.
-
-**What you need to do.** Nothing.
-
----
-
 ## 2026-10-02 — Email reading uses GMime: install `libgmime-3.0-dev` before rebuilding
 
 **What you need to do.** If you build DAWN from source with email enabled (the default), install
@@ -248,73 +245,12 @@ Without it, CMake stops with `gmime-3.0 not found`. If you don't use email, buil
 - **Asking to trash an email no longer downloads it** just to show its sender and subject.
   On IMAP it also no longer marks the message read.
 - **Gmail reads never download attachment bytes** to read the text.
-
----
-
-## 2026-10-02 — Email trash and archive over IMAP no longer purge other deleted mail
-
-**What changed.**
-- **Trashing or archiving a message on an IMAP account now touches only that
-  message.** Before, DAWN finished the move with a plain `EXPUNGE`, which
-  permanently erased *every* message marked deleted in that folder, including
-  ones another mail app had only marked. DAWN now uses `MOVE`, or removes just
-  the one message. On a server that supports neither, the message is copied and
-  marked deleted, and DAWN says it is still in the folder for your mail app to
-  remove.
-- **DAWN finds Trash and Archive by asking the server**, not by guessing names
-  like "Trash" or "[Gmail]/Trash". It uses the folder your server marks for
-  that purpose, or a folder named Trash, Deleted Items, Archive (and similar)
-  at the top of your folders. It never uses a folder shared by other people.
-- **If an account has no Trash folder, trash is refused** and the message stays
-  where it is. Archive is refused the same way when there is no archive folder.
-  Create the folder in your mail app if you want DAWN to use it.
-
-**What you need to do.** Nothing. Gmail API accounts are unaffected.
-
----
-
-## 2026-10-01 — Retrieved memory is sent once per conversation; two focus settings retired
-
-**What changed.**
-- **Each turn now sends only the retrieved items (memories, document passages,
-  calendar events) the conversation hasn't already shown the model.** An item
-  that is still relevant on a later turn is named on a short `[still relevant:
-  M3, M7]` line instead of being sent again; an item whose text changed is sent
-  again under the same number. DAWN reads this from the conversation itself, so
-  it holds across a restart, a reload, a compaction and a forget (a forgotten or
-  summarized-away item counts as not shown). Long conversations on one topic
-  send far less, and the model's prompt cache holds more of each request.
-- **`recent_window_turns` and `score_uplift_factor` under
-  `[memory.focus_injection.dedup]` are retired.** They tuned the old "don't
-  re-send for N turns" rule, which this replaces. If your `dawn.toml` sets them,
-  DAWN logs once that they are ignored, and the next save from the WebUI
-  settings panel drops the section. The two controls are gone from the panel.
-- **The rules for retrieved items moved into the system prompt.** Each
-  existing conversation gets one "updated instructions" message on its next
-  turn, once.
-- **The database moves to schema v100**, automatically on start. The memory
-  citation audit records the items a turn named again apart from the ones it
-  sent, and each conversation's compaction summary is now stored exactly as it
-  is sent (cleaned once, when it is made, instead of at every reload). A
-  summary that DAWN's stricter cleaning changes is updated once; that
-  conversation's earlier turns then replay without the model's earlier
-  reasoning (its text and tool calls stay), the same as after any other
-  change that rewrites what a conversation was sent. The log line
-  `v100 stored N compaction summaries as sent` says how many.
-- **Text DAWN didn't write is cleaned more thoroughly.** Imitations of the new
-  item lines are defused in tool results, retrieved items, attached documents
-  and MCP tool descriptions. An MCP tool's description is now one line; a
-  conversation using that tool gets the new description as a tool change,
-  once, at its next turn (all of one server's tools together; if that server's
-  tools already changed four times in the past hour, within the hour). A
-  conversation whose tools have already changed 32 times keeps the
-  descriptions it has, as it does for any later tool change.
-
-**What you need to do.** Nothing. Optionally remove the
-`[memory.focus_injection.dedup]` section from `dawn.toml` to silence the notice.
-The WebUI Context panel now says, for each item, whether it was sent this turn
-or was already in the conversation (reload the page once to pick up the new
-script).
+- **IMAP trash and archive move only that one message,** into the folder your
+  server marks for it (or one named Trash, Deleted Items, Archive). Before, the
+  move erased every message marked deleted in that folder, including ones another
+  mail app had only marked. **An account with no Trash (or Archive) folder now
+  refuses that action** and leaves the message where it is; create the folder in
+  your mail app if you want DAWN to use it.
 
 ---
 
@@ -336,7 +272,7 @@ WebSocket must upload each image first and send its id in `image_ids`; see
 
 ---
 
-## 2026-10-01 — Camera captures stay in the conversation; `capture_history_count` retired
+## 2026-10-01 — Camera captures stay in the conversation
 
 **What changed.**
 - **An image a tool returns (a camera capture from `viewing`, an MCP image) is now
@@ -344,9 +280,8 @@ WebSocket must upload each image first and send its id in `image_ids`; see
   reloads with the conversation. Before, a capture lived only in memory and older
   ones were blanked out as new ones came in. Captures are private to their owner and
   are deleted with their conversation. Guests' captures stay in memory only.
-- **`[vision] capture_history_count` is retired and ignored.** If your `dawn.toml`
-  sets it, DAWN logs one warning at startup and carries on; the next settings save
-  removes it. Images are now bounded by the model instead: a request carries at most
+- **Images are bounded by the model**, replacing `[vision] capture_history_count`
+  (retired, see 2026-10-06): a request carries at most
   the images its vendor allows (`models.toml` `[max_request_images]`), a capture past
   that is refused for that turn, and the next turn compacts the conversation so its
   oldest images are summarized away.
@@ -431,6 +366,10 @@ browser rejects a `__Host-` cookie that has one).
   Measured on a Jetson, a 16 MB write now holds the database ~90 ms, from
   ~130-180 ms.
 
+- **Large tool results are now stored too** (a long web page, a big MCP
+  response), whole, with their conversation, and deleted with it: up to 256 MB
+  per conversation, 1 GB per user and 4 GB in all, oldest first.
+
 **What you need to do.** Nothing, as long as the disk has the space above. A
 manual `VACUUM` (the admin compact command) briefly needs twice the database's
 size on disk, as before.
@@ -439,155 +378,93 @@ size on disk, as before.
 file promptly (its space is returned to the disk). Like any deleted file, its old
 contents can remain in freed disk blocks, in the database's log until it is
 overwritten, and in any backup copies (DAWN's pre-upgrade backups in
-`backups/`, and any copies you made yourself). Full-disk encryption is the way
-to protect data at rest on the device.
+`backups/`, and any copies you made yourself). Tool results are kept at rest in
+`auth.db` the way the conversation's messages are; back it up and protect it the
+same way. Full-disk encryption is the way to protect data at rest on the device.
 
 ---
 
-## 2026-09-29 — Long conversations are compacted between turns
+## 2026-09-29 — Existing conversations migrate once
 
-**What changed.**
-- **Compaction happens between turns only.** When a conversation grows long,
-  DAWN summarizes its oldest part in the background and puts the summary in
-  place when your next message starts, never in the middle of a reply that is
-  using tools. The summary now appears as a "CONVERSATION SUMMARY" block in
-  front of the first kept message, the same whether the conversation is live
-  or reopened.
-- **Instructions survive a compaction.** A persona or setting change made in
-  the part that was summarized is sent again, so the model keeps following it.
-- **A reply that fills the conversation mid-task** now answers with what it
-  has (or says it ran out of room) instead of compacting mid-reply; send another
-  message to carry on. A background job continues on its own.
-- **Switching models** fits the conversation to the new model with your next
-  message.
-- `context_expand` with no arguments shows the messages the latest summary
-  replaced.
+**What changed.** A conversation now keeps the prompt it started with and adds
+changes where they happen (edited instructions, the surface you're on, each
+question's time and retrieved memory), each reply is saved with the model's own
+reasoning so it replays exactly, and a long conversation is summarized between
+turns, never mid-reply. Cloud providers can then reuse their prompt cache across
+the whole conversation, which costs less and answers faster. On Claude Opus 5.5
+and Fable 5.1 accounts created on or after 2026-08-31, it also stops the "system
+prompt re-rendered" error on the turn after a tool call. The database migrates
+itself on first start (schema v92 to v96).
 
-**Upgrading.** Nothing to do: the database migrates itself (schema v96).
-Conversations that were already compacted lose the model's earlier reasoning
-once (their text and tool calls stay).
-
----
-
-## 2026-09-29 — Merging duplicate memories is recoverable again
-
-**What changed.**
-- **Merges are real merges.** When the assistant merged duplicate memories
-  (`forget` with a fact to keep), the fact to keep never reached DAWN, so every
-  such "merge" permanently deleted the duplicates. Duplicates are now hidden
-  behind the kept fact and recoverable, as intended.
-- **A merged fact is kept for `prune_superseded_days` (default 30) from the
-  merge.** Before, the window counted from when the fact was first learned, so
-  any fact older than that was deleted at the next prune, right after merging.
-
-**Upgrading.** Nothing to do: the database migrates itself (schema v95), and
-facts merged before the upgrade get a fresh window from the upgrade. Duplicates
-deleted by earlier "merges" are not brought back; the facts they were merged
-into still hold what they said.
-
----
-
-## 2026-09-29 — Conversations keep the prompt they started with
-
-**What changed.**
-- **A conversation's system prompt is fixed when it starts.** Before, DAWN
-  rebuilt it on every turn, so any change (the time, your memory, a device
-  coming online) re-sent the whole conversation to the model as new. Now a
-  change reaches the conversation where it happened, and nothing already sent
-  is rewritten:
-  - Editing your persona or settings mid-conversation adds a note to the
-    conversation that the instructions changed, with the new text. The model
-    follows the newest.
-  - The surface you're talking through (voice, a messaging channel, a
-    satellite's room) and which tools are unavailable right now are added as
-    standing directions when they change.
-  - The current time, the memory items retrieved for a question, and new
-    device events (a phone ringing) go in front of the question they belong to.
-  - What DAWN knows about you (your preferences and recent conversations) goes
-    in front of a question when it changed since the conversation last had it.
-
-  Cloud providers can then reuse their prompt cache across the whole
-  conversation, which costs less and answers faster. On Claude Opus 5.5 and
-  Fable 5.1 accounts created on or after 2026-08-31, it also stops the
-  "system prompt re-rendered" error on the turn after a tool call.
-- **A conversation offers the same tools on every turn.** A tool that isn't
-  available where you are right now (a device offline, a tool disabled for
-  this kind of session) stays listed; the model is told it's unavailable, and
-  DAWN refuses it if called. A newly connected tool (an MCP server) takes
-  effect with the conversation's next turn, as a fresh start for the model's
-  earlier reasoning (text and tool calls are kept).
-- **Memory citations keep their number.** A memory item shown as `[M7]` is
-  `[M7]` for the whole conversation, across reloads.
-- **Image turns send the image on every request of the turn**, the same way a
-  reloaded conversation does.
-
-**Upgrading.** Nothing to do: the database migrates itself (schema v94). The
-first message you send in each existing conversation fixes its prompt; the
-model's earlier reasoning in that conversation isn't replayed from then on (its
-text and tool calls are). The daemon log says `prefix boundary (adopted)` once
-per such conversation.
+**What you'll notice.**
+- **The first message in each existing conversation fixes its prompt.** The
+  model's earlier reasoning there isn't replayed from then on (its text and tool
+  calls are). The daemon log says `prefix boundary (adopted)` once per such
+  conversation. A conversation that was already compacted loses its earlier
+  reasoning once the same way.
+- **A long conversation is summarized between turns.** The summary appears as a
+  "CONVERSATION SUMMARY" block in front of the first kept message. A reply that
+  fills the conversation mid-task answers with what it has (or says it ran out of
+  room); send another message to carry on.
+- **A tool that isn't available where you are stays listed,** and DAWN refuses it
+  if called. A newly connected MCP server's tools take effect with a
+  conversation's next turn.
+- **Old voice conversations are rewritten once.** Before this version, saving a
+  voice conversation lost part of every turn that used a tool. On the first start
+  DAWN turns those messages into proper tool entries where it can; where a call was
+  never saved, the turn becomes a note ("[Tool Call: its name and arguments weren't
+  saved]") followed by its results. The daemon log says how many rows were
+  rewritten.
 
 **Worth knowing.**
-- The memory and context sent with each question are stored with the
-  conversation, like the question. They never appear in the WebUI, search,
-  exports or memory extraction. Forgetting a memory item, deleting memories
-  in the memory panel, or deleting a document also removes it from the
-  context stored in your conversations,
-  including ones open right now; the model's earlier reasoning in those
-  conversations isn't replayed after that, since it may have repeated the item.
-  What the assistant itself said about it (its replies, tool results it read)
-  stays in the conversation; delete the conversation to remove those too.
-- Phone notices (an incoming or missed call, an arriving text) now go only to
-  the conversations of the user who owns the phone (the local device's voice
-  user), not to every connected user. With no user assigned to the local
-  device, no conversation gets them; the incoming-call banner still shows.
-- The debug chat logs (`logs/chat_history_*.json`) now include that memory and
-  context, as they were sent.
+- **Saved reasoning is for the model only.** It's never shown in the WebUI,
+  exported, searched or sent to another model, and only the provider that
+  produced it gets it back.
+- **The memory and context sent with each question are stored with the
+  conversation** (never shown, searched, exported or extracted). Forgetting a
+  memory item, deleting memories, or deleting a document also removes it from
+  that stored context, including in open conversations. What the assistant said
+  about it (its replies, tool results it read) stays; delete the conversation to
+  remove those too.
+- **Backups made before the upgrade still hold the old voice messages,**
+  reasoning included. Delete or keep them as you would any backup with private
+  content.
+
+**What you need to do.** Nothing.
 
 ---
 
-## 2026-09-29 — Reloaded conversations replay as the model produced them; old voice conversations cleaned up
+## 2026-09-28 — Reasoning is set per model; the WebUI shows only what a model takes
 
 **What changed.**
-- **Each reply is now saved with its model's reasoning, for the model only.** When
-  a conversation is reopened, resumed as a background job, or continued from a
-  messaging channel, each earlier reply goes back to the model exactly as that
-  model produced it, reasoning included, instead of as plain text. Replies keep
-  their quality, and cloud providers can reuse their prompt cache. The reasoning
-  sits in a new database column that is never shown in the WebUI, exported,
-  searched or sent to any other model. Only the provider that produced it gets
-  it back (and, where a provider ties it to an account, only through the same
-  API key). It is removed once a conversation is compacted past it. A database
-  copied to another DAWN install can't replay it there.
-- **Old voice conversations are cleaned up automatically.** Before this
-  version, saving a voice conversation lost part of every turn that used a
-  tool:
-  - With Claude, the model's raw reply structure (tool calls, results, and any
-    reasoning) was stored as the message text, so reasoning reached memory
-    extraction and a reloaded conversation gave the model raw blocks instead of
-    real tool calls.
-  - With other models, the tool calls were dropped: the turn was saved as an
-    empty assistant message (an empty box in the WebUI) and its results were
-    saved without the call they answer, so the WebUI didn't show them.
+- **Each model gets the reasoning settings it actually supports**, from a new
+  `[thinking.*]` table in `models.toml`. DAWN now always sends a reasoning
+  setting the model accepts. Models that can't turn thinking off (Claude Opus
+  5.5, Sonnet 5.5, Fable 5) get adaptive thinking at their lowest effort when
+  you've asked for none; before, the setting was left out and they thought at
+  medium. Background calls (summaries, memory extraction) use each model's
+  cheapest setting.
+- **Reasoning is no longer switched off after a tool call,** and every provider
+  uses the effort you set for the conversation. A tool-heavy turn on a
+  thinking model can therefore use more output tokens than before; lower the
+  effort if cost matters.
+- **The WebUI reasoning menu lists only the modes and effort levels the current
+  model takes**, works mid-conversation, and keeps your pick across reloads and
+  model switches (a model that can't honor it gets the nearest setting, and
+  a notice says so).
+- **Direct Claude requests degrade instead of failing when an earlier turn's
+  reasoning can't be replayed.** On Claude accounts created on or after
+  2026-08-31, that used to be an error; now the reasoning is dropped and the
+  request goes through. The database migrates itself (schema v91).
+- **An OpenAI or Gemini model `models.toml` doesn't list gets no reasoning
+  setting** (DAWN used to guess from the model's name). That includes a newer
+  `gpt-5.x` than the ones listed.
 
-  On the first start after upgrading, DAWN rewrites those messages: calls and
-  results become proper tool entries where they can be paired, reasoning is
-  dropped, and where the call itself was never saved the turn becomes a note
-  ("[Tool Call: its name and arguments weren't saved]") followed by its results
-  ("[Tool Result: …]"), shown as tool entries in debug mode. The daemon log
-  says how many rows were rewritten. Messages DAWN saves from now on keep
-  their tool calls.
-
-**What you need to do.** Nothing. The database migrates itself on first start
-(schema versions 92 and 93).
-
-**Worth knowing.**
-- Backups made before the upgrade still hold the old voice messages, reasoning
-  included. Delete or keep them as you would any backup with private content.
-- Facts memory already extracted from those old voice conversations stay as
-  they are.
-- Rolling back to an older DAWN version is safe: older versions ignore the new
-  column.
+**What you need to do.** Nothing if you use the shipped `models.toml`. If you
+keep your own copy, it doesn't need the new table: DAWN uses the built-in one
+for any table your copy lacks. To give an unlisted model reasoning controls,
+add a row to the `[thinking.openai]`, `[thinking.anthropic]` or
+`[thinking.gemini]` table, following the shipped examples.
 
 ---
 
@@ -667,9 +544,12 @@ per such conversation.
   deleting it.
 - **DAWN now knows about phone calls when you speak to it.** Notices like "the phone
   is ringing" or "the call was answered elsewhere" were meant to reach the model but
-  were dropped every time a reply was prepared. Now they're included with your
-  requests for 10 minutes after the event, on every surface, and they're no longer
-  stored in conversations. Proactive alerts (Watches) do the same when *Make
+  were dropped every time a reply was prepared. Now they're included with the
+  phone owner's requests for 10 minutes after the event, on every surface, and
+  they're no longer
+  stored in conversations. Other users see only the incoming-call banner; while
+  the *Local Device* has no user assigned, the phone belongs to the *Default
+  Voice User*. Proactive alerts (Watches) do the same when *Make
   Conversations Aware* is on (Settings → Proactive Attention; off by default), but
   only on the watch owner's own devices.
 - **Voice fixes.**
@@ -742,30 +622,6 @@ per such conversation.
   likely place to find them.
 - Nothing else. The embedding, re-indexing and category work runs in the background
   after the first start (see the re-index note above for how long it takes).
-
----
-
-## 2026-09-24 — Email: per-account digest depth, and older mail on IMAP accounts
-
-**What changed.**
-- Each email account has a new **Digest depth** setting (Settings → Email → edit
-  account → Advanced Settings). It's the most messages the daily digest will look
-  through in that inbox. The digest now pages back through an inbox until it covers
-  the whole digest window, so a busy day is no longer cut off at 50 messages. Depth
-  defaults to 50, the same as before, so nothing changes until you raise it (up to 200).
-  Lower it for a busy inbox you don't need fully covered.
-- The **Max recent emails** setting now actually takes effect. When you ask for recent
-  mail without saying how many, that account returns this many (default 10, as
-  before). Asking for a specific number works as it always did.
-- **IMAP accounts** (non-Gmail) can now page back to older mail, the way Gmail
-  accounts already could.
-- **Fix for large IMAP mailboxes:** listing or searching a big IMAP inbox could
-  quietly drop messages (commonly showing one fewer than asked for) because of a
-  limit in the curl library. DAWN now searches in small batches, so results are
-  complete.
-
-**What (if anything) to do.** Nothing. The database upgrades itself on first start.
-If a digest line says "digest depth N reached", raise that account's Digest depth.
 
 ---
 

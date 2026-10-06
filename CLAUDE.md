@@ -42,12 +42,12 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
 ## Critical Rules — Always Follow
 
 - **NEVER delete files.** Tell the developer which files to delete. Files may hold secrets or unrecoverable data.
-- **NEVER run `git add`, `git commit`, or `git push`.** Suggest the command and message; let the developer run it.
+- **Commits need an explicit OK; never push.** Propose the `git add` and the message, then run `git add`/`git commit` only after the developer approves that specific commit (approval doesn't carry to the next one). **Never `git push`** — the developer pushes.
 - **Merge strategy: merge commits (not rebase), since 2026-08-18.** PRs land as merge commits, which **preserve each branch commit's original SHA on `main`** — so a commit hash is a durable reference: cite hashes freely in TODO.md/DONE.md/design docs. `PR #N` is still richer (diff + all commits + review threads + CI) when the review context matters, so prefer it there, but it's a preference now, not a correctness rule. (This reverses the old rebase-era "cite PRs, not branch hashes" convention — branch SHAs no longer die at merge.)
 - **Feedback before implementation.** When the developer asks a question, provide analysis, trade-offs, and a recommendation *first*. Wait for explicit confirmation ("go ahead", "do it", "yes") before coding.
-- **Format before committing.** Every change must pass `./format_code.sh --check`. The pre-commit hook enforces this.
+- **Format before committing.** Every change must pass the format check. The pre-commit hook enforces it on the staged content (`./format_code.sh --staged --check`); CI runs the full-tree `--check`.
 - **GPL header on every new `.c`/`.cpp`/`.h`.** Template at the bottom of this file.
-- **Adding a `dawn.toml` setting? Read @docs/CONFIGURATION_GUIDE.md first.** It touches up to nine files. A setting that `config_write_toml()` doesn't emit is **silently deleted from the user's `dawn.toml`** on their next WebUI settings save — clean build, green tests, no warning. Already shipped three times. `config_to_json()` (GET) + `config_write_toml()` (persist) + `webui_config.c` POST handler always move together, and new sections go in `tests/test_config_roundtrip.c`'s `required[]`.
+- **Adding a `dawn.toml` setting? Read @docs/CONFIGURATION_GUIDE.md first.** It touches up to nine files. A setting that `config_write_toml()` doesn't emit is **silently deleted from the user's `dawn.toml`** on their next WebUI settings save — clean build, green tests, no warning. Already shipped four times. `config_to_json()` (GET) + `config_write_toml()` (persist) + `webui_config.c` POST handler always move together, and new sections go in `tests/test_config_roundtrip.c`'s `required[]`.
 - **Never commit `docs/TODO.md` or `docs/DONE.md`** — both developer-maintained. TODO.md is the active list; DONE.md is the shipped/completed archive (moved 2026-05-28). When an item ships, move its `~~strikethrough~~` row from TODO.md into DONE.md under the matching section.
 - **Keep internal planning language out of committed text.** Code comments, build-file comments, and commit messages must stand on their own for a future reader who has none of our working context. So: no references to `docs/TODO.md`/`docs/DONE.md` or any other untracked doc (they're not in the repo — the pointer dangles), and no internal roadmap shorthand like "Phase A/B/C" of some rollout (meaningless outside the session that coined it). State the substance directly instead — *what* the code does or why, not *where it sits* in our plan. A dated commit hash or a tracked-doc path is fine; a TODO row number or phase label is not.
 - **Design doc commit policy**: commit design docs only when they describe shipped or in-flight code (implementation matches the doc substantially). Docs for planned-but-unstarted work and working/scratch docs stay untracked — the developer uses them as a local unimplemented-work reminder. When unsure, ask.
@@ -68,15 +68,23 @@ LD_LIBRARY_PATH=/usr/local/lib ./build-debug/dawn
 ./format_code.sh --check --changed  # verify only changed files (local pre-commit; run AFTER build)
 ./format_code.sh                 # fix all files
 ./format_code.sh --check         # full-tree scan (what CI runs; walks the whole repo, slow)
+./format_code.sh --staged --check  # the staged (index) content — what the pre-commit hook checks
 
-# Unit test (standalone binaries in tests/)
+# CI test suite (plain `make` does NOT rebuild test binaries — build tests-ci first)
+make -C build-debug tests-ci
+ctest --test-dir build-debug -L ci
+
+# Single unit test (standalone binaries in tests/)
 make -C build-debug test_<name>
 ./build-debug/tests/test_<name>
 ```
 
 - Dependencies and setup: see @DEPENDENCIES.md and @GETTING_STARTED.md.
 - x86_64 server mode: see `docs/GETTING_STARTED_SERVER.md`.
-- Pre-commit hook: `./install-git-hooks.sh` (one-time).
+- Git hooks: `./install-git-hooks.sh` (one-time) installs both:
+  - **pre-commit** — `format_code.sh --staged --check`; when source/build files are staged (`src/ include/ common/ tests/ benchmarks/ cmake/`, `CMakeLists.txt`, `*.cmake`) it also builds `tests-ci benches` and runs `ctest -L ci`.
+  - **pre-push** — builds `tests-ci` and runs the `ci` suite (prefers `build-ci/`, the WebUI-off build).
+  - Optional `pre-commit.local.hook` / `pre-push.local.hook` (gitignored) run as local extensions.
 
 ## Code Standards
 
@@ -147,15 +155,17 @@ char *myCallback(const char *actionName, char *value, int *should_respond) {
 ### Logging
 
 ```c
-LOG_INFO("System initialized");
-LOG_WARNING("Battery voltage low: %.2fV", voltage);
-LOG_ERROR("I2C communication failed: %d", error);
+OLOG_INFO("System initialized");
+OLOG_WARNING("Battery voltage low: %.2fV", voltage);
+OLOG_ERROR("I2C communication failed: %d", error);
 ```
+
+The macros are `OLOG_*` (`common/include/logging.h`), not `LOG_*`, which collide with syslog's level constants.
 
 ## Configuration Files
 
 - `dawn.toml` — runtime config (LLM provider, ASR/TTS, audio, network, WebUI, scheduler, MQTT). See file for all sections.
-- `dawn.h` — compile-time defaults (`AI_NAME`, `AI_DESCRIPTION`, device names, MQTT broker defaults).
+- `dawn.h` — compile-time defaults: `APPLICATION_NAME`, `AI_NAME`, the default persona (`AI_PERSONA*`), the default voice-output directives and the ASR disambiguation hint. Other defaults (MQTT broker, etc.) live in `src/config/config_defaults.c`.
 - `secrets.toml` — API keys / OAuth credentials. **Gitignored.** Never commit.
 
 **Adding or changing a setting** — follow @docs/CONFIGURATION_GUIDE.md. Two mechanisms exist: *tool-owned*
@@ -178,14 +188,14 @@ still in `dawn.toml`.
 4. **Test** — developer tests manually and reports. Fix issues found; adjacent bugs may warrant their own mini cycle.
 5. **Document** — update or create the atlas design doc (`~/code/The-OASIS-Project/atlas/dawn/`) for significant features. Memory-subsystem docs land under `atlas/dawn/memory/`; everything else flat under `atlas/dawn/archive/`. Have architecture-reviewer verify the doc against code.
 6. **Update planning docs** — cut the item's row from `docs/TODO.md` and paste it into `docs/DONE.md` under the matching section, with the `~~strikethrough~~` SHIPPED tag including the commit hash; remove any `§N` detail section from TODO.md.
-7. **Commit** — always **format before building**, so the bytes you compiled and tested are the bytes you commit (formatting rewrites code; compiling first verifies a draft you then discard). The verify order is `./format_code.sh --changed` → build → test → `./format_code.sh --check --changed` (changed-scope verify — never bare `--check`, which walks the whole tree). Then provide a single `git add` command and a commit message. **Developer runs `git add`/`commit`/`push`.** Wait for confirmation.
+7. **Commit** — always **format before building**, so the bytes you compiled and tested are the bytes you commit (formatting rewrites code; compiling first verifies a draft you then discard). The verify order is `./format_code.sh --changed` → build → test → `./format_code.sh --check --changed` (changed-scope verify — never bare `--check`, which walks the whole tree). Then provide a single `git add` command and a commit message, and wait for the developer's OK before running them. **The developer pushes.**
 
 ## Code Review Workflow
 
 Trigger phrases: "code review", "review my changes", "run the agents", "run the big three", "run all four", "run all five", "run all six", "full review", "what do the agents think?". The `/review` skill (`.claude/skills/review/SKILL.md`) implements this workflow.
 
 1. Capture diff via `git status` + `git diff`.
-2. Launch review agents in **parallel**:
+2. Launch review agents in **parallel** (these are user-level agents in `~/.claude/agents/`, not in the repo — a fresh clone won't have them):
    - **Big three** (code review / run the big three): `architecture-reviewer`, `embedded-efficiency-reviewer`, `security-auditor` — **plus `correctness-reviewer` in every set** (the general-logic lens; it also checks non-literal format strings such as prompt templates, which `-Wformat` can't).
    - **All four** (run all four): above + `ui-design-architect` (when UI changes present).
    - **All five / all six** (full review / run all five / run all six): above + `coding-standards-auditor` — mandatory for large refactors, new modules, or pre-release audits.
@@ -204,7 +214,7 @@ When writing a number for an external audience (atlas, X post, paper, README), c
 
 ## Design Docs
 
-- **Active planning**: @docs/TODO.md (master, untracked), plus per-feature docs in `docs/` (e.g., `PHONE_SMS_DESIGN.md`, `SPEAKER_IDENTIFICATION_PLAN.md`).
+- **Active planning**: @docs/TODO.md (master, untracked), plus per-feature docs in `docs/` (e.g., `PHONE_SMS_DESIGN.md`, `DEEP_RESEARCH_DESIGN.md`).
 - **Shipped/completed archive**: `docs/DONE.md` (untracked, sibling to TODO.md). Migrated 2026-05-28 when TODO.md outgrew its own length. Section structure mirrors TODO.md so cross-reference back stays trivial.
 - **Archived designs**: [atlas/dawn](https://github.com/The-OASIS-Project/atlas/tree/main/dawn) — shipped-feature design docs kept for historical reference. Memory subsystem under [`memory/`](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/memory) (system design, injection filter, cat-2 temporal, reranker investigation, LoCoMo cat-3 profiling). Everything else flat under [`archive/`](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive) — RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.
 

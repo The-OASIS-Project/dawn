@@ -4,7 +4,7 @@
 
 This document is the **architectural map**: directory layout, the cross-cutting rules every subsystem obeys (layering, threading, lock ordering, error handling, configuration), and a one-paragraph summary of each subsystem with a link to its detail doc. For the internals of any single subsystem — its components, data flow, DB schema, and tuning — open the linked file in [`docs/arch/subsystems/`](docs/arch/subsystems/).
 
-**Last updated**: June 2026.
+**Last updated**: October 2026.
 
 ## Table of Contents
 
@@ -123,7 +123,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 
 | Subsystem | Role | Detail doc |
 |---|---|---|
-| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`LOG_INFO/WARNING/ERROR`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
+| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`OLOG_INFO/WARNING/ERROR/DEBUG`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
 | **ASR** | Speech recognition abstraction (Strategy pattern) over Whisper and Vosk, plus Silero VAD and chunking for long utterances. Whisper on Jetson GPU is the default; Vosk is retained for CPU-only builds. | [asr.md](docs/arch/subsystems/asr.md) |
 | **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one key; its `anthropic/` models use its Anthropic Messages endpoint on the Claude path, the rest its OpenAI-compatible one), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. A conversation's request is append-only (`src/core/session_prefix.c`): its system prompt and tool set are frozen on its first turn, and later changes (instructions, the surface's directions, each turn's context) are appended where they happen, so providers cache the whole conversation and signed reasoning stays replayable. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
 | **TTS** | Piper + ONNX Runtime with preprocessing for natural phrasing. Mutex-protected so the main loop, network server, and streaming buffer can all synthesize safely. | [tts.md](docs/arch/subsystems/tts.md) |
@@ -151,171 +151,69 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 
 To prevent circular dependencies and maintain clean architecture, modules are organized into layers. **Modules may only depend on modules in lower layers.**
 
+This map lists the layers and the exceptions to them, not every file: a file is named here only when it carries a rule you could break without knowing it. To find a file, grep, or open the subsystem's detail doc (see the [Subsystem Index](#subsystem-index)).
+
 ```
-Layer 0 (Foundation)
-├── common/src/logging.c           - Logging macros (shared with satellite, no deps)
-├── include/dawn_error.h           - SUCCESS/FAILURE return codes (no deps)
-├── src/config/                    - Configuration parsing and defaults
-│   ├── config_parser.c
-│   ├── config_defaults.c
-│   ├── config_env.c
-│   └── config_validate.c
-└── include/config/dawn_config.h   - Config struct definitions
+Layer 0 (Foundation) — no DAWN dependencies
+├── common/src/logging.c, include/dawn_error.h   Logging (OLOG_*), SUCCESS/FAILURE codes
+└── src/config/, include/config/                  Config structs, defaults, parsing, validation
 
-Layer 1 (Core Infrastructure)
-├── src/tools/tool_registry.c/h    - Tool registration and lookup, and each action's kind (read, fetch, state,
-│                                    device, prepare, act: what a call does, checked at registration and at
-│                                    build time by scripts/check_tool_action_kinds.sh) (deps: logging, config)
-├── src/core/command_router.c/h    - Request/response routing (deps: logging)
-├── src/core/command_executor.c/h  - Unified command executor (deps: tool_registry)
-├── src/core/session_manager.c/h   - Session lifecycle (deps: logging, config); with session_history.c and
-│                                    session_prefix.c it forms one session unit that reaches Layer 2 (see Layer 2)
-├── include/core/turn_origin.h     - Where a pending action was made and whether a confirm may carry it out (the
-│                                    same session, the next turn); captured by session_history.c
-├── src/core/tool_call_challenge.c/h - An action asked for by text waiting for the user's reply code: one per channel,
-│                                    the newest replacing an older; handed over once on the right code, capped per
-│                                    channel (deps: reply_code, pending_slots clock)
-├── src/core/reply_code.c/h        - Codes texted to a number and texted back: new code, keyed digest, recognizing a reply
-├── src/core/pending_slots.c/h     - What a tool staged for the user's confirm: one item per session and kind, each
-│                                    with a new id its confirm must name; never evicts another session's item.
-│                                    Callers lock (deps: turn_origin.h)
-├── src/core/session_reaper.c/h    - Finishes destroyed sessions: session_destroy() only ends one (never waits), the
-│                                    reaper joins its compaction worker, waits for its last reference, then frees it
-├── src/core/worker_pool.c/h       - Concurrent tool execution (deps: logging)
-├── src/core/wake_word.c/h         - Wake-word matching (shared daemon + satellites)
-├── src/core/time_query_parser.c/h - Stateless temporal-expression recognizer (deps: libc, math)
-├── src/core/utterance_dedup.c/h   - Cross-device utterance dedup (leaf lock, deps: logging)
-├── src/core/text_input_dispatch.c - Shared text-input → LLM entry path (deps: session_manager)
-├── src/core/prompt_sections.c     - Named system-prompt sections (composed_prompt_t)
-├── src/core/ws_reconnect.c/h      - Reconnect/backoff helper for persistent WS clients (deps: none; consumers: Discord, Slack, HA realtime WS)
-└── src/input_queue.c/h            - Thread-safe input queue (deps: logging)
+Layer 1 (Core infrastructure) — deps: Layer 0
+├── src/tools/tool_registry.c   Tool registration and lookup, and each action's kind (read, fetch, state,
+│                               device, prepare, act), checked at registration and at build time
+├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
+│                               dedup, reply codes, text-input dispatch, prompt sections, input queue
+├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
+│                               session, on the next turn
+├── src/core/pending_slots.c    What a tool staged for the user's confirm: one item per session and kind, each
+│                               with a new id its confirm must name; never evicts another session's item
+├── src/core/tool_call_challenge.c  An action asked for by text, waiting for its reply code: one per channel,
+│                               handed over once on the right code
+└── src/core/session_reaper.c   session_destroy() only ends a session and never waits; the reaper joins its
+                                compaction worker, waits for its last reference, then frees it
 
-Layer 2 (Services)
-├── src/llm/                       - LLM providers and tools
-│   ├── llm_interface.c            - Provider abstraction (deps: Layer 0-1)
-│   ├── llm_openai.c               - OpenAI/Ollama/llama.cpp (deps: llm_interface)
-│   ├── llm_claude.c               - Anthropic Claude (deps: llm_interface)
-│   ├── llm_claude_route.c         - Which calls take the Anthropic Messages format (Claude, OpenRouter's
-│   │                                anthropic/ models) and what each endpoint gets (deps: llm_model_family)
-│   ├── llm_tools.c                - Tool execution (deps: tool_registry)
-│   ├── llm_turn_blocks*.c         - Provider-neutral turn blocks + their stored shape (deps: Layer 0)
-│   ├── llm_history_kind.c         - Kind-marked history messages; folds stored context rows back in front of their questions; the compaction summary part (deps: Layer 0)
-│   ├── llm_compaction.c           - The compaction core: sizes, the mechanical summary, the escalation (pure; the summarizer behind a function pointer)
-│   ├── llm_context_text.c         - Tagged framing, neutralizing untrusted text, withdrawing forgotten lines (pure, deps: Layer 0)
-│   ├── llm_tools_filter.c         - Which tools a request advertises (frozen set, research allowlist, surface) (deps: tool table)
-│   ├── llm_tools_results.c        - Tool results into history (per provider) + tool calls parsed from responses
-│   ├── llm_tools_dup.c            - Duplicate tool-call detection within a turn
-│   ├── llm_tools_reply_code.c     - A call held for a reply code: what it would do, its fingerprint; the approved call run
-│   ├── llm_history_rows.c         - A history message → the rows it saves as (deps: turn blocks)
-│   ├── llm_key_tag.c              - API-key tag / request carrier for vendor reasoning (deps: crypto_store)
-│   ├── llm_tool_view.c            - A bounded view of a tool result too big to send whole (pure)
-│   ├── llm_tool_views_plan.c      - The tool loop's view stage: batch budget, split, header (pure)
-│   ├── llm_tool_views_apply.c     - ...applied to a batch as its finish step: views, stores, finishes
-│   │                                (deps: tool_result_store, session_prefix, llm_context, tool_registry)
-│   ├── llm_tool_view_path.c       - JSON paths as views write them and readers take them back (pure)
-│   ├── llm_tool_defs.c            - A conversation's tools by value: frozen definitions + tool_change rows (pure)
-│   ├── llm_claude_tools.c         - A Claude request's tools: the tools array, inline tool_addition blocks
-│   ├── llm_tool_images.c          - Images a tool returns: checked, stored unbound (owner-only), shown (deps: image_store)
-│   ├── llm_tool_images_render.c   - A tool's images in a request, per provider; a vision-less model gets text (pure)
-│   └── llm_turn_result.c          - A turn's result beyond its text (inline tools rejected), provider-neutral
-├── src/core/embedding_engine.c    - Shared embedding infrastructure (deps: Layer 0-1)
-├── src/core/crypto_store.c        - Shared libsodium encryption (deps: Layer 0)
-├── src/core/scheduler.c           - Scheduler engine + background thread (deps: Layer 0-1)
-├── src/core/session_manager_llm.c - LLM-call orchestration extracted from session_manager (deps: Layer 0-1, llm)
-├── src/core/session_voice_save.c  - Saves a voice session's conversation as rows (deps: Layer 0-1, llm, memory)
-├── src/core/session_prefix.c      - Append-only conversation request: freezes the prefix, appends changes + turn context, saves each turn's record, withdraws forgotten items live (deps: Layer 0-1, llm, auth)
-│                                    session_manager.c (the dispatch), session_history.c (history lifecycle) and session_compaction.c call into it
-│                                    and it back into them (session_focus.c with them): read these as one Layer-2 session unit
-│                                    (session_image_hold.c joins it: the image store reaches it only through a weak
-│                                    symbol, never an include)
-├── src/core/tool_call_policy.c/h  - Who may make a tool call: the caller's kind of turn (user, unverified sender,
-│                                    background job, unattended) against the action's kind; decided once per call
-│                                    in llm_tools and at the MQTT entry that names a session (deps: session unit,
-│                                    tool registry)
-├── src/core/session_focus.c       - A turn's retrieved items at its seam: which the history already shows, the items part of
-│                                    its context, the per-turn citation map; the client's context panel told after the history
-│                                    lock is released (a weak hook the WebUI replaces).  Part of the session unit
-│                                    (deps: Layer 0-1, focus_incremental)
-├── src/core/focus/                - The focus framework: retrieval adapters' registry and ranker (focus_source.c), the
-│                                    conversation's item handles (focus_handles.c), incremental focus (below); uses the
-│                                    llm/ text helpers and memory's embeddings (deps: Layer 0-2)
-├── src/core/focus/focus_incremental.c - Incremental focus (pure): reads which items a history's turn contexts show (through
-│                                    llm_history_for_each_context_part, the walk withdrawal uses), chooses what a turn sends,
-│                                    renders the declared item lines, reference line and citation reminder (deps: llm text helpers)
-├── src/core/session_compaction.c  - Compaction: a range summarized ahead on a worker, applied at a turn seam, saved with the turn
-│                                    (deps: Layer 0-1, llm, auth, tts; its client marker is a weak hook the WebUI replaces)
-├── src/core/prefix_in_force.c     - What a conversation has in force (section/directive/tool-schema hashes) and the deltas to append (deps: llm)
-├── src/core/prefix_message.c      - The one maker of a conversation's frozen prefix message (deps: llm)
-├── src/core/prefix_tools.c        - A conversation's tools at a turn seam: frozen on its first turn, changes appended
-│                                    as tool_change rows, bounded per conversation and per MCP server (deps: llm)
-├── src/core/conv_images.c         - Deleting a conversation with the images only it names; purging a user's stores
-│                                    (deps: auth_db, image_store, document_original_store)
-├── src/core/session_image_hold.c  - Which unbound images a live session (interactive or a job's) of their owner still
-│                                    holds.  The image store, a layer below, calls up into it through a weak symbol
-│                                    (session_images_held), so a build without sessions links and holds nothing: an
-│                                    upward call by design, part of the session unit below
-├── src/core/image_rehydrate.c     - Rebuilds image content from stored markers for replay (deps: image_store)
-├── src/core/tool_result_store.c   - Tool results kept whole behind a view: who may read one (its conversation, or
-│                                    before one exists the turn that stored it), binding, a parsed-tree cache
-│                                    (deps: Layer 0-1, auth, llm_tool_view)
-├── src/core/ota*.c                - OTA release store, signed manifests, fleet rollout (deps: Layer 0-1, crypto_store; rollout pushes via a registered fn pointer to avoid a Layer-4 dep)
-├── src/tts/                       - Text-to-speech (deps: Layer 0-1)
-├── src/asr/                       - Daemon-side ASR interface, Vosk, chunking (deps: Layer 0-1)
-├── common/src/asr/                - Shared ASR engines (Whisper, VAD) used by daemon + satellite
-├── src/mosquitto_comms.c          - MQTT integration (deps: Layer 0-1, tool_registry)
-├── src/memory/                    - Persistent memory + contacts (deps: Layer 0-1, embedding_engine)
-└── src/auth/                      - User auth, settings, per-user prefs, conversation rows
-                                     (auth_db_messages.c: the one message insert + the LLM replay read;
-                                      auth_db_conv_prefix.c: a conversation's frozen prefix + turn records;
-                                      auth_db_withdraw.c: withdrawing a user's removals from stored context;
-                                      auth_db_tool_results.c: stored tool results, their caps and eviction;
-                                      auth_db_storage.c: checkpoints on their own thread and connection, free pages drained) (deps: Layer 0-1;
-                                      auth_db_withdraw.c also uses the pure llm/llm_context_text.c line helpers)
+Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
+├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views
+├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
+│                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
+├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
+│                               background job, unattended) against the action's kind; decided once per call
+├── src/memory/                 Persistent memory, contacts, extraction, forgetting
+├── src/auth/                   Users, settings, conversations and messages; auth_db_messages.c is the one
+│                               message insert (and the LLM replay read)
+├── src/tts/, src/asr/, common/src/asr/   Speech in and out (shared engines in common/)
+└── src/mosquitto_comms.c       MQTT
 
-Layer 3 (Tools)
-├── src/tools/weather_tool.c           - Weather API (deps: Layer 0-2)
-├── src/tools/music_tool.c             - Music playback (deps: Layer 0-2)
-├── src/tools/search_tool.c            - Web search (deps: Layer 0-2)
-├── src/tools/memory_tool.c            - Memory commands (deps: Layer 0-2, memory/)
-├── src/tools/document_search.c        - RAG semantic search (deps: Layer 0-2, embedding_engine)
-├── src/tools/document_read.c          - Paginated doc reader (deps: Layer 0-2, document_db)
-├── src/tools/document_db.c            - Document SQLite CRUD (deps: Layer 0-1, auth_db)
-├── src/tools/email_service.c          - Email routing + two-step confirm (deps: Layer 0-2, oauth_client)
-├── src/tools/email_client.c           - IMAP/SMTP backend (deps: Layer 0-1, crypto_store);
-│                                        email_imap_move.c: trash/archive moves of one message
-├── src/tools/gmail_client.c           - Gmail REST API backend (deps: Layer 0-1, oauth_client);
-│                                        gmail_read.c: reading one message (deps: email_mime,
-│                                        email_display, email_transfer); gmail_parts.c: its MIME
-│                                        tree as the email_mime part list (pure)
-├── src/tools/contact_resolve.c        - Who a call, text or email goes to: a name, number or address
-│                                        resolved without guessing (partial, sound-alike or not-said names
-│                                        are a question) (deps: contacts_db, str_fuzzy, phone_number)
-├── src/tools/email_mime.c             - Reading a message, both backends: GMime (only here), the
-│                                        part policy, bounded decode (deps: html_parser,
-│                                        email_display, GMime); email_transfer.c: failure codes
-│                                        and cancelling transfers (deps: libcurl)
-├── src/tools/oauth_client.c           - OAuth 2.0 + PKCE (deps: Layer 0-1, crypto_store)
-├── src/tools/homeassistant_service.c  - HA REST API + entity cache (deps: Layer 0-1);
-│                                        homeassistant_match.c: which entity a name means, never
-│                                        picking among equals (pure)
-├── src/tools/calendar_service.c       - CalDAV business logic (deps: Layer 0-2, oauth_client)
-├── src/messaging/messaging_engine.c   - Channel engine: sessions, binding, dispatch (deps: Layer 0-2, session_manager, auth_db, scheduler);
-│                                        messaging_engine_codes.c: texting a reply code, and a code or STOP coming back
-├── src/messaging/messaging_{telegram,slack,discord,sms}.c - Provider drivers behind messaging_driver_t (deps: curl/lws);
-│                                        messaging_telegram_parse.c: a Telegram message → its sender, or dropped (pure);
-│                                        messaging_sender_gate.c: whether a sender speaks for a channel (pure)
-├── src/tools/research_run.c           - Deep-research deterministic controller (ledger→stop decision; deps: Layer 0-2, research_db, document store)
-├── src/tools/research_run_loop.c      - Deep-research live round loop + synthesis (session/dispatch-coupled; deps: Layer 0-2)
-├── src/tools/research_tools.c         - In-loop research tools (plan/record/conclude; deps: Layer 0-2)
-├── src/tools/result_read_tool.c       - More of a stored tool result by its handle (deps: Layer 0-2, tool_result_store;
-│                                        its pure reads in result_read_ops.c)
-└── src/tools/*.c                      - All other tools (deps: Layer 0-2)
+Layer 3 (Tools and channels) — deps: Layers 0-2
+├── src/tools/                  Every tool and its service (email, calendar, Home Assistant, music, stocks,
+│                               documents, research, MCP bridge, ...); email_mime.c is the only file that uses
+│                               GMime
+└── src/messaging/              Channel engine and provider drivers (Telegram, Slack, Discord, SMS)
 
-Layer 4 (Application)
-├── src/dawn.c                     - Main entry + voice state machine (deps: all layers)
-├── src/webui/                     - Web interface + WebSocket server (deps: Layer 0-3)
-└── src/core/{job_worker,research_worker}.c - Detached background-job sequencers* (deps: Layer 0-3)
+Layer 4 (Application) — deps: everything below
+├── src/dawn.c                  Main entry, local voice state machine
+├── src/webui/                  Web interface and WebSocket server.  Optional (ENABLE_WEBUI): without it,
+│                               webui_absent.c supplies the WebUI entry points the rest of DAWN calls, as
+│                               no-ops, and the WebUI-only pieces are left out (messaging channels, the job and
+│                               deep_research tools, the OAuth and code-project handlers, Home Assistant's
+│                               realtime connection)
+└── src/core/{job_worker,research_worker}.c   Detached background-job sequencers*
 ```
+
+**The session unit.** `session_manager.c` (the dispatch), `session_history.c` (history lifecycle),
+`session_prefix.c` (the append-only request: frozen prefix, appended changes and turn context, live withdrawal),
+`session_compaction.c`, `session_focus.c`, `prompt_builder.c` and `session_image_hold.c` call into each other: read
+them as one Layer-2 unit, not as separate modules with a direction between them.
+
+**Deliberate upward calls.** Each goes through a weak symbol or a registered function pointer, never an `#include`:
+
+| From (lower) | To (higher) | How |
+|---|---|---|
+| `src/image_store.c` | `session_image_hold.c` (which unbound images a live session still holds) | weak `session_images_held` |
+| `session_compaction.c` | the WebUI's compaction marker | weak `session_compaction_client_notice` |
+| `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
+| `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
+| lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -324,6 +222,11 @@ They therefore include and call *upward* into Layer 3 (e.g. `research_worker.c` 
 This is a deliberate, **acyclic** exception to "downward only" — the Layer-3 controllers do not depend
 back on the workers — mirroring how `dawn.c` (Layer 4) reaches every layer. Read them as Layer-4
 sequencers that happen to sit in `src/core/` beside the job pool they build on, not as Layer-2 modules.
+
+**Every build has sessions.** The session unit, turn queue, job pool and workers, prompt builder and worker pool
+are compiled whether or not the WebUI is: the local microphone runs its turns on them, and the WebUI only adds the
+server. The tools that start a background job (`job`, `deep_research`) are WebUI-only, since a job delivers its
+result through the WebUI (the conversation it reports into, the missed-notification replay).
 
 ### Dependency Rules
 
@@ -350,6 +253,23 @@ tool_registry_register(&weather_metadata);  // Passes function pointer up
 // In llm_tools.h — avoid including full tool_registry.h
 struct tool_metadata;  // Forward declaration
 ```
+
+### Build-time invariant checks
+
+Some rules can't be expressed in types, so scripts in `scripts/` enforce them. Each is a CMake target that `dawn`
+depends on, so every build runs them, and they fail the build when broken:
+
+| Target | Script | Rule |
+|---|---|---|
+| `no_ws_direct_write_check` | `check_no_ws_direct_write.sh` | Every WebSocket data frame goes through the WebUI's response queue, never a direct `lws_write()` |
+| `messaging_send_funnel_check` | `check_messaging_send_funnel.sh` | Every messaging driver send goes through `messaging_deliver` (per-provider formatting and escaping) |
+| `tool_action_kinds_check` | `check_tool_action_kinds.sh` | Every tool's action-kinds table names its own actions, and each prepare names a listed confirm |
+| `llm_blocks_confined_check` | `check_llm_blocks_confined.sh` | Stored turn blocks (`messages.llm_blocks`) are read only to rebuild an LLM request |
+| `message_kind_confined_check` | `check_message_kind_confined.sh` | Request-context rows (a `messages.kind`) are never shown, searched, counted or extracted |
+| `user_removal_marked_check` | `check_user_removal_marked.sh` | A delete a user makes is marked as their removal, so it is withdrawn from conversations |
+| `blob_marker_sync_check` | `check_blob_marker_sync.sh` | The chat-attachment blob marker agrees across its producer, parser and orphan sweep |
+| `no_raw_strncpy_check` | `check_no_raw_strncpy.sh` | No raw `strncpy`/`strncat` in directories moved to `safe_strscpy` |
+| `no_process_mgmt_check` | `check_no_process_mgmt.sh` | No process-management calls in the MCP bridge or code-project sources |
 
 ---
 
@@ -497,6 +417,9 @@ Per-session locks (src/core/session_manager.c):
   session->fd_mutex         — WebSocket file-descriptor state
   session->ref_mutex        — session reference counting
   session->llm_config_mutex — per-session LLM config overrides
+  session->tools_mutex      — the tools running now, and a render_visual result waiting for the reply to save
+  (llm_config_mutex, history_mutex, metrics_mutex and tools_mutex are leaves: never two held at once,
+   copy under the lock; the order is session_manager_rwlock, ref_mutex, fd_mutex, then one of these)
 
 Per-module locks (scoped to a single subsystem):
   auth_db mutex (src/auth/auth_db_core.c)         — SQLite serialization
@@ -508,6 +431,10 @@ Per-module locks (scoped to a single subsystem):
   utterance_dedup::s_mutex (utterance_dedup.c)    — cross-device dedup slots (leaf)
   attention::s_mutex (src/core/attention/attention_core.c) — SAGE watch cache + event queue + metrics (leaf)
   turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
+  focus_source::s_registry_mutex (src/core/focus/focus_source.c) — the retrieval-adapter registry (LEAF: held only to
+                                                                     register or clear an adapter; adapters register once at
+                                                                     startup, so a turn's focus_compose reads the registry
+                                                                     without it)
   llm_tools::llm_tools_mutex (src/llm/llm_tools*.c)         — the LLM tool table + cached schema hashes; taken BEFORE the tool registry's own mutex (schemas are built from registry lookups), never after it
   session_prefix::s_withdraw_mutex (src/core/session_prefix.c) — the withdraw worker's queue (LEAF: never held across a withdrawal)
   auth_db_storage::s_wake_mutex (src/auth/auth_db_storage.c) — wakes the storage thread (LEAF: taken by the WAL hook inside a
@@ -594,7 +521,7 @@ static int16_t audio_buffer[AUDIO_BUFFER_SIZE];
 ```c
 char *response = malloc(response_len);
 if (response == NULL) {
-   LOG_ERROR("Failed to allocate response buffer");
+   OLOG_ERROR("Failed to allocate response buffer");
    return FAILURE;
 }
 // ... use response ...
@@ -660,7 +587,7 @@ Modules define specific error codes > 1 in their own headers (e.g., `AUTH_DB_FAI
 ```c
 int asr_process_audio(ASRContext *ctx, int16_t *audio, size_t samples) {
    if (ctx == NULL || audio == NULL) {
-      LOG_ERROR("Invalid parameters");
+      OLOG_ERROR("Invalid parameters");
       return FAILURE;
    }
    // ... processing ...
@@ -674,7 +601,7 @@ int asr_process_audio(ASRContext *ctx, int16_t *audio, size_t samples) {
 int retry_count = 0;
 while (retry_count < MAX_RETRIES) {
    if (send_packet(packet) == SUCCESS) break;
-   LOG_WARNING("Send failed, retry %d/%d", retry_count + 1, MAX_RETRIES);
+   OLOG_WARNING("Send failed, retry %d/%d", retry_count + 1, MAX_RETRIES);
    sleep(1 << retry_count);  // 1s, 2s, 4s
    retry_count++;
 }
@@ -686,7 +613,7 @@ while (retry_count < MAX_RETRIES) {
 if (gpu_available) {
    ctx = asr_whisper_init(model_path);
 } else {
-   LOG_WARNING("GPU not available, using CPU-only ASR");
+   OLOG_WARNING("GPU not available, using CPU-only ASR");
    ctx = asr_vosk_init(model_path);
 }
 ```
@@ -801,7 +728,7 @@ claude_api_key = "sk-ant-..."
 gemini_api_key = "..."
 ```
 
-**`dawn.h`** — compile-time fallbacks: `AI_NAME`, `AI_DESCRIPTION`, `DEFAULT_PCM_PLAYBACK_DEVICE`, `DEFAULT_PCM_CAPTURE_DEVICE`, `MQTT_IP`, `MQTT_PORT`.
+**`dawn.h`** — compile-time fallbacks: `APPLICATION_NAME`, `AI_NAME`, the default persona (`AI_PERSONA`, `AI_PERSONA_TRAITS`), the default voice-output directives (`DEFAULT_VOICE_OUTPUT_DIRECTIVE`, `_WEBUI`) and the ASR disambiguation hint. Audio devices and MQTT broker defaults live in `src/config/config_defaults.c`.
 
 **`models.toml`** — model context-window registry (per-model-prefix → max input tokens for OpenAI/Anthropic/Gemini). Read-only reference data loaded once by `llm_context.c` at startup; **exempt from the `dawn.toml` settings round-trip** (never rewritten). Edit + restart to update; no rebuild. OpenRouter/local windows are fetched live and not listed. See [MODELS_TOML_DESIGN.md](docs/MODELS_TOML_DESIGN.md).
 
