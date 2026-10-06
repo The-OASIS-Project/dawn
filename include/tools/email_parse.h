@@ -96,18 +96,6 @@ void email_imap_append_search_key(char *buf,
 bool email_imap_flags_contains(const char *flags_group, const char *flag);
 
 /**
- * Decode all RFC 2047 encoded words ("=?charset?Q?..?=" / "=?charset?B?..?=") in
- * @p src into @p dst (NUL-terminated, bounded by @p dst_len).  Non-encoded text
- * is copied through; whitespace between adjacent encoded words is folded away
- * (RFC 2047 §6.2); an unknown encoding is copied literally.  Shared by both email
- * backends for header display names / subjects.  NULL-safe.
- *
- * NOTE: decoded bytes are emitted as-is — correct for UTF-8, lossy for legacy
- * ISO-8859-x charsets (no transcoding).
- */
-void email_decode_rfc2047(const char *src, char *dst, size_t dst_len);
-
-/**
  * Copy @p src to @p dst (NUL-terminated, bounded by @p dst_len) with CR and LF
  * removed, to prevent SMTP header injection via a user-supplied header value.
  * Shared by both backends' send paths.  NULL-safe.

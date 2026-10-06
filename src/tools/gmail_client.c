@@ -48,6 +48,7 @@
 
 #include "core/curl_buffer.h"
 #include "logging.h"
+#include "tools/email_mime.h"
 #include "tools/email_parse.h"
 #include "tools/gmail_client_internal.h"
 #include "tools/html_parser.h"
@@ -308,45 +309,6 @@ static size_t url_encode(const char *str, char *out, size_t out_len) {
  * ============================================================================= */
 
 
-/** Parse "Display Name <email@addr>" or bare "email@addr" */
-static void parse_from_field(const char *from,
-                             char *name_out,
-                             size_t name_len,
-                             char *addr_out,
-                             size_t addr_len) {
-   name_out[0] = '\0';
-   addr_out[0] = '\0';
-   if (!from || !from[0])
-      return;
-
-   const char *lt = strchr(from, '<');
-   const char *gt = strchr(from, '>');
-   if (lt && gt && gt > lt) {
-      /* Copy name (trim trailing spaces and quotes) */
-      size_t nlen = lt - from;
-      while (nlen > 0 && (from[nlen - 1] == ' ' || from[nlen - 1] == '"'))
-         nlen--;
-      const char *nstart = from;
-      while (nlen > 0 && (*nstart == ' ' || *nstart == '"')) {
-         nstart++;
-         nlen--;
-      }
-      if (nlen > 0) {
-         size_t copy = nlen < name_len - 1 ? nlen : name_len - 1;
-         memcpy(name_out, nstart, copy);
-         name_out[copy] = '\0';
-      }
-
-      /* Copy address */
-      size_t alen = gt - lt - 1;
-      size_t copy = alen < addr_len - 1 ? alen : addr_len - 1;
-      memcpy(addr_out, lt + 1, copy);
-      addr_out[copy] = '\0';
-   } else {
-      snprintf(addr_out, addr_len, "%s", from);
-   }
-}
-
 /* =============================================================================
  * Search Query Builder
  *
@@ -458,18 +420,20 @@ static int parse_message_json(struct json_object *root, email_summary_t *out) {
    if (json_object_object_get_ex(root, "payload", &payload))
       json_object_object_get_ex(payload, "headers", &headers);
 
-   /* Gmail's API does NOT MIME-decode header values (only the snippet), so
-    * RFC 2047-decode From/Subject here — otherwise a non-ASCII sender/subject
-    * ("=?UTF-8?B?..?=") reaches the user as raw gibberish.  The encoded word
-    * lives in the From display-name, so decode before splitting name/addr. */
-   const char *from = gmail_find_header(headers, "From");
-   char from_decoded[512];
-   email_decode_rfc2047(from, from_decoded, sizeof(from_decoded));
-   parse_from_field(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
-                    sizeof(out->from_addr));
-
-   const char *subject = gmail_find_header(headers, "Subject");
-   email_decode_rfc2047(subject, out->subject, sizeof(out->subject));
+   /* Gmail's API does NOT MIME-decode header values (only the snippet).  The
+    * same decoding and display rules as reading a message: the sender's words
+    * decoded, invisible and direction-changing characters dropped. */
+   email_addr_t from;
+   const char *from_raw = gmail_find_header(headers, "From");
+   if (email_mime_addr_first(from_raw, &from)) {
+      snprintf(out->from_name, sizeof(out->from_name), "%s", from.name);
+      snprintf(out->from_addr, sizeof(out->from_addr), "%s", from.addr);
+   } else {
+      /* No address in it ("From: Some Name"): show what it says. */
+      email_mime_header_text(from_raw, out->from_name, sizeof(out->from_name));
+   }
+   email_mime_header_text(gmail_find_header(headers, "Subject"), out->subject,
+                          sizeof(out->subject));
 
    const char *date = gmail_find_header(headers, "Date");
    if (date)

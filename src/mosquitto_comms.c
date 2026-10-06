@@ -227,10 +227,11 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
     * input): it gains per-turn memory/focus context + native tool-calling, is
     * subject to utterance dedup, and lands in the session history that feeds
     * end-of-session memory extraction. Device data on MQTT is operator-trusted
-    * (see the MQTT-auth hardening TODO); the explicit [DEVICE DATA] delimiter is
-    * retained. A burst of relays during one long turn can exceed the 8-slot queue
-    * (drop-oldest). Revisit tool-scoping / extraction-tagging for relays if the
-    * MQTT LOCAL PATH sees heavy use. */
+    * (broker auth is the admin's); the explicit [DEVICE DATA] delimiter is
+    * retained, and its turn only reads and changes session state: a device's
+    * data can carry outside text, so it never acts, fetches or works a device
+    * (dawn.c marks it unattended).  A burst of relays during one long turn can
+    * exceed the 8-slot queue (drop-oldest). */
    (void)mosq; /* command chaining + TTS now handled by the main pipeline */
    /* A callback's result can be text from anywhere (a search): what imitates
     * DAWN's framing or carries a tag is defused before it becomes input. */

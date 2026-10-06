@@ -303,6 +303,12 @@
       var themeCSS = cachedThemeCSS;
       var visualClasses = cachedVisualClasses;
 
+      /* A visual opens no connections: the page lets its own scripts open a
+       * socket to any host, and the iframe inherits that, so a visual made
+       * from content the model read could send data out.  (WebRTC is outside
+       * any CSP: docs/THREAT_MODEL.md, Known Gaps.) */
+      var noConnect = '<meta http-equiv="Content-Security-Policy" content="connect-src \'none\'">';
+
       /* Build the bridge script: sendPrompt + debounced ResizeObserver */
       var bridgeScript =
          '<script>\n' +
@@ -322,7 +328,9 @@
       var content;
       if (type === 'svg') {
          content =
-            '<!DOCTYPE html><html><head><style>' +
+            '<!DOCTYPE html><html><head>' +
+            noConnect +
+            '<style>' +
             themeCSS +
             visualClasses +
             'body { margin: 0; padding: 0; overflow: hidden; }\n' +
@@ -428,7 +436,9 @@
                'script>\n';
          }
          content =
-            '<!DOCTYPE html><html><head><style>' +
+            '<!DOCTYPE html><html><head>' +
+            noConnect +
+            '<style>' +
             themeCSS +
             visualClasses +
             canvasCSS +

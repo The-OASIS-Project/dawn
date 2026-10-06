@@ -212,7 +212,7 @@ static audio_capture_context_t *audio_capture_ctx = NULL;
 static silero_vad_context_t *vad_ctx = NULL;
 
 // End-of-speech decision for the local WAKEWORD_LISTEN path. Owned by the single
-// main-loop thread. In P0 it runs with adaptive=false, so it reproduces the
+// main-loop thread. On the local mic it runs shadow-only (adaptive=false), so it reproduces the
 // legacy `silence_duration >= end_of_speech_duration` timing exactly while
 // shadow-recording the tentative->resume gaps (adaptive-dwell instrumentation).
 static endpointer_t s_ww_endpointer;
@@ -411,6 +411,13 @@ static char *s_pending_voice_command = NULL;
 /* The command PROCESS_COMMAND is handling came from the hold: it already
  * passed the cross-device dedup check when it was spoken. */
 static bool s_voice_command_from_hold = false;
+
+/* The next command came from an MQTT device's data relay, not the user: set
+ * when the input queue hands one over, taken when PROCESS_COMMAND starts on
+ * it (main-thread state).  Its text can come from anywhere (a search), so its
+ * turn only reads and changes session state (tool_call_policy.c). */
+static bool s_next_command_unattended = false;
+static bool s_command_unattended = false;
 
 /* The running reply was stopped by a cancel phrase (main-thread state): its
  * question is kept in the history with a stopped note, rather than rolled back
@@ -1180,6 +1187,7 @@ static int check_and_process_input_queue(char **command_text_out,
    OLOG_INFO("Text input from %s: %s", input_source_name(input.source), input.text);
 
    *command_text_out = strdup(input.text);
+   s_next_command_unattended = *command_text_out && input.source == INPUT_SOURCE_MQTT;
    if (*command_text_out == NULL) {
       OLOG_ERROR("Failed to allocate memory for text input from %s",
                  input_source_name(input.source));
@@ -3257,8 +3265,8 @@ mqtt_disabled:
             }
 
             // Adaptive-dwell endpointer, fed one frame per tick in lockstep with the
-            // durations below. P0: adaptive=false, so ww_ev's COMMIT fires on the exact
-            // frame the legacy `silence_duration >= end_of_speech_duration` check would;
+            // durations below. Shadow-only here (adaptive=false), so ww_ev's COMMIT fires on the
+            // exact frame the legacy `silence_duration >= end_of_speech_duration` check would;
             // TENTATIVE/CANCEL are shadow-only signals (they change no timing) that record
             // the tentative->resume pause distribution. Config re-synced each tick so live
             // [vad] setting changes apply exactly as before. t_hush = the chunker's pause
@@ -3837,6 +3845,8 @@ mqtt_disabled:
             buff_size = 0;
             break;
          case DAWN_STATE_PROCESS_COMMAND:
+            s_command_unattended = s_next_command_unattended;
+            s_next_command_unattended = false;
             // Skip processing if command is empty, whitespace, or a silence marker
             if (asr_transcript_is_blank(command_text)) {
                OLOG_INFO("Ignoring empty or invalid command\n");
@@ -3916,6 +3926,11 @@ mqtt_disabled:
                session_turn_begin(local_session, 0, session_effective_user_id(local_session));
                s_local_turn_token = session_turn_token();
                s_local_turn_open = true;
+#ifdef ENABLE_MULTI_CLIENT
+               if (s_command_unattended) {
+                  session_turn_mark_background(local_session);
+               }
+#endif
                session_add_turn_message(local_session, "user", command_text);
             }
 
@@ -4068,6 +4083,11 @@ mqtt_disabled:
                      session_turn_begin(local_session, 0, session_effective_user_id(local_session));
                      s_local_turn_token = session_turn_token();
                      s_local_turn_open = true;
+#ifdef ENABLE_MULTI_CLIENT
+                     if (s_command_unattended) {
+                        session_turn_mark_background(local_session);
+                     }
+#endif
                   }
 
                   // Check for thinking trigger phrases and enable extended thinking for this

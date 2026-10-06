@@ -97,7 +97,13 @@ static void satellite_remap_spawn(void *arg) {
    if (ret != 0) {
       satellite_remap_t *w = (satellite_remap_t *)arg;
       const uint32_t sid = w->session->session_id;
-      OLOG_ERROR("Satellite: failed to start the user remap for session %u (%d)", sid, ret);
+      OLOG_ERROR("Satellite: failed to start the user remap for session %u (%d); history "
+                 "discarded",
+                 sid, ret);
+      /* As when it can't be queued: the next user never gets the previous
+       * one's history, and the satellite is theirs. */
+      session_clear_history(w->session);
+      satellite_apply_mapping(w->session, w->user_id);
       satellite_remap_free(w);
       turn_queue_turn_done(sid);
    }

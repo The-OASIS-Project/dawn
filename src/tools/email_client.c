@@ -472,10 +472,11 @@ static int batch_fetch_headers(CURL *curl,
       char faddr[256] = { 0 };
       if (email_parse_envelope(seg, subj_raw, sizeof(subj_raw), fname_raw, sizeof(fname_raw), faddr,
                                sizeof(faddr))) {
-         email_decode_rfc2047(subj_raw, s->subject, sizeof(s->subject));
-         if (fname_raw[0])
-            email_decode_rfc2047(fname_raw, s->from_name, sizeof(s->from_name));
-         snprintf(s->from_addr, sizeof(s->from_addr), "%s", faddr);
+         /* As reading the message does: words decoded, invisible and
+          * direction-changing characters dropped. */
+         email_mime_header_text(subj_raw, s->subject, sizeof(s->subject));
+         email_mime_header_text(fname_raw, s->from_name, sizeof(s->from_name));
+         email_display_sanitize(faddr, strlen(faddr), s->from_addr, sizeof(s->from_addr), 0);
       }
 
       (*out_count)++;
