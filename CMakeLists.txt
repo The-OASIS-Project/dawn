@@ -1107,6 +1107,15 @@ add_custom_target(no_ws_direct_write_check
     COMMENT "Checking WebUI invariant: no direct WS-frame lws_write()")
 add_dependencies(dawn no_ws_direct_write_check)
 
+# Messaging send-path invariant: every driver->send_text() goes through the
+# messaging_deliver funnel (formatting and escaping per provider).  See
+# scripts/check_messaging_send_funnel.sh.
+add_custom_target(messaging_send_funnel_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_messaging_send_funnel.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking messaging invariant: send_text only through the funnel")
+add_dependencies(dawn messaging_send_funnel_check)
+
 # safe_strscpy migration guard: forbid raw strncpy()/strncat() in directories
 # already swept onto safe_strscpy()/safe_strncpy() (ratcheting COVERED_DIRS list
 # in the script).  Runs at -O0 on every build, so it catches regressions that

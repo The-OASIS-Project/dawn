@@ -62,8 +62,10 @@ static bool send_now(const inbound_item_t *item, const char *text, const char *l
          rc = drv->send_text_unlogged(item->ref.user_id, item->provider_address, address_json, text,
                                       log_text);
       }
-   } else if (drv->send_text) {
-      rc = drv->send_text(item->ref.user_id, item->provider_address, address_json, text);
+   } else {
+      /* The one outbound path: formatted and split for the provider. */
+      return messaging_deliver(drv, item->ref.user_id, item->provider_address, address_json,
+                               text) == MESSAGING_SUCCESS;
    }
    return rc == SUCCESS;
 }

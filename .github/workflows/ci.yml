@@ -35,24 +35,23 @@ jobs:
       - name: Check formatting
         run: ./format_code.sh --check
 
-      # Outbound markdown funnel invariant: every driver->send_text() CALL must
-      # go through the messaging_deliver / engine_send_async funnel (which
-      # renders the canonical markdown into the driver's out_format + escapes
-      # it).  A direct call from anywhere else would ship raw markdown and, for
-      # Telegram (parse_mode=HTML), get the whole message rejected with HTTP
-      # 400.  Drivers are not reachable outside src/messaging (find_driver is
-      # engine-internal), so only these three files may call send_text.
+  # -------------------------------------------------------------------------
+  # Job 1b: Source checks (~10s)
+  # Code invariants that need no build (each is also a build target, so a
+  # local build runs them too).  Kept out of format-check so a failure here
+  # isn't reported as a formatting failure.  No job gates another: every
+  # result shows on every push.
+  # -------------------------------------------------------------------------
+  source-checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # Outbound markdown funnel invariant: every driver->send_text() call
+      # goes through messaging_deliver.
       - name: Messaging send_text funnel invariant
-        run: |
-          bad=$(grep -rn -- '->send_text(' src/messaging/ \
-            | grep -vE 'messaging_engine\.c|messaging_engine_link\.c|messaging_engine_inbound\.c' \
-            || true)
-          if [ -n "$bad" ]; then
-            echo "$bad"
-            echo "ERROR: driver->send_text() called outside the messaging_deliver funnel."
-            echo "Route outbound replies through messaging_deliver() or messaging_engine_send()."
-            exit 1
-          fi
+        run: ./scripts/check_messaging_send_funnel.sh
 
   # -------------------------------------------------------------------------
   # Job 2: Unit Tests (~2 min)
@@ -60,7 +59,6 @@ jobs:
   # No submodules needed (VOSK=ON skips whisper.cpp submodule)
   # -------------------------------------------------------------------------
   unit-tests:
-    needs: format-check
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -107,7 +105,6 @@ jobs:
   # release-time check (./tests/smoke_test.sh on hardware).
   # -------------------------------------------------------------------------
   docker-build:
-    needs: format-check
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout with submodules
@@ -133,7 +130,6 @@ jobs:
   # full ML build is exercised by the developer's pre-push hook on hardware.
   # -------------------------------------------------------------------------
   satellite-build:
-    needs: format-check
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -169,7 +165,6 @@ jobs:
   # is operator-built with real headers (see dawn_satellite_arduino/README.md).
   # -------------------------------------------------------------------------
   esp32-build:
-    needs: format-check
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
