@@ -44,6 +44,7 @@
 #include "tools/schwab_txn.h"       /* transaction classifier + aggregates */
 #include "tools/schwab_watchlist.h" /* SCHWAB_WATCHLIST_MAX (batch-size coupling) */
 #include "tools/tool_registry.h"    /* TOOL_RESULT_ERROR_MARK */
+#include "utils/string_utils.h"
 
 #define SCHWAB_MAX_SYMBOLS 25
 /* schwab_service_quotes sends a whole watchlist in ONE un-chunked /quotes batch, so
@@ -518,9 +519,9 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
  * ETF) holdings, so the panel's per-position company/fund name must come from a
  * separate /quotes?fields=reference call. Names are effectively static, so a small
  * process-wide cache means the extra call fires only for symbols not yet named —
- * not on every 30s refresh. The extended-hours price overlay (P2) reuses
- * schwab_quotes_parse + schwab_quotes_fetch, widening the fields set and
- * schwab_quote_t rather than adding a second path. */
+ * not on every 30s refresh. The extended-hours price overlay uses the same
+ * schwab_quotes_parse + schwab_quotes_fetch path with a wider fields set
+ * ("quote,regular,extended") rather than a second path. */
 #define SCHWAB_NAME_CACHE_MAX 128 /* distinct symbols named over the daemon's life */
 #define SCHWAB_NAME_MISS_MAX 64   /* distinct un-named symbols resolved per snapshot */
 /* Distinct held equity/ETF symbols enriched with an ext-hours price per snapshot.
@@ -553,7 +554,8 @@ static bool name_cache_get(const char *sym, char *out, size_t n) {
 /* Insert (sym -> name) if absent and there is room. An empty @p name is a valid,
  * deliberate NEGATIVE entry ("resolved, no name" — e.g. a delisted/invalid ticker),
  * so a nameless symbol is not re-queried on every refresh. Append-only, no eviction:
- * 128 slots cover a personal account; a large watchlist (P3a) would want eviction. */
+ * 128 slots cover a personal account's holdings. Watchlist quotes don't use this
+ * cache: they request "reference" in the same call and carry the name themselves. */
 static void name_cache_put(const char *sym, const char *name) {
    if (!sym[0]) {
       return;
@@ -567,8 +569,8 @@ static void name_cache_put(const char *sym, const char *name) {
       }
    }
    if (!found && s_name_cache_n < SCHWAB_NAME_CACHE_MAX) {
-      snprintf(s_name_cache[s_name_cache_n].sym, SCHWAB_SYMBOL_MAX, "%s", sym);
-      snprintf(s_name_cache[s_name_cache_n].name, SCHWAB_DESC_MAX, "%s", name);
+      safe_strscpy(s_name_cache[s_name_cache_n].sym, sym);
+      safe_strscpy(s_name_cache[s_name_cache_n].name, name);
       s_name_cache_n++;
    }
    pthread_mutex_unlock(&s_name_cache_mutex);
@@ -579,8 +581,8 @@ static void name_cache_put(const char *sym, const char *name) {
  * (anything else is skipped) so the query can't be injected regardless of the
  * caller — the guard travels with the function, not the call site. Fills @p out (up
  * to @p max); @p n_out set. Returns SCHWAB_RC_OK with *n_out == 0 when no symbol was
- * URL-safe (nothing to ask). Future callers (P2 ext-hours, watchlist) can pass
- * arbitrary tickers safely. */
+ * URL-safe (nothing to ask). Callers (held-position names, the extended-hours
+ * overlay, watchlist quotes, symbol validation) can pass arbitrary tickers safely. */
 static schwab_rc_t schwab_quotes_fetch(int user_id,
                                        const char *const *syms,
                                        int n_syms,

@@ -91,8 +91,8 @@ void admin_cache_format_stats(const llm_usage_stat_t *rows,
                                 ? saved_tokens(type, provider, r->model, r->cache_read_tokens,
                                                r->cache_write_tokens)
                                 : 0;
-      char prompt[16];
-      char saved_s[16];
+      char prompt[24]; /* any int64 with its suffix */
+      char saved_s[24];
       short_count(r->prompt_tokens, prompt, sizeof(prompt));
       short_count(saved, saved_s, sizeof(saved_s));
       const int cover = r->prompt_tokens > 0 ? (int)(r->cache_read_tokens * 100 / r->prompt_tokens)

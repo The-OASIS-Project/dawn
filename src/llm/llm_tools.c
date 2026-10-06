@@ -1754,7 +1754,7 @@ static bool call_carries_tag(const tool_call_t *call) {
    session_t *ctx = session_get_command_context();
    char tag[LLM_CONTEXT_TAG_MAX];
    char hex[9];
-   if (!ctx || !call->arguments || !session_prefix_tag(ctx, tag, sizeof(tag)) ||
+   if (!ctx || !call->arguments[0] || !session_prefix_tag(ctx, tag, sizeof(tag)) ||
        !llm_context_tag_secret(tag, hex)) {
       return false;
    }

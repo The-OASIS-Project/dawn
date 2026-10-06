@@ -200,8 +200,8 @@ void llm_tool_views_finish_batch(const tool_call_list_t *calls,
    const int n = results->count < LLM_TOOL_VIEWS_BATCH_MAX ? results->count
                                                            : LLM_TOOL_VIEWS_BATCH_MAX;
    const tool_metadata_t *metas[LLM_TOOL_VIEWS_BATCH_MAX];
-   size_t demands[LLM_TOOL_VIEWS_BATCH_MAX];
-   bool first[LLM_TOOL_VIEWS_BATCH_MAX];
+   size_t demands[LLM_TOOL_VIEWS_BATCH_MAX] = { 0 };
+   bool first[LLM_TOOL_VIEWS_BATCH_MAX] = { false };
    size_t shares[LLM_TOOL_VIEWS_BATCH_MAX];
    size_t sizes[LLM_TOOL_VIEWS_BATCH_MAX];
    bool any_over = false;

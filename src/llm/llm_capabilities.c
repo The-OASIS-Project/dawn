@@ -34,6 +34,7 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/toml.h"
+#include "utils/string_utils.h"
 
 /* A models.toml row: "prefix" = { modes = [...], efforts = [...] }. */
 typedef struct {
@@ -339,7 +340,7 @@ static void add_mode(llm_thinking_caps_t *out,
       return;
    }
    for (int i = 0; efforts && i < effort_count && i < LLM_EFFORTS_MAX; i++) {
-      snprintf(m->efforts[m->effort_count++], LLM_EFFORT_NAME_MAX, "%s", efforts[i]);
+      safe_strscpy(m->efforts[m->effort_count++], efforts[i]);
    }
 }
 

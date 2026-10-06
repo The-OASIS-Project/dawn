@@ -481,7 +481,8 @@ static char *handle_call(struct json_object *details, int user_id, const turn_or
       if (pending_id == 0) {
          return stage_refusal(src, "call");
       }
-      char buf[768];
+      /* Room for the whole question the resolver asks. */
+      char buf[sizeof(rez.name) + sizeof(rez.number) + sizeof(rez.question) + 32];
       if (rez.name[0]) {
          snprintf(buf, sizeof(buf), "About to call %s at %s. %s", rez.name, rez.number,
                   confirm ? rez.question : "Say 'confirm' to proceed.");

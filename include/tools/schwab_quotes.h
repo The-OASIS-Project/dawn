@@ -17,11 +17,11 @@
  * the project author(s).
  *
  * Charles Schwab /quotes response parser — structured, per-symbol extraction from a
- * batch /quotes call. Pure (no OAuth/HTTP): fixture-testable. Phase 1 carries only
- * the instrument reference name (company/fund), used to fill in position
- * descriptions the /accounts call omits for equities. The extended-hours price
- * overlay extends schwab_quote_t with quote/regular/extended fields — additively,
- * without reshaping this struct or the parser's control flow.
+ * batch /quotes call. Pure (no OAuth/HTTP): fixture-testable. Each schwab_quote_t
+ * carries the instrument reference name (company/fund, used to fill in position
+ * descriptions the /accounts call omits for equities), the last price and day
+ * change, and, when the regular+extended fields were requested, an extended-hours
+ * overlay (pre/post-market last price and its change against the regular close).
  */
 
 #ifndef SCHWAB_QUOTES_H

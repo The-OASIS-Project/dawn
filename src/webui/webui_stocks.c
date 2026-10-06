@@ -37,6 +37,7 @@
 #include "tools/schwab_quotes.h"    /* schwab_quote_t + watch payload */
 #include "tools/schwab_service.h"   /* schwab_service_portfolio_snapshot / _quotes */
 #include "tools/schwab_watchlist.h" /* per-user watchlist CRUD */
+#include "utils/string_utils.h"
 
 #define STOCKS_MAX_USERS 4            /* owner-only today; keyed per-user for generality */
 #define STOCKS_CADENCE_REGULAR_SEC 30 /* market-hours push cadence */
@@ -598,7 +599,7 @@ static void refresh_watch_user(int user_id, bool ext, const char *market) {
             full[nfull] = quotes[f]; /* quotable=true (set by the parser) */
          } else {
             memset(&full[nfull], 0, sizeof(full[nfull]));
-            snprintf(full[nfull].symbol, sizeof(full[nfull].symbol), "%s", syms[i]);
+            safe_strscpy(full[nfull].symbol, syms[i]);
             full[nfull].quotable = false;
          }
          nfull++;
