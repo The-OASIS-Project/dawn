@@ -387,15 +387,6 @@ static void initialize_command_prompt(void) {
              g_config.llm.tools.enabled ? "on" : "off", prompt_len);
 }
 
-const char *get_command_prompt(void) {
-   /* Always delegate to the initializer — it takes system_instructions_mutex
-    * and early-returns if already initialized. Reading prompt_initialized
-    * here without the lock is a data race because invalidate_system_instructions()
-    * (runnable from MQTT callback threads) writes the flag under the mutex. */
-   initialize_command_prompt();
-   return command_prompt;
-}
-
 int get_command_prompt_parts(command_prompt_parts_t *out) {
    if (!out) {
       return 1;

@@ -22,7 +22,7 @@
  * Compared once per seam, after a compaction applied, against what the
  * history still shows (the frozen definitions and every later change in it),
  * so a change a compaction summarized away is appended again, once.  What is
- * compared is what is registered (llm_tools_definitions), never enable flags:
+ * compared is what is registered (llm_tools_definitions_hashed), never enable flags:
  * a tool toggled, a component coming online or going offline appends nothing
  * (whether a surface may use a tool is decided where a request is advertised
  * and a call executed).  A tool no longer registered appends nothing either:

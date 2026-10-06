@@ -32,10 +32,10 @@
  *     still emitted for SHADOW instrumentation (they change no timing) so the
  *     tentative->resume gap distribution can be measured before adaptive is ever
  *     enabled.
- *   - ADAPTIVE (adaptive=true): same COMMIT, but a caller may act on the
- *     TENTATIVE at t_hush (e.g. start a speculative decode) knowing CANCEL will
- *     fire first if speech resumes before t_commit. Commit timing is UNCHANGED
- *     from legacy — adaptive only adds the earlier, cancellable tentative signal.
+ *   - ADAPTIVE (adaptive=true; reserved, no caller acts on it yet): same COMMIT,
+ *     but a caller may act on the TENTATIVE at t_hush (e.g. start a speculative
+ *     decode) knowing CANCEL will fire first if speech resumes before t_commit. Commit timing is
+ * UNCHANGED from legacy — adaptive only adds the earlier, cancellable tentative signal.
  *
  * Never act on a TENTATIVE as if it were final: wake-word match, TTS resume, and
  * dispatch belong to COMMIT only.
@@ -59,7 +59,8 @@ typedef struct {
    float t_hush;   /* silence to a tentative endpoint (0 or >= t_commit disables it) */
    float t_commit; /* silence to a committed end-of-speech (the legacy dwell)        */
    float max_rec;  /* hard utterance cap; 0 = no cap. Wins over t_commit.            */
-   bool adaptive;  /* false = legacy timing + shadow signal; true = act on tentative */
+   bool adaptive;  /* reserved: no caller acts on a tentative yet, and either value
+                    * gives the same events and timing (tests pin it) */
 
    /* Live state (per utterance; cleared by endpointer_reset). */
    float speech_s;
@@ -94,9 +95,10 @@ void endpointer_reset(endpointer_t *ep);
  * @param dt        frame duration in seconds (e.g. 0.05).
  * @return the event for this frame (see endpoint_event_t).
  *
- * At most one event per frame. Priority: max_rec cap (COMMIT, forced) > committed
- * end-of-speech (COMMIT) > resumed-speech (CANCEL) > tentative arm (TENTATIVE) >
- * NONE. On any speech frame silence is reset to 0 (legacy semantics preserved).
+ * At most one event per frame. Priority: max_rec cap (COMMIT, forced) > resumed
+ * speech (CANCEL) > committed end-of-speech (COMMIT) > tentative arm (TENTATIVE) >
+ * NONE (a CANCEL frame is speech, so it never also reaches end-of-speech). On any
+ * speech frame silence is reset to 0 (legacy semantics preserved).
  */
 endpoint_event_t endpointer_feed(endpointer_t *ep, bool is_speech, float dt);
 

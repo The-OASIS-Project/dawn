@@ -18,11 +18,13 @@
  *
  * Speculative-decode result slot — a pure, testable state machine.
  *
- * Part of the adaptive end-of-speech dwell ("P1 speculative decode overlap").
+ * Part of the adaptive end-of-speech dwell (overlapping a speculative decode with
+ * the dwell).
  * On the always-on voice path, when the user pauses mid-command a speculative
  * Whisper decode is started on a snapshot of the audio-so-far WITHOUT committing;
- * resumed speech discards it, and a committed end-of-speech consumes it — hiding
- * the serial Whisper time. This module owns only the SLOT bookkeeping (generation
+ * resumed speech discards it, and a committed end-of-speech takes it. Today the
+ * taken transcript is only compared with the real decode (shadow mode); using it
+ * would hide the serial Whisper time. This module owns only the SLOT bookkeeping (generation
  * tagging, arm/cancel/store/take, the in-flight and per-utterance-fire caps). It
  * owns no audio, no threads, no locks.
  *
@@ -30,7 +32,8 @@
  * The slot is NOT internally synchronized. The owner (the always-on connection)
  * embeds one `spec_slot_t` and MUST hold its own `ctx->mutex` across every call
  * here, with a single exception: `spec_slot_gen()` reads the `_Atomic gen` field
- * lock-free (reserved for a future decode abort-poll — see P1.3). Every mutating
+ * lock-free (reserved for a decode that polls it to abort early; nothing reads it that
+ * way yet). Every mutating
  * call happens under the mutex, so the compare-and-store in `spec_slot_store()`
  * is atomic against the invalidations driven from the connection's threads.
  *

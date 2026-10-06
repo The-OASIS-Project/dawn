@@ -42,14 +42,13 @@ extern "C" {
  * reuse are unaffected by the merge.
  *
  * Merges only the leading run whose messages carry plain-string content; a
- * non-string (e.g. already cache-wrapped) system message ends the run.  No-op if
+ * non-string (e.g. a content-part array) system message ends the run.  No-op if
  * fewer than two such messages lead the array.  Bodies are joined with a blank
  * line ("\n\n").
  *
  * Copy-on-write: @p root's "messages" array may ALIAS the session's canonical
  * conversation_history, so the merged run is written into a request-private clone
- * of the messages array; the session's history object is never mutated (same
- * contract.
+ * of the messages array; the session's history object is never mutated.
  *
  * @param root Request body (its "messages" array may be swapped for a private clone).
  */

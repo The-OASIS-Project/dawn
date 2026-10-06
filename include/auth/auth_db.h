@@ -2288,15 +2288,6 @@ int conv_db_fill_llm_settings_if_empty(int64_t conv_id,
  */
 int conv_db_delete(int64_t conv_id, int user_id);
 
-/**
- * @brief Delete a conversation (admin only, no ownership check)
- *
- * For admin CLI tools that need to delete any conversation.
- *
- * @param conv_id Conversation ID
- * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
- */
-int conv_db_delete_admin(int64_t conv_id);
 
 /**
  * @brief Search conversations by title

@@ -119,7 +119,7 @@ typedef struct {
     *  when they differ from what the conversation last had. */
    char *directives;
    /** Every registered tool's neutral definition, a JSON array in registry
-    *  order (llm_tools_definitions): what a conversation starting now freezes,
+    *  order (llm_tools_definitions_hashed): what a conversation starting now freezes,
     *  and what a running one's later changes are compared against.  Decided
     *  by registration, not by enable flags: a tool this surface may not use
     *  is refused when called, and the turn's standing directions say which.

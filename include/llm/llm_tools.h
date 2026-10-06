@@ -326,14 +326,6 @@ struct json_object *llm_tools_get_openai_format_filtered(bool is_remote_session)
 struct json_object *llm_tools_get_claude_format(void);
 
 /**
- * @brief Generate tools array in Claude format, filtered by session type
- *
- * @param is_remote_session true for WebUI/satellite sessions, false for local mic
- * @return JSON array (caller must json_object_put), or NULL if no tools
- */
-struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session);
-
-/**
  * @brief Every registered tool's neutral definition (llm_tool_defs.h), in
  *        registry order, as a JSON array (caller frees)
  *
@@ -346,14 +338,11 @@ struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session)
  * request sends.  A definition past the caps llm_tool_def_valid() checks is
  * left out (logged).  Recomputed only when a tool or schema could have
  * changed.  NULL when the registry isn't up.
- */
-char *llm_tools_definitions(void);
-
-/**
- * @brief llm_tools_definitions, with each definition's canonical hash by name
- *        (a JSON object, llm_tool_defs_hashes) in @p hashes_out and the set's
- *        fingerprint in @p fp_out (65 bytes: a SHA-256 in hex), all three of
- *        one registry generation and hashed once per generation
+ *
+ * With each definition's canonical hash by name (a JSON object,
+ * llm_tool_defs_hashes) in @p hashes_out when given, and the set's fingerprint
+ * in @p fp_out (65 bytes: a SHA-256 in hex) when given, all three of one
+ * registry generation and hashed once per generation.
  *
  * @p hashes_out is NULL (and @p fp_out "") when they couldn't be computed.
  * @return The definitions (caller frees), or NULL

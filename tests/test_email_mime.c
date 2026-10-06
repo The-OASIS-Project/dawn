@@ -87,7 +87,7 @@ static const char *ALT = HDR
     "Content-Transfer-Encoding: base64\r\n\r\n"
     "PHA+SGVsbG8sIDxiPndvcmxkPC9iPjwvcD4=\r\n--b1--\r\n";
 
-/* The P1.0 gate: a base64 multipart/alternative reads correctly. */
+/* The baseline case: a base64 multipart/alternative reads correctly. */
 static void test_alternative_base64(void) {
    email_message_t m;
    TEST_ASSERT_EQUAL_INT(0, parse(ALT, false, &PANEL, &m));

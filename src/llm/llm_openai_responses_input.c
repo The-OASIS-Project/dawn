@@ -16,8 +16,8 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Pure request-input shaping for the OpenAI Responses API (see header +
- * docs/RESPONSES_CACHE_REORDER_PLAN.md).
+ * Pure request-input shaping for the OpenAI Responses API (see the header and
+ * the prompt-cache layout note below).
  */
 
 #include "llm/llm_openai_responses_input.h"
@@ -34,32 +34,27 @@
 #include "logging.h"
 
 /*
- * Prompt-cache layout (see docs/RESPONSES_CACHE_REORDER_PLAN.md).
+ * Prompt-cache layout.
  *
- * CROSS-MODULE INVARIANT: DAWN's two-segment system prompt is produced by
- * rebuild_history_with_two_system_messages_locked() (session_manager.c) as a
- * LEADING CONTIGUOUS RUN of system messages: index 0 = stable prefix (persona +
- * static rules, byte-identical across turns), index 1 = volatile block (per-turn
- * memory/docs/calendar + [system_time], the "--- TURN CONTEXT ---" DATA block).
- * A later `role:"system"` message is NOT part of that pair — it is a mid-history
- * system message (device events now render into the volatile block instead, but a
- * history saved by an older build may still hold one).
+ * A conversation's request is append-only (src/core/session_prefix.c): its system
+ * prompt and tool set are frozen at its first turn, in one leading system message,
+ * and later changes (directives, instructions, tool-set changes, each turn's context)
+ * are appended where they happen. That leading message goes in `instructions`, so
+ * [instructions][tools][history] is byte-stable across turns and OpenAI caches it with
+ * its implicit end-of-messages breakpoint; a turn's context is part of its question,
+ * not a separate block. Conversation-scoped system messages (a directive, instruction
+ * or tool-set change) are never part of the leading run: they are emitted inline at
+ * their position (a tool-set change goes in the request's tools instead). A later
+ * `role:"system"` message from a history an older build saved is emitted inline too.
  *
- * For OpenAI Responses the STABLE segment goes in `instructions` (kept byte-stable so
- * [instructions][tools][history] forms a reusable prefix); the VOLATILE segment is
+ * A history without a frozen prefix (a research run, whose system messages are its
+ * prompt) can carry a second leading system message: a per-turn volatile block. It is
  * repositioned to a user-role input item just before the current question
- * (llm_responses_build_input), and mid-history system messages are emitted inline at their
- * position. Because the volatile changes every turn and sits before the question,
- * implicit-only caching cannot reuse the stable prefix cross-turn (OpenAI's "a shared
- * prefix is not always a cached prefix" gotcha). GPT-5.6+ resolves this with an EXPLICIT
- * `prompt_cache_breakpoint` stamped on the last stable input_text before the volatile,
- * paired with request-root `prompt_cache_options:{mode:implicit}` (set in
- * llm_openai_responses.c) — implicit keeps the within-turn end breakpoint, the explicit
- * one makes the history cache cross-turn. This differs from the Anthropic `cache_control`
- * mechanism (llm_openai_cache.c), which is position-independent; the breakpoint here is
- * gated on model >= 5.6 (pre-5.6 Responses models reject the field). If the CC path is
- * ever taught to cache cross-turn, reuse this "volatile as a user item before the
- * question" pattern.
+ * (llm_responses_build_input), and on GPT-5.6+ an explicit `prompt_cache_breakpoint`
+ * is stamped on the last stable input_text before it, paired with request-root
+ * `prompt_cache_options:{mode:implicit}` (set in llm_openai_responses.c), so the
+ * history before the volatile block still caches across rounds. Pre-5.6 Responses
+ * models reject the field, so it is gated on the model version.
  */
 
 int llm_responses_count_leading_system_run(struct json_object *history) {
@@ -135,12 +130,12 @@ char *llm_responses_extract_volatile_context(struct json_object *history) {
 /*
  * Stamp an explicit prompt-cache breakpoint on the last stable input_text block.
  *
- * GPT-5.6+ prompt caching (docs/RESPONSES_CACHE_REORDER_PLAN.md, OpenAI "Prompt caching"
- * guide): implicit caching writes ONE breakpoint at the end of the latest message, so the
- * stable [instructions][tools][history] prefix in front of DAWN's per-turn volatile block
- * ([system_time] + memory retrieval, which changes every turn) is never independently
- * reusable — the documented "a shared prefix is not always a cached prefix" gotcha
- * (live-measured: within-turn cached ~full, each NEW turn fell back to header-only ~21K).
+ * GPT-5.6+ prompt caching (OpenAI "Prompt caching" guide): implicit caching writes ONE
+ * breakpoint at the end of the latest message, so the stable [instructions][tools][history]
+ * prefix in front of a per-turn volatile block (only a history without a frozen prefix
+ * has one: a research run) is never independently reusable — the documented "a shared
+ * prefix is not always a cached prefix" gotcha (live-measured: within-turn cached ~full,
+ * each NEW turn fell back to header-only ~21K).
  * An explicit breakpoint after the stable content makes that prefix cache cross-turn. It
  * is honored ALONGSIDE the implicit end breakpoint (mode stays "implicit"), so within-turn
  * tool-loop caching is preserved. OpenAI accepts breakpoints only on input-side text

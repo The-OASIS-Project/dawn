@@ -39,7 +39,7 @@ void llm_openai_merge_leading_system_messages(json_object *root) {
    int msg_count = json_object_array_length(messages);
 
    /* Measure the leading run of system messages that carry plain-string content;
-    * a non-string (e.g. already cache-wrapped) system message ends the run. */
+    * a non-string (e.g. a content-part array) system message ends the run. */
    int run = 0;
    size_t total = 0;
    for (int i = 0; i < msg_count; i++) {

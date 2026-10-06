@@ -79,6 +79,20 @@ static void test_legacy_max_rec_forced(void) {
    TEST_ASSERT_TRUE(endpointer_commit_forced(&ep));
 }
 
+/* Speech resuming on the frame the cap is reached: the cap still wins. */
+static void test_max_rec_wins_over_a_cancel(void) {
+   endpointer_t ep;
+   endpointer_init(&ep, T_HUSH, T_COMMIT, 0.5f, false);
+   endpoint_event_t ev = ENDPOINT_NONE;
+   for (int i = 0; i < 9; i++) { /* 0.45 s: speech, then a pause that arms */
+      ev = endpointer_feed(&ep, i < 2, DT);
+   }
+   TEST_ASSERT_TRUE(ep.tentative);
+   ev = endpointer_feed(&ep, true, DT); /* 0.5 s, and speech resumes */
+   TEST_ASSERT_EQUAL_INT(ENDPOINT_COMMIT, ev);
+   TEST_ASSERT_TRUE(endpointer_commit_forced(&ep));
+}
+
 /* A pause shorter than the commit dwell does not end speech; resumed speech
  * continues the same utterance. */
 static void test_pause_below_commit_does_not_end(void) {
@@ -220,6 +234,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_legacy_clean_stop);
    RUN_TEST(test_legacy_max_rec_forced);
+   RUN_TEST(test_max_rec_wins_over_a_cancel);
    RUN_TEST(test_pause_below_commit_does_not_end);
    RUN_TEST(test_tentative_then_cancel);
    RUN_TEST(test_stutter_one_commit);

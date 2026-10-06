@@ -68,6 +68,7 @@ endpoint_event_t endpointer_feed(endpointer_t *ep, bool is_speech, float dt) {
    ep->recording_s += dt;
    ep->commit_forced = false;
 
+   bool cancel = false;
    if (is_speech) {
       ep->speech_s += dt;
       ep->saw_speech = true;
@@ -79,8 +80,7 @@ endpoint_event_t endpointer_feed(endpointer_t *ep, bool is_speech, float dt) {
          if (ep->silence_s > ep->max_pause_s) {
             ep->max_pause_s = ep->silence_s;
          }
-         ep->silence_s = 0.0f;
-         return ENDPOINT_CANCEL;
+         cancel = true;
       }
       ep->silence_s = 0.0f;
    } else {
@@ -88,10 +88,13 @@ endpoint_event_t endpointer_feed(endpointer_t *ep, bool is_speech, float dt) {
    }
 
    /* Priority order mirrors the legacy dawn.c if-else-if: the max-recording cap is
-    * checked first and wins over end-of-speech. */
+    * checked first and wins over end-of-speech (and over a cancel on this frame). */
    if (ep->max_rec > 0.0f && ep->recording_s >= ep->max_rec) {
       ep->commit_forced = true;
       return ENDPOINT_COMMIT;
+   }
+   if (cancel) {
+      return ENDPOINT_CANCEL;
    }
 
    /* Committed end-of-speech — the legacy `silence >= end_of_speech_duration`. */
@@ -100,8 +103,8 @@ endpoint_event_t endpointer_feed(endpointer_t *ep, bool is_speech, float dt) {
    }
 
    /* Tentative endpoint: arm once when silence first crosses t_hush. A caller in
-    * adaptive mode may act on it (speculative decode); in legacy mode it is a
-    * pure shadow signal that changes no timing. Disabled when t_hush is 0 or not
+    * adaptive mode could act on it (speculative decode; none does yet); otherwise
+    * it is a pure shadow signal that changes no timing. Disabled when t_hush is 0 or not
     * strictly shorter than the commit dwell. */
    if (!ep->tentative && ep->t_hush > 0.0f && ep->t_hush < ep->t_commit &&
        ep->silence_s >= ep->t_hush) {

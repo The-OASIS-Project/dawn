@@ -212,7 +212,7 @@ void conv_image_files_free(conv_image_files_t *files);
  * @brief Delete a conversation, and with @p mode the images it owns, in one
  *        transaction under the database lock
  *
- * conv_db_delete() (or, with @p admin, conv_db_delete_admin(): any owner's)
+ * conv_db_delete() (or, with @p admin, any owner's conversation)
  * with its images: their rows are removed (or unbound) in the same
  * transaction as the conversation, so no row naming one can be stored between
  * the choice and the delete.  The removed images' files come back in

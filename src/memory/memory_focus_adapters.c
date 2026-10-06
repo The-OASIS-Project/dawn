@@ -129,10 +129,9 @@ _Static_assert(RELATION_ADAPTER_MAX_CANDIDATES_CAP >= 64,
  * post-check on each fact → batch provenance via
  * memory_db_facts_get_sources.
  *
- * include_private (1f gap): the parameter is accepted from the
- * framework but is a no-op in v1.  hybrid_search currently scopes by
- * user_id; the conversation-private boundary is enforced at conv_db_*
- * level only, not at memory_facts.  Wired in 1f.
+ * include_private: the parameter is accepted from the framework but is
+ * a no-op.  hybrid_search scopes by user_id; the conversation-private
+ * boundary is enforced at the conv_db_* level only, not at memory_facts.
  * ============================================================================= */
 
 static int fact_adapter_query(int user_id,
@@ -144,7 +143,7 @@ static int fact_adapter_query(int user_id,
                               int max_candidates,
                               focus_candidate_t **out_candidates,
                               int *out_count) {
-   (void)include_private; /* 1f gap — see header comment above */
+   (void)include_private; /* No-op — see header comment above */
    *out_candidates = NULL;
    *out_count = 0;
    if (max_candidates <= 0 || query_text == NULL || query_text[0] == '\0')
@@ -180,10 +179,10 @@ static int fact_adapter_query(int user_id,
    }
 
    /* "I don't remember" gate — same configurable score floor that gates the
-    * memory tool's `search` action.  Focus-block facts are prepended to the
-    * system prompt verbatim, so the marginal-cosine fabrication surface is
-    * identical to the tool path.  Single knob (g_config.memory.search_score_floor)
-    * keeps tool-time and injection-time semantics aligned. */
+    * memory tool's `search` action.  Focus facts go verbatim into the turn's
+    * context (just before the user's message), so the marginal-cosine
+    * fabrication surface is identical to the tool path.  Single knob
+    * (g_config.memory.search_score_floor) keeps tool-time and injection-time semantics aligned. */
    kept = memory_search_apply_score_floor(facts, scores, kept, g_config.memory.search_score_floor);
    if (kept <= 0)
       return SUCCESS;
@@ -419,7 +418,7 @@ static int entity_adapter_query(int user_id,
                                 int max_candidates,
                                 focus_candidate_t **out_candidates,
                                 int *out_count) {
-   (void)include_private; /* Same 1f gap as fact adapter */
+   (void)include_private; /* No-op, as in the fact adapter */
    (void)embed_dim;       /* Engine reports its own dim */
    *out_candidates = NULL;
    *out_count = 0;
@@ -778,7 +777,7 @@ static int summary_adapter_query(int user_id,
                                  int max_candidates,
                                  focus_candidate_t **out_candidates,
                                  int *out_count) {
-   (void)include_private; /* Same 1f gap as fact adapter */
+   (void)include_private; /* No-op, as in the fact adapter */
    *out_candidates = NULL;
    *out_count = 0;
    if (max_candidates <= 0 || query_text == NULL || query_text[0] == '\0')

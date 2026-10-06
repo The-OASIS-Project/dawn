@@ -21,42 +21,18 @@
  * calls parsed from a provider's response.  Split from llm_tools.c.
  */
 
+#include <json-c/json.h>
 #include <limits.h>
-#include <mosquitto.h>
-#include <openssl/buffer.h>
-#include <openssl/evp.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
-#include "config/dawn_config.h"
-#include "core/command_executor.h"
-#include "core/component_status.h"
-#include "core/hash_util.h"
-#include "core/ocp_helpers.h"
-#include "core/research_allowlist.h"
 #include "core/session_manager.h"
-#include "core/session_prefix.h"
-#include "core/worker_pool.h"
-#include "dawn.h"
 #include "dawn_error.h"
-#include "llm/llm_capabilities.h"
-#include "llm/llm_claude_format.h"
-#include "llm/llm_command_parser.h"
-#include "llm/llm_context.h"
-#include "llm/llm_context_text.h"
-#include "llm/llm_history_kind.h"
-#include "llm/llm_interface.h"
 #include "llm/llm_tool_images.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_tools_internal.h"
 #include "logging.h"
-#include "mosquitto_comms.h"
-#include "tools/hud_discovery.h"
-#include "tools/tool_registry.h"
 #include "utils/string_utils.h"
-#include "webui/webui_server.h"
 
 /* =============================================================================
  * Tool Result Formatting for Conversation History

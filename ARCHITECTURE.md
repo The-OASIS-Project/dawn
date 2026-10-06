@@ -392,6 +392,24 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    returned to the disk in chunks      │
 │  Session reaper  — finishes destroyed sessions once    │
 │                    their last reference is released    │
+│  Forget/withdraw — on demand: removes a user's         │
+│                    forgotten items from live and stored│
+│                    conversations                       │
+│  Embed backfill  — embeds facts stored without an      │
+│                    embedding (request queue + startup  │
+│                    sweep)                              │
+│  Spec decode     — always-on WebUI, shadow mode only: a│
+│                    decode at a pause, logged for       │
+│                    agreement, never used               │
+│  Satellite remap — detached per remap: saves the       │
+│                    previous user's conversation,       │
+│                    applies the new user                │
+│  Conv memory     — detached: counts/forgets memories   │
+│                    learned from a conversation made    │
+│                    private                             │
+│  Stocks refresh  — pushes quotes to open stocks panels │
+│                    (every 30s in market hours); idle   │
+│                    when no panel is open               │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -497,6 +515,9 @@ Per-module locks (scoped to a single subsystem):
   llm_cache_monitor::s_keys_mutex + s_alert_mutex (src/llm/llm_cache_monitor.c) — cache keys, warning times, queued
                                                                      alerts (LEAVES: taken under history_mutex by a history
                                                                      rewrite; no other lock or callout while held)
+  llm_cache_monitor::s_queue_mutex (src/llm/llm_cache_monitor.c) — usage records waiting for the 1-second flush (LEAF: held
+                                                                     only to queue, copy out or remove rows; never across the
+                                                                     database write)
   tool_call_challenge::s_mutex (src/core/tool_call_challenge.c) — actions waiting for a reply code (LEAF: held only to find,
                                                                      add, hand out or drop an entry; never across a tool call or a send)
   session_reaper::s_mutex (src/core/session_reaper.c)          — the reaper's list of destroyed sessions (LEAF: never held while
@@ -517,7 +538,7 @@ Per-module locks (scoped to a single subsystem):
   job_manager::s_pool_mutex (src/core/job_manager.c)       — background-job session pool (REGISTRY tier, like session_manager_rwlock: released before any ref-cond wait, session_free, or conv_db_*/scheduler_* callout)
   job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
   memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)
-  document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (taken BEFORE the auth_db lock while a rebuild streams rows; never after it; scoring holds only this)
+  document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (LEAF: never held across a database call; a rebuild reads pages outside it, then installs; scoring holds only this)
   memory_embeddings_entity::s_ent.mutex (src/memory/memory_embeddings_entity.c) — per-user entity-embedding copies (LEAF: held only to look up, score and install; a copy is read from the DB and name-stemmed with no cache lock held; invalidation is lock-free atomics, safe under the auth_db lock)
   memory_extraction::s_extraction_mutex + s_extraction_cond (src/memory/memory_extraction.c) — per-user extraction slots (leaf); the cond var lets a forget wait out a user's in-flight extraction (memory_extraction_hold_user)
   ...and similar per-tool mutexes in src/tools/*.c

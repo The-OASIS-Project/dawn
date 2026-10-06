@@ -165,12 +165,8 @@ struct json_object *llm_tools_get_openai_format_filtered(bool is_remote_session)
    return format_filtered(is_remote_session, false);
 }
 
-struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session) {
-   return format_filtered(is_remote_session, true);
-}
-
 /* A conversation's tool set comes from every registered tool but research's
- * own (llm_tools_definitions). */
+ * own (llm_tools_definitions_hashed). */
 static bool frozen_candidate(const tool_definition_t *t) {
    return !research_tool_is_research_only(t->name);
 }
@@ -249,10 +245,6 @@ char *llm_tools_definitions_hashed(char **hashes_out, char *fp_out) {
    }
    pthread_mutex_unlock(&llm_tools_mutex);
    return copy;
-}
-
-char *llm_tools_definitions(void) {
-   return llm_tools_definitions_hashed(NULL, NULL);
 }
 
 struct json_object *llm_tools_render_frozen(struct json_object *defs, bool claude) {

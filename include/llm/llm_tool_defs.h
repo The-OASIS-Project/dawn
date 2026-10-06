@@ -19,7 +19,7 @@
  * A conversation's tools, by value.
  *
  * A tool definition is neutral: {"name", "description", "parameters"} (a JSON
- * schema object), the registry's projection of a tool (llm_tools_definitions),
+ * schema object), the registry's projection of a tool (llm_tools_definitions_hashed),
  * rendered per provider when a request is built (llm_tools_render_frozen).
  * A conversation freezes the definitions it starts with on its prefix message
  * (LLM_HISTORY_TOOLS_KEY), and a later change is a tool_change message

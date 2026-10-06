@@ -1282,10 +1282,6 @@ int conv_db_delete(int64_t conv_id, int user_id) {
    return conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_KEEP, NULL);
 }
 
-int conv_db_delete_admin(int64_t conv_id) {
-   return conv_db_delete_ex(conv_id, 0, true, CONV_IMAGES_KEEP, NULL);
-}
-
 /* =============================================================================
  * Search Operations
  * ============================================================================= */

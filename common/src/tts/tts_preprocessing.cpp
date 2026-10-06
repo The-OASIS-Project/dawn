@@ -1322,8 +1322,8 @@ static inline size_t generate_output(const char *src, size_t len, char *out) {
 // Phone-number expansion (pre-pass)
 // ============================================================================
 
-/* Phone numbers must be read digit-by-digit ("+14045550142" -> "1 6 7 8 ...")
- * rather than as one cardinal ("sixteen billion ...").  A dedicated pre-pass
+/* Phone numbers must be read digit-by-digit ("+14045550142" -> "1 4 0 4 5 5 5 0 1 4 2")
+ * rather than as one cardinal ("fourteen billion ...").  A dedicated pre-pass
  * (rather than a branch in the two-pass core) keeps that delicate size-calc /
  * generate symmetry untouched: it rewrites the input string first, and the
  * rest of the pipeline runs on the result.

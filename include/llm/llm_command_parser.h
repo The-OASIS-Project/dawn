@@ -30,17 +30,6 @@
 #define TOOL_DEFAULTS_HEADER_TEXT \
    "TOOL DEFAULTS (for tool calls only, do not mention in conversation):"
 
-/**
- * @brief The command prompt every surface starts from: persona, system
- *        instructions, localization
- *
- * Surface-neutral: what differs by surface (voice output, ASR hints, a room,
- * a channel) reaches the model as standing directions, so a conversation
- * keeps one system prompt wherever it continues.  Points into a shared buffer
- * a rebuild rewrites (invalidate_system_instructions()).
- */
-const char *get_command_prompt(void);
-
 /** The command prompt's pieces, each a private copy. */
 typedef struct {
    char *persona;       /**< who the assistant is */
@@ -49,7 +38,7 @@ typedef struct {
 } command_prompt_parts_t;
 
 /**
- * @brief The pieces get_command_prompt() joins, for a builder that sends them
+ * @brief The pieces the command prompt joins, for a builder that sends them
  *        as sections of their own
  *
  * @return 0, or 1 on allocation failure (@p out then empty)
@@ -60,9 +49,13 @@ int get_command_prompt_parts(command_prompt_parts_t *out);
 void command_prompt_parts_free(command_prompt_parts_t *parts);
 
 /**
- * @brief A private copy of get_command_prompt() (caller frees; NULL on OOM)
+ * @brief The command prompt every surface starts from: persona, system
+ *        instructions, localization (a private copy: caller frees; NULL on OOM)
  *
- * For a caller that uses the prompt later, not right away.
+ * Surface-neutral: what differs by surface (voice output, ASR hints, a room,
+ * a channel) reaches the model as standing directions, so a conversation
+ * keeps one system prompt wherever it continues.  A copy, since the shared
+ * buffer is rewritten on a rebuild (invalidate_system_instructions()).
  */
 char *get_command_prompt_dup(void);
 

@@ -87,10 +87,6 @@ local_provider_t llm_local_detect_provider(const char *endpoint) {
    (void)endpoint;
    return llm_local_get_provider();
 }
-struct json_object *llm_tools_get_claude_format_filtered(bool r) {
-   (void)r;
-   return NULL;
-}
 /* The conversation's tools by value (llm_tools_request_tools): its frozen set
  * and the changes not sent in place, a name rendered as itself. */
 struct json_object *llm_tools_request_tools(struct json_object *history,

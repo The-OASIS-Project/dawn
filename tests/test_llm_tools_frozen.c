@@ -68,13 +68,13 @@ void tearDown(void) {
 /* Every registered tool is defined, enabled or not, and a toggle (or a
  * component coming online) changes no definition. */
 static void test_definitions_ignore_enable_flags(void) {
-   char *before = llm_tools_definitions();
+   char *before = llm_tools_definitions_hashed(NULL, NULL);
    TEST_ASSERT_NOT_NULL(before);
    TEST_ASSERT_NOT_NULL(strstr(before, "\"name\":\"hud_control\""));
    llm_tools_table[1].enabled = true;          /* the helmet comes online */
    llm_tools_table[0].enabled_local = false;   /* a tool turned off */
    atomic_fetch_add(&llm_tools_generation, 1); /* recomputed, not cached */
-   char *after = llm_tools_definitions();
+   char *after = llm_tools_definitions_hashed(NULL, NULL);
    TEST_ASSERT_EQUAL_STRING(before, after);
    free(before);
    free(after);

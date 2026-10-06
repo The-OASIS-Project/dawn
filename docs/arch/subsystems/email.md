@@ -65,8 +65,9 @@ Display names are quoted in the To and From headers (`email_format_mailbox`).
 Both backends end in one reader, `email_mime.c`, the only file that uses GMime.
 The backends hand over the message in different forms:
 
-- **IMAP** fetches the raw RFC 822 bytes, bounded: 512 KB for the LLM tool, 2 MB
-  for the WebUI mail panel. A larger message comes back cut and reads as
+- **IMAP** fetches the raw RFC 822 bytes, bounded: 512 KB for the LLM tool (a
+  2 MB cap, `EMAIL_READ_FETCH_PANEL`, is reserved for the planned email panel's
+  read path and not in use yet). A larger message comes back cut and reads as
   truncated; it is never refused. A read-specific curl sink stops the transfer at
   the cap.
   - **Pre-scan.** Before GMime sees the bytes, `email_mime_prescan` cuts the
@@ -81,9 +82,10 @@ The backends hand over the message in different forms:
   bytes inline and every attachment behind an `attachmentId`, so a read never
   downloads attachment bytes. `gmail_parts.c` (pure, no network) turns the tree
   into the same part list. `gmail_read.c` fetches, on its own, a body part that
-  Gmail moved behind an `attachmentId`, and only one the policy will read. A
-  later attachment download re-reads the tree and maps a part id back to its
-  `attachmentId` the same way; nothing is cached between reads.
+  Gmail moved behind an `attachmentId`, and only one the policy will read.
+  Nothing is cached between reads. (Attachment download, which would map a part
+  id back to its `attachmentId` the same way, is planned for the email panel and
+  not built.)
 
 The part list includes the multiparts as nodes, so the policy (`email_mime_apply`)
 sees the message's structure. It does the rest:
@@ -106,8 +108,11 @@ sees the message's structure. It does the rest:
   - Declared UTF-8 keeps its valid text; a bad byte becomes `?`.
   - Tag characters (U+E0000-E007F: invisible, but a model reads them) are
     removed. Line and paragraph separators become line breaks.
-- **Produces HTML only on request.** `body_html` (raw, for the panel, which
-  sanitizes it) exists only when `want_html` is set. The LLM tool never asks for it.
+- **Produces HTML only on request.** `body_html` (raw; whoever shows it must
+  sanitize it) exists only when `want_html` is set, capped by `max_html_bytes`.
+  The LLM tool never asks for it. These fields, `EMAIL_READ_HTML_PANEL`, the
+  read's `cancel` hook and `email_error_name()` are reserved for the planned email
+  panel's read path; nothing uses them yet.
 - **Lists every other leaf as an attachment**: part id, filename, type,
   Content-ID, size, and whether it's inline.
 - **Sets truncation flags**: `text_truncated`, `html_truncated` and

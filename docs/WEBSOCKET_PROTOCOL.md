@@ -701,9 +701,53 @@ Mark a conversation as private (hidden from admin view).
 ```
 Response: `set_private_response`
 
-With `conversation_id: 0` (no conversation yet), it sets the privacy of the next conversation
-this connection creates, typed or voice, and gets no reply. It lasts until a conversation is
-created or loaded or the session is cleared, and lives on the connection: send it again after a reconnect.
+With `conversation_id: 0`, it applies to the connection's active conversation when there is
+one (a voice turn may have created it meanwhile) and replies as above. With no conversation
+yet, it sets the privacy of the next conversation this connection creates, typed or voice, and
+gets no reply. That lasts until a conversation is created or loaded or the session is cleared,
+and lives on the connection: send it again after a reconnect.
+
+When marking private, the response also carries `also_private`: the ids of the conversation's
+continuations, which went private with it. Then, once any memory extraction in flight has
+finished, a `conversation_learned` frame reports what the conversation already taught, so the
+client can offer to forget it.
+
+#### `conversation_learned_request`
+Ask again what a private conversation taught (the same report `set_private` sends).
+```json
+{"type": "conversation_learned_request", "payload": {"conversation_id": 42}}
+```
+Response: `conversation_learned`
+```json
+{
+   "type": "conversation_learned",
+   "payload": {
+      "conversation_id": 42,
+      "success": true,
+      "memories": 5,
+      "facts": 3,
+      "outdated": 1,
+      "summaries": 1,
+      "preferences": 1,
+      "relations": 2
+   }
+}
+```
+- `memories` is what the Memory panel lists (facts, summaries and preferences); `outdated` are
+  superseded facts it doesn't show; `relations` are links in the entity graph.
+- A conversation that isn't the user's, or isn't private, gets `success: false` with `error`.
+  `success: false` with `busy: true` means another of the user's memory requests is still
+  running: ask again shortly. `success: false` can also come with neither (the count couldn't
+  be made or started).
+
+#### `forget_conversation_memories`
+Forget what a conversation taught (private or not; the user's own conversations only).
+```json
+{"type": "forget_conversation_memories", "payload": {"conversation_id": 42}}
+```
+Response: `forget_conversation_memories_response`, with `conversation_id`, `success`, and on
+success the counts removed (the same fields as `conversation_learned`); on failure `error`
+says why (memory still being saved from the conversation, too many continuations, busy).
 
 #### `reassign_conversation`
 Reassign a conversation to a different user. **Admin only.**
@@ -1739,10 +1783,14 @@ Notification after automatic context compaction.
       "tokens_before": 7500,
       "tokens_after": 2000,
       "messages_summarized": 12,
+      "level": 1,
+      "conversation_id": 1703,
       "summary": "Summary of compacted messages..."
    }
 }
 ```
+`conversation_id` (absent when the conversation isn't saved yet) names the conversation that
+was compacted; a client showing another conversation ignores the frame.
 
 #### `metrics_update`
 Real-time metrics for UI visualization (rings/gauges), and the turn's prompt-cache figures.
@@ -1763,8 +1811,11 @@ Real-time metrics for UI visualization (rings/gauges), and the turn's prompt-cac
    }
 }
 ```
-- The cache fields describe the turn's **last LLM call** and are meaningful on the final
-  `"idle"` frame only (mid-stream frames carry zeros and no `cache_state`).
+- The cache fields describe the session's **last completed LLM call**, and every frame carries
+  them: a `"thinking"` frame repeats the previous call's figures, and one call's figures can
+  arrive on several `"idle"` frames (each idle state change sends one). Read them from an
+  `"idle"` frame, and to total across turns count one per turn (the first `"idle"` after its
+  `stream_end`), never every frame.
 - `input_tokens` is the whole prompt (the hit-rate denominator), `cached_tokens` what was read
   from the provider's cache (0 = a miss), `cache_write_tokens` only when non-zero,
   `cache_saved_tokens` the input tokens' worth saved (list prices; negative on a write-heavy call).
@@ -1775,8 +1826,7 @@ Real-time metrics for UI visualization (rings/gauges), and the turn's prompt-cac
   (that part changed), `images` (the conversation's first image),
   `rewritten` (the history was compacted, a forgotten item withdrawn, or a turn taken back),
   `shared` (a local server another conversation used in between), or `untracked` (not judged:
-  Gemini, other OpenRouter vendors, a local server other than llama.cpp, and the local
-  microphone's turns).
+  Gemini, other OpenRouter vendors, a local server other than llama.cpp).
 
 #### `conversation_reset`
 Notification that conversation context was reset (via tool).
@@ -2200,6 +2250,8 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `delete_conversation` | `delete_conversation_response` |
 | `rename_conversation` | `rename_conversation_response` |
 | `set_private` | `set_private_response` |
+| `conversation_learned_request` | `conversation_learned` |
+| `forget_conversation_memories` | `forget_conversation_memories_response` |
 | `reassign_conversation` | `reassign_conversation_response` |
 | `search_conversations` | `search_conversations_response` |
 | `save_message` | `save_message_response` |
