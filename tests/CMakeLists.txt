@@ -84,6 +84,12 @@ function(dawn_add_unit_test NAME)
    if(NOT T_NO_TEST)
       add_test(NAME ${NAME} COMMAND ${NAME})
       if(T_LABEL STREQUAL "ci")
+         # CI runners have no onnxruntime: a ci test that links it builds on a
+         # dev box with the headers installed and fails only on GitHub.
+         if("onnxruntime" IN_LIST T_LIBS OR "${SRC_ROOT}/src/memory/memory_embed_onnx.c" IN_LIST
+                                            T_SOURCES)
+            message(FATAL_ERROR "${NAME}: a ci test can't use onnxruntime (stub the provider)")
+         endif()
          set_tests_properties(${NAME} PROPERTIES LABELS "ci")
          add_dependencies(tests-ci ${NAME})
       elseif(T_LABEL STREQUAL "hardware")
@@ -2164,9 +2170,10 @@ dawn_add_unit_test(bench_retrieval
 
 # The remember tool end to end (memory_callback.c on a real schema), linked like
 # the retrieval bench: where a remembered fact's source comes from, and the
-# refusal when a turn has more facts waiting than it can track.
+# refusal when a turn has more facts waiting than it can track.  It never
+# embeds, so the ONNX provider is a stub: CI runners have no onnxruntime.
 dawn_add_unit_test(test_memory_remember
-   SOURCES test_memory_remember.c
+   SOURCES test_memory_remember.c test_memory_remember_stub.c
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
            ${SRC_ROOT}/src/tools/document_db.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
@@ -2174,9 +2181,6 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/core/embedding_engine.c
-           ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
-           ${SRC_ROOT}/src/memory/memory_embed_unicode.c
-           ${SRC_ROOT}/src/memory/memory_embed_onnx.c
            ${SRC_ROOT}/src/memory/memory_embed_ollama.c
            ${SRC_ROOT}/src/memory/memory_embed_openai.c
            # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
@@ -2272,8 +2276,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/config/config_validate.c
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
-   INCLUDES /usr/local/include/onnxruntime
-   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
