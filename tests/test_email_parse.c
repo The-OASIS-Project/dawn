@@ -723,6 +723,58 @@ static void test_exists_line(void) {
    TEST_ASSERT_FALSE(email_imap_parse_exists(ok, 10, &v));
 }
 
+/* A sender as shown: a quoted name can't pass for an address. */
+static void test_format_mailbox(void) {
+   char out[128];
+   email_format_mailbox("Bob Smith", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Bob Smith\" <bob@example.com>", out);
+   email_format_mailbox("", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("bob@example.com", out);
+   email_format_mailbox("Some Name", "", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Some Name\"", out);
+   email_format_mailbox("boss@bank.com", "evil@x.io", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"boss@bank.com\" <evil@x.io>", out);
+   email_format_mailbox("a\"b", "c@d", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"a\\\"b\" <c@d>", out);
+   /* As shown: a name that is an address never stands for the sender's. */
+   email_display_mailbox("boss@bank.com", "evil@x.io", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("evil@x.io", out);
+   email_display_mailbox("Bob@Example.com", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Bob@Example.com\" <bob@example.com>", out);
+   email_display_mailbox("Some Name", "", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Some Name\" (no address)", out);
+   email_display_mailbox("boss@bank.com", "", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("(no address)", out);
+   email_display_mailbox("Bob Smith", "bob@example.com", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("\"Bob Smith\" <bob@example.com>", out);
+   /* A lookalike at sign (fullwidth U+FF20) counts as one. */
+   email_display_mailbox("billing\xEF\xBC\xA0paypal.com", "x@evil.tld", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("x@evil.tld", out);
+}
+
+/* "folder:uid" ids: a folder that doesn't fit is refused, never read as INBOX
+ * or cut to another mailbox's name. */
+static void test_imap_id_parse(void) {
+   char folder[16];
+   uint32_t uid = 0;
+   TEST_ASSERT_TRUE(email_imap_id_parse("Archive:42", folder, sizeof(folder), &uid));
+   TEST_ASSERT_EQUAL_STRING("Archive", folder);
+   TEST_ASSERT_EQUAL_UINT32(42, uid);
+   TEST_ASSERT_TRUE(email_imap_id_parse("7", folder, sizeof(folder), &uid));
+   TEST_ASSERT_EQUAL_STRING("INBOX", folder);
+   TEST_ASSERT_EQUAL_UINT32(7, uid);
+   TEST_ASSERT_TRUE(email_imap_id_parse("a:b:9", folder, sizeof(folder), &uid));
+   TEST_ASSERT_EQUAL_STRING("a:b", folder);
+
+   TEST_ASSERT_FALSE(email_imap_id_parse("AVeryLongFolderName:5", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:0", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:-3", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:4294967296", folder, sizeof(folder), &uid));
+   TEST_ASSERT_FALSE(
+       email_imap_id_parse("18c2f0a9b1", folder, sizeof(folder), &uid)); /* Gmail id */
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_rfc822_utc);
@@ -788,5 +840,7 @@ int main(void) {
    RUN_TEST(test_uidvalidity_line);
    RUN_TEST(test_select_uids_collapses_duplicates);
    RUN_TEST(test_exists_line);
+   RUN_TEST(test_imap_id_parse);
+   RUN_TEST(test_format_mailbox);
    return UNITY_END();
 }

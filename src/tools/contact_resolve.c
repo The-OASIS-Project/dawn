@@ -743,22 +743,29 @@ void contact_resolve(int user_id,
    }
 }
 
+/* Room kept after the list for the instruction that follows it ("Ask the user
+ * which one..."): the longest, with a contact's name in it, fits. */
+#define CANDIDATES_TAIL_ROOM 256
+
 static void append_candidates(const contact_resolve_t *r,
                               bool labels_only,
                               char *buf,
                               size_t buf_size) {
+   const size_t limit = buf_size > 2 * CANDIDATES_TAIL_ROOM ? buf_size - CANDIDATES_TAIL_ROOM
+                                                            : buf_size;
    size_t len = strnlen(buf, buf_size);
-   for (int i = 0; i < r->candidate_count && len < buf_size; i++) {
+   for (int i = 0; i < r->candidate_count && len < limit; i++) {
       const contact_candidate_t *c = &r->candidates[i];
       int n;
       if (labels_only) {
-         n = snprintf(buf + len, buf_size - len, "%s%s (%s)", i == 0 ? "" : "; ",
+         n = snprintf(buf + len, limit - len, "%s%s (%s)", i == 0 ? "" : "; ",
                       c->label[0] ? c->label : "no label", c->value);
       } else {
-         n = snprintf(buf + len, buf_size - len, "%s%s (%s%s%s)", i == 0 ? "" : "; ", c->name,
+         n = snprintf(buf + len, limit - len, "%s%s (%s%s%s)", i == 0 ? "" : "; ", c->name,
                       c->value, c->label[0] ? ", " : "", c->label);
       }
-      if (n < 0 || (size_t)n >= buf_size - len) {
+      if (n < 0 || (size_t)n >= limit - len) {
+         buf[len] = '\0'; /* no half an entry */
          break;
       }
       len += (size_t)n;

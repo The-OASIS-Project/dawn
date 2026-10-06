@@ -254,14 +254,6 @@ static const char *cancelResponses[] = { "Stopped, Sir.", "Standing by, Sir.", "
 // This includes common filler words or phrases signaling to disregard the prior input.
 static char *ignoreWords[] = { "", "the", "cancel", "never mind", "nevermind", "ignore" };
 
-// Array of words/phrases that we accept as a way to tell the AI to cancel its current
-// text to speech instead of requiring another command.
-static char *cancelWords[] = { "stop",      "stop it",        "cancel",        "hold on",
-                               "wait",      "never mind",     "abort",         "pause",
-                               "enough",    "disregard",      "no thanks",     "forget it",
-                               "leave it",  "drop it",        "stand by",      "cease",
-                               "interrupt", "say no more",    "shut up",       "silence",
-                               "zip it",    "enough already", "that's enough", "stop right there" };
 
 // Standard greeting messages based on the time of day.
 const char *morning_greeting = "Good morning.";
@@ -427,17 +419,6 @@ static bool s_reply_stopped_by_user = false;
 /* Recorded in place of the reply a cancel phrase stopped. */
 #define STOPPED_REPLY_NOTE "(Stopped at the user's request before finishing.)"
 
-/* Whether @p command is only a cancel phrase ("stop", "never mind"). */
-static bool is_cancel_command(const char *command) {
-   char normalized[MAX_COMMAND_LENGTH];
-   normalize_for_matching(command, normalized, sizeof(normalized));
-   for (size_t i = 0; i < sizeof(cancelWords) / sizeof(cancelWords[0]); i++) {
-      if (strcmp(normalized, cancelWords[i]) == 0) {
-         return true;
-      }
-   }
-   return false;
-}
 
 /* A cancel phrase: stop the reply (its speech, and its generation if still
  * running) and confirm out loud, since silence can't be told apart from not
@@ -1466,7 +1447,6 @@ int main(int argc, char *argv[]) {
    int numGoodbyeWords = sizeof(goodbyeWords) / sizeof(goodbyeWords[0]);
    int numWakeWords = NUM_WAKE_WORDS;
    int numIgnoreWords = sizeof(ignoreWords) / sizeof(ignoreWords[0]);
-   int numCancelWords = sizeof(cancelWords) / sizeof(cancelWords[0]);
 
    int i = 0;
 
@@ -3463,11 +3443,7 @@ mqtt_disabled:
                   pthread_mutex_lock(&tts_mutex);
                   const bool speaking = tts_playback_state == TTS_PLAYBACK_PAUSE;
                   pthread_mutex_unlock(&tts_mutex);
-                  bool cancelled = false;
-                  for (i = 0; speaking && !cancelled && i < numCancelWords; i++) {
-                     cancelled = normalized_text && strcmp(normalized_text, cancelWords[i]) == 0;
-                  }
-                  if (cancelled) {
+                  if (speaking && wake_word_is_cancel(input_text)) {
                      OLOG_WARNING("Cancel word detected.\n");
                      acknowledge_cancel();
                      silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
@@ -3845,7 +3821,7 @@ mqtt_disabled:
 
             /* "Okay Friday, stop": the wake word already interrupted the reply;
              * confirm instead of sending the phrase to the model. */
-            if (is_cancel_command(command_text)) {
+            if (wake_word_is_cancel(command_text)) {
                s_voice_command_from_hold = false;
                acknowledge_cancel();
                free(command_text);

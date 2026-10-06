@@ -616,31 +616,22 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   // complete JSON objects on each chunk.
                   if (json_object_object_get_ex(function_obj, "arguments", &args_obj)) {
                      const char *args_chunk = json_object_get_string(args_obj);
-                     if (args_chunk) {
-                        size_t cur_len = strlen(ctx->provider.openai.tool_args_buffer[tc_index]);
-                        size_t add_len = strlen(args_chunk);
-
-                        // Gemini sends complete JSON on each chunk - replace instead of append
-                        // Use explicit provider check rather than heuristic
-                        if (ctx->cloud_provider == CLOUD_PROVIDER_GEMINI && cur_len > 0) {
-                           // Replace with latest complete JSON
-                           if (add_len < LLM_TOOLS_ARGS_LEN - 1) {
-                              memcpy(ctx->provider.openai.tool_args_buffer[tc_index], args_chunk,
-                                     add_len);
-                              ctx->provider.openai.tool_args_buffer[tc_index][add_len] = '\0';
-                           } else {
-                              ctx->provider.openai.tool_args_overflow[tc_index] = true;
-                           }
-                        } else if (cur_len + add_len < LLM_TOOLS_ARGS_LEN - 1) {
-                           // OpenAI-style: append incremental delta
-                           memcpy(ctx->provider.openai.tool_args_buffer[tc_index] + cur_len,
-                                  args_chunk, add_len);
-                           ctx->provider.openai.tool_args_buffer[tc_index][cur_len + add_len] =
-                               '\0';
-                        } else {
-                           // Buffer full — the rest of this (and later) deltas are dropped.
-                           ctx->provider.openai.tool_args_overflow[tc_index] = true;
-                        }
+                     /* Some OpenAI-compatible servers stream the arguments as a JSON
+                      * object, which get_string serializes but get_string_len counts as 0. */
+                     const size_t chunk_len = json_object_is_type(args_obj, json_type_string)
+                                                  ? (size_t)json_object_get_string_len(args_obj)
+                                                  : (args_chunk ? strlen(args_chunk) : 0);
+                     size_t *cur_len = &ctx->provider.openai.tool_args_len[tc_index];
+                     /* Gemini sends the complete JSON on each chunk (an explicit
+                      * provider check, not a heuristic): replace instead of append.
+                      * An empty chunk after content replaces nothing, so a cut
+                      * stays flagged. */
+                     const bool gemini = ctx->cloud_provider == CLOUD_PROVIDER_GEMINI;
+                     if (args_chunk && !(gemini && chunk_len == 0 && *cur_len > 0)) {
+                        llm_tools_args_append(ctx->provider.openai.tool_args_buffer[tc_index],
+                                              cur_len,
+                                              &ctx->provider.openai.tool_args_overflow[tc_index],
+                                              args_chunk, chunk_len, gemini && *cur_len > 0);
                      }
                   }
                }
@@ -1055,17 +1046,10 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                if (json_object_object_get_ex(delta, "partial_json", &partial_json_obj)) {
                   const char *partial = json_object_get_string(partial_json_obj);
                   if (partial) {
-                     size_t partial_len = strlen(partial);
-                     if (ctx->provider.claude.tool_args_len + partial_len <
-                         LLM_TOOLS_ARGS_LEN - 1) {
-                        memcpy(ctx->provider.claude.tool_args + ctx->provider.claude.tool_args_len,
-                               partial, partial_len);
-                        ctx->provider.claude.tool_args_len += partial_len;
-                        ctx->provider.claude.tool_args[ctx->provider.claude.tool_args_len] = '\0';
-                     } else {
-                        /* Buffer full — this and later deltas are dropped. */
-                        ctx->provider.claude.tool_args_overflow = true;
-                     }
+                     llm_tools_args_append(ctx->provider.claude.tool_args,
+                                           &ctx->provider.claude.tool_args_len,
+                                           &ctx->provider.claude.tool_args_overflow, partial,
+                                           strlen(partial), false);
                   }
                }
 

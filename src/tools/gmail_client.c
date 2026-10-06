@@ -423,21 +423,9 @@ static int parse_message_json(struct json_object *root, email_summary_t *out) {
    /* Gmail's API does NOT MIME-decode header values (only the snippet).  The
     * same decoding and display rules as reading a message: the sender's words
     * decoded, invisible and direction-changing characters dropped. */
-   email_addr_t from;
-   const char *from_raw = gmail_find_header(headers, "From");
-   if (email_mime_addr_first(from_raw, &from)) {
-      snprintf(out->from_name, sizeof(out->from_name), "%s", from.name);
-      snprintf(out->from_addr, sizeof(out->from_addr), "%s", from.addr);
-   } else {
-      /* No address in it ("From: Some Name"): show what it says. */
-      email_mime_header_text(from_raw, out->from_name, sizeof(out->from_name));
-   }
-   email_mime_header_text(gmail_find_header(headers, "Subject"), out->subject,
-                          sizeof(out->subject));
-
-   const char *date = gmail_find_header(headers, "Date");
-   if (date)
-      snprintf(out->date_str, sizeof(out->date_str), "%s", date);
+   gmail_header_fields(headers, out->from_name, sizeof(out->from_name), out->from_addr,
+                       sizeof(out->from_addr), out->subject, sizeof(out->subject), out->date_str,
+                       sizeof(out->date_str));
 
    /* Parse snippet as preview */
    struct json_object *snippet_obj = NULL;

@@ -658,6 +658,28 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
  */
 int llm_tools_parse_claude_response(struct json_object *response, tool_call_list_t *out);
 
+/**
+ * @brief Add a piece of a tool call's arguments to its buffer
+ *
+ * Every provider path fills arguments through this, so a cut is always
+ * flagged: a call whose arguments don't fit is refused, never run.
+ * A cut lands on a whole UTF-8 character; a length already at the buffer's
+ * size only sets the flag.
+ *
+ * @param buf      Arguments buffer, LLM_TOOLS_ARGS_LEN bytes
+ * @param len      In/out: the buffer's current length
+ * @param overflow Out: set when the text didn't fit (cleared by a replace that fits)
+ * @param text     The piece (a delta, or the whole arguments when replace)
+ * @param n        Its length in bytes
+ * @param replace  true: the piece is the complete arguments, replacing the buffer
+ */
+void llm_tools_args_append(char *buf,
+                           size_t *len,
+                           bool *overflow,
+                           const char *text,
+                           size_t n,
+                           bool replace);
+
 /* =============================================================================
  * Capability Checking
  * ============================================================================= */

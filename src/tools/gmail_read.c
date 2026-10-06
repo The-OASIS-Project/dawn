@@ -159,15 +159,9 @@ static int take_attachment_ids(gmail_parts_t *w) {
 }
 
 static void gmail_message_headers(struct json_object *headers, email_message_t *out) {
-   email_addr_t from;
-   if (email_mime_addr_first(gmail_find_header(headers, "From"), &from)) {
-      snprintf(out->from_name, sizeof(out->from_name), "%s", from.name);
-      snprintf(out->from_addr, sizeof(out->from_addr), "%s", from.addr);
-   }
-   email_mime_header_text(gmail_find_header(headers, "Subject"), out->subject,
-                          sizeof(out->subject));
-   const char *date = gmail_find_header(headers, "Date");
-   email_display_sanitize(date, date ? strlen(date) : 0, out->date_str, sizeof(out->date_str), 0);
+   gmail_header_fields(headers, out->from_name, sizeof(out->from_name), out->from_addr,
+                       sizeof(out->from_addr), out->subject, sizeof(out->subject), out->date_str,
+                       sizeof(out->date_str));
    email_mime_addr_first(gmail_find_header(headers, "Reply-To"), &out->reply_to);
 }
 

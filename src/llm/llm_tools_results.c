@@ -185,15 +185,47 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
       safe_strncpy(call->name, json_object_get_string(name_obj), LLM_TOOLS_NAME_LEN);
 
       const char *args_str = json_object_get_string(args_obj);
-      call->args_truncated = (args_str && strlen(args_str) >= LLM_TOOLS_ARGS_LEN);
+      size_t args_len = 0;
+      llm_tools_args_append(call->arguments, &args_len, &call->args_truncated,
+                            args_str ? args_str : "", args_str ? strlen(args_str) : 0, true);
       if (call->args_truncated) {
          OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
                       strlen(args_str), LLM_TOOLS_ARGS_LEN - 1);
       }
-      safe_strncpy(call->arguments, args_str ? args_str : "", LLM_TOOLS_ARGS_LEN);
    }
 
    return out->count > 0 ? 0 : 1;
+}
+
+void llm_tools_args_append(char *buf,
+                           size_t *len,
+                           bool *overflow,
+                           const char *text,
+                           size_t n,
+                           bool replace) {
+   if (!buf || !len || !overflow || !text) {
+      return;
+   }
+   if (replace) {
+      *len = 0;
+      *overflow = false;
+   }
+   if (*len >= LLM_TOOLS_ARGS_LEN) {
+      *overflow = true;
+      return;
+   }
+   size_t room = LLM_TOOLS_ARGS_LEN - 1 - *len;
+   if (n > room) {
+      *overflow = true;
+      n = room;
+      /* Never end inside a UTF-8 character: a refused call is still replayed in
+       * history, and a strict provider rejects invalid UTF-8. */
+      while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80)
+         n--;
+   }
+   memcpy(buf + *len, text, n);
+   *len += n;
+   buf[*len] = '\0';
 }
 
 int llm_tools_parse_claude_response(struct json_object *response, tool_call_list_t *out) {
@@ -248,12 +280,13 @@ int llm_tools_parse_claude_response(struct json_object *response, tool_call_list
 
       /* Claude sends input as object, we need it as string */
       const char *input_str = json_object_to_json_string(input_obj);
-      call->args_truncated = (input_str && strlen(input_str) >= LLM_TOOLS_ARGS_LEN);
+      size_t input_len = 0;
+      llm_tools_args_append(call->arguments, &input_len, &call->args_truncated,
+                            input_str ? input_str : "", input_str ? strlen(input_str) : 0, true);
       if (call->args_truncated) {
          OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
                       strlen(input_str), LLM_TOOLS_ARGS_LEN - 1);
       }
-      safe_strncpy(call->arguments, input_str, LLM_TOOLS_ARGS_LEN);
    }
 
    return out->count > 0 ? 0 : 1;

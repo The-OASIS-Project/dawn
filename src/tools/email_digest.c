@@ -42,6 +42,7 @@
 #include "logging.h"
 #include "tools/email_db.h"
 #include "tools/email_digest_internal.h"
+#include "tools/email_parse.h"
 #include "tools/email_service.h"
 #include "tools/email_types.h"
 #include "tools/tool_registry.h"
@@ -118,8 +119,9 @@ static void emit_row(strbuf_t *sb, const email_summary_t *m, int *enn, bool show
    if (!(d > 0 && localtime_r(&d, &tmv) && strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tmv)))
       snprintf(ts, sizeof(ts), "(no date)");
 
-   strbuf_appendf(sb, "[E-%02d] From: %s%s%s | Subject: %s%s%s", *enn, m->from_name,
-                  m->from_name[0] ? " " : "", m->from_addr, m->subject,
+   char from[2 * sizeof(m->from_name) + sizeof(m->from_addr) + 8];
+   email_display_mailbox(m->from_name, m->from_addr, from, sizeof(from));
+   strbuf_appendf(sb, "[E-%02d] From: %s | Subject: %s%s%s", *enn, from, m->subject,
                   m->unread ? " [UNREAD]" : "",
                   (m->replied == EMAIL_REPLIED_YES) ? " [replied]" : "");
    if (show_category)

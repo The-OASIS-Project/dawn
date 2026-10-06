@@ -124,6 +124,8 @@ typedef struct {
 typedef struct {
    char tool_args_buffer[LLM_TOOLS_MAX_PARALLEL_CALLS][LLM_TOOLS_ARGS_LEN];
    bool tool_args_overflow[LLM_TOOLS_MAX_PARALLEL_CALLS]; /**< per-call: args clipped at the cap */
+   size_t tool_args_len[LLM_TOOLS_MAX_PARALLEL_CALLS];    /**< per-call length, so a delta doesn't
+                                                             re-measure the buffer */
 } openai_stream_state_t;
 
 /**

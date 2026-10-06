@@ -1064,6 +1064,22 @@ dawn_add_unit_test(test_llm_tools_finish
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
+# Tool-call arguments that don't fit are flagged on every path (and refused).
+dawn_add_unit_test(test_llm_tools_args
+   SOURCES test_llm_tools_args.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/hash_util.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 # A conversation's tools are decided by registration, not enable flags; a
 # tool a session may not use is never offered to it, frozen or added later.
 dawn_add_unit_test(test_llm_tools_frozen

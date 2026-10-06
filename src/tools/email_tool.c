@@ -41,6 +41,7 @@
 #include "tools/contact_resolve.h"
 #include "tools/email_digest.h"
 #include "tools/email_display.h"
+#include "tools/email_parse.h"
 #include "tools/email_service.h"
 #include "tools/oauth_client.h"
 #include "tools/toml.h"
@@ -161,6 +162,77 @@ static char *handle_accounts(int user_id) {
  * is stripped before the LLM reads the text (see TOOL_DEVELOPMENT_GUIDE.md
  * § Signaling a Failure).
  */
+/* Room a row may need: the quoted sender, the fields as stored, and the fixed text. */
+#define EMAIL_FROM_MAX \
+   (2 * sizeof(((email_summary_t *)0)->from_name) + sizeof(((email_summary_t *)0)->from_addr) + 8)
+#define EMAIL_ACCT_LABEL_MAX 300
+#define EMAIL_LISTING_TAIL_ROOM 1024
+#define EMAIL_ROW_MAX                                                                 \
+   (EMAIL_FROM_MAX + sizeof(((email_summary_t *)0)->subject) + EMAIL_ACCT_LABEL_MAX + \
+    sizeof(((email_summary_t *)0)->date_str) + sizeof(((email_summary_t *)0)->message_id) + 128)
+
+/* Appends to @p buf (RESULT_BUF_SIZE) at @p pos; never moves pos past the buffer.
+ * A text that doesn't fit whole is left out, so the result has no partial line. */
+static int append_bounded(char *buf, int pos, const char *text) {
+   size_t n = strlen(text);
+   if (pos < 0 || (size_t)pos + n >= RESULT_BUF_SIZE)
+      return pos;
+   memcpy(buf + pos, text, n + 1);
+   return pos + (int)n;
+}
+
+/* A listing's rows (recent and search), from @p pos in a RESULT_BUF_SIZE
+ * buffer.  The sender's name is quoted, so it can't pass for an address.  A row
+ * that doesn't fit whole ends the listing (senders control most of a row) and
+ * sets @p cut: the page token would skip the rows left out, so the caller drops it. */
+static int append_summary_rows(char *buf,
+                               int pos,
+                               const email_summary_t *emails,
+                               int count,
+                               bool *cut) {
+   *cut = false;
+   for (int i = 0; i < count; i++) {
+      /* Prefer "name (address)" so a generic display name like "Gmail" still
+       * identifies which inbox; collapse to one when name == address. */
+      char acctlabel[EMAIL_ACCT_LABEL_MAX];
+      const char *an = emails[i].account_name;
+      const char *aa = emails[i].account_addr;
+      if (aa[0] && an[0] && strcmp(an, aa) != 0)
+         snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
+      else
+         snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
+      char from[EMAIL_FROM_MAX];
+      email_display_mailbox(emails[i].from_name, emails[i].from_addr, from, sizeof(from));
+      char row[EMAIL_ROW_MAX];
+      snprintf(row, sizeof(row),
+               "\n%d. From: %s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
+               "%s]\n",
+               i + 1, from, emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
+               emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
+               emails[i].date_str, emails[i].message_id);
+      /* Keep room for the page token and the note on unreachable accounts. */
+      if ((size_t)pos + strlen(row) + EMAIL_LISTING_TAIL_ROOM >= RESULT_BUF_SIZE) {
+         char note[160];
+         snprintf(note, sizeof(note),
+                  "\n[%d more not shown: the listing is full. Ask again with a smaller "
+                  "count to see them.]\n",
+                  count - i);
+         *cut = true;
+         return append_bounded(buf, pos, note);
+      }
+      pos = append_bounded(buf, pos, row);
+   }
+   return pos;
+}
+
+/* The page-token line after a listing, appended only whole. */
+static int append_page_token(char *buf, int pos, const char *token) {
+   char line[384];
+   snprintf(line, sizeof(line),
+            "\n[More results available. Use page_token: \"%s\" to fetch next page]", token);
+   return append_bounded(buf, pos, line);
+}
+
 static char *email_rc_to_error(int rc, const char *op, const char *account, const char *folder) {
    char *msg = malloc(384);
    if (!msg)
@@ -309,37 +381,18 @@ static char *handle_recent(struct json_object *details, int user_id) {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    int pos = 0;
+   bool cut = false;
    if (out_count == 0 && next_page_token[0]) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
    } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No recent emails found.");
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Recent emails (%d):\n", out_count);
-      for (int i = 0; i < out_count && pos < RESULT_BUF_SIZE - 512; i++) {
-         /* Prefer "name (address)" so a generic display name like "Gmail" still
-          * identifies which inbox; collapse to one when name == address. */
-         char acctlabel[300];
-         const char *an = emails[i].account_name;
-         const char *aa = emails[i].account_addr;
-         if (aa[0] && an[0] && strcmp(an, aa) != 0)
-            snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
-         else
-            snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
-         pos += snprintf(
-             buf + pos, RESULT_BUF_SIZE - pos,
-             "\n%d. From: %s%s%s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
-             "%s]\n",
-             i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "", emails[i].from_addr,
-             emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
-             emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
-             emails[i].date_str, emails[i].message_id);
-      }
+      pos = append_summary_rows(buf, pos, emails, out_count, &cut);
    }
 
-   if (next_page_token[0])
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                      "\n[More results available. Use page_token: \"%s\" to fetch next page]",
-                      next_page_token);
+   if (next_page_token[0] && !cut)
+      pos = append_page_token(buf, pos, next_page_token);
 
    return buf;
 }
@@ -434,8 +487,9 @@ static char *handle_read(struct json_object *details, int user_id) {
    strbuf_t sb;
    const size_t body = msg.body_len > 0 ? (size_t)msg.body_len : 0;
    strbuf_init_with_max(&sb, body + 2048, body + 65536);
-   strbuf_appendf(&sb, "From: %s%s%s%s\n", msg.from_name, msg.from_name[0] ? " <" : "",
-                  msg.from_addr, msg.from_name[0] ? ">" : "");
+   char from[2 * sizeof(msg.from_name) + sizeof(msg.from_addr) + 8];
+   email_display_mailbox(msg.from_name, msg.from_addr, from, sizeof(from));
+   strbuf_appendf(&sb, "From: %s\n", from);
    append_addrs(&sb, "To", msg.to_list, msg.to_count, msg.to_total);
    append_addrs(&sb, "Cc", msg.cc_list, msg.cc_count, msg.cc_total);
    if (msg.reply_to.addr[0] && strcasecmp(msg.reply_to.addr, msg.from_addr) != 0)
@@ -567,37 +621,18 @@ static char *handle_search(struct json_object *details, int user_id) {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    int pos = 0;
+   bool cut = false;
    if (out_count == 0 && next_page_token[0]) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
    } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No emails matching your search criteria.");
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Search results (%d):\n", out_count);
-      for (int i = 0; i < out_count && pos < RESULT_BUF_SIZE - 512; i++) {
-         /* Prefer "name (address)" so a generic display name like "Gmail" still
-          * identifies which inbox; collapse to one when name == address. */
-         char acctlabel[300];
-         const char *an = emails[i].account_name;
-         const char *aa = emails[i].account_addr;
-         if (aa[0] && an[0] && strcmp(an, aa) != 0)
-            snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
-         else
-            snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
-         pos += snprintf(
-             buf + pos, RESULT_BUF_SIZE - pos,
-             "\n%d. From: %s%s%s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
-             "%s]\n",
-             i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "", emails[i].from_addr,
-             emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
-             emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
-             emails[i].date_str, emails[i].message_id);
-      }
+      pos = append_summary_rows(buf, pos, emails, out_count, &cut);
    }
 
-   if (next_page_token[0])
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                      "\n[More results available. Use page_token: \"%s\" to fetch next page]",
-                      next_page_token);
+   if (next_page_token[0] && !cut)
+      pos = append_page_token(buf, pos, next_page_token);
 
    /* Partial result: some accounts succeeded, others couldn't be reached.  Surface
     * it so the LLM tells the user rather than silently presenting incomplete results

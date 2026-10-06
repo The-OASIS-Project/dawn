@@ -103,12 +103,21 @@ bool email_imap_flags_contains(const char *flags_group, const char *flag);
 void email_sanitize_header_value(const char *src, char *dst, size_t dst_len);
 
 /**
- * "Name" <addr> (RFC 5322 quoted display name; " and \ escaped), or just the
- * address with no name: a name with a comma ("Smith, Bob") can't split the
- * header into two recipients.  Both are already free of CR/LF
+ * "Name" <addr> (RFC 5322 quoted display name; " and \ escaped), just the
+ * address with no name, or just "Name" with no address: a name with a comma
+ * ("Smith, Bob") can't split the header into two recipients, and a shown
+ * sender's name can't pass for an address.  Both are already free of CR/LF
  * (email_sanitize_header_value).  Cut to fit on a whole character.
  */
 void email_format_mailbox(const char *name, const char *addr, char *dst, size_t dst_len);
+
+/**
+ * A sender as shown to the user or the model (never a header): as
+ * email_format_mailbox, except a name containing '@' that isn't the address
+ * itself is dropped (it would pass for the sender's address), and a sender
+ * with no address says "(no address)".
+ */
+void email_display_mailbox(const char *name, const char *addr, char *dst, size_t dst_len);
 
 /**
  * Find the ')' matching the '(' at @p open, honoring IMAP quoted strings (so a
@@ -244,6 +253,18 @@ bool email_imap_parse_uidvalidity(const char *line, size_t len, uint32_t *out);
  * @return true and sets @p out when the line is a valid EXISTS response.
  */
 bool email_imap_parse_exists(const char *line, size_t len, uint32_t *out);
+
+/**
+ * @brief Split an IMAP message id, "folder:uid" (a bare uid means INBOX).
+ *
+ * Splits at the last colon.  Refuses a folder too long for @p folder rather
+ * than cutting it or falling back to INBOX: either would act on a message in
+ * another mailbox.  The folder name itself is the caller's to validate.
+ *
+ * @return true and fills @p folder and @p uid when the id is one; false when
+ *         the folder doesn't fit or the uid isn't a decimal 1..UINT32_MAX.
+ */
+bool email_imap_id_parse(const char *message_id, char *folder, size_t folder_size, uint32_t *uid);
 
 #ifdef __cplusplus
 }

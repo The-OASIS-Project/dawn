@@ -73,6 +73,22 @@ unsigned char *gmail_base64url_decode(const char *input, size_t max_out, size_t 
 /** The value of header @p name in a Gmail payload headers array, or NULL. */
 const char *gmail_find_header(struct json_object *headers_arr, const char *name);
 
+/**
+ * From, Subject and Date out of a Gmail payload headers array, for a listing
+ * and for a read alike.  Gmail doesn't MIME-decode header values, so each is
+ * decoded and stripped of invisible and direction-changing characters.  A From
+ * with no address shows what it says, as the name.
+ */
+void gmail_header_fields(struct json_object *headers,
+                         char *from_name,
+                         size_t from_name_size,
+                         char *from_addr,
+                         size_t from_addr_size,
+                         char *subject,
+                         size_t subject_size,
+                         char *date,
+                         size_t date_size);
+
 /** The string member @p key of @p obj, or NULL. */
 const char *gmail_json_str(struct json_object *obj, const char *key);
 

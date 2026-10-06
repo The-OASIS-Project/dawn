@@ -28,6 +28,7 @@
 
 #include "logging.h"
 #include "tools/email_client.h"
+#include "tools/email_parse.h"
 #include "tools/email_service.h"
 #include "tools/email_service_internal.h"
 #include "tools/gmail_client.h"
@@ -63,41 +64,24 @@ static int read_gmail(const email_account_t *acct,
    return *err == EMAIL_ERR_NOT_FOUND ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;
 }
 
-/* An IMAP message id is "folder:uid" (the last colon: folder names may hold
- * colons, UIDs are decimal).  False when @p message_id isn't one. */
-static bool parse_imap_id(const char *message_id,
-                          char *folder,
-                          size_t folder_size,
-                          uint32_t *uid,
-                          bool fanout) {
-   snprintf(folder, folder_size, "INBOX");
-   const char *uid_str = message_id;
-   const char *last_colon = strrchr(message_id, ':');
-   if (last_colon) {
-      const size_t len = (size_t)(last_colon - message_id);
-      if (len > 0 && len < folder_size) {
-         memcpy(folder, message_id, len);
-         folder[len] = '\0';
-      }
-      uid_str = last_colon + 1;
+bool email_svc_parse_imap_id(const char *message_id,
+                             char *folder,
+                             size_t folder_size,
+                             uint32_t *uid,
+                             bool fanout) {
+   if (!email_imap_id_parse(message_id, folder, folder_size, uid)) {
+      /* During a no-account fan-out this is a Gmail id landing on an IMAP
+       * account (backend mismatch): expected.  Otherwise a real error. */
+      if (fanout)
+         OLOG_DEBUG("email: message id '%s' is not an IMAP id (skipping IMAP account)", message_id);
+      else
+         OLOG_ERROR("email: invalid IMAP message id '%s'", message_id);
+      return false;
    }
    if (!email_service_validate_folder_name(folder)) {
       OLOG_ERROR("email: invalid folder name in message_id '%s'", message_id);
       return false;
    }
-   char *end = NULL;
-   const unsigned long v = strtoul(uid_str, &end, 10);
-   if (!end || *end != '\0' || v == 0 || v > UINT32_MAX) {
-      /* During a no-account fan-out this is a Gmail id landing on an IMAP
-       * account (backend mismatch): expected.  A named IMAP account with a bad
-       * UID is a real error. */
-      if (fanout)
-         OLOG_DEBUG("email: message id '%s' is not an IMAP UID (skipping IMAP account)", uid_str);
-      else
-         OLOG_ERROR("email: invalid IMAP UID '%s'", uid_str);
-      return false;
-   }
-   *uid = (uint32_t)v;
    return true;
 }
 
@@ -125,7 +109,7 @@ int email_svc_read_single(const email_account_t *acct,
 
    char folder[128];
    uint32_t uid = 0;
-   if (!parse_imap_id(message_id, folder, sizeof(folder), &uid, fanout)) {
+   if (!email_svc_parse_imap_id(message_id, folder, sizeof(folder), &uid, fanout)) {
       /* Not this backend's id shape: the message isn't in this account. */
       *err = fanout ? EMAIL_ERR_NOT_FOUND : EMAIL_ERR_FAILED;
       return fanout ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;

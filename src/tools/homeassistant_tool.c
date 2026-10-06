@@ -620,6 +620,21 @@ PENDING_ARRAY_CHECK(s_pending);
 static const pending_slots_t s_pending_slots = PENDING_SLOTS_TABLE(s_pending,
                                                                    HA_PENDING_EXPIRY_SEC);
 
+/* What each staged verb does once confirmed.  A verb not here is refused at
+ * confirm, never run as something else (a toggle on a door). */
+static const struct {
+   const char *verb;
+   ha_error_t (*apply)(const char *entity_id);
+} k_door_ops[] = {
+   { "unlock", homeassistant_unlock },
+   { "open", homeassistant_open_cover },
+   { "turn on", homeassistant_turn_on },
+   { "toggle", homeassistant_toggle },
+   { "activate", homeassistant_activate_scene },
+   { "run", homeassistant_run_script },
+   { "trigger", homeassistant_trigger_automation },
+};
+
 /* Stage @p verb on @p entity: the preview to return. */
 static char *stage_door(const ha_entity_t *entity, const char *verb) {
    turn_origin_t origin;
@@ -684,21 +699,18 @@ static char *handle_confirm(const char *value) {
       default:
          return strdup("Nothing is waiting to be confirmed (it may have expired). Ask again.");
    }
-   ha_error_t err;
-   if (strcmp(p.verb, "unlock") == 0)
-      err = homeassistant_unlock(p.entity_id);
-   else if (strcmp(p.verb, "open") == 0)
-      err = homeassistant_open_cover(p.entity_id);
-   else if (strcmp(p.verb, "turn on") == 0)
-      err = homeassistant_turn_on(p.entity_id);
-   else if (strcmp(p.verb, "activate") == 0)
-      err = homeassistant_activate_scene(p.entity_id);
-   else if (strcmp(p.verb, "run") == 0)
-      err = homeassistant_run_script(p.entity_id);
-   else if (strcmp(p.verb, "trigger") == 0)
-      err = homeassistant_trigger_automation(p.entity_id);
-   else
-      err = homeassistant_toggle(p.entity_id);
+   ha_error_t (*apply)(const char *) = NULL;
+   for (size_t i = 0; i < sizeof(k_door_ops) / sizeof(k_door_ops[0]); i++) {
+      if (strcmp(p.verb, k_door_ops[i].verb) == 0)
+         apply = k_door_ops[i].apply;
+   }
+   if (!apply) {
+      OLOG_ERROR("homeassistant: no action for staged verb '%s'", p.verb);
+      snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Not done: '%s' can't be carried out.",
+               p.verb);
+      return strdup(buf);
+   }
+   const ha_error_t err = apply(p.entity_id);
    if (err != HA_OK) {
       snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Failed to %s '%s': %s", p.verb,
                p.friendly_name, homeassistant_error_str(err));

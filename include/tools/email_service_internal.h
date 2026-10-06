@@ -55,6 +55,18 @@ bool email_svc_is_gmail_api(const email_account_t *acct);
 int email_svc_gmail_token(const email_account_t *acct, char *token, size_t len, bool *revoked);
 
 /**
+ * @brief An IMAP message id ("folder:uid") split and checked: the folder fits
+ *        and passes the allow-list, the uid is valid.  Logged when it isn't
+ *        (at debug during a fan-out, where a Gmail id is expected).
+ * @return true when @p folder and @p uid are filled
+ */
+bool email_svc_parse_imap_id(const char *message_id,
+                             char *folder,
+                             size_t folder_size,
+                             uint32_t *uid,
+                             bool fanout);
+
+/**
  * @brief Read @p message_id from one account (email_service_read without the fan-out)
  * @param fanout true while probing every account: an id of the other backend's
  *               shape is then expected, not an error

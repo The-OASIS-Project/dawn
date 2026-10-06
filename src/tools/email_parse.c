@@ -24,11 +24,13 @@
 #include "tools/email_parse.h"
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "core/buf_printf.h"
 
@@ -93,7 +95,34 @@ void email_format_mailbox(const char *name, const char *addr, char *dst, size_t 
    }
    quoted[j++] = '"';
    quoted[j] = '\0';
-   snprintf(dst, dst_len, "%s <%s>", quoted, addr ? addr : "");
+   if (addr && addr[0])
+      snprintf(dst, dst_len, "%s <%s>", quoted, addr);
+   else
+      snprintf(dst, dst_len, "%s", quoted); /* a From with no address */
+}
+
+void email_display_mailbox(const char *name, const char *addr, char *dst, size_t dst_len) {
+   if (!dst || dst_len == 0)
+      return;
+   const bool has_addr = addr && addr[0];
+   /* A name that is itself an address shows as the address it claims to be;
+    * keep only the real one (or say there is none). */
+   /* '@' or a lookalike: fullwidth U+FF20, small U+FE6B. */
+   const bool name_is_addr = name &&
+                             (strchr(name, '@') || strstr(name, "\xEF\xBC\xA0") ||
+                              strstr(name, "\xEF\xB9\xAB")) &&
+                             !(has_addr && strcasecmp(name, addr) == 0);
+   if (name_is_addr)
+      name = NULL;
+   if (has_addr) {
+      email_format_mailbox(name, addr, dst, dst_len);
+   } else if (name && name[0]) {
+      char quoted[200];
+      email_format_mailbox(name, NULL, quoted, sizeof(quoted));
+      snprintf(dst, dst_len, "%s (no address)", quoted);
+   } else {
+      snprintf(dst, dst_len, "(no address)");
+   }
 }
 
 time_t email_parse_rfc822_date(const char *date_str) {
@@ -721,5 +750,33 @@ bool email_imap_parse_exists(const char *line, size_t len, uint32_t *out) {
    if (i < len && line[i] != '\r' && line[i] != '\n')
       return false;
    *out = (uint32_t)v;
+   return true;
+}
+
+bool email_imap_id_parse(const char *message_id, char *folder, size_t folder_size, uint32_t *uid) {
+   if (!message_id || !folder || folder_size == 0 || !uid)
+      return false;
+   const char *uid_str = message_id;
+   const char *last_colon = strrchr(message_id, ':');
+   if (last_colon && last_colon > message_id) {
+      const size_t len = (size_t)(last_colon - message_id);
+      if (len >= folder_size)
+         return false;
+      memcpy(folder, message_id, len);
+      folder[len] = '\0';
+      uid_str = last_colon + 1;
+   } else {
+      if (snprintf(folder, folder_size, "INBOX") >= (int)folder_size)
+         return false;
+      if (last_colon)
+         uid_str = last_colon + 1;
+   }
+   if (!isdigit((unsigned char)uid_str[0]))
+      return false;
+   char *end = NULL;
+   const unsigned long v = strtoul(uid_str, &end, 10);
+   if (!end || *end != '\0' || v == 0 || v > UINT32_MAX)
+      return false;
+   *uid = (uint32_t)v;
    return true;
 }

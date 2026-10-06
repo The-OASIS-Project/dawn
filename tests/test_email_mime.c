@@ -808,6 +808,25 @@ static void gmail_read(const char *payload_json,
    json_object_put(payload);
 }
 
+/* A listing and a read take From/Subject/Date the same way: Date sanitized
+ * (a sender writes it), a From with no address shown as its text. */
+static void test_gmail_header_fields(void) {
+   struct json_object *h = json_tokener_parse(
+       "[{\"name\":\"From\",\"value\":\"Some Name\"},"
+       "{\"name\":\"Subject\",\"value\":\"=?UTF-8?B?SGVsbG8=?=\"},"
+       "{\"name\":\"Date\",\"value\":\"Mon, 5 Oct 2026 \u202eevil\"}]");
+   TEST_ASSERT_NOT_NULL(h);
+   char name[64] = "", addr[64] = "", subject[64] = "", date[32] = "";
+   gmail_header_fields(h, name, sizeof(name), addr, sizeof(addr), subject, sizeof(subject), date,
+                       sizeof(date));
+   TEST_ASSERT_EQUAL_STRING("Some Name", name);
+   TEST_ASSERT_EQUAL_STRING("", addr);
+   TEST_ASSERT_EQUAL_STRING("Hello", subject);
+   TEST_ASSERT_NULL(strstr(date, "\xe2\x80\xae")); /* direction override dropped */
+   TEST_ASSERT_NOT_NULL(strstr(date, "Mon, 5 Oct 2026"));
+   json_object_put(h);
+}
+
 static void test_gmail_walk(void) {
    char plain[64];
    char html[64];
@@ -1221,5 +1240,6 @@ int main(void) {
    RUN_TEST(test_body_fallbacks);
    RUN_TEST(test_prescan_reads_like_gmime);
    RUN_TEST(test_prescan_takes_gmime_type);
+   RUN_TEST(test_gmail_header_fields);
    return UNITY_END();
 }

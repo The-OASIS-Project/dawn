@@ -29,6 +29,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "tools/email_display.h"
 #include "tools/email_mime.h"
 #include "tools/gmail_client_internal.h"
 
@@ -106,6 +107,28 @@ const char *gmail_find_header(struct json_object *headers_arr, const char *name)
       }
    }
    return NULL;
+}
+
+void gmail_header_fields(struct json_object *headers,
+                         char *from_name,
+                         size_t from_name_size,
+                         char *from_addr,
+                         size_t from_addr_size,
+                         char *subject,
+                         size_t subject_size,
+                         char *date,
+                         size_t date_size) {
+   email_addr_t from;
+   const char *from_raw = gmail_find_header(headers, "From");
+   if (email_mime_addr_first(from_raw, &from)) {
+      snprintf(from_name, from_name_size, "%s", from.name);
+      snprintf(from_addr, from_addr_size, "%s", from.addr);
+   } else {
+      email_mime_header_text(from_raw, from_name, from_name_size);
+   }
+   email_mime_header_text(gmail_find_header(headers, "Subject"), subject, subject_size);
+   const char *date_raw = gmail_find_header(headers, "Date");
+   email_display_sanitize(date_raw, date_raw ? strlen(date_raw) : 0, date, date_size, 0);
 }
 
 const char *gmail_json_str(struct json_object *obj, const char *key) {

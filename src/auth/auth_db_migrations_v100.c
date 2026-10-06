@@ -133,7 +133,14 @@ int auth_db_migrations_v100(sqlite3 *db) {
          rc = restore_one(db, rows[i].id, rows[i].summary, rows[i].watermark, &changed,
                           &boundaries);
       }
-      sqlite3_exec(db, rc == AUTH_DB_SUCCESS ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+      if (rc == AUTH_DB_SUCCESS && sqlite3_exec(db, "COMMIT", NULL, NULL, &errmsg) != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v100 commit failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         rc = AUTH_DB_FAILURE;
+      }
+      if (rc != AUTH_DB_SUCCESS) {
+         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+      }
    }
    for (size_t i = 0; i < n; i++) {
       free(rows[i].summary);

@@ -560,16 +560,13 @@ static void responses_fc_append_args(responses_stream_ctx_t *rctx, int idx, cons
    if (idx < 0 || !delta)
       return;
    tool_call_t *call = &rctx->stream_ctx->tool_calls.calls[idx];
-   size_t cur = rctx->fc_args_len[idx];
-   size_t add = strlen(delta);
-   if (cur + add + 1 > sizeof(call->arguments)) {
-      OLOG_WARNING("Responses: function_call args truncated (overflow %zu+%zu vs %zu)", cur, add,
-                   sizeof(call->arguments));
-      add = sizeof(call->arguments) - cur - 1;
+   bool was_cut = call->args_truncated;
+   llm_tools_args_append(call->arguments, &rctx->fc_args_len[idx], &call->args_truncated, delta,
+                         strlen(delta), false);
+   if (call->args_truncated && !was_cut) {
+      OLOG_WARNING("Responses: function_call '%s' args cut at %d bytes", call->name,
+                   LLM_TOOLS_ARGS_LEN - 1);
    }
-   memcpy(call->arguments + cur, delta, add);
-   call->arguments[cur + add] = '\0';
-   rctx->fc_args_len[idx] = cur + add;
 }
 
 /**
@@ -676,6 +673,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                      safe_strscpy(call->name, json_object_get_string(name_obj));
                   }
                   call->arguments[0] = '\0';
+                  call->args_truncated = false;
                   rctx->fc_args_len[idx] = 0;
                   rctx->stream_ctx->has_tool_calls = 1;
                }
@@ -718,8 +716,12 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          tool_call_t *call = &rctx->stream_ctx->tool_calls.calls[idx];
          const char *args = json_object_get_string(args_obj);
          if (args) {
-            safe_strscpy(call->arguments, args);
-            rctx->fc_args_len[idx] = strlen(call->arguments);
+            llm_tools_args_append(call->arguments, &rctx->fc_args_len[idx], &call->args_truncated,
+                                  args, strlen(args), true);
+            if (call->args_truncated) {
+               OLOG_WARNING("Responses: function_call '%s' args cut at %d bytes", call->name,
+                            LLM_TOOLS_ARGS_LEN - 1);
+            }
          }
       }
    } else if (strcmp(event_type, "response.output_item.done") == 0) {

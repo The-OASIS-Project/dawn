@@ -326,6 +326,31 @@ static void test_literals(void) {
    TEST_ASSERT_FALSE(contact_email_is_single("a@b@c.com"));
 }
 
+/* A list too long for the question keeps whole entries and the instruction
+ * after it (long addresses, five matches). */
+static void test_long_candidate_list_keeps_the_ask(void) {
+   contact_resolve_t r;
+   memset(&r, 0, sizeof(r));
+   r.kind = CONTACT_RESOLVE_AMBIGUOUS;
+   r.candidate_count = CONTACT_RESOLVE_MAX_CANDIDATES;
+   for (int i = 0; i < r.candidate_count; i++) {
+      snprintf(r.candidates[i].name, sizeof(r.candidates[i].name), "Bob Number%d", i);
+      memset(r.candidates[i].value, 'a', 240);
+      snprintf(r.candidates[i].value + 240, 16, "@example.com");
+   }
+   char q[1024];
+   contact_resolve_question("Bob", CONTACT_FIELD_EMAIL, &r, q, sizeof(q));
+   TEST_ASSERT_NOT_NULL(strstr(q, "Ask the user which one"));
+   TEST_ASSERT_NOT_NULL(strstr(q, "Bob Number0 (")); /* the first fits */
+   /* Every entry shown is whole: each "(" has its ")". */
+   int open = 0;
+   for (const char *p = q; *p; p++) {
+      open += *p == '(';
+      open -= *p == ')';
+   }
+   TEST_ASSERT_EQUAL_INT(0, open);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_unique);
@@ -333,5 +358,6 @@ int main(void) {
    RUN_TEST(test_named);
    RUN_TEST(test_ambiguous_and_none);
    RUN_TEST(test_literals);
+   RUN_TEST(test_long_candidate_list_keeps_the_ask);
    return UNITY_END();
 }

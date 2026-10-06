@@ -49,6 +49,9 @@
 #include "tools/oauth_client.h"
 #include "utils/string_utils.h"
 
+/* Characters of a sender shown in a trash confirmation. */
+#define EMAIL_TRASH_FROM_SHOWN 100
+
 /* =============================================================================
  * Module State
  * ============================================================================= */
@@ -1202,7 +1205,7 @@ int email_service_describe_pending_trash(int user_id,
           t->origin.session_id == session_id && strcmp(t->pending_id, pending_id) == 0) {
          char subject[160], from[160];
          str_excerpt_line(t->subject, 100, subject, sizeof(subject));
-         str_excerpt_line(t->from, 100, from, sizeof(from));
+         str_excerpt_line(t->from, EMAIL_TRASH_FROM_SHOWN, from, sizeof(from));
          if (valid_for_sec) {
             *valid_for_sec = (int)(EMAIL_PENDING_TRASH_EXPIRY_SEC -
                                    (pending_slots_now() - t->created_at));
@@ -1416,9 +1419,12 @@ int email_service_create_pending_trash(int user_id,
        * confirmation text as invalid UTF-8, so drop any such tail. */
       snprintf(fetched_subject, sizeof(fetched_subject), "%s", msg.subject);
       utf8_trim_incomplete(fetched_subject);
-      char from[sizeof(msg.from_name) + 1 + sizeof(msg.from_addr)];
-      snprintf(from, sizeof(from), "%s%s%s", msg.from_name, msg.from_name[0] ? " " : "",
-               msg.from_addr);
+      char from[2 * sizeof(msg.from_name) + sizeof(msg.from_addr) + 8];
+      email_display_mailbox(msg.from_name, msg.from_addr, from, sizeof(from));
+      /* A long name would push the address out of the confirmation (excerpted
+       * to EMAIL_TRASH_FROM_SHOWN); the address is the part that identifies. */
+      if (strlen(from) > EMAIL_TRASH_FROM_SHOWN && msg.from_addr[0])
+         email_display_mailbox(NULL, msg.from_addr, from, sizeof(from));
       safe_strncpy(fetched_from, from, sizeof(fetched_from));
       utf8_trim_incomplete(fetched_from);
       email_message_free(&msg);
@@ -1487,26 +1493,9 @@ static int execute_trash(email_account_t *acct, const char *message_id) {
       return rc;
    }
 
-   /* IMAP path — parse composite "folder:uid" */
-   char imap_folder[128] = "INBOX";
-   const char *uid_str = message_id;
-
-   const char *last_colon = strrchr(message_id, ':');
-   if (last_colon) {
-      size_t folder_len = last_colon - message_id;
-      if (folder_len > 0 && folder_len < sizeof(imap_folder)) {
-         memcpy(imap_folder, message_id, folder_len);
-         imap_folder[folder_len] = '\0';
-      }
-      uid_str = last_colon + 1;
-   }
-
-   if (!validate_folder_name(imap_folder))
-      return 1;
-
-   char *endptr = NULL;
-   unsigned long uid_val = strtoul(uid_str, &endptr, 10);
-   if (!endptr || *endptr != '\0' || uid_val == 0 || uid_val > UINT32_MAX)
+   char imap_folder[128];
+   uint32_t uid_val = 0;
+   if (!email_svc_parse_imap_id(message_id, imap_folder, sizeof(imap_folder), &uid_val, false))
       return 1;
 
    email_conn_t conn;
@@ -1516,7 +1505,7 @@ static int execute_trash(email_account_t *acct, const char *message_id) {
       return 1;
    }
 
-   rc = email_trash_message(&conn, imap_folder, (uint32_t)uid_val);
+   rc = email_trash_message(&conn, imap_folder, uid_val);
    sodium_memzero(&conn, sizeof(conn));
    return rc;
 }
@@ -1621,26 +1610,9 @@ int email_service_archive(int user_id, const char *account_name, const char *mes
       return rc;
    }
 
-   /* IMAP path — parse composite "folder:uid" */
-   char imap_folder[128] = "INBOX";
-   const char *uid_str = message_id;
-
-   const char *last_colon = strrchr(message_id, ':');
-   if (last_colon) {
-      size_t folder_len = last_colon - message_id;
-      if (folder_len > 0 && folder_len < sizeof(imap_folder)) {
-         memcpy(imap_folder, message_id, folder_len);
-         imap_folder[folder_len] = '\0';
-      }
-      uid_str = last_colon + 1;
-   }
-
-   if (!validate_folder_name(imap_folder))
-      return 1;
-
-   char *endptr = NULL;
-   unsigned long uid_val = strtoul(uid_str, &endptr, 10);
-   if (!endptr || *endptr != '\0' || uid_val == 0 || uid_val > UINT32_MAX)
+   char imap_folder[128];
+   uint32_t uid_val = 0;
+   if (!email_svc_parse_imap_id(message_id, imap_folder, sizeof(imap_folder), &uid_val, false))
       return 1;
 
    email_conn_t conn;
@@ -1650,7 +1622,7 @@ int email_service_archive(int user_id, const char *account_name, const char *mes
       return 1;
    }
 
-   rc = email_archive_message(&conn, imap_folder, (uint32_t)uid_val);
+   rc = email_archive_message(&conn, imap_folder, uid_val);
    sodium_memzero(&conn, sizeof(conn));
    return rc;
 }
