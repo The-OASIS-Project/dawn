@@ -909,12 +909,13 @@ int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id) {
-   if (user_id <= 0)
-      return MEMORY_DB_FAILURE;
-
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-
+/* Caller holds the auth_db lock.  Marks @p old_fact_id superseded by
+ * @p new_fact_id (both @p user_id's).  SQLITE_DONE on success; *changed says
+ * whether a row changed. */
+static int fact_supersede_locked(int64_t old_fact_id,
+                                 int64_t new_fact_id,
+                                 int user_id,
+                                 bool *changed) {
    /* SQL enforces (a) old_fact_id is owned by user_id AND (b) new_fact_id
     * is owned by user_id via EXISTS subquery.  CWE-639 defense-in-depth
     * + cross-user pointer prevention (foreign new_fact_id would let a
@@ -927,11 +928,100 @@ int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_
    sqlite3_bind_int64(stmt, 4, new_fact_id);
    sqlite3_bind_int(stmt, 5, user_id);
 
-   int rc = sqlite3_step(stmt);
+   const int rc = sqlite3_step(stmt);
+   *changed = rc == SQLITE_DONE && sqlite3_changes(s_db.db) > 0;
    sqlite3_reset(stmt);
+   return rc;
+}
 
+int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id) {
+   if (user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   bool changed = false;
+   const int rc = fact_supersede_locked(old_fact_id, new_fact_id, user_id, &changed);
    AUTH_DB_UNLOCK();
+   /* The fact cache loads only current facts; a superseded one leaves recall
+    * once its copy is reloaded.  Off the DB lock: a reload holds the cache's
+    * lock while it reads the DB. */
+   if (changed) {
+      memory_embeddings_invalidate_cache_for_user(user_id);
+   }
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+/* The kept fact takes the merged one's sources: what that fact was learned
+ * from now teaches the kept one too.  A merged fact learned outside any
+ * conversation (a remember, an import), or whose only conversation is gone,
+ * makes the kept one count as learned outside any conversation (as deleting
+ * that conversation would have made it). */
+static const char *const MERGE_SOURCES_SQL =
+    "INSERT OR IGNORE INTO memory_fact_sources (fact_id, conversation_id) "
+    "SELECT ?1, conversation_id FROM memory_fact_sources WHERE fact_id = ?2 "
+    "UNION SELECT ?1, source_conversation_id FROM memory_facts "
+    "WHERE id = ?2 AND user_id = ?3 AND source_conversation_id IN "
+    "(SELECT id FROM conversations);"
+    "UPDATE memory_facts SET origin_unsourced = 1 WHERE id = ?1 AND user_id = ?3 AND "
+    "EXISTS (SELECT 1 FROM memory_facts m WHERE m.id = ?2 AND m.user_id = ?3 AND "
+    "(m.origin_unsourced = 1 OR (NOT EXISTS (SELECT 1 FROM memory_fact_sources x "
+    "WHERE x.fact_id = m.id) AND (m.source_conversation_id IS NULL OR "
+    "m.source_conversation_id NOT IN (SELECT id FROM conversations)))));";
+
+/* Caller holds the auth_db lock.  Runs MERGE_SOURCES_SQL's statements. */
+static bool merge_sources_locked(int64_t old_fact_id, int64_t keeper_id, int user_id) {
+   const char *sql = MERGE_SOURCES_SQL;
+   while (sql && *sql) {
+      sqlite3_stmt *st = NULL;
+      const char *tail = NULL;
+      if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, &tail) != SQLITE_OK) {
+         return false;
+      }
+      if (!st) {
+         break; /* trailing whitespace */
+      }
+      sqlite3_bind_int64(st, 1, keeper_id);
+      sqlite3_bind_int64(st, 2, old_fact_id);
+      sqlite3_bind_int(st, 3, user_id);
+      const int rc = sqlite3_step(st);
+      sqlite3_finalize(st);
+      if (rc != SQLITE_DONE) {
+         return false;
+      }
+      sql = tail;
+   }
+   return true;
+}
+
+int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id) {
+   if (user_id <= 0 || old_fact_id == keeper_id)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_merge", NULL, NULL, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   bool changed = false;
+   bool ok = fact_supersede_locked(old_fact_id, keeper_id, user_id, &changed) == SQLITE_DONE;
+   if (ok && changed) {
+      ok = merge_sources_locked(old_fact_id, keeper_id, user_id);
+   }
+   if (!ok) {
+      OLOG_WARNING("memory_db: merging fact %lld into %lld failed: %s", (long long)old_fact_id,
+                   (long long)keeper_id, sqlite3_errmsg(s_db.db));
+      sqlite3_exec(s_db.db, "ROLLBACK TO fact_merge", NULL, NULL, NULL);
+      changed = false;
+   }
+   sqlite3_exec(s_db.db, "RELEASE fact_merge", NULL, NULL, NULL);
+   AUTH_DB_UNLOCK();
+   if (changed) {
+      memory_embeddings_invalidate_cache_for_user(user_id);
+   }
+   if (!ok) {
+      return MEMORY_DB_FAILURE;
+   }
+   return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND; /* either fact gone, or not theirs */
 }
 
 int memory_db_fact_delete(int64_t fact_id, int user_id) {

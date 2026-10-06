@@ -105,6 +105,7 @@ static const char *DDL =
    "  last_accessed INTEGER,"
    "  access_count INTEGER DEFAULT 0,"
    "  superseded_by INTEGER,"
+   "  superseded_at INTEGER DEFAULT NULL,"
    "  normalized_hash INTEGER DEFAULT 0,"
    "  embedding BLOB DEFAULT NULL,"
    "  embedding_norm REAL DEFAULT NULL,"
@@ -348,6 +349,15 @@ static int prepare_statements(void) {
                            &s_db.stmt_memory_fact_delete, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
+   /* Merge: keep in sync with auth_db_statements.c. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET superseded_by = ?, "
+                           "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                           "WHERE id = ? AND user_id = ? "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
+                           -1, &s_db.stmt_memory_fact_supersede, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT OR IGNORE INTO memory_fact_sources (fact_id, conversation_id) "
                            "SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM conversations WHERE "
@@ -417,6 +427,8 @@ static void close_db(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_prune_expired);
    if (s_db.stmt_memory_fact_delete)
       sqlite3_finalize(s_db.stmt_memory_fact_delete);
+   if (s_db.stmt_memory_fact_supersede)
+      sqlite3_finalize(s_db.stmt_memory_fact_supersede);
    if (s_db.stmt_memory_fact_source_add)
       sqlite3_finalize(s_db.stmt_memory_fact_source_add);
    if (s_db.stmt_memory_pref_source_add)
@@ -1331,6 +1343,61 @@ void test_forget_takes_superseded_chain(void) {
    TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_facts"));
 }
 
+/* A merge gives the kept fact the merged one's sources: forgetting the only
+ * conversation the kept fact came from leaves it, since another taught it too. */
+void test_forget_keeps_what_a_merge_brought(void) {
+   memory_provenance_t p10 = { .conv_id = 10 }, p25 = { .conv_id = 25 };
+   int64_t dup = 0, keep = 0;
+   memory_db_fact_create(1, "User plays cello", 0.9f, "explicit", "interests", &p10, &dup);
+   memory_db_fact_create(1, "User plays the cello", 0.9f, "explicit", "interests", &p25, &keep);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t n, d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_learned_count(1, set, 1, &n));
+   TEST_ASSERT_EQUAL_INT(0, n.facts);
+   TEST_ASSERT_EQUAL_INT(0, n.outdated);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT64(2, q_int("SELECT COUNT(*) FROM memory_facts"));
+}
+
+/* A fact merged from a remember (no conversation) makes the kept one count as
+ * learned outside any conversation. */
+void test_merge_carries_unsourced_origin(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t said = 0, keep = 0;
+   memory_db_fact_create(1, "User is vegetarian", 0.9f, "explicit", "health", NULL, &said);
+   memory_db_fact_create(1, "User eats no meat", 0.9f, "explicit", "health", &p25, &keep);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(said, keep, 1));
+   char sql[128];
+   snprintf(sql, sizeof(sql), "SELECT origin_unsourced FROM memory_facts WHERE id = %lld",
+            (long long)keep);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_fact_merge(keep, keep, 1));
+}
+
+/* A merged fact whose conversation is gone (deleted before sources were kept
+ * per conversation) still merges, and the kept fact counts as learned outside
+ * any conversation, as the delete would have made the merged one. */
+void test_merge_with_a_deleted_source_conversation(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t old = 0, keep = 0;
+   memory_db_fact_create(1, "User has a dog", 0.9f, "explicit", "personal", &p25, &old);
+   memory_db_fact_create(1, "User owns a dog", 0.9f, "explicit", "personal", &p25, &keep);
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "DELETE FROM memory_fact_sources WHERE fact_id = %lld;"
+            "UPDATE memory_facts SET source_conversation_id = 9999 WHERE id = %lld;",
+            (long long)old, (long long)old);
+   q_exec("PRAGMA foreign_keys=OFF;");
+   q_exec(sql);
+   q_exec("PRAGMA foreign_keys=ON;");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(old, keep, 1));
+   snprintf(sql, sizeof(sql), "SELECT origin_unsourced FROM memory_facts WHERE id = %lld",
+            (long long)keep);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_merge(old, 424242, 1));
+}
+
 /* An entity an alias still targets is kept (its target column can't be nulled),
  * and doesn't fail the forget. */
 void test_forget_keeps_alias_target_entity(void) {
@@ -1594,6 +1661,9 @@ int main(void) {
    RUN_TEST(test_preference_sources_follow_the_value);
    RUN_TEST(test_forget_keeps_relation_taught_elsewhere);
    RUN_TEST(test_forget_takes_superseded_chain);
+   RUN_TEST(test_forget_keeps_what_a_merge_brought);
+   RUN_TEST(test_merge_carries_unsourced_origin);
+   RUN_TEST(test_merge_with_a_deleted_source_conversation);
    RUN_TEST(test_forget_keeps_alias_target_entity);
    RUN_TEST(test_conversation_delete_drops_sources);
    RUN_TEST(test_forget_queries_use_their_indexes);

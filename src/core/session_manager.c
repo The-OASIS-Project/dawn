@@ -1355,35 +1355,6 @@ static int broadcast_notice(int user_id, const char *content) {
    return delivered;
 }
 
-void session_manager_for_each_user_session(int user_id,
-                                           void (*fn)(session_t *session, void *ctx),
-                                           void *ctx) {
-   if (!initialized || !fn || user_id < 0) {
-      return;
-   }
-   /* Snapshot ids under the read lock, then visit each retained session with
-    * it released (never a per-session lock under the module lock). */
-   uint32_t snapshot_ids[MAX_SESSIONS];
-   int count = 0;
-   pthread_rwlock_rdlock(&session_manager_rwlock);
-   for (int i = 0; i < MAX_SESSIONS; i++) {
-      if (sessions[i]) {
-         snapshot_ids[count++] = sessions[i]->session_id;
-      }
-   }
-   pthread_rwlock_unlock(&session_manager_rwlock);
-   for (int i = 0; i < count; i++) {
-      session_t *s = session_get(snapshot_ids[i]); /* Retains */
-      if (!s) {
-         continue;
-      }
-      if (user_id == 0 || session_effective_user_id(s) == user_id) {
-         fn(s, ctx);
-      }
-      session_release(s);
-   }
-}
-
 void session_manager_for_each_session_any(void (*fn)(session_t *session, void *ctx), void *ctx) {
    if (!initialized || !fn) {
       return;

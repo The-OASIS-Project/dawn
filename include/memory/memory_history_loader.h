@@ -81,11 +81,13 @@ int memory_history_load_rows(int64_t conv_id,
 /**
  * @brief Reconstruct conversation history as a json_object array.
  *
- * Reads rows from the messages table for (conv_id, user_id), strips inline
- * image markers, and assembles {"role","content","id"} entries in original
- * order.  Carries no stored blocks: for extraction and summaries, which never
- * replay a turn to its vendor.  The returned array is owned by the caller and
- * must be released with json_object_put().
+ * Reads every row from the messages table for (conv_id, user_id), a
+ * compacted conversation's included, strips inline image markers, and
+ * assembles {"role","content","id"} entries in original order.  Carries no
+ * stored blocks or compaction summary: for extraction and summaries, which
+ * read what the conversation said and never replay a turn to its vendor.  The
+ * returned array is owned by the caller and must be released with
+ * json_object_put().
  *
  * @param conv_id        conversation ID
  * @param user_id        owning user ID (defense-in-depth ownership check)

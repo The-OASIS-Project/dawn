@@ -51,6 +51,7 @@ static const char *DDL =
    "  user_id INTEGER NOT NULL,"
    "  message_count INTEGER NOT NULL DEFAULT 0,"
    "  is_private INTEGER NOT NULL DEFAULT 0,"
+   "  job_status TEXT DEFAULT NULL,"
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
    ");"
 
@@ -162,6 +163,18 @@ void test_count_is_per_user_scoped(void) {
    TEST_ASSERT_EQUAL(1, b_count);
 }
 
+/* A background job's transcript is the model's own work, never summarized. */
+void test_count_excludes_job_conversations(void) {
+   seed_conv(1, 6, false);
+   seed_conv(1, 6, false);
+   sqlite3_exec(s_db.db, "UPDATE conversations SET job_status = 'done' WHERE id = 1", NULL, NULL,
+                NULL);
+
+   int count = 0;
+   TEST_ASSERT_EQUAL(SUCCESS, memory_summarize_missing_count(1, &count));
+   TEST_ASSERT_EQUAL(1, count);
+}
+
 void test_count_excludes_2plus_msg_with_summary_kept(void) {
    /* Two convs both with >= 2 msgs, only one summarized. */
    seed_conv(1, 2, false); /* conv_a */
@@ -203,6 +216,7 @@ int main(void) {
    RUN_TEST(test_count_zero_when_no_conversations);
    RUN_TEST(test_count_returns_unsummarized_eligible_only);
    RUN_TEST(test_count_is_per_user_scoped);
+   RUN_TEST(test_count_excludes_job_conversations);
    RUN_TEST(test_count_excludes_2plus_msg_with_summary_kept);
    RUN_TEST(test_count_rejects_invalid_inputs);
    RUN_TEST(test_start_rejects_invalid_user_id);

@@ -1263,6 +1263,11 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
                        "The 'replaced_by' keeper ID wasn't found (or isn't yours). "
                        "Nothing was changed.");
       }
+      if (keep.superseded_by != 0) {
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "The 'replaced_by' keeper was itself merged into another fact; keep "
+                       "that one instead. Nothing was changed.");
+      }
       for (int i = 0; i < id_count; i++) {
          if (ids[i] == replaced_by) {
             return strdup("'replaced_by' must be the fact you are KEEPING, not one of the IDs "
@@ -1290,7 +1295,7 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
       memory_fact_t fact;
       bool removed = false;
       if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS &&
-          (merge ? memory_db_fact_supersede(ids[i], replaced_by, user_id)
+          (merge ? memory_db_fact_merge(ids[i], replaced_by, user_id)
                  : memory_db_fact_delete(ids[i], user_id)) == MEMORY_DB_SUCCESS) {
          removed = true;
          if (forgotten == 0) {

@@ -102,7 +102,7 @@ static void test_point_inside_a_tool_exchange(void) {
                          conv_db_set_compaction_watermark(conv, s_user_id, "They added numbers.",
                                                           first_result));
 
-   struct json_object *h = memory_history_load_from_db(conv, s_user_id, NULL);
+   struct json_object *h = memory_history_load_for_llm(conv, s_user_id, NULL);
    TEST_ASSERT_NOT_NULL(h);
    /* The answer, then the next question with the summary in front of it:
     * results 2 and 3, whose call is in the summary, are gone. */
@@ -123,11 +123,28 @@ static void test_point_at_a_turn(void) {
    add(conv, "assistant", "second", NULL, NULL);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_set_compaction_watermark(conv, s_user_id, "One.", answer));
-   struct json_object *h = memory_history_load_from_db(conv, s_user_id, NULL);
+   struct json_object *h = memory_history_load_for_llm(conv, s_user_id, NULL);
    TEST_ASSERT_NOT_NULL(h);
    TEST_ASSERT_EQUAL_INT(2, json_object_array_length(h)); /* two (summary first), second */
    TEST_ASSERT_EQUAL_STRING("user", role_at(h, 0));
    assert_summary_leads(json_object_array_get_idx(h, 0), "One.", "two");
+   json_object_put(h);
+}
+
+/* Extraction and summaries read every row a compaction left behind, without
+ * its summary (DAWN's own text). */
+static void test_extraction_load_reads_every_row(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user_id, "chat", &conv));
+   add(conv, "user", "one", NULL, NULL);
+   const int64_t answer = add(conv, "assistant", "first", NULL, NULL);
+   add(conv, "user", "two", NULL, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_set_compaction_watermark(conv, s_user_id, "One.", answer));
+   struct json_object *h = memory_history_load_from_db(conv, s_user_id, NULL);
+   TEST_ASSERT_NOT_NULL(h);
+   TEST_ASSERT_EQUAL_INT(3, json_object_array_length(h));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(h), "CONVERSATION SUMMARY"));
    json_object_put(h);
 }
 
@@ -199,6 +216,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_point_inside_a_tool_exchange);
    RUN_TEST(test_point_at_a_turn);
+   RUN_TEST(test_extraction_load_reads_every_row);
    RUN_TEST(test_blocks_reload_for_replay_only);
    return UNITY_END();
 }

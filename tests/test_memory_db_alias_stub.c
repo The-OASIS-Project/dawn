@@ -101,6 +101,9 @@ void memory_embeddings_invalidate_entity_cache_for_user(int user_id) {
    (void)user_id;
    g_alias_test_entity_cache_invalidations++;
 }
+void memory_embeddings_invalidate_cache_for_user(int user_id) {
+   (void)user_id;
+}
 
 void memory_embeddings_invalidate_cache(void) {
    /* No-op — alias surface only invalidates the entity cache. */

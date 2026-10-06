@@ -93,6 +93,22 @@ struct json_object *memory_history_load_from_db(int64_t conv_id,
    return NULL;
 }
 
+struct json_object *memory_extraction_build_input(int user_id,
+                                                  int64_t conversation_id,
+                                                  struct json_object *conversation_history,
+                                                  int64_t last_msg_id) {
+   (void)user_id;
+   (void)conversation_id;
+   (void)conversation_history;
+   (void)last_msg_id;
+   return NULL;
+}
+
+struct json_object *llm_history_strip_internal(struct json_object *history) {
+   (void)history;
+   return NULL;
+}
+
 /* Conversation DB stubs.  conv_db_get_anchor_date returns NOT_FOUND-ish so
  * the worker would build no anchor line; conv_db_get_max_msg_id likewise
  * returns 0.  Neither is reached in the count-only tests. */

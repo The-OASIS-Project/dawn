@@ -1384,16 +1384,6 @@ void session_post_notice(session_t *session, const char *text);
 void session_post_notice_for(session_t *session, const char *text, int user_id);
 
 /**
- * @brief Call @p fn on each live session whose effective user is @p user_id
- *        (0: every live session)
- *
- * Each session is retained for the call; no manager lock is held across it.
- */
-void session_manager_for_each_user_session(int user_id,
-                                           void (*fn)(session_t *session, void *ctx),
-                                           void *ctx);
-
-/**
  * @brief Call @p fn on every session in the manager, disconnected ones
  *        included (a satellite that dropped before its idle save still holds
  *        its unsaved history)

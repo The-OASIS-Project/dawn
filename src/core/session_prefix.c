@@ -32,6 +32,7 @@
 #include "auth/auth_db_messages.h"
 #include "auth/auth_db_withdraw.h"
 #include "core/focus/focus_handles.h"
+#include "core/job_manager.h"
 #include "core/prefix_in_force.h"
 #include "core/prefix_message.h"
 #include "core/prefix_tools.h"
@@ -1494,10 +1495,12 @@ int session_withdraw_forgotten(int user_id, bool memory_bodies) {
    if (conv_db_withdraw(user_id, memory_bodies, &w) != AUTH_DB_SUCCESS) {
       return FAILURE;
    }
-   /* Every live session: a shared document's passage can sit in anyone's,
-    * saved or not yet. */
+   /* Every session: a shared document's passage can sit in anyone's, saved or
+    * not yet.  A disconnected one too (its idle save would write the item back)
+    * and a background job's. */
    const withdraw_ctx_t wc = { .w = &w, .memory_bodies = memory_bodies, .remover = user_id };
-   session_manager_for_each_user_session(0, withdraw_in_session, (void *)&wc);
+   session_manager_for_each_session_any(withdraw_in_session, (void *)&wc);
+   job_manager_for_each_session(withdraw_in_session, (void *)&wc);
    conv_withdrawn_free(&w);
    return SUCCESS;
 }

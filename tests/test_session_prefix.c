@@ -243,12 +243,13 @@ int focus_handles_withdrawn_locked(const session_t *session,
    return 0;
 }
 
-/* The one live session, the user's. */
-void session_manager_for_each_user_session(int user_id,
-                                           void (*fn)(session_t *session, void *ctx),
-                                           void *ctx) {
-   (void)user_id;
+/* The one session, the user's; no jobs. */
+void session_manager_for_each_session_any(void (*fn)(session_t *session, void *ctx), void *ctx) {
    fn(s, ctx);
+}
+void job_manager_for_each_session(void (*fn)(session_t *session, void *ctx), void *ctx) {
+   (void)fn;
+   (void)ctx;
 }
 
 /* What the panel was told at the last seam (session_focus_client_notice). */

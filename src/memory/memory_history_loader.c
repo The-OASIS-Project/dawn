@@ -575,50 +575,17 @@ static struct json_object *load_history(int64_t conv_id, int user_id, size_t *te
       return NULL;
    }
 
-   /* v67: if the conversation carries a compaction watermark, bound the reload to
-    * post-watermark messages and prepend the summary — mirrors the WebUI restore
-    * funnel (webui_restore_conversation_context) so any loader, including the
-    * messaging forever-conversation path, stays context-bounded.  watermark == 0
-    * (never compacted) keeps the original full-history behavior. */
-   int64_t watermark = 0;
-   char *summary = NULL;
-   conversation_t conv = { 0 };
-   if (conv_db_get(conv_id, user_id, &conv) == AUTH_DB_SUCCESS) {
-      watermark = conv.context_watermark_msg_id;
-      if (watermark > 0 && conv.compaction_summary && conv.compaction_summary[0]) {
-         summary = strdup(conv.compaction_summary);
-      }
-   }
-   conv_free(&conv);
-
+   /* Every row, compaction or not: extraction and summaries read what the
+    * conversation said, not the request a model is given (whose compaction
+    * summary is DAWN's own text, which they leave out). */
    size_t dropped_chars = 0;
-   const int rc = memory_history_load_rows(conv_id, user_id, watermark, false,
-                                           append_message_to_history, &ctx, ctx.array,
-                                           &dropped_chars);
+   const int rc = memory_history_load_rows(conv_id, user_id, 0, false, append_message_to_history,
+                                           &ctx, ctx.array, &dropped_chars);
    if (rc != AUTH_DB_SUCCESS) {
-      free(summary);
       json_object_put(ctx.array);
       return NULL;
    }
    ctx.total_text_len -= dropped_chars <= ctx.total_text_len ? dropped_chars : ctx.total_text_len;
-   /* The compaction's summary, as a request rebuild renders it: framed with
-    * the conversation's tag (its frozen prompt holds it; this history is
-    * given that prompt later, when it runs). */
-   if (summary) {
-      char tag[32] = "";
-      struct json_object *prefix_only = json_object_new_array();
-      struct json_object *prefix = prefix_only ? prefix_message_stored(conv_id, user_id) : NULL;
-      if (prefix) {
-         json_object_array_add(prefix_only, prefix);
-         const char *t = llm_history_tag(prefix_only);
-         snprintf(tag, sizeof(tag), "%s", t ? t : "");
-      }
-      json_object_put(prefix_only);
-      if (llm_history_attach_summary(ctx.array, 0, summary, tag[0] ? tag : NULL) >= 0) {
-         ctx.total_text_len += strlen(summary);
-      }
-   }
-   free(summary);
    if (text_len_out) {
       *text_len_out = ctx.total_text_len;
    }

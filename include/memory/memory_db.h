@@ -438,6 +438,22 @@ int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t
 int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id);
 
 /**
+ * @brief Merge a duplicate fact into the one kept
+ *
+ * As memory_db_fact_supersede, and in the same transaction the kept fact takes
+ * the merged one's sources (its conversations, or its having been learned
+ * outside any conversation), so forgetting a conversation only the kept fact
+ * came from doesn't take what another conversation taught.
+ *
+ * @param old_fact_id Fact merged away
+ * @param keeper_id   Fact kept
+ * @param user_id     User ID (owns both)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (either fact missing or not the
+ *         user's), or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id);
+
+/**
  * @brief Delete a fact
  *
  * @param fact_id Fact ID

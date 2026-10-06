@@ -73,14 +73,6 @@ int session_effective_user_id(session_t *session) {
  * interactive one and a job's. */
 static session_t *s_live;
 static session_t *s_job_live;
-void session_manager_for_each_user_session(int user_id,
-                                           void (*fn)(session_t *session, void *ctx),
-                                           void *ctx) {
-   (void)user_id;
-   if (s_live) {
-      fn(s_live, ctx);
-   }
-}
 void session_manager_for_each_session_any(void (*fn)(session_t *session, void *ctx), void *ctx) {
    if (s_live) {
       fn(s_live, ctx);
