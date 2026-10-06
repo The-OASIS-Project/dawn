@@ -64,7 +64,8 @@ const uint32_t ALWAYS_ON_VALID_SAMPLE_RATES[] = { 8000, 16000, 22050, 44100, 480
 
 /* Adaptive-dwell speculative decode: cap the speculative runs per utterance so a
  * long stutter can't spawn unbounded decodes (paired with the <=1-in-flight cap in
- * spec_slot). See docs/ADAPTIVE_DWELL_DESIGN.md. */
+ * spec_slot). Speculation starts a decode at a pause, before the dwell ends, so its
+ * transcript can be compared with the final one. */
 #define SPEC_MAX_FIRES 3
 
 /* =============================================================================
@@ -369,8 +370,9 @@ static void *wake_check_worker(void *arg) {
  */
 static void dispatch_wake_check(always_on_ctx_t *ctx, ws_connection_t *conn) {
    /* Adaptive-dwell shadow: snapshot the speculative slot BEFORE set_state wipes
-    * it. Never consumed in P1.1 — it rides to the worker only for agreement logging;
-    * the synchronous wake-check decode below is always authoritative. */
+    * it. Shadow mode never uses it ("on" isn't available; config_clamp_vad runs it as
+    * shadow): it rides to the worker only for agreement logging; the synchronous
+    * wake-check decode below is always authoritative. */
    char *spec_text = spec_slot_take_if_current(&ctx->spec);
    if (always_on_adaptive_enabled()) {
       const int64_t commit_now = now_ms();
@@ -495,7 +497,7 @@ static void *cmd_transcribe_worker(void *arg) {
 }
 
 /* =============================================================================
- * Adaptive-dwell speculative decode (P1.1 shadow: arms + decodes, never consumes)
+ * Adaptive-dwell speculative decode (shadow mode: arms + decodes, never consumes)
  * ============================================================================= */
 
 /* True when speculative decode should run: [vad] adaptive_endpoint is not "off"
@@ -647,8 +649,9 @@ static void always_on_spec_maybe_arm(always_on_ctx_t *ctx,
 static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn) {
    /* Adaptive-dwell shadow: snapshot the speculative slot BEFORE set_state wipes
     * it. take_if_current detaches a ready + current speculative transcript (else
-    * NULL). P1.1 NEVER consumes it — it rides along to the worker only so agreement
-    * can be logged; the real synchronous decode below is always authoritative. */
+    * NULL). Shadow mode NEVER uses it ("on" isn't available; config_clamp_vad runs it
+    * as shadow): it rides along to the worker only so agreement can be logged; the
+    * real synchronous decode below is always authoritative. */
    char *spec_text = spec_slot_take_if_current(&ctx->spec);
    if (always_on_adaptive_enabled()) {
       const int64_t commit_now = now_ms();

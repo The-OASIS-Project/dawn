@@ -42,6 +42,7 @@
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
 #include "auth/auth_db_storage.h"
+#include "auth/auth_db_tool_results.h"
 #include "auth/auth_db_withdraw.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -144,6 +145,16 @@ int auth_db_run_cleanup(void) {
    int blobs = 0;
    if (conv_db_prompt_blobs_gc(&blobs) == AUTH_DB_SUCCESS && blobs > 0) {
       OLOG_INFO("auth_db: removed %d unused stored prompt(s)", blobs);
+   }
+
+   /* Large tool results no conversation ever claimed: their turn's session
+    * ended before saving (a crash, a shutdown before an idle save).  A later
+    * store reclaims them too, but nothing may follow. */
+   int unbound = 0;
+   if (tool_results_db_reclaim_unbound((int64_t)now - TOOL_RESULTS_UNBOUND_GRACE_SEC, &unbound) ==
+           AUTH_DB_SUCCESS &&
+       unbound > 0) {
+      OLOG_INFO("auth_db: removed %d unclaimed tool result(s)", unbound);
    }
 
    /* Deleted items' rows past the time a late-saved turn is checked against. */

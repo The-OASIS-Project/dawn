@@ -793,7 +793,14 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    PARSE_STRING(table, "compact_provider", config->compact_provider);
    PARSE_STRING(table, "compact_model", config->compact_model);
 
-   PARSE_BOOL(table, "conversation_logging", config->conversation_logging);
+   /* Retired: nothing wrote the log any more.  Still a known key, so an older
+    * dawn.toml that sets it gets this note once, not a typo warning. */
+   static bool s_conversation_logging_warned = false;
+   if (toml_key_exists(table, "conversation_logging") && !s_conversation_logging_warned) {
+      s_conversation_logging_warned = true;
+      OLOG_WARNING("[llm] conversation_logging is retired and ignored: conversations are kept in "
+                   "the database (see UPGRADING.md)");
+   }
    PARSE_BOOL(table, "rate_limit_enabled", config->rate_limit_enabled);
    PARSE_INT(table, "rate_limit_rpm", config->rate_limit_rpm);
 
@@ -1726,11 +1733,14 @@ void config_clamp_vad(vad_config_t *config) {
    if (!config) {
       return;
    }
-   /* adaptive_endpoint is a tri-state enum ("off"|"shadow"|"on"); anything else
-    * falls back to "off" so the file path and the WebUI POST path share bounds. */
-   if (strcmp(config->adaptive_endpoint, "off") != 0 &&
-       strcmp(config->adaptive_endpoint, "shadow") != 0 &&
-       strcmp(config->adaptive_endpoint, "on") != 0) {
+   /* adaptive_endpoint is "off" or "shadow" (measure only); anything else falls
+    * back to "off" so the file path and the WebUI POST path share bounds.
+    * "on" (use the early result) isn't built: it runs as "shadow". */
+   if (strcmp(config->adaptive_endpoint, "on") == 0) {
+      OLOG_WARNING("[vad] adaptive_endpoint 'on' isn't available yet; measuring only ('shadow')");
+      safe_strscpy(config->adaptive_endpoint, "shadow");
+   } else if (strcmp(config->adaptive_endpoint, "off") != 0 &&
+              strcmp(config->adaptive_endpoint, "shadow") != 0) {
       OLOG_WARNING("Invalid [vad] adaptive_endpoint '%s'; using 'off'", config->adaptive_endpoint);
       safe_strscpy(config->adaptive_endpoint, "off");
    }

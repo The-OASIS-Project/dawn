@@ -306,14 +306,6 @@ struct json_object *llm_history_strip_internal(struct json_object *history);
  */
 int llm_history_drop_turn_blocks(struct json_object *history);
 
-/**
- * @brief A deep copy of @p history for a log on disk
- *
- * As llm_history_strip_internal, except that request context stays, with its
- * kind marks, so the log shows each request as it was sent.
- */
-struct json_object *llm_history_log_copy(struct json_object *history);
-
 /* ---- The stored shape (llm_turn_blocks_stored.c) ---- */
 
 /** Version of the stored envelope ({"v":1,"blocks":[...]}). */

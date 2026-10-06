@@ -118,7 +118,8 @@ static __thread struct {
 
 /* The previous conversation call per cache key, for the expected read. */
 typedef struct {
-   uint32_t session_id; /* 0 = free */
+   bool in_use;
+   uint32_t session_id; /* 0 is the local microphone's session */
    int64_t conversation_id;
    uint64_t last_ms;
    llm_cache_prefix_t prefix;
@@ -410,8 +411,8 @@ static llm_call_kind_t call_kind(session_t *session) {
       return (llm_call_kind_t)t_kind;
    }
    if (!session) {
-      /* No session: the local microphone's turn (its worker says so) runs its
-       * tool loop without one; anything else untagged is unattributed. */
+      /* No session: the local microphone's worker (its thread says so) before
+       * its command context is set; anything else untagged is unattributed. */
       if (!t_local_mic) {
          return LLM_CALL_OTHER;
       }
@@ -455,19 +456,20 @@ int llm_cache_monitor_expected_read_at(uint32_t session_id,
                                        llm_cache_state_t *state) {
    *gap_ms = 0;
    *state = LLM_CACHE_COLD_FIRST;
-   if (session_id == 0) {
-      return 0;
-   }
    int expected = 0;
    pthread_mutex_lock(&s_keys_mutex);
    cache_key_state_t *slot = NULL;
    cache_key_state_t *oldest = &s_keys[0];
    for (int i = 0; i < CACHE_KEYS_MAX; i++) {
-      if (s_keys[i].session_id == session_id && s_keys[i].conversation_id == conversation_id) {
+      if (s_keys[i].in_use && s_keys[i].session_id == session_id &&
+          s_keys[i].conversation_id == conversation_id) {
          slot = &s_keys[i];
          break;
       }
-      if (s_keys[i].session_id == 0 || s_keys[i].last_ms < oldest->last_ms) {
+      if (!oldest->in_use) {
+         continue; /* a free slot is taken first */
+      }
+      if (!s_keys[i].in_use || s_keys[i].last_ms < oldest->last_ms) {
          oldest = &s_keys[i];
       }
    }
@@ -485,6 +487,7 @@ int llm_cache_monitor_expected_read_at(uint32_t session_id,
       }
    } else {
       slot = oldest;
+      slot->in_use = true;
       slot->session_id = session_id;
       slot->conversation_id = conversation_id;
       slot->zero_streak = 0;
@@ -499,12 +502,9 @@ int llm_cache_monitor_expected_read_at(uint32_t session_id,
 }
 
 void llm_cache_monitor_history_rewritten(uint32_t session_id) {
-   if (session_id == 0) {
-      return;
-   }
    pthread_mutex_lock(&s_keys_mutex);
    for (int i = 0; i < CACHE_KEYS_MAX; i++) {
-      if (s_keys[i].session_id == session_id) {
+      if (s_keys[i].in_use && s_keys[i].session_id == session_id) {
          s_keys[i].rewritten = true;
       }
    }
@@ -522,7 +522,8 @@ int llm_cache_monitor_zero_streak(uint32_t session_id, int64_t conversation_id, 
    int streak = 0;
    pthread_mutex_lock(&s_keys_mutex);
    for (int i = 0; i < CACHE_KEYS_MAX; i++) {
-      if (s_keys[i].session_id == session_id && s_keys[i].conversation_id == conversation_id) {
+      if (s_keys[i].in_use && s_keys[i].session_id == session_id &&
+          s_keys[i].conversation_id == conversation_id) {
          s_keys[i].zero_streak = zero_read ? s_keys[i].zero_streak + 1 : 0;
          streak = s_keys[i].zero_streak;
          break;
@@ -606,13 +607,14 @@ bool llm_cache_monitor_previous_message_id(uint32_t session_id,
                                            int64_t conversation_id,
                                            char *out,
                                            size_t out_len) {
-   if (!out || out_len == 0 || session_id == 0) {
+   if (!out || out_len == 0) {
       return false;
    }
    out[0] = '\0';
    pthread_mutex_lock(&s_keys_mutex);
    for (int i = 0; i < CACHE_KEYS_MAX; i++) {
-      if (s_keys[i].session_id == session_id && s_keys[i].conversation_id == conversation_id) {
+      if (s_keys[i].in_use && s_keys[i].session_id == session_id &&
+          s_keys[i].conversation_id == conversation_id) {
          snprintf(out, out_len, "%s", s_keys[i].message_id);
          break;
       }
@@ -683,7 +685,8 @@ static void classify(uint32_t session_id,
                      const llm_usage_report_t *usage,
                      bool noted,
                      llm_cache_record_t *rec) {
-   const bool conversation = noted && session_id > 0 && llm_call_kind_is_conversation(rec->kind);
+   /* Session 0 is the local microphone's: its turns are conversation calls too. */
+   const bool conversation = noted && llm_call_kind_is_conversation(rec->kind);
    const bool local = usage->type == LLM_LOCAL;
    const bool shared = local && llm_cache_monitor_local_shared(session_id, rec->conversation_id,
                                                                conversation);

@@ -12,6 +12,18 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-06 — `conversation_logging` retired
+
+**What changed.** `[llm] conversation_logging` (the "Conversation File Logging"
+checkbox) is retired and ignored. It had stopped writing anything when
+compaction changed: conversations are kept in the database, where the WebUI and
+`dawn-admin` read them.
+
+**What you need to do.** Nothing. If your `dawn.toml` sets it, DAWN logs a note
+once at startup; you can delete the line.
+
+---
+
 ## 2026-10-05 — OpenRouter's Claude models use OpenRouter's Anthropic endpoint
 
 **What changed.** If you run Claude models through OpenRouter (`provider =

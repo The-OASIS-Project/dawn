@@ -174,7 +174,7 @@ typedef struct {
 
    /* Stream completion tracking */
    int stream_complete;    /**< 1 when stream has ended */
-   char stream_error[160]; /**< An error event's message (Claude); "" = none */
+   char stream_error[160]; /**< A failure the stream reported; "" = none */
    char finish_reason[32]; /**< Final finish/stop reason from stream */
 
    /* TTFT (Time To First Token) tracking for metrics */
@@ -279,6 +279,17 @@ char *llm_stream_get_response(llm_stream_context_t *ctx);
  * @return 1 if stream has completed, 0 otherwise
  */
 int llm_stream_is_complete(llm_stream_context_t *ctx);
+
+/**
+ * @brief Whether a stream that returned 200 actually finished
+ *
+ * A stream that reported an error, or ended without its end marker, was cut
+ * off: logged (as @p api), worth a retry if nothing was shown yet
+ * (LLM_ERR_TRANSIENT_NETWORK), and told to a WebUI session if something was.
+ *
+ * @return 0 when it finished, 1 when it was cut off
+ */
+int llm_stream_check_finished(llm_stream_context_t *ctx, const char *api);
 
 /**
  * @brief Check if stream contains tool calls instead of text

@@ -418,9 +418,6 @@ static void claude_sse_event_handler(const char *event_type,
    llm_stream_handle_event(ctx->stream_ctx, event_data);
 }
 
-/* Maximum tool call iterations to prevent infinite loops */
-#define MAX_TOOL_ITERATIONS 8
-
 #ifdef ENABLE_WEBUI
 /**
  * @brief Extract error message from Claude API error response
@@ -697,25 +694,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    curl_slist_free_all(headers);
    curl_buffer_free(&streaming_ctx.raw_response);
 
-   /* A 200 says only that the stream started: an error event, or a stream that
-    * ends without message_stop, means the reply was cut off.  (A user stop
-    * aborts the transfer and fails above.)  Before any output it is worth a
-    * retry; after some (text or thinking), a retry would repeat what the user
-    * already heard or saw. */
-   if (!llm_stream_is_complete(stream_ctx)) {
-      const char *why = stream_ctx->stream_error[0] ? stream_ctx->stream_error
-                                                    : "the response ended early";
-      const bool shown = stream_ctx->first_token_received || stream_ctx->has_thinking;
-      OLOG_ERROR("Claude API: stream failed: %s", why);
-      if (!shown) {
-         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
-      }
-#ifdef ENABLE_WEBUI
-      session_t *session = session_get_command_context();
-      if (shown && session && session->type == SESSION_TYPE_WEBUI) {
-         webui_send_error(session, "LLM_ERROR", why);
-      }
-#endif
+   if (llm_stream_check_finished(stream_ctx, "Claude API") != 0) {
       sse_parser_free(sse_parser);
       llm_stream_free(stream_ctx);
       json_object_put(request);

@@ -201,13 +201,6 @@ static void test_strip_internal_drops_context(void) {
    /* The history itself is untouched. */
    TEST_ASSERT_EQUAL_INT(4, (int)json_object_array_length(h));
 
-   /* A log keeps the context and its marks, without other internal keys. */
-   json_object_object_add(json_object_array_get_idx(h, 3), "_blocks", json_object_new_array());
-   struct json_object *log = llm_history_log_copy(h);
-   TEST_ASSERT_EQUAL_INT(4, (int)json_object_array_length(log));
-   TEST_ASSERT_TRUE(llm_history_is_context(json_object_array_get_idx(log, 0)));
-   TEST_ASSERT_FALSE(json_object_object_get_ex(json_object_array_get_idx(log, 3), "_blocks", NULL));
-   json_object_put(log);
    json_object_put(clean);
    json_object_put(h);
 }

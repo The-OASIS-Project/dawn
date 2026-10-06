@@ -25,7 +25,6 @@
 
 #include <curl/curl.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -41,7 +40,6 @@
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
-#include "core/path_utils.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
@@ -1222,77 +1220,6 @@ void llm_context_note_compacted(uint32_t session_id, int estimate) {
    }
    pthread_mutex_unlock(&s_state.mutex);
 }
-
-int llm_context_save_conversation(uint32_t session_id,
-                                  struct json_object *history,
-                                  const char *suffix,
-                                  char *filename_out,
-                                  size_t filename_len) {
-   /* Check if logging is enabled */
-   if (!g_config.llm.conversation_logging) {
-      OLOG_INFO("llm_context: Conversation logging disabled, skipping save");
-      return 1;
-   }
-
-   if (!history) {
-      return FAILURE;
-   }
-
-   /* Generate timestamped filename */
-   time_t now = time(NULL);
-   struct tm tm_storage;
-   struct tm *tm_info = localtime_r(&now, &tm_storage);
-   char timestamp[32];
-   strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_info);
-
-   char filename[256];
-   snprintf(filename, sizeof(filename), "logs/chat_history_session%u_%s_%s.json", session_id,
-            suffix, timestamp);
-
-   /* Create logs directory if needed */
-   if (!path_ensure_parent_dir(filename)) {
-      OLOG_WARNING("llm_context: Could not create logs directory");
-   }
-
-   /* Strip provider-private fields (encrypted reasoning blobs etc.) before
-    * writing to disk — they're session-bound and must not be persisted. */
-   struct json_object *sanitized = llm_history_log_copy(history);
-   if (!sanitized) {
-      OLOG_ERROR("llm_context: Failed to strip provider state — skipping save to avoid "
-                 "persisting session-bound fields");
-      return FAILURE;
-   }
-
-   /* Write JSON to file */
-   const char *json_str = json_object_to_json_string_ext(
-       sanitized, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
-
-   /* Owner-only: the log holds the conversation, its memory and what its
-    * background jobs reported. */
-   const int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-   FILE *fp = fd >= 0 ? fdopen(fd, "w") : NULL;
-   if (!fp) {
-      if (fd >= 0) {
-         close(fd);
-      }
-      OLOG_ERROR("llm_context: Failed to open %s for writing", filename);
-      json_object_put(sanitized);
-      return FAILURE;
-   }
-
-   fprintf(fp, "%s\n", json_str);
-   fclose(fp);
-   json_object_put(sanitized);
-
-   OLOG_INFO("llm_context: Conversation saved to %s", filename);
-
-   if (filename_out && filename_len > 0) {
-      safe_strncpy(filename_out, filename, filename_len);
-   }
-
-   return 0;
-}
-
 
 /* =============================================================================
  * Compaction Helpers (Phase 1 LCM — escalation levels)

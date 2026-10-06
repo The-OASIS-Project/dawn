@@ -431,7 +431,6 @@ compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 compact_use_session = true      # Use session's LLM for compaction
 compact_provider = ""           # Dedicated compaction provider (claude/openai/gemini/local)
 compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5)
-conversation_logging = false    # Save chat history to log files
 rate_limit_enabled = true       # Throttle cloud API calls
 rate_limit_rpm = 40             # Max requests per minute
 

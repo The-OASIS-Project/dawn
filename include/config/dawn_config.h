@@ -377,9 +377,8 @@ typedef struct {
    char compact_provider[32];    /* Compaction provider: openai/claude/gemini/openrouter/local */
    char compact_model[128]; /* Compaction model; a "vendor/model" slug when provider = "openrouter"
                              */
-   bool conversation_logging; /* Save chat history to log files (default: false) */
-   bool rate_limit_enabled;   /* Throttle cloud API calls (default: true) */
-   int rate_limit_rpm;        /* Max cloud API calls per minute (default: 40) */
+   bool rate_limit_enabled; /* Throttle cloud API calls (default: true) */
+   int rate_limit_rpm;      /* Max cloud API calls per minute (default: 40) */
 } llm_config_t;
 
 /* =============================================================================

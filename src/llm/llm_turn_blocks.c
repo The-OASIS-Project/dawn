@@ -786,14 +786,6 @@ int llm_history_drop_turn_blocks(struct json_object *history) {
    return dropped;
 }
 
-struct json_object *llm_history_log_copy(struct json_object *history) {
-   struct json_object *copy = copy_history(history, true, true);
-   if (copy) {
-      drop_reasoning_parts(copy); /* a deep copy: the history is untouched */
-   }
-   return copy;
-}
-
 /* @p url's parts that name an endpoint: scheme and host lower-cased (no
  * credentials), then the path, without a query, fragment or trailing '/'.
  * The host alone goes to @p host. */

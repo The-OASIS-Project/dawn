@@ -60,17 +60,6 @@ extern int llm_curl_progress_callback(void *clientp,
                                       curl_off_t ultotal,
                                       curl_off_t ulnow);
 
-/* Maximum tool call iterations to prevent infinite loops (used by old recursive path) */
-#define MAX_TOOL_ITERATIONS 8
-
-/* A chat-template / Jinja render failure is DETERMINISTIC: the raise lives in the
- * model's GGUF chat template (e.g. Qwen 3.5/3.6's "System message must be at the
- * beginning"), so the identical request fails identically on every retry.  Detect
- * it from the server's error body so the tool loop's transient-5xx retry path
- * fails fast instead of burning ~7s on three hopeless exponential-backoff
- * attempts.  Genuine transient 5xx (no template signature) stay retryable. */
-/* The cloud provider behind an OpenAI-compatible endpoint.  From the endpoint,
- * never the session config or the model name: the endpoint is what answered. */
 /* The model a request uses: the one given, else the configured default (the
  * local model when there's no API key). */
 static const char *resolve_model(const char *model, const char *api_key) {
@@ -80,6 +69,8 @@ static const char *resolve_model(const char *model, const char *api_key) {
    return (api_key == NULL) ? g_config.llm.local.model : llm_get_default_openai_model();
 }
 
+/* The cloud provider behind an OpenAI-compatible endpoint.  From the endpoint,
+ * never the session config or the model name: the endpoint is what answered. */
 static cloud_provider_t provider_for_endpoint(const char *base_url) {
    if (base_url && strstr(base_url, "generativelanguage.googleapis.com")) {
       return CLOUD_PROVIDER_GEMINI;
@@ -100,6 +91,12 @@ static void add_prompt_cache_key(json_object *root, const char *api_key, const c
    }
 }
 
+/* A chat-template / Jinja render failure is DETERMINISTIC: the raise lives in the
+ * model's GGUF chat template (e.g. Qwen 3.5/3.6's "System message must be at the
+ * beginning"), so the identical request fails identically on every retry.  Detect
+ * it from the server's error body so the tool loop's transient-5xx retry path
+ * fails fast instead of burning ~7s on three hopeless exponential-backoff
+ * attempts.  Genuine transient 5xx (no template signature) stay retryable. */
 static bool llm_openai_is_deterministic_template_error(const char *body) {
    if (body == NULL) {
       return false;
@@ -548,10 +545,6 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
    return response;
 }
 
-/* ── Streaming with recursive tool execution ────────────────────────────── */
-
-/* ── Public streaming wrapper (legacy recursive path) ───────────────────── */
-
 /* ── Single-shot streaming (no tool execution or recursion) ─────────────── */
 
 int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history,
@@ -804,6 +797,14 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
    curl_easy_cleanup(curl_handle);
    curl_slist_free_all(headers);
+
+   if (llm_stream_check_finished(stream_ctx, "OpenAI API") != 0) {
+      sse_parser_free(sse_parser);
+      llm_stream_free(stream_ctx);
+      json_object_put(root);
+      curl_buffer_free(&streaming_ctx.raw_response);
+      return 1;
+   }
 
    if (llm_stream_has_tool_calls(stream_ctx)) {
       const tool_call_list_t *tool_calls = llm_stream_get_tool_calls(stream_ctx);

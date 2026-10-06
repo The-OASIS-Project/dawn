@@ -337,25 +337,6 @@ char *llm_context_summarize(struct json_object *to_summarize,
  */
 char *llm_context_usage_string(const llm_context_usage_t *usage, char *buf, size_t buf_len);
 
-/**
- * @brief Save conversation history to log file
- *
- * Saves to logs/ directory with timestamped filename.
- * Respects conversation_logging config setting.
- *
- * @param session_id Session ID for filename
- * @param history Conversation history to save
- * @param suffix Filename suffix (e.g., "precompact", "shutdown")
- * @param filename_out Output: saved filename (can be NULL)
- * @param filename_len Length of filename buffer
- * @return SUCCESS, 1 if logging disabled, or FAILURE on error
- */
-int llm_context_save_conversation(uint32_t session_id,
-                                  struct json_object *history,
-                                  const char *suffix,
-                                  char *filename_out,
-                                  size_t filename_len);
-
 #ifdef __cplusplus
 }
 #endif

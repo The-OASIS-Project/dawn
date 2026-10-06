@@ -231,9 +231,13 @@ void test_expected_read_follows_the_previous_call_on_its_key(void) {
    /* Past the TTL: cold, whatever was cached. */
    TEST_ASSERT_EQUAL_INT(0, expect(&P1, 6400, 400000, &state));
    TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_TTL, state);
-   /* No key (no session): never an expectation. */
+   /* Session 0 is the local microphone's: a key like any other. */
    TEST_ASSERT_EQUAL_INT(0, llm_cache_monitor_expected_read_at(0, 0, &P1, 300000, 9, NULL, 1, &gap,
                                                                &state));
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_COLD_FIRST, state);
+   TEST_ASSERT_EQUAL_INT(9, llm_cache_monitor_expected_read_at(0, 0, &P1, 300000, 9, NULL, 2, &gap,
+                                                               &state));
+   TEST_ASSERT_EQUAL_INT(LLM_CACHE_WARM, state);
 }
 
 void test_a_changed_prefix_names_what_changed(void) {
@@ -518,7 +522,7 @@ static void test_one_off_calls(void) {
 }
 
 
-/* ---- P3: detectors ---- */
+/* ---- detectors: warm misses, zero-read streaks, dropped reasoning ---- */
 
 static session_t s_conv_session;
 

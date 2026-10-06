@@ -280,10 +280,12 @@
             adaptive_endpoint: {
                type: 'select',
                label: 'Adaptive Endpoint',
-               options: ['off', 'shadow', 'on'],
+               options: ['off', 'shadow'],
                default: 'off',
                advanced: true,
-               hint: 'Speculative-decode overlap for lower voice latency (shadow = measure only). Experimental.',
+               hint:
+                  'Shadow: at each pause, transcribe early and log whether it matched the final ' +
+                  'transcript (measurement only; replies are unchanged). WebUI always-on voice only.',
             },
             chunking: {
                type: 'group',
@@ -627,12 +629,6 @@
                   'empty for provider default.',
                advanced: true,
                showWhen: [{ key: 'llm.compact_use_session', value: false }],
-            },
-            conversation_logging: {
-               type: 'checkbox',
-               label: 'Conversation File Logging',
-               hint: 'Save chat history to log files on disk (debug use — WebUI saves to DB regardless)',
-               advanced: true,
             },
             rate_limit_enabled: {
                type: 'checkbox',

@@ -28,6 +28,7 @@
 
 #include "core/session_manager.h"
 #include "llm/llm_context.h"
+#include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -462,6 +463,19 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
       return;
    }
 
+   /* A provider failing mid-stream (OpenRouter's upstream, a server error)
+    * sends an error object, then [DONE]: the reply is cut off. */
+   json_object *chunk_err;
+   if (json_object_object_get_ex(chunk, "error", &chunk_err) && chunk_err &&
+       !json_object_is_type(chunk_err, json_type_null)) {
+      json_object *m;
+      const char *text = json_object_object_get_ex(chunk_err, "message", &m)
+                             ? json_object_get_string(m)
+                             : NULL;
+      safe_strscpy(ctx->stream_error, text && text[0] ? text : "error in the stream");
+      OLOG_ERROR("OpenAI stream error: %s", ctx->stream_error);
+   }
+
    // Cache session lookup for WebUI notifications (avoids repeated lookups)
    session_t *ws_session = session_get_command_context();
    int has_ws_session = (ws_session && ws_session->type == SESSION_TYPE_WEBUI);
@@ -647,6 +661,9 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
             if (reason) {
                safe_strscpy(ctx->finish_reason, reason);
                OLOG_INFO("Stream finish_reason: %s", reason);
+               if (strcmp(reason, "error") == 0 && !ctx->stream_error[0]) {
+                  safe_strscpy(ctx->stream_error, "the provider ended the reply with an error");
+               }
             }
             ctx->stream_complete = 1;
 
@@ -1324,6 +1341,34 @@ int llm_stream_is_complete(llm_stream_context_t *ctx) {
    }
 
    return ctx->stream_complete;
+}
+
+int llm_stream_check_finished(llm_stream_context_t *ctx, const char *api) {
+   if (!ctx) {
+      return 1;
+   }
+   if (ctx->stream_complete && !ctx->stream_error[0]) {
+      return 0;
+   }
+   /* A 200 says only that the stream started: an error event, or a stream that
+    * ends without its end marker, means the reply was cut off.  (A user stop
+    * aborts the transfer and fails earlier.)  Before any output it is worth a
+    * retry; after some (text or thinking), a retry would repeat what the user
+    * already heard or saw. */
+   const char *why = ctx->stream_error[0] ? ctx->stream_error : "the response ended early";
+   /* Any text counts: a path may stream it without marking a first token. */
+   const bool shown = ctx->first_token_received || ctx->has_thinking || ctx->accumulated_size > 0;
+   OLOG_ERROR("%s: stream failed: %s", api, why);
+   if (!shown) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+   }
+#ifdef ENABLE_WEBUI
+   session_t *session = session_get_command_context();
+   if (shown && session && session->type == SESSION_TYPE_WEBUI) {
+      webui_send_error(session, "LLM_ERROR", why);
+   }
+#endif
+   return 1;
 }
 
 int llm_stream_has_tool_calls(llm_stream_context_t *ctx) {

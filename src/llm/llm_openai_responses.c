@@ -248,10 +248,12 @@ static struct json_object *build_responses_request(struct json_object *history,
 
    /* Prompt-cache mode (GPT-5.6+ only — see cache_explicit_supported). "implicit" keeps
     * OpenAI's automatic end-of-messages breakpoint (preserves the within-turn tool-loop
-    * hit) AND honors the explicit prompt_cache_breakpoint that build_input stamps on the
-    * last stable input_text before the volatile block — that explicit breakpoint is what
-    * makes the conversation history cache CROSS-turn (the documented "a shared prefix is
-    * not always a cached prefix" fix). Raw-JSON path, so this works regardless of the
+    * hit; for an append-only conversation request it is also what caches the history
+    * across turns) AND honors the explicit prompt_cache_breakpoint that build_input
+    * stamps on the last stable input_text before a volatile block. Only a history
+    * without a frozen prefix (a research run) has a volatile block; there the explicit
+    * breakpoint is what lets the history cache across rounds (the documented "a shared
+    * prefix is not always a cached prefix" fix). Raw-JSON path, so this works regardless of the
     * Python SDK's type lag. TTL defaults to 30m on 5.6, so it is left unset.
     *
     * Deliberate cost tradeoff: implicit mode re-writes the ~2K changing volatile+question
@@ -287,10 +289,12 @@ static struct json_object *build_responses_request(struct json_object *history,
                 resolved.clamped ? " (setting resolved to what the model accepts)" : "");
    }
 
-   /* System → instructions: ONLY the stable segment, kept byte-stable across turns so
-    * [instructions][tools][history] forms a cacheable prefix. The per-turn volatile
-    * block is repositioned into `input` (below). The stable persona is always present
-    * on the live path, so the field presence is itself stable. */
+   /* System → instructions: ONLY the leading system message (a conversation's frozen
+    * prefix), kept byte-stable across turns so [instructions][tools][history] forms a
+    * cacheable prefix. A conversation's turn context is part of its question; only a
+    * history without a frozen prefix (a research run) has a per-turn volatile block,
+    * repositioned into `input` (below). The prefix is always present on the live path,
+    * so the field presence is itself stable. */
    char *instructions = llm_responses_extract_stable_instructions(history);
    if (instructions) {
       json_object_object_add(root, "instructions", json_object_new_string(instructions));
@@ -586,6 +590,7 @@ static bool responses_event_is_handled(const char *event_type) {
           strcmp(event_type, "response.function_call_arguments.done") == 0 ||
           strcmp(event_type, "response.output_item.done") == 0 ||
           strcmp(event_type, "response.completed") == 0 ||
+          strcmp(event_type, "response.incomplete") == 0 ||
           strcmp(event_type, "response.failed") == 0 || strcmp(event_type, "error") == 0;
 }
 
@@ -742,8 +747,10 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          }
       }
 #endif
-   } else if (strcmp(event_type, "response.completed") == 0) {
-      struct json_object *resp;
+   } else if (strcmp(event_type, "response.completed") == 0 ||
+              strcmp(event_type, "response.incomplete") == 0) {
+      /* Incomplete: it stopped at the output limit, the same response shape. */
+      struct json_object *resp = NULL;
       if (json_object_object_get_ex(root, "response", &resp)) {
          struct json_object *id_obj, *usage_obj;
          if (json_object_object_get_ex(resp, "id", &id_obj)) {
@@ -828,7 +835,17 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          }
       }
       /* Set finish_reason consistent with chat-completions semantics */
-      if (rctx->stream_ctx->has_tool_calls) {
+      if (strcmp(event_type, "response.incomplete") == 0) {
+         /* Stopped at the output limit, unless a filter stopped it. */
+         struct json_object *details = NULL, *reason = NULL;
+         const bool filtered = json_object_object_get_ex(resp, "incomplete_details", &details) &&
+                               json_object_object_get_ex(details, "reason", &reason) &&
+                               strcmp(json_object_get_string(reason)
+                                          ? json_object_get_string(reason)
+                                          : "",
+                                      "content_filter") == 0;
+         safe_strscpy(rctx->stream_ctx->finish_reason, filtered ? "content_filter" : "length");
+      } else if (rctx->stream_ctx->has_tool_calls) {
          safe_strscpy(rctx->stream_ctx->finish_reason, "tool_calls");
       } else {
          safe_strscpy(rctx->stream_ctx->finish_reason, "stop");
@@ -852,6 +869,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
       }
       OLOG_ERROR("Responses stream %s: %s", event_type, msg ? msg : "(no message)");
       safe_strscpy(rctx->stream_ctx->finish_reason, "error");
+      safe_strscpy(rctx->stream_ctx->stream_error, msg && msg[0] ? msg : event_type);
       rctx->stream_ctx->stream_complete = 1;
    }
 
@@ -1070,6 +1088,15 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
 
    curl_easy_cleanup(curl);
    curl_slist_free_all(headers);
+
+   if (llm_stream_check_finished(rctx.stream_ctx, "Responses") != 0) {
+      sse_parser_free(rctx.sse_parser);
+      llm_stream_free(rctx.stream_ctx);
+      json_object_put(root);
+      curl_buffer_free(&rctx.raw_response);
+      json_object_put(rctx.blocks);
+      return 1;
+   }
 
    /* Populate result from stream + responses-specific captures */
    if (rctx.stream_ctx->has_tool_calls && rctx.stream_ctx->tool_calls.count > 0) {

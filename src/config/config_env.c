@@ -1296,8 +1296,6 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(llm, "compact_model",
                              json_object_new_string(config->llm.compact_model));
    }
-   json_object_object_add(llm, "conversation_logging",
-                          json_object_new_boolean(config->llm.conversation_logging));
    json_object_object_add(llm, "rate_limit_enabled",
                           json_object_new_boolean(config->llm.rate_limit_enabled));
    json_object_object_add(llm, "rate_limit_rpm", json_object_new_int(config->llm.rate_limit_rpm));
@@ -2215,7 +2213,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       write_toml_string(fp, "compact_provider", config->llm.compact_provider);
    if (config->llm.compact_model[0])
       write_toml_string(fp, "compact_model", config->llm.compact_model);
-   fprintf(fp, "conversation_logging = %s\n", config->llm.conversation_logging ? "true" : "false");
 
    fprintf(fp, "\n[llm.cloud]\n");
    write_toml_string(fp, "provider", config->llm.cloud.provider);

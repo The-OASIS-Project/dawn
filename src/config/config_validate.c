@@ -255,9 +255,9 @@ int config_validate(const dawn_config_t *config,
 
    /* ===== VAD Adaptive Endpoint (enum) ===== */
    {
-      const char *valid_modes[] = { "off", "shadow", "on" };
-      if (!string_in_list(config->vad.adaptive_endpoint, valid_modes, 3)) {
-         ADD_ERROR("vad.adaptive_endpoint", "must be 'off', 'shadow', or 'on' (got '%s')",
+      const char *valid_modes[] = { "off", "shadow" };
+      if (!string_in_list(config->vad.adaptive_endpoint, valid_modes, 2)) {
+         ADD_ERROR("vad.adaptive_endpoint", "must be 'off' or 'shadow' (got '%s')",
                    config->vad.adaptive_endpoint);
       }
    }

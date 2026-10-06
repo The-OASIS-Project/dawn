@@ -83,8 +83,9 @@
                                   # Env: DAWN_VAD_MAX_RECORDING_DURATION
 # preroll_ms = 500                # Audio to keep before speech detected
                                   # Env: DAWN_VAD_PREROLL_MS
-# adaptive_endpoint = "off"       # "off" | "shadow" (measure only) | "on" (speculative
-                                  # decode overlap). Experimental; Whisper-only.
+# adaptive_endpoint = "off"       # "off" | "shadow": at each pause, transcribe early and
+                                  # log whether it matched (measurement only; replies are
+                                  # unchanged). WebUI always-on voice; Whisper only.
                                   # Env: DAWN_VAD_ADAPTIVE_ENDPOINT
 
 [vad.chunking]
@@ -188,8 +189,6 @@
                                   # compaction is a summarization pass, so a small fast model keeps it
                                   # cheap (same reasoning as extraction; not separately benchmarked). A
                                   # "vendor/model" slug when compact_provider = "openrouter".
-# conversation_logging = false    # Save chat history to log files (WebUI saves to DB)
-                                  # Env: DAWN_LLM_CONVERSATION_LOGGING
 # rate_limit_enabled = true       # Throttle cloud API calls to avoid 429 errors
                                   # Env: DAWN_LLM_RATE_LIMIT_ENABLED
 # rate_limit_rpm = 40             # Max cloud API requests per minute

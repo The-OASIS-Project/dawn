@@ -638,7 +638,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_STR(section, "compact_provider", config->llm.compact_provider);
       JSON_TO_CONFIG_STR(section, "compact_model", config->llm.compact_model);
 
-      JSON_TO_CONFIG_BOOL(section, "conversation_logging", config->llm.conversation_logging);
       JSON_TO_CONFIG_BOOL(section, "rate_limit_enabled", config->llm.rate_limit_enabled);
       JSON_TO_CONFIG_INT(section, "rate_limit_rpm", config->llm.rate_limit_rpm);
       llm_rate_limit_set_rpm(config->llm.rate_limit_enabled ? config->llm.rate_limit_rpm : 0);
