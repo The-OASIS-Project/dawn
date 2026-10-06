@@ -73,20 +73,6 @@ static struct json_object *parse_array(const char *json) {
    return v;
 }
 
-/* The in-force record on @p prefix, made when it has none. */
-static struct json_object *record_of(struct json_object *prefix) {
-   struct json_object *rec = NULL;
-   if (json_object_object_get_ex(prefix, LLM_HISTORY_IN_FORCE_KEY, &rec) &&
-       json_object_is_type(rec, json_type_object)) {
-      return rec;
-   }
-   rec = json_object_new_object();
-   if (rec) {
-      json_object_object_add(prefix, LLM_HISTORY_IN_FORCE_KEY, rec);
-   }
-   return rec;
-}
-
 static const char *str_of(struct json_object *obj, const char *key) {
    struct json_object *v = NULL;
    return json_object_is_type(obj, json_type_object) && json_object_object_get_ex(obj, key, &v) &&
@@ -500,11 +486,8 @@ void prefix_tools_apply(struct json_object *hist,
                         uint32_t session_id,
                         prefix_tools_result_t *out) {
    memset(out, 0, sizeof(*out));
-   struct json_object *prefix = json_object_is_type(hist, json_type_array) &&
-                                        json_object_array_length(hist) > 0
-                                    ? json_object_array_get_idx(hist, 0)
-                                    : NULL;
-   if (llm_history_kind_of(prefix) != MESSAGE_KIND_PREFIX) {
+   struct json_object *prefix = llm_history_prefix(hist);
+   if (!prefix) {
       return;
    }
    const bool compacted = json_object_is_type(removed, json_type_array) &&
@@ -518,7 +501,7 @@ void prefix_tools_apply(struct json_object *hist,
          return; /* tools off: what the conversation has stays */
       }
    }
-   struct json_object *rec = record_of(prefix);
+   struct json_object *rec = llm_history_in_force(prefix, true);
    if (!rec) {
       json_object_put(catalog);
       return;
@@ -655,14 +638,11 @@ void prefix_tools_apply(struct json_object *hist,
 }
 
 bool prefix_tools_mark_rejected(struct json_object *hist) {
-   struct json_object *prefix = json_object_is_type(hist, json_type_array) &&
-                                        json_object_array_length(hist) > 0
-                                    ? json_object_array_get_idx(hist, 0)
-                                    : NULL;
-   if (llm_history_kind_of(prefix) != MESSAGE_KIND_PREFIX || llm_tool_defs_inline_rejected(hist)) {
+   struct json_object *prefix = llm_history_prefix(hist);
+   if (!prefix || llm_tool_defs_inline_rejected(hist)) {
       return false;
    }
-   struct json_object *rec = record_of(prefix);
+   struct json_object *rec = llm_history_in_force(prefix, true);
    if (!rec) {
       return false;
    }

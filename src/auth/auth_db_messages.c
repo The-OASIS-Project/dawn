@@ -510,7 +510,7 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
 
    /* A row naming images is one transaction with what records them. */
    const bool txn = images || (strcmp(row->role, "user") == 0 && strstr(row->content, "[IMAGE:"));
-   if (txn && sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+   if (txn && auth_db_txn_begin_locked("messages") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -518,13 +518,7 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
    int64_t id = 0;
    int result = msg_insert_locked(conv_id, user_id, row, now, &id);
    if (txn) {
-      if (result == AUTH_DB_SUCCESS &&
-          sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-         result = AUTH_DB_FAILURE;
-      }
-      if (result != AUTH_DB_SUCCESS) {
-         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      }
+      result = auth_db_txn_end_locked(result, "messages");
    }
    if (result != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
@@ -592,7 +586,7 @@ int conv_db_add_rows(int64_t conv_id,
    }
 
    AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+   if (auth_db_txn_begin_locked("messages") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       if (!ids_out) {
          free(ids);
@@ -619,12 +613,8 @@ int conv_db_add_rows(int64_t conv_id,
          sqlite3_reset(s_db.stmt_conv_update_meta);
       }
    }
-   if (result == AUTH_DB_SUCCESS &&
-       sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-      result = AUTH_DB_FAILURE;
-   }
+   result = auth_db_txn_end_locked(result, "messages");
    if (result != AUTH_DB_SUCCESS) {
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
       memset(ids, 0, (size_t)n * sizeof(*ids));
    }
    AUTH_DB_UNLOCK();

@@ -403,8 +403,7 @@ int conv_db_save_turn(int64_t conv_id,
    }
 
    AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("conv_prefix: BEGIN failed: %s", sqlite3_errmsg(s_db.db));
+   if (auth_db_txn_begin_locked("conv_prefix") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -442,15 +441,7 @@ int conv_db_save_turn(int64_t conv_id,
    if (result == AUTH_DB_SUCCESS && !withdrawn) {
       result = floor_settled_locked(conv_id, save);
    }
-   const bool commit = result == AUTH_DB_SUCCESS;
-   if (sqlite3_exec(s_db.db, commit ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("conv_prefix: turn %s failed: %s", commit ? "COMMIT" : "ROLLBACK",
-                 sqlite3_errmsg(s_db.db));
-      if (commit) {
-         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-         result = AUTH_DB_FAILURE;
-      }
-   }
+   result = auth_db_txn_end_locked(result, "conv_prefix: turn");
    AUTH_DB_UNLOCK();
    /* What the watermark passed has no reader left: its blocks go, in batches. */
    if (result == AUTH_DB_SUCCESS && compacted) {
@@ -469,7 +460,7 @@ int conv_db_retract_envelope(int64_t conv_id, int user_id, int64_t envelope_id) 
       return AUTH_DB_NOT_FOUND;
    }
    AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+   if (auth_db_txn_begin_locked("conv_prefix") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -530,12 +521,7 @@ int conv_db_retract_envelope(int64_t conv_id, int user_id, int64_t envelope_id) 
          st = NULL;
       }
    }
-   const bool commit = result == AUTH_DB_SUCCESS;
-   if (sqlite3_exec(s_db.db, commit ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK &&
-       commit) {
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      result = AUTH_DB_FAILURE;
-   }
+   result = auth_db_txn_end_locked(result, "conv_prefix");
    AUTH_DB_UNLOCK();
    return result;
 }

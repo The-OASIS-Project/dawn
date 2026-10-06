@@ -148,27 +148,6 @@ void memory_db_internal_source_add_locked(memory_source_kind_t kind,
    sqlite3_reset(stmt);
 }
 
-bool memory_db_internal_ids_json(const int64_t *ids, int n, char *out, size_t size) {
-   if (!out || size < 3 || n < 0 || (n > 0 && !ids)) {
-      return false;
-   }
-   size_t len = 0;
-   out[len++] = '[';
-   for (int i = 0; i < n; i++) {
-      int w = snprintf(out + len, size - len, "%s%lld", i ? "," : "", (long long)ids[i]);
-      if (w < 0 || (size_t)w >= size - len) {
-         return false;
-      }
-      len += (size_t)w;
-   }
-   if (len + 2 > size) {
-      return false;
-   }
-   out[len++] = ']';
-   out[len] = '\0';
-   return true;
-}
-
 void memory_db_internal_build_like_pattern(const char *keywords,
                                            char *out_pattern,
                                            size_t max_len) {

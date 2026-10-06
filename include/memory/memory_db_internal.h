@@ -73,7 +73,7 @@ void memory_db_internal_source_add_locked(memory_source_kind_t kind,
                                           int64_t conv_id);
 
 /* Forgetting a set of conversations: SQL fragments bound as ?1 = user_id,
- * ?2 = the conversation ids as a JSON array (memory_db_internal_ids_json).
+ * ?2 = the conversation ids as a JSON array (auth_db_internal_ids_json_into).
  * Shared by the count shown before a forget and the forget itself, so the two
  * always agree.
  *
@@ -133,14 +133,6 @@ void memory_db_internal_source_add_locked(memory_source_kind_t kind,
  * current value). */
 #define MEMORY_FORGET_PREF_WHERE \
    MEMORY_FORGET_ONLY_FROM("p", "memory_preferences", "memory_preference_sources", "preference_id")
-
-/* Size for memory_db_internal_ids_json() output: "[", n ids of up to 20 digits
- * plus a comma each, "]", NUL. */
-#define MEMORY_DB_IDS_JSON_SIZE(n) ((size_t)(n)*21 + 3)
-
-/* Render @p ids as a JSON array ("[1,2,3]") for binding to json_each().
- * Returns false if @p out (of @p size bytes) is too small.  Pure helper. */
-bool memory_db_internal_ids_json(const int64_t *ids, int n, char *out, size_t size);
 
 /* Lightweight FK existence check (diagnostic — used by the relation_supersede
  * FK probe to pinpoint which FK fired on SQLITE_CONSTRAINT_FOREIGNKEY).

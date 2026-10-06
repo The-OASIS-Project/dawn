@@ -43,16 +43,6 @@
  * Small helpers
  * ------------------------------------------------------------------------- */
 
-static int64_t pragma_int(sqlite3 *db, const char *sql) {
-   sqlite3_stmt *st = NULL;
-   int64_t v = -1;
-   if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
-      v = sqlite3_column_int64(st, 0);
-   }
-   sqlite3_finalize(st);
-   return v;
-}
-
 static int64_t now_ms(void) {
    struct timespec ts;
    clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -129,12 +119,12 @@ static bool same_filesystem(const char *a, const char *b) {
 
 void auth_db_storage_convert_locked(sqlite3 *db, const char *path) {
    if (!path || strlen(path) >= AUTH_DB_STORAGE_PATH_MAX ||
-       pragma_int(db, "PRAGMA auto_vacuum") != 0) {
+       auth_db_query_int64(db, "PRAGMA auto_vacuum") != 0) {
       return; /* incremental already (or full, chosen by hand) */
    }
-   const int64_t page_size = pragma_int(db, "PRAGMA page_size");
-   const int64_t pages = pragma_int(db, "PRAGMA page_count");
-   const int64_t free_pages = pragma_int(db, "PRAGMA freelist_count");
+   const int64_t page_size = auth_db_query_int64(db, "PRAGMA page_size");
+   const int64_t pages = auth_db_query_int64(db, "PRAGMA page_count");
+   const int64_t free_pages = auth_db_query_int64(db, "PRAGMA freelist_count");
    if (page_size <= 0 || pages < 0 || free_pages < 0) {
       return;
    }
@@ -278,7 +268,7 @@ static int vacuum_pass(checkpointer_t *cp, int budget_ms, int *freed_out);
 
 static void *storage_thread(void *arg) {
    checkpointer_t cp = { .conn = arg };
-   cp.page_size = pragma_int(cp.conn, "PRAGMA page_size");
+   cp.page_size = auth_db_query_int64(cp.conn, "PRAGMA page_size");
    if (cp.page_size <= 0) {
       cp.page_size = 4096;
    }
@@ -403,11 +393,11 @@ static int vacuum_pass(checkpointer_t *cp, int budget_ms, int *freed_out) {
          pthread_mutex_unlock(&s_db.mutex);
          return AUTH_DB_FAILURE;
       }
-      if (pragma_int(s_db.db, "PRAGMA auto_vacuum") != 2) {
+      if (auth_db_query_int64(s_db.db, "PRAGMA auto_vacuum") != 2) {
          pthread_mutex_unlock(&s_db.mutex);
          break; /* not converted yet */
       }
-      const int64_t free_pages = pragma_int(s_db.db, "PRAGMA freelist_count");
+      const int64_t free_pages = auth_db_query_int64(s_db.db, "PRAGMA freelist_count");
       if (free_pages <= AUTH_DB_VACUUM_FLOOR_PAGES) {
          pthread_mutex_unlock(&s_db.mutex);
          break;

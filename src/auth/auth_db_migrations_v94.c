@@ -74,17 +74,6 @@ static bool chunks_autoincrement(sqlite3 *db) {
    return yes;
 }
 
-/* The one number @p sql counts, or -1. */
-static int count_rows(sqlite3 *db, const char *sql) {
-   sqlite3_stmt *st = NULL;
-   int n = -1;
-   if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
-      n = sqlite3_column_int(st, 0);
-   }
-   sqlite3_finalize(st);
-   return n;
-}
-
 /* A deleted chunk's id must never name a new one: its withdrawn_items row and
  * the conversations it was injected into still name it.  SQLite can't add
  * AUTOINCREMENT to a table, so it is rebuilt with the same rows and ids (the
@@ -121,7 +110,7 @@ static int chunks_rebuild(sqlite3 *db) {
        "ALTER TABLE document_chunks_v94 RENAME TO document_chunks;"
        "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON "
        "document_chunks(document_id);" DOC_CHUNK_GENERATION_TRIGGERS_SQL "RELEASE v94_chunks;";
-   const int before = count_rows(db, "SELECT COUNT(*) FROM document_chunks");
+   const int64_t before = auth_db_query_int64(db, "SELECT COUNT(*) FROM document_chunks");
    char *errmsg = NULL;
    if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK) {
       OLOG_ERROR("auth_db: v94 document_chunks rebuild failed: %s", errmsg ? errmsg : "unknown");
@@ -129,9 +118,10 @@ static int chunks_rebuild(sqlite3 *db) {
       sqlite3_exec(db, "ROLLBACK TO v94_chunks; RELEASE v94_chunks;", NULL, NULL, NULL);
       return AUTH_DB_FAILURE;
    }
-   const int after = count_rows(db, "SELECT COUNT(*) FROM document_chunks");
+   const int64_t after = auth_db_query_int64(db, "SELECT COUNT(*) FROM document_chunks");
    if (before > after) {
-      OLOG_WARNING("auth_db: v94 left %d chunk(s) of deleted documents behind", before - after);
+      OLOG_WARNING("auth_db: v94 left %lld chunk(s) of deleted documents behind",
+                   (long long)(before - after));
    }
    OLOG_INFO("auth_db: v94 rebuilt document_chunks so chunk ids are never reused");
    return AUTH_DB_SUCCESS;

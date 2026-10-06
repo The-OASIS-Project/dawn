@@ -343,15 +343,9 @@ bool llm_tool_change_stored_inline(struct json_object *msg) {
 }
 
 bool llm_tool_defs_inline_rejected(struct json_object *history) {
-   if (!json_object_is_type(history, json_type_array) || json_object_array_length(history) == 0) {
-      return false;
-   }
-   struct json_object *first = json_object_array_get_idx(history, 0);
-   struct json_object *rec = NULL;
+   struct json_object *rec = llm_history_in_force(llm_history_prefix(history), false);
    struct json_object *flag = NULL;
-   return llm_history_kind_of(first) == MESSAGE_KIND_PREFIX &&
-          json_object_object_get_ex(first, LLM_HISTORY_IN_FORCE_KEY, &rec) &&
-          json_object_object_get_ex(rec, LLM_TOOL_DEFS_REJECTED_KEY, &flag) &&
+   return json_object_object_get_ex(rec, LLM_TOOL_DEFS_REJECTED_KEY, &flag) &&
           json_object_get_boolean(flag);
 }
 

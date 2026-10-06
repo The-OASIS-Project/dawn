@@ -850,6 +850,41 @@ int auth_db_internal_create_parent_dir(const char *path);
  */
 char *auth_db_internal_ids_json(const int64_t *ids, int n);
 
+/** Bytes auth_db_internal_ids_json_into() needs for @p n ids: "[", up to 20
+ *  digits and a comma each, "]", NUL. */
+#define AUTH_DB_IDS_JSON_SIZE(n) ((size_t)(n)*21 + 3)
+
+/**
+ * @brief @p n row ids as a JSON array into @p out (@p size bytes); "[]" for none
+ *
+ * @return false when @p out is too small or the arguments are invalid
+ */
+bool auth_db_internal_ids_json_into(const int64_t *ids, int n, char *out, size_t size);
+
+/**
+ * @brief BEGIN IMMEDIATE on the shared handle (the auth_db lock held)
+ *
+ * @param tag  Prefix for the log line on failure
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (logged)
+ */
+int auth_db_txn_begin_locked(const char *tag);
+
+/**
+ * @brief End the transaction: COMMIT when @p result is AUTH_DB_SUCCESS, else ROLLBACK
+ *
+ * A COMMIT that fails is logged and rolled back, and the result becomes
+ * AUTH_DB_FAILURE; any other result is returned as it came.
+ */
+int auth_db_txn_end_locked(int result, const char *tag);
+
+/**
+ * @brief The first column of the first row of @p sql, an integer (one-number
+ * queries: a pragma, a count)
+ *
+ * @return The value, or -1 when the statement fails or returns no row
+ */
+int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
+
 /* =============================================================================
  * Schema + Statement Lifecycle (defined in sibling modules)
  *
@@ -1107,7 +1142,7 @@ int conv_prompt_blob_get_locked(const char *hash, char **out);
 
 /** Whether conversation @p conv_id is @p user_id's: AUTH_DB_SUCCESS,
  *  AUTH_DB_NOT_FOUND or AUTH_DB_FAILURE.  Caller holds the lock
- *  (auth_db_focus_handles.c). */
+ *  (auth_db_ids.c). */
 int conv_db_owned_locked(int64_t conv_id, int user_id);
 
 /** Clear the stored blocks of conversation @p conv_id's rows at or below

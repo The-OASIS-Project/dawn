@@ -59,28 +59,6 @@ static const char *str_of(struct json_object *obj, const char *key) {
               : NULL;
 }
 
-static struct json_object *prefix_of(struct json_object *hist) {
-   if (!json_object_is_type(hist, json_type_array) || json_object_array_length(hist) == 0) {
-      return NULL;
-   }
-   struct json_object *first = json_object_array_get_idx(hist, 0);
-   return llm_history_kind_of(first) == MESSAGE_KIND_PREFIX ? first : NULL;
-}
-
-/* The record on @p prefix, made when it has none. */
-static struct json_object *record_of(struct json_object *prefix) {
-   struct json_object *rec = NULL;
-   if (json_object_object_get_ex(prefix, LLM_HISTORY_IN_FORCE_KEY, &rec) &&
-       json_object_is_type(rec, json_type_object)) {
-      return rec;
-   }
-   rec = json_object_new_object();
-   if (rec) {
-      json_object_object_add(prefix, LLM_HISTORY_IN_FORCE_KEY, rec);
-   }
-   return rec;
-}
-
 /* The object at @p key of @p rec, made when absent. */
 static struct json_object *child(struct json_object *rec, const char *key) {
    struct json_object *obj = NULL;
@@ -144,8 +122,8 @@ void prefix_in_force_init(struct json_object *prefix_msg,
 }
 
 const char *prefix_in_force_ensure_tag(struct json_object *hist) {
-   struct json_object *prefix = prefix_of(hist);
-   struct json_object *rec = prefix ? record_of(prefix) : NULL;
+   struct json_object *prefix = llm_history_prefix(hist);
+   struct json_object *rec = prefix ? llm_history_in_force(prefix, true) : NULL;
    if (!rec) {
       return NULL;
    }
@@ -222,11 +200,11 @@ static bool in_prompt(const composed_prompt_t *cp, const char *name) {
 }
 
 char *prefix_in_force_instructions(struct json_object *hist, const composed_prompt_t *cp) {
-   struct json_object *prefix = prefix_of(hist);
+   struct json_object *prefix = llm_history_prefix(hist);
    if (!prefix || !cp || cp->n_sections <= 0) {
       return NULL;
    }
-   struct json_object *rec = record_of(prefix);
+   struct json_object *rec = llm_history_in_force(prefix, true);
    if (!rec) {
       return NULL;
    }
@@ -330,8 +308,8 @@ static void legacy_directives_hash(struct json_object *hist, char out[DAWN_SHA25
 }
 
 bool prefix_in_force_directives_changed(struct json_object *hist, const char *directives) {
-   struct json_object *prefix = prefix_of(hist);
-   struct json_object *rec = prefix ? record_of(prefix) : NULL;
+   struct json_object *prefix = llm_history_prefix(hist);
+   struct json_object *rec = prefix ? llm_history_in_force(prefix, true) : NULL;
    if (!rec || !directives) {
       return false;
    }
@@ -354,9 +332,8 @@ bool prefix_in_force_directives_changed(struct json_object *hist, const char *di
 }
 
 char *prefix_in_force_json(struct json_object *hist) {
-   struct json_object *prefix = prefix_of(hist);
-   struct json_object *rec = NULL;
-   if (!prefix || !json_object_object_get_ex(prefix, LLM_HISTORY_IN_FORCE_KEY, &rec)) {
+   struct json_object *rec = llm_history_in_force(llm_history_prefix(hist), false);
+   if (!rec) {
       return NULL;
    }
    const char *json = json_object_to_json_string_ext(rec, JSON_C_TO_STRING_PLAIN);
@@ -364,10 +341,8 @@ char *prefix_in_force_json(struct json_object *hist) {
 }
 
 void prefix_in_force_reset_to_history(struct json_object *hist) {
-   struct json_object *prefix = prefix_of(hist);
-   struct json_object *rec = NULL;
-   if (!prefix || !json_object_object_get_ex(prefix, LLM_HISTORY_IN_FORCE_KEY, &rec) ||
-       !json_object_is_type(rec, json_type_object)) {
+   struct json_object *rec = llm_history_in_force(llm_history_prefix(hist), false);
+   if (!rec) {
       return;
    }
    /* The tag stays (the frozen prefix still declares it), and so do the

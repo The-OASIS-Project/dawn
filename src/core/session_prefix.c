@@ -352,8 +352,7 @@ char *session_prefix_mask_secret(session_t *session, char *text) {
 }
 
 bool session_prefix_is_frozen(struct json_object *history) {
-   return json_object_is_type(history, json_type_array) && json_object_array_length(history) > 0 &&
-          llm_history_kind_of(json_object_array_get_idx(history, 0)) == MESSAGE_KIND_PREFIX;
+   return llm_history_prefix(history) != NULL;
 }
 
 static struct json_object *system_message(const char *text, message_kind_t kind) {

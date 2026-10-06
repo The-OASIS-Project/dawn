@@ -173,7 +173,7 @@ static int forget_in_tx_locked(int user_id,
                                int n_facts,
                                memory_conv_learned_t *d) {
    memset(d, 0, sizeof(*d));
-   bool ok = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+   bool ok = auth_db_txn_begin_locked("memory_db: forget") == AUTH_DB_SUCCESS;
    ok = ok && sqlite3_exec(s_db.db,
                            "CREATE TEMP TABLE IF NOT EXISTS forget_collected(id INTEGER PRIMARY "
                            "KEY);"
@@ -205,8 +205,7 @@ static int forget_in_tx_locked(int user_id,
                                "forget_collected))",
                                user_id, ids, &joined) == SUCCESS;
    if (ok && joined) {
-      (void)sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      return FORGET_SET_CHANGED;
+      return auth_db_txn_end_locked(FORGET_SET_CHANGED, "memory_db: forget");
    }
 
    /* Relations are decided before their facts go (that clears their fact_id). */
@@ -326,12 +325,11 @@ static int forget_in_tx_locked(int user_id,
                       "DELETE FROM forget_collected; DELETE FROM forget_facts; "
                       "DELETE FROM forget_relations; DELETE FROM forget_entities;",
                       NULL, NULL, NULL);
-   if (ok && sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-      ok = false;
-   }
    if (!ok) {
       OLOG_ERROR("memory_db: forget for user %d failed: %s", user_id, sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+   }
+   if (auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE, "memory_db: forget") !=
+       AUTH_DB_SUCCESS) {
       return MEMORY_DB_FAILURE;
    }
    return MEMORY_DB_SUCCESS;
@@ -344,9 +342,9 @@ int memory_db_conversations_forget(int user_id,
    if (deleted_out) {
       memset(deleted_out, 0, sizeof(*deleted_out));
    }
-   char ids[MEMORY_DB_IDS_JSON_SIZE(CONV_CHAIN_MAX)];
+   char ids[AUTH_DB_IDS_JSON_SIZE(CONV_CHAIN_MAX)];
    if (user_id <= 0 || !conv_ids || n_conv <= 0 || n_conv > CONV_CHAIN_MAX ||
-       !memory_db_internal_ids_json(conv_ids, n_conv, ids, sizeof(ids))) {
+       !auth_db_internal_ids_json_into(conv_ids, n_conv, ids, sizeof(ids))) {
       return MEMORY_DB_FAILURE;
    }
 

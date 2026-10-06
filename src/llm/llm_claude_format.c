@@ -72,67 +72,6 @@ static bool is_current_session_remote(void) {
  * @param block Content block to convert (or copy if not image_url)
  * @return New json_object in Claude format (caller must json_object_put), or NULL on error
  */
-/* Whether @p obj, or a part of its content, has a key of DAWN's own. */
-static bool has_internal_key(json_object *obj) {
-   json_object_object_foreach(obj, key, val) {
-      if (key[0] == '_') {
-         return true;
-      }
-      if (strcmp(key, "content") == 0 && json_object_is_type(val, json_type_array)) {
-         const size_t n = json_object_array_length(val);
-         for (size_t i = 0; i < n; i++) {
-            json_object *part = json_object_array_get_idx(val, i);
-            if (json_object_is_type(part, json_type_object) && has_internal_key(part)) {
-               return true;
-            }
-         }
-      }
-   }
-   return false;
-}
-
-/* @p block less DAWN's own keys, its content's parts too (a tool_result's
- * images): a new reference.  NULL on out of memory. */
-static json_object *without_internal_keys(json_object *block) {
-   if (!has_internal_key(block)) {
-      return json_object_get(block);
-   }
-   json_object *copy = json_object_new_object();
-   if (!copy) {
-      return NULL;
-   }
-   json_object_object_foreach(block, k, v) {
-      if (k[0] == '_') {
-         continue;
-      }
-      json_object *value = NULL;
-      if (strcmp(k, "content") == 0 && json_object_is_type(v, json_type_array)) {
-         const size_t n = json_object_array_length(v);
-         value = json_object_new_array_ext((int)n);
-         for (size_t i = 0; value && i < n; i++) {
-            json_object *part = json_object_array_get_idx(v, i);
-            json_object *plain = json_object_is_type(part, json_type_object)
-                                     ? without_internal_keys(part)
-                                     : json_object_get(part);
-            if (!plain) {
-               json_object_put(value);
-               value = NULL;
-               break;
-            }
-            json_object_array_add(value, plain);
-         }
-      } else {
-         value = json_object_get(v);
-      }
-      if (v && !value) {
-         json_object_put(copy);
-         return NULL;
-      }
-      json_object_object_add(copy, k, value);
-   }
-   return copy;
-}
-
 static json_object *convert_content_block_to_claude(json_object *block);
 
 /* A tool result's @p parts converted into @p out.  An image that doesn't
@@ -217,7 +156,7 @@ static json_object *convert_content_block_to_claude(json_object *block) {
       /* Not image_url: the block as it is, less any key of DAWN's own (a
        * turn's context parts carry their kind, a result's images their
        * stored id). */
-      return without_internal_keys(block);
+      return llm_history_wire_copy_object(block);
    }
 
    // This is an OpenAI image_url block - convert to Claude format

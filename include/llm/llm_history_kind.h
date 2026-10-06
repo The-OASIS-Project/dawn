@@ -65,6 +65,16 @@ struct json_object;
 /** @p history's tag (its prefix's record), or NULL when it has none. */
 const char *llm_history_tag(struct json_object *history);
 
+/** @p history's first message when it is the frozen prefix (borrowed), else NULL. */
+struct json_object *llm_history_prefix(struct json_object *history);
+
+/**
+ * The in-force record on @p prefix (borrowed; a JSON object), or NULL when it
+ * has none.  With @p create, one is made when it has none (NULL only when out
+ * of memory).
+ */
+struct json_object *llm_history_in_force(struct json_object *prefix, bool create);
+
 /** @} */
 
 /** Key on a loaded request-context message holding the row id of the question

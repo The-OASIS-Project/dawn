@@ -559,6 +559,7 @@ dawn_add_unit_test(test_llm_tools_reply_code
 dawn_add_unit_test(test_pending_slots
    SOURCES test_pending_slots.c
            ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/tools/tool_pending.c
    LIBS    unity
    LABEL   ci)
 

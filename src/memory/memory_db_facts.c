@@ -1413,7 +1413,11 @@ int memory_db_facts_delete_by_patterns(int user_id,
       sqlite3_bind_text(victim_stmt, 2 + i, patterns[i], -1, SQLITE_STATIC);
    }
 
-   sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+   if (auth_db_txn_begin_locked("memory_db: delete_by_patterns") != AUTH_DB_SUCCESS) {
+      sqlite3_finalize(victim_stmt);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
    while (sqlite3_step(victim_stmt) == SQLITE_ROW) {
       int64_t fid = sqlite3_column_int64(victim_stmt, 0);
       const unsigned char *text = sqlite3_column_text(victim_stmt, 1);
@@ -1451,7 +1455,11 @@ int memory_db_facts_delete_by_patterns(int user_id,
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
-   sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+   if (auth_db_txn_end_locked(AUTH_DB_SUCCESS, "memory_db: delete_by_patterns") !=
+       AUTH_DB_SUCCESS) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
    AUTH_DB_UNLOCK();
 
    /* Cache invalidation — embedding cache holds (id, embedding) pairs that

@@ -53,6 +53,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/research_run.h"
+#include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
@@ -423,10 +424,7 @@ static char *handle_confirm_start(struct json_object *details,
                     "Error: too many failed confirmations — wait a minute and try again.");
    }
    if (crc == DR_CLAIM_RC_NOT_NOW) {
-      char buf[256];
-      snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: the run wasn't started: %s",
-               turn_origin_retry_hint(orc));
-      return strdup(buf);
+      return tool_pending_take_refusal(PENDING_NOT_NOW, orc, "research run");
    }
    if (crc != DR_CLAIM_RC_OK) {
       return strdup(TOOL_RESULT_ERROR_MARK
@@ -503,14 +501,7 @@ static char *handle_start(struct json_object *details,
    pending_stage_rc_t src = PENDING_STAGED;
    if (!dr_pending_store(origin, user_id, brief, deliver_to, parent_conv, token, sizeof(token),
                          &src)) {
-      if (src == PENDING_TWICE_IN_TURN) {
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "Error: a research proposal from this turn is already waiting for the "
-                       "user's yes. Ask about that one first.");
-      }
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: too many research proposals are waiting for a confirm. Try again in "
-                    "a few minutes.");
+      return tool_pending_stage_refusal(src, "research proposal");
    }
    return research_build_proposal(brief, private_requested, token);
 }
@@ -841,7 +832,7 @@ static int deep_research_describe_call(const char *action,
             str_excerpt_line(p->brief, 200, brief, sizeof(brief));
             n = snprintf(out, out_len, "start a deep-research run on \"%s\"%s%s", brief,
                          p->deliver_to[0] ? ", reporting to " : "", p->deliver_to);
-            *valid_for_sec = (int)(DR_PENDING_TTL_SEC - (pending_slots_now() - slot->made_at));
+            *valid_for_sec = pending_slots_valid_for(&s_dr_slots, slot, pending_slots_now());
          }
       }
       pthread_mutex_unlock(&s_dr_confirm.mutex);

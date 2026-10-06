@@ -373,8 +373,7 @@ int conv_db_withdraw(int user_id, bool memory_bodies, conv_withdrawn_t *out) {
    }
    const time_t now = time(NULL);
    AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("withdraw: BEGIN failed: %s", sqlite3_errmsg(s_db.db));
+   if (auth_db_txn_begin_locked("withdraw") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -500,12 +499,8 @@ int conv_db_withdraw(int user_id, bool memory_bodies, conv_withdrawn_t *out) {
    }
    stmts_finalize(&st);
 
-   const bool commit = ok;
-   if (sqlite3_exec(s_db.db, commit ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK &&
-       commit) {
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      ok = false;
-   }
+   ok = auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE, "withdraw") ==
+        AUTH_DB_SUCCESS;
    if (!ok) {
       OLOG_ERROR("withdraw: user %d's forgotten items not withdrawn: %s", user_id,
                  sqlite3_errmsg(s_db.db));
@@ -639,7 +634,7 @@ int conv_db_withdraw_conversation(int64_t conv_id, int user_id, int64_t since, i
       return AUTH_DB_FAILURE;
    }
    AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+   if (auth_db_txn_begin_locked("withdraw") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -648,12 +643,7 @@ int conv_db_withdraw_conversation(int64_t conv_id, int user_id, int64_t since, i
    if (result == AUTH_DB_SUCCESS) {
       result = conv_db_withdraw_saved_locked(conv_id, user_id, 0, since, since_seq, &changed);
    }
-   const bool commit = result == AUTH_DB_SUCCESS;
-   if (sqlite3_exec(s_db.db, commit ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK &&
-       commit) {
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      result = AUTH_DB_FAILURE;
-   }
+   result = auth_db_txn_end_locked(result, "withdraw");
    AUTH_DB_UNLOCK();
    if (result == AUTH_DB_SUCCESS && changed) {
       OLOG_INFO("withdraw: conv %lld: saved context changed or predates a withdrawal",

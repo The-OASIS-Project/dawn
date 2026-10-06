@@ -42,6 +42,7 @@
 #include "tools/homeassistant_service.h"
 #include "tools/homeassistant_ws.h"
 #include "tools/toml.h"
+#include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
@@ -653,13 +654,8 @@ static char *stage_door(const ha_entity_t *entity, const char *verb) {
       snprintf(p->verb, sizeof(p->verb), "%s", verb);
    }
    pthread_mutex_unlock(&s_pending_mutex);
-   if (id == 0 && rc == PENDING_TWICE_IN_TURN)
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Another unlock or open from this turn is already waiting for the user's "
-                    "yes. Ask about that one first.");
    if (id == 0)
-      return strdup(TOOL_RESULT_ERROR_MARK "Too many unlocks or opens are waiting for a confirm. "
-                                           "Try again in a couple of minutes.");
+      return tool_pending_stage_refusal(rc, "door action");
    char buf[512];
    snprintf(buf, sizeof(buf),
             "About to %s '%s' (%s). Ask the user to confirm; if they say yes in their reply, "
@@ -677,7 +673,7 @@ static char *handle_confirm(const char *value) {
    const uint32_t id = parse_pending_id(value);
    turn_origin_t origin;
    if (id == 0 || !turn_origin_capture(&origin))
-      return strdup(TOOL_RESULT_ERROR_MARK "Name it with the pending_id its preview gave.");
+      return tool_pending_missing_id("door action");
    ha_pending_t p;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_pending_mutex);
@@ -685,20 +681,9 @@ static char *handle_confirm(const char *value) {
                                                    tool_get_current_user_id(), HA_PENDING_DOOR, id,
                                                    pending_slots_now(), &p, sizeof(p), &orc);
    pthread_mutex_unlock(&s_pending_mutex);
+   if (rc != PENDING_FOUND)
+      return tool_pending_take_refusal(rc, orc, "door action");
    char buf[320];
-   switch (rc) {
-      case PENDING_FOUND:
-         break;
-      case PENDING_OTHER_ITEM:
-         return strdup(TOOL_RESULT_ERROR_MARK "That pending_id isn't the one waiting. Use the id "
-                                              "from the latest preview.");
-      case PENDING_NOT_NOW:
-         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Not done: %s",
-                  turn_origin_retry_hint(orc));
-         return strdup(buf);
-      default:
-         return strdup("Nothing is waiting to be confirmed (it may have expired). Ask again.");
-   }
    ha_error_t (*apply)(const char *) = NULL;
    for (size_t i = 0; i < sizeof(k_door_ops) / sizeof(k_door_ops[0]); i++) {
       if (strcmp(p.verb, k_door_ops[i].verb) == 0)
@@ -739,7 +724,7 @@ static int ha_describe_call(const char *action,
                           id, pending_slots_now(), &slot) == PENDING_FOUND) {
       const ha_pending_t *p = (const ha_pending_t *)slot;
       n = snprintf(out, out_len, "%s '%s'", p->verb, p->friendly_name);
-      *valid_for_sec = (int)(HA_PENDING_EXPIRY_SEC - (pending_slots_now() - slot->made_at));
+      *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
    }
    pthread_mutex_unlock(&s_pending_mutex);
    return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;

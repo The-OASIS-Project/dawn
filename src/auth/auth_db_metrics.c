@@ -438,7 +438,7 @@ int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
        "WHERE id = ?2)",
        -1, &st, NULL);
    const bool began = rc == SQLITE_OK &&
-                      sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+                      auth_db_txn_begin_locked("auth_db: llm_usage_log") == AUTH_DB_SUCCESS;
    bool ok = began;
    for (int i = 0; ok && i < count; i++) {
       const llm_usage_row_t *r = &rows[i];
@@ -481,8 +481,8 @@ int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
    if (!ok) {
       OLOG_ERROR("auth_db: llm_usage_log insert failed: %s", sqlite3_errmsg(s_db.db));
    }
-   if (began && (!ok || sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)) {
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+   if (began && auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                                       "auth_db: llm_usage_log") != AUTH_DB_SUCCESS) {
       ok = false;
    }
    sqlite3_finalize(st);

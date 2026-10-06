@@ -174,6 +174,9 @@ void pending_slots_drop(const pending_slots_t *slots,
 /** Clear one slot and the struct it heads. */
 void pending_slots_clear(const pending_slots_t *slots, pending_slot_t *slot);
 
+/** Seconds @p slot has left before the table's TTL expires it, at @p now. */
+int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *slot, time_t now);
+
 #ifdef __cplusplus
 }
 #endif

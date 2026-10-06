@@ -42,6 +42,7 @@
 #include "tools/phone_db.h"
 #include "tools/phone_service.h"
 #include "tools/toml.h"
+#include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
@@ -194,10 +195,6 @@ PENDING_ARRAY_CHECK(s_pending);
 static const pending_slots_t s_pending_slots = PENDING_SLOTS_TABLE(s_pending,
                                                                    PHONE_TOOL_PENDING_TTL_SEC);
 
-#define PHONE_PENDING_FULL_ERR                                                                  \
-   TOOL_RESULT_ERROR_MARK "Error: too many actions are waiting for a confirm. Confirm one, or " \
-                          "try again in a couple of minutes."
-
 /* Stage (replace) this session's pending item of @p kind.  NULL when every
  * slot holds another session's live item.  Caller holds s_phone_tool_mutex. */
 static phone_pending_t *stage_pending_locked(const turn_origin_t *origin,
@@ -206,19 +203,6 @@ static phone_pending_t *stage_pending_locked(const turn_origin_t *origin,
                                              pending_stage_rc_t *rc) {
    return (phone_pending_t *)pending_slots_stage(&s_pending_slots, origin, user_id, kind,
                                                  pending_slots_now(), rc);
-}
-
-/* Why a preview wasn't staged, for the model. */
-static char *stage_refusal(pending_stage_rc_t rc, const char *what) {
-   if (rc != PENDING_TWICE_IN_TURN) {
-      return strdup(PHONE_PENDING_FULL_ERR);
-   }
-   char buf[256];
-   snprintf(buf, sizeof(buf),
-            TOOL_RESULT_ERROR_MARK "Error: a %s is already waiting for the user's yes from this "
-                                   "turn. Ask about that one first; prepare another after.",
-            what);
-   return strdup(buf);
 }
 
 /* Drop this session's pending item of @p kind (nothing armed). */
@@ -259,43 +243,21 @@ static char *take_pending(const turn_origin_t *origin,
                           uint32_t item_id,
                           const char *what,
                           phone_pending_t *out) {
-   char buf[256];
    if (item_id == 0) {
-      snprintf(buf, sizeof(buf),
-               TOOL_RESULT_ERROR_MARK "Error: name the %s with the pending_id its preview gave.",
-               what);
-      return strdup(buf);
+      return tool_pending_missing_id(what);
    }
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_phone_tool_mutex);
    const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id, kind, item_id,
                                                    pending_slots_now(), out, sizeof(*out), &orc);
    pthread_mutex_unlock(&s_phone_tool_mutex);
-   switch (rc) {
-      case PENDING_FOUND:
-         return NULL;
-      case PENDING_EXPIRED:
-         snprintf(buf, sizeof(buf),
-                  TOOL_RESULT_ERROR_MARK "Error: confirmation expired. Please retry the %s.", what);
-         break;
-      case PENDING_OTHER_ITEM:
-         snprintf(buf, sizeof(buf),
-                  TOOL_RESULT_ERROR_MARK "Error: that pending_id isn't the %s waiting for a "
-                                         "confirm (it may have been replaced). Use the id from "
-                                         "the latest preview, or prepare it again.",
-                  what);
-         break;
-      case PENDING_NOT_NOW:
-         OLOG_WARNING("phone_tool: confirm of %s refused (%s)", what, turn_origin_refusal(orc));
-         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: the %s wasn't confirmed: %s",
-                  what, turn_origin_retry_hint(orc));
-         break;
-      default:
-         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: no pending %s to confirm.",
-                  what);
-         break;
+   if (rc == PENDING_FOUND) {
+      return NULL;
    }
-   return strdup(buf);
+   if (rc == PENDING_NOT_NOW) {
+      OLOG_WARNING("phone_tool: confirm of %s refused (%s)", what, turn_origin_refusal(orc));
+   }
+   return tool_pending_take_refusal(rc, orc, what);
 }
 
 /* Forward decl — used in the delete-preview handlers before the definition. */
@@ -479,7 +441,7 @@ static char *handle_call(struct json_object *details, int user_id, const turn_or
       }
       pthread_mutex_unlock(&s_phone_tool_mutex);
       if (pending_id == 0) {
-         return stage_refusal(src, "call");
+         return tool_pending_stage_refusal(src, "call");
       }
       /* Room for the whole question the resolver asks. */
       char buf[sizeof(rez.name) + sizeof(rez.number) + sizeof(rez.question) + 32];
@@ -566,7 +528,7 @@ static char *handle_send_sms(struct json_object *details,
       }
       pthread_mutex_unlock(&s_phone_tool_mutex);
       if (pending_id == 0) {
-         return stage_refusal(src, "text");
+         return tool_pending_stage_refusal(src, "text");
       }
 
       char recipient[96];
@@ -723,7 +685,7 @@ static char *handle_delete_sms(struct json_object *details,
       const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_SMS, id,
                                                      NULL, 0, 1, &src);
       if (pending_id == 0) {
-         return stage_refusal(src, "deletion");
+         return tool_pending_stage_refusal(src, "deletion");
       }
 
       snprintf(buf, sizeof(buf),
@@ -758,7 +720,7 @@ static char *handle_delete_sms(struct json_object *details,
       const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_SMS, -1,
                                                      number, 0, match_count, &src);
       if (pending_id == 0) {
-         return stage_refusal(src, "deletion");
+         return tool_pending_stage_refusal(src, "deletion");
       }
 
       snprintf(buf, sizeof(buf),
@@ -791,7 +753,7 @@ static char *handle_delete_sms(struct json_object *details,
    const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_SMS, -1,
                                                   NULL, cutoff, match_count, &src);
    if (pending_id == 0) {
-      return stage_refusal(src, "deletion");
+      return tool_pending_stage_refusal(src, "deletion");
    }
 
    char cutoff_date[32];
@@ -931,7 +893,7 @@ static char *handle_delete_call(struct json_object *details,
       const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_CALL, id,
                                                      NULL, 0, 1, &src);
       if (pending_id == 0) {
-         return stage_refusal(src, "deletion");
+         return tool_pending_stage_refusal(src, "deletion");
       }
 
       snprintf(buf, sizeof(buf),
@@ -962,7 +924,7 @@ static char *handle_delete_call(struct json_object *details,
    const uint32_t pending_id = arm_pending_delete(origin, user_id, PHONE_PENDING_DELETE_CALL, -1,
                                                   NULL, cutoff, match_count, &src);
    if (pending_id == 0) {
-      return stage_refusal(src, "deletion");
+      return tool_pending_stage_refusal(src, "deletion");
    }
 
    char cutoff_date[32];
@@ -1465,7 +1427,7 @@ static int describe_pending(struct json_object *details,
       const phone_pending_t *p = (const phone_pending_t *)slot;
       char text[320];
       if (valid_for_sec) {
-         *valid_for_sec = (int)(PHONE_TOOL_PENDING_TTL_SEC - (pending_slots_now() - slot->made_at));
+         *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
       }
       char date[32];
       switch (kind) {

@@ -35,23 +35,6 @@ static bool name_ok(const char *s, size_t max) {
    return s && s[0] && strlen(s) <= max;
 }
 
-/* Caller holds the lock. */
-int conv_db_owned_locked(int64_t conv_id, int user_id) {
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db, "SELECT 1 FROM conversations WHERE id = ? AND user_id = ?", -1,
-                          &st, NULL) != SQLITE_OK) {
-      return AUTH_DB_FAILURE;
-   }
-   sqlite3_bind_int64(st, 1, conv_id);
-   sqlite3_bind_int(st, 2, user_id);
-   int rc = sqlite3_step(st);
-   sqlite3_finalize(st);
-   if (rc == SQLITE_ROW) {
-      return AUTH_DB_SUCCESS;
-   }
-   return rc == SQLITE_DONE ? AUTH_DB_NOT_FOUND : AUTH_DB_FAILURE;
-}
-
 int conv_db_focus_handles_assign(int64_t conv_id,
                                  int user_id,
                                  conv_focus_handle_t *items,
@@ -82,8 +65,7 @@ int conv_db_focus_handles_assign(int64_t conv_id,
       AUTH_DB_UNLOCK();
       return result;
    }
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("focus_handles: BEGIN failed: %s", sqlite3_errmsg(s_db.db));
+   if (auth_db_txn_begin_locked("focus_handles") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -139,13 +121,7 @@ int conv_db_focus_handles_assign(int64_t conv_id,
    sqlite3_finalize(find);
    sqlite3_finalize(add);
 
-   const bool commit = result == AUTH_DB_SUCCESS;
-   if (sqlite3_exec(s_db.db, commit ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK &&
-       commit) {
-      OLOG_ERROR("focus_handles: COMMIT failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      result = AUTH_DB_FAILURE;
-   }
+   result = auth_db_txn_end_locked(result, "focus_handles");
    AUTH_DB_UNLOCK();
    if (result != AUTH_DB_SUCCESS) {
       for (int i = 0; i < count; i++) {
@@ -182,8 +158,7 @@ int conv_db_focus_handles_put(int64_t conv_id, int user_id, conv_focus_handle_t 
       AUTH_DB_UNLOCK();
       return result;
    }
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("focus_handles: BEGIN failed: %s", sqlite3_errmsg(s_db.db));
+   if (auth_db_txn_begin_locked("focus_handles") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -210,13 +185,7 @@ int conv_db_focus_handles_put(int64_t conv_id, int user_id, conv_focus_handle_t 
       OLOG_ERROR("focus_handles: put failed: %s", sqlite3_errmsg(s_db.db));
    }
    sqlite3_finalize(st);
-   const bool commit = result == AUTH_DB_SUCCESS;
-   if (sqlite3_exec(s_db.db, commit ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK &&
-       commit) {
-      OLOG_ERROR("focus_handles: COMMIT failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      result = AUTH_DB_FAILURE;
-   }
+   result = auth_db_txn_end_locked(result, "focus_handles");
    AUTH_DB_UNLOCK();
    if (result != AUTH_DB_SUCCESS) {
       for (int i = 0; i < count; i++) {

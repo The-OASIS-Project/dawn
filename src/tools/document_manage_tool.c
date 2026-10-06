@@ -49,6 +49,7 @@
 #include "tools/document_index_pipeline.h"
 #include "tools/document_manage.h"
 #include "tools/toml.h"
+#include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
@@ -205,32 +206,18 @@ static char *take_pending(const turn_origin_t *origin,
                           uint32_t pending_id,
                           docmgmt_pending_t *out) {
    if (pending_id == 0)
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Name the deletion with the pending_id its 'delete' preview gave.");
+      return tool_pending_missing_id("deletion");
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_pending_mutex);
    const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id,
                                                    DOCMGMT_PENDING_DELETE, pending_id,
                                                    pending_slots_now(), out, sizeof(*out), &orc);
    pthread_mutex_unlock(&s_pending_mutex);
-   char buf[256];
-   switch (rc) {
-      case PENDING_FOUND:
-         return NULL;
-      case PENDING_OTHER_ITEM:
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "That pending_id isn't the deletion waiting for a confirm (it may have "
-                       "been replaced). Use the id from the latest preview, or run 'delete' "
-                       "again.");
-      case PENDING_NOT_NOW:
-         OLOG_WARNING("document_manage: confirm_delete refused (%s)", turn_origin_refusal(orc));
-         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Not deleted: %s",
-                  turn_origin_retry_hint(orc));
-         return strdup(buf);
-      default:
-         return strdup("There's nothing staged to delete (the request may have expired). Run "
-                       "'delete' again first.");
-   }
+   if (rc == PENDING_FOUND)
+      return NULL;
+   if (rc == PENDING_NOT_NOW)
+      OLOG_WARNING("document_manage: confirm_delete refused (%s)", turn_origin_refusal(orc));
+   return tool_pending_take_refusal(rc, orc, "deletion");
 }
 
 static int resolve_owned_doc(int user_id, const char *label, int64_t id, document_t *out);
@@ -308,7 +295,7 @@ static int doc_manage_describe_call(const char *action,
          const docmgmt_pending_t *p = (const docmgmt_pending_t *)slot;
          n = snprintf(out, out_len, "delete the %s '%s' (#%lld)", p->is_note ? "note" : "document",
                       p->label, (long long)p->doc_id);
-         *valid_for_sec = (int)(DOCMGMT_PENDING_EXPIRY_SEC - (pending_slots_now() - slot->made_at));
+         *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
       }
       pthread_mutex_unlock(&s_pending_mutex);
    } else {
@@ -945,12 +932,8 @@ static char *do_delete_request(int user_id,
    bool is_note = (strcmp(doc.filetype, "note") == 0);
    pending_stage_rc_t src = PENDING_STAGED;
    const uint32_t pending_id = stage_pending(origin, user_id, doc.id, doc.filename, is_note, &src);
-   if (pending_id == 0 && src == PENDING_TWICE_IN_TURN)
-      return strdup(TOOL_RESULT_ERROR_MARK "A deletion from this turn is already waiting for the "
-                                           "user's yes. Ask about that one first.");
    if (pending_id == 0)
-      return strdup(TOOL_RESULT_ERROR_MARK "Too many deletions are waiting for a confirm. Confirm "
-                                           "one, or try again in a couple of minutes.");
+      return tool_pending_stage_refusal(src, "deletion");
 
    char msg[DOCMGMT_CONFIRM_MSG_MAX]; /* base copy + up to DOC_FILENAME_MAX label */
    snprintf(msg, sizeof(msg),

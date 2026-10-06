@@ -249,15 +249,11 @@ static int reclaim_unbound_locked(int64_t before, int *deleted_out) {
 }
 
 static int end_transaction_locked(int result) {
-   if (result == AUTH_DB_SUCCESS &&
-       sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) {
-      return AUTH_DB_SUCCESS;
-   }
-   if (result != AUTH_DB_INVALID) { /* a refused request isn't a database failure */
+   /* A refused request isn't a database failure. */
+   if (result != AUTH_DB_SUCCESS && result != AUTH_DB_INVALID) {
       OLOG_ERROR("tool_results: transaction failed: %s", sqlite3_errmsg(s_db.db));
    }
-   sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-   return result == AUTH_DB_SUCCESS ? AUTH_DB_FAILURE : result;
+   return auth_db_txn_end_locked(result, "tool_results");
 }
 
 int tool_results_db_add(const tool_results_new_t *r, int *evicted_out) {
@@ -274,8 +270,7 @@ int tool_results_db_add(const tool_results_new_t *r, int *evicted_out) {
    const int64_t now = (int64_t)time(NULL);
 
    AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("tool_results: BEGIN failed: %s", sqlite3_errmsg(s_db.db));
+   if (auth_db_txn_begin_locked("tool_results") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -397,7 +392,7 @@ int tool_results_db_bind(int64_t conv_id, const char (*ids)[TOOL_RESULTS_ID_LEN]
       return AUTH_DB_SUCCESS;
    }
    AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+   if (auth_db_txn_begin_locked("tool_results") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }

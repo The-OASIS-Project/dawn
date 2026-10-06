@@ -76,28 +76,18 @@ static int64_t now_ms(void) {
    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* The one number @p sql gives, or -1. */
-static int64_t query_int(sqlite3 *db, const char *sql) {
-   sqlite3_stmt *st = NULL;
-   int64_t v = -1;
-   if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
-      v = sqlite3_column_int64(st, 0);
-   }
-   sqlite3_finalize(st);
-   return v;
-}
-
 /* Bytes messages and its indexes take: their pages (dbstat), or, where SQLite
  * was built without it, every page in use (more than enough). */
 static int64_t table_bytes(sqlite3 *db) {
-   int64_t bytes = query_int(db, "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name IN "
-                                 "('messages', 'idx_messages_conversation', "
-                                 "'idx_messages_llm_blocks', 'idx_messages_display', "
-                                 "'idx_messages_kind')");
+   int64_t bytes = auth_db_query_int64(db,
+                                       "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name IN "
+                                       "('messages', 'idx_messages_conversation', "
+                                       "'idx_messages_llm_blocks', 'idx_messages_display', "
+                                       "'idx_messages_kind')");
    if (bytes < 0) {
-      const int64_t page = query_int(db, "PRAGMA page_size");
-      const int64_t pages = query_int(db, "PRAGMA page_count");
-      const int64_t free_pages = query_int(db, "PRAGMA freelist_count");
+      const int64_t page = auth_db_query_int64(db, "PRAGMA page_size");
+      const int64_t pages = auth_db_query_int64(db, "PRAGMA page_count");
+      const int64_t free_pages = auth_db_query_int64(db, "PRAGMA freelist_count");
       bytes = page > 0 && pages >= 0 && free_pages >= 0 ? (pages - free_pages) * page : 0;
    }
    return bytes;
@@ -192,12 +182,12 @@ static int rebuild(sqlite3 *db, bool has_images) {
    if (exec_logged(db, "BEGIN IMMEDIATE", "BEGIN") != AUTH_DB_SUCCESS) {
       return AUTH_DB_FAILURE;
    }
-   const int64_t before = query_int(db, "SELECT COUNT(*) FROM messages");
+   const int64_t before = auth_db_query_int64(db, "SELECT COUNT(*) FROM messages");
    if (exec_logged(db, sql, "messages rebuild") != AUTH_DB_SUCCESS) {
       sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
       return AUTH_DB_FAILURE;
    }
-   const int64_t after = query_int(db, "SELECT COUNT(*) FROM messages");
+   const int64_t after = auth_db_query_int64(db, "SELECT COUNT(*) FROM messages");
    if (before != after) {
       OLOG_ERROR("auth_db: v98 rebuild copied %lld of %lld messages; rolled back", (long long)after,
                  (long long)before);
@@ -266,8 +256,8 @@ int auth_db_migrations_v98(sqlite3 *db, const char *db_path) {
              (long long)(bytes / (1024 * 1024)));
    const int64_t t0 = now_ms();
    /* Both are no-ops inside a transaction, so they're set around it. */
-   const bool fk_on = query_int(db, "PRAGMA foreign_keys") == 1;
-   const bool legacy_on = query_int(db, "PRAGMA legacy_alter_table") == 1;
+   const bool fk_on = auth_db_query_int64(db, "PRAGMA foreign_keys") == 1;
+   const bool legacy_on = auth_db_query_int64(db, "PRAGMA legacy_alter_table") == 1;
    sqlite3_exec(db, "PRAGMA foreign_keys=OFF", NULL, NULL, NULL);
    sqlite3_exec(db, "PRAGMA legacy_alter_table=ON", NULL, NULL, NULL);
    const int rc = rebuild(db, has_images);

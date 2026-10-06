@@ -772,9 +772,8 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
 
    /* Going private updates the conversation and its continuations together. */
    const bool txn = is_private &&
-                    sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+                    auth_db_txn_begin_locked("conv_db_set_private") == AUTH_DB_SUCCESS;
    if (is_private && !txn) {
-      OLOG_ERROR("conv_db_set_private: BEGIN failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
@@ -823,8 +822,9 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_set_private: update failed: %s", sqlite3_errmsg(s_db.db));
    }
-   if (txn) {
-      sqlite3_exec(s_db.db, rc == SQLITE_DONE ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+   if (txn && auth_db_txn_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                                     "conv_db_set_private") != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
    }
 
    AUTH_DB_UNLOCK();

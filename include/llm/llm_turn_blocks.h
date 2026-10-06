@@ -281,6 +281,15 @@ size_t llm_turn_message_reasoning_chars(struct json_object *message);
 struct json_object *llm_history_wire_copy(struct json_object *history);
 
 /**
+ * @brief One message or content part for the wire: DAWN's own keys removed,
+ * its content's parts too (a turn's context parts, a tool result's images)
+ *
+ * Shared when it has none, as in llm_history_wire_copy().  A new reference;
+ * NULL on allocation failure.
+ */
+struct json_object *llm_history_wire_copy_object(struct json_object *obj);
+
+/**
  * @brief A deep copy of @p history without DAWN's own keys
  *
  * For anything that isn't a replay to the same vendor: memory extraction, a

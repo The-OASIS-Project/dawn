@@ -21,9 +21,11 @@
  * names, in the user's next turn.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/pending_slots.h"
+#include "tools/tool_pending.h"
 #include "unity.h"
 
 #define SLOTS 3
@@ -246,8 +248,40 @@ static void test_drop_keeps_this_turns_item(void) {
    TEST_ASSERT_FALSE(first->hdr.active);
 }
 
+/* The seconds left come from the table's TTL. */
+static void test_valid_for_counts_down_from_the_ttl(void) {
+   item_t *it = stage(1, 7, KIND_CALL, "555", 1000);
+   TEST_ASSERT_NOT_NULL(it);
+   TEST_ASSERT_EQUAL_INT(TTL, pending_slots_valid_for(&s_slots, &it->hdr, 1000));
+   TEST_ASSERT_EQUAL_INT(TTL - 30, pending_slots_valid_for(&s_slots, &it->hdr, 1030));
+}
+
+/* Every tool that stages for a confirm says the same thing for each outcome. */
+static void test_tool_messages_name_the_item(void) {
+   char *m = tool_pending_stage_refusal(PENDING_TWICE_IN_TURN, "deletion");
+   TEST_ASSERT_NOT_NULL(strstr(m, "a deletion is already waiting for the user's yes"));
+   free(m);
+   m = tool_pending_stage_refusal(PENDING_STAGED, "deletion");
+   TEST_ASSERT_NOT_NULL(strstr(m, "too many actions are waiting for a confirm"));
+   free(m);
+   m = tool_pending_missing_id("call");
+   TEST_ASSERT_NOT_NULL(strstr(m, "name the call with the pending_id"));
+   free(m);
+   m = tool_pending_take_refusal(PENDING_NOT_NOW, TURN_ORIGIN_SAME_TURN, "call");
+   TEST_ASSERT_NOT_NULL(strstr(m, "the call wasn't confirmed: only the user's reply"));
+   free(m);
+   m = tool_pending_take_refusal(PENDING_OTHER_ITEM, TURN_ORIGIN_OK, "text");
+   TEST_ASSERT_NOT_NULL(strstr(m, "isn't the text waiting for a confirm"));
+   free(m);
+   m = tool_pending_take_refusal(PENDING_NONE, TURN_ORIGIN_OK, "text");
+   TEST_ASSERT_NOT_NULL(strstr(m, "no pending text to confirm"));
+   free(m);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_valid_for_counts_down_from_the_ttl);
+   RUN_TEST(test_tool_messages_name_the_item);
    RUN_TEST(test_same_session_replaces);
    RUN_TEST(test_other_session_untouched);
    RUN_TEST(test_other_user_not_found);

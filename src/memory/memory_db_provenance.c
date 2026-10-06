@@ -445,20 +445,6 @@ static int provenance_extend_impl(int64_t fact_id,
    return rc;
 }
 
-/* Caller holds the auth_db lock.  Whether @p conv_id exists and is @p user_id's. */
-static bool conversation_owned_locked(int64_t conv_id, int user_id) {
-   bool owned = false;
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db, "SELECT 1 FROM conversations WHERE id = ? AND user_id = ?", -1,
-                          &st, NULL) == SQLITE_OK) {
-      sqlite3_bind_int64(st, 1, conv_id);
-      sqlite3_bind_int(st, 2, user_id);
-      owned = sqlite3_step(st) == SQLITE_ROW;
-   }
-   sqlite3_finalize(st);
-   return owned;
-}
-
 void memory_db_fact_attach_sources(const session_fact_source_t *facts, int count, int64_t conv_id) {
    if (!facts || count <= 0 || conv_id <= 0) {
       return;
@@ -477,7 +463,7 @@ void memory_db_fact_attach_sources(const session_fact_source_t *facts, int count
        * point a fact at one that is gone (or isn't this user's). */
       if (f->user_id != checked_user) {
          checked_user = f->user_id;
-         owned = conversation_owned_locked(conv_id, f->user_id);
+         owned = conv_db_owned_locked(conv_id, f->user_id) == AUTH_DB_SUCCESS;
       }
       if (!owned || provenance_extend_locked(f->fact_id, f->user_id, conv_id, 0, 0, f->created) !=
                         MEMORY_DB_SUCCESS) {
@@ -553,9 +539,9 @@ int memory_db_conversations_learned_count(int user_id,
       return MEMORY_DB_FAILURE;
    }
    memset(out, 0, sizeof(*out));
-   char ids[MEMORY_DB_IDS_JSON_SIZE(CONV_CHAIN_MAX)];
+   char ids[AUTH_DB_IDS_JSON_SIZE(CONV_CHAIN_MAX)];
    if (n_conv > CONV_CHAIN_MAX ||
-       !memory_db_internal_ids_json(conv_ids, n_conv, ids, sizeof(ids))) {
+       !auth_db_internal_ids_json_into(conv_ids, n_conv, ids, sizeof(ids))) {
       return MEMORY_DB_FAILURE;
    }
 #define IN_CONVS " WHERE user_id = ?1 AND source_conversation_id IN " MEMORY_FORGET_IN_SET

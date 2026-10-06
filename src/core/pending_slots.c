@@ -190,3 +190,10 @@ void pending_slots_drop(const pending_slots_t *slots,
       pending_slots_clear(slots, s);
    }
 }
+
+int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *slot, time_t now) {
+   if (!slots || !slot) {
+      return 0;
+   }
+   return (int)(slots->ttl_sec - (now - slot->made_at));
+}

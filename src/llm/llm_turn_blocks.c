@@ -710,6 +710,10 @@ struct json_object *llm_history_wire_copy(struct json_object *history) {
    return copy_history(history, false, false);
 }
 
+struct json_object *llm_history_wire_copy_object(struct json_object *obj) {
+   return copy_object(obj, false, false);
+}
+
 /* Whether @p part is one another reader may not see: anything but text, tool
  * calls and results, and images.  Thinking, redacted thinking and any vendor's
  * opaque content (a server tool's encrypted result, say) go. */

@@ -277,8 +277,32 @@ static void test_fold_keeps_an_envelopes_context_apart(void) {
    json_object_put(h);
 }
 
+/* The frozen prefix is the first message only when it is marked as one; its
+ * in-force record is read without being made unless the caller asks. */
+static void test_prefix_and_its_in_force_record(void) {
+   struct json_object *plain = parse("[{\"role\":\"system\",\"content\":\"S\"}]");
+   TEST_ASSERT_NULL(llm_history_prefix(plain));
+   TEST_ASSERT_NULL(llm_history_prefix(NULL));
+   json_object_put(plain);
+
+   struct json_object *h = parse("[{\"role\":\"system\",\"content\":\"S\",\"_kind\":\"prefix\"},"
+                                 "{\"role\":\"user\",\"content\":\"Q\"}]");
+   struct json_object *prefix = llm_history_prefix(h);
+   TEST_ASSERT_EQUAL_PTR(json_object_array_get_idx(h, 0), prefix);
+   TEST_ASSERT_NULL(llm_history_in_force(prefix, false));
+   TEST_ASSERT_NULL(llm_history_tag(h));
+
+   struct json_object *rec = llm_history_in_force(prefix, true);
+   TEST_ASSERT_NOT_NULL(rec);
+   TEST_ASSERT_EQUAL_PTR(rec, llm_history_in_force(prefix, false));
+   json_object_object_add(rec, "tag", json_object_new_string("t1"));
+   TEST_ASSERT_EQUAL_STRING("t1", llm_history_tag(h));
+   json_object_put(h);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_prefix_and_its_in_force_record);
    RUN_TEST(test_fold_puts_context_in_front_of_the_question);
    RUN_TEST(test_fold_keeps_a_content_array_question);
    RUN_TEST(test_fold_leaves_orphan_context_alone);

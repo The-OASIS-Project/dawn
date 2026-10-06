@@ -43,14 +43,33 @@ static bool is_role(struct json_object *msg, const char *role) {
    return r && strcmp(r, role) == 0;
 }
 
-struct json_object *llm_history_frozen_tools(struct json_object *history) {
+struct json_object *llm_history_prefix(struct json_object *history) {
    if (!json_object_is_type(history, json_type_array) || json_object_array_length(history) == 0) {
       return NULL;
    }
    struct json_object *first = json_object_array_get_idx(history, 0);
+   return llm_history_kind_of(first) == MESSAGE_KIND_PREFIX ? first : NULL;
+}
+
+struct json_object *llm_history_in_force(struct json_object *prefix, bool create) {
+   struct json_object *rec = NULL;
+   if (json_object_object_get_ex(prefix, LLM_HISTORY_IN_FORCE_KEY, &rec) &&
+       json_object_is_type(rec, json_type_object)) {
+      return rec;
+   }
+   if (!create || !json_object_is_type(prefix, json_type_object)) {
+      return NULL;
+   }
+   rec = json_object_new_object();
+   if (rec) {
+      json_object_object_add(prefix, LLM_HISTORY_IN_FORCE_KEY, rec);
+   }
+   return rec;
+}
+
+struct json_object *llm_history_frozen_tools(struct json_object *history) {
    struct json_object *tools = NULL;
-   if (llm_history_kind_of(first) != MESSAGE_KIND_PREFIX ||
-       !json_object_object_get_ex(first, LLM_HISTORY_TOOLS_KEY, &tools) ||
+   if (!json_object_object_get_ex(llm_history_prefix(history), LLM_HISTORY_TOOLS_KEY, &tools) ||
        !json_object_is_type(tools, json_type_array)) {
       return NULL;
    }
@@ -58,16 +77,7 @@ struct json_object *llm_history_frozen_tools(struct json_object *history) {
 }
 
 const char *llm_history_tag(struct json_object *history) {
-   if (!json_object_is_type(history, json_type_array) || json_object_array_length(history) == 0) {
-      return NULL;
-   }
-   struct json_object *first = json_object_array_get_idx(history, 0);
-   struct json_object *rec = NULL;
-   if (llm_history_kind_of(first) != MESSAGE_KIND_PREFIX ||
-       !json_object_object_get_ex(first, LLM_HISTORY_IN_FORCE_KEY, &rec)) {
-      return NULL;
-   }
-   const char *tag = str_field(rec, "tag");
+   const char *tag = str_field(llm_history_in_force(llm_history_prefix(history), false), "tag");
    return (tag && tag[0]) ? tag : NULL;
 }
 
