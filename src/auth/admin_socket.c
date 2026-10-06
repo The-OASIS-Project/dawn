@@ -1027,11 +1027,12 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
 
    /* Purge the user's images (rows + files) BEFORE the user delete: the images FK
     * cascades the rows on user delete but leaks the files, and after the cascade
-    * there are no rows left to enumerate.  Edge: if the delete is then rejected
-    * (last admin), the images are gone but the account survives — acceptable, since
-    * deleting the last admin is a blocked misuse anyway. */
+    * there are no rows left to enumerate.  Not for the last admin, whose delete is
+    * refused below: the account stays, with its images. */
    auth_user_t del_user;
-   if (auth_db_get_user(target, &del_user) == AUTH_DB_SUCCESS && del_user.id > 0) {
+   int admins = 0;
+   if (auth_db_get_user(target, &del_user) == AUTH_DB_SUCCESS && del_user.id > 0 &&
+       !(del_user.is_admin && auth_db_count_admins(&admins) == AUTH_DB_SUCCESS && admins <= 1)) {
       /* An incomplete purge is logged (rows or files may have leaked, which
        * matters for a deletion guarantee); the FK cascade still removes rows. */
       (void)conv_images_purge_user(del_user.id);

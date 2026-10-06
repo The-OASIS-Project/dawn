@@ -199,7 +199,10 @@ void handle_update_satellite(ws_connection_t *conn, struct json_object *payload)
    struct json_object *user_id_obj, *ha_area_obj;
    if (json_object_object_get_ex(payload, "user_id", &user_id_obj)) {
       int new_user_id = json_object_get_int(user_id_obj);
-      satellite_db_update_user(uuid, new_user_id);
+      if (satellite_db_update_user(uuid, new_user_id) != AUTH_DB_SUCCESS) {
+         send_error_impl(conn->wsi, "DB_ERROR", "Could not assign that user");
+         return;
+      }
       mapping.user_id = new_user_id;
       /* The Local Device is the daemon's own mic and speaker: its mic follows
        * the same assignment (applied between local turns). */

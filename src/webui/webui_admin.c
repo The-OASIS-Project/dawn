@@ -218,9 +218,11 @@ void handle_delete_user(ws_connection_t *conn, struct json_object *payload) {
    const int target_id = auth_db_get_user(username, &target) == AUTH_DB_SUCCESS ? target.id : 0;
    /* The account's stores (images, document originals) go first: their rows
     * cascade with the user, their files don't, and after it nothing names
-    * them.  As on the admin socket: a refused delete (the last admin) has
-    * lost them already, a blocked misuse. */
-   if (target_id > 0) {
+    * them.  Not for the last admin, whose delete is refused below. */
+   int admins = 0;
+   const bool last_admin = target_id > 0 && target.is_admin &&
+                           auth_db_count_admins(&admins) == AUTH_DB_SUCCESS && admins <= 1;
+   if (target_id > 0 && !last_admin) {
       (void)conv_images_purge_user(target_id);
    }
    conv_db_withdraw_intent_begin(target_id);
