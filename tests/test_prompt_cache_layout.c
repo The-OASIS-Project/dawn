@@ -114,11 +114,9 @@ int llm_tools_get_enabled_count_filtered(bool r) {
    (void)r;
    return 0;
 }
-#ifdef ENABLE_MULTI_CLIENT
 struct session *session_get_command_context(void) {
    return NULL;
 }
-#endif
 void webui_send_error(struct session *s, const char *code, const char *message) {
    (void)s;
    (void)code;

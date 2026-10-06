@@ -167,7 +167,7 @@ char *memory_build_context(int user_id, int token_budget) {
    }
 
    /* The IMPORTANT MEMORY INSTRUCTIONS section of the system prompt
-    * (build_stable_sections in webui_auth_helpers.c) refers to this block by
+    * (build_stable_sections in core/prompt_builder.c) refers to this block by
     * name. */
 
    if (strbuf_oom(&sb)) {

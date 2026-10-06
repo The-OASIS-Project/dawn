@@ -590,3 +590,7 @@ int auth_db_unlock_user(const char *username) {
 
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
+
+/* Replaced by the WebUI (webui_login_sweep.c); nothing to do without it. */
+__attribute__((weak)) void auth_sessions_changed(void) {
+}

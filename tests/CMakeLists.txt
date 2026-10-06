@@ -311,7 +311,6 @@ dawn_add_unit_test(test_mcp_bridge
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
-   DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
 
 dawn_add_unit_test(test_sentence_buffer
@@ -362,7 +361,6 @@ dawn_add_unit_test(test_text_input_dispatch
    SOURCES test_text_input_dispatch.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
-   DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
 
 # A turn's attached documents built into its text (bodies defused, boundaries kept).
@@ -436,13 +434,10 @@ dawn_add_unit_test(test_ota
 # invariants).  Externals (satellite_db_list / ota_db_get / sessions / transport)
 # are stubbed IN the test TU (not a sibling *_stub.c) — deliberate: ota_rollout.c
 # is the sole consumer here, so there's no stub to share, and a future new external
-# dep should surface as a link error in this TU.  ENABLE_MULTI_CLIENT forces the
-# extern session_find_by_uuid decl (vs the header's inline NULL stub) so the test's
-# online-check stub is the one that runs.
+# dep should surface as a link error in this TU.
 dawn_add_unit_test(test_ota_rollout
    SOURCES test_ota_rollout.c
            ${SRC_ROOT}/src/core/ota_rollout.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -533,7 +528,6 @@ dawn_add_unit_test(test_tool_call_policy
            ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/tools/tool_registry.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${SODIUM_LIBRARIES}
-   DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
 
 # Reply codes and the actions from a text that wait for them.
@@ -553,7 +547,6 @@ dawn_add_unit_test(test_llm_tools_reply_code
            ${SRC_ROOT}/src/core/reply_code.c
            ${SRC_ROOT}/src/core/pending_slots.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${SODIUM_LIBRARIES}
-   DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
 
 # What a tool staged for the user's confirm: one item per session and kind.
@@ -641,7 +634,6 @@ dawn_add_unit_test(test_session_history
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/core/hash_util.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -682,7 +674,6 @@ dawn_add_unit_test(test_session_prefix
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/core/prefix_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -690,7 +681,6 @@ dawn_add_unit_test(test_satellite_remap
    SOURCES test_satellite_remap.c
            ${SRC_ROOT}/src/webui/satellite_remap.c
            ${SRC_ROOT}/src/core/turn_queue.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1082,7 +1072,6 @@ dawn_add_unit_test(test_llm_tools_frozen
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/hash_util.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
@@ -1206,14 +1195,10 @@ dawn_add_unit_test(test_prompt_builder
            ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
            ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/prompt_sections.c
-           ${SRC_ROOT}/src/webui/build_focus_block.c
+           ${SRC_ROOT}/src/core/build_focus_block.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/core/strbuf.c
-   # build_focus_block's session reads are gated #ifdef ENABLE_MULTI_CLIENT
-   # in the daemon (the root CMakeLists sets it only when ENABLE_WEBUI=ON);
-   # the ci preset turns WEBUI off, so force the define here.
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1246,11 +1231,9 @@ dawn_add_unit_test(test_focus_probe
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/strbuf.c
-           ${SRC_ROOT}/src/webui/build_focus_block.c
+           ${SRC_ROOT}/src/core/build_focus_block.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
-   # See test_prompt_builder above — same ENABLE_MULTI_CLIENT requirement.
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1295,7 +1278,6 @@ dawn_add_unit_test(test_llm_cache_monitor
    SOURCES test_llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
@@ -1402,7 +1384,6 @@ dawn_add_unit_test(test_llm_claude_betas
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_claude_route.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1755,7 +1736,6 @@ dawn_add_unit_test(test_tool_images
            ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${AUTH_DB_SOURCES}
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1765,7 +1745,6 @@ dawn_add_unit_test(test_focus_handles
    SOURCES test_focus_handles.c
            ${SRC_ROOT}/src/core/focus/focus_handles.c
            ${AUTH_DB_SOURCES}
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1773,7 +1752,6 @@ dawn_add_unit_test(test_focus_handles
 dawn_add_unit_test(test_auth_db_storage
    SOURCES test_auth_db_storage.c
            ${AUTH_DB_SOURCES}
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1781,7 +1759,6 @@ dawn_add_unit_test(test_auth_db_storage
 dawn_add_unit_test(test_session_reaper
    SOURCES test_session_reaper.c
            ${SRC_ROOT}/src/core/session_reaper.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1821,7 +1798,6 @@ dawn_add_unit_test(test_tool_result_store
            ${SRC_ROOT}/src/llm/llm_tool_view_path.c
            ${SRC_ROOT}/src/blob_store_util.c
            ${AUTH_DB_SOURCES}
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1896,15 +1872,10 @@ dawn_add_unit_test(test_history_strip_markers
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
-# Background-job session pool.  ENABLE_MULTI_CLIENT is forced (same reason as
-# test_ota_rollout above): the ci preset builds WEBUI=OFF, and session_manager.h
-# only declares the multi-client session API — session_job_lookup_fn, and the
-# real session_release rather than its no-op inline stub — under that define.
-# Without it this test cannot compile on the preset CI actually runs.
+# Background-job session pool.
 dawn_add_unit_test(test_job_manager
    SOURCES test_job_manager.c
            ${SRC_ROOT}/src/core/job_manager.c
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -2188,7 +2159,6 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
 
@@ -2303,7 +2273,6 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -2341,11 +2310,9 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/strbuf.c
-           ${SRC_ROOT}/src/webui/build_focus_block.c
+           ${SRC_ROOT}/src/core/build_focus_block.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
-   # See test_prompt_builder — same ENABLE_MULTI_CLIENT requirement.
-   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common pthread m stemmer
            ${JSONC_LIBRARIES})
 

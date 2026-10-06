@@ -47,7 +47,7 @@
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
-#include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (job_worker is ENABLE_WEBUI-only) */
+#include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (jobs run only in WebUI builds) */
 
 /* Work item handed to the detached worker thread. */
 typedef struct {

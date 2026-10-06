@@ -31,14 +31,14 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h> /* free() in static-inline composed_prompt_free fallback */
+#include <stdlib.h>
 #include <time.h>
 
-#include "config/dawn_config.h"  // g_config (the non-multi-client stubs read it)
-#include "core/prompt_parts.h"   // For composed_prompt_t
-#include "core/text_filter.h"    // For cmd_tag_filter_state_t
-#include "dawn_error.h"          // SUCCESS / FAILURE (the non-multi-client stubs return them)
-#include "llm/llm_interface.h"   // For session_llm_config_t
+#include "config/dawn_config.h"
+#include "core/prompt_parts.h"  // For composed_prompt_t
+#include "core/text_filter.h"   // For cmd_tag_filter_state_t
+#include "dawn_error.h"
+#include "llm/llm_interface.h"  // For session_llm_config_t
 
 #define SESSION_PROVIDER_MAX 16
 #define SESSION_MAX_PROVIDERS 5 /* local + each cloud provider */
@@ -1055,7 +1055,6 @@ typedef int (*session_prompt_builder_t)(session_t *session,
 // Lifecycle Functions
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 /**
  * @brief Initialize the session manager
  *
@@ -1073,13 +1072,11 @@ int session_manager_init(void);
  * Should be called during application shutdown.
  */
 void session_manager_cleanup(void);
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Session Creation and Retrieval
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 /**
  * @brief Create new session
  *
@@ -1251,13 +1248,11 @@ void session_release(session_t *session);
  * @note Does NOT increment ref_count (local session is never destroyed)
  */
 session_t *session_get_local(void);
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Session Destruction
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Destroy a session: end it now, free it once nothing holds it.
@@ -1336,13 +1331,11 @@ bool session_manager_conv_has_turn_in_flight(int64_t conv_id);
  * Called periodically from auth_maintenance thread.
  */
 void session_check_idle_conversations(void);
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Conversation History
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Add message to session's conversation history
@@ -1681,13 +1674,11 @@ bool session_replace_last_message_content(session_t *session,
 
 /**
  * @brief Register the structured per-user prompt builder used by the
- *        refresh helper (Phase 1e).
+ *        refresh helper.
  *
  * Called once during dawn.c init to wire the session manager to the
- * WebUI's structured prompt builder (`dawn_build_prompt`) without
- * creating a direct dependency from core into webui.  Replaces the
- * legacy single-string `session_user_prompt_builder_t` registration
- * (removed in 1e).
+ * structured prompt builder (`dawn_build_prompt`, core/prompt_builder.c),
+ * a layer above it.
  *
  * May be called with NULL to clear.
  *
@@ -1727,13 +1718,10 @@ int session_dispatch_user_turn_ex(session_t *session,
                                   const char *turn_note);
 
 
-#endif /* ENABLE_MULTI_CLIENT */
-
 // =============================================================================
 // LLM Integration
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Call LLM with session's conversation history
@@ -1799,13 +1787,11 @@ char *session_llm_call_with_tts_no_add(session_t *session,
                                        const char *user_text,
                                        session_sentence_callback sentence_cb,
                                        void *userdata);
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Per-Session LLM Configuration
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Set per-session LLM configuration
@@ -1845,13 +1831,11 @@ int session_set_turn_llm_config(session_t *session, const session_llm_config_t *
  */
 void session_get_llm_config(session_t *session, session_llm_config_t *config);
 
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Per-Session Metrics
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Record a completed LLM query in session metrics
@@ -1933,13 +1917,11 @@ void session_record_pipeline_timing(session_t *session, double pipeline_ms);
  */
 void session_set_metrics_user(session_t *session, int user_id);
 
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Utility Functions
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Update session's last activity timestamp
@@ -1963,13 +1945,11 @@ int session_count(void);
  */
 const char *session_type_name(session_type_t type);
 
-#endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
 // Command Context (Thread-Local)
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Set the current command context session for this thread
@@ -2013,7 +1993,6 @@ void session_set_turn_token(uint64_t token);
  * stay valid until cleared.  Pass NULL to clear.
  */
 void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config);
-#endif /* ENABLE_MULTI_CLIENT */
 
 /* =============================================================================
  * Command Context Scope Guard (GCC/Clang cleanup attribute)
@@ -2029,7 +2008,6 @@ void session_set_llm_config_override(const session_t *session, const session_llm
  *   }
  * ============================================================================= */
 
-#ifdef ENABLE_MULTI_CLIENT
 /**
  * @brief Cleanup function for scope guard - clears command context
  * @param ctx Pointer to session pointer (unused, just for cleanup signature)
@@ -2051,249 +2029,6 @@ static inline void session_command_context_cleanup(session_t **ctx) {
    session_t *_scoped_ctx_##__LINE__                                                  \
        __attribute__((cleanup(session_command_context_cleanup), unused)) = (session); \
    session_set_command_context(session)
-#else
-/* Local-only mode: scope guard is a no-op */
-static inline void session_command_context_cleanup(session_t **ctx) {
-   (void)ctx;
-}
-#define SESSION_SCOPED_COMMAND_CONTEXT(session)                                       \
-   session_t *_scoped_ctx_##__LINE__                                                  \
-       __attribute__((cleanup(session_command_context_cleanup), unused)) = (session); \
-   (void)_scoped_ctx_##__LINE__
-#endif /* ENABLE_MULTI_CLIENT */
-
-/* =============================================================================
- * Stub Implementations for Local-Only Mode (no network features)
- *
- * When ENABLE_WEBUI is disabled, session_manager.c
- * is not compiled. These inline stubs provide the minimal API needed by
- * code that calls session functions unconditionally.
- * ============================================================================= */
-
-#ifndef ENABLE_MULTI_CLIENT
-
-/* Stub: No sessions in local-only mode */
-static inline session_t *session_get_command_context(void) {
-   return NULL;
-}
-
-static inline char *session_recent_questions_dup(session_t *session) {
-   (void)session;
-   return NULL;
-}
-
-static inline void session_set_command_context(session_t *session) {
-   (void)session;
-}
-
-static inline uint64_t session_turn_token(void) {
-   return 0;
-}
-
-static inline void session_set_turn_token(uint64_t token) {
-   (void)token;
-}
-
-static inline void session_set_llm_config_override(const session_t *session,
-                                                   const session_llm_config_t *config) {
-   (void)session;
-   (void)config;
-}
-
-static inline session_t *session_get(uint32_t session_id) {
-   (void)session_id;
-   return NULL;
-}
-
-static inline session_t *session_find_by_uuid(const char *uuid) {
-   (void)uuid;
-   return NULL;
-}
-
-/**
- * @brief Get local session for local-only mode (lazy initialization)
- *
- * Creates a static session with conversation history on first call.
- * This allows local-only builds to maintain conversation context.
- *
- * @return Pointer to static local session (never NULL after first call)
- */
-static inline session_t *session_get_local(void) {
-   static session_t local_stub = { 0 };
-   static bool initialized = false;
-
-   if (!initialized) {
-      local_stub.session_id = LOCAL_SESSION_ID;
-      local_stub.type = SESSION_TYPE_LOCAL;
-      local_stub.client_fd = -1;
-      local_stub.conversation_history = json_object_new_array();
-      pthread_mutex_init(&local_stub.history_mutex, NULL);
-      pthread_mutex_init(&local_stub.llm_config_mutex, NULL);
-      llm_get_default_config(&local_stub.llm_config);
-      initialized = true;
-   }
-   return &local_stub;
-}
-
-static inline int session_manager_init(void) {
-   return 0;
-}
-
-static inline void session_manager_cleanup(void) {
-}
-
-static inline void session_cleanup_expired(void) {
-}
-
-static inline bool session_manager_conv_has_turn_in_flight(int64_t conv_id) {
-   (void)conv_id;
-   return false;
-}
-
-static inline void session_check_idle_conversations(void) {
-}
-
-static inline int session_count(void) {
-   return 0;
-}
-
-static inline int session_set_llm_config(session_t *session, const session_llm_config_t *config) {
-   (void)session;
-   (void)config;
-   return 1; /* Not supported in local-only mode */
-}
-
-static inline int session_set_turn_llm_config(session_t *session,
-                                              const session_llm_config_t *config) {
-   (void)session;
-   (void)config;
-   return 1; /* Not supported in local-only mode */
-}
-
-static inline void session_get_llm_config(session_t *session, session_llm_config_t *config) {
-   (void)session;
-   /* In local-only mode, use global defaults */
-   if (config) {
-      llm_get_default_config(config);
-   }
-}
-
-/**
- * @brief Initialize session with system prompt (local-only mode)
- *
- * Clears existing history and adds the system message.
- * Provides conversation context for LLM in local-only builds.
- */
-static inline void session_init_system_prompt(session_t *session, const char *system_prompt) {
-   if (!session || !session->conversation_history || !system_prompt)
-      return;
-
-   /* Clear existing messages */
-   size_t len = json_object_array_length(session->conversation_history);
-   for (size_t i = len; i > 0; i--) {
-      json_object_array_del_idx(session->conversation_history, i - 1, 1);
-   }
-
-   /* Add system message */
-   struct json_object *msg = json_object_new_object();
-   json_object_object_add(msg, "role", json_object_new_string("system"));
-   json_object_object_add(msg, "content", json_object_new_string(system_prompt));
-   json_object_array_add(session->conversation_history, msg);
-}
-
-static inline void session_release(session_t *session) {
-   (void)session;
-}
-
-static inline void session_retain(session_t *session) {
-   (void)session;
-}
-
-static inline void session_manager_set_prompt_builder(session_prompt_builder_t fn) {
-   (void)fn;
-}
-
-static inline int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
-   (void)session;
-   (void)user_turn_text;
-   return 0;
-}
-
-static inline int session_dispatch_user_turn_ex(session_t *session,
-                                                const char *user_turn_text,
-                                                const char *turn_note) {
-   (void)session;
-   (void)user_turn_text;
-   (void)turn_note;
-   return SUCCESS;
-}
-
-static inline char *session_get_full_system_prompt(session_t *session) {
-   (void)session;
-   return NULL;
-}
-
-
-static inline int64_t session_get_last_user_msg_id(session_t *session) {
-   (void)session;
-   return 0;
-}
-
-/* The one session here is the local device's, and it belongs to the default
- * voice user; there are no other sessions to reconnect to, no metrics to sum,
- * and no conversation store to save a voice conversation into. */
-static inline int session_default_voice_user_id(void) {
-   return g_config.memory.default_voice_user_id > 0 ? g_config.memory.default_voice_user_id : 1;
-}
-
-static inline int session_effective_user_id(session_t *session) {
-   if (!session) {
-      return 0;
-   }
-   if (session->metrics.user_id > 0) {
-      return session->metrics.user_id;
-   }
-   return session->type == SESSION_TYPE_LOCAL ? session_default_voice_user_id() : 0;
-}
-
-static inline session_t *session_get_for_reconnect(uint32_t session_id) {
-   (void)session_id;
-   return NULL;
-}
-
-static inline void session_metrics_totals(session_t *session,
-                                          uint64_t *tokens_in_out,
-                                          uint32_t *queries_out) {
-   (void)session;
-   if (tokens_in_out) {
-      *tokens_in_out = 0;
-   }
-   if (queries_out) {
-      *queries_out = 0;
-   }
-}
-
-static inline void session_clear_history(session_t *session) {
-   if (!session || !session->conversation_history) {
-      return;
-   }
-   pthread_mutex_lock(&session->history_mutex);
-   const size_t len = json_object_array_length(session->conversation_history);
-   if (len > 0) {
-      json_object_array_del_idx(session->conversation_history, 0, len);
-   }
-   pthread_mutex_unlock(&session->history_mutex);
-}
-
-static inline int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
-   (void)session;
-   if (conv_id_out) {
-      *conv_id_out = 0;
-   }
-   return FAILURE; /* no conversation store in a local-only build */
-}
-
-#endif /* !ENABLE_MULTI_CLIENT */
 
 #ifdef __cplusplus
 }

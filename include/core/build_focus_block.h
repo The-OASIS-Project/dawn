@@ -21,14 +21,14 @@
  * its seam (core/session_focus.h), against what the conversation already
  * shows.
  *
- * Sole consumer: dawn_build_prompt (webui_auth_helpers.c), once per turn.
- * Layer 4 (webui) — pulls in the L2 focus framework via
+ * Sole consumer: dawn_build_prompt (core/prompt_builder.c), once per turn.
+ * Layer 2 (with the prompt builder) — pulls in the L2 focus framework via
  * core/focus/focus_source.h and the L2 embedding engine via
  * memory/memory_embeddings.h.
  */
 
-#ifndef WEBUI_BUILD_FOCUS_BLOCK_H
-#define WEBUI_BUILD_FOCUS_BLOCK_H
+#ifndef CORE_BUILD_FOCUS_BLOCK_H
+#define CORE_BUILD_FOCUS_BLOCK_H
 
 #include <stdint.h>
 
@@ -51,7 +51,7 @@ struct session;
  *      defuse DAWN's markers in its text and make it one line.
  *   4. Keep the ranked result as the context panel's (out->focus_panel):
  *      the seam tells the panel each item's place once it has decided it
- *      (session_focus_client_notice, defined here for the WebUI).
+ *      (session_focus_client_notice; the WebUI shows it).
  *
  * Leaves @p out's focus fields empty, returning SUCCESS, when:
  *   - Feature gate (`config->memory.focus_injection.enabled`) is off
@@ -87,4 +87,4 @@ int build_focus_block(struct session *session,
 }
 #endif
 
-#endif /* WEBUI_BUILD_FOCUS_BLOCK_H */
+#endif /* CORE_BUILD_FOCUS_BLOCK_H */

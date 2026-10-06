@@ -258,10 +258,9 @@ else()
     message(STATUS "DAWN: Scheduler tool DISABLED")
 endif()
 
-# Background Job Tool.  The job subsystem (job_manager/worker/reinvoke) compiles
-# only under ENABLE_WEBUI, and job_tool.c links against it — so gate the tool on
-# ENABLE_WEBUI too (mirrors the calendar/email tools below), keeping the WEBUI-off
-# (local) preset linking.
+# Background Job Tool.  Jobs deliver their results through the WebUI (the
+# conversation a job reports into, the missed-notification replay), so the
+# tool needs it.
 if(DAWN_ENABLE_JOB_TOOL AND ENABLE_WEBUI)
     add_definitions(-DDAWN_ENABLE_JOB_TOOL)
     list(APPEND TOOL_SOURCES src/tools/job_tool.c)
@@ -270,9 +269,7 @@ else()
     message(STATUS "DAWN: Job tool DISABLED")
 endif()
 
-# Deep-Research Tool.  Spawns the research controller via research_worker, which
-# (like the job subsystem) compiles only under ENABLE_WEBUI — so gate the tool on
-# ENABLE_WEBUI too, keeping the WEBUI-off (local) preset linking.
+# Deep-Research Tool.  A research run is a background job: needs the WebUI too.
 if(DAWN_ENABLE_DEEP_RESEARCH_TOOL AND ENABLE_WEBUI)
     add_definitions(-DDAWN_ENABLE_DEEP_RESEARCH_TOOL)
     list(APPEND TOOL_SOURCES src/tools/deep_research_tool.c)

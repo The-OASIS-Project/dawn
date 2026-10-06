@@ -70,15 +70,8 @@ typedef enum {
    TOOL_CALL_CHALLENGE, /* waits for the user's reply code (core/tool_call_challenge.h) */
 } tool_call_decision_t;
 
-#ifdef ENABLE_MULTI_CLIENT
 /** The kind of turn the calling code runs in (the command context's). */
 tool_caller_t tool_call_policy_caller(void);
-#else
-/* No sessions: every call is the local user's. */
-static inline tool_caller_t tool_call_policy_caller(void) {
-   return TOOL_CALLER_USER;
-}
-#endif
 
 /** The caller's name, for logs. */
 const char *tool_call_policy_caller_name(tool_caller_t caller);

@@ -45,13 +45,13 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/build_focus_block.h"
 #include "core/focus/focus_incremental.h"
 #include "core/prompt_parts.h"
 #include "core/session_focus.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "unity.h"
-#include "webui/build_focus_block.h"
 
 /* The session a turn runs on: the prompt builder's argument (build_focus_block
  * reads the conversation's item handles from it). */

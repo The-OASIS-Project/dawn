@@ -27,11 +27,9 @@
 #include "core/tool_call_policy.h"
 #include "llm/llm_tools_internal.h"
 
-#ifdef ENABLE_MULTI_CLIENT
 tool_caller_t tool_call_policy_caller(void) {
    return TOOL_CALLER_USER;
 }
-#endif
 
 const char *tool_call_policy_caller_name(tool_caller_t caller) {
    (void)caller;

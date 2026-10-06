@@ -61,7 +61,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
-#include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (job_reinvoke is ENABLE_WEBUI-only) */
+#include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (jobs run only in WebUI builds) */
 
 /* Generous per-result head cap so a pathological job output can't blow the
  * reinjected prompt.  Decision #3 is "full result" — this is a safety ceiling,

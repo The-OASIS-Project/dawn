@@ -50,7 +50,6 @@ static const tool_call_decision_t s_policy[4][6] = {
 /* The call running on this thread, as decided. */
 static __thread tool_call_scope_t s_scope;
 
-#ifdef ENABLE_MULTI_CLIENT
 tool_caller_t tool_call_policy_caller(void) {
    session_t *ctx = session_get_command_context();
    if (!ctx) {
@@ -71,20 +70,15 @@ tool_caller_t tool_call_policy_caller(void) {
    /* Set when the session is created, before it's published: never changes. */
    return ctx->messaging_identity.sender_unverified ? TOOL_CALLER_UNVERIFIED : TOOL_CALLER_USER;
 }
-#endif
 
 /* Whether this turn already holds an action for its code on the calling
  * session's channel.  (One an earlier turn held is dropped when a new request
  * prepares something: llm_tools_drop_earlier_code.) */
 static bool channel_code_waiting(void) {
-#ifdef ENABLE_MULTI_CLIENT
    session_t *ctx = session_get_command_context();
    return ctx && ctx->messaging_identity.channel_id > 0 &&
           tool_call_challenge_live_in_turn(ctx->messaging_identity.channel_id,
                                            session_turn_token());
-#else
-   return false;
-#endif
 }
 
 const char *tool_call_policy_caller_name(tool_caller_t caller) {

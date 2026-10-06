@@ -354,7 +354,7 @@ envelope), and the run spawns only on a yes. See [§7a](#7a-invocation-routing--
 | Concurrency backstop | `[jobs]` runtime reap (`max_runtime_sec`) | Per-run round/tool/**token-cost** budgets |
 
 **Not reusable (corrected assumptions, verified against the tree):**
-- `worker_pool.c` is an **audio-client pipeline pool** (`WORKER_POOL_MAX_SIZE 8`, `ENABLE_MULTI_CLIENT`), not a
+- `worker_pool.c` is an **audio-client pipeline pool** (`WORKER_POOL_MAX_SIZE 8`), not a
   submit-N/collect-N task pool. P2 parallel page-fetch uses the detached-thread + counter pattern
   (`job_worker.c:495`), or introduces a small bounded pool — flagged as a P2 gap, **not** a reuse.
 - Programmatic note-create is `document_index_note()` (`document_index_pipeline.h:110`, **single-chunk**);

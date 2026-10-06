@@ -913,12 +913,10 @@ char *memory_action_search(int user_id,
 static int remember_record_source(int64_t fact_id, int user_id, bool created) {
    int64_t conv = 0;
    int where = FAILURE;
-#ifdef ENABLE_MULTI_CLIENT
    session_t *session = session_get_command_context();
    if (session) {
       where = session_defer_fact_source(session, fact_id, user_id, created, &conv);
    }
-#endif
    if (where == SUCCESS) {
       memory_db_fact_attach_source(fact_id, user_id, created, conv);
    } else if (where == FAILURE && !created) {

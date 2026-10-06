@@ -1259,7 +1259,6 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    const char *source_location = NULL;
    sched_source_type_t source_client_type = SCHED_SOURCE_LOCAL;
 
-#ifdef ENABLE_MULTI_CLIENT
    session_t *ctx = session_get_command_context();
    if (ctx) {
       if (ctx->type == SESSION_TYPE_DAP2) {
@@ -1285,7 +1284,6 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
       OLOG_WARNING("scheduler_tool: refused '%s' from a caller with no session context", action);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: changing a schedule requires a user session.");
    }
-#endif
 
    /* A guest has no schedule; snooze/dismiss act only on an alarm already
     * ringing, so any device can still silence one. */

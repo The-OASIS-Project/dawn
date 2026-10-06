@@ -52,9 +52,8 @@
 #include "tools/tool_registry.h"
 #include "unity.h"
 
-/* session_manager.c is not linked into this test, but ENABLE_MULTI_CLIENT is
- * defined for the target (so the header uses the extern declarations). Provide
- * the thread-local command context here, mirroring test_session_commands.c. */
+/* session_manager.c is not linked into this test: the thread-local command
+ * context is provided here, mirroring test_session_commands.c. */
 static __thread session_t *s_test_cmd_ctx;
 void session_set_command_context(session_t *session) {
    s_test_cmd_ctx = session;

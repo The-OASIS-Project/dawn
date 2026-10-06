@@ -91,12 +91,8 @@ static bool summary_readable(int64_t conv_id, int64_t turn_conv, int user_id) {
 
 /* This turn's conversation (not the one being viewed), or 0. */
 static int64_t turn_conversation(void) {
-#ifdef ENABLE_WEBUI
    session_t *session = session_get_command_context();
    return session ? session_turn_conversation(session) : 0;
-#else
-   return 0;
-#endif
 }
 
 static char *context_expand_callback(const char *action, char *value, int *should_respond);
@@ -356,7 +352,6 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
 
    /* If conversation_id not provided, use current or its parent */
    if (conv_id <= 0) {
-#ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
       if (session) {
          conv_id = session_turn_conversation(session); /* this turn's, not the view */
@@ -369,7 +364,6 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
             }
          }
       }
-#endif
       if (conv_id <= 0)
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: conversation_id required (could not determine from context).");

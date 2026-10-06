@@ -26,9 +26,9 @@
  * notes + job-conversation copy).
  *
  * Kept SEPARATE from research_run.c (the deterministic core) because this half
- * depends on the session + dispatch subsystems (which are ENABLE_WEBUI-coupled,
- * like the jobs code it rides on), whereas the core is standalone and unit-
- * tested against the ledger alone.
+ * depends on the session + dispatch subsystems (like the jobs code it rides
+ * on), whereas the core is standalone and unit-tested against the ledger
+ * alone.
  */
 
 #include <stdatomic.h>

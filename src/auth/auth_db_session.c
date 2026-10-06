@@ -406,10 +406,6 @@ int auth_db_session_prefix_exists(const char *prefix, bool *exists_out) {
    return AUTH_DB_FAILURE;
 }
 
-/* Replaced by the WebUI (webui_login_sweep.c); nothing to do without it. */
-__attribute__((weak)) void auth_sessions_changed(void) {
-}
-
 int auth_db_delete_sessions_by_username(const char *username, int *deleted_out) {
    if (!username) {
       return AUTH_DB_FAILURE;

@@ -213,9 +213,7 @@ at startup when it doesn't.
   confirmed from a satellite, or from another tab.
 - **Background jobs, re-engaged background turns, scheduled tasks and MQTT
   messages can't send, trash or archive email.** The assistant says what it
-  would do and leaves it to you. A build without the WebUI (no multi-client
-  support) can't send, trash or archive email at all, since it can't tell your
-  voice from an MQTT message.
+  would do and leaves it to you.
 - **The read-back now ends with a fixed line**, "Sending to <address>, from
   <account>, subject: ...". The assistant is asked to say it as written, so you
   hear where the mail really goes.

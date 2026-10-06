@@ -67,8 +67,9 @@
 #include "core/conv_stream.h"
 #include "core/embedding_engine.h"
 #include "core/endpointer.h"
+#include "core/prompt_builder.h"
 #ifdef ENABLE_WEBUI
-#include "core/job_manager.h" /* job subsystem compiles only under ENABLE_WEBUI */
+#include "core/job_manager.h" /* jobs run only with the WebUI (their delivery) */
 #include "core/job_reinvoke.h"
 #endif
 #include "core/llm_response_finalize.h"
@@ -119,7 +120,6 @@
 #include "ui/tui.h"
 #endif
 #ifdef ENABLE_WEBUI
-#include "webui/webui_internal.h" /* dawn_build_prompt declaration (Phase 1e) */
 #include "webui/webui_music_server.h"
 #include "webui/webui_ota.h" /* webui_ota_push — registered as the rollout delivery fn */
 #include "webui/webui_server.h"
@@ -128,6 +128,7 @@
 #include "memory/memory_db_admin.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embed_backfill.h"
+#include "memory/memory_embed_recompute.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_focus_adapters.h"
 #include "memory/memory_recategorize.h"
@@ -139,7 +140,6 @@
 #include "auth/auth_maintenance.h"
 #include "document_original_store.h"
 #include "image_store.h"
-#include "memory/memory_embed_recompute.h"
 #include "memory/memory_recovery.h"
 #endif
 #ifdef ENABLE_AEC
@@ -494,7 +494,6 @@ static bool take_voice_command(char **command_text_out,
    return true;
 }
 
-#ifdef ENABLE_MULTI_CLIENT
 /* Apply a change of the local device's owner (session_request_local_owner), only
  * between turns: the previous owner's voice conversation is saved first (or, with
  * nothing saved, a new context starts), so one history never holds two users'
@@ -517,7 +516,6 @@ static void apply_local_owner_change(session_t *local) {
    }
    session_set_metrics_user(local, owner);
 }
-#endif
 
 /* End the local turn (main thread): once its worker is joined, or when no
  * worker is spawned for it (a direct command handled it, the spawn failed). */
@@ -2108,13 +2106,9 @@ int main(int argc, char *argv[]) {
    }
 
    // Register the prompt builder before any turn can run.
-#ifdef ENABLE_WEBUI
-   /* Phase 1d/1e: register all six focus-source adapters into the framework
-    * BEFORE wiring the structured prompt builder.  Adapters register
-    * unconditionally regardless of memory.focus_injection.enabled — the
-    * runtime gate lives in build_focus_block() so toggling the feature
-    * does not require a daemon restart.  Registration is cheap (linear
-    * append into a fixed-cap registry); gating at use time. */
+   /* The focus-source adapters, before the prompt builder that uses them.
+    * They register whether or not memory.focus_injection is on: the runtime
+    * gate is in build_focus_block(), so toggling it needs no restart. */
    if (memory_focus_adapters_register_all() != SUCCESS) {
       OLOG_ERROR("Failed to register memory focus adapters");
       return FAILURE;
@@ -2124,14 +2118,10 @@ int main(int argc, char *argv[]) {
       return FAILURE;
    }
 
-   /* Phase 1e: structured per-user prompt builder.  Replaces the legacy
-    * single-string session_manager_set_user_prompt_builder(build_user_prompt).
-    * Declaration via webui_internal.h (pulled in for ENABLE_WEBUI builds —
-    * no extra dep cost since this block already lives under that gate). */
+   /* The per-turn prompt builder, for every surface. */
    session_manager_set_prompt_builder(dawn_build_prompt);
    /* A "remember" made before its conversation existed gets it as its source. */
    session_set_fact_source_hook(memory_db_fact_attach_sources);
-#endif
 
    // Initialize command router for worker thread request/response
    if (command_router_init() != 0) {
@@ -2576,7 +2566,6 @@ mqtt_disabled:
 #endif
 #endif
 
-#ifdef ENABLE_MULTI_CLIENT
    /* The local mic belongs to whoever the Local Device (the speaker) is assigned
     * to on the satellite page; unassigned, to the default voice user. */
    if (auth_db_ready) {
@@ -2585,7 +2574,6 @@ mqtt_disabled:
          session_request_local_owner(local_map.user_id);
       }
    }
-#endif
 
    /* SAGE proactive attention: load per-user watches + seed the safety set on
     * first run (needs auth_db open).  Master switch [attention] enabled gates
@@ -2595,10 +2583,9 @@ mqtt_disabled:
    }
 
    /* Background-job session pool (needs session_manager up so it can register
-    * its resolver hook).  Gated on [jobs] enabled; non-fatal on failure.  The
-    * whole job subsystem is compiled only under ENABLE_WEBUI (CMakeLists.txt), so
-    * the init/tick/shutdown call sites are guarded to keep the WEBUI-off (local)
-    * preset linking. */
+    * its resolver hook).  Gated on [jobs] enabled; non-fatal on failure.  Jobs
+    * deliver their results through the WebUI, so they run only in WebUI builds
+    * (and the job tools are registered only there). */
 #ifdef ENABLE_WEBUI
    if (g_config.jobs.enabled) {
       if (job_manager_init() != SUCCESS) {
@@ -2704,8 +2691,6 @@ mqtt_disabled:
 #ifdef ENABLE_WEBUI
          jobs_monitor_tick(now_srv);
          webui_watch_readings_tick();
-#endif
-#ifdef ENABLE_MULTI_CLIENT
 #endif
       }
       goto server_shutdown;
@@ -2824,10 +2809,8 @@ mqtt_disabled:
             response_final_free(&fin);  // safe: fin.text is NULL on the finalize-failure path
             free(response_text);
 
-#ifdef ENABLE_MULTI_CLIENT
             /* Mark successful interaction complete for idle timeout tracking */
             session_update_interaction_complete(local_session);
-#endif
          } else if (llm_response_silent) {
             // Tool handled its own output (skip_followup with no text response)
             OLOG_INFO("Tool completed silently (no text response expected)");
@@ -2867,16 +2850,13 @@ mqtt_disabled:
              * Gated on !llm_processing so a queued item is never popped into a turn while
              * the worker is running — it waits until the pipeline is free, so a
              * turn never starts while another is running. */
-#ifdef ENABLE_MULTI_CLIENT
             apply_local_owner_change(local_session);
-#endif
             if (take_voice_command(&command_text, &recState, &silenceNextState) ||
                 (!local_llm_busy() &&
                  check_and_process_input_queue(&command_text, &recState, &silenceNextState))) {
                break;
             }
 
-#ifdef ENABLE_MULTI_CLIENT
             /* Check voice conversation idle timeout (only when not processing LLM) */
             if (!local_llm_busy() && g_config.memory.enabled &&
                 g_config.memory.conversation_idle_timeout_min > 0) {
@@ -2896,7 +2876,6 @@ mqtt_disabled:
                   }
                }
             }
-#endif
 
             capture_buffer(&myAudioControls, max_buff, max_buff_size, &buff_size);
 
@@ -3926,11 +3905,9 @@ mqtt_disabled:
                session_turn_begin(local_session, 0, session_effective_user_id(local_session));
                s_local_turn_token = session_turn_token();
                s_local_turn_open = true;
-#ifdef ENABLE_MULTI_CLIENT
                if (s_command_unattended) {
                   session_turn_mark_background(local_session);
                }
-#endif
                session_add_turn_message(local_session, "user", command_text);
             }
 
@@ -4083,11 +4060,9 @@ mqtt_disabled:
                      session_turn_begin(local_session, 0, session_effective_user_id(local_session));
                      s_local_turn_token = session_turn_token();
                      s_local_turn_open = true;
-#ifdef ENABLE_MULTI_CLIENT
                      if (s_command_unattended) {
                         session_turn_mark_background(local_session);
                      }
-#endif
                   }
 
                   // Check for thinking trigger phrases and enable extended thinking for this
@@ -4210,7 +4185,6 @@ server_shutdown:
    free(s_pending_voice_command); /* a request never answered */
    s_pending_voice_command = NULL;
 
-#ifdef ENABLE_MULTI_CLIENT
    /* Save any non-empty voice conversation before shutdown */
    if (local_session && session_has_messages(local_session)) {
       OLOG_INFO("Shutdown: saving Session 0 voice conversation");
@@ -4219,7 +4193,6 @@ server_shutdown:
          OLOG_INFO("Shutdown: saved as conversation %lld", (long long)conv_id);
       }
    }
-#endif
 
    /* Background jobs: cancel running jobs before auth/DB teardown (their workers
     * use sessions + conv_db).  Unregisters the resolver + requests cancellation;
@@ -4263,7 +4236,6 @@ server_shutdown:
    OLOG_INFO("Shutdown: auth_crypto_shutdown");
    auth_crypto_shutdown();
 #endif
-#ifdef ENABLE_WEBUI
    /* Sessions destroyed and not yet finished: while the database and memory
     * subsystems are up, so their final metrics and memory extraction still
     * reach them.  Then nothing more is finished until session_manager_cleanup
@@ -4273,7 +4245,6 @@ server_shutdown:
       OLOG_WARNING("Shutdown: %d destroyed session(s) still referenced", session_reaper_pending());
    }
    session_reaper_hold();
-#endif
    OLOG_INFO("Shutdown: memory_embeddings_cleanup");
    memory_embeddings_cleanup();
    document_embed_cache_shutdown();

@@ -43,7 +43,6 @@ struct session;
 struct json_object;
 struct session_prefix_turn;
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Apply a turn's prompt to the history the turn runs on
@@ -198,96 +197,6 @@ char *session_prefix_mask_secret(struct session *session, char *text);
  */
 bool session_prefix_is_frozen(struct json_object *history);
 
-#else
-
-static inline void session_prefix_apply_turn(struct session *session,
-                                             const composed_prompt_t *cp,
-                                             const char *turn_note) {
-   (void)session;
-   (void)cp;
-   (void)turn_note;
-}
-
-static inline int session_withdraw_forgotten(int user_id, bool memory_bodies) {
-   (void)user_id;
-   (void)memory_bodies;
-   return 0;
-}
-
-static inline void session_withdraw_forgotten_async(int user_id, bool memory_bodies) {
-   (void)user_id;
-   (void)memory_bodies;
-}
-
-static inline struct json_object *session_prefix_tool_defs(struct session *session) {
-   (void)session;
-   return NULL;
-}
-
-static inline void session_prefix_inline_tools_rejected(struct session *session) {
-   (void)session;
-}
-
-/* No sessions, no frozen prefix, no tag: llm_tools_execute's tag tripwire has
- * nothing to look for in such a build. */
-static inline bool session_prefix_tag(struct session *session, char *out, size_t size) {
-   (void)session;
-   if (out && size) {
-      out[0] = '\0';
-   }
-   return false;
-}
-
-static inline char *session_prefix_mask_secret(struct session *session, char *text) {
-   (void)session;
-   return text;
-}
-
-static inline bool session_prefix_is_frozen(struct json_object *history) {
-   (void)history;
-   return false;
-}
-
-static inline void session_prefix_question_saved(struct session *session,
-                                                 int64_t conv_id,
-                                                 int user_id,
-                                                 int64_t row_id) {
-   (void)session;
-   (void)conv_id;
-   (void)user_id;
-   (void)row_id;
-}
-
-static inline void session_prefix_turn_free(struct session_prefix_turn *turn) {
-   (void)turn;
-}
-
-static inline void session_prefix_release_locked(struct session *session) {
-   (void)session;
-}
-
-static inline struct session_prefix_turn *session_prefix_take_back_locked(
-    struct session *session,
-    struct json_object *question,
-    bool boundary) {
-   (void)session;
-   (void)question;
-   (void)boundary;
-   return NULL;
-}
-
-static inline void session_prefix_save_taken(struct session *session,
-                                             struct session_prefix_turn *turn) {
-   (void)session;
-   (void)turn;
-}
-
-static inline void session_prefix_voice_save_locked(struct session *session) {
-   (void)session;
-}
-
-
-#endif /* ENABLE_MULTI_CLIENT */
 
 /**
  * @brief Caller holds history_mutex.  Whether a turn record still holds

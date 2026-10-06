@@ -52,14 +52,7 @@
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
-
-#ifdef ENABLE_MULTI_CLIENT
-#include "webui/webui_satellite.h"
-#endif
-
-#ifdef ENABLE_WEBUI
-#include "webui/webui_server.h"
-#endif
+#include "webui/webui_server.h" /* satellite_send_response; the user's sessions */
 
 /* Forward declaration for TTS */
 extern void text_to_speech(char *text);
@@ -227,7 +220,6 @@ static void generate_announcement_text(const sched_event_t *event, char *buf, si
  * (fixes pre-existing bug where session_get(i) missed sessions with IDs > MAX_SESSIONS).
  */
 static bool route_tts_announcement(const sched_event_t *event, const char *text) {
-#ifdef ENABLE_MULTI_CLIENT
    bool delivered = false;
 
    /* Cache the local-speaker decision once per fire — avoids 2+ DB lookups for
@@ -283,6 +275,19 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
       }
    }
 
+   bool local_fallback = false;
+#ifndef ENABLE_WEBUI
+   /* Without the WebUI the local speaker is the only output: an event made
+    * elsewhere (a WebUI or satellite, on a shared database) still sounds. */
+   if (!delivered && local_plays) {
+      char *tts_text = strdup(text);
+      if (tts_text) {
+         text_to_speech(tts_text);
+         delivered = true;
+         local_fallback = true;
+      }
+   }
+#endif
    if (!delivered) {
       OLOG_WARNING("scheduler: no active session for user %d, TTS not delivered for event %lld",
                    event->user_id, (long long)event->id);
@@ -298,7 +303,7 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
       /* Also play on daemon speaker if not already done — still respecting the
        * local pseudo-satellite assignment so announce_all doesn't override the
        * admin's device ownership. Reuses the cached decision. */
-      if (event->source_client_type != SCHED_SOURCE_LOCAL && local_plays) {
+      if (event->source_client_type != SCHED_SOURCE_LOCAL && local_plays && !local_fallback) {
          char *tts_text = strdup(text);
          if (tts_text)
             text_to_speech(tts_text);
@@ -306,13 +311,6 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
    }
 
    return delivered;
-#else
-   (void)event;
-   char *tts_text = strdup(text);
-   if (tts_text)
-      text_to_speech(tts_text);
-   return true;
-#endif
 }
 
 static void announce_event(const sched_event_t *event) {

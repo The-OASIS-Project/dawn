@@ -646,6 +646,19 @@ void webui_broadcast_plan_progress(struct session *session, const char *json_str
  */
 int64_t webui_get_active_conversation_id(struct session *session);
 
+/** Whether @p session is a WebUI session whose browser has speech on. */
+bool webui_session_tts_enabled(struct session *session);
+
+/**
+ * @brief Send response text to a satellite (non-streaming)
+ *
+ * For short responses or when streaming is not desired.
+ *
+ * @param session DAP2 session
+ * @param text Response text
+ */
+void satellite_send_response(struct session *session, const char *text);
+
 /**
  * @brief Broadcast a conversation title change to all connections for a given user
  *

@@ -57,8 +57,7 @@
  * refusal at EVERY such entry (not one caller up) is the point of HIGH-1: the
  * boundary must not depend on a particular caller having gated upstream.
  *
- * Inert outside a research run (research_run_id <= 0) and in local-only builds,
- * where session_get_command_context() is a NULL stub.  On refusal @p result is
+ * Inert outside a research run (research_run_id <= 0).  On refusal @p result is
  * fully (re)initialized so a caller that did not memset it first still gets a
  * clean error.
  *

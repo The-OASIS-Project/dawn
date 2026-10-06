@@ -41,7 +41,6 @@ extern "C" {
 /** session_defer_fact_source(): in a turn, but no room to keep it (logged). */
 #define SESSION_FACT_SOURCE_DROPPED 3
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Let go of a reference to a history message (or an array of them)
@@ -542,54 +541,6 @@ bool session_stop_turn(session_t *session, const char *note);
  */
 bool session_turn_defers_writes_locked(const session_t *session);
 
-#else /* !ENABLE_MULTI_CLIENT: no sessions; the history is the caller's alone */
-
-static inline void session_history_append(struct json_object *history, struct json_object *msg) {
-   json_object_array_add(history, msg);
-}
-
-static inline void session_history_replace_contents(struct json_object *history,
-                                                    struct json_object *from) {
-   json_object_array_del_idx(history, 0, json_object_array_length(history));
-   for (size_t i = 0; i < json_object_array_length(from); i++) {
-      json_object_array_add(history, json_object_get(json_object_array_get_idx(from, i)));
-   }
-}
-
-static inline bool session_turn_is_caller(session_t *session) {
-   (void)session;
-   return false;
-}
-
-static inline bool session_turn_active(session_t *session) {
-   (void)session;
-   return false;
-}
-
-static inline bool session_turn_user_originated(session_t *session) {
-   (void)session;
-   return false;
-}
-
-static inline uint32_t session_turn_number(session_t *session) {
-   (void)session;
-   return 0;
-}
-
-static inline bool session_turn_is_background(session_t *session) {
-   (void)session;
-   return false;
-}
-
-static inline void session_set_call_code_redeemed(bool redeemed) {
-   (void)redeemed;
-}
-
-static inline bool session_call_code_redeemed(void) {
-   return false;
-}
-
-#endif /* ENABLE_MULTI_CLIENT */
 
 #ifdef __cplusplus
 }

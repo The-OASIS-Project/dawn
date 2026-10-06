@@ -313,19 +313,14 @@ static void play_ringtone(void) {
  * announcements are handled separately for immediate feedback.
  */
 static void inject_local_context(const char *message) {
-   /* Session context injection is a WebUI/multi-client feature; in a WebUI-less
-    * build there is no session to inject into.  Posted as the phone owner's
-    * (the local device's user now): if the device changes hands before it is
-    * told, the next user's conversation doesn't get it. */
-#ifdef ENABLE_WEBUI
+   /* Posted as the phone owner's (the local device's user now): if the device
+    * changes hands before it is told, the next user's conversation doesn't
+    * get it. */
    session_t *local = session_get_local();
    const int owner = session_effective_user_id(local);
    if (owner > 0) {
       session_post_notice_for(local, message, owner);
    }
-#else
-   (void)message;
-#endif
 }
 
 /**
@@ -341,14 +336,10 @@ static void inject_local_context(const char *message) {
  * owner's business); they keep the incoming-call banner.
  */
 static void broadcast_call_context(const char *message) {
-#ifdef ENABLE_WEBUI
    const int owner = session_effective_user_id(session_get_local());
    if (owner > 0) {
       session_broadcast_notice_for_user(owner, message);
    }
-#else
-   (void)message;
-#endif
 }
 
 #ifndef ENABLE_WEBUI

@@ -117,8 +117,8 @@ __attribute__((weak)) void webui_broadcast_message_appended(int user_id,
    (void)stream_id;
 }
 
-/* Weak link-safety stub: never runs in a real build (every caller compiles under
- * ENABLE_WEBUI, which links the strong def in webui_broadcasts.c).  Loud + fail-closed so
+/* Weak link-safety stub: never runs in a real build (its callers are jobs, which
+ * run only in WebUI builds, where webui_broadcasts.c defines it).  Loud + fail-closed so
  * a future headless-caller misconfiguration is caught rather than silently dropping the
  * assistant reply. */
 __attribute__((weak)) int webui_persist_final_answer(struct session *session,

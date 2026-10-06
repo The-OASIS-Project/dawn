@@ -21,7 +21,7 @@
  * told about them.  See header for the full contract.
  */
 
-#include "webui/build_focus_block.h"
+#include "core/build_focus_block.h"
 
 #include <stdbool.h>
 #include <stddef.h>

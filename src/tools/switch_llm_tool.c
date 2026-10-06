@@ -190,11 +190,9 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
    const llm_type_t type_before = config.type;
 
    int64_t conv_id = session->messaging_identity.conversation_id;
-#ifdef ENABLE_WEBUI
    if (conv_id <= 0) {
       conv_id = session_turn_conversation(session);
    }
-#endif
    const bool user_asked = !in_turn || session_turn_user_originated(session);
    if (!user_asked && type_before == LLM_LOCAL && entry->type == LLM_CLOUD) {
       /* Not even for this reply: the turn would send its whole history, which

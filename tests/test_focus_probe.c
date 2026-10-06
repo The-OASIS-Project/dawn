@@ -57,6 +57,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/build_focus_block.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_incremental.h"
 #include "core/focus/focus_source.h"
@@ -65,7 +66,6 @@
 #include "dawn_error.h"
 #include "llm/llm_history_kind.h"
 #include "unity.h"
-#include "webui/build_focus_block.h"
 
 /* The session a turn runs on: the prompt builder's argument (build_focus_block
  * reads the conversation's item handles from it). */

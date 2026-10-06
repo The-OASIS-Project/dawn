@@ -68,7 +68,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 A conversation's request is **append-only**: nothing already sent to the model is rewritten. That keeps the provider's prompt cache valid across the whole conversation, and keeps a model's signed reasoning replayable (Anthropic refuses reasoning whose earlier prompt changed). The design record (the evidence, per-provider measurements, phases and decisions) is in ATLAS: `dawn/archive/PROMPT_CACHE_DESIGN.md`. It is built in three layers:
 
-1. **The prompt builder** — `dawn_build_prompt()` (`src/webui/webui_auth_helpers.c`), registered as the session prompt builder. For each turn it returns a `composed_prompt_t` (`include/core/prompt_parts.h`) describing what a conversation *starting now* would get, plus this turn's context. It does not decide what reaches the model.
+1. **The prompt builder** — `dawn_build_prompt()` (`src/core/prompt_builder.c`), registered as the session prompt builder. For each turn it returns a `composed_prompt_t` (`include/core/prompt_parts.h`) describing what a conversation *starting now* would get, plus this turn's context. It does not decide what reaches the model.
 2. **The prefix engine** — `session_prefix_apply_turn()` (`src/core/session_prefix.c`, API in `include/core/session_prefix.h`). It compares the composed prompt with what the conversation already has in force and appends only the differences, as kind-marked messages.
 3. **The renderers** — each provider formatter turns those kind-marked messages into its own wire shape.
 

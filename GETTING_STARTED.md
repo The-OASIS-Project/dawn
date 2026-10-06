@@ -206,7 +206,7 @@ cmake --build --preset default
 
 > **Skip AEC**: If WebRTC build fails, you can disable it: `cmake --preset default -DENABLE_AEC=OFF`
 
-> **Build presets**: `default`/`full` build everything; `local` (`ENABLE_WEBUI=OFF`) is a microphone-only build with no network features; `debug` adds symbols; `server` skips local audio (see [server mode](docs/GETTING_STARTED_SERVER.md)). List them with `cmake --list-presets`. Common toggles: `-DENABLE_WEBUI=OFF`, `-DENABLE_AEC=OFF`, `-DDAWN_ENABLE_EMAIL_TOOL=ON`.
+> **Build presets**: `default`/`full` build everything; `local` (`ENABLE_WEBUI=OFF`) is a microphone-only build with no WebUI, logins, messaging channels or background jobs (conversations, tools and memory work as in a full build); `debug` adds symbols; `server` skips local audio (see [server mode](docs/GETTING_STARTED_SERVER.md)). List them with `cmake --list-presets`. Common toggles: `-DENABLE_WEBUI=OFF`, `-DENABLE_AEC=OFF`, `-DDAWN_ENABLE_EMAIL_TOOL=ON`.
 
 The binary will be at `build/dawn`. Build time varies by platform and optimization level.
 

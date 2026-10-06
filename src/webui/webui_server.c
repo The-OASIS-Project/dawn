@@ -43,11 +43,11 @@
 #include <sys/random.h>
 #include <unistd.h>
 
+#include "core/build_focus_block.h"
 #include "core/focus/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
 #include "core/focus/focus_source.h"            /* focus_compose_result_t */
 #include "core/image_rehydrate.h"
 #include "memory/memory_db_aliases.h" /* memory_db_proposal_count_pending */
-#include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_protocol.h"
 
@@ -3071,6 +3071,14 @@ int64_t webui_get_active_conversation_id(session_t *session) {
    if (!session || session->type != SESSION_TYPE_WEBUI)
       return 0;
    return atomic_load(&session->viewed_conversation_id);
+}
+
+bool webui_session_tts_enabled(session_t *session) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
+      return false;
+   }
+   const ws_connection_t *conn = (const ws_connection_t *)session->client_data;
+   return conn != NULL && conn->tts_enabled;
 }
 
 bool webui_session_owned_by(const session_t *session, int user_id) {

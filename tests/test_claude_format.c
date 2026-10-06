@@ -120,15 +120,10 @@ int llm_tools_get_enabled_count_filtered(bool r) {
    return 0;
 }
 /* ENABLE_WEBUI is defined for the test build, so the converter's thinking-disabled
- * notify path is compiled in.  Return no session so that path is skipped.
- * In local-only mode (ENABLE_MULTI_CLIENT off) session_manager.h already supplies a
- * static-inline stub, so only define our own when the header expects an extern —
- * otherwise the two collide (redefinition). */
-#ifdef ENABLE_MULTI_CLIENT
+ * notify path is compiled in.  Return no session so that path is skipped. */
 struct session *session_get_command_context(void) {
    return NULL;
 }
-#endif
 void webui_send_error(struct session *s, const char *code, const char *message) {
    (void)s;
    (void)code;

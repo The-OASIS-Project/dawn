@@ -122,22 +122,9 @@ static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
  * @param out Receives the origin (zeroed on false)
  * @return false with no command context, in a job's session, on a background
  *         turn, or with no turn running (an MQTT message naming a session gets
- *         that session as its context, but no turn).  A build without turn
- *         tracking returns false always.
+ *         that session as its context, but no turn).
  */
-#ifdef ENABLE_MULTI_CLIENT
 bool turn_origin_capture(turn_origin_t *out);
-#else
-/* No turn tracking: the local mic can't be told from an MQTT message, so
- * nothing counts as a live user turn. */
-static inline bool turn_origin_capture(turn_origin_t *out) {
-   if (out) {
-      const turn_origin_t none = { 0 };
-      *out = none;
-   }
-   return false;
-}
-#endif
 
 #ifdef __cplusplus
 }

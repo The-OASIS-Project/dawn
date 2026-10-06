@@ -43,12 +43,7 @@ bool satellite_owner_changes(session_t *session, int new_user) {
 /* Apply a mapping to the session: its user (the next turn's prompt is built
  * for them; the satellite's room is a standing direction). */
 void satellite_apply_mapping(session_t *session, int user_id) {
-#ifdef ENABLE_MULTI_CLIENT
    session_set_metrics_user(session, user_id);
-#else
-   (void)session;
-   (void)user_id;
-#endif
 }
 
 typedef struct {

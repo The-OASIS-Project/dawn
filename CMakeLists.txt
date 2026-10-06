@@ -258,13 +258,6 @@ if(NOT SODIUM_FOUND)
     message(STATUS "libsodium: Found (${SODIUM_VERSION}) - required for crypto_store")
 endif()
 
-# Multi-client session support (required if WebUI is enabled)
-# Provides session manager and worker pool for concurrent client handling
-if(ENABLE_WEBUI)
-    add_definitions(-DENABLE_MULTI_CLIENT)
-    message(STATUS "Multi-client: ENABLED (session manager + worker pool)")
-endif()
-
 # Document extraction libraries (PDF, DOCX support for document upload)
 # MuPDF: PDF text extraction (AGPL-3.0, GPL-compatible; dual-licensed AGPL/commercial)
 # MuPDF ships as two static libraries: libmupdf.a + libmupdf-third.a (bundled freetype/zlib/etc)
@@ -583,7 +576,7 @@ set(DAWN_SOURCES
     src/core/wake_word.c
     src/core/utterance_dedup.c
     src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
-    src/core/tool_call_policy.c       # who may make a tool call (sessions only with multi-client)
+    src/core/tool_call_policy.c       # who may make a tool call
     src/core/tool_call_challenge.c    # actions from a text waiting for the user's reply code
     src/core/reply_code.c             # codes texted to a number and texted back
 
@@ -734,7 +727,6 @@ if(ENABLE_WEBUI)
         src/webui/webui_send.c
         src/webui/webui_turn_ref.c
         src/webui/webui_attachments.c
-        src/webui/build_focus_block.c
         src/webui/webui_http.c
         src/webui/webui_admin.c
         src/webui/webui_messaging.c
@@ -786,46 +778,52 @@ if(ENABLE_WEBUI)
     endif()
 endif()
 
-# Conditionally add session manager, LLM call orchestration, prompt
-# composition, worker pool, and related multi-client support sources.
+# Without the WebUI: its entry points that the rest of DAWN calls, as no-ops.
+if(NOT ENABLE_WEBUI)
+    list(APPEND DAWN_SOURCES src/webui/webui_absent.c)
+endif()
+
+# Sessions, turns, jobs, prompt composition and the worker pool: every build.
+# The local microphone runs its turns on them; the WebUI only adds the server.
+list(APPEND DAWN_SOURCES
+    src/core/session_manager.c
+    src/core/session_reaper.c
+    src/core/session_voice_save.c
+    src/core/session_image_hold.c
+    src/core/session_history.c
+    src/core/turn_queue.c
+    src/core/session_manager_llm.c
+    src/core/job_manager.c
+    src/core/job_worker.c
+    src/core/job_reinvoke.c
+    src/core/job_dispatch.c
+    # Deep-research live orchestration (rides on the job session + dispatch).
+    src/tools/research_run_loop.c
+    src/core/research_worker.c
+    src/core/text_input_dispatch.c
+    src/core/prompt_sections.c
+    src/core/prefix_in_force.c
+    src/core/prefix_tools.c
+    src/core/session_focus.c
+    src/core/build_focus_block.c
+    src/core/prompt_builder.c
+    src/core/session_prefix.c
+    src/core/tool_result_store.c
+    src/tools/result_read_tool.c
+    src/tools/result_read_ops.c
+    src/core/session_compaction.c
+    src/core/focus/focus_handles.c
+    src/core/focus/focus_incremental.c
+    src/core/worker_pool.c
+    src/core/text_filter.c
+    src/core/rate_limiter.c
+    # Reconnect helper (Layer 1, no DAWN deps) — shared by the Discord/Slack
+    # WS drivers and Home Assistant realtime.
+    src/core/ws_reconnect.c
+)
+
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
-        src/core/session_manager.c
-        src/core/session_reaper.c
-        src/core/session_voice_save.c
-        src/core/session_image_hold.c
-        src/core/session_history.c
-        src/core/turn_queue.c
-        src/core/session_manager_llm.c
-        src/core/job_manager.c
-        src/core/job_worker.c
-        src/core/job_reinvoke.c
-        src/core/job_dispatch.c
-        # Deep-research live orchestration (rides on the job session + dispatch).
-        # The deterministic core (research_run.c) stays in unconditional
-        # TOOL_SOURCES; only this loop half + the worker are ENABLE_WEBUI-coupled.
-        src/tools/research_run_loop.c
-        src/core/research_worker.c
-        src/core/text_input_dispatch.c
-        src/core/prompt_sections.c
-        src/core/prefix_in_force.c
-        src/core/prefix_tools.c
-        src/core/session_focus.c
-        src/core/session_prefix.c
-        src/core/tool_result_store.c
-        src/tools/result_read_tool.c
-        src/tools/result_read_ops.c
-        src/core/session_compaction.c
-        src/core/focus/focus_handles.c
-        src/core/focus/focus_incremental.c
-        src/core/worker_pool.c
-        src/core/text_filter.c
-        src/core/rate_limiter.c
-        # Reconnect helper (Layer 1, no DAWN deps) — shared by the Discord/Slack
-        # WS drivers and Home Assistant realtime. Compiled here as a build-gating
-        # convenience (all consumers are ENABLE_WEBUI-gated), NOT a layering statement;
-        # move to the unconditional core sources if a non-WEBUI core module needs it.
-        src/core/ws_reconnect.c
         # Messaging channels (Telegram, SMS, Discord, Slack)
         src/messaging/messaging_engine.c
         src/messaging/messaging_engine_session.c
@@ -972,6 +970,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_research.c
     src/auth/auth_db_events.c
     src/auth/auth_db_user.c
+    src/auth/auth_db_metrics.c
     src/auth/auth_db_settings.c
     src/auth/auth_db_satellite.c
     src/blob_store.c
@@ -1051,7 +1050,6 @@ if(ENABLE_AUTH)
         src/auth/auth_db_rate_limit.c
         src/auth/auth_db_audit.c
         src/auth/auth_db_maint.c
-        src/auth/auth_db_metrics.c
         src/auth/auth_crypto.c
         src/auth/auth_maintenance.c
     )

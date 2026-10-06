@@ -166,9 +166,7 @@ a web page, a tool result) tells it to.
   (`send`, `confirm_send`, `trash`, `confirm_trash`, `archive`) need a running
   turn the user started, and are refused anywhere else: in a background job, in
   a background (re-engaged) turn, in a scheduled run (the scheduler refuses
-  them too), and from an MQTT message, with or without a session named. A
-  build without multi-client support has no turns to check, and it can't tell
-  the local mic from MQTT, so it refuses these actions altogether.
+  them too), and from an MQTT message, with or without a session named.
 
 A refused confirm leaves the draft in place, and it doesn't count toward the
 wrong-id throttle.

@@ -142,12 +142,9 @@
 #ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
 #include "tools/context_expand_tool.h"
 #endif
-#ifdef ENABLE_MULTI_CLIENT
-#include "tools/result_read_tool.h"
-#endif
-
 #include "tools/plan_executor.h"
 #include "tools/recall_tool.h"
+#include "tools/result_read_tool.h"
 
 /* ========== Registration ========== */
 
@@ -394,13 +391,11 @@ int tools_register_all(void) {
       OLOG_WARNING("Failed to register attention tool");
    }
 
-#ifdef ENABLE_MULTI_CLIENT
    /* More of a tool result too large to show whole (the store is session-
     * scoped, so it rides with the session manager). */
    if (result_read_tool_register() != 0) {
       OLOG_WARNING("Failed to register result_read tool");
    }
-#endif
 
 #ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
    if (context_expand_tool_register() != 0) {

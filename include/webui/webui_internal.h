@@ -1041,32 +1041,6 @@ void webui_login_sweep_request(void);
 void webui_login_sweep_run_pending(void);
 
 /* =============================================================================
- * Prompt Construction Helpers
- * ============================================================================= */
-
-/**
- * @brief The prompt builder (session_prompt_builder_t): a turn's prompt, in
- *        parts
- *
- * The system prompt a conversation starting now would freeze (in named
- * sections), the surface's standing directions, what DAWN knows about the
- * user, the tool set, and the turn's context.  session_prefix.c applies them
- * to the conversation, append-only.
- *
- * @param session        The session the turn runs on (its surface, its
- *                       conversation, its focus dedup state); may be NULL
- * @param user_id        The turn's user (0: a guest; nothing of any user's)
- * @param user_turn_text The turn's words (for retrieval)
- * @param[out] out       Zero-initialized; the caller frees it
- *                       (composed_prompt_free).  On FAILURE it is empty.
- * @return SUCCESS, or FAILURE on allocation failure
- */
-int dawn_build_prompt(session_t *session,
-                      int user_id,
-                      const char *user_turn_text,
-                      composed_prompt_t *out);
-
-/* =============================================================================
  * Connection Iterator (defined in webui_server.c, used by webui_music.c)
  * ============================================================================= */
 

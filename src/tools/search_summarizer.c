@@ -428,7 +428,6 @@ static int summarize_with_default_llm(const char *prompt, char **out_summary) {
  * For WebUI sessions: Sends status update to display in UI
  */
 static void notify_summarization_starting(void) {
-#ifdef ENABLE_MULTI_CLIENT
    session_t *session = session_get_command_context();
 
    if (!session || session->session_id == 0) {
@@ -440,10 +439,6 @@ static void notify_summarization_starting(void) {
       /* WebUI session - send status update */
       webui_send_state_with_detail(session, "summarizing", "Processing search results...");
    }
-#endif
-#else
-   /* Local-only mode - use TTS */
-   text_to_speech((char *)"Summarizing the results, please standby.");
 #endif
 }
 

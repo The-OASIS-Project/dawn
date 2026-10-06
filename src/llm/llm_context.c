@@ -995,7 +995,6 @@ void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usa
       }
    }
 
-#ifdef ENABLE_MULTI_CLIENT
    /* Record query metrics to session (persisted to database per-query) */
    session_t *session = session_get_command_context();
    if (session) {
@@ -1019,7 +1018,6 @@ void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usa
                            (uint64_t)completion_tokens, (uint64_t)cached_tokens, ttft_ms, total_ms,
                            false /* is_error */);
    }
-#endif
 }
 
 void llm_context_get_last_usage(int *current_tokens, int *max_tokens, float *threshold) {

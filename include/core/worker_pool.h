@@ -83,7 +83,6 @@ typedef struct {
 // Lifecycle Functions
 // =============================================================================
 
-#ifdef ENABLE_MULTI_CLIENT
 
 /**
  * @brief Initialize worker pool (EAGER initialization)
@@ -244,77 +243,6 @@ void worker_pool_set_mosq(struct mosquitto *mosq);
  * @return Mosquitto client instance, or NULL if not set
  */
 struct mosquitto *worker_pool_get_mosq(void);
-
-#endif /* ENABLE_MULTI_CLIENT */
-
-/* =============================================================================
- * Stub Implementations for Local-Only Mode (no network features)
- *
- * When ENABLE_WEBUI is disabled, worker_pool.c
- * is not compiled. These inline stubs provide the minimal API needed by
- * code that calls worker_pool functions unconditionally.
- * ============================================================================= */
-
-#ifndef ENABLE_MULTI_CLIENT
-
-static inline int worker_pool_init(asr_engine_type_t engine_type, const char *model_path) {
-   (void)engine_type;
-   (void)model_path;
-   return 0; /* Success - no workers needed */
-}
-
-static inline void worker_pool_shutdown(void) {
-}
-
-static inline int worker_pool_assign_client(int client_fd, session_t *session) {
-   (void)client_fd;
-   (void)session;
-   return 1; /* Failure - no workers available */
-}
-
-static inline asr_context_t *worker_pool_borrow_asr(void) {
-   return NULL;
-}
-
-static inline asr_context_t *worker_pool_try_borrow_asr(int keep_idle) {
-   (void)keep_idle;
-   return NULL;
-}
-
-static inline asr_engine_type_t worker_pool_engine_type(void) {
-   return ASR_ENGINE_WHISPER;
-}
-
-static inline void worker_pool_return_asr(asr_context_t *ctx) {
-   (void)ctx;
-}
-
-static inline int worker_pool_size(void) {
-   return 0;
-}
-
-static inline int worker_pool_active_count(void) {
-   return 0;
-}
-
-static inline worker_state_t worker_pool_get_state(int worker_id) {
-   (void)worker_id;
-   return WORKER_STATE_SHUTDOWN;
-}
-
-static inline bool worker_pool_is_initialized(void) {
-   return false;
-}
-
-static inline void worker_pool_set_mosq(struct mosquitto *mosq) {
-   (void)mosq;
-}
-
-static inline struct mosquitto *worker_pool_get_mosq(void) {
-   return NULL;
-}
-
-#endif /* !ENABLE_MULTI_CLIENT */
 
 #ifdef __cplusplus
 }
