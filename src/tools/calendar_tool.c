@@ -36,6 +36,7 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "logging.h"
+#include "tools/calendar_pick.h"
 #include "tools/calendar_service.h"
 #include "tools/oauth_client.h"
 #include "tools/tool_registry.h"
@@ -392,7 +393,7 @@ static char *handle_add(struct json_object *details, int user_id) {
    const char *rrule = json_get_str(details, "rrule");
    const char *tz = g_config.localization.timezone;
 
-   char cal_used[256] = ""; /* a display name, whole */
+   char cal_used[CALENDAR_PICK_LABEL_MAX] = ""; /* a label, whole */
    char uid[256] = { 0 };
    int rc = calendar_service_add(user_id, summary, start, end, location, description, all_day,
                                  calendar_name, rrule, tz, uid, sizeof(uid), cal_used,

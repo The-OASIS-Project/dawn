@@ -163,7 +163,7 @@ int calendar_service_search(int user_id,
  * @param rrule         Recurrence rule (NULL = non-recurring)
  * @param tz_name       User timezone for iCalendar DTSTART TZID
  * @param uid_out       Buffer for created UID (at least 256 bytes)
- * @param calendar_out  Receives the calendar's name (may be NULL)
+ * @param calendar_out  Receives the calendar's label (calendar_pick_label; may be NULL)
  * @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
  *         CALENDAR_RC_READONLY if the target calendar/account is read-only,
  *         CALENDAR_RC_NOT_FOUND if no single writable calendar has that name

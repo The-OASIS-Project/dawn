@@ -2255,7 +2255,8 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT c.id, c.account_id, c.caldav_path, c.display_name, c.color, "
-                           "c.is_active, c.ctag, c.sync_token, c.created_at, a.read_only "
+                           "c.is_active, c.ctag, c.sync_token, c.created_at, a.read_only, "
+                           "a.name "
                            "FROM calendar_calendars c "
                            "JOIN calendar_accounts a ON c.account_id = a.id "
                            "WHERE a.user_id = ? AND a.enabled = 1 AND c.is_active = 1 "

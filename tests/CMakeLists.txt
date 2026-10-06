@@ -1469,6 +1469,13 @@ dawn_add_unit_test(test_homeassistant_match
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_calendar_pick
+   SOURCES test_calendar_pick.c
+           ${SRC_ROOT}/src/tools/calendar_pick.c
+           ${SRC_ROOT}/src/core/str_fuzzy.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_extraction_input
    SOURCES test_memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c

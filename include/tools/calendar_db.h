@@ -71,6 +71,7 @@ typedef struct {
                            *   rejected by the server → perpetual re-baseline. */
    time_t created_at;
    bool account_read_only; /**< Populated by JOIN queries — reflects parent account's read_only */
+   char account_name[128]; /**< Populated by JOIN queries — the parent account's name */
 } calendar_calendar_t;
 
 typedef struct {

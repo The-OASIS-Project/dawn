@@ -321,6 +321,7 @@ if(DAWN_ENABLE_CALENDAR_TOOL)
         list(APPEND TOOL_SOURCES
             src/tools/calendar_tool.c
             src/tools/calendar_service.c
+            src/tools/calendar_pick.c
             src/tools/calendar_db.c
             src/tools/caldav_client.c
             src/tools/oauth_client.c)

@@ -97,10 +97,14 @@ static void row_to_calendar(sqlite3_stmt *stmt, calendar_calendar_t *c) {
    col_str(c->ctag, sizeof(c->ctag), stmt, 6);
    col_str(c->sync_token, sizeof(c->sync_token), stmt, 7);
    c->created_at = (time_t)sqlite3_column_int64(stmt, 8);
-   /* Column 9 (account read_only) only present in active_for_user JOIN query.
-    * Standard calendar queries return 9 columns; the JOIN query returns 10. */
+   /* Columns 9-10 (the account's read_only and name) only in the
+    * active_for_user JOIN query; standard calendar queries return 9 columns. */
    int col_count = sqlite3_column_count(stmt);
    c->account_read_only = (col_count >= 10) ? (sqlite3_column_int(stmt, 9) != 0) : false;
+   c->account_name[0] = '\0';
+   if (col_count >= 11) {
+      col_str(c->account_name, sizeof(c->account_name), stmt, 10);
+   }
 }
 
 static void row_to_event(sqlite3_stmt *stmt, calendar_event_t *e) {
