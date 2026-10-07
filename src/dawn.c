@@ -2282,6 +2282,7 @@ int main(int argc, char *argv[]) {
       mosq = mosquitto_new(NULL, true, NULL);
       if (mosq == NULL) {
          OLOG_ERROR("Error: Out of memory.\n");
+         free(max_buff);
          return 1;
       }
 
@@ -2381,6 +2382,7 @@ int main(int argc, char *argv[]) {
          OLOG_ERROR("Error on mosquitto_connect(): %s\n", mosquitto_strerror(rc));
          OLOG_ERROR("  Hint: Check Mosquitto is running: sudo systemctl status mosquitto");
          OLOG_ERROR("  Hint: Verify [mqtt] broker and port in dawn.toml (default: 127.0.0.1:1883)");
+         free(max_buff);
          return 1;
       } else {
          OLOG_INFO("Connected to local MQTT server.\n");
@@ -4007,6 +4009,8 @@ mqtt_disabled:
                if (ignoreCount < numIgnoreWords &&
                    command_processing_mode == CMD_MODE_DIRECT_ONLY) {
                   OLOG_WARNING("Input ignored. Found in ignore list.\n");
+                  free(command_text);
+                  command_text = NULL;
                   silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
                   recState = DAWN_STATE_SILENCE;
 
@@ -4314,6 +4318,7 @@ server_shutdown:
    audio_backend_cleanup();
 
    free(max_buff);
+   free(command_text); /* an utterance still held at shutdown */
 
    // Note: preroll_buffer is statically allocated, no free needed
 

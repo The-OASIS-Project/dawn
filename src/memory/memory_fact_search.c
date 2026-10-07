@@ -329,7 +329,7 @@ int memory_search_execute(int user_id,
                           int *out_count) {
    if (out_count != NULL)
       *out_count = 0;
-   if (out_facts == NULL || out_scores == NULL || max <= 0)
+   if (out_facts == NULL || out_scores == NULL || out_count == NULL || max <= 0)
       return FAILURE;
    if (query == NULL || query[0] == '\0')
       return SUCCESS;

@@ -97,6 +97,9 @@ static struct {
  * @brief Perform HTTP GET request
  */
 static int http_get(const char *url, int timeout_ms, curl_buffer_t *response) {
+   /* First: every caller frees the response, even when the request fails. */
+   curl_buffer_init_with_max(response, LLM_LOCAL_MAX_RESPONSE_SIZE);
+
    CURL *curl = curl_easy_init();
    if (!curl) {
       return FAILURE;
@@ -107,8 +110,6 @@ static int http_get(const char *url, int timeout_ms, curl_buffer_t *response) {
       timeout_ms = HTTP_TIMEOUT_MIN_MS;
    if (timeout_ms > HTTP_TIMEOUT_MAX_MS)
       timeout_ms = HTTP_TIMEOUT_MAX_MS;
-
-   curl_buffer_init_with_max(response, LLM_LOCAL_MAX_RESPONSE_SIZE);
 
    curl_easy_setopt(curl, CURLOPT_URL, url);
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
@@ -143,6 +144,9 @@ static int http_post_json(const char *url,
                           const char *json_body,
                           int timeout_ms,
                           curl_buffer_t *response) {
+   /* First: every caller frees the response, even when the request fails. */
+   curl_buffer_init_with_max(response, LLM_LOCAL_MAX_RESPONSE_SIZE);
+
    CURL *curl = curl_easy_init();
    if (!curl) {
       return FAILURE;
@@ -153,8 +157,6 @@ static int http_post_json(const char *url,
       timeout_ms = HTTP_TIMEOUT_MIN_MS;
    if (timeout_ms > HTTP_TIMEOUT_MAX_MS)
       timeout_ms = HTTP_TIMEOUT_MAX_MS;
-
-   curl_buffer_init_with_max(response, LLM_LOCAL_MAX_RESPONSE_SIZE);
 
    struct curl_slist *headers = NULL;
    headers = curl_slist_append(headers, "Content-Type: application/json");

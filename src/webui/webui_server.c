@@ -2255,6 +2255,7 @@ void webui_send_state_for_conversation(session_t *session,
 
    if (!resp.state.state) {
       OLOG_ERROR("WebUI: Failed to allocate state response");
+      free(resp.state.detail);
       return;
    }
 

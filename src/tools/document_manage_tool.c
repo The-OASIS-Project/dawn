@@ -201,12 +201,19 @@ static uint32_t stage_pending(const turn_origin_t *origin,
 /* Take this session's pending deletion, the one the confirm names, for its
  * confirm: copied to @p out and consumed.  NULL on success, else the message
  * to return (one named wrong, or confirmed in the wrong turn, stays). */
-static char *take_pending(const turn_origin_t *origin,
-                          int user_id,
-                          uint32_t pending_id,
-                          docmgmt_pending_t *out) {
-   if (pending_id == 0)
-      return tool_pending_missing_id("deletion");
+/* True with *out filled when the staged deletion is taken.  False otherwise,
+ * with *err the refusal to return (NULL if even that couldn't be allocated):
+ * "found" is never inferred from a NULL message. */
+static bool take_pending(const turn_origin_t *origin,
+                         int user_id,
+                         uint32_t pending_id,
+                         docmgmt_pending_t *out,
+                         char **err) {
+   *err = NULL;
+   if (pending_id == 0) {
+      *err = tool_pending_missing_id("deletion");
+      return false;
+   }
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_pending_mutex);
    const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id,
@@ -214,10 +221,11 @@ static char *take_pending(const turn_origin_t *origin,
                                                    pending_slots_now(), out, sizeof(*out), &orc);
    pthread_mutex_unlock(&s_pending_mutex);
    if (rc == PENDING_FOUND)
-      return NULL;
+      return true;
    if (rc == PENDING_NOT_NOW)
       OLOG_WARNING("document_manage: confirm_delete refused (%s)", turn_origin_refusal(orc));
-   return tool_pending_take_refusal(rc, orc, "deletion");
+   *err = tool_pending_take_refusal(rc, orc, "deletion");
+   return false;
 }
 
 static int resolve_owned_doc(int user_id, const char *label, int64_t id, document_t *out);
@@ -952,9 +960,10 @@ static char *do_confirm_delete(int user_id, const turn_origin_t *origin, const c
       pending_id = (n > 0 && n <= UINT32_MAX) ? (uint32_t)n : 0;
    }
    docmgmt_pending_t pending;
-   char *err = take_pending(origin, user_id, pending_id, &pending);
-   if (err)
+   char *err = NULL;
+   if (!take_pending(origin, user_id, pending_id, &pending, &err)) {
       return err;
+   }
    const int64_t doc_id = pending.doc_id;
    const char *label = pending.label;
    const bool is_note = pending.is_note;

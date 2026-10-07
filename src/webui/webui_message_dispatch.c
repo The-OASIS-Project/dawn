@@ -217,6 +217,7 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
    if (text[strspn(text, " \t\r\n")] == '\0') {
       if (image_id_count == 0) {
          send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
+         free(built);
          return;
       }
       text = "";

@@ -312,7 +312,9 @@ static bool bn_sub(bignum_t *r, const bignum_t *a, const bignum_t *b) {
       bn_free(&nb);
       return false;
    }
-   memcpy(nb.limb, b->limb, b->n * sizeof(*b->limb));
+   if (b->n > 0) { /* a zero has no limbs, and memcpy's source must not be NULL */
+      memcpy(nb.limb, b->limb, b->n * sizeof(*b->limb));
+   }
    nb.n = b->n;
    nb.sign = -b->sign;
    bool ok = bn_add(r, a, &nb);
@@ -547,7 +549,9 @@ static void parse_power(exact_ctx_t *c, bignum_t *out) {
       if (!bn_reserve(&base, out->n ? out->n : 1)) {
          ok = false;
       } else {
-         memcpy(base.limb, out->limb, out->n * sizeof(*out->limb));
+         if (out->n > 0) { /* a zero has no limbs, and memcpy's source must not be NULL */
+            memcpy(base.limb, out->limb, out->n * sizeof(*out->limb));
+         }
          base.n = out->n;
          base.sign = out->sign;
       }

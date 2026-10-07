@@ -468,7 +468,9 @@ char *result_read_distinct(struct json_object *root,
       tally[k].value = key;
       tally[k++].count = json_object_get_int(val);
    }
-   qsort(tally, (size_t)distinct, sizeof(*tally), tally_order);
+   if (distinct > 1) { /* tally is NULL when nothing was counted */
+      qsort(tally, (size_t)distinct, sizeof(*tally), tally_order);
+   }
 
    strbuf_t sb;
    strbuf_init_with_max(&sb, 512, budget + 256);
