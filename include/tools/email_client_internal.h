@@ -52,6 +52,49 @@ CURLcode email_imap_run_command(CURL *curl,
                                 bool first,
                                 curl_buffer_t *buf);
 
+/** @p folder percent-encoded for an IMAP URL path, as every IMAP call addresses it. */
+void email_imap_url_encode_folder(const char *folder, char *out, size_t out_len);
+
+/**
+ * @brief STATUS INBOX (UNSEEN) on @p curl, before any mailbox is selected on it
+ *        (RFC 3501: STATUS shouldn't be asked of the selected mailbox)
+ *
+ * Sets the handle's URL to the server (no mailbox); the caller sets its own
+ * URL afterwards.  email_imap_flags.c
+ * @param first As for email_imap_run_command
+ * @return CURLE_OK with @p unseen set, or why it failed (@p unseen -1)
+ */
+CURLcode email_imap_status_inbox_unseen(CURL *curl,
+                                        email_instrument_ctx_t *dctx,
+                                        const email_conn_t *conn,
+                                        bool first,
+                                        int *unseen);
+
+/**
+ * @brief Message @p uid's read state in the mailbox at @p folder_url
+ * @param state EMAIL_IMAP_UID_SEEN/_UNSEEN/_ABSENT (email_imap_state.h)
+ * @return CURLE_OK with @p state set, or why the FETCH failed
+ */
+CURLcode email_imap_seen_state(CURL *curl,
+                               email_instrument_ctx_t *dctx,
+                               const email_conn_t *conn,
+                               const char *folder_url,
+                               uint32_t uid,
+                               bool first,
+                               int *state);
+
+/**
+ * @brief Clear \Seen on @p uid again after a read set it, whatever happened to
+ *        the read: no cancel (the read's may be set), its own short timeout,
+ *        possibly a new login (curl drops the connection after an aborted fetch)
+ * @return true when the server took it
+ */
+bool email_imap_restore_unseen(CURL *curl,
+                               email_instrument_ctx_t *dctx,
+                               const email_conn_t *conn,
+                               const char *folder_url,
+                               uint32_t uid);
+
 #ifdef __cplusplus
 }
 #endif

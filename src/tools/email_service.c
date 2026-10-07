@@ -389,6 +389,19 @@ int email_svc_gmail_token(const email_account_t *acct, char *token, size_t len, 
    return rc;
 }
 
+int email_svc_gmail_token_err(const email_account_t *acct,
+                              char *token,
+                              size_t len,
+                              email_err_t *err) {
+   bool revoked = false;
+   if (email_svc_gmail_token(acct, token, len, &revoked) == 0)
+      return 0;
+   sodium_memzero(token, len);
+   if (err)
+      *err = revoked ? EMAIL_ERR_AUTH_REVOKED : EMAIL_ERR_AUTH_FAILED;
+   return 1;
+}
+
 /* =============================================================================
  * Account Management (WebUI)
  * ============================================================================= */
@@ -520,12 +533,8 @@ int email_service_test_connection(int user_id,
    /* Gmail API path — single API call covers both directions */
    if (email_svc_is_gmail_api(&acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      bool revoked = false;
-      if (email_svc_gmail_token(&acct, token, sizeof(token), &revoked) != 0) {
-         sodium_memzero(token, sizeof(token));
+      if (email_svc_gmail_token_err(&acct, token, sizeof(token), err) != 0) {
          sodium_memzero(&acct, sizeof(acct));
-         if (err)
-            *err = revoked ? EMAIL_ERR_AUTH_REVOKED : EMAIL_ERR_AUTH_FAILED;
          return EMAIL_RC_FAILURE;
       }
       char email[128];
@@ -1082,10 +1091,7 @@ int email_service_list_folders(int user_id,
    int rc;
    if (email_svc_is_gmail_api(&acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      bool revoked = false;
-      if (email_svc_gmail_token(&acct, token, sizeof(token), &revoked) != 0) {
-         if (err)
-            *err = revoked ? EMAIL_ERR_AUTH_REVOKED : EMAIL_ERR_AUTH_FAILED;
+      if (email_svc_gmail_token_err(&acct, token, sizeof(token), err) != 0) {
          rc = EMAIL_RC_FAILURE;
       } else {
          rc = gmail_list_labels(token, out, out_len);
@@ -1273,12 +1279,8 @@ static int execute_move(const email_account_t *acct,
    /* Gmail API path */
    if (email_svc_is_gmail_api(acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
-      bool revoked = false;
-      if (email_svc_gmail_token(acct, token, sizeof(token), &revoked) != 0) {
-         sodium_memzero(token, sizeof(token));
-         *err = revoked ? EMAIL_ERR_AUTH_REVOKED : EMAIL_ERR_AUTH_FAILED;
+      if (email_svc_gmail_token_err(acct, token, sizeof(token), err) != 0)
          return 1;
-      }
       int rc = trash ? gmail_trash_message(token, message_id)
                      : gmail_archive_message(token, message_id);
       sodium_memzero(token, sizeof(token));

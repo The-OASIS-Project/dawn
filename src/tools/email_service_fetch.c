@@ -170,6 +170,7 @@ static int recent_on_account(const email_account_t *acct,
                              int *out_count,
                              char *next_page_token,
                              size_t npt_len,
+                             int *inbox_unread,
                              const email_target_t *target,
                              email_err_t *err);
 
@@ -184,12 +185,15 @@ int email_service_recent(int user_id,
                          int *out_count,
                          char *next_page_token,
                          size_t npt_len,
+                         int *inbox_unread,
                          const email_target_t *target,
                          email_err_t *err) {
    email_err_t err_local;
    if (!err)
       err = &err_local;
    *err = EMAIL_ERR_FAILED;
+   if (inbox_unread)
+      *inbox_unread = -1;
 
    /* Copy the incoming cursor before clearing the outgoing one, so a caller may
     * pass the same buffer for both (page N's token in, page N+1's out). */
@@ -214,7 +218,7 @@ int email_service_recent(int user_id,
    if (count <= 0)
       count = acct.max_recent > 0 ? acct.max_recent : EMAIL_MAX_RECENT_DEFAULT;
    const int rc = recent_on_account(&acct, folder, count, unread_only, page_token, out, max,
-                                    out_count, next_page_token, npt_len, target, err);
+                                    out_count, next_page_token, npt_len, inbox_unread, target, err);
    sodium_memzero(&acct, sizeof(acct));
    return rc;
 }
@@ -230,10 +234,15 @@ static int recent_on_account(const email_account_t *acct,
                              int *out_count,
                              char *next_page_token,
                              size_t npt_len,
+                             int *inbox_unread,
                              const email_target_t *target,
                              email_err_t *err) {
    folder_norm_t norm;
    normalize_folder(folder, acct, &norm);
+   /* The unread count comes with the inbox's first page only: decided on the
+    * folder asked for, since other folders can fall back to INBOX on IMAP. */
+   const bool asked_inbox = !folder || !folder[0] || strcasecmp(folder, "inbox") == 0;
+   const bool want_unread = inbox_unread && asked_inbox && !(page_token && page_token[0]);
 
    /* Gmail API path */
    if (email_svc_is_gmail_api(acct)) {
@@ -242,14 +251,11 @@ static int recent_on_account(const email_account_t *acct,
          return EMAIL_RC_INVALID_PAGE_TOKEN;
       }
       char token[OAUTH_TOKEN_BUF_SIZE];
-      bool revoked = false;
-      if (email_svc_gmail_token(acct, token, sizeof(token), &revoked) != 0) {
-         sodium_memzero(token, sizeof(token));
-         *err = revoked ? EMAIL_ERR_AUTH_REVOKED : EMAIL_ERR_AUTH_FAILED;
+      if (email_svc_gmail_token_err(acct, token, sizeof(token), err) != 0)
          return 1;
-      }
       int rc = gmail_fetch_recent(token, norm.gmail_query, count, unread_only, page_token, out, max,
-                                  out_count, next_page_token, npt_len);
+                                  out_count, next_page_token, npt_len,
+                                  want_unread ? inbox_unread : NULL);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
       *err = rc == 0 ? EMAIL_ERR_NONE : EMAIL_ERR_FAILED;
@@ -273,7 +279,7 @@ static int recent_on_account(const email_account_t *acct,
       rc = 1;
    } else {
       rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, &page, out, max,
-                              out_count, err);
+                              out_count, want_unread ? inbox_unread : NULL, err);
    }
    email_svc_lease_end(&lease);
    sodium_memzero(&conn, sizeof(conn));
@@ -339,13 +345,9 @@ static int search_single_account(email_account_t *acct,
       snprintf(gmail_params.folder, sizeof(gmail_params.folder), "%s", norm.gmail_query);
 
       char token[OAUTH_TOKEN_BUF_SIZE];
-      bool revoked = false;
-      if (email_svc_gmail_token(acct, token, sizeof(token), &revoked) != 0) {
-         /* Token fetch failed = the account can't authenticate (revoked/expired). */
-         *err = revoked ? EMAIL_ERR_AUTH_REVOKED : EMAIL_ERR_AUTH_FAILED;
-         sodium_memzero(token, sizeof(token));
+      /* A failed token = the account can't authenticate (revoked/expired). */
+      if (email_svc_gmail_token_err(acct, token, sizeof(token), err) != 0)
          return 1;
-      }
       int rc = gmail_search(token, &gmail_params, max, out, max, out_count, next_page_token,
                             npt_len);
       sodium_memzero(token, sizeof(token));

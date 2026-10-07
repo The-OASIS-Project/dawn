@@ -119,4 +119,14 @@ void email_instrument_note_denied(const char *account,
                                   const email_instrument_ctx_t *ctx,
                                   const char *op);
 
+/**
+ * @brief Whether @p account on @p server (its IMAP URL) has refused STATUS in
+ *        the last 24 hours (so a listing skips it: a refused command costs the
+ *        connection, and a second login)
+ */
+bool email_instrument_status_refused(const char *server, const char *account);
+
+/** Remember that @p account on @p server refused STATUS, for 24 hours; logged once. */
+void email_instrument_note_status_refused(const char *server, const char *account);
+
 #endif /* EMAIL_INSTRUMENT_H */

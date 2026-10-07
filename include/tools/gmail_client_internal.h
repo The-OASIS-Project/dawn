@@ -50,6 +50,15 @@ int gmail_api_get_ex(CURL *curl,
                      long *http_code_out,
                      CURLcode *res_out);
 
+/** gmail_api_get_ex with a reply cap of @p max_bytes instead of the default 4 MB. */
+int gmail_api_get_capped(CURL *curl,
+                         const char *token,
+                         const char *url,
+                         size_t max_bytes,
+                         curl_buffer_t *resp,
+                         long *http_code_out,
+                         CURLcode *res_out);
+
 /** gmail_api_get_ex without the transfer result. */
 int gmail_api_get(CURL *curl,
                   const char *token,
@@ -57,8 +66,36 @@ int gmail_api_get(CURL *curl,
                   curl_buffer_t *resp,
                   long *http_code_out);
 
+/**
+ * @brief POST @p body to a Gmail API URL, reply into @p resp (freed on failure)
+ * @param http_code_out As for gmail_api_get_ex (a 403 rate limit reads as 429)
+ * @return 0 on a 2xx, 1 otherwise
+ */
+int gmail_api_post_ex(CURL *curl,
+                      const char *token,
+                      const char *url,
+                      const char *content_type,
+                      const char *body,
+                      curl_buffer_t *resp,
+                      long *http_code_out,
+                      CURLcode *res_out);
+
+/** Remove UNREAD from one message on @p curl's connection (gmail_flags.c). */
+int gmail_mark_read(CURL *curl, const char *token, const char *message_id, email_err_t *err);
+
+/** The email_err_t a failed Gmail call stands for (gmail_client.c). */
+email_err_t gmail_http_err(CURLcode res, long http_code);
+
+/** gmail_inbox_unread on the caller's handle (no new connection) (gmail_flags.c). */
+int gmail_inbox_unread_on(CURL *curl, const char *token, int *unread, email_err_t *err);
+
 /* The most of one text part read from a message's tree. */
 #define GMAIL_TEXT_PART_MAX (4 * 1024 * 1024)
+
+/* The reply cap for one part fetched by its attachmentId: the part's base64
+ * (4/3 of GMAIL_TEXT_PART_MAX) plus the JSON around it.  A part that fits is
+ * read whole; a bigger one reads as cut. */
+#define GMAIL_PART_RESPONSE_MAX (GMAIL_TEXT_PART_MAX / 3 * 4 + 64 * 1024)
 
 /** Whether @p c is a base64url character.  gmail_parts.c, as below. */
 bool gmail_b64url_char(unsigned char c);

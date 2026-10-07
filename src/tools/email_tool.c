@@ -376,7 +376,7 @@ static char *handle_recent(struct json_object *details, int user_id) {
    email_err_t err = EMAIL_ERR_NONE;
    int rc = email_service_recent(user_id, account, folder, count, unread_only, page_token, emails,
                                  MAX_EMAIL_RESULTS, &out_count, next_page_token,
-                                 sizeof(next_page_token), NULL, &err);
+                                 sizeof(next_page_token), NULL, NULL, &err);
 
    if (rc != EMAIL_RC_OK)
       return err_error(rc, err, "recent", account, folder);

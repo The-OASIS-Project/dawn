@@ -42,6 +42,8 @@
  * @param out_count        Output: number of results written
  * @param next_page_token  Output: token for next page (empty if no more pages)
  * @param npt_len          Size of next_page_token buffer
+ * @param inbox_unread     Optional: the INBOX's unread count, asked on the
+ *                         same connection (-1 when it can't be had)
  * @return 0 on success, 1 on failure
  */
 int gmail_fetch_recent(const char *token,
@@ -53,7 +55,8 @@ int gmail_fetch_recent(const char *token,
                        int max_out,
                        int *out_count,
                        char *next_page_token,
-                       size_t npt_len);
+                       size_t npt_len,
+                       int *inbox_unread);
 
 
 /** Whether @p id has the shape of a Gmail message id (hex, bounded). */
@@ -150,5 +153,34 @@ int gmail_trash_message(const char *token, const char *message_id);
  * @return 0 on success, 1 on failure
  */
 int gmail_archive_message(const char *token, const char *message_id);
+
+/** The most ids one gmail_set_unread call takes (one batchModify). */
+#define GMAIL_FLAGS_MAX_IDS 50
+
+/**
+ * @brief Add or remove UNREAD on messages (nothing else): one batchModify, or
+ *        each message on its own when the batch is refused (gmail_flags.c)
+ *
+ * batchModify answers for the batch, not per message, so an id not in the
+ * mailbox reads as updated when the batch succeeds.  An id that isn't a Gmail
+ * id is EMAIL_ERR_NOT_FOUND without asking.
+ *
+ * @param n       At most GMAIL_FLAGS_MAX_IDS
+ * @param updated Per id: true when it was done
+ * @param errs    Per id: why it wasn't (EMAIL_ERR_NONE when it was)
+ * @return 0, or 1 when the request couldn't be made (see @p errs)
+ */
+int gmail_set_unread(const char *token,
+                     const char *const *ids,
+                     int n,
+                     bool unread,
+                     bool *updated,
+                     email_err_t *errs);
+
+/**
+ * @brief The INBOX's unread count (labels/INBOX messagesUnread) (gmail_flags.c)
+ * @return 0 with @p unread set, or 1 (@p err says why)
+ */
+int gmail_inbox_unread(const char *token, int *unread, email_err_t *err);
 
 #endif /* GMAIL_CLIENT_H */

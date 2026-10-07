@@ -111,6 +111,14 @@ void email_transfer_set_cancel(CURL *curl, const atomic_bool *cancel) {
    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 }
 
+void email_transfer_clear_cancel(CURL *curl) {
+   if (!curl)
+      return;
+   curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, NULL);
+   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
+}
+
 /* Thread-local, so a worker serving one request can't stop another's transfers. */
 static __thread const atomic_bool *s_thread_cancel;
 

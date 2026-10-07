@@ -378,3 +378,63 @@ void email_instrument_note_denied(const char *account,
    OLOG_WARNING("email: [%s] %s login denied: \"%s\" [denial #%lu]",
                 account ? account : "(unknown)", op ? op : "?", reject, denials);
 }
+
+/* Servers that answered STATUS with NO, per server and user: a refused command
+ * costs the connection, so a listing stops asking for a while.  The entry
+ * expires, so a temporary refusal isn't permanent. */
+#define EMAIL_STATUS_REFUSED_SEC (24 * 60 * 60)
+
+typedef struct {
+   char server[512]; /* the IMAP URL, as email_conn_t holds it */
+   char account[128];
+   time_t until; /* 0: free */
+} email_status_refusal_t;
+
+static email_status_refusal_t s_status_refused[EMAIL_INSTR_MAX_ACCOUNTS];
+
+/* Caller holds s_accts_mutex. */
+static email_status_refusal_t *status_refusal_locked(const char *server,
+                                                     const char *account,
+                                                     time_t now) {
+   for (int i = 0; i < EMAIL_INSTR_MAX_ACCOUNTS; i++) {
+      email_status_refusal_t *r = &s_status_refused[i];
+      if (r->until > now && strncmp(r->server, server, sizeof(r->server)) == 0 &&
+          strncmp(r->account, account, sizeof(r->account)) == 0)
+         return r;
+   }
+   return NULL;
+}
+
+bool email_instrument_status_refused(const char *server, const char *account) {
+   if (!server || !account)
+      return false;
+   pthread_mutex_lock(&s_accts_mutex);
+   const bool refused = status_refusal_locked(server, account, time(NULL)) != NULL;
+   pthread_mutex_unlock(&s_accts_mutex);
+   return refused;
+}
+
+void email_instrument_note_status_refused(const char *server, const char *account) {
+   if (!server || !account)
+      return;
+   bool noted = false;
+   const time_t now = time(NULL);
+   pthread_mutex_lock(&s_accts_mutex);
+   if (!status_refusal_locked(server, account, now)) {
+      /* A free or expired entry; with none, the oldest is replaced. */
+      email_status_refusal_t *slot = &s_status_refused[0];
+      for (int i = 1; i < EMAIL_INSTR_MAX_ACCOUNTS; i++) {
+         if (s_status_refused[i].until < slot->until)
+            slot = &s_status_refused[i];
+      }
+      snprintf(slot->server, sizeof(slot->server), "%s", server);
+      snprintf(slot->account, sizeof(slot->account), "%s", account);
+      slot->until = now + EMAIL_STATUS_REFUSED_SEC;
+      noted = true;
+   }
+   pthread_mutex_unlock(&s_accts_mutex);
+   if (noted)
+      OLOG_WARNING("email: [%s] server refused STATUS; its unread count won't be asked again "
+                   "for 24 hours",
+                   account);
+}

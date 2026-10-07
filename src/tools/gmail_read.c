@@ -48,22 +48,11 @@
  * Public API: Read Message
  * ============================================================================= */
 
-/* The email_err_t a failed Gmail call stands for. */
-static email_err_t gmail_err(CURLcode res, long http_code) {
-   if (res != CURLE_OK)
-      return email_err_from_curl(res);
-   if (http_code == 401)
-      return EMAIL_ERR_AUTH_FAILED;
-   if (http_code == 404)
-      return EMAIL_ERR_NOT_FOUND;
-   if (http_code == 429)
-      return EMAIL_ERR_RATE_LIMITED;
-   return EMAIL_ERR_FAILED;
-}
-
 /* One part's bytes from behind its attachmentId: Gmail moves a large body part
  * out of the tree, and the body we read may be one.  NULL with *err set on
- * failure. */
+ * failure, or NULL with *err EMAIL_ERR_NONE when the part is bigger than
+ * GMAIL_TEXT_PART_MAX (its reply passes GMAIL_PART_RESPONSE_MAX): it reads as
+ * cut, with none of its text. */
 static unsigned char *gmail_fetch_part(CURL *curl,
                                        const char *token,
                                        const char *message_id,
@@ -85,8 +74,10 @@ static unsigned char *gmail_fetch_part(CURL *curl,
    curl_buffer_t resp;
    long http_code = 0;
    CURLcode res = CURLE_OK;
-   if (gmail_api_get_ex(curl, token, url, &resp, &http_code, &res) != 0) {
-      *err = gmail_err(res, http_code);
+   if (gmail_api_get_capped(curl, token, url, GMAIL_PART_RESPONSE_MAX, &resp, &http_code, &res) !=
+       0) {
+      /* A reply past the response cap comes back as no reply with no status. */
+      *err = res == CURLE_OK && http_code == 0 ? EMAIL_ERR_NONE : gmail_http_err(res, http_code);
       return NULL;
    }
    struct json_object *root = json_tokener_parse(resp.data);
@@ -132,6 +123,12 @@ static bool fetch_body_part(void *ctx,
    unsigned char *bytes = gmail_fetch_part(fc->curl, fc->token, fc->message_id,
                                            w->attachment_ids[index], &len, &e);
    if (!bytes) {
+      if (e == EMAIL_ERR_NONE) {
+         /* Too big to take: the part reads as cut, and isn't asked for again. */
+         free((void *)w->attachment_ids[index]);
+         w->attachment_ids[index] = NULL;
+         return false;
+      }
       fc->err = e;
       return false;
    }
@@ -201,7 +198,7 @@ int gmail_read_message(const char *token,
    CURLcode res = CURLE_OK;
    if (gmail_api_get_ex(curl, token, url, &resp, &http_code, &res) != 0) {
       curl_easy_cleanup(curl);
-      *err = gmail_err(res, http_code);
+      *err = gmail_http_err(res, http_code);
       return 1;
    }
    struct json_object *root = json_tokener_parse(resp.data);
@@ -259,6 +256,19 @@ int gmail_read_message(const char *token,
    }
    if (root)
       json_object_put(root);
+   if (rc == 0 && !opts->headers_only && opts->mark != EMAIL_MARK_AS_BACKEND) {
+      /* A Gmail read changes nothing; marking it read is a call of its own. */
+      bool unread = out->unread_before;
+      if (opts->mark == EMAIL_MARK_READ && unread) {
+         email_err_t merr = EMAIL_ERR_NONE;
+         if (gmail_mark_read(curl, token, message_id, &merr) == 0)
+            unread = false;
+         else
+            OLOG_WARNING("gmail: couldn't mark a message read (%s)", email_error_name(merr));
+      }
+      out->unread_known = true;
+      out->unread_after = unread;
+   }
    curl_easy_cleanup(curl);
    if (rc != 0) {
       email_message_free(out);

@@ -341,12 +341,15 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_service.c
         src/tools/email_service_read.c
         src/tools/email_service_fetch.c
+        src/tools/email_service_flags.c
         src/tools/email_account_lease.c
         src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c
         src/tools/email_imap_move.c
         src/tools/email_imap_roles.c
+        src/tools/email_imap_flags.c
+        src/tools/email_imap_state.c
         src/tools/email_instrument.c
         src/tools/email_mime.c
         src/tools/email_display.c
@@ -354,6 +357,7 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_parse.c
         src/tools/gmail_client.c
         src/tools/gmail_read.c
+        src/tools/gmail_flags.c
         src/tools/gmail_parts.c)
     # oauth_client.c may already be included by calendar tool
     if(NOT DAWN_ENABLE_CALENDAR_TOOL)

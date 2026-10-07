@@ -157,6 +157,13 @@ typedef enum {
 /** The wire name of @p err ("AUTH_FAILED", ...; "" for NONE).  email_transfer.c */
 const char *email_error_name(email_err_t err);
 
+/* What a read does to the message's read state. */
+typedef enum {
+   EMAIL_MARK_AS_BACKEND = 0, /* as the backend's read does: IMAP marks it read, Gmail doesn't */
+   EMAIL_MARK_READ,           /* leave it read */
+   EMAIL_MARK_KEEP,           /* leave it as it was (IMAP: mark it unread again right after) */
+} email_mark_t;
+
 /* How a message is read: how much to fetch and what to produce. */
 typedef struct {
    size_t fetch_bytes;        /* IMAP: raw bytes fetched (EMAIL_READ_FETCH_*) */
@@ -166,6 +173,7 @@ typedef struct {
    bool headers_only;         /* no body is fetched: From and Subject are filled (Date on
                                * Gmail); nothing else is promised */
    const atomic_bool *cancel; /* set it to stop the read's transfers (may be NULL) */
+   email_mark_t mark;         /* the read state to leave it in (not with headers_only) */
 } email_read_opts_t;
 
 typedef struct {
@@ -194,6 +202,8 @@ typedef struct {
    char date_str[32];     /* the Date header as sent */
    time_t internal_date;  /* server receive time (Gmail internalDate); 0 when unknown */
    bool unread_before;    /* unread when it was read (Gmail); false when unknown */
+   bool unread_known;     /* unread_after holds the state the read left (with a mark) */
+   bool unread_after;     /* unread once the read is done */
    email_addr_t *to_list; /* heap; to_count kept of to_total */
    int to_count;
    int to_total;

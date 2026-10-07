@@ -602,6 +602,12 @@ dawn_add_unit_test(test_email_parse
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_email_imap_state
+   SOURCES test_email_imap_state.c
+           ${SRC_ROOT}/src/tools/email_imap_state.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_email_digest_step
    SOURCES test_email_digest_step.c
    LIBS    unity

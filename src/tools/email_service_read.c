@@ -51,17 +51,24 @@ static int read_gmail(const email_account_t *acct,
                       email_message_t *out,
                       email_err_t *err) {
    char token[OAUTH_TOKEN_BUF_SIZE];
-   bool revoked = false;
-   if (email_svc_gmail_token(acct, token, sizeof(token), &revoked) != 0) {
-      sodium_memzero(token, sizeof(token));
-      *err = revoked ? EMAIL_ERR_AUTH_REVOKED : EMAIL_ERR_AUTH_FAILED;
+   if (email_svc_gmail_token_err(acct, token, sizeof(token), err) != 0)
       return EMAIL_RC_FAILURE;
-   }
    const int rc = gmail_read_message(token, message_id, opts, out, err);
    sodium_memzero(token, sizeof(token));
    if (rc == 0)
       return EMAIL_RC_OK;
    return *err == EMAIL_ERR_NOT_FOUND ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;
+}
+
+/* An id as a log line may show it: at most 64 bytes, controls replaced, since
+ * it can come from a client. */
+static void loggable_id(const char *id, char *out, size_t out_size) {
+   size_t j = 0;
+   for (size_t i = 0; id && id[i] && i < 64 && j + 1 < out_size; i++) {
+      const unsigned char c = (unsigned char)id[i];
+      out[j++] = (c < 0x20 || c == 0x7f) ? '?' : (char)c;
+   }
+   out[j] = '\0';
 }
 
 bool email_svc_parse_imap_id(const char *message_id,
@@ -72,14 +79,21 @@ bool email_svc_parse_imap_id(const char *message_id,
    if (!email_imap_id_parse(message_id, folder, folder_size, uid)) {
       /* During a no-account fan-out this is a Gmail id landing on an IMAP
        * account (backend mismatch): expected.  Otherwise a real error. */
+      char shown[65];
+      loggable_id(message_id, shown, sizeof(shown));
+      const size_t len = message_id ? strlen(message_id) : 0;
       if (fanout)
-         OLOG_DEBUG("email: message id '%s' is not an IMAP id (skipping IMAP account)", message_id);
+         OLOG_DEBUG("email: message id '%s' (%zu bytes) is not an IMAP id (skipping IMAP account)",
+                    shown, len);
       else
-         OLOG_ERROR("email: invalid IMAP message id '%s'", message_id);
+         OLOG_ERROR("email: invalid IMAP message id '%s' (%zu bytes)", shown, len);
       return false;
    }
    if (!email_service_validate_folder_name(folder)) {
-      OLOG_ERROR("email: invalid folder name in message_id '%s'", message_id);
+      char shown[65];
+      loggable_id(message_id, shown, sizeof(shown));
+      OLOG_ERROR("email: invalid folder name in message id '%s' (%zu bytes)", shown,
+                 strlen(message_id));
       return false;
    }
    return true;

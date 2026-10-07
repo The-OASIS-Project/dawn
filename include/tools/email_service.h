@@ -286,6 +286,9 @@ bool email_service_is_gmail_account(const email_account_t *acct);
  *                         token on an IMAP account (or a stale IMAP cursor) returns
  *                         EMAIL_RC_INVALID_PAGE_TOKEN.
  * @param next_page_token  Filled when more (older) messages remain; empty otherwise.
+ * @param inbox_unread     Optional: the INBOX's unread count, on the inbox's first
+ *                         page only (IMAP: on the same login); -1 when it couldn't be
+ *                         had.  NULL to skip it.
  * @param target             The account by id, or NULL to resolve by name (see email_target_t)
  * @param err              Why it failed (may be NULL)
  * @note @p page_token and @p next_page_token may be the same buffer (the input is
@@ -302,6 +305,7 @@ int email_service_recent(int user_id,
                          int *out_count,
                          char *next_page_token,
                          size_t npt_len,
+                         int *inbox_unread,
                          const email_target_t *target,
                          email_err_t *err);
 
@@ -323,6 +327,49 @@ int email_service_read(int user_id,
                        email_message_t *out,
                        const email_target_t *target,
                        email_err_t *err);
+
+/* Most messages one email_service_set_flags call changes, and the most folders
+ * they may span (an IMAP login each). */
+#define EMAIL_FLAGS_MAX_IDS 50
+#define EMAIL_FLAGS_MAX_FOLDERS 8
+
+/* One message's outcome in email_service_set_flags. */
+typedef struct {
+   bool updated;    /* the message is there in the state asked for */
+   email_err_t err; /* why not: NOT_FOUND (no such message), FAILED (past the folder cap), ... */
+} email_flag_result_t;
+
+/**
+ * @brief Mark messages read or unread (email_service_flags.c)
+ *
+ * Only the read state is ever changed (\Seen, Gmail's UNREAD), so a read-only
+ * account allows it, as reading a message would.  IMAP ids are parsed into
+ * folder and UID before anything is sent, one login per folder.
+ *
+ * @param target  The account by id (required)
+ * @param n       At most EMAIL_FLAGS_MAX_IDS
+ * @param results Per id, in order
+ * @return EMAIL_RC_OK (see @p results), an account-lookup code, or
+ *         EMAIL_RC_FAILURE with @p err set (nothing could be asked)
+ */
+int email_service_set_flags(int user_id,
+                            const email_target_t *target,
+                            const char *const *message_ids,
+                            int n,
+                            bool unread,
+                            email_flag_result_t *results,
+                            email_err_t *err);
+
+/**
+ * @brief The INBOX's unread count (email_service_flags.c)
+ * @param target The account by id (required)
+ * @return EMAIL_RC_OK with @p inbox_unread set, an account-lookup code, or
+ *         EMAIL_RC_FAILURE with @p err set
+ */
+int email_service_unread_count(int user_id,
+                               const email_target_t *target,
+                               int *inbox_unread,
+                               email_err_t *err);
 
 /**
  * @brief Search email across one or (when account_name is NULL) all enabled accounts.

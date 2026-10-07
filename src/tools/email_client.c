@@ -45,6 +45,7 @@
 #include "logging.h"
 #include "tools/email_client_internal.h"
 #include "tools/email_display.h"
+#include "tools/email_imap_state.h"
 #include "tools/email_instrument.h"
 #include "tools/email_mime.h"
 #include "tools/email_parse.h"
@@ -496,7 +497,7 @@ static int batch_fetch_headers(CURL *curl,
  * curl handles mUTF-7 decoding internally for IMAP URLs.
  * ============================================================================= */
 
-static void url_encode_folder(const char *folder, char *out, size_t out_len) {
+void email_imap_url_encode_folder(const char *folder, char *out, size_t out_len) {
    size_t j = 0;
    for (size_t i = 0; folder[i] && j < out_len - 4; i++) {
       unsigned char c = (unsigned char)folder[i];
@@ -835,12 +836,15 @@ int email_fetch_recent(const email_conn_t *conn,
                        email_summary_t *out,
                        int max_out,
                        int *out_count,
+                       int *inbox_unseen,
                        email_err_t *err) {
    email_err_t err_local;
    if (!err)
       err = &err_local;
    *err = EMAIL_ERR_FAILED;
    *out_count = 0;
+   if (inbox_unseen)
+      *inbox_unseen = -1;
    page_reset_outputs(page);
 
    if (count > max_out)
@@ -854,7 +858,7 @@ int email_fetch_recent(const email_conn_t *conn,
       folder = "INBOX";
 
    char encoded_folder[256];
-   url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
 
    CURL *curl = email_imap_handle_create(conn);
    if (!curl)
@@ -862,6 +866,21 @@ int email_fetch_recent(const email_conn_t *conn,
 
    email_instrument_ctx_t dctx;
    email_instrument_attach(curl, &dctx);
+
+   /* The INBOX's unread count rides the same login, asked before any mailbox
+    * is selected on this connection.  A server that doesn't answer it leaves
+    * -1; only a transfer failure ends the listing. */
+   if (inbox_unseen && !email_instrument_status_refused(conn->imap_url, conn->username)) {
+      const CURLcode sres = email_imap_status_inbox_unseen(curl, &dctx, conn, true, inbox_unseen);
+      if (sres == CURLE_QUOTE_ERROR)
+         email_instrument_note_status_refused(conn->imap_url, conn->username);
+      if (sres != CURLE_OK && sres != CURLE_QUOTE_ERROR) {
+         *err = email_err_from_curl(sres);
+         email_instrument_op_done(conn->username, "recent", curl, &dctx);
+         curl_easy_cleanup(curl);
+         return 1;
+      }
+   }
 
    char url[1024];
    build_mailbox_url(conn, encoded_folder, page, url, sizeof(url));
@@ -978,7 +997,7 @@ int email_read_message(const email_conn_t *conn,
       folder = "INBOX";
 
    char encoded_folder[256];
-   url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
    CURL *curl = email_imap_handle_create(conn);
    if (!curl) {
       *err = EMAIL_ERR_FAILED;
@@ -999,6 +1018,26 @@ int email_read_message(const email_conn_t *conn,
          out->uid = uid;
       return rc;
    }
+
+   /* The read state to keep or set: look at it first.  The body fetch below is
+    * libcurl's URL fetch, a plain BODY[] (BODY.PEEK isn't reachable through
+    * it), so the server marks the message read; with EMAIL_MARK_KEEP an unread
+    * message is marked unread again right after (see the restore below). */
+   char folder_url[1024];
+   snprintf(folder_url, sizeof(folder_url), "%s/%s", conn->imap_url, encoded_folder);
+   int seen_before = EMAIL_IMAP_UID_ABSENT;
+   if (opts->mark != EMAIL_MARK_AS_BACKEND) {
+      const CURLcode sres = email_imap_seen_state(curl, &dctx, conn, folder_url, uid, true,
+                                                  &seen_before);
+      if (sres != CURLE_OK || seen_before == EMAIL_IMAP_UID_ABSENT) {
+         *err = sres != CURLE_OK ? email_err_from_curl(sres) : EMAIL_ERR_NOT_FOUND;
+         email_instrument_op_done(conn->username, "read", curl, &dctx);
+         curl_easy_cleanup(curl);
+         return 1;
+      }
+      curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, NULL); /* the fetch is the URL's own */
+   }
+   const bool restore = opts->mark == EMAIL_MARK_KEEP && seen_before == EMAIL_IMAP_UID_UNSEEN;
 
    /* A bounded fetch (IMAP BODY[]<0.N>, curl ";PARTIAL="): a message bigger than
     * the read wants comes back cut, and is read as truncated.  PARTIAL is core
@@ -1053,6 +1092,11 @@ int email_read_message(const email_conn_t *conn,
                       curl_easy_strerror(res));
       }
    }
+   /* Unread again, whatever became of the fetch (failed, cut, stopped): it may
+    * have marked the message read before it ended.  Known side effects: a read
+    * another client did in that moment is undone too, and if this fails the
+    * message stays read (reported as such). */
+   const bool restored = restore && email_imap_restore_unseen(curl, &dctx, conn, folder_url, uid);
    email_instrument_op_done(conn->username, "read", curl, &dctx);
    curl_easy_cleanup(curl);
    if (!got)
@@ -1063,6 +1107,11 @@ int email_read_message(const email_conn_t *conn,
    if (rc != 0) {
       *err = EMAIL_ERR_FAILED;
       return 1;
+   }
+   if (opts->mark != EMAIL_MARK_AS_BACKEND) {
+      out->unread_before = seen_before == EMAIL_IMAP_UID_UNSEEN;
+      out->unread_known = true;
+      out->unread_after = restored;
    }
    *err = EMAIL_ERR_NONE;
    out->uid = uid;
@@ -1095,7 +1144,7 @@ int email_search(const email_conn_t *conn,
       folder = "INBOX";
 
    char encoded_folder[256];
-   url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
 
    CURL *curl = email_imap_handle_create(conn);
    if (!curl)

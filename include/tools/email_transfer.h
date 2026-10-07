@@ -43,6 +43,9 @@ email_err_t email_err_from_curl(CURLcode res);
  */
 void email_transfer_set_cancel(CURL *curl, const atomic_bool *cancel);
 
+/** Undo email_transfer_set_cancel on @p curl: its next transfers can't be stopped. */
+void email_transfer_clear_cancel(CURL *curl);
+
 /**
  * @brief Set this thread's transfer cancel flag; every IMAP, SMTP or Gmail handle
  *        the thread creates from now on ends early once it is set

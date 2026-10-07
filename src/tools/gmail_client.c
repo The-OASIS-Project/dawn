@@ -122,11 +122,22 @@ int gmail_api_get_ex(CURL *curl,
                      curl_buffer_t *resp,
                      long *http_code_out,
                      CURLcode *res_out) {
+   return gmail_api_get_capped(curl, token, url, GMAIL_MAX_RESPONSE_SIZE, resp, http_code_out,
+                               res_out);
+}
+
+int gmail_api_get_capped(CURL *curl,
+                         const char *token,
+                         const char *url,
+                         size_t max_bytes,
+                         curl_buffer_t *resp,
+                         long *http_code_out,
+                         CURLcode *res_out) {
    if (http_code_out)
       *http_code_out = 0;
    if (res_out)
       *res_out = CURLE_OK;
-   curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
+   curl_buffer_init_with_max(resp, max_bytes);
 
    char auth_header[2112];
    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", token);
@@ -153,7 +164,7 @@ int gmail_api_get_ex(CURL *curl,
    }
 
    if (resp->truncated) {
-      OLOG_ERROR("gmail: API response exceeded %d byte cap; rejecting", GMAIL_MAX_RESPONSE_SIZE);
+      OLOG_ERROR("gmail: API response exceeded %zu byte cap; rejecting", max_bytes);
       curl_buffer_free(resp);
       return 1;
    }
@@ -190,12 +201,18 @@ int gmail_api_get(CURL *curl,
    return gmail_api_get_ex(curl, token, url, resp, http_code_out, NULL);
 }
 
-static int gmail_api_post(CURL *curl,
-                          const char *token,
-                          const char *url,
-                          const char *content_type,
-                          const char *body,
-                          curl_buffer_t *resp) {
+int gmail_api_post_ex(CURL *curl,
+                      const char *token,
+                      const char *url,
+                      const char *content_type,
+                      const char *body,
+                      curl_buffer_t *resp,
+                      long *http_code_out,
+                      CURLcode *res_out) {
+   if (http_code_out)
+      *http_code_out = 0;
+   if (res_out)
+      *res_out = CURLE_OK;
    curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
 
    char auth_header[2112];
@@ -217,6 +234,8 @@ static int gmail_api_post(CURL *curl,
 
    sodium_memzero(auth_header, sizeof(auth_header));
    curl_slist_free_all(headers);
+   if (res_out)
+      *res_out = res;
 
    if (res != CURLE_OK) {
       OLOG_ERROR("gmail: API POST failed: %s", curl_easy_strerror(res));
@@ -233,6 +252,10 @@ static int gmail_api_post(CURL *curl,
 
    long http_code = 0;
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+   if (http_code == 403 && resp->data && strstr(resp->data, "ateLimitExceeded"))
+      http_code = 429;
+   if (http_code_out)
+      *http_code_out = http_code;
    if (http_code < 200 || http_code >= 300) {
       OLOG_ERROR("gmail: API POST returned HTTP %ld", http_code);
       curl_buffer_free(resp);
@@ -240,6 +263,27 @@ static int gmail_api_post(CURL *curl,
    }
 
    return 0;
+}
+
+email_err_t gmail_http_err(CURLcode res, long http_code) {
+   if (res != CURLE_OK)
+      return email_err_from_curl(res);
+   if (http_code == 401)
+      return EMAIL_ERR_AUTH_FAILED;
+   if (http_code == 404)
+      return EMAIL_ERR_NOT_FOUND;
+   if (http_code == 429)
+      return EMAIL_ERR_RATE_LIMITED;
+   return EMAIL_ERR_FAILED;
+}
+
+static int gmail_api_post(CURL *curl,
+                          const char *token,
+                          const char *url,
+                          const char *content_type,
+                          const char *body,
+                          curl_buffer_t *resp) {
+   return gmail_api_post_ex(curl, token, url, content_type, body, resp, NULL, NULL);
 }
 
 /* =============================================================================
@@ -814,10 +858,13 @@ int gmail_fetch_recent(const char *token,
                        int max_out,
                        int *out_count,
                        char *next_page_token,
-                       size_t npt_len) {
+                       size_t npt_len,
+                       int *inbox_unread) {
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
+   if (inbox_unread)
+      *inbox_unread = -1;
 
    if (!token || !token[0])
       return 1;
@@ -857,6 +904,10 @@ int gmail_fetch_recent(const char *token,
 
    /* Batch fetch metadata (2 HTTP calls total instead of N+1) */
    rc = gmail_batch_fetch_metadata(curl, token, ids, id_count, out, max_out, out_count);
+
+   /* The INBOX's unread count on the same connection; -1 when it can't be had. */
+   if (rc == 0 && inbox_unread)
+      gmail_inbox_unread_on(curl, token, inbox_unread, NULL);
 
    curl_easy_cleanup(curl);
    return rc;

@@ -57,6 +57,9 @@ typedef struct {
  * @param folder       IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
  * @param unread_only  If true, only fetch unread (UNSEEN) emails
  * @param page         Optional paging cursor (NULL = first page, no cursor out)
+ * @param inbox_unseen Optional: the INBOX's unread count, asked on the same
+ *                     connection before the folder is selected (-1 when the
+ *                     server didn't say); NULL to skip it
  * @param err          Why it failed (may be NULL)
  * @return 0 on success, 1 on failure (page->stale set when the cursor's epoch changed)
  */
@@ -68,6 +71,7 @@ int email_fetch_recent(const email_conn_t *conn,
                        email_summary_t *out,
                        int max_out,
                        int *out_count,
+                       int *inbox_unseen,
                        email_err_t *err);
 
 /**
@@ -133,6 +137,42 @@ int email_send(const email_conn_t *conn,
                const char *to_name,
                const char *subject,
                const char *body);
+
+/**
+ * @brief The INBOX's unread count: STATUS INBOX (UNSEEN), one login
+ *        (email_imap_flags.c)
+ * @return 0 with @p unseen set, or 1 (@p err says why)
+ */
+int email_imap_inbox_unseen(const email_conn_t *conn, int *unseen, email_err_t *err);
+
+/** One folder's share of an email_imap_set_seen call. */
+typedef struct {
+   const char *folder;
+   const uint32_t *uids; /* parsed UIDs, never text from a client */
+   int n;
+   bool *updated;   /* per UID: true when the message is there in the asked state */
+   email_err_t err; /* EMAIL_ERR_NONE, or why this folder's change failed */
+} email_imap_seen_batch_t;
+
+/**
+ * @brief Mark messages read or unread (\Seen only, nothing else), folder by
+ *        folder, on one connection: one login for the whole call
+ *
+ * Per folder: UID STORE, then a UID FETCH (FLAGS) of the same set to see which
+ * messages exist and now have the state asked for (a STORE of a UID that
+ * doesn't exist is OK on the wire).  If the STORE went through but that check
+ * failed, the folder's messages count as updated.  A folder the server won't
+ * SELECT (deleted or renamed) is NOT_FOUND and the rest go on.  A cancel, a
+ * lost connection or a refused login ends the call: the folders not reached
+ * get the same error.
+ * email_imap_flags.c
+ *
+ * @return 0 when every folder's commands went through (see each @p updated), or 1
+ */
+int email_imap_set_seen(const email_conn_t *conn,
+                        email_imap_seen_batch_t *batches,
+                        int nbatches,
+                        bool seen);
 
 /** Test IMAP connectivity (log in and look at INBOX); true if it worked. */
 bool email_test_imap(const email_conn_t *conn);

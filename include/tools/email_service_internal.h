@@ -96,6 +96,16 @@ bool email_svc_is_gmail_api(const email_account_t *acct);
 int email_svc_gmail_token(const email_account_t *acct, char *token, size_t len, bool *revoked);
 
 /**
+ * @brief email_svc_gmail_token, with a failure as its email_err_t: on failure
+ *        @p token is wiped and @p err (if given) is AUTH_REVOKED or AUTH_FAILED
+ * @return 0, or 1
+ */
+int email_svc_gmail_token_err(const email_account_t *acct,
+                              char *token,
+                              size_t len,
+                              email_err_t *err);
+
+/**
  * @brief An IMAP message id ("folder:uid") split and checked: the folder fits
  *        and passes the allow-list, the uid is valid.  Logged when it isn't
  *        (at debug during a fan-out, where a Gmail id is expected).
