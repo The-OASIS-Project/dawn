@@ -1603,19 +1603,16 @@ int main(int argc, char *argv[]) {
    curl_global_init(CURL_GLOBAL_DEFAULT);
    atexit(curl_global_cleanup);
 
-#if defined(ENABLE_TUI) && defined(ENABLE_AEC)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::R::Tt:B", long_options,
-                             &option_index)) != -1) {
-#elif defined(ENABLE_TUI)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::Tt:B", long_options,
-                             &option_index)) != -1) {
-#elif defined(ENABLE_AEC)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::R::B", long_options,
-                             &option_index)) != -1) {
-#else
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::B", long_options,
-                             &option_index)) != -1) {
+   /* Short options; -R (AEC) and -T/-t (TUI) exist only when built in. */
+   static const char short_options[] = "c:d:hl:LCDm:P:A:W:w:M:r::a::"
+#ifdef ENABLE_AEC
+                                       "R::"
 #endif
+#ifdef ENABLE_TUI
+                                       "Tt:"
+#endif
+                                       "B";
+   while ((opt = getopt_long(argc, argv, short_options, long_options, &option_index)) != -1) {
       switch (opt) {
          case 'c':
             safe_strscpy(pcm_capture_device, optarg);
