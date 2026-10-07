@@ -30,7 +30,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y clang-format-14
 
       - name: Install Prettier
-        run: npm install
+        run: npm ci
 
       - name: Check formatting
         run: ./format_code.sh --check
