@@ -100,6 +100,7 @@ static void keep_visible(const focus_scan_t *scan, session_focus_turn_t *out) {
       }
    }
    if (out->n_visible > 1) {
+      // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker): qsort runs only with n_visible > 1
       qsort(out->visible, (size_t)out->n_visible, sizeof(*out->visible), cmp_int);
    }
 }

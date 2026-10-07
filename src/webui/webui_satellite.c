@@ -114,6 +114,8 @@ void satellite_send_response(session_t *session, const char *text) {
                               .text = strdup(text),
                           } };
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    if (!resp.transcript.role || !resp.transcript.text) {
       free(resp.transcript.role);
       free(resp.transcript.text);
@@ -181,6 +183,8 @@ void satellite_send_error(session_t *session, const char *code, const char *mess
                               .message = strdup(message ? message : "Unknown error"),
                           } };
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    if (!resp.error.code || !resp.error.message) {
       free(resp.error.code);
       free(resp.error.message);
@@ -209,6 +213,8 @@ void satellite_send_state(session_t *session, const char *state) {
       return;
    }
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    queue_response(&resp);
 }
 
@@ -1028,6 +1034,8 @@ char *satellite_volume_execute_tool(ws_connection_t *conn,
       free(json_copy);
    }
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    OLOG_INFO("Satellite: Volume set to %d%% for %s", level_int,
              conn->session ? conn->session->identity.name : "(unknown)");
 

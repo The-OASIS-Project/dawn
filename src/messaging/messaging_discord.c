@@ -269,6 +269,8 @@ static void prepare_heartbeat_payload(void) {
       json_object_put(obj);
       return;
    }
+   /* WebSocket frame sent by length (lws_write), never read as a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(s_tx_buf + LWS_PRE, s, len);
    s_tx_payload_len = len;
    json_object_put(obj);
@@ -308,6 +310,8 @@ static void prepare_identify_payload(void) {
       json_object_put(root);
       return;
    }
+   /* WebSocket frame sent by length (lws_write), never read as a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(s_tx_buf + LWS_PRE, s, len);
    s_tx_payload_len = len;
    json_object_put(root);
@@ -340,6 +344,8 @@ static void prepare_resume_payload(void) {
       json_object_put(root);
       return;
    }
+   /* WebSocket frame sent by length (lws_write), never read as a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(s_tx_buf + LWS_PRE, s, len);
    s_tx_payload_len = len;
    json_object_put(root);

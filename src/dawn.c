@@ -636,9 +636,13 @@ void signal_handler(int signal) {
        * `quit`, a worker that asked "is the daemon going down?" got `false` and
        * filed an interrupted job as "failed: no response from model" — which
        * reads terminal to the user and is not what happened. */
+      /* only an atomic store (job_manager.c), safe in a signal handler */
+      // NOLINTNEXTLINE(bugprone-signal-handler,cert-sig30-c,cert-msc54-cpp)
       job_manager_note_shutdown_requested();
 #endif
       // Request LLM interrupt (safe to call from signal handler - uses sig_atomic_t)
+      /* only an atomic store to a sig_atomic_t, safe in a signal handler */
+      // NOLINTNEXTLINE(bugprone-signal-handler,cert-sig30-c,cert-msc54-cpp)
       llm_request_interrupt();
       quit = 1;
    }

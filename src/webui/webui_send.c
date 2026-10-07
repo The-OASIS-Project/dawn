@@ -206,6 +206,8 @@ int send_json_message(struct lws *wsi, const char *json) {
    /* For messages that fit in the stack buffer, use the fast path */
    if (len < WS_SEND_BUFFER_SIZE - LWS_PRE) {
       unsigned char buf[LWS_PRE + WS_SEND_BUFFER_SIZE];
+      /* WebSocket frame sent by length (lws_write), never read as a C string */
+      // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
       memcpy(&buf[LWS_PRE], json, len);
 
       int written = lws_write(wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
@@ -223,6 +225,8 @@ int send_json_message(struct lws *wsi, const char *json) {
       return LWS_CLOSE_CONNECTION;
    }
 
+   /* WebSocket frame sent by length (lws_write), never read as a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(&buf[LWS_PRE], json, len);
    int written = lws_write(wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
    free(buf);

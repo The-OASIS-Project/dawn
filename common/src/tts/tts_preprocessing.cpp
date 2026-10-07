@@ -765,6 +765,8 @@ static inline size_t render_spoken_domain(const char *src, size_t start, size_t 
       char c = src[i];
       if (c == '.') {
          if (out)
+            /* a fragment of the two-pass output buffer, which is terminated as a whole */
+            // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
             std::memcpy(out + pos, " dot ", 5);
          pos += 5;
          first_digit = true;
@@ -949,6 +951,8 @@ template<PassMode mode> static size_t emit_large_number(char *out,
 
    size_t wlen = std::strlen(words);
    if constexpr (mode == PassMode::GenerateOutput) {
+      /* a fragment of the two-pass output buffer, which is terminated as a whole */
+      // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
       std::memcpy(out + out_pos, words, wlen);
    }
    out_pos += wlen;

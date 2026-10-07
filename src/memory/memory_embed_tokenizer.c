@@ -86,6 +86,9 @@ static int vocab_load_locked(const char *path) {
    char line[VOCAB_MAX_WORD_LEN];
    int id = 0;
    int truncated_count = 0;
+   /* the one-time vocabulary load is serialized on purpose; a failed read ends the loop; the
+    * position is not used */
+   // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection,clang-analyzer-unix.Stream)
    while (fgets(line, sizeof(line), fp)) {
       size_t len = strlen(line);
       bool had_newline = (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'));

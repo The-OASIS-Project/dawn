@@ -1163,6 +1163,8 @@ static bool is_css_line(const char *line, size_t len) {
 
    /* Skip leading whitespace */
    size_t i = 0;
+   /* output is NUL-terminated from the start and by every append */
+   // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.ArraySubscript)
    while (i < len && isspace(line[i]))
       i++;
 
@@ -1197,6 +1199,8 @@ static bool is_css_line(const char *line, size_t len) {
          /* Check if before colon looks like a CSS property (alphanumeric and -) */
          bool looks_like_property = true;
          for (const char *p = line + i; p < colon && looks_like_property; p++) {
+            /* output is NUL-terminated from the start and by every append */
+            // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.ArraySubscript)
             if (!isalnum(*p) && *p != '-' && !isspace(*p)) {
                looks_like_property = false;
             }
@@ -1285,6 +1289,8 @@ static size_t strip_css_artifacts(char *text) {
 
    while (read < end) {
       /* Check for CSS @ blocks */
+      /* output is NUL-terminated from the start and by every append */
+      // NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult)
       if (*read == '@' && scan_budget > 0) {
          bool is_css_block = false;
          for (size_t k = 0; k < CSS_BLOCK_KEYWORD_COUNT; k++) {

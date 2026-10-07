@@ -100,6 +100,8 @@ int ota_manifest_serialize(const ota_manifest_t *m,
    }
 
    uint8_t *p = out;
+   /* fixed-width field of the binary manifest, never a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(p, OTA_MANIFEST_MAGIC, MAGIC_LEN);
    p += MAGIC_LEN;
    put_u16le(p, m->fmt_version);

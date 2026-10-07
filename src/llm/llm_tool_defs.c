@@ -139,6 +139,8 @@ static struct json_object *canonical(struct json_object *v) {
       int k = 0;
       json_object_object_foreach(v, key, val) {
          (void)val;
+         /* keys is NULL only for an empty object, and then the loop does not run */
+         // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
          keys[k++] = key;
       }
       if (k > 1) { /* keys is NULL for an empty object, and qsort's array must not be */

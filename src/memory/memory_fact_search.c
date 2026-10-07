@@ -281,6 +281,8 @@ static int fact_search_hybrid_impl(int user_id,
    const int produced = (kw_count > max) ? max : kw_count;
    for (int i = 0; i < produced; i++) {
       out_facts[i] = kw_facts[i];
+      /* kw_scores is written for every i < kw_count */
+      // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Assign)
       out_scores[i] = (float)kw_scores[i];
    }
    *out_count = produced;

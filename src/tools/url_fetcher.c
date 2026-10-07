@@ -1325,6 +1325,8 @@ int url_is_blocked_with_resolve(const char *url,
    if (host[0] == '[') {
       char ipv6[128];
       size_t j = 0;
+      /* k < strlen(host) is checked first and host is NUL-terminated */
+      // NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult)
       for (size_t k = 1; k < strlen(host) && host[k] != ']' && j < sizeof(ipv6) - 1; k++) {
          ipv6[j++] = host[k];
       }

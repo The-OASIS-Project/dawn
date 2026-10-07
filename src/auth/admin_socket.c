@@ -1937,6 +1937,8 @@ static int pack_conv_entry(conv_list_ctx_t *cctx,
    p += 4;
    *p++ = (uint8_t)uname_len;
    if (uname_len > 0) {
+      /* length-prefixed binary record, not a C string */
+      // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
       memcpy(p, username, uname_len);
       p += uname_len;
    }

@@ -352,6 +352,8 @@ static void prepare_auth_payload(void) {
       json_object_put(obj);
       return;
    }
+   /* WebSocket frame sent by length (lws_write), never read as a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(s_tx_buf + LWS_PRE, s, len);
    s_tx_payload_len = len;
    /* Drop json-c's internal copy of the serialized string (which holds the
@@ -374,6 +376,8 @@ static void prepare_ping_payload(void) {
       json_object_put(obj);
       return;
    }
+   /* WebSocket frame sent by length (lws_write), never read as a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(s_tx_buf + LWS_PRE, s, len);
    s_tx_payload_len = len;
    json_object_put(obj);
@@ -402,6 +406,8 @@ static void prepare_command_payload(void) {
       json_object_put(obj);
       return;
    }
+   /* WebSocket frame sent by length (lws_write), never read as a C string */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(s_tx_buf + LWS_PRE, s, len);
    s_tx_payload_len = len;
    s_expected_result_id = id;

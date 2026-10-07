@@ -222,6 +222,8 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
             size_t snippet_len = strlen(snippet);
             char *replacement = malloc(sub_prefix_len + snippet_len + 1);
             if (replacement) {
+               /* the next memcpy copies snippet_len + 1 bytes, NUL included */
+               // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
                memcpy(replacement, sub_prefix, sub_prefix_len);
                memcpy(replacement + sub_prefix_len, snippet, snippet_len + 1);
                free(content);
@@ -266,6 +268,8 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
       char *wrapped = malloc(prefix_len + body_len + suffix_len + 1);
       if (wrapped) {
          memcpy(wrapped, prefix, prefix_len);
+         /* the suffix memcpy copies suffix_len + 1 bytes, NUL included */
+         // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
          memcpy(wrapped + prefix_len, content, body_len);
          memcpy(wrapped + prefix_len + body_len, suffix, suffix_len + 1);
          free(content);

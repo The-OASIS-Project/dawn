@@ -1544,6 +1544,8 @@ static void webui_send_llm_state_update(session_t *session) {
                           .transcript = { .role = strdup("__llm_state__"),
                                           .text = strdup(json_object_to_json_string(response)) } };
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    json_object_put(response);
 
    if (resp.transcript.role && resp.transcript.text) {
@@ -1669,6 +1671,8 @@ static void send_state_with_tools(session_t *session, const char *state) {
       return;
    }
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    queue_response(&resp);
 }
 
@@ -2210,6 +2214,8 @@ void webui_send_transcript_ex(session_t *session,
                               .message_id = message_id,
                           } };
    /* The user's own echo names the turn it echoes (its client_ref). */
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    if (role && strcmp(role, "user") == 0 && webui_turn_ref_get()) {
       snprintf(resp.transcript.client_ref, sizeof(resp.transcript.client_ref), "%s",
                webui_turn_ref_get());
@@ -2259,6 +2265,8 @@ void webui_send_state_for_conversation(session_t *session,
       return;
    }
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    queue_response(&resp);
 }
 
@@ -2339,6 +2347,8 @@ void webui_send_error_ex(session_t *session,
                               .severity = severity,
                           } };
    /* An error raised while a text turn is handled belongs to it. */
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    if (webui_turn_ref_get()) {
       snprintf(resp.error.client_ref, sizeof(resp.error.client_ref), "%s", webui_turn_ref_get());
    }
@@ -2376,6 +2386,8 @@ void webui_send_compaction_complete(session_t *session,
                           } };
 
    queue_response(&resp);
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
 }
 
 /**
@@ -2425,6 +2437,8 @@ void webui_send_audio(session_t *session, const uint8_t *data, size_t len) {
                              } };
 
       queue_response(&resp);
+      /* queue_response() takes ownership of the response strings (freed by free_response) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       offset += chunk_len;
       chunk_num++;
    }
@@ -3121,6 +3135,8 @@ void webui_broadcast_plan_progress(session_t *session, const char *json_str) {
    if (!resp.generic_json.json)
       return;
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    queue_response(&resp);
 }
 

@@ -465,6 +465,8 @@ char *result_read_distinct(struct json_object *root,
    }
    int k = 0;
    json_object_object_foreach(counts, key, val) {
+      /* tally is NULL only when distinct is 0, and then the loop does not run */
+      // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
       tally[k].value = key;
       tally[k++].count = json_object_get_int(val);
    }
@@ -488,6 +490,8 @@ char *result_read_distinct(struct json_object *root,
    int shown = 0;
    for (; shown < distinct && shown < RESULT_READ_DISTINCT_MAX; shown++) {
       const char *v = tally[shown].value;
+      /* tally values are JSON object keys, never NULL */
+      // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
       const size_t n = strlen(v);
       const size_t keep = n > RESULT_READ_VALUE_MAX ? utf8_back(v, RESULT_READ_VALUE_MAX) : n;
       if (strbuf_len(&sb) + keep + 32 > budget) {

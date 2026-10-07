@@ -569,6 +569,8 @@ int focus_compose_ex(int user_id,
    for (int rank = 0; rank < pool_count; rank++) {
       const int p = order[rank].idx;
       if (keep[p]) {
+         /* keep[p] set means kept > 0, so out was allocated */
+         // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
          out[out_idx] = pool[p];
          out_breakdowns[out_idx] = pool_breakdowns[p];
          out_idx++;

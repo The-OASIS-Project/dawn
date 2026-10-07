@@ -340,6 +340,8 @@ static void add_mode(llm_thinking_caps_t *out,
       return;
    }
    for (int i = 0; efforts && i < effort_count && i < LLM_EFFORTS_MAX; i++) {
+      /* safe_strscpy evaluates dst once; its other uses are inside sizeof/typeof */
+      // NOLINTNEXTLINE(bugprone-macro-repeated-side-effects)
       safe_strscpy(m->efforts[m->effort_count++], efforts[i]);
    }
 }

@@ -2546,6 +2546,8 @@ int config_backup_file(const char *path) {
    /* Copy contents */
    char buffer[4096];
    size_t bytes;
+   /* a short read ends the copy loop; the position is not used */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Stream)
    while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0) {
       if (fwrite(buffer, 1, bytes, dst) != bytes) {
          OLOG_ERROR("Failed to write backup file: %s", backup_path);
