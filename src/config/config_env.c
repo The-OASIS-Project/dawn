@@ -68,41 +68,55 @@
          char *end_;                                                                          \
          errno = 0;                                                                           \
          long v_ = strtol(val, &end_, 10);                                                    \
-         if (*end_ != '\0' || errno != 0 || v_ < INT_MIN || v_ > INT_MAX) {                   \
+         if (end_ == val || *end_ != '\0' || errno != 0 || v_ < INT_MIN || v_ > INT_MAX) {    \
             OLOG_WARNING("Config override: %s=%s (invalid integer, ignored)", env_name, val); \
          } else {                                                                             \
-            dest = (int)v_;                                                                   \
-            OLOG_INFO("Config override: %s=%d", env_name, dest);                              \
+            (dest) = (int)v_;                                                                 \
+            OLOG_INFO("Config override: %s=%d", env_name, (dest));                            \
          }                                                                                    \
       }                                                                                       \
    } while (0)
 
-#define ENV_FLOAT(env_name, dest)                               \
-   do {                                                         \
-      const char *val = getenv(env_name);                       \
-      if (val) {                                                \
-         dest = (float)atof(val);                               \
-         OLOG_INFO("Config override: %s=%.2f", env_name, dest); \
-      }                                                         \
+#define ENV_FLOAT(env_name, dest)                                                            \
+   do {                                                                                      \
+      const char *val = getenv(env_name);                                                    \
+      if (val) {                                                                             \
+         char *end_;                                                                         \
+         errno = 0;                                                                          \
+         float v_ = strtof(val, &end_);                                                      \
+         if (end_ == val || *end_ != '\0' || errno != 0) {                                   \
+            OLOG_WARNING("Config override: %s=%s (invalid number, ignored)", env_name, val); \
+         } else {                                                                            \
+            (dest) = v_;                                                                     \
+            OLOG_INFO("Config override: %s=%.2f", env_name, (dest));                         \
+         }                                                                                   \
+      }                                                                                      \
    } while (0)
 
-#define ENV_BOOL(env_name, dest)                                                 \
-   do {                                                                          \
-      const char *val = getenv(env_name);                                        \
-      if (val) {                                                                 \
-         dest = (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 ||        \
-                 strcasecmp(val, "yes") == 0);                                   \
-         OLOG_INFO("Config override: %s=%s", env_name, dest ? "true" : "false"); \
-      }                                                                          \
+#define ENV_BOOL(env_name, dest)                                                   \
+   do {                                                                            \
+      const char *val = getenv(env_name);                                          \
+      if (val) {                                                                   \
+         (dest) = (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 ||        \
+                   strcasecmp(val, "yes") == 0);                                   \
+         OLOG_INFO("Config override: %s=%s", env_name, (dest) ? "true" : "false"); \
+      }                                                                            \
    } while (0)
 
-#define ENV_SIZE_T(env_name, dest)                             \
-   do {                                                        \
-      const char *val = getenv(env_name);                      \
-      if (val) {                                               \
-         dest = (size_t)atol(val);                             \
-         OLOG_INFO("Config override: %s=%zu", env_name, dest); \
-      }                                                        \
+#define ENV_SIZE_T(env_name, dest)                                                           \
+   do {                                                                                      \
+      const char *val = getenv(env_name);                                                    \
+      if (val) {                                                                             \
+         char *end_;                                                                         \
+         errno = 0;                                                                          \
+         unsigned long long v_ = strtoull(val, &end_, 10);                                   \
+         if (val[0] == '-' || end_ == val || *end_ != '\0' || errno != 0 || v_ > SIZE_MAX) { \
+            OLOG_WARNING("Config override: %s=%s (invalid size, ignored)", env_name, val);   \
+         } else {                                                                            \
+            (dest) = (size_t)v_;                                                             \
+            OLOG_INFO("Config override: %s=%zu", env_name, (dest));                          \
+         }                                                                                   \
+      }                                                                                      \
    } while (0)
 
 /* =============================================================================

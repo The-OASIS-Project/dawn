@@ -111,12 +111,12 @@ static struct json_object *openai_tool_result(const char *content) {
    return m;
 }
 
-/* Build the Claude {"document":"Open Sauce 2026"} input + its exact serialized
- * form (what the dedup comparator stringifies the stored input to). */
+/* Build the stored Claude {"document":"Open Sauce 2026"} input, and the arguments as
+ * the model sends them on the next call: its own spacing, not json-c's. */
 static struct json_object *doc_input(char **args_out) {
    struct json_object *input = json_object_new_object();
    json_object_object_add(input, "document", json_object_new_string("Open Sauce 2026"));
-   *args_out = strdup(json_object_to_json_string(input));
+   *args_out = strdup("{\"document\":\"Open Sauce 2026\"}");
    return input;
 }
 
@@ -157,6 +157,35 @@ static void test_claude_repeat_within_turn_blocked(void) {
    json_object_put(history);
 }
 
+/* A call with no arguments repeats one whose stored input is an empty object. */
+static void test_claude_repeat_no_args_blocked(void) {
+   struct json_object *history = json_object_new_array();
+   json_object_array_add(history, user_text("what time is it")); /* current turn start */
+   json_object_array_add(history, claude_tool_use("datetime", json_object_new_object()));
+   json_object_array_add(history, claude_tool_result("...time..."));
+
+   TEST_ASSERT_TRUE(llm_tools_is_duplicate_call(history, "datetime", "", LLM_HISTORY_CLAUDE));
+   TEST_ASSERT_TRUE(llm_tools_is_duplicate_call(history, "datetime", NULL, LLM_HISTORY_CLAUDE));
+
+   json_object_put(history);
+}
+
+/* Different arguments are a different call. */
+static void test_claude_different_args_allowed(void) {
+   char *args = NULL;
+   struct json_object *input = doc_input(&args);
+   struct json_object *history = json_object_new_array();
+   json_object_array_add(history, user_text("read the doc")); /* current turn start */
+   json_object_array_add(history, claude_tool_use("document_read", input));
+   json_object_array_add(history, claude_tool_result("...doc text..."));
+
+   TEST_ASSERT_FALSE(llm_tools_is_duplicate_call(
+       history, "document_read", "{\"document\": \"Other Doc\"}", LLM_HISTORY_CLAUDE));
+
+   free(args);
+   json_object_put(history);
+}
+
 static void test_openai_repeat_across_turns_allowed(void) {
    const char *args = "{\"document\":\"Open Sauce 2026\"}";
    struct json_object *history = json_object_new_array();
@@ -188,6 +217,8 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_claude_repeat_across_turns_allowed);
    RUN_TEST(test_claude_repeat_within_turn_blocked);
+   RUN_TEST(test_claude_repeat_no_args_blocked);
+   RUN_TEST(test_claude_different_args_allowed);
    RUN_TEST(test_openai_repeat_across_turns_allowed);
    RUN_TEST(test_openai_repeat_within_turn_blocked);
    return UNITY_END();

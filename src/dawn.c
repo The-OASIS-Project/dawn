@@ -29,6 +29,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sodium.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -441,7 +442,7 @@ static void acknowledge_cancel(void) {
    pthread_mutex_unlock(&tts_mutex);
    const size_t n = sizeof(cancelResponses) / sizeof(cancelResponses[0]);
    OLOG_INFO("Cancel phrase: reply stopped, confirming");
-   text_to_speech(cancelResponses[(size_t)rand() % n]);
+   text_to_speech(cancelResponses[randombytes_uniform((uint32_t)n)]);
 }
 
 /* Keep @p command (ownership taken) to answer once the pipeline is free,
@@ -966,10 +967,7 @@ const char *timeOfDayGreeting(void) {
 const char *wakeWordAcknowledgment() {
    int numWakeResponses = sizeof(wakeResponses) /
                           sizeof(wakeResponses[0]);  // Calculate the number of available responses.
-   int choice;
-
-   srand(time(NULL));                   // Seed the random number generator.
-   choice = rand() % numWakeResponses;  // Generate a random index to select a response.
+   int choice = (int)randombytes_uniform((uint32_t)numWakeResponses);
 
    return wakeResponses[choice];  // Return the randomly selected wake word acknowledgment.
 }
@@ -1766,12 +1764,21 @@ int main(int argc, char *argv[]) {
             OLOG_INFO("Search summarization backend: %s (CLI override)",
                       search_summarizer_backend_name(summarizer_config.backend));
             break;
-         case 257:  // --summarize-threshold
-            summarizer_config.threshold_bytes = (size_t)atol(optarg);
+         case 257: {  // --summarize-threshold
+            char *end = NULL;
+            errno = 0;
+            const unsigned long long bytes = strtoull(optarg, &end, 10);
+            if (optarg[0] == '-' || end == optarg || *end != '\0' || errno != 0 ||
+                bytes > SIZE_MAX) {
+               fprintf(stderr, "--summarize-threshold needs a byte count, got '%s'\n", optarg);
+               exit(EXIT_FAILURE);
+            }
+            summarizer_config.threshold_bytes = (size_t)bytes;
             cli_overrides |= CLI_OVERRIDE_SUMMARIZER_THRESHOLD;
             OLOG_INFO("Search summarization threshold: %zu bytes (CLI override)",
                       summarizer_config.threshold_bytes);
             break;
+         }
          case 258:  // --config
             config_path = optarg;
             break;

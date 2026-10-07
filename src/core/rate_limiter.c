@@ -24,6 +24,7 @@
 #include "core/rate_limiter.h"
 
 #include <arpa/inet.h>
+#include <sodium.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -103,7 +104,7 @@ bool rate_limiter_check(rate_limiter_t *limiter, const char *ip) {
       entry = lru_entry;
       if (!entry) {
          /* All slots full and active - use random eviction to prevent targeting */
-         entry = &limiter->entries[rand() % limiter->config.slot_count];
+         entry = &limiter->entries[randombytes_uniform((uint32_t)limiter->config.slot_count)];
       }
       safe_strscpy(entry->ip, ip);
       entry->count = 1;

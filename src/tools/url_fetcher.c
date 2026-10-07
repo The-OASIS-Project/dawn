@@ -26,6 +26,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <curl/curl.h>
+#include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -272,9 +273,13 @@ static int parse_cidr(const char *cidr, unsigned int *network, unsigned int *net
    ip_part[ip_len] = '\0';
 
    // Parse prefix length
-   prefix_len = atoi(slash + 1);
-   if (prefix_len < 0 || prefix_len > 32)
+   /* Strictly a number 0-32: atoi("") is 0, and "/0" would match every address */
+   char *end = NULL;
+   errno = 0;
+   const long pl = strtol(slash + 1, &end, 10);
+   if (errno != 0 || end == slash + 1 || *end != '\0' || pl < 0 || pl > 32)
       return 0;
+   prefix_len = (int)pl;
 
    // Parse IP
    struct in_addr addr;
@@ -1222,7 +1227,12 @@ static curl_socket_t ssrf_guard_opensocket_cb(void *clientp,
 
 /**
  * @brief Extract host and port from URL
- * @param url URL to parse
+ *
+ * Parsed with libcurl's own URL parser, so the host checked here is the host curl
+ * connects to: userinfo ("user@host") is dropped, and an IPv6 literal keeps its
+ * brackets ("[::1]") for the bracket check below.
+ *
+ * @param url URL to parse (http or https)
  * @param host Output buffer for host (caller provides)
  * @param host_size Size of host buffer
  * @param port Output pointer for port number (optional, can be NULL)
@@ -1231,43 +1241,29 @@ static curl_socket_t ssrf_guard_opensocket_cb(void *clientp,
 static int extract_host_port(const char *url, char *host, size_t host_size, int *port) {
    if (!url || !host || host_size == 0)
       return 0;
-
-   const char *host_start = NULL;
-   int default_port = 80;
-
-   if (strncmp(url, "http://", 7) == 0) {
-      host_start = url + 7;
-      default_port = 80;
-   } else if (strncmp(url, "https://", 8) == 0) {
-      host_start = url + 8;
-      default_port = 443;
-   } else {
-      return 0;
-   }
-
-   // Extract host (stop at /, :, or ?)
-   size_t i = 0;
-   while (*host_start && *host_start != '/' && *host_start != ':' && *host_start != '?' &&
-          i < host_size - 1) {
-      host[i++] = *host_start++;
-   }
-   host[i] = '\0';
-
-   if (i == 0)
+   if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)
       return 0;
 
-   // Extract port if present
-   if (port) {
-      if (*host_start == ':') {
-         *port = atoi(host_start + 1);
-         if (*port <= 0 || *port > 65535)
-            *port = default_port;
-      } else {
-         *port = default_port;
-      }
-   }
+   CURLU *h = curl_url();
+   if (!h)
+      return 0;
 
-   return 1;
+   int ok = 0;
+   char *c_host = NULL;
+   char *c_port = NULL;
+   if (curl_url_set(h, CURLUPART_URL, url, 0) == CURLUE_OK &&
+       curl_url_get(h, CURLUPART_HOST, &c_host, CURLU_URLDECODE) == CURLUE_OK &&
+       curl_url_get(h, CURLUPART_PORT, &c_port, CURLU_DEFAULT_PORT) == CURLUE_OK &&
+       c_host[0] != '\0' && strlen(c_host) < host_size) {
+      memcpy(host, c_host, strlen(c_host) + 1);
+      if (port)
+         *port = atoi(c_port); /* curl has checked it: digits, 0-65535 */
+      ok = 1;
+   }
+   curl_free(c_host);
+   curl_free(c_port);
+   curl_url_cleanup(h);
+   return ok;
 }
 
 /**

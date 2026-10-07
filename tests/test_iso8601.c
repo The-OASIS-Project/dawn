@@ -117,6 +117,32 @@ static void test_parse_positive_offset(void) {
 
 /* ── iso8601_parse: time-only ───────────────────────────────────────────── */
 
+static void test_parse_basic_format_offset(void) {
+   /* -0500 without the colon: 15:30 at -05:00 == 20:30 UTC (not 500 hours). */
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc + 5 * 3600,
+                           (int64_t)iso8601_parse("2026-02-19T15:30:00-0500"));
+}
+
+static void test_parse_space_separator_keeps_the_time(void) {
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc,
+                           (int64_t)iso8601_parse("2026-02-19 15:30"));
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc + 5 * 3600,
+                           (int64_t)iso8601_parse("2026-02-19 15:30:00-05:00"));
+}
+
+static void test_parse_out_of_range_returns_minus_one(void) {
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-13-19T15:30"));
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-40T15:30"));
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-19T25:00"));
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-19T15:61"));
+}
+
+static void test_parse_out_of_range_offset_is_ignored(void) {
+   /* +25:00 isn't an offset: the time is read as local (UTC here). */
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc,
+                           (int64_t)iso8601_parse("2026-02-19T15:30:00+25:00"));
+}
+
 static void test_parse_time_only_returns_today_or_tomorrow(void) {
    /* Time-only resolves to today (if not yet past) or tomorrow.  Either way,
     * the result must be in [now, now + 24h]. */
@@ -166,6 +192,10 @@ int main(void) {
    RUN_TEST(test_parse_garbage_returns_minus_one);
    RUN_TEST(test_parse_bad_time_only_returns_minus_one);
    RUN_TEST(test_parse_date_only_utc);
+   RUN_TEST(test_parse_basic_format_offset);
+   RUN_TEST(test_parse_space_separator_keeps_the_time);
+   RUN_TEST(test_parse_out_of_range_returns_minus_one);
+   RUN_TEST(test_parse_out_of_range_offset_is_ignored);
    RUN_TEST(test_parse_no_tz_local_is_utc);
    RUN_TEST(test_parse_z_suffix_is_utc);
    RUN_TEST(test_parse_lowercase_z_suffix_is_utc);

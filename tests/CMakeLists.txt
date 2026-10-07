@@ -1456,6 +1456,17 @@ dawn_add_unit_test(test_iso8601
    LIBS    unity
    LABEL   ci)
 
+# The URL fetcher's private-address block (IP literals only, no network).
+dawn_add_unit_test(test_url_whitelist
+   SOURCES test_url_whitelist.c
+           ${SRC_ROOT}/src/tools/url_fetcher.c
+           ${SRC_ROOT}/src/tools/url_fetcher_detect.c
+           ${SRC_ROOT}/src/tools/url_fetcher_fallback.c
+           ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} m
+   LABEL   ci)
+
 # sanitize_utf8_for_json — the guard that keeps invalid UTF-8 out of WebSocket
 # text frames (string_utils.c lives in dawn_common).
 dawn_add_unit_test(test_string_utils
@@ -1648,7 +1659,7 @@ dawn_add_unit_test(test_embed_tokenizer
 dawn_add_unit_test(test_rate_limiter
    SOURCES test_rate_limiter.c
            ${SRC_ROOT}/src/core/rate_limiter.c
-   LIBS    unity pthread
+   LIBS    unity pthread ${SODIUM_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_llm_interrupt_ctx
@@ -1931,7 +1942,7 @@ dawn_add_unit_test(test_calculator
            ${SRC_ROOT}/src/tools/calculator.c
            ${SRC_ROOT}/src/tools/calculator_bignum.c
            ${SRC_ROOT}/third_party/tinyexpr/tinyexpr.c
-   LIBS    dawn_common unity m pthread
+   LIBS    dawn_common unity m pthread ${SODIUM_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_event_payload

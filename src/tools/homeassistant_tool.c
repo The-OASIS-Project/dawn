@@ -845,8 +845,10 @@ static char *handle_brightness(const char *value) {
       return strdup("Please specify entity name and brightness (0-100).");
    }
 
-   int level = atoi(val_part);
-   if (level < 0 || level > 100) {
+   /* A word ("kitchen lamp", "lamp max") isn't a level: atoi would make it 0, off */
+   char *end = NULL;
+   const long level = strtol(val_part, &end, 10);
+   if (end == val_part || (*end != '\0' && strcmp(end, "%") != 0) || level < 0 || level > 100) {
       return strdup("Brightness must be 0-100.");
    }
 

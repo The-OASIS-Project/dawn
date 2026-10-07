@@ -66,7 +66,12 @@ static bool parse_tz_offset(const char *suffix, int *offset_sec) {
 
    if (suffix[0] == '+' || suffix[0] == '-') {
       int tz_h = 0, tz_m = 0;
-      if (sscanf(suffix + 1, "%d:%d", &tz_h, &tz_m) >= 1) {
+      const int n = sscanf(suffix + 1, "%d:%d", &tz_h, &tz_m);
+      if (n == 1 && tz_h > 99) { /* the basic form, +HHMM */
+         tz_m = tz_h % 100;
+         tz_h /= 100;
+      }
+      if (n >= 1 && tz_h >= 0 && tz_h <= 14 && tz_m >= 0 && tz_m <= 59) {
          *offset_sec = (tz_h * 3600 + tz_m * 60);
          if (suffix[0] == '-')
             *offset_sec = -*offset_sec;
@@ -105,10 +110,14 @@ time_t iso8601_parse(const char *iso_str) {
       return result;
    }
 
-   /* Full ISO 8601 */
+   /* Full ISO 8601; a space between date and time is accepted as well as 'T' */
    int year, month, day, hour = 0, min = 0, sec = 0;
-   int parsed = sscanf(iso_str, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &min, &sec);
+   int parsed = sscanf(iso_str, "%d-%d-%d%*1[T ]%d:%d:%d", &year, &month, &day, &hour, &min, &sec);
    if (parsed < 3)
+      return -1;
+   /* Out of range is an error, not something for mktime to roll over */
+   if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || min < 0 ||
+       min > 59 || sec < 0 || sec > 60)
       return -1;
 
    tm_info.tm_year = year - 1900;
@@ -120,7 +129,7 @@ time_t iso8601_parse(const char *iso_str) {
 
    /* Find timezone suffix after the time portion */
    const char *tz_start = iso_str;
-   const char *t_pos = strchr(iso_str, 'T');
+   const char *t_pos = strpbrk(iso_str, "T ");
    if (t_pos) {
       tz_start = t_pos + 1;
       /* Skip past HH:MM:SS digits */
