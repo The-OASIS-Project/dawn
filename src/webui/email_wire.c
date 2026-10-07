@@ -214,6 +214,136 @@ json_object *email_wire_read_payload(int64_t account_id,
    return payload;
 }
 
+json_object *email_wire_changed(int64_t account_id,
+                                bool gmail_api,
+                                email_move_kind_t kind,
+                                bool undo,
+                                const email_summary_t *created,
+                                int nc,
+                                const char *const *destroyed,
+                                int nd,
+                                bool refresh) {
+   json_object *payload = json_object_new_object();
+   json_object *frame = json_object_new_object();
+   json_object *rows = json_object_new_array();
+   json_object *gone = json_object_new_array();
+   if (!payload || !frame || !rows || !gone) {
+      json_object_put(payload);
+      json_object_put(frame);
+      json_object_put(rows);
+      json_object_put(gone);
+      return NULL;
+   }
+   json_object_object_add(payload, "account_id", json_object_new_int64(account_id));
+   json_object_object_add(payload, "state", NULL);
+   json_object_object_add(payload, "kind",
+                          json_object_new_string(kind == EMAIL_MOVE_ARCHIVE ? "archive" : "trash"));
+   json_object_object_add(payload, "undo", json_object_new_boolean(undo));
+   for (int i = 0; created && i < nc; i++) /* only Gmail knows starred/important */
+      json_object_array_add(rows, email_wire_row(account_id, &created[i], gmail_api));
+   json_object_object_add(payload, "created", rows);
+   json_object_object_add(payload, "updated", json_object_new_array());
+   for (int i = 0; destroyed && i < nd; i++) {
+      if (!destroyed[i])
+         continue;
+      char *fixed = utf8_repair_dup(destroyed[i], strlen(destroyed[i]), NULL);
+      json_object_array_add(gone, json_object_new_string(fixed ? fixed : destroyed[i]));
+      free(fixed);
+   }
+   json_object_object_add(payload, "destroyed", gone);
+   if (refresh)
+      json_object_object_add(payload, "refresh", json_object_new_boolean(1));
+   json_object_object_add(frame, "type", json_object_new_string("email_changed"));
+   json_object_object_add(frame, "payload", payload);
+   return frame;
+}
+
+bool email_wire_undo_token_ok(const char *s) {
+   if (!s)
+      return false;
+   for (int i = 0; i < EMAIL_UNDO_TOKEN_LEN; i++) {
+      if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+         return false;
+   }
+   return s[EMAIL_UNDO_TOKEN_LEN] == '\0';
+}
+
+/* A failed entry: { <key>: id, error_code, error }. */
+static void add_failed(json_object *arr, const char *key, const char *id, email_err_t e) {
+   if (e == EMAIL_ERR_NONE)
+      e = EMAIL_ERR_FAILED;
+   json_object *f = json_object_new_object();
+   if (!f)
+      return;
+   add_str(f, key, id);
+   json_object_object_add(f, "error_code", json_object_new_string(email_error_name(e)));
+   json_object_object_add(f, "error", json_object_new_string(email_wire_error_text(e)));
+   json_object_array_add(arr, f);
+}
+
+/* {<a>: [], <b>: []} into @p p, or NULL with nothing leaked. */
+static json_object *two_lists(const char *a, json_object **la, const char *b, json_object **lb) {
+   json_object *p = json_object_new_object();
+   *la = json_object_new_array();
+   *lb = json_object_new_array();
+   if (!p || !*la || !*lb) {
+      json_object_put(p);
+      json_object_put(*la);
+      json_object_put(*lb);
+      return NULL;
+   }
+   json_object_object_add(p, a, *la);
+   json_object_object_add(p, b, *lb);
+   return p;
+}
+
+json_object *email_wire_move_payload(const char *const *ids,
+                                     const email_move_result_t *results,
+                                     int n) {
+   json_object *done, *failed;
+   json_object *p = two_lists("done", &done, "failed", &failed);
+   for (int i = 0; p && i < n; i++) {
+      const email_move_result_t *r = &results[i];
+      if (r->outcome == EMAIL_MOVE_FAILED) {
+         add_failed(failed, "message_id", ids[i], r->err);
+         continue;
+      }
+      json_object *d = json_object_new_object();
+      if (!d)
+         continue;
+      add_str(d, "message_id", r->message_id[0] ? r->message_id : ids[i]);
+      json_object_object_add(d, "undo", r->undo[0] ? json_object_new_string(r->undo) : NULL);
+      if (r->outcome == EMAIL_MOVE_LEFT_FLAGGED)
+         json_object_object_add(d, "left_flagged", json_object_new_boolean(1));
+      json_object_array_add(done, d);
+   }
+   return p;
+}
+
+json_object *email_wire_undo_payload(int64_t account_id,
+                                     const char *const *tokens,
+                                     const email_undo_result_t *const *results,
+                                     int n,
+                                     bool flags_known) {
+   json_object *restored, *failed;
+   json_object *p = two_lists("restored", &restored, "failed", &failed);
+   for (int i = 0; p && i < n; i++) {
+      const email_undo_result_t *r = results[i];
+      if (!r || r->err != EMAIL_ERR_NONE) {
+         add_failed(failed, "undo", tokens[i], r ? r->err : EMAIL_ERR_UNDO_EXPIRED);
+         continue;
+      }
+      json_object *o = json_object_new_object();
+      if (!o)
+         continue;
+      json_object_object_add(o, "undo", json_object_new_string(tokens[i]));
+      json_object_object_add(o, "row",
+                             r->row_ok ? email_wire_row(account_id, &r->row, flags_known) : NULL);
+      json_object_array_add(restored, o);
+   }
+   return p;
+}
+
 const char *email_wire_error_text(email_err_t err) {
    switch (err) {
       case EMAIL_ERR_NONE:

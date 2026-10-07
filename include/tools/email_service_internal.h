@@ -28,6 +28,7 @@
 
 #include "tools/email_client.h"
 #include "tools/email_db.h"
+#include "tools/email_imap_roles.h"
 #include "tools/email_service.h"
 #include "tools/email_types.h"
 
@@ -165,5 +166,29 @@ int email_svc_read_single(const email_account_t *acct,
                           email_message_t *out,
                           email_err_t *err,
                           bool fanout);
+
+/* =============================================================================
+ * Account capabilities (email_service_move.c)
+ * ============================================================================= */
+
+/**
+ * @brief The account's capability generation, taken before learning its roles
+ *
+ * A note made under an older generation (the account was edited or removed in
+ * between) is dropped.
+ */
+uint64_t email_svc_caps_gen(int64_t account_id);
+
+/** Record what @p roles say the account can move to, learned under @p gen. */
+void email_svc_caps_from_roles(int64_t account_id, uint64_t gen, const email_imap_roles_t *roles);
+
+/**
+ * @brief Whether the list path may learn the account's roles now (not learned or
+ *        tried within the hour); true also marks it tried
+ */
+bool email_svc_caps_probe_due(int64_t account_id);
+
+/** The list path's probe failed: let the next page try again. */
+void email_svc_caps_probe_failed(int64_t account_id);
 
 #endif /* EMAIL_SERVICE_INTERNAL_H */

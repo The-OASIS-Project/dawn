@@ -36,15 +36,23 @@ typedef enum {
    EMAIL_EXEC_SLOT_COUNTS,   /* one at a time */
    EMAIL_EXEC_SLOT_FLAGS,    /* one at a time */
    EMAIL_EXEC_SLOT_ADMIN,    /* account settings work (test connection): one at a time */
+   EMAIL_EXEC_SLOT_MOVE, /* archive, trash, undo: a FIFO, never replaced (each is the user's act) */
    EMAIL_EXEC_SLOT_COUNT
 } email_exec_slot_t;
 
-/* Most email requests one user may have running, waiting or still draining, across sessions. */
+/* Most email requests one user may have running, waiting or still draining, across sessions
+ * (queued moves aren't counted: only the one running). */
 #define EMAIL_EXEC_USER_LIVE_MAX 6
+
+/* Moves one session may have queued behind its running one. */
+#define EMAIL_EXEC_MOVE_QUEUE 3
+
+/* Most requests one slot may hold: one running plus its waiting ones. */
+#define EMAIL_EXEC_SLOT_JOINS_MAX (1 + EMAIL_EXEC_MOVE_QUEUE)
 
 typedef enum {
    EMAIL_EXEC_RUN = 0, /* start it now */
-   EMAIL_EXEC_WAIT,    /* keep it as the slot's waiting request */
+   EMAIL_EXEC_WAIT,    /* keep it waiting in the slot (behind the others, for a move) */
    EMAIL_EXEC_REFUSE,  /* answer BUSY */
 } email_exec_action_t;
 
@@ -58,13 +66,13 @@ typedef struct {
  * @brief Decide a new request
  * @param slot        Its slot
  * @param has_running The slot has a request running
- * @param has_waiting The slot has a request waiting
- * @param user_live   The user's live requests now: running or waiting in any session,
- *                    plus cancelled ones whose tasks still run
+ * @param waiting     Requests waiting in the slot
+ * @param user_live   The user's live requests now: running or waiting in any session
+ *                    (moves: running only), plus cancelled ones whose tasks still run
  */
 email_exec_admit_t email_exec_admit(email_exec_slot_t slot,
                                     bool has_running,
-                                    bool has_waiting,
+                                    int waiting,
                                     int user_live);
 
 #ifdef __cplusplus

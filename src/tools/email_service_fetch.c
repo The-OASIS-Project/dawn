@@ -31,10 +31,12 @@
 
 #include "logging.h"
 #include "tools/email_client.h"
+#include "tools/email_client_internal.h"
 #include "tools/email_db.h"
 #include "tools/email_parse.h"
 #include "tools/email_service.h"
 #include "tools/email_service_internal.h"
+#include "tools/email_transfer.h"
 #include "tools/gmail_client.h"
 #include "tools/oauth_client.h"
 
@@ -300,6 +302,9 @@ static int recent_on_account(const email_account_t *acct,
    email_svc_lease_t lease;
    if (email_svc_lease_begin(acct, target, EMAIL_LEASE_WAIT_SEC, &lease, err) != EMAIL_RC_OK)
       return EMAIL_RC_FAILURE;
+   /* Taken before connecting: an account edit while this list runs makes
+    * what the probe below learns stale, and it's dropped. */
+   const uint64_t caps_gen = want_unread ? email_svc_caps_gen(acct->id) : 0;
    email_conn_t conn;
    int rc = email_svc_build_conn(acct, &conn);
    if (rc != EMAIL_SVC_CONN_OK) {
@@ -309,6 +314,19 @@ static int recent_on_account(const email_account_t *acct,
       imap_all_folder(&conn, &norm);
       rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, &page, out, max,
                               out_count, want_unread ? inbox_unread : NULL, err);
+      /* The panel's first inbox page learns what the account can move to, while
+       * the lease is held (cached roles cost nothing; else one probe an hour). */
+      if (rc == 0 && want_unread && email_svc_caps_probe_due(acct->id)) {
+         /* Not the list's to cancel: a newer list replacing this one mustn't
+          * leave the account's buttons unknown for an hour. */
+         const atomic_bool *saved = email_transfer_scope_cancel(NULL);
+         email_imap_roles_t roles;
+         if (email_imap_roles_get(&conn, true, &roles))
+            email_svc_caps_from_roles(acct->id, caps_gen, &roles);
+         else
+            email_svc_caps_probe_failed(acct->id);
+         email_transfer_scope_cancel(saved);
+      }
    }
    email_svc_lease_end(&lease);
    sodium_memzero(&conn, sizeof(conn));

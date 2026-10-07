@@ -1446,7 +1446,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 #endif /* DAWN_ENABLE_CALENDAR_TOOL */
 #ifdef DAWN_ENABLE_EMAIL_TOOL
    else if (strcmp(type, "email_list_accounts") == 0) {
-      handle_email_list_accounts(conn);
+      handle_email_list_accounts(conn, payload);
    } else if (strcmp(type, "email_add_account") == 0) {
       if (payload) {
          handle_email_add_account(conn, payload);
@@ -1483,6 +1483,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_email_set_flags(conn, payload);
    } else if (strcmp(type, "email_unread_counts") == 0) {
       handle_email_unread_counts(conn, payload);
+   } else if (strcmp(type, "email_archive") == 0) {
+      handle_email_archive(conn, payload);
+   } else if (strcmp(type, "email_trash") == 0) {
+      handle_email_trash(conn, payload);
+   } else if (strcmp(type, "email_undo") == 0) {
+      handle_email_undo(conn, payload);
    }
 #endif /* DAWN_ENABLE_EMAIL_TOOL */
    /* Watches (SAGE proactive attention) — per-user attention_rules CRUD */

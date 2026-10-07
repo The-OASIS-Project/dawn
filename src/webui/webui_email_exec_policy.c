@@ -25,9 +25,10 @@
 
 email_exec_admit_t email_exec_admit(email_exec_slot_t slot,
                                     bool has_running,
-                                    bool has_waiting,
+                                    int waiting,
                                     int user_live) {
    email_exec_admit_t a = { .action = EMAIL_EXEC_REFUSE };
+   const bool has_waiting = waiting > 0;
    int live_after = user_live;
 
    switch (slot) {
@@ -46,6 +47,17 @@ email_exec_admit_t email_exec_admit(email_exec_slot_t slot,
          a.replace_waiting = has_waiting;
          live_after -= has_waiting ? 1 : 0;
          a.action = has_running ? EMAIL_EXEC_WAIT : EMAIL_EXEC_RUN;
+         break;
+      case EMAIL_EXEC_SLOT_MOVE:
+         /* Each is something the user did: none is dropped or replaced.  One
+          * runs; the rest wait in order, and only the running one counts. */
+         if (has_running || has_waiting) {
+            if (waiting >= EMAIL_EXEC_MOVE_QUEUE)
+               return a;
+            a.action = EMAIL_EXEC_WAIT;
+            return a;
+         }
+         a.action = EMAIL_EXEC_RUN;
          break;
       default:
          if (has_running)

@@ -478,6 +478,7 @@ int email_service_remove_account(int64_t account_id) {
    email_account_t acct;
    if (email_db_account_get(account_id, &acct) != 0)
       return 1;
+   email_service_account_caps_forget(account_id);
 
    /* If OAuth, revoke and delete tokens — but only if no other service shares them */
    if (strcmp(acct.auth_type, "oauth") == 0 && acct.oauth_account_key[0]) {

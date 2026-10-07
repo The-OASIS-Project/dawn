@@ -70,13 +70,20 @@ typedef enum {
    MODE_LOAD = 0,
    MODE_FAST,
    MODE_SLOW,
-   MODE_PROBE
+   MODE_PROBE,
+   MODE_SEQ,  /* records the order it ran in */
+   MODE_HOLD, /* runs until s_hold_release, saying when it began */
 } stub_mode_t;
 
 typedef struct {
    stub_mode_t mode;
+   int seq;
    int results[EMAIL_EXEC_MAX_TASKS];
 } stub_ctx_t;
+
+static atomic_int s_order[16];
+static atomic_int s_order_n;
+static atomic_bool s_hold_running, s_hold_release;
 
 static atomic_int s_slow_done; /* MODE_SLOW tasks finished */
 static atomic_int s_probe_saw; /* s_slow_done when the probe ran (-1: not yet) */
@@ -110,6 +117,19 @@ static void stub_op(const email_exec_task_ctx_t *t) {
       atomic_store(&s_probe_saw, atomic_load(&s_slow_done));
       return;
    }
+   if (ctx->mode == MODE_SEQ) {
+      usleep(5000);
+      const int at = atomic_fetch_add(&s_order_n, 1);
+      if (at < 16)
+         atomic_store(&s_order[at], ctx->seq);
+      return;
+   }
+   if (ctx->mode == MODE_HOLD) {
+      atomic_store(&s_hold_running, true);
+      while (!atomic_load(&s_hold_release))
+         usleep(2000);
+      return;
+   }
    if (t->lease_err != EMAIL_ERR_NONE) {
       ctx->results[t->index] = -1;
       return;
@@ -138,15 +158,17 @@ static void stub_free(void *ctx) {
    free(ctx);
 }
 
-static int submit_ids(uint32_t session,
+static int submit_seq(uint32_t session,
                       int user,
                       email_exec_slot_t slot,
                       stub_mode_t mode,
+                      int seq,
                       const int64_t *ids,
                       const bool *imap,
                       int n) {
    stub_ctx_t *ctx = calloc(1, sizeof(*ctx));
    ctx->mode = mode;
+   ctx->seq = seq;
    atomic_fetch_add(&s_created, 1);
    atomic_fetch_add(&s_submitted, 1);
    const email_exec_request_t r = {
@@ -164,6 +186,16 @@ static int submit_ids(uint32_t session,
       .ctx = ctx,
    };
    return webui_email_exec_submit(&r);
+}
+
+static int submit_ids(uint32_t session,
+                      int user,
+                      email_exec_slot_t slot,
+                      stub_mode_t mode,
+                      const int64_t *ids,
+                      const bool *imap,
+                      int n) {
+   return submit_seq(session, user, slot, mode, 0, ids, imap, n);
 }
 
 static int submit(uint32_t session, int user, email_exec_slot_t slot, int n_accounts) {
@@ -326,6 +358,26 @@ static void test_one_user_cant_hold_every_worker(void) {
    TEST_ASSERT_TRUE_MESSAGE(saw <= EMAIL_EXEC_WORKERS, "probe waited behind the slow user");
 }
 
+/* Moves are each the user's act: they run in the order sent, none replaced; a
+ * fifth while four are held is BUSY (and answered). */
+static void test_moves_run_in_order_and_none_is_dropped(void) {
+   static const int64_t ids[1] = { 3 };
+   static const bool imap[1] = { false };
+   atomic_store(&s_order_n, 0);
+   const int sent = atomic_load(&s_sent);
+   for (int i = 0; i < 1 + EMAIL_EXEC_MOVE_QUEUE; i++)
+      TEST_ASSERT_EQUAL(EMAIL_EXEC_OK,
+                        submit_seq(900, 60, EMAIL_EXEC_SLOT_MOVE, MODE_SEQ, i, ids, imap, 1));
+   TEST_ASSERT_EQUAL(EMAIL_EXEC_BUSY,
+                     submit_seq(900, 60, EMAIL_EXEC_SLOT_MOVE, MODE_SEQ, 99, ids, imap, 1));
+   TEST_ASSERT_TRUE_MESSAGE(wait_drained(20), "requests still pending: a hang");
+   TEST_ASSERT_EQUAL(1 + EMAIL_EXEC_MOVE_QUEUE, atomic_load(&s_order_n));
+   for (int i = 0; i < 1 + EMAIL_EXEC_MOVE_QUEUE; i++)
+      TEST_ASSERT_EQUAL(i, atomic_load(&s_order[i]));
+   /* Four results and the BUSY: nothing dropped, nothing answered twice. */
+   TEST_ASSERT_EQUAL(sent + 2 + EMAIL_EXEC_MOVE_QUEUE, atomic_load(&s_sent));
+}
+
 static void *stopper(void *arg) {
    (void)arg;
    usleep(30000);
@@ -333,7 +385,31 @@ static void *stopper(void *arg) {
    return NULL;
 }
 
+static void *releaser(void *arg) {
+   (void)arg;
+   usleep(200000);
+   atomic_store(&s_hold_release, true);
+   return NULL;
+}
+
 static void test_a_stop_under_load_neither_hangs_nor_leaks(void) {
+   /* A move already at work when the stop comes isn't answered (its change
+    * reaches the tabs as email_changed); the moves queued behind it are. */
+   static const int64_t move_ids[1] = { 3 };
+   static const bool move_imap[1] = { false };
+   atomic_store(&s_hold_running, false);
+   atomic_store(&s_hold_release, false);
+   TEST_ASSERT_EQUAL(EMAIL_EXEC_OK, submit_seq(950, 70, EMAIL_EXEC_SLOT_MOVE, MODE_HOLD, 0,
+                                               move_ids, move_imap, 1));
+   for (int i = 0; i < 200 && !atomic_load(&s_hold_running); i++)
+      usleep(1000);
+   TEST_ASSERT_TRUE(atomic_load(&s_hold_running));
+   for (int i = 1; i <= 2; i++)
+      TEST_ASSERT_EQUAL(EMAIL_EXEC_OK, submit_seq(950, 70, EMAIL_EXEC_SLOT_MOVE, MODE_SEQ, i,
+                                                  move_ids, move_imap, 1));
+   pthread_t release;
+   pthread_create(&release, NULL, releaser, NULL);
+
    /* A long outside hold leaves tasks waiting in the lease when the stop comes. */
    pthread_t holder, stop;
    pthread_create(&stop, NULL, stopper, NULL);
@@ -342,8 +418,10 @@ static void test_a_stop_under_load_neither_hangs_nor_leaks(void) {
    atomic_store(&s_holder_stop, true);
    pthread_join(holder, NULL);
 
+   pthread_join(release, NULL);
+
    TEST_ASSERT_TRUE_MESSAGE(wait_drained(20), "contexts not freed after stop");
-   TEST_ASSERT_EQUAL(atomic_load(&s_submitted), atomic_load(&s_sent));
+   TEST_ASSERT_EQUAL(atomic_load(&s_submitted) - 1, atomic_load(&s_sent)); /* the held move */
    TEST_ASSERT_EQUAL(0, atomic_load(&s_overlap));
    TEST_ASSERT_FALSE(email_lease_is_held(1));
 
@@ -373,6 +451,7 @@ int main(void) {
    RUN_TEST(test_every_request_is_answered_once_and_freed_once);
    RUN_TEST(test_a_supersede_racing_a_finishing_task_frees_once);
    RUN_TEST(test_one_user_cant_hold_every_worker);
+   RUN_TEST(test_moves_run_in_order_and_none_is_dropped);
    RUN_TEST(test_a_stop_under_load_neither_hangs_nor_leaks); /* last: a stop is final */
    return UNITY_END();
 }

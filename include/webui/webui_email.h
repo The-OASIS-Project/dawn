@@ -27,7 +27,7 @@
 #include "webui/webui_internal.h"
 
 /** List email accounts for the current user */
-void handle_email_list_accounts(ws_connection_t *conn);
+void handle_email_list_accounts(ws_connection_t *conn, json_object *payload);
 
 /** Add a new email account */
 void handle_email_add_account(ws_connection_t *conn, json_object *payload);

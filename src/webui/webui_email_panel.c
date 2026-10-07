@@ -16,11 +16,12 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * The mail panel's verbs (webui_email_panel.h).  A request is checked here,
- * on the lws thread, against its limits and the user's own enabled accounts,
- * and anything it carries that isn't plainly valid is refused before the
- * service sees it.  The work then runs on the email executor, one task per
- * account; the last task's finish builds the reply.
+ * The mail panel's verbs (webui_email_panel.h), but for the moves
+ * (webui_email_panel_move.c).  A request is checked here, on the lws thread,
+ * against its limits and the user's own enabled accounts, and anything it
+ * carries that isn't plainly valid is refused before the service sees it.  The
+ * work then runs on the email executor, one task per account; the last task's
+ * finish builds the reply.
  */
 
 #include "webui/webui_email_panel.h"
@@ -41,11 +42,10 @@
 #include "webui/email_cursor.h"
 #include "webui/email_wire.h"
 #include "webui/webui_email_exec.h"
+#include "webui/webui_email_panel_internal.h"
 
 #define PANEL_LIMIT_DEFAULT 25
 #define PANEL_LIMIT_MAX EMAIL_MAX_FETCH_RESULTS
-/* A message id the panel got from DAWN fits this (email_summary_t.message_id). */
-#define PANEL_MSG_ID_MAX (sizeof(((email_summary_t *)0)->message_id) - 1)
 #define PANEL_FOLDER_MAX 127
 
 _Static_assert(EMAIL_CURSOR_ACCOUNTS >= EMAIL_MAX_ACCOUNTS, "a cursor holds every account");
@@ -60,7 +60,10 @@ bool webui_email_client_enabled(void) {
  * Replies from the lws thread, and request checks
  * ============================================================================= */
 
-static void reply(ws_connection_t *conn, const char *verb, json_object *payload, const char *req) {
+void email_panel_reply(ws_connection_t *conn,
+                       const char *verb,
+                       json_object *payload,
+                       const char *req) {
    json_object *frame = json_object_new_object();
    if (!frame || !payload) {
       json_object_put(frame);
@@ -80,7 +83,7 @@ static void reply(ws_connection_t *conn, const char *verb, json_object *payload,
    json_object_put(frame);
 }
 
-static json_object *error_payload(email_err_t code) {
+json_object *email_panel_error_payload(email_err_t code) {
    json_object *p = json_object_new_object();
    if (!p)
       return NULL;
@@ -90,11 +93,11 @@ static json_object *error_payload(email_err_t code) {
    return p;
 }
 
-static void reply_error(ws_connection_t *conn,
-                        const char *verb,
-                        email_err_t code,
-                        const char *req) {
-   reply(conn, verb, error_payload(code), req);
+void email_panel_reply_error(ws_connection_t *conn,
+                             const char *verb,
+                             email_err_t code,
+                             const char *req) {
+   email_panel_reply(conn, verb, email_panel_error_payload(code), req);
 }
 
 /* A bool member: @p def when absent; false when it isn't a bool. */
@@ -130,7 +133,7 @@ static bool get_int(json_object *payload,
 }
 
 /* A string of 1..max bytes with no control characters or embedded NUL. */
-static bool text_ok(json_object *v, size_t max) {
+bool email_panel_text_ok(json_object *v, size_t max) {
    if (!v || !json_object_is_type(v, json_type_string))
       return false;
    const char *s = json_object_get_string(v);
@@ -157,20 +160,14 @@ static bool get_text(json_object *payload,
    *present = false;
    if (!payload || !json_object_object_get_ex(payload, key, &v))
       return true;
-   if (!text_ok(v, max) || (size_t)json_object_get_string_len(v) >= size)
+   if (!email_panel_text_ok(v, max) || (size_t)json_object_get_string_len(v) >= size)
       return false;
    *present = true;
    memcpy(out, json_object_get_string(v), (size_t)json_object_get_string_len(v) + 1);
    return true;
 }
 
-/* The user's enabled accounts, as the panel needs them. */
-typedef struct {
-   int64_t id;
-   bool is_imap; /* takes the account lease; otherwise the Gmail API */
-} panel_acct_t;
-
-static int load_accounts(int user_id, panel_acct_t *out) {
+int email_panel_load_accounts(int user_id, panel_acct_t *out) {
    email_account_t accounts[EMAIL_MAX_ACCOUNTS];
    const int n = email_service_list_accounts(user_id, accounts, EMAIL_MAX_ACCOUNTS);
    int count = 0;
@@ -179,6 +176,7 @@ static int load_accounts(int user_id, panel_acct_t *out) {
          continue;
       out[count].id = accounts[i].id;
       out[count].is_imap = email_service_account_uses_lease(&accounts[i]);
+      out[count].read_only = accounts[i].read_only;
       count++;
    }
    sodium_memzero(accounts, sizeof(accounts));
@@ -187,7 +185,7 @@ static int load_accounts(int user_id, panel_acct_t *out) {
 
 /* A message id of the account's kind, checked before it goes any further:
  * IMAP "folder:uid" with a valid folder, or a Gmail hex id. */
-static bool msg_id_ok(const char *id, bool is_imap) {
+bool email_panel_msg_id_ok(const char *id, bool is_imap) {
    if (!is_imap)
       return gmail_message_id_valid(id);
    char folder[PANEL_FOLDER_MAX + 1];
@@ -205,29 +203,29 @@ static const panel_acct_t *find_acct(const panel_acct_t *accts, int n, int64_t i
 }
 
 /* The request's session, or NULL. */
-static uint32_t session_id_of(ws_connection_t *conn, bool *ok) {
+uint32_t email_panel_session_id_of(ws_connection_t *conn, bool *ok) {
    session_t *s = conn_get_session(conn);
    *ok = s != NULL;
    return s ? s->session_id : 0;
 }
 
 /* Submit; on a submit that wasn't answered, answer it here. */
-static void submit(ws_connection_t *conn, const email_exec_request_t *r) {
+void email_panel_submit(ws_connection_t *conn, const email_exec_request_t *r) {
    if (webui_email_exec_submit(r) == EMAIL_EXEC_FAILURE)
-      reply_error(conn, r->verb, EMAIL_ERR_FAILED, r->req);
+      email_panel_reply_error(conn, r->verb, EMAIL_ERR_FAILED, r->req);
 }
 
 /* The verb's common start: logged in, email on, the request's req. */
-static bool verb_start(ws_connection_t *conn,
-                       const char *verb,
-                       json_object *payload,
-                       char *req,
-                       const char **req_out) {
+bool email_panel_verb_start(ws_connection_t *conn,
+                            const char *verb,
+                            json_object *payload,
+                            char *req,
+                            const char **req_out) {
    if (!conn_require_auth(conn))
       return false;
    *req_out = email_exec_payload_req(payload, req, EMAIL_EXEC_REQ_MAX + 1) ? req : NULL;
    if (!webui_email_client_enabled()) {
-      reply_error(conn, verb, EMAIL_ERR_UNAVAILABLE, *req_out);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_UNAVAILABLE, *req_out);
       return false;
    }
    return true;
@@ -437,14 +435,17 @@ static void list_op(const email_exec_task_ctx_t *t) {
       list_gmail(c, a, t);
 }
 
-static void add_account_status(json_object *arr, int64_t id, email_err_t err, int unread) {
+static json_object *add_account_status(json_object *arr, int64_t id, email_err_t err, int unread) {
    json_object *o = json_object_new_object();
+   if (!o)
+      return NULL;
    json_object_object_add(o, "account_id", json_object_new_int64(id));
    json_object_object_add(o, "inbox_unread",
                           err == EMAIL_ERR_NONE && unread >= 0 ? json_object_new_int(unread)
                                                                : NULL);
    json_object_object_add(o, "status", json_object_new_string(email_wire_account_status(err)));
    json_object_array_add(arr, o);
+   return o;
 }
 
 static void add_partial(json_object *arr, int64_t id, email_err_t err) {
@@ -459,10 +460,10 @@ static json_object *list_finish(void *ctx, const int64_t *account_ids, int n) {
    (void)account_ids;
    list_ctx_t *c = (list_ctx_t *)ctx;
    if (n != c->n)
-      return error_payload(EMAIL_ERR_FAILED);
+      return email_panel_error_payload(EMAIL_ERR_FAILED);
    for (int i = 0; i < c->n; i++) {
       if (c->acct[i].err == EMAIL_ERR_CURSOR_STALE)
-         return error_payload(EMAIL_ERR_CURSOR_STALE);
+         return email_panel_error_payload(EMAIL_ERR_CURSOR_STALE);
    }
 
    email_merge_in_t in[EMAIL_MAX_ACCOUNTS];
@@ -517,9 +518,18 @@ static json_object *list_finish(void *ctx, const int64_t *account_ids, int n) {
 
    if (c->want_counts) {
       json_object *accounts = json_object_new_array();
-      for (int i = 0; accounts && i < c->n; i++)
-         add_account_status(accounts, c->acct[i].from.account_id, c->acct[i].err,
-                            c->acct[i].inbox_unread);
+      for (int i = 0; accounts && i < c->n; i++) {
+         const email_cursor_pos_t *f = &c->acct[i].from;
+         json_object *o = add_account_status(accounts, f->account_id, c->acct[i].err,
+                                             c->acct[i].inbox_unread);
+         /* What it can move to, once known (the fetch above may have learned it). */
+         bool can_trash, can_archive;
+         if (o &&
+             email_service_account_caps(f->account_id, !f->is_imap, &can_trash, &can_archive)) {
+            json_object_object_add(o, "can_trash", json_object_new_boolean(can_trash));
+            json_object_object_add(o, "can_archive", json_object_new_boolean(can_archive));
+         }
+      }
       json_object_object_add(payload, "accounts", accounts);
    }
    return payload;
@@ -567,12 +577,12 @@ static void list_or_search(ws_connection_t *conn, json_object *payload, bool sea
    const char *verb = search ? "email_search" : "email_list";
    char req_buf[EMAIL_EXEC_REQ_MAX + 1];
    const char *req = NULL;
-   if (!verb_start(conn, verb, payload, req_buf, &req))
+   if (!email_panel_verb_start(conn, verb, payload, req_buf, &req))
       return;
 
    list_ctx_t *c = calloc(1, sizeof(*c));
    if (!c) {
-      reply_error(conn, verb, EMAIL_ERR_FAILED, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_FAILED, req);
       return;
    }
    c->search = search;
@@ -601,16 +611,16 @@ static void list_or_search(ws_connection_t *conn, json_object *payload, bool sea
    }
    if (!ok) {
       free(c);
-      reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
       return;
    }
    c->limit = (int)limit;
 
    panel_acct_t accts[EMAIL_MAX_ACCOUNTS];
-   const int n_accts = load_accounts(conn->auth_user_id, accts);
+   const int n_accts = email_panel_load_accounts(conn->auth_user_id, accts);
    if (n_accts == 0) {
       free(c);
-      reply_error(conn, verb, EMAIL_ERR_NO_ACCOUNT, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_NO_ACCOUNT, req);
       return;
    }
    /* The folder as it's used (omitted = inbox), so the two spellings share cursors. */
@@ -632,7 +642,7 @@ static void list_or_search(ws_connection_t *conn, json_object *payload, bool sea
       }
       if (stale) {
          free(c);
-         reply_error(conn, verb, EMAIL_ERR_CURSOR_STALE, req);
+         email_panel_reply_error(conn, verb, EMAIL_ERR_CURSOR_STALE, req);
          return;
       }
    } else if (has_ids) {
@@ -654,12 +664,13 @@ static void list_or_search(ws_connection_t *conn, json_object *payload, bool sea
    c->want_counts = !search && !has_cursor && strcasecmp(c->folder, "inbox") == 0;
 
    bool have_session = false;
-   const uint32_t session_id = session_id_of(conn, &have_session);
+   const uint32_t session_id = email_panel_session_id_of(conn, &have_session);
    if (c->n == 0 || !have_session) {
       /* Nothing to fetch (every id asked for is gone): answer now. */
-      json_object *p = have_session ? list_finish(c, NULL, 0) : error_payload(EMAIL_ERR_FAILED);
+      json_object *p = have_session ? list_finish(c, NULL, 0)
+                                    : email_panel_error_payload(EMAIL_ERR_FAILED);
       list_free(c);
-      reply(conn, verb, p, req);
+      email_panel_reply(conn, verb, p, req);
       return;
    }
 
@@ -684,7 +695,7 @@ static void list_or_search(ws_connection_t *conn, json_object *payload, bool sea
       .free_ctx = list_free,
       .ctx = c,
    };
-   submit(conn, &r);
+   email_panel_submit(conn, &r);
 }
 
 void handle_email_list(ws_connection_t *conn, json_object *payload) {
@@ -728,13 +739,13 @@ static void read_op(const email_exec_task_ctx_t *t) {
 static json_object *read_finish(void *ctx, const int64_t *account_ids, int n) {
    read_ctx_t *c = (read_ctx_t *)ctx;
    if (c->rc != EMAIL_RC_OK || n != 1)
-      return error_payload(c->err == EMAIL_ERR_NONE ? EMAIL_ERR_FAILED : c->err);
+      return email_panel_error_payload(c->err == EMAIL_ERR_NONE ? EMAIL_ERR_FAILED : c->err);
    /* The state the read left, when it knows; otherwise what the mark asked for. */
    const bool unread = c->msg.unread_known
                            ? c->msg.unread_after
                            : (c->mark == EMAIL_MARK_READ ? false : c->msg.unread_before);
    json_object *p = email_wire_read_payload(account_ids[0], &c->msg, unread, EMAIL_PANEL_FRAME_MAX);
-   return p ? p : error_payload(EMAIL_ERR_FAILED);
+   return p ? p : email_panel_error_payload(EMAIL_ERR_FAILED);
 }
 
 static void read_free(void *ctx) {
@@ -746,10 +757,10 @@ static void read_free(void *ctx) {
 }
 
 /* The account_id member: the user's enabled account, else NULL. */
-static const panel_acct_t *get_account(json_object *payload,
-                                       const panel_acct_t *accts,
-                                       int n_accts,
-                                       bool *valid) {
+const panel_acct_t *email_panel_get_account(json_object *payload,
+                                            const panel_acct_t *accts,
+                                            int n_accts,
+                                            bool *valid) {
    int64_t id = 0;
    json_object *v;
    *valid = payload && json_object_object_get_ex(payload, "account_id", &v) &&
@@ -761,12 +772,12 @@ void handle_email_read(ws_connection_t *conn, json_object *payload) {
    const char *verb = "email_read";
    char req_buf[EMAIL_EXEC_REQ_MAX + 1];
    const char *req = NULL;
-   if (!verb_start(conn, verb, payload, req_buf, &req))
+   if (!email_panel_verb_start(conn, verb, payload, req_buf, &req))
       return;
 
    read_ctx_t *c = calloc(1, sizeof(*c));
    if (!c) {
-      reply_error(conn, verb, EMAIL_ERR_FAILED, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_FAILED, req);
       return;
    }
    bool has_id = false, mark_read = true;
@@ -774,28 +785,28 @@ void handle_email_read(ws_connection_t *conn, json_object *payload) {
                  &has_id) ||
        !has_id || !get_bool(payload, "mark_read", true, &mark_read)) {
       free(c);
-      reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
       return;
    }
    c->mark = mark_read ? EMAIL_MARK_READ : EMAIL_MARK_KEEP;
 
    panel_acct_t accts[EMAIL_MAX_ACCOUNTS];
-   const int n_accts = load_accounts(conn->auth_user_id, accts);
+   const int n_accts = email_panel_load_accounts(conn->auth_user_id, accts);
    bool valid = false;
-   const panel_acct_t *a = get_account(payload, accts, n_accts, &valid);
+   const panel_acct_t *a = email_panel_get_account(payload, accts, n_accts, &valid);
    bool have_session = false;
-   const uint32_t session_id = session_id_of(conn, &have_session);
+   const uint32_t session_id = email_panel_session_id_of(conn, &have_session);
    if (!valid || !a || !have_session) {
       free(c);
-      reply_error(conn, verb,
-                  !valid ? EMAIL_ERR_INVALID_REQUEST
-                         : (!a ? EMAIL_ERR_ACCOUNT_NOT_FOUND : EMAIL_ERR_FAILED),
-                  req);
+      email_panel_reply_error(conn, verb,
+                              !valid ? EMAIL_ERR_INVALID_REQUEST
+                                     : (!a ? EMAIL_ERR_ACCOUNT_NOT_FOUND : EMAIL_ERR_FAILED),
+                              req);
       return;
    }
-   if (!msg_id_ok(c->message_id, a->is_imap)) {
+   if (!email_panel_msg_id_ok(c->message_id, a->is_imap)) {
       free(c);
-      reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
       return;
    }
    const int64_t id = a->id;
@@ -814,7 +825,7 @@ void handle_email_read(ws_connection_t *conn, json_object *payload) {
       .free_ctx = read_free,
       .ctx = c,
    };
-   submit(conn, &r);
+   email_panel_submit(conn, &r);
 }
 
 /* =============================================================================
@@ -849,7 +860,7 @@ static json_object *flags_finish(void *ctx, const int64_t *account_ids, int n) {
    (void)n;
    flags_ctx_t *c = (flags_ctx_t *)ctx;
    if (c->rc != EMAIL_RC_OK)
-      return error_payload(c->err == EMAIL_ERR_NONE ? EMAIL_ERR_FAILED : c->err);
+      return email_panel_error_payload(c->err == EMAIL_ERR_NONE ? EMAIL_ERR_FAILED : c->err);
    json_object *p = json_object_new_object();
    json_object *updated = json_object_new_array();
    json_object *failed = json_object_new_array();
@@ -885,12 +896,12 @@ void handle_email_set_flags(ws_connection_t *conn, json_object *payload) {
    const char *verb = "email_set_flags";
    char req_buf[EMAIL_EXEC_REQ_MAX + 1];
    const char *req = NULL;
-   if (!verb_start(conn, verb, payload, req_buf, &req))
+   if (!email_panel_verb_start(conn, verb, payload, req_buf, &req))
       return;
 
    flags_ctx_t *c = calloc(1, sizeof(*c));
    if (!c) {
-      reply_error(conn, verb, EMAIL_ERR_FAILED, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_FAILED, req);
       return;
    }
    json_object *arr = NULL, *unread_obj = NULL;
@@ -901,7 +912,7 @@ void handle_email_set_flags(ws_connection_t *conn, json_object *payload) {
              json_object_is_type(unread_obj, json_type_boolean);
    for (size_t i = 0; ok && i < json_object_array_length(arr); i++) {
       json_object *v = json_object_array_get_idx(arr, i);
-      ok = text_ok(v, PANEL_MSG_ID_MAX);
+      ok = email_panel_text_ok(v, PANEL_MSG_ID_MAX);
       if (ok) {
          memcpy(c->ids[c->n], json_object_get_string(v), (size_t)json_object_get_string_len(v) + 1);
          c->n++;
@@ -909,29 +920,29 @@ void handle_email_set_flags(ws_connection_t *conn, json_object *payload) {
    }
    if (!ok) {
       free(c);
-      reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
       return;
    }
    c->unread = json_object_get_boolean(unread_obj);
 
    panel_acct_t accts[EMAIL_MAX_ACCOUNTS];
-   const int n_accts = load_accounts(conn->auth_user_id, accts);
+   const int n_accts = email_panel_load_accounts(conn->auth_user_id, accts);
    bool valid = false;
-   const panel_acct_t *a = get_account(payload, accts, n_accts, &valid);
+   const panel_acct_t *a = email_panel_get_account(payload, accts, n_accts, &valid);
    bool have_session = false;
-   const uint32_t session_id = session_id_of(conn, &have_session);
+   const uint32_t session_id = email_panel_session_id_of(conn, &have_session);
    if (!valid || !a || !have_session) {
       free(c);
-      reply_error(conn, verb,
-                  !valid ? EMAIL_ERR_INVALID_REQUEST
-                         : (!a ? EMAIL_ERR_ACCOUNT_NOT_FOUND : EMAIL_ERR_FAILED),
-                  req);
+      email_panel_reply_error(conn, verb,
+                              !valid ? EMAIL_ERR_INVALID_REQUEST
+                                     : (!a ? EMAIL_ERR_ACCOUNT_NOT_FOUND : EMAIL_ERR_FAILED),
+                              req);
       return;
    }
    for (int i = 0; i < c->n; i++) {
-      if (!msg_id_ok(c->ids[i], a->is_imap)) {
+      if (!email_panel_msg_id_ok(c->ids[i], a->is_imap)) {
          free(c);
-         reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
+         email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
          return;
       }
    }
@@ -951,7 +962,7 @@ void handle_email_set_flags(ws_connection_t *conn, json_object *payload) {
       .free_ctx = flags_free,
       .ctx = c,
    };
-   submit(conn, &r);
+   email_panel_submit(conn, &r);
 }
 
 /* =============================================================================
@@ -999,24 +1010,27 @@ void handle_email_unread_counts(ws_connection_t *conn, json_object *payload) {
    const char *verb = "email_unread_counts";
    char req_buf[EMAIL_EXEC_REQ_MAX + 1];
    const char *req = NULL;
-   if (!verb_start(conn, verb, payload, req_buf, &req))
+   if (!email_panel_verb_start(conn, verb, payload, req_buf, &req))
       return;
 
    panel_acct_t accts[EMAIL_MAX_ACCOUNTS];
-   const int n_accts = load_accounts(conn->auth_user_id, accts);
+   const int n_accts = email_panel_load_accounts(conn->auth_user_id, accts);
    bool have_session = false;
-   const uint32_t session_id = session_id_of(conn, &have_session);
+   const uint32_t session_id = email_panel_session_id_of(conn, &have_session);
    if (n_accts == 0 || !have_session) {
       json_object *p = json_object_new_object();
       if (p)
          json_object_object_add(p, "accounts", json_object_new_array());
-      reply(conn, verb, have_session ? p : (json_object_put(p), error_payload(EMAIL_ERR_FAILED)),
-            req);
+      email_panel_reply(conn, verb,
+                        have_session
+                            ? p
+                            : (json_object_put(p), email_panel_error_payload(EMAIL_ERR_FAILED)),
+                        req);
       return;
    }
    counts_ctx_t *c = calloc(1, sizeof(*c));
    if (!c) {
-      reply_error(conn, verb, EMAIL_ERR_FAILED, req);
+      email_panel_reply_error(conn, verb, EMAIL_ERR_FAILED, req);
       return;
    }
    c->n = n_accts;
@@ -1040,5 +1054,5 @@ void handle_email_unread_counts(ws_connection_t *conn, json_object *payload) {
       .free_ctx = counts_free,
       .ctx = c,
    };
-   submit(conn, &r);
+   email_panel_submit(conn, &r);
 }

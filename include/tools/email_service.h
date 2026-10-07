@@ -615,6 +615,22 @@ int email_service_move(int user_id,
                        email_move_result_t *results,
                        email_err_t *err);
 
+/**
+ * @brief Whether the account has a Trash and an Archive to move to, once known
+ *        (learned on a worker: a move, the panel's first inbox page).  A Gmail
+ *        API account (@p gmail_api) has both.  Reads no credentials and does no
+ *        I/O: safe on any thread.
+ * @return false when not yet known (both outs false)
+ */
+bool email_service_account_caps(int64_t account_id,
+                                bool gmail_api,
+                                bool *can_trash,
+                                bool *can_archive);
+
+/** Forget what email_service_account_caps knows of an account (its server or
+ *  login changed, or it's gone). */
+void email_service_account_caps_forget(int64_t account_id);
+
 /** One undo record's result in email_service_undo. */
 typedef struct {
    email_err_t err;     /* EMAIL_ERR_NONE when it's back */
@@ -657,6 +673,7 @@ int email_service_undo(int user_id,
  *        the panel should reload (a row couldn't be read, or a message's move
  *        may have happened without its answer)
  *
+ * @p gmail_api says which backend the ids are from (a Gmail row carries flags).
  * @p kind and @p undo say what moved, because a Gmail id is the same in every
  * view.  A move's @p destroyed ids left INBOX (archive) or everything but
  * Trash (trash); an IMAP id names its folder, so it left just that one.  An
@@ -669,6 +686,7 @@ int email_service_undo(int user_id,
  */
 void email_changed_notify(int user_id,
                           int64_t account_id,
+                          bool gmail_api,
                           email_move_kind_t kind,
                           bool undo,
                           const email_summary_t *created,

@@ -17,7 +17,8 @@
  * the project author(s).
  *
  * The mail panel's verbs: email_list, email_search, email_read,
- * email_set_flags, email_unread_counts (docs/WEBSOCKET_PROTOCOL.md, Email).
+ * email_set_flags, email_unread_counts, email_archive, email_trash, email_undo
+ * (docs/WEBSOCKET_PROTOCOL.md, Email).
  * Each is checked on the lws thread and run on the email executor.
  */
 
@@ -37,6 +38,9 @@ void handle_email_search(ws_connection_t *conn, json_object *payload);
 void handle_email_read(ws_connection_t *conn, json_object *payload);
 void handle_email_set_flags(ws_connection_t *conn, json_object *payload);
 void handle_email_unread_counts(ws_connection_t *conn, json_object *payload);
+void handle_email_archive(ws_connection_t *conn, json_object *payload);
+void handle_email_trash(ws_connection_t *conn, json_object *payload);
+void handle_email_undo(ws_connection_t *conn, json_object *payload);
 
 /** The panel's verbs answer (the email tool is on and its service up): the email_client flag. */
 bool webui_email_client_enabled(void);

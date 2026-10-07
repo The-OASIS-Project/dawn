@@ -17,6 +17,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 │  recent | read | search | folders │   _search, _read, _set_flags,     │
 │  | send | confirm_send | accounts │   _unread_counts (email_cursor.c, │
 │  | trash | confirm_trash | archive│   email_wire.c: paging, frames)   │
+│                                   │  webui_email_panel_move.c:        │
+│                                   │   _archive, _trash, _undo         │
 │  → TOOL_CAP_DANGEROUS gates       │  webui_email_exec.c: 4 workers,   │
 │                                   │   one task per account            │
 ├───────────────────────────────────────────────────────────────────────┤
@@ -165,6 +167,20 @@ caches the roles). It never uses another user's or a shared namespace.
   kept 60 s in memory. An undo checks the message is still where it went, moves it
   back, and reads its new row. Every move and undo is told to the user's panels
   once (`email_changed_notify`).
+- **What an account can do.** The panel's account list says whether each account
+  can trash and archive (`email_service_account_caps`). Gmail always can; for
+  IMAP it's whether the server has a folder for the role, learned from a move or,
+  at most once an hour per account, from the account's first inbox page. A probe
+  that fails is tried again on the next page. Each cached entry has a generation
+  number: removing or changing the account forgets it, and a probe that started
+  before that can't write its answer back.
+- **The panel's moves run in order.** Archive, trash and undo go to the
+  executor's MOVE slot: one running and three queued per session, first in
+  first out, and a newer request never replaces a queued one. A fifth is BUSY.
+  A move that started always runs its login and its first folder (IMAP) or
+  message (Gmail) with no stop armed, so it always acts and always sends
+  `email_changed`; a stop waits at most for that, and a stop between folders
+  leaves the rest where they were.
 
 ## Confirming a send or a trash
 

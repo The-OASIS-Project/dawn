@@ -83,7 +83,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
-| `email_client` | 2026-10-07 | The mail panel's verbs answer: `email_list`, `email_search`, `email_read`, `email_set_flags`, `email_unread_counts` (see Email). Advertised only while email is turned on (`[email] enabled`) and its service is up; a build without the WebUI or the email tool never advertises it. |
+| `email_client` | 2026-10-07 | The mail panel's verbs answer: `email_list`, `email_search`, `email_read`, `email_set_flags`, `email_unread_counts`, `email_archive`, `email_trash`, `email_undo`, and the server pushes `email_changed` (see Email). Advertised only while email is turned on (`[email] enabled`) and its service is up; a build without the WebUI or the email tool never advertises it. |
 | `document_attachments` | 2026-10-02 | A `text` frame may carry its documents as `attachments` (`[{filename, size, content, blob_id?}]`): the daemon defuses each body and filename and builds the `[ATTACHED DOCUMENT: …]…[END DOCUMENT]` text itself, so a document can't end its own span. Without it, inline the documents into `text` as before. Every daemon with it also has `turn_refs`. |
 | `turn_refs` | 2026-10-02 | A `text` frame may carry `client_ref`: the turn's own user `transcript` echo and every `error` raised for that turn (refused at receipt, refused or failed when it runs) carry it back unchanged, so a client knows which of its turns an error belongs to. Without it, refusals name no turn. |
 | `visual_prompt_guard` | 2026-10-07 | A `text` frame may carry `from_visual: true` for a prompt a rendered visual sent; no confirm (email send or trash, call, text, document delete, door, research) counts in that turn. Send a visual's prompt only to a daemon with this flag, as its own turn; without it, drop the prompt and tell the user, never send it as an ordinary turn. |
@@ -1215,7 +1215,13 @@ isn't a string is ignored (the reply carries none). Every reply is `<verb>_respo
 | `NO_ACCOUNT` / `ACCOUNT_NOT_FOUND` | The user has no enabled account / not one with that id |
 | `AUTH_FAILED` / `AUTH_REVOKED` | The server refused the login / the OAuth grant was revoked (reconnect) |
 | `UNREACHABLE` / `TIMEOUT` / `RATE_LIMITED` | Network, server or provider trouble; try again |
-| `NOT_FOUND` | No such message |
+| `NOT_FOUND` | No such message (an undo: it's no longer where the move put it, e.g. Trash was emptied) |
+| `READ_ONLY` | The account is read-only in DAWN: it can't trash, archive or undo |
+| `NO_TRASH` / `FOLDER_MISSING` | The account has no Trash / the folder (an Archive, or the one an undo goes back to) doesn't exist |
+| `IN_TRASH` | Archive of a message in Trash or Spam (Gmail): restore it first |
+| `NOT_REMOVED` | Copied to Trash or Archive, but the original couldn't be removed. Don't retry (it would copy again); the next list shows both |
+| `OUTCOME_UNKNOWN` | The server didn't say whether the move happened; the panel reloads on the `email_changed` that follows (`refresh`) |
+| `UNDO_EXPIRED` | The undo token is unknown, past its 60 s window, already used or running, or the account changed (server, login, read-only, disabled) |
 | `UNSUPPORTED_QUERY` | This account can't run the search (IMAP: non-ASCII text) |
 | `CURSOR_STALE` | The cursor no longer applies: start again without one |
 | `BUSY` | Too many email requests at once (per session or per user); try again shortly |
@@ -1223,22 +1229,30 @@ isn't a string is ignored (the reply carries none). Every reply is `<verb>_respo
 | `SHUTTING_DOWN` | The daemon is stopping |
 | `CANCELLED` / `FAILED` | Stopped / anything else |
 
-Every request gets exactly one reply, even when it's refused or replaced. Email work runs
-off the socket's thread, so replies may come back in a different order than the requests
-went out: match on `req`.
+Every request gets exactly one reply, even when it's refused or replaced, with two
+exceptions: an archive, trash or undo that already started when the daemon stops finishes on
+the server without a reply (`email_changed` tells every tab what it did), and when a socket's
+session passes to another user (log out, log in), the old user's requests get none.
+Email work runs off the socket's thread, so replies may come back in a different order than
+the requests went out: match on `req`.
 
 #### Account settings
 
-`email_list_accounts` (no payload) returns `accounts: [{id, name, imap_server, imap_port,
-imap_ssl, smtp_server, smtp_port, smtp_ssl, username, display_name, has_password, auth_type,
-oauth_account_key, enabled, read_only, max_recent, max_body_chars, digest_depth}]` and
-`limits: {max_recent_max, max_recent_default, digest_depth_max, digest_depth_default,
-body_chars_min, body_chars_max}`. Passwords never leave the daemon.
+`email_list_accounts` (payload optional, `{req?}`) returns `accounts: [{id, name, imap_server,
+imap_port, imap_ssl, smtp_server, smtp_port, smtp_ssl, username, display_name, has_password,
+auth_type, oauth_account_key, enabled, read_only, max_recent, max_body_chars, digest_depth,
+can_trash?, can_archive?}]` and `limits: {max_recent_max, max_recent_default,
+digest_depth_max, digest_depth_default, body_chars_min, body_chars_max}`. Passwords never
+leave the daemon. `can_trash` / `can_archive`: whether the account has a Trash / an Archive to
+move to. Always true on Gmail; on IMAP present only once DAWN has learned it (from a move, or
+the first inbox page of `email_list`). Absent means not known yet, not false.
+
+Every account-settings request below may carry `req`, echoed like the panel's.
 
 | Request | Payload | Notes |
 |---|---|---|
 | `email_add_account` | `{name, imap_server, smtp_server, username, password?, auth_type?, imap_port?, imap_ssl?, smtp_port?, smtp_ssl?, display_name?, read_only?, oauth_account_key?}` | `auth_type` `"app_password"` (needs `password`) or `"oauth"` (needs `oauth_account_key`) |
-| `email_update_account` | `{id, …any of the above, max_recent?, max_body_chars?, digest_depth?}` | An out-of-range number is refused, not dropped |
+| `email_update_account` | `{id, …any of the above, max_recent?, max_body_chars?, digest_depth?}` | An out-of-range number is refused, not dropped. Clears what's known of `can_trash` / `can_archive` |
 | `email_remove_account` | `{id}` | |
 | `email_set_read_only` | `{id, read_only}` | A read-only account can't send, trash or archive |
 | `email_set_enabled` | `{id, enabled}` | |
@@ -1262,6 +1276,10 @@ limit, or with an id of the wrong shape, the request is refused with `INVALID_RE
 `date` is the server's receive time in epoch seconds. `thread_id`, `starred` and
 `important` are there only where the backend has them (Gmail). `preview` is the
 provider's snippet, and `""` on IMAP accounts. A `message_id` is opaque: pass it back as is.
+IMAP ids carry the mailbox's epoch (`INBOX:4211.7`, folder, UID, UIDVALIDITY), so an id
+from before the mailbox was rebuilt answers `NOT_FOUND` instead of naming another message;
+an id without it (`INBOX:4211`, from older clients) still works, unpinned. A message's id
+changes when it moves: use the one a reply or `email_changed` gives.
 
 ##### `email_list` / `email_search`
 
@@ -1308,7 +1326,8 @@ meanwhile the inbox is searched.)
 - **`accounts`** (first page of `email_list` for the inbox only, no cursor): each account's
   inbox unread count, on the same login as the list. `inbox_unread` is `null` when it isn't
   known. `status`: `ok`, `auth_revoked`, `auth_failed` or `unreachable` (timeouts and rate
-  limits count as unreachable).
+  limits count as unreachable). `can_trash` / `can_archive` as in `email_list_accounts`
+  (present once known; this page learns them for an IMAP account, at most once an hour).
 
 A newer `email_list` or `email_search` from the same session replaces one still running
 (that one is answered `SUPERSEDED`).
@@ -1359,6 +1378,78 @@ Marks messages read (`unread: false`) or unread. Only the read state ever change
 works on read-only accounts. `failed: [{message_id, error_code, error}]`: `NOT_FOUND` for a
 message that isn't there (on Gmail a batch the provider accepts reports every id updated).
 Repeating it is harmless. On IMAP the messages may span at most 8 folders per call.
+
+##### `email_archive` / `email_trash`
+
+```json
+{"type": "email_trash", "payload": {"account_id": 3,
+ "message_ids": ["INBOX:4211.7", "INBOX:4212.7"], "req": "t-5"}}
+{"type": "email_trash_response", "payload": {"success": true, "req": "t-5",
+ "done": [{"message_id": "INBOX:4211.7", "undo": "9f2c…(32 hex)"},
+          {"message_id": "INBOX:4212.7", "undo": null}],
+ "failed": []}}
+```
+
+Moves messages of one account (1–50) to its Trash or Archive. Gmail: trash is the Trash label,
+archive takes the message out of the inbox. IMAP: the folder the server marks `\Trash` /
+`\Archive` (or a usual name; on Gmail over IMAP, All Mail), never a delete. Refused with
+`READ_ONLY` on a read-only account.
+
+- **`done`**: every message now in Trash or Archive, including ones already there.
+  `message_id` is the id as the server knows it (pinned). `undo` is a token for `email_undo`,
+  good for 60 seconds, or `null` when the move can't be undone (already there, or the server
+  can't say where it went: IMAP without UIDPLUS). `left_flagged: true` (IMAP without MOVE or
+  UIDPLUS): the message was copied and marked deleted, and is removed at the folder's next
+  expunge; it may still show in other clients until then.
+- **`failed`**: `[{message_id (as sent), error_code, error}]`. `NOT_REMOVED` and
+  `OUTCOME_UNKNOWN` mean don't retry.
+- On IMAP the messages may span at most 8 folders per call. When nothing moved because the
+  whole call failed (the login, no Trash, the account busy), the reply is an error reply with
+  that `error_code`; otherwise it's `done` and `failed`, even if the call stopped partway.
+
+**Queueing.** Archive, trash and undo share one queue per session: one runs, up to 3 wait
+in order behind it, none is ever replaced; a 5th is `BUSY`, and so is one that would take
+the user past their limit of live email requests. A move that started isn't cancelled
+midway: its login and its first folder (IMAP) or message (Gmail) always run, and a stop
+between folders leaves the rest where they were. So a started move always moves something
+and always sends `email_changed`; a stop waits at most for that first folder or message
+(bounded by the server timeouts). When the daemon stops, a queued one that never started is
+answered `SHUTTING_DOWN`; one that started may get no reply, so its ids are not reported
+either way: wait for `email_changed`, which says what moved.
+Clicks are meant to be batched client-side (a short debounce, then one call with every id).
+
+##### `email_undo`
+
+```json
+{"type": "email_undo", "payload": {"account_id": 3, "undo": ["9f2c…"], "req": "u-1"}}
+{"type": "email_undo_response", "payload": {"success": true, "req": "u-1",
+ "restored": [{"undo": "9f2c…", "row": {"account_id": 3, "message_id": "INBOX:4390.7", …}}],
+ "failed": []}}
+```
+
+Moves messages back where a move took them (1–50 tokens, each 32 lowercase hex characters,
+no repeats, all from moves on `account_id`). `row` is the message where it is now (a new id
+on IMAP), or `null` when it came back but couldn't be read (the `email_changed` that follows
+then asks for a reload). `failed: [{undo, error_code, error}]`: `UNDO_EXPIRED`, `NOT_FOUND`
+(no longer in Trash or Archive), `FOLDER_MISSING` (the folder it came from is gone). A token
+that failed for a passing reason (busy, network) can be sent again within its window.
+
+##### `email_changed` (push)
+
+```json
+{"type": "email_changed", "payload": {"account_id": 3, "state": null, "kind": "trash",
+ "undo": false, "created": [], "updated": [], "destroyed": ["INBOX:4211.7"]}}
+```
+
+Sent to every browser tab of the user after any archive, trash or undo on one of their
+accounts (from the panel or from Friday), including moves whose reply didn't arrive.
+`kind`: `"trash"` or `"archive"`; `undo`: whether it was an undo. `created`: rows that
+appeared (an undo's restored messages; a row replaces any with the same id). `destroyed`:
+ids that left their folder: an IMAP id names its folder; a Gmail id left the inbox (archive)
+or every view but Trash (trash), and for a Gmail undo the `created` row replaces it.
+`updated` is empty and `state` is `null` for now. `refresh: true` (only when set): reload
+this account's lists, because a row couldn't be read or a move may have happened without its
+answer.
 
 ##### `email_unread_counts`
 
@@ -2415,6 +2506,9 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `email_read` | `email_read_response` |
 | `email_set_flags` | `email_set_flags_response` |
 | `email_unread_counts` | `email_unread_counts_response` |
+| `email_archive` | `email_archive_response` |
+| `email_trash` | `email_trash_response` |
+| `email_undo` | `email_undo_response` |
 | `set_config` | `set_config_response` |
 | `set_secrets` | `set_secrets_response` |
 | `get_audio_devices` | `get_audio_devices_response` |

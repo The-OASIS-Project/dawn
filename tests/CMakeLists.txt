@@ -621,7 +621,8 @@ dawn_add_unit_test(test_email_wire
    SOURCES test_email_wire.c
            ${SRC_ROOT}/src/webui/email_wire.c
            ${SRC_ROOT}/src/tools/email_parse.c
-   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${CURL_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_email_imap_state

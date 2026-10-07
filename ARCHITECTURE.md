@@ -198,10 +198,13 @@ Layer 4 (Application) — deps: everything below
 │                               deep_research tools, the OAuth and code-project handlers, Home Assistant's
 │                               realtime connection)
 │   ├── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
-│   │                           taken by ticket so no worker waits on an account, replies by session id
-│   └── webui_email_panel.c     The mail panel's verbs (email_list/_search/_read/_set_flags/_unread_counts),
-│                               with the pure email_cursor.c (paging across accounts) and email_wire.c
-│                               (rows, read frames within their size budget)
+│   │                           taken by ticket so no worker waits on an account, replies by session id; a
+│   │                           session's moves queue in order on its MOVE slot, never replaced
+│   └── webui_email_panel*.c    The mail panel's verbs (email_list/_search/_read/_set_flags/_unread_counts;
+│                               _archive/_trash/_undo in webui_email_panel_move.c), with the pure
+│                               email_cursor.c (paging across accounts) and email_wire.c (rows, read frames
+│                               within their size budget); webui_email_changed.c pushes email_changed to
+│                               every tab of the user after a move or undo
 └── src/core/{job_worker,research_worker}.c   Detached background-job sequencers*
 ```
 
@@ -499,6 +502,8 @@ Per-module locks (scoped to a single subsystem):
                                                                      a token; never across a call into anything else)
   email_service_move::s_pace_mutex (src/tools/email_service_move.c) — Gmail's per-account call pacing, shared by the tool and
                                                                      the panel (LEAF: held only to reserve a slot; the wait sleeps with it released)
+  email_service_move::s_caps_mutex (src/tools/email_service_move.c) — which accounts can trash and archive, as last learned (LEAF:
+                                                                     held only to find, note or read a slot; never across I/O or another lock)
   ...and similar per-tool mutexes in src/tools/*.c
 ```
 

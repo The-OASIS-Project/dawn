@@ -28,28 +28,28 @@ void tearDown(void) {
 }
 
 static void test_a_list_replaces_the_one_before_it(void) {
-   email_exec_admit_t a = email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, false, 1);
+   email_exec_admit_t a = email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, 0, 1);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN, a.action);
    TEST_ASSERT_TRUE(a.cancel_running);
    TEST_ASSERT_FALSE(a.replace_waiting);
 
-   a = email_exec_admit(EMAIL_EXEC_SLOT_LIST, false, false, 0);
+   a = email_exec_admit(EMAIL_EXEC_SLOT_LIST, false, 0, 0);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN, a.action);
    TEST_ASSERT_FALSE(a.cancel_running);
 }
 
 static void test_a_read_waits_behind_the_open_one(void) {
-   email_exec_admit_t a = email_exec_admit(EMAIL_EXEC_SLOT_READ, true, false, 1);
+   email_exec_admit_t a = email_exec_admit(EMAIL_EXEC_SLOT_READ, true, 0, 1);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_WAIT, a.action);
    TEST_ASSERT_FALSE(a.cancel_running);
 
    /* The waiting read hasn't marked anything: the newer one takes its place. */
-   a = email_exec_admit(EMAIL_EXEC_SLOT_READ, true, true, 2);
+   a = email_exec_admit(EMAIL_EXEC_SLOT_READ, true, 1, 2);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_WAIT, a.action);
    TEST_ASSERT_TRUE(a.replace_waiting);
    TEST_ASSERT_FALSE(a.cancel_running);
 
-   a = email_exec_admit(EMAIL_EXEC_SLOT_READ, false, false, 0);
+   a = email_exec_admit(EMAIL_EXEC_SLOT_READ, false, 0, 0);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN, a.action);
 }
 
@@ -57,30 +57,52 @@ static void test_counts_flags_and_admin_run_one_at_a_time(void) {
    const email_exec_slot_t slots[] = { EMAIL_EXEC_SLOT_COUNTS, EMAIL_EXEC_SLOT_FLAGS,
                                        EMAIL_EXEC_SLOT_ADMIN };
    for (int i = 0; i < 3; i++) {
-      TEST_ASSERT_EQUAL(EMAIL_EXEC_REFUSE, email_exec_admit(slots[i], true, false, 1).action);
-      TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN, email_exec_admit(slots[i], false, false, 1).action);
+      TEST_ASSERT_EQUAL(EMAIL_EXEC_REFUSE, email_exec_admit(slots[i], true, 0, 1).action);
+      TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN, email_exec_admit(slots[i], false, 0, 1).action);
    }
 }
 
 static void test_the_user_cap_counts_what_stays(void) {
    const int full = EMAIL_EXEC_USER_LIVE_MAX;
    TEST_ASSERT_EQUAL(EMAIL_EXEC_REFUSE,
-                     email_exec_admit(EMAIL_EXEC_SLOT_COUNTS, false, false, full).action);
+                     email_exec_admit(EMAIL_EXEC_SLOT_COUNTS, false, 0, full).action);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN,
-                     email_exec_admit(EMAIL_EXEC_SLOT_COUNTS, false, false, full - 1).action);
+                     email_exec_admit(EMAIL_EXEC_SLOT_COUNTS, false, 0, full - 1).action);
    /* A list that replaces a waiting one frees that place; the running one it
     * cancels keeps its place until it drains. */
-   TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN,
-                     email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, true, full).action);
+   TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN, email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, 1, full).action);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_REFUSE,
-                     email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, false, full).action);
+                     email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, 0, full).action);
    /* A refusal cancels nothing. */
-   email_exec_admit_t a = email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, false, full + 1);
+   email_exec_admit_t a = email_exec_admit(EMAIL_EXEC_SLOT_LIST, true, 0, full + 1);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_REFUSE, a.action);
    TEST_ASSERT_FALSE(a.cancel_running);
-   a = email_exec_admit(EMAIL_EXEC_SLOT_READ, true, true, full + 1);
+   a = email_exec_admit(EMAIL_EXEC_SLOT_READ, true, 1, full + 1);
    TEST_ASSERT_EQUAL(EMAIL_EXEC_REFUSE, a.action);
    TEST_ASSERT_FALSE(a.replace_waiting);
+}
+
+static void test_moves_queue_in_order_and_are_never_replaced(void) {
+   email_exec_admit_t a = email_exec_admit(EMAIL_EXEC_SLOT_MOVE, false, 0, 0);
+   TEST_ASSERT_EQUAL(EMAIL_EXEC_RUN, a.action);
+   for (int waiting = 0; waiting < EMAIL_EXEC_MOVE_QUEUE; waiting++) {
+      a = email_exec_admit(EMAIL_EXEC_SLOT_MOVE, true, waiting, 1);
+      TEST_ASSERT_EQUAL(EMAIL_EXEC_WAIT, a.action);
+      TEST_ASSERT_FALSE(a.cancel_running);
+      TEST_ASSERT_FALSE(a.replace_waiting);
+   }
+   /* The queue is full: BUSY, and nothing already there is touched. */
+   a = email_exec_admit(EMAIL_EXEC_SLOT_MOVE, true, EMAIL_EXEC_MOVE_QUEUE, 1);
+   TEST_ASSERT_EQUAL(EMAIL_EXEC_REFUSE, a.action);
+   TEST_ASSERT_FALSE(a.cancel_running);
+   TEST_ASSERT_FALSE(a.replace_waiting);
+   /* Queued moves don't count toward the user's cap; the one that runs does. */
+   TEST_ASSERT_EQUAL(
+       EMAIL_EXEC_WAIT,
+       email_exec_admit(EMAIL_EXEC_SLOT_MOVE, true, 1, EMAIL_EXEC_USER_LIVE_MAX).action);
+   TEST_ASSERT_EQUAL(
+       EMAIL_EXEC_REFUSE,
+       email_exec_admit(EMAIL_EXEC_SLOT_MOVE, false, 0, EMAIL_EXEC_USER_LIVE_MAX).action);
 }
 
 int main(void) {
@@ -89,5 +111,6 @@ int main(void) {
    RUN_TEST(test_a_read_waits_behind_the_open_one);
    RUN_TEST(test_counts_flags_and_admin_run_one_at_a_time);
    RUN_TEST(test_the_user_cap_counts_what_stays);
+   RUN_TEST(test_moves_queue_in_order_and_are_never_replaced);
    return UNITY_END();
 }

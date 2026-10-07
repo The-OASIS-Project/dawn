@@ -46,11 +46,18 @@ static bool verify_account_owner(ws_connection_t *conn, int64_t account_id, emai
           EMAIL_RC_OK;
 }
 
+/* Echo the request's req (when it's a plain one) in @p resp_payload. */
+static void echo_req(json_object *payload, json_object *resp_payload) {
+   char req[EMAIL_EXEC_REQ_MAX + 1];
+   if (resp_payload && email_exec_payload_req(payload, req, sizeof(req)))
+      json_object_object_add(resp_payload, "req", json_object_new_string(req));
+}
+
 /* =============================================================================
  * List Accounts
  * ============================================================================= */
 
-void handle_email_list_accounts(ws_connection_t *conn) {
+void handle_email_list_accounts(ws_connection_t *conn, json_object *payload) {
    if (!conn_require_auth(conn))
       return;
 
@@ -96,6 +103,13 @@ void handle_email_list_accounts(ws_connection_t *conn) {
          json_object_object_add(obj, "max_body_chars",
                                 json_object_new_int(accounts[i].max_body_chars));
          json_object_object_add(obj, "digest_depth", json_object_new_int(accounts[i].digest_depth));
+         bool can_trash, can_archive;
+         if (email_service_account_caps(accounts[i].id,
+                                        email_service_is_gmail_account(&accounts[i]), &can_trash,
+                                        &can_archive)) {
+            json_object_object_add(obj, "can_trash", json_object_new_boolean(can_trash));
+            json_object_object_add(obj, "can_archive", json_object_new_boolean(can_archive));
+         }
          json_object_array_add(arr, obj);
       }
       json_object_object_add(resp_payload, "accounts", arr);
@@ -118,6 +132,7 @@ void handle_email_list_accounts(ws_connection_t *conn) {
       json_object_object_add(resp_payload, "limits", limits);
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -221,6 +236,7 @@ void handle_email_add_account(ws_connection_t *conn, json_object *payload) {
    }
 
 done:
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -345,10 +361,13 @@ void handle_email_update_account(ws_connection_t *conn, json_object *payload) {
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to update account"));
    } else {
+      /* Another server or login may have other folders: learn them again. */
+      email_service_account_caps_forget(account_id);
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    }
 
 done:
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -392,6 +411,7 @@ void handle_email_remove_account(ws_connection_t *conn, json_object *payload) {
       }
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -559,6 +579,7 @@ void handle_email_set_read_only(ws_connection_t *conn, json_object *payload) {
       }
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -604,6 +625,7 @@ void handle_email_set_enabled(ws_connection_t *conn, json_object *payload) {
       }
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);

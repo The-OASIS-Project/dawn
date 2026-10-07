@@ -315,32 +315,40 @@ static void probe_note(const char *key, bool failed) {
    pthread_mutex_unlock(&s_roles_mutex);
 }
 
+bool email_imap_roles_get(const email_conn_t *conn, bool probe, email_imap_roles_t *out) {
+   if (!conn || !out)
+      return false;
+   char key[sizeof(((roles_slot_t *)0)->key)];
+   roles_key(conn, key, sizeof(key));
+   if (roles_cached(key, out))
+      return true;
+   if (!probe)
+      return false;
+   pthread_mutex_lock(&s_roles_mutex);
+   const bool skip = probe_failed_recently_locked(key, time(NULL));
+   pthread_mutex_unlock(&s_roles_mutex);
+   if (skip)
+      return false;
+   CURL *curl = email_imap_handle_create(conn);
+   if (!curl)
+      return false;
+   email_instrument_ctx_t dctx;
+   email_instrument_attach(curl, &dctx);
+   bool first = true;
+   const int rc = roles_for(curl, &dctx, conn, key, &first, out);
+   email_instrument_op_done(conn->username, "roles", curl, &dctx);
+   curl_easy_cleanup(curl);
+   probe_note(key, rc != 0);
+   return rc == 0;
+}
+
 bool email_imap_all_mail_folder(const email_conn_t *conn, char *out, size_t size) {
    if (!conn || !out || size == 0)
       return false;
    out[0] = '\0';
-   char key[sizeof(((roles_slot_t *)0)->key)];
-   roles_key(conn, key, sizeof(key));
    email_imap_roles_t roles;
-   if (!roles_cached(key, &roles)) {
-      pthread_mutex_lock(&s_roles_mutex);
-      const bool skip = probe_failed_recently_locked(key, time(NULL));
-      pthread_mutex_unlock(&s_roles_mutex);
-      if (skip)
-         return false;
-      CURL *curl = email_imap_handle_create(conn);
-      if (!curl)
-         return false;
-      email_instrument_ctx_t dctx;
-      email_instrument_attach(curl, &dctx);
-      bool first = true;
-      const int rc = roles_for(curl, &dctx, conn, key, &first, &roles);
-      email_instrument_op_done(conn->username, "roles", curl, &dctx);
-      curl_easy_cleanup(curl);
-      probe_note(key, rc != 0);
-      if (rc != 0)
-         return false;
-   }
+   if (!email_imap_roles_get(conn, true, &roles))
+      return false;
    if (!roles.all[0] || strlen(roles.all) >= size)
       return false;
    snprintf(out, size, "%s", roles.all);

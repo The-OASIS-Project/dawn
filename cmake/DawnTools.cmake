@@ -408,10 +408,12 @@ if(DAWN_ENABLE_EMAIL_TOOL AND ENABLE_WEBUI)
         src/webui/email_cursor.c
         src/webui/email_wire.c
         src/webui/webui_email.c
+        src/webui/webui_email_changed.c
         src/webui/webui_email_exec.c
         src/webui/webui_email_exec_policy.c
         src/webui/webui_email_exec_send.c
-        src/webui/webui_email_panel.c)
+        src/webui/webui_email_panel.c
+        src/webui/webui_email_panel_move.c)
 endif()
 
 # SFX Tool (sound effect playback)

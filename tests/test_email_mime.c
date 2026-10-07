@@ -396,9 +396,11 @@ static void test_fetch_on_read(void) {
    (void)html;
 }
 
+/* CPU time of this thread, not wall time: the suite runs tests in parallel,
+ * and a loaded machine stretches wall time without the parse doing more work. */
 static long now_ms(void) {
    struct timespec ts;
-   clock_gettime(CLOCK_MONOTONIC, &ts);
+   clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 

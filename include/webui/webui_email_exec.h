@@ -108,8 +108,11 @@ typedef struct {
 int webui_email_exec_submit(const email_exec_request_t *r);
 
 /**
- * @brief Stop: refuse new work, cancel what's queued or waiting, finish what's
- *        running, join the workers.  Before the auth DB and email service go.
+ * @brief Stop: refuse new work, cancel what's queued or waiting (answered
+ *        SHUTTING_DOWN), finish what's running, join the workers.  A move that
+ *        started stops between folders and isn't answered: what it did reaches
+ *        the user's tabs as email_changed.  Before the auth DB and email
+ *        service go.
  */
 void webui_email_exec_stop(void);
 

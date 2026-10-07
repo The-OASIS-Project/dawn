@@ -121,6 +121,14 @@ email_err_t email_imap_open_roles(CURL *curl,
 void email_imap_roles_forget(const email_conn_t *conn);
 
 /**
+ * @brief @p conn's folder roles, from the cache; with @p probe, learned on a
+ *        login of its own when not cached (a failed probe isn't retried for 5
+ *        minutes) (email_imap_move.c)
+ * @return false when they aren't known
+ */
+bool email_imap_roles_get(const email_conn_t *conn, bool probe, email_imap_roles_t *out);
+
+/**
  * @brief Rows (sender, subject, date, flags) for @p uids in @p folder, on
  *        @p curl's logged-in connection (email_client.c)
  * @return 0 with @p out_count rows (a UID that isn't there has none), or 1

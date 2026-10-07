@@ -319,17 +319,21 @@ int email_imap_move_batch(const email_conn_t *conn,
       }
       groups[g].dest_uidvalidity = 0;
    }
+   /* A move that has started acts: the login and the whole first folder run
+    * with no stop armed (the job's stop is put back from the second folder),
+    * so a stop can't leave it having done nothing and told no one. */
+   const atomic_bool *cancel = email_transfer_scope_cancel(NULL);
    CURL *curl = email_imap_handle_create(conn);
    email_copyuid_t *cap = calloc(1, sizeof(*cap));
    if (!curl || !cap) {
       free(cap);
       if (curl)
          curl_easy_cleanup(curl);
+      email_transfer_scope_cancel(cancel);
       return 1;
    }
    email_instrument_ctx_t dctx;
    email_instrument_attach(curl, &dctx);
-   const atomic_bool *cancel = email_transfer_thread_cancel();
 
    email_imap_roles_t roles;
    email_err_t e = email_imap_open_roles(curl, &dctx, conn, &roles);
@@ -358,15 +362,17 @@ int email_imap_move_batch(const email_conn_t *conn,
    for (int g = 0; g < ngroups; g++) {
       email_imap_move_group_t *grp = &groups[g];
       /* Stopping is honoured between folders only: a folder's move, once
-       * started, finishes (half of one would leave a copy in both). */
-      if (cancel && atomic_load(cancel)) {
+       * started, finishes (half of one would leave a copy in both).  The first
+       * folder always runs, so a move that has begun does something. */
+      if (g > 0 && cancel && atomic_load(cancel)) {
          for (int r = g; r < ngroups; r++) {
             for (int i = 0; i < groups[r].n; i++)
                groups[r].errs[i] = EMAIL_ERR_CANCELLED;
          }
          break;
       }
-      email_transfer_set_cancel(curl, cancel);
+      if (g > 0)
+         email_transfer_set_cancel(curl, cancel); /* from the second folder on */
       if (!grp->folder || !grp->folder[0] || grp->n <= 0 || grp->n > EMAIL_IMAP_MOVE_MAX)
          continue;
       if (strcmp(dest, grp->folder) == 0) {
@@ -439,6 +445,7 @@ done:
    email_instrument_op_done(conn->username, "move", curl, &dctx);
    curl_easy_cleanup(curl);
    free(cap);
+   email_transfer_scope_cancel(cancel);
    return *err == EMAIL_ERR_NONE ? 0 : 1;
 }
 
@@ -461,6 +468,8 @@ int email_imap_move_back(const email_conn_t *conn,
       }
       groups[g].src_uidvalidity = 0;
    }
+   /* As a move: the login and the first folder run with no stop armed. */
+   const atomic_bool *cancel = email_transfer_scope_cancel(NULL);
    CURL *curl = email_imap_handle_create(conn);
    email_copyuid_t *cap = calloc(1, sizeof(*cap));
    email_summary_t *fetched = calloc(EMAIL_IMAP_MOVE_MAX, sizeof(*fetched));
@@ -469,11 +478,11 @@ int email_imap_move_back(const email_conn_t *conn,
       free(fetched);
       if (curl)
          curl_easy_cleanup(curl);
+      email_transfer_scope_cancel(cancel);
       return 1;
    }
    email_instrument_ctx_t dctx;
    email_instrument_attach(curl, &dctx);
-   const atomic_bool *cancel = email_transfer_thread_cancel();
    email_imap_roles_t roles;
    const email_err_t se = email_imap_open_roles(curl, &dctx, conn, &roles);
    bool first = false;
@@ -488,14 +497,15 @@ int email_imap_move_back(const email_conn_t *conn,
 
    for (int g = 0; g < ngroups; g++) {
       email_imap_undo_group_t *grp = &groups[g];
-      if (cancel && atomic_load(cancel)) {
+      if (g > 0 && cancel && atomic_load(cancel)) { /* the first always runs */
          for (int r = g; r < ngroups; r++) {
             for (int i = 0; i < groups[r].n; i++)
                groups[r].errs[i] = EMAIL_ERR_CANCELLED;
          }
          break;
       }
-      email_transfer_set_cancel(curl, cancel);
+      if (g > 0)
+         email_transfer_set_cancel(curl, cancel); /* from the second folder on */
       char url[EMAIL_IMAP_MAILBOX_URL_MAX], set[MOVE_SET_MAX];
       char quoted[EMAIL_IMAP_ROLE_FOLDER_MAX * 2 + 3];
       if (grp->n <= 0 || grp->n > EMAIL_IMAP_MOVE_MAX ||
@@ -573,5 +583,6 @@ done:
    curl_easy_cleanup(curl);
    free(cap);
    free(fetched);
+   email_transfer_scope_cancel(cancel);
    return *err == EMAIL_ERR_NONE ? 0 : 1;
 }

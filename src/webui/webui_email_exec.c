@@ -44,8 +44,9 @@
 
 /* Sessions that can have email work at once. */
 #define EMAIL_EXEC_SESSIONS 64
-/* Joins one stop or one submit may cancel. */
-#define EMAIL_EXEC_CANCEL_MAX (EMAIL_EXEC_SESSIONS * EMAIL_EXEC_SLOT_COUNT * 2)
+/* Joins one session holds at most, and one stop may cancel. */
+#define EMAIL_EXEC_SESSION_JOINS (EMAIL_EXEC_SLOT_COUNT * EMAIL_EXEC_SLOT_JOINS_MAX)
+#define EMAIL_EXEC_CANCEL_MAX (EMAIL_EXEC_SESSIONS * EMAIL_EXEC_SESSION_JOINS)
 
 typedef enum {
    TASK_QUEUED = 0, /* in the run queue */
@@ -80,6 +81,7 @@ typedef struct exec_join {
    pthread_mutex_t deliver_mutex;
    bool delivered;      /* its result was sent (under deliver_mutex) */
    bool started;        /* its tasks went into the run queue */
+   bool ran;            /* a task of it began its work (under s_mutex) */
    exec_drain_t *drain; /* set when cancelled with tasks still running */
    uint32_t session_id;
    int user_id;
@@ -100,7 +102,9 @@ typedef struct {
    uint32_t session_id;
    int user_id;
    exec_join_t *running[EMAIL_EXEC_SLOT_COUNT];
-   exec_join_t *waiting[EMAIL_EXEC_SLOT_COUNT];
+   /* Waiting, oldest first: one at most, except moves (EMAIL_EXEC_MOVE_QUEUE). */
+   exec_join_t *waiting[EMAIL_EXEC_SLOT_COUNT][EMAIL_EXEC_MOVE_QUEUE];
+   int nwait[EMAIL_EXEC_SLOT_COUNT];
 } exec_session_t;
 
 static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -229,10 +233,38 @@ static exec_session_t *session_get_locked(uint32_t session_id, int user_id) {
 
 static void session_free_if_idle_locked(exec_session_t *s) {
    for (int i = 0; i < EMAIL_EXEC_SLOT_COUNT; i++) {
-      if (s->running[i] || s->waiting[i])
+      if (s->running[i] || s->nwait[i] > 0)
          return;
    }
    s->in_use = false;
+}
+
+static void waiting_push_locked(exec_session_t *s, email_exec_slot_t k, exec_join_t *j) {
+   s->waiting[k][s->nwait[k]++] = j; /* the policy keeps it under EMAIL_EXEC_MOVE_QUEUE */
+}
+
+/* The oldest waiting request of the slot, taken out; NULL when none. */
+static exec_join_t *waiting_pop_locked(exec_session_t *s, email_exec_slot_t k) {
+   if (s->nwait[k] == 0)
+      return NULL;
+   exec_join_t *j = s->waiting[k][0];
+   for (int i = 1; i < s->nwait[k]; i++)
+      s->waiting[k][i - 1] = s->waiting[k][i];
+   s->waiting[k][--s->nwait[k]] = NULL;
+   return j;
+}
+
+/* Every request of the slot (running first, then waiting in order), taken out of
+ * it into @p out; returns how many. */
+static int slot_take_all_locked(exec_session_t *s, email_exec_slot_t k, exec_join_t **out) {
+   int n = 0;
+   if (s->running[k])
+      out[n++] = s->running[k];
+   s->running[k] = NULL;
+   exec_join_t *w;
+   while ((w = waiting_pop_locked(s, k)))
+      out[n++] = w;
+   return n;
 }
 
 /* A user's entry for cancelled joins still running; NULL when the table is full. */
@@ -257,7 +289,7 @@ static int user_live_locked(int user_id) {
       const exec_session_t *s = &s_sessions[i];
       if (s->in_use && s->user_id == user_id) {
          for (int k = 0; k < EMAIL_EXEC_SLOT_COUNT; k++)
-            n += (s->running[k] ? 1 : 0) + (s->waiting[k] ? 1 : 0);
+            n += (s->running[k] ? 1 : 0) + (k == EMAIL_EXEC_SLOT_MOVE ? 0 : s->nwait[k]);
       }
       const int draining = atomic_load(&s_drain[i].count);
       if (draining > 0 && s_drain[i].user_id == user_id)
@@ -432,9 +464,8 @@ static void join_tasks_done(exec_join_t *j) {
       exec_session_t *s = session_find_locked(j->session_id);
       if (s && s->running[j->slot] == j) {
          s->running[j->slot] = NULL;
-         exec_join_t *next = s->waiting[j->slot];
+         exec_join_t *next = waiting_pop_locked(s, j->slot);
          if (next) {
-            s->waiting[j->slot] = NULL;
             s->running[j->slot] = next;
             if (!s_stopped)
                join_start_locked(next); /* when stopping, the stop cancels it unstarted */
@@ -507,10 +538,15 @@ static void *worker_main(void *arg) {
             t->lease_err = EMAIL_ERR_BUSY; /* the lease table is full */
       }
       t->state = TASK_RUNNING;
+      /* Decided once, under s_mutex: a stop that finds `ran` set leaves this
+       * join to the work it will do, so it must then do it. */
+      const bool run = !atomic_load(&j->cancel);
+      if (run)
+         j->ran = true;
       s_worker_user[me] = j->user_id;
       pthread_mutex_unlock(&s_mutex);
 
-      if (!atomic_load(&j->cancel))
+      if (run)
          run_task(t);
       if (t->has_lease) {
          t->has_lease = false;
@@ -608,8 +644,8 @@ int webui_email_exec_submit(const email_exec_request_t *r) {
    }
    const char *req = j->has_req ? j->req : NULL;
 
-   exec_join_t *cancelled[2 * EMAIL_EXEC_SLOT_COUNT];
-   exec_notice_t notice[2 * EMAIL_EXEC_SLOT_COUNT];
+   exec_join_t *cancelled[EMAIL_EXEC_SESSION_JOINS + 2];
+   exec_notice_t notice[EMAIL_EXEC_SESSION_JOINS + 2];
    int n_cancelled = 0;
 
    pthread_mutex_lock(&s_mutex);
@@ -630,11 +666,9 @@ int webui_email_exec_submit(const email_exec_request_t *r) {
     * unanswered, since the tab is someone else's. */
    if (s && s->user_id != r->user_id) {
       for (int k = 0; k < EMAIL_EXEC_SLOT_COUNT; k++) {
-         exec_join_t *old[2] = { s->running[k], s->waiting[k] };
-         s->running[k] = s->waiting[k] = NULL;
-         for (int m = 0; m < 2; m++) {
-            if (!old[m])
-               continue;
+         exec_join_t *old[EMAIL_EXEC_SLOT_JOINS_MAX];
+         const int n_old = slot_take_all_locked(s, (email_exec_slot_t)k, old);
+         for (int m = 0; m < n_old; m++) {
             notice[n_cancelled] = notice_of(old[m]);
             notice[n_cancelled].answer = false;
             join_cancel_locked(old[m]);
@@ -646,16 +680,14 @@ int webui_email_exec_submit(const email_exec_request_t *r) {
 
    if (refuse == EMAIL_ERR_NONE) {
       const email_exec_admit_t a = email_exec_admit(r->slot, s->running[r->slot] != NULL,
-                                                    s->waiting[r->slot] != NULL,
+                                                    s->nwait[r->slot],
                                                     user_live_locked(r->user_id));
       if (a.action == EMAIL_EXEC_REFUSE) {
          refuse = EMAIL_ERR_BUSY;
       } else {
          exec_join_t *superseded[2] = { NULL, NULL };
-         if (a.replace_waiting && s->waiting[r->slot]) {
-            superseded[0] = s->waiting[r->slot];
-            s->waiting[r->slot] = NULL;
-         }
+         if (a.replace_waiting && s->nwait[r->slot] > 0)
+            superseded[0] = waiting_pop_locked(s, r->slot); /* only moves wait more than one */
          if (a.cancel_running && s->running[r->slot]) {
             superseded[1] = s->running[r->slot];
             s->running[r->slot] = NULL;
@@ -669,7 +701,7 @@ int webui_email_exec_submit(const email_exec_request_t *r) {
             cancelled[n_cancelled++] = superseded[m];
          }
          if (a.action == EMAIL_EXEC_WAIT) {
-            s->waiting[r->slot] = j;
+            waiting_push_locked(s, r->slot, j);
          } else {
             s->running[r->slot] = j;
             join_start_locked(j);
@@ -710,7 +742,9 @@ void webui_email_exec_stop(void) {
    email_lease_clear_hook();
 
    /* What's still running or waiting is answered SHUTTING_DOWN, like a new
-    * request would be, so the client isn't left waiting. */
+    * request would be, so the client isn't left waiting.  A move that started
+    * isn't: it stops only between folders, and what it did reaches every tab as
+    * email_changed, so "shutting down" would be wrong. */
    exec_notice_t *notices = calloc(EMAIL_EXEC_CANCEL_MAX, sizeof(*notices));
    exec_join_t **cancelled = calloc(EMAIL_EXEC_CANCEL_MAX, sizeof(*cancelled));
    int n = 0;
@@ -721,13 +755,13 @@ void webui_email_exec_stop(void) {
       if (!s->in_use)
          continue;
       for (int k = 0; k < EMAIL_EXEC_SLOT_COUNT; k++) {
-         exec_join_t *old[2] = { s->running[k], s->waiting[k] };
-         s->running[k] = s->waiting[k] = NULL;
-         for (int m = 0; m < 2; m++) {
-            if (!old[m])
-               continue;
+         exec_join_t *old[EMAIL_EXEC_SLOT_JOINS_MAX];
+         const int n_old = slot_take_all_locked(s, (email_exec_slot_t)k, old);
+         for (int m = 0; m < n_old; m++) {
             const exec_notice_t note = notice_of(old[m]);
-            const bool answer = !join_cancel_locked(old[m]);
+            /* A move whose work began: what it did reaches the tabs as email_changed. */
+            const bool started_move = k == EMAIL_EXEC_SLOT_MOVE && old[m]->ran;
+            const bool answer = !join_cancel_locked(old[m]) && !started_move;
             if (notices && cancelled) {
                notices[n] = note;
                notices[n].answer = answer;
