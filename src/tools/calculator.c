@@ -37,8 +37,8 @@
 #include <time.h>
 
 #include "logging.h"
+#include "tinyexpr.h"
 #include "tools/calculator_bignum.h"
-#include "tools/tinyexpr.h"
 
 #define RESULT_BUFFER_SIZE 256
 

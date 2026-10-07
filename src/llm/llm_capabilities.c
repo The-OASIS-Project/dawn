@@ -33,7 +33,7 @@
 #include "llm/llm_model_family.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "utils/string_utils.h"
 
 /* A models.toml row: "prefix" = { modes = [...], efforts = [...] }. */

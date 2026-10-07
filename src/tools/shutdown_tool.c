@@ -32,7 +32,7 @@
 #include "utils/string_utils.h"
 
 /* TOML parsing */
-#include "tools/toml.h"
+#include "toml.h"
 
 /* =============================================================================
  * Tool Configuration

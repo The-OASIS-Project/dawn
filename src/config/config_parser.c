@@ -34,7 +34,7 @@
 
 #include "dawn_error.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "utils/string_utils.h"
 
 /* =============================================================================

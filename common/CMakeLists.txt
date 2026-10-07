@@ -180,6 +180,7 @@ if(DAWN_COMMON_WITH_ASR_VOSK)
         add_library(dawn_common_asr_vosk STATIC src/asr/asr_vosk.c)
         target_include_directories(dawn_common_asr_vosk PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/vosk
             ${JSONC_INCLUDE_DIRS}
         )
         target_link_libraries(dawn_common_asr_vosk PUBLIC
@@ -254,18 +255,18 @@ if(DAWN_COMMON_WITH_TTS)
         pkg_check_modules(SPDLOG spdlog)
     endif()
 
-    # Check if piper source exists in parent project
-    set(PIPER_HEADER_DIR "")
-    set(PIPER_SOURCE_FILE "")
-    if(EXISTS "${CMAKE_SOURCE_DIR}/include/tts/piper.hpp")
-        set(PIPER_HEADER_DIR "${CMAKE_SOURCE_DIR}/include")
-        set(PIPER_SOURCE_FILE "${CMAKE_SOURCE_DIR}/src/tts/piper.cpp")
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../include/tts/piper.hpp")
-        set(PIPER_HEADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
-        set(PIPER_SOURCE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../src/tts/piper.cpp")
+    # Piper is vendored in the repository (third_party/piper, with the nlohmann/json and
+    # utf8-cpp headers it includes), so it is always there; a missing file is a broken
+    # checkout, not a missing optional dependency, and must not quietly drop TTS.
+    set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party")
+    set(PIPER_SOURCE_FILE "${THIRD_PARTY_DIR}/piper/piper.cpp")
+    set(PIPER_HEADER_DIRS
+        "${THIRD_PARTY_DIR}/piper" "${THIRD_PARTY_DIR}/nlohmann" "${THIRD_PARTY_DIR}/utfcpp")
+    if(NOT EXISTS "${PIPER_SOURCE_FILE}")
+        message(FATAL_ERROR "Vendored Piper source missing: ${PIPER_SOURCE_FILE}")
     endif()
 
-    if(ONNXRUNTIME_LIBRARY AND PIPER_PHONEMIZE_LIBRARY AND PIPER_HEADER_DIR AND EXISTS "${PIPER_SOURCE_FILE}")
+    if(ONNXRUNTIME_LIBRARY AND PIPER_PHONEMIZE_LIBRARY)
         message(STATUS "Found ONNX Runtime for TTS: ${ONNXRUNTIME_LIBRARY}")
         message(STATUS "Found piper-phonemize: ${PIPER_PHONEMIZE_LIBRARY}")
         message(STATUS "Found Piper source: ${PIPER_SOURCE_FILE}")
@@ -275,7 +276,7 @@ if(DAWN_COMMON_WITH_TTS)
             # Create piper library (same pattern as main build)
             add_library(piper STATIC ${PIPER_SOURCE_FILE})
             target_include_directories(piper PUBLIC
-                ${PIPER_HEADER_DIR}
+                ${PIPER_HEADER_DIRS}
                 ${ONNXRUNTIME_INCLUDE_DIR}
                 ${PIPER_PHONEMIZE_INCLUDE_DIR}
                 ${SPDLOG_INCLUDE_DIRS}
@@ -293,7 +294,7 @@ if(DAWN_COMMON_WITH_TTS)
         )
         target_include_directories(dawn_common_tts PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${PIPER_HEADER_DIR}
+            ${PIPER_HEADER_DIRS}
             ${ONNXRUNTIME_INCLUDE_DIR}
             ${PIPER_PHONEMIZE_INCLUDE_DIR}
             ${SPDLOG_INCLUDE_DIRS}
@@ -314,12 +315,6 @@ if(DAWN_COMMON_WITH_TTS)
         endif()
         if(NOT PIPER_PHONEMIZE_LIBRARY)
             message(WARNING "piper-phonemize not found - TTS support disabled")
-        endif()
-        if(NOT PIPER_HEADER_DIR)
-            message(WARNING "Piper headers not found - TTS support disabled")
-        endif()
-        if(NOT EXISTS "${PIPER_SOURCE_FILE}")
-            message(WARNING "Piper source (piper.cpp) not found - TTS support disabled")
         endif()
         set(DAWN_COMMON_WITH_TTS OFF)
     endif()

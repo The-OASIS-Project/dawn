@@ -45,10 +45,10 @@
 #include "llm/llm_tools.h" /* LLM_TOOLS_ARGS_LEN — the upstream tool-arg cap DOCMGMT_SAVE_TEXT_MAX mirrors */
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
+#include "toml.h"
 #include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
 #include "tools/document_manage.h"
-#include "tools/toml.h"
 #include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"

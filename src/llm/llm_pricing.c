@@ -28,7 +28,7 @@
 
 #include "llm/llm_model_family.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 
 /* Provider defaults, for a model models.toml doesn't list (list prices,
  * September 2026): Anthropic reads 0.1x and writes 1.25x (5 min) / 2x (1 h);

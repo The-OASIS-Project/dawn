@@ -78,7 +78,7 @@ first-match-in-array C tables had.
 
 `llm_context_init()` calls a new `load_model_registry()`:
 1. Locate `models.toml` via the config search path (reuse `config_file_readable`).
-2. Parse with tomlc99 (`tools/toml.h`, already a dependency).
+2. Parse with tomlc99 (`toml.h`, already a dependency).
 3. For each of `[openai]`/`[anthropic]`/`[gemini]`, iterate keys
    (`toml_table_nkval` + `toml_key_in` + `toml_int_in`) into a heap array of
    `{ char prefix[N]; int context; }`, then sort by `strlen(prefix)` desc.

@@ -39,7 +39,7 @@
 #include "logging_common.h"
 
 /* Include Piper headers */
-#include "tts/piper.hpp"
+#include "piper.hpp"
 
 /**
  * @brief Internal TTS context structure

@@ -1,3 +1,25 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Text-to-speech for the daemon: drives Piper (third_party/piper) to turn text
+ * into audio for the local speaker and network clients.
+ */
+
 #include "tts/text_to_speech.h"
 
 #include <stdint.h>
@@ -62,8 +84,8 @@ typedef struct __attribute__((packed)) {
    char data_header[4];
    uint32_t data_bytes;
 } WAVHeader;
+#include "piper.hpp"
 #include "text_to_command_nuevo.h"
-#include "tts/piper.hpp"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
 
