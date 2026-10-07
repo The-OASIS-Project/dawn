@@ -234,6 +234,9 @@ int email_service_test_connection(int user_id,
                                   email_err_t *err);
 int email_service_list_accounts(int user_id, email_account_t *out, int max);
 
+/** Whether @p acct's operations take its lease (IMAP: one connection per account). */
+bool email_service_account_uses_lease(const email_account_t *acct);
+
 /**
  * @brief The user's account @p account_id
  * @param enabled_only Refuse a disabled account (operations do; account settings don't)

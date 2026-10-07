@@ -338,6 +338,10 @@ void email_svc_lease_end(email_svc_lease_t *lease) {
  * Gmail API accounts: auth_type == "oauth" AND imap_server contains "gmail.com".
  * ============================================================================= */
 
+bool email_service_account_uses_lease(const email_account_t *acct) {
+   return acct && !email_svc_is_gmail_api(acct);
+}
+
 bool email_svc_is_gmail_api(const email_account_t *acct) {
    return strcmp(acct->auth_type, "oauth") == 0 &&
           strcasestr(acct->imap_server, "gmail.com") != NULL;

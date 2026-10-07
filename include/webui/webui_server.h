@@ -514,6 +514,12 @@ void webui_send_reasoning_summary(struct session *session, int reasoning_tokens)
 void webui_send_session_json(struct session *session, const char *json_str);
 
 /**
+ * @brief Like webui_send_session_json, but takes @p json_str (heap) instead of
+ *        copying it: the send queue frees it, or it's freed here if not sent
+ */
+void webui_send_session_json_take(struct session *session, char *json_str);
+
+/**
  * @brief Send conversation reset notification to WebSocket client
  *
  * Notifies the frontend that the conversation context was reset (e.g., via

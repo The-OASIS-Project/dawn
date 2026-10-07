@@ -354,8 +354,7 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_parse.c
         src/tools/gmail_client.c
         src/tools/gmail_read.c
-        src/tools/gmail_parts.c
-        src/webui/webui_email.c)
+        src/tools/gmail_parts.c)
     # oauth_client.c may already be included by calendar tool
     if(NOT DAWN_ENABLE_CALENDAR_TOOL)
         list(APPEND TOOL_SOURCES src/tools/oauth_client.c)
@@ -392,6 +391,15 @@ endif()
 # it when WebUI is on — otherwise the local / ci presets fail to link.
 if((DAWN_ENABLE_CALENDAR_TOOL OR DAWN_ENABLE_EMAIL_TOOL) AND ENABLE_WEBUI)
     list(APPEND TOOL_SOURCES src/webui/webui_oauth.c)
+endif()
+
+# The email account panel and its executor are WebUI surfaces too.
+if(DAWN_ENABLE_EMAIL_TOOL AND ENABLE_WEBUI)
+    list(APPEND TOOL_SOURCES
+        src/webui/webui_email.c
+        src/webui/webui_email_exec.c
+        src/webui/webui_email_exec_policy.c
+        src/webui/webui_email_exec_send.c)
 endif()
 
 # SFX Tool (sound effect playback)

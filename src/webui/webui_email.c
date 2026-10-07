@@ -24,6 +24,8 @@
 #include "webui/webui_email.h"
 
 #include <json-c/json.h>
+#include <sodium.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "config/dawn_config.h"
@@ -31,6 +33,7 @@
 #include "tools/email_db.h"
 #include "tools/email_service.h"
 #include "tools/oauth_client.h"
+#include "webui/webui_email_exec.h"
 #include "webui/webui_internal.h"
 
 /* =============================================================================
@@ -398,65 +401,122 @@ void handle_email_remove_account(ws_connection_t *conn, json_object *payload) {
  * Test Connection
  * ============================================================================= */
 
+/* A test talks to the servers, so it runs on the email executor, off the lws
+ * thread; an IMAP test waits its turn for the account's lease. */
+typedef struct {
+   bool imap_ok;
+   bool smtp_ok;
+   email_err_t err;
+} test_ctx_t;
+
+static void test_op(const email_exec_task_ctx_t *task) {
+   test_ctx_t *t = (test_ctx_t *)task->ctx;
+   /* Without the lease (its table is full), the IMAP half reports busy and the
+    * SMTP half is still tested. */
+   email_service_test_connection(task->user_id, task->account_id, task->target, &t->imap_ok,
+                                 &t->smtp_ok, &t->err);
+}
+
+static json_object *test_finish(void *ctx, const int64_t *account_ids, int n) {
+   (void)account_ids;
+   (void)n;
+   const test_ctx_t *t = (const test_ctx_t *)ctx;
+   json_object *payload = json_object_new_object();
+   if (!payload)
+      return NULL;
+   const bool imap_busy = t->err == EMAIL_ERR_BUSY;
+   json_object_object_add(payload, "imap_ok", json_object_new_boolean(t->imap_ok));
+   json_object_object_add(payload, "smtp_ok", json_object_new_boolean(t->smtp_ok));
+   if (imap_busy) /* not tested, not failed */
+      json_object_object_add(payload, "imap_busy", json_object_new_boolean(1));
+   if (t->imap_ok && t->smtp_ok) {
+      json_object_object_add(payload, "success", json_object_new_boolean(1));
+      return payload;
+   }
+   json_object_object_add(payload, "success", json_object_new_boolean(0));
+   char err[256];
+   if (imap_busy)
+      snprintf(err, sizeof(err),
+               "IMAP not tested: the account is busy, try again in a moment "
+               "(SMTP %s)",
+               t->smtp_ok ? "OK" : "failed");
+   else if (!t->imap_ok && !t->smtp_ok)
+      snprintf(err, sizeof(err), "Both IMAP and SMTP connection failed");
+   else if (!t->imap_ok)
+      snprintf(err, sizeof(err), "IMAP connection failed (SMTP OK)");
+   else
+      snprintf(err, sizeof(err), "SMTP connection failed (IMAP OK)");
+   json_object_object_add(payload, "error", json_object_new_string(err));
+   if (t->err != EMAIL_ERR_NONE)
+      json_object_object_add(payload, "error_code",
+                             json_object_new_string(email_error_name(t->err)));
+   return payload;
+}
+
+static void test_free(void *ctx) {
+   free(ctx);
+}
+
+static void send_test_error(ws_connection_t *conn, const char *error, const char *req) {
+   json_object *response = json_object_new_object();
+   json_object *payload = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("email_test_connection_response"));
+   json_object_object_add(payload, "success", json_object_new_boolean(0));
+   json_object_object_add(payload, "error", json_object_new_string(error));
+   if (req)
+      json_object_object_add(payload, "req", json_object_new_string(req));
+   json_object_object_add(response, "payload", payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
 void handle_email_test_connection(ws_connection_t *conn, json_object *payload) {
    if (!conn_require_auth(conn))
       return;
 
-   json_object *response = json_object_new_object();
-   json_object_object_add(response, "type",
-                          json_object_new_string("email_test_connection_response"));
-
-   json_object *resp_payload = json_object_new_object();
+   char req[EMAIL_EXEC_REQ_MAX + 1];
+   const bool has_req = email_exec_payload_req(payload, req, sizeof(req));
 
    json_object *id_obj;
-   if (!json_object_object_get_ex(payload, "id", &id_obj)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error", json_object_new_string("Missing account id"));
-   } else {
-      int64_t account_id = json_object_get_int64(id_obj);
+   if (!payload || !json_object_object_get_ex(payload, "id", &id_obj)) {
+      send_test_error(conn, "Missing account id", has_req ? req : NULL);
+      return;
+   }
+   const int64_t account_id = json_object_get_int64(id_obj);
 
-      email_account_t acct;
-      if (!verify_account_owner(conn, account_id, &acct)) {
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string("Account not found or access denied"));
-      } else {
-         bool imap_ok = false, smtp_ok = false;
-         email_err_t test_err = EMAIL_ERR_NONE;
-         email_service_test_connection(conn->auth_user_id, account_id, NULL, &imap_ok, &smtp_ok,
-                                       &test_err);
+   email_account_t acct;
+   if (!verify_account_owner(conn, account_id, &acct)) {
+      send_test_error(conn, "Account not found or access denied", has_req ? req : NULL);
+      return;
+   }
+   const bool is_imap = email_service_account_uses_lease(&acct);
+   sodium_memzero(&acct, sizeof(acct));
 
-         const bool imap_busy = test_err == EMAIL_ERR_BUSY;
-         json_object_object_add(resp_payload, "imap_ok", json_object_new_boolean(imap_ok));
-         json_object_object_add(resp_payload, "smtp_ok", json_object_new_boolean(smtp_ok));
-         if (imap_busy) /* not tested, not failed */
-            json_object_object_add(resp_payload, "imap_busy", json_object_new_boolean(1));
-
-         if (imap_ok && smtp_ok) {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-         } else {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-            char err[256];
-            if (imap_busy)
-               snprintf(err, sizeof(err), "IMAP busy, try again in a moment (SMTP %s)",
-                        smtp_ok ? "OK" : "failed");
-            else if (!imap_ok && !smtp_ok)
-               snprintf(err, sizeof(err), "Both IMAP and SMTP connection failed");
-            else if (!imap_ok)
-               snprintf(err, sizeof(err), "IMAP connection failed (SMTP OK)");
-            else
-               snprintf(err, sizeof(err), "SMTP connection failed (IMAP OK)");
-            json_object_object_add(resp_payload, "error", json_object_new_string(err));
-            if (test_err != EMAIL_ERR_NONE)
-               json_object_object_add(resp_payload, "error_code",
-                                      json_object_new_string(email_error_name(test_err)));
-         }
-      }
+   session_t *session = conn_get_session(conn);
+   test_ctx_t *ctx = calloc(1, sizeof(*ctx));
+   if (!session || !ctx) {
+      free(ctx);
+      send_test_error(conn, "Couldn't start the test", has_req ? req : NULL);
+      return;
    }
 
-   json_object_object_add(response, "payload", resp_payload);
-   send_json_response(conn, response);
-   json_object_put(response);
+   const email_exec_request_t r = {
+      .session_id = session->session_id,
+      .user_id = conn->auth_user_id,
+      .slot = EMAIL_EXEC_SLOT_ADMIN,
+      .verb = "email_test_connection",
+      .req = has_req ? req : NULL,
+      .task_count = 1,
+      .account_ids = &account_id,
+      .is_imap = &is_imap,
+      .op = test_op,
+      .finish = test_finish,
+      .free_ctx = test_free,
+      .ctx = ctx,
+   };
+   if (webui_email_exec_submit(&r) == EMAIL_EXEC_FAILURE)
+      send_test_error(conn, "Couldn't start the test", has_req ? req : NULL);
 }
 
 /* =============================================================================

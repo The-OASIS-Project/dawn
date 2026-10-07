@@ -507,6 +507,23 @@ dawn_add_unit_test(test_email_account_lease
    DEFINES NDEBUG
    LABEL   ci)
 
+# The WebUI email executor: admission per slot, and the executor under load
+# with the real lease (stub account work and sender).
+dawn_add_unit_test(test_webui_email_exec_policy
+   SOURCES test_webui_email_exec_policy.c
+           ${SRC_ROOT}/src/webui/webui_email_exec_policy.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_webui_email_exec
+   SOURCES test_webui_email_exec.c
+           ${SRC_ROOT}/src/webui/webui_email_exec.c
+           ${SRC_ROOT}/src/webui/webui_email_exec_policy.c
+           ${SRC_ROOT}/src/tools/email_account_lease.c
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${CURL_LIBRARIES}
+   LABEL   ci)
+
 # Email failure codes on the wire, curl results as codes, the per-thread cancel.
 dawn_add_unit_test(test_email_transfer
    SOURCES test_email_transfer.c

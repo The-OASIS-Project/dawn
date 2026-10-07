@@ -124,6 +124,9 @@
 #include "webui/webui_ota.h" /* webui_ota_push — registered as the rollout delivery fn */
 #include "webui/webui_server.h"
 #endif
+#if defined(DAWN_ENABLE_EMAIL_TOOL) && defined(ENABLE_WEBUI)
+#include "webui/webui_email_exec.h"
+#endif
 #include "auth/auth_db.h"
 #include "memory/memory_db_admin.h"
 #include "memory/memory_db_provenance.h"
@@ -4182,6 +4185,12 @@ server_shutdown:
       }
    }
 
+#if defined(DAWN_ENABLE_EMAIL_TOOL) && defined(ENABLE_WEBUI)
+   /* The WebUI's email work uses the auth DB and the email service, both torn
+    * down below; stop it first (new requests are refused from here on). */
+   OLOG_INFO("Shutdown: webui_email_exec_stop");
+   webui_email_exec_stop();
+#endif
    /* Background jobs: cancel running jobs before auth/DB teardown (their workers
     * use sessions + conv_db).  Unregisters the resolver + requests cancellation;
     * detached workers observe it and tear down their own sessions. */

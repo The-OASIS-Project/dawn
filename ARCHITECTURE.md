@@ -197,6 +197,8 @@ Layer 4 (Application) — deps: everything below
 │                               no-ops, and the WebUI-only pieces are left out (messaging channels, the job and
 │                               deep_research tools, the OAuth and code-project handlers, Home Assistant's
 │                               realtime connection)
+│   └── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
+│                               taken by ticket so no worker waits on an account, replies by session id
 └── src/core/{job_worker,research_worker}.c   Detached background-job sequencers*
 ```
 
@@ -330,6 +332,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │
+│  Email exec      — 4 workers, started on the first     │
+│                    WebUI email request: the panel's    │
+│                    email work, off the lws thread      │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -475,6 +480,18 @@ Per-module locks (scoped to a single subsystem):
                                                                      mutexes or s_conn_registry_mutex; the release hook runs with no lease mutex held.
                                                                      A thread re-taking its own lease is caught; a ticket holder has no thread,
                                                                      so code running under a ticket's lease checks email_lease_is_held
+  webui_email_exec::s_mutex (src/webui/webui_email_exec.c) — the WebUI email executor's run queue, sessions' slots and which
+                                                                     user each worker serves.  Taken BEFORE the lease mutex (a worker asks for a
+                                                                     lease, a cancel withdraws a ticket) and before a join's deliver_mutex; never
+                                                                     held while releasing a lease (the release may call the hook, which takes it)
+                                                                     or while running account work.  A request's free_ctx takes no locks (it may
+                                                                     run under s_mutex)
+  webui_email_exec join->deliver_mutex (src/webui/webui_email_exec.c) — one per request: its cancel and its result's send are
+                                                                     ordered by it (a cancelled request's result is never sent).  Order: s_mutex →
+                                                                     deliver_mutex → the send queue's lock.  The reply's session is looked up (session
+                                                                     registry, then its metrics_mutex for the owner check) BEFORE the deliver_mutex is
+                                                                     taken.  A deliberate module-before-session exception to rule 1: the send only
+                                                                     queues, so nothing waits on a session while it's held
   ...and similar per-tool mutexes in src/tools/*.c
 ```
 
