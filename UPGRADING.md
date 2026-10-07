@@ -12,6 +12,28 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-07 — Old conversation copies in `logs/` are safe to delete
+
+**What changed.** Versions from December 2025 until 2026-09-30 saved a full copy
+of a conversation to DAWN's `logs/` directory each time it was compacted (a long
+conversation summarized to fit the model), in files named
+`chat_history_session<N>_precompact_<date>_<time>.json`. Current versions don't
+write them, but nothing removed the ones already there. They hold whole
+conversations, and forgetting a memory or deleting a conversation doesn't reach
+them.
+
+**What you need to do.** Delete them unless you want to keep them. They're in the
+`logs/` directory under the directory DAWN runs from (`/var/lib/dawn/logs/` for
+the systemd service):
+
+```bash
+rm /var/lib/dawn/logs/chat_history_*_precompact_*.json
+```
+
+DAWN doesn't read them; your conversations are in the database.
+
+---
+
 ## 2026-10-06 — Device data relayed over MQTT is read, not acted on
 
 **What changed.** When a device answers over MQTT and DAWN speaks its data to

@@ -224,9 +224,8 @@ static char *build_request_body(const char *api_key,
 }
 
 /**
- * @brief Parse Tavily response and populate response->results[]. Bounds-caps,
- *        runs memory_filter_check, and skips entries that don't have both a
- *        title and URL.
+ * @brief Parse Tavily response and populate response->results[]. Bounds-caps
+ *        and skips entries that don't have both a title and URL.
  */
 static void parse_response(const char *json_text, int max_results, search_response_t *response) {
    struct json_object *root = json_tokener_parse(json_text);
