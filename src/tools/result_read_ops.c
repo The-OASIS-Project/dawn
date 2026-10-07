@@ -46,10 +46,10 @@ static char *failure(const char *fmt, ...) {
    va_start(ap, fmt);
    vsnprintf(text, sizeof(text), fmt, ap);
    va_end(ap);
-   char *out = malloc(strlen(TOOL_RESULT_ERROR_MARK) + strlen(text) + 1);
+   const size_t size = strlen(TOOL_RESULT_ERROR_MARK) + strlen(text) + 1;
+   char *out = malloc(size);
    if (out) {
-      strcpy(out, TOOL_RESULT_ERROR_MARK);
-      strcat(out, text);
+      snprintf(out, size, "%s%s", TOOL_RESULT_ERROR_MARK, text);
    }
    return out;
 }
@@ -859,10 +859,11 @@ char *result_read_lines(const char *text, size_t len, long from, long to, size_t
    if (!view) {
       return NULL;
    }
-   char *out = malloc((size_t)h + strlen(view) + 1);
+   const size_t view_len = strlen(view);
+   char *out = malloc((size_t)h + view_len + 1);
    if (out) {
       memcpy(out, header, (size_t)h);
-      strcpy(out + h, view);
+      memcpy(out + h, view, view_len + 1);
    }
    free(view);
    return out;

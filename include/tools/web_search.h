@@ -133,11 +133,12 @@ void web_search_free_response(search_response_t *response);
  * and must call json_object_put() when done. Image results have fields:
  * img_src, thumbnail_src, title, source, resolution.
  *
+ * SearXNG returns one page of results; the caller takes as many as it needs.
+ *
  * @param query Search query string
- * @param max_results Maximum results to request
  * @return Parsed JSON root (caller must json_object_put), or NULL on error
  */
-struct json_object *web_search_query_images_raw(const char *query, int max_results);
+struct json_object *web_search_query_images_raw(const char *query);
 
 /**
  * @brief Cleanup web search module

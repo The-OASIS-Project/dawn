@@ -516,13 +516,15 @@ static void extraction_slot_release_locked(int user_id) {
  * Helper: Build existing profile string
  * ============================================================================= */
 
+#define EXISTING_PROFILE_BUF 4096
+
 static char *build_existing_profile(int user_id) {
-   char *profile = malloc(4096);
+   char *profile = malloc(EXISTING_PROFILE_BUF);
    if (!profile)
       return strdup("(none)");
 
    size_t off = 0;
-   size_t rem = 4096;
+   size_t rem = EXISTING_PROFILE_BUF;
 
    /* Load existing preferences */
    memory_preference_t prefs[10];
@@ -590,7 +592,7 @@ static char *build_existing_profile(int user_id) {
    }
 
    if (off == 0) {
-      strcpy(profile, "(none)");
+      snprintf(profile, EXISTING_PROFILE_BUF, "(none)");
    }
 
    return profile;

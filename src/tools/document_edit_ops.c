@@ -47,7 +47,7 @@ int docmgmt_find_replace_once(const char *src, const char *find, const char *rep
    /* the strcpy that follows copies the tail with its NUL */
    // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(n + prefix, replace, rep_len);
-   strcpy(n + prefix + rep_len, first + find_len);
+   memcpy(n + prefix + rep_len, first + find_len, strlen(first + find_len) + 1);
    *out = n;
    return 1;
 }

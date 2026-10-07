@@ -902,7 +902,8 @@ char *getTextResponse(const char *input) {
          return NULL;
       }
 
-      return_text = malloc((strlen(input_text) + 1) * sizeof(char));
+      const size_t input_len = strlen(input_text);
+      return_text = malloc(input_len + 1);
       if (return_text == NULL) {
          OLOG_ERROR("malloc() failed in getTextResponse().\n");
          json_object_put(parsed_json);
@@ -910,7 +911,7 @@ char *getTextResponse(const char *input) {
       }
 
       // Directly copy the input text into the return buffer
-      strcpy(return_text, input_text);
+      memcpy(return_text, input_text, input_len + 1);
 
       // Debugging: Print the extracted text
       OLOG_INFO("Input Text: %s\n", return_text);

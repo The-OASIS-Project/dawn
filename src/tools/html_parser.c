@@ -896,6 +896,8 @@ static int decode_entity(const char *src, char *out) {
             return 5;
          }
          break;
+      default:
+         break;
    }
 
    // Unknown entity - just return the ampersand
@@ -1513,7 +1515,7 @@ static int html_extract_internal(const char *html,
             // Accumulate link text
             size_t dlen = strlen(decoded);
             if (state.link_text_pos + dlen < sizeof(state.link_text) - 1) {
-               strcpy(state.link_text + state.link_text_pos, decoded);
+               memcpy(state.link_text + state.link_text_pos, decoded, dlen + 1);
                state.link_text_pos += dlen;
             }
          } else {

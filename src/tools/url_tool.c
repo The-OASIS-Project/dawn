@@ -52,6 +52,9 @@
  * cap on what the LLM sees. _Static_assert below pins the count. */
 #define URL_CONTENT_WRAP_OVERHEAD 92
 #define URL_CONTENT_TRUNCATION_NOTICE_LEN 50
+#define URL_CONTENT_TRUNCATION_NOTICE "\n\n[Content truncated - original was too large]"
+_Static_assert(sizeof(URL_CONTENT_TRUNCATION_NOTICE) - 1 <= URL_CONTENT_TRUNCATION_NOTICE_LEN,
+               "the truncation notice must fit the room reserved for it");
 #define URL_CONTENT_BODY_BUDGET \
    (URL_CONTENT_MAX_CHARS - URL_CONTENT_WRAP_OVERHEAD - URL_CONTENT_TRUNCATION_NOTICE_LEN)
 
@@ -188,8 +191,8 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
       char *truncated = malloc(URL_CONTENT_BODY_BUDGET + URL_CONTENT_TRUNCATION_NOTICE_LEN + 1);
       if (truncated) {
          memcpy(truncated, content, URL_CONTENT_BODY_BUDGET);
-         truncated[URL_CONTENT_BODY_BUDGET] = '\0';
-         strcat(truncated, "\n\n[Content truncated - original was too large]");
+         memcpy(truncated + URL_CONTENT_BODY_BUDGET, URL_CONTENT_TRUNCATION_NOTICE,
+                sizeof(URL_CONTENT_TRUNCATION_NOTICE));
          free(content);
          content = truncated;
          content_size = strlen(content);

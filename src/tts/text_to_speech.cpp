@@ -129,6 +129,8 @@ typedef struct {
 } TTS_Handle;
 
 // Global TTS_Handle object
+/* Plain data, zero-initialized; its construction cannot throw */
+// NOLINTNEXTLINE(cert-err58-cpp)
 static TTS_Handle tts_handle;
 
 /**
@@ -367,6 +369,8 @@ static int openPlaybackDevice(const char *pcm_device) {
 /**
  * @brief Thread-safe queue for text-to-speech requests.
  */
+/* An empty std::queue's constructor does not allocate */
+// NOLINTNEXTLINE(cert-err58-cpp)
 std::queue<std::string> tts_queue;
 
 /**

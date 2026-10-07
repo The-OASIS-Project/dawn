@@ -371,6 +371,8 @@ void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn) {
     * connection's close handler must still see a non-NULL session to release its
     * per-connection ref (the ownership guard there leaves the session intact since
     * client_data will already point at new_conn). */
+   /* An application close code (4000-4999), which lws passes through */
+   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
    lws_close_reason(old->wsi, (enum lws_close_status)WEBUI_CLOSE_SUPERSEDED,
                     (unsigned char *)"superseded", 10);
    lws_set_timeout(old->wsi, PENDING_TIMEOUT_CLOSE_SEND, 3);
@@ -1634,7 +1636,8 @@ static bool session_remove_active_tool(session_t *session, const char *tool_name
       if (strcmp(session->active_tools[i], tool_name) == 0) {
          /* Shift remaining tools down */
          for (int j = i; j < session->active_tool_count - 1; j++) {
-            strcpy(session->active_tools[j], session->active_tools[j + 1]);
+            memcpy(session->active_tools[j], session->active_tools[j + 1],
+                   sizeof(session->active_tools[j]));
          }
          session->active_tool_count--;
          pthread_mutex_unlock(&session->tools_mutex);

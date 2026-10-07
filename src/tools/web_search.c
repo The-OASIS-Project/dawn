@@ -921,7 +921,7 @@ search_response_t *web_search_query(const char *query, int max_results) {
    return web_search_query_typed(query, max_results, SEARCH_TYPE_WEB, NULL);
 }
 
-struct json_object *web_search_query_images_raw(const char *query, int max_results) {
+struct json_object *web_search_query_images_raw(const char *query) {
    if (!module_initialized) {
       OLOG_ERROR("web_search: Module not initialized");
       return NULL;
@@ -930,10 +930,6 @@ struct json_object *web_search_query_images_raw(const char *query, int max_resul
    if (!query || query[0] == '\0') {
       OLOG_ERROR("web_search: Empty query");
       return NULL;
-   }
-
-   if (max_results <= 0) {
-      max_results = SEARXNG_MAX_RESULTS;
    }
 
    CURL *curl = curl_easy_init();

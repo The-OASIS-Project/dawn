@@ -297,7 +297,7 @@ void handle_get_config(ws_connection_t *conn) {
          const char *_str = json_object_get_string(_val); \
          if (_str) {                                      \
             safe_strscpy(dest, _str);                     \
-            dest[sizeof(dest) - 1] = '\0';                \
+            (dest)[sizeof(dest) - 1] = '\0';              \
          }                                                \
       }                                                   \
    } while (0)
@@ -306,7 +306,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = json_object_get_int(_val);              \
+         (dest) = json_object_get_int(_val);            \
       }                                                 \
    } while (0)
 
@@ -314,7 +314,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = json_object_get_boolean(_val);          \
+         (dest) = json_object_get_boolean(_val);        \
       }                                                 \
    } while (0)
 
@@ -322,7 +322,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = (float)json_object_get_double(_val);    \
+         (dest) = (float)json_object_get_double(_val);  \
       }                                                 \
    } while (0)
 
@@ -330,7 +330,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = (size_t)json_object_get_int64(_val);    \
+         (dest) = (size_t)json_object_get_int64(_val);  \
       }                                                 \
    } while (0)
 
