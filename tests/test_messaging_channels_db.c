@@ -29,6 +29,7 @@
 
 #include <pthread.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -108,7 +109,8 @@ static int fake_send(int user_id, const char *addr, const char *json, const char
    return 0;
 }
 
-static bool s_sms_fails = false; /* true: the phone service can't send */
+static atomic_bool s_sms_fails =
+    false; /* true: the phone service can't send; read by detached sends */
 
 static int fake_send_unlogged(int user_id,
                               const char *addr,
@@ -236,7 +238,7 @@ void setUp(void) {
    s_user_b = make_user("user_b");
    s_sms_running = true;
    s_sms_fails = false;
-   s_channels_changed = 0;
+   __atomic_store_n(&s_channels_changed, 0, __ATOMIC_SEQ_CST);
    pthread_mutex_lock(&s_sent_mutex);
    s_sent_count = 0;
    s_last_text[0] = '\0';
