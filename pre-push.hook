@@ -74,7 +74,7 @@ if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
 fi
 
 echo -e "${BLUE}Pre-push: running CI test suite…${NC}"
-if ! ctest --test-dir "$BUILD_DIR" --output-on-failure --no-tests=error -L ci > "$TEST_LOG" 2>&1; then
+if ! ctest --test-dir "$BUILD_DIR" -j"$(nproc)" --output-on-failure --no-tests=error -L ci > "$TEST_LOG" 2>&1; then
    echo -e "${RED}Test suite FAILED.  Failing cases:${NC}"
    # Highlight FAIL/Failed lines + tail the summary block.
    grep -E "FAIL:|\*\*\*Failed|tests failed" "$TEST_LOG" | head -20

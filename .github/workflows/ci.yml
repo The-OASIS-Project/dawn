@@ -87,7 +87,7 @@ jobs:
         run: make -C build-ci -j"$(nproc)" tests-ci
 
       - name: Run tests
-        run: ctest --test-dir build-ci --output-on-failure --no-tests=error -L ci
+        run: ctest --test-dir build-ci -j"$(nproc)" --output-on-failure --no-tests=error -L ci
 
   # -------------------------------------------------------------------------
   # Job 3: Docker Build (~10 min)
