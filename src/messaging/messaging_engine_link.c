@@ -73,9 +73,8 @@ static const char CROCKFORD_ALPHABET[32] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
  * fires inline from handle_link_command which runs on the mosquitto
  * thread — hence the need for an async dispatch.
  *
- * Spawned threads are detached (no join), small stack (64 KB), and
- * outlive the engine briefly on shutdown if a send is in flight.
- * Acceptable because shutdown doesn't free the driver descriptor. */
+ * Spawned threads are detached (no join) with a small stack (64 KB); they are
+ * counted, and engine shutdown waits for them (engine_wait_async_sends). */
 typedef struct {
    const messaging_driver_t *drv;
    int user_id;
@@ -276,6 +275,20 @@ messaging_link_state_t messaging_engine_link_status(const char *code) {
    return state;
 }
 
+/* Async sends still running. */
+static atomic_int s_async_inflight;
+
+int engine_wait_async_sends(int timeout_ms) {
+   const struct timespec step = { 0, 10 * 1000 * 1000 }; /* 10 ms */
+   for (int waited_ms = 0; atomic_load(&s_async_inflight) > 0; waited_ms += 10) {
+      if (waited_ms >= timeout_ms) {
+         return FAILURE;
+      }
+      nanosleep(&step, NULL);
+   }
+   return SUCCESS;
+}
+
 static void *async_send_thread(void *arg) {
    async_send_item_t *item = (async_send_item_t *)arg;
    if (!item) {
@@ -301,6 +314,7 @@ static void *async_send_thread(void *arg) {
    free(item->text);
    free(item->log_text);
    free(item);
+   atomic_fetch_sub(&s_async_inflight, 1);
    return NULL;
 }
 
@@ -389,9 +403,11 @@ static void send_async_impl(const messaging_driver_t *drv,
    pthread_attr_setstacksize(&attr, 64 * 1024);
 
    pthread_t tid;
+   atomic_fetch_add(&s_async_inflight, 1);
    int rc = pthread_create(&tid, &attr, async_send_thread, item);
    pthread_attr_destroy(&attr);
    if (rc != 0) {
+      atomic_fetch_sub(&s_async_inflight, 1);
       OLOG_WARNING("messaging: async-send pthread_create failed (rc=%d); dropping send", rc);
       if (item->log_text) {
          sodium_memzero(item->text, strlen(item->text));

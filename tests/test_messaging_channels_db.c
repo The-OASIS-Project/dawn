@@ -157,18 +157,13 @@ const messaging_driver_t *find_driver(const char *name) {
    return NULL;
 }
 
-/* Wait for the n-th send (sends run detached). */
+/* Wait for the sends to finish (they run detached), then for n of them. */
 static void wait_sends(int n) {
-   for (int i = 0; i < 200; i++) {
-      pthread_mutex_lock(&s_sent_mutex);
-      int c = s_sent_count;
-      pthread_mutex_unlock(&s_sent_mutex);
-      if (c >= n) {
-         return;
-      }
-      usleep(5000);
-   }
-   TEST_FAIL_MESSAGE("expected send never happened");
+   TEST_ASSERT_EQUAL_INT(SUCCESS, engine_wait_async_sends(MESSAGING_ASYNC_SEND_DRAIN_MS));
+   pthread_mutex_lock(&s_sent_mutex);
+   int c = s_sent_count;
+   pthread_mutex_unlock(&s_sent_mutex);
+   TEST_ASSERT_GREATER_OR_EQUAL_INT_MESSAGE(n, c, "expected send never happened");
 }
 
 /* --- helpers ------------------------------------------------------------- */
@@ -247,7 +242,8 @@ void setUp(void) {
 }
 
 void tearDown(void) {
-   usleep(20000); /* let detached sends finish before the next test */
+   /* A send from this test mustn't run into the next one's database. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, engine_wait_async_sends(MESSAGING_ASYNC_SEND_DRAIN_MS));
    auth_db_shutdown();
 }
 
@@ -481,12 +477,10 @@ static int64_t sends_of(int64_t id) {
    return n;
 }
 
-/* Wait until the channel's send count reads n (a failed send is undone on
- * the send's own thread). */
+/* The channel's send count once the sends have finished (a failed send is
+ * undone on the send's own thread). */
 static void wait_sends_of(int64_t id, int64_t n) {
-   for (int i = 0; i < 200 && sends_of(id) != n; i++) {
-      usleep(5000);
-   }
+   TEST_ASSERT_EQUAL_INT(SUCCESS, engine_wait_async_sends(MESSAGING_ASYNC_SEND_DRAIN_MS));
    TEST_ASSERT_EQUAL_INT64(n, sends_of(id));
 }
 

@@ -308,6 +308,13 @@ void messaging_engine_shutdown(void) {
       s_worker_started = false;
    }
 
+   /* Async sends (link confirmations, verification codes) run on their own
+    * threads; let them finish while their drivers are still up. */
+   if (engine_wait_async_sends(MESSAGING_ASYNC_SEND_DRAIN_MS) != SUCCESS) {
+      OLOG_WARNING("messaging: async sends still running after %d ms; shutting down anyway",
+                   MESSAGING_ASYNC_SEND_DRAIN_MS);
+   }
+
    /* Destroy any retained sessions.  Using session_destroy (vs the
     * old session_release-only path) triggers memory extraction for
     * the closing conversation via session_destroy's existing hook —
