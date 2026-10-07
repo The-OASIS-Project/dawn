@@ -255,16 +255,110 @@ bool email_imap_parse_uidvalidity(const char *line, size_t len, uint32_t *out);
 bool email_imap_parse_exists(const char *line, size_t len, uint32_t *out);
 
 /**
- * @brief Split an IMAP message id, "folder:uid" (a bare uid means INBOX).
+ * @brief Split an IMAP message id, "folder:uid" or "folder:uid.uidvalidity"
+ *        (a bare uid means INBOX).
  *
- * Splits at the last colon.  Refuses a folder too long for @p folder rather
- * than cutting it or falling back to INBOX: either would act on a message in
- * another mailbox.  The folder name itself is the caller's to validate.
+ * Splits at the last colon; the ".uidvalidity" pin, when present, is after
+ * it (a folder name may hold dots).  Refuses a folder too long for @p folder
+ * rather than cutting it or falling back to INBOX: either would act on a
+ * message in another mailbox.  The folder name itself is the caller's to
+ * validate.
  *
+ * @param uidvalidity The mailbox epoch the id was issued under, 0 when it
+ *                    carries none (may be NULL)
  * @return true and fills @p folder and @p uid when the id is one; false when
- *         the folder doesn't fit or the uid isn't a decimal 1..UINT32_MAX.
+ *         the folder doesn't fit, the uid isn't a decimal 1..UINT32_MAX, or a
+ *         pin is present but isn't one ("5.", "5.0", "5.x").
  */
-bool email_imap_id_parse(const char *message_id, char *folder, size_t folder_size, uint32_t *uid);
+bool email_imap_id_parse(const char *message_id,
+                         char *folder,
+                         size_t folder_size,
+                         uint32_t *uid,
+                         uint32_t *uidvalidity);
+
+/** A folder name's room in an IMAP URL path: every byte may become "%XX". */
+#define EMAIL_IMAP_FOLDER_URL_MAX (256 * 3 + 1)
+
+/**
+ * @brief @p folder percent-encoded for an IMAP URL path, as every IMAP call
+ *        addresses it (libcurl maps it to modified UTF-7 itself)
+ * @return false when it doesn't fit @p out: a cut name could address another
+ *         folder, so the caller must not use it (@p out is empty then)
+ */
+bool email_imap_url_encode_folder(const char *folder, char *out, size_t out_len);
+
+/**
+ * @brief An IMAP message id as DAWN issues it: "folder:uid.uidvalidity", or
+ *        "folder:uid" when the epoch is unknown (@p uidvalidity 0)
+ * @return false when it doesn't fit @p out (never a cut id)
+ */
+bool email_imap_id_format(const char *folder,
+                          uint32_t uid,
+                          uint32_t uidvalidity,
+                          char *out,
+                          size_t out_size);
+
+/* The longest uid set one COPYUID occurrence may carry, and how many
+ * occurrences one command's reply may hold (a MOVE may answer in pieces). */
+#define EMAIL_COPYUID_SET_MAX 640
+#define EMAIL_COPYUID_OCC_MAX 8
+
+/* The COPYUID answers of one UID MOVE or UID COPY (RFC 4315 / RFC 6851). */
+typedef struct {
+   int count;
+   bool overflow; /* more occurrences, or a longer set, than fit: don't trust any */
+   struct {
+      uint32_t uidvalidity; /* the destination's */
+      char src[EMAIL_COPYUID_SET_MAX];
+      char dst[EMAIL_COPYUID_SET_MAX];
+   } occ[EMAIL_COPYUID_OCC_MAX];
+} email_copyuid_t;
+
+/**
+ * @brief Recognize a COPYUID answer line: "* OK [COPYUID v src dst]..." or
+ *        "<tag> OK [COPYUID v src dst]...", and add it to @p cap
+ *
+ * Only the line's own shape is checked here; the caller applies it only to
+ * lines answering a UID MOVE or UID COPY it sent (libcurl also hands over the
+ * lines inside IMAP literals, which a sender controls).  A set too long for
+ * the capture, or one occurrence too many, marks @p cap overflowed.
+ *
+ * @return true when the line was a COPYUID answer (recorded or overflowed)
+ */
+bool email_imap_copyuid_line(const char *line, size_t len, email_copyuid_t *cap);
+
+/**
+ * @brief Whether a server line is untagged ("* ...") or tagged with @p tag (the
+ *        command's own): the only lines answering that command
+ */
+bool email_imap_reply_tag_ok(const char *line, size_t len, const char *tag);
+
+/**
+ * @brief Map the UIDs a MOVE or COPY sent to where they landed
+ *
+ * Walks each occurrence's source and destination sets side by side without
+ * expanding ranges ("a:b" either way round reads ascending; '*' and 0 are
+ * refused), at most 100 terms per set.  Every source UID must be one of
+ * @p sent, none twice, and the two sets of an occurrence must be the same
+ * size; all occurrences must name one destination epoch.  Anything else maps
+ * nothing.
+ *
+ * @param dest   Per @p sent index: its destination UID, 0 when it wasn't moved
+ * @param dest_v The destination's UIDVALIDITY
+ * @return EMAIL_COPYUID_MAPPED with @p dest filled, EMAIL_COPYUID_NONE when there
+ *         was no COPYUID at all, EMAIL_COPYUID_UNTRUSTED when what came back can't
+ *         be trusted (@p dest all 0)
+ */
+typedef enum {
+   EMAIL_COPYUID_NONE = 0,
+   EMAIL_COPYUID_MAPPED = 1,
+   EMAIL_COPYUID_UNTRUSTED = 2,
+} email_copyuid_rc_t;
+email_copyuid_rc_t email_imap_copyuid_map(const email_copyuid_t *cap,
+                                          const uint32_t *sent,
+                                          int n,
+                                          uint32_t *dest,
+                                          uint32_t *dest_v);
 
 #ifdef __cplusplus
 }

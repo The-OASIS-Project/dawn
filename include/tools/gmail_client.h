@@ -140,22 +140,6 @@ int gmail_test_connection(const char *token, char *email_out, size_t email_len);
  */
 int gmail_list_labels(const char *token, char *out, size_t out_len);
 
-/**
- * @brief Move a message to Trash.
- * @param token       Bearer access token
- * @param message_id  Gmail hex message ID
- * @return 0 on success, 1 on failure
- */
-int gmail_trash_message(const char *token, const char *message_id);
-
-/**
- * @brief Archive a message (remove from Inbox, keep in All Mail).
- * @param token       Bearer access token
- * @param message_id  Gmail hex message ID
- * @return 0 on success, 1 on failure
- */
-int gmail_archive_message(const char *token, const char *message_id);
-
 /** The most ids one gmail_set_unread call takes (one batchModify). */
 #define GMAIL_FLAGS_MAX_IDS 50
 

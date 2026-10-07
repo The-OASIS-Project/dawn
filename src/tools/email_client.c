@@ -290,16 +290,22 @@ static bool page_mark_stale(email_imap_page_t *page,
 /* Mailbox URL; a continuation page pins the UIDVALIDITY epoch its cursor came
  * from, so libcurl fails the SELECT (CURLE_REMOTE_FILE_NOT_FOUND) instead of
  * paging a rebuilt mailbox with stale UIDs. */
-static void build_mailbox_url(const email_conn_t *conn,
+/* @return false when it doesn't fit @p url_len: a cut URL could address
+ * another mailbox, so it is never used. */
+static bool build_mailbox_url(const email_conn_t *conn,
                               const char *encoded_folder,
                               const email_imap_page_t *page,
                               char *url,
                               size_t url_len) {
-   if (page && page->before_uid > 1 && page->uidvalidity > 0)
-      snprintf(url, url_len, "%s/%s;UIDVALIDITY=%u", conn->imap_url, encoded_folder,
-               page->uidvalidity);
-   else
-      snprintf(url, url_len, "%s/%s", conn->imap_url, encoded_folder);
+   const int w = (page && page->before_uid > 1 && page->uidvalidity > 0)
+                     ? snprintf(url, url_len, "%s/%s;UIDVALIDITY=%u", conn->imap_url,
+                                encoded_folder, page->uidvalidity)
+                     : snprintf(url, url_len, "%s/%s", conn->imap_url, encoded_folder);
+   if (w < 0 || (size_t)w >= url_len) {
+      url[0] = '\0';
+      return false;
+   }
+   return true;
 }
 
 /* =============================================================================
@@ -404,8 +410,10 @@ static int batch_fetch_headers(CURL *curl,
       BUF_PRINTF(uid_list, upos, urem, "%u", uids[i]);
    }
 
-   char url[1024];
-   snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
+   char url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   const int ulen = snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
+   if (ulen < 0 || (size_t)ulen >= sizeof(url))
+      return 1; /* never a cut URL: it would name another mailbox */
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    char fetch_cmd[1200];
@@ -490,24 +498,41 @@ static int batch_fetch_headers(CURL *curl,
    return 0;
 }
 
-/* =============================================================================
- * URL-encode IMAP Folder Name
- *
- * Percent-encode folder name for use in IMAP curl URLs.
- * curl handles mUTF-7 decoding internally for IMAP URLs.
- * ============================================================================= */
+int email_imap_fetch_summaries(CURL *curl,
+                               const email_conn_t *conn,
+                               const char *folder,
+                               const uint32_t *uids,
+                               int n,
+                               email_summary_t *out,
+                               int max_out,
+                               int *out_count) {
+   *out_count = 0;
+   char encoded[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded, sizeof(encoded)))
+      return 1;
+   return batch_fetch_headers(curl, conn, encoded, uids, n, out, max_out, out_count);
+}
 
-void email_imap_url_encode_folder(const char *folder, char *out, size_t out_len) {
-   size_t j = 0;
-   for (size_t i = 0; folder[i] && j < out_len - 4; i++) {
-      unsigned char c = (unsigned char)folder[i];
-      if (isalnum(c) || c == '/' || c == '.' || c == '_' || c == '-') {
-         out[j++] = c;
-      } else {
-         j += snprintf(out + j, out_len - j, "%%%02X", c);
-      }
+bool email_imap_mailbox_url(const email_conn_t *conn,
+                            const char *folder,
+                            uint32_t uidvalidity,
+                            char *out,
+                            size_t out_size) {
+   if (!conn || !folder || !folder[0] || !out || out_size == 0)
+      return false;
+   char encoded[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded, sizeof(encoded))) {
+      out[0] = '\0';
+      return false; /* never a cut name, which could address another folder */
    }
-   out[j] = '\0';
+   const int w = uidvalidity ? snprintf(out, out_size, "%s/%s;UIDVALIDITY=%u", conn->imap_url,
+                                        encoded, uidvalidity)
+                             : snprintf(out, out_size, "%s/%s", conn->imap_url, encoded);
+   if (w < 0 || (size_t)w >= out_size) {
+      out[0] = '\0';
+      return false;
+   }
+   return true;
 }
 
 /* =============================================================================
@@ -857,8 +882,12 @@ int email_fetch_recent(const email_conn_t *conn,
    if (!folder || !folder[0])
       folder = "INBOX";
 
-   char encoded_folder[256];
-   email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   char encoded_folder[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      return 1;
+   }
 
    CURL *curl = email_imap_handle_create(conn);
    if (!curl)
@@ -882,8 +911,14 @@ int email_fetch_recent(const email_conn_t *conn,
       }
    }
 
-   char url[1024];
-   build_mailbox_url(conn, encoded_folder, page, url, sizeof(url));
+   char url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   if (!build_mailbox_url(conn, encoded_folder, page, url, sizeof(url))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      email_instrument_op_done(conn->username, "recent", curl, &dctx);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    /* Step 1: the newest `count` matching UIDs, via windowed UID SEARCH.  UID
@@ -941,8 +976,12 @@ int email_search(const email_conn_t *conn,
    if (!folder || !folder[0])
       folder = "INBOX";
 
-   char encoded_folder[256];
-   email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   char encoded_folder[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      return 1;
+   }
 
    CURL *curl = email_imap_handle_create(conn);
    if (!curl)
@@ -985,8 +1024,14 @@ int email_search(const email_conn_t *conn,
       }
    }
 
-   char url[1024];
-   build_mailbox_url(conn, encoded_folder, page, url, sizeof(url));
+   char url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   if (!build_mailbox_url(conn, encoded_folder, page, url, sizeof(url))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      email_instrument_op_done(conn->username, "search", curl, &dctx);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    /* The newest max_out matches, newest first, plus the cursor */

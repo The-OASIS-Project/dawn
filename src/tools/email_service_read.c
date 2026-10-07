@@ -76,8 +76,9 @@ bool email_svc_parse_imap_id(const char *message_id,
                              char *folder,
                              size_t folder_size,
                              uint32_t *uid,
+                             uint32_t *uidvalidity,
                              bool fanout) {
-   if (!email_imap_id_parse(message_id, folder, folder_size, uid)) {
+   if (!email_imap_id_parse(message_id, folder, folder_size, uid, uidvalidity)) {
       /* During a no-account fan-out this is a Gmail id landing on an IMAP
        * account (backend mismatch): expected.  Otherwise a real error. */
       char shown[65];
@@ -98,6 +99,90 @@ bool email_svc_parse_imap_id(const char *message_id,
       return false;
    }
    return true;
+}
+
+/* The group for (@p folder, @p v), made when @p make and there's room; -1 if none. */
+static int group_find(email_imap_group_t *groups,
+                      int *ngroups,
+                      const char *folder,
+                      uint32_t v,
+                      bool make) {
+   for (int g = 0; g < *ngroups; g++) {
+      if (groups[g].uidvalidity == v && strcmp(groups[g].folder, folder) == 0)
+         return g;
+   }
+   if (!make || *ngroups == EMAIL_IMAP_GROUP_MAX_FOLDERS)
+      return -1;
+   const int g = (*ngroups)++;
+   /* Both are folder buffers of one size; bounded so the copy is plainly whole. */
+   const size_t len = strnlen(folder, sizeof(groups[g].folder) - 1);
+   memcpy(groups[g].folder, folder, len);
+   groups[g].folder[len] = '\0';
+   groups[g].uidvalidity = v;
+   groups[g].count = 0;
+   return g;
+}
+
+/* Adds @p uid to group @p g once; its position. */
+static int group_add(email_imap_group_t *grp, uint32_t uid) {
+   for (int k = 0; k < grp->count; k++) {
+      if (grp->uids[k] == uid)
+         return k;
+   }
+   grp->uids[grp->count] = uid;
+   return grp->count++;
+}
+
+int email_svc_group_imap_ids(const char *const *ids,
+                             int n,
+                             email_imap_group_t *groups,
+                             int *at_group,
+                             int *at_pos,
+                             email_err_t *errs) {
+   if (n > EMAIL_IMAP_GROUP_MAX_IDS)
+      n = EMAIL_IMAP_GROUP_MAX_IDS;
+   struct {
+      char folder[128];
+      uint32_t uid, v;
+      bool ok;
+   } parsed[EMAIL_IMAP_GROUP_MAX_IDS];
+   for (int i = 0; i < n; i++) {
+      at_group[i] = -1;
+      parsed[i].ok = ids[i] &&
+                     email_svc_parse_imap_id(ids[i], parsed[i].folder, sizeof(parsed[i].folder),
+                                             &parsed[i].uid, &parsed[i].v, false);
+      if (!parsed[i].ok)
+         errs[i] = EMAIL_ERR_NOT_FOUND;
+   }
+   int ngroups = 0;
+   /* Pinned ids first, so an unpinned one can tell how many epochs its folder has. */
+   for (int pass = 0; pass < 2; pass++) {
+      for (int i = 0; i < n; i++) {
+         if (!parsed[i].ok || (pass == 0) != (parsed[i].v != 0))
+            continue;
+         const char *folder = parsed[i].folder;
+         int g = -1;
+         if (parsed[i].v) {
+            g = group_find(groups, &ngroups, folder, parsed[i].v, true);
+         } else {
+            int same = 0, only = -1;
+            for (int k = 0; k < ngroups; k++) {
+               if (groups[k].uidvalidity && strcmp(groups[k].folder, folder) == 0) {
+                  same++;
+                  only = k;
+               }
+            }
+            g = same == 1 ? only : group_find(groups, &ngroups, folder, 0, true);
+         }
+         if (g < 0) {
+            errs[i] = EMAIL_ERR_FAILED; /* past the group cap */
+            continue;
+         }
+         at_group[i] = g;
+         at_pos[i] = group_add(&groups[g], parsed[i].uid);
+      }
+   }
+   return ngroups;
 }
 
 int email_svc_read_single(const email_account_t *acct,
@@ -123,8 +208,8 @@ int email_svc_read_single(const email_account_t *acct,
    }
 
    char folder[128];
-   uint32_t uid = 0;
-   if (!email_svc_parse_imap_id(message_id, folder, sizeof(folder), &uid, fanout)) {
+   uint32_t uid = 0, v = 0;
+   if (!email_svc_parse_imap_id(message_id, folder, sizeof(folder), &uid, &v, fanout)) {
       /* Not this backend's id shape: the message isn't in this account. */
       *err = fanout ? EMAIL_ERR_NOT_FOUND : EMAIL_ERR_FAILED;
       return fanout ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;
@@ -136,11 +221,17 @@ int email_svc_read_single(const email_account_t *acct,
       *err = email_svc_conn_err(crc);
       return EMAIL_RC_FAILURE;
    }
-   const int rc = email_read_message(&conn, folder, uid, &o, out, err);
+   const int rc = email_read_message(&conn, folder, uid, v, &o, out, err);
    sodium_memzero(&conn, sizeof(conn));
    if (rc != 0)
       return *err == EMAIL_ERR_NOT_FOUND ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;
-   snprintf(out->message_id, sizeof(out->message_id), "%s", message_id);
+   /* The id as DAWN issues it: pinned to the epoch this read saw. */
+   if (!email_imap_id_format(folder, uid, out->uidvalidity, out->message_id,
+                             sizeof(out->message_id))) {
+      email_message_free(out);
+      *err = EMAIL_ERR_FAILED;
+      return EMAIL_RC_FAILURE;
+   }
    return EMAIL_RC_OK;
 }
 
@@ -157,7 +248,7 @@ static int read_leased(const email_account_t *acct,
    if (fanout && !email_svc_is_gmail_api(acct)) {
       char folder[128];
       uint32_t uid = 0;
-      if (!email_svc_parse_imap_id(message_id, folder, sizeof(folder), &uid, true)) {
+      if (!email_svc_parse_imap_id(message_id, folder, sizeof(folder), &uid, NULL, true)) {
          *err = EMAIL_ERR_NOT_FOUND;
          return EMAIL_RC_NOT_FOUND;
       }

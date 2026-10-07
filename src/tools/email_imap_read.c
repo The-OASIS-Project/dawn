@@ -102,6 +102,7 @@ static int read_headers_only(CURL *curl,
 int email_read_message(const email_conn_t *conn,
                        const char *folder,
                        uint32_t uid,
+                       uint32_t uidvalidity,
                        const email_read_opts_t *opts,
                        email_message_t *out,
                        email_err_t *err) {
@@ -117,8 +118,13 @@ int email_read_message(const email_conn_t *conn,
    if (!folder || !folder[0])
       folder = "INBOX";
 
-   char encoded_folder[256];
-   email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   /* The mailbox, pinned to the epoch the id was issued under: a rebuilt
+    * mailbox fails the SELECT (not found) instead of reading another message. */
+   char folder_url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   if (!email_imap_mailbox_url(conn, folder, uidvalidity, folder_url, sizeof(folder_url))) {
+      *err = EMAIL_ERR_FAILED;
+      return 1;
+   }
    CURL *curl = email_imap_handle_create(conn);
    if (!curl) {
       *err = EMAIL_ERR_FAILED;
@@ -127,16 +133,17 @@ int email_read_message(const email_conn_t *conn,
    email_instrument_ctx_t dctx;
    email_instrument_attach(curl, &dctx);
    email_transfer_set_cancel(curl, opts->cancel);
-   char url[1024];
+   char url[sizeof(folder_url) + 48]; /* the folder URL, then ;UID= and ;PARTIAL= */
    int rc = 1;
 
    if (opts->headers_only) {
-      snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
-      rc = read_headers_only(curl, &dctx, conn, url, uid, out, err);
+      rc = read_headers_only(curl, &dctx, conn, folder_url, uid, out, err);
       email_instrument_op_done(conn->username, "read", curl, &dctx);
       curl_easy_cleanup(curl);
-      if (rc == 0)
+      if (rc == 0) {
          out->uid = uid;
+         out->uidvalidity = dctx.uidvalidity ? dctx.uidvalidity : uidvalidity;
+      }
       return rc;
    }
 
@@ -144,8 +151,6 @@ int email_read_message(const email_conn_t *conn,
     * libcurl's URL fetch, a plain BODY[] (BODY.PEEK isn't reachable through
     * it), so the server marks the message read; with EMAIL_MARK_KEEP an unread
     * message is marked unread again right after (see the restore below). */
-   char folder_url[1024];
-   snprintf(folder_url, sizeof(folder_url), "%s/%s", conn->imap_url, encoded_folder);
    int seen_before = EMAIL_IMAP_UID_ABSENT;
    if (opts->mark != EMAIL_MARK_AS_BACKEND) {
       const CURLcode sres = email_imap_seen_state(curl, &dctx, conn, folder_url, uid, true,
@@ -171,10 +176,9 @@ int email_read_message(const email_conn_t *conn,
    for (int attempt = 0; attempt < 2 && !got; attempt++) {
       const bool partial = attempt == 0;
       if (partial)
-         snprintf(url, sizeof(url), "%s/%s/;UID=%u;PARTIAL=0.%zu", conn->imap_url, encoded_folder,
-                  uid, cap);
+         snprintf(url, sizeof(url), "%s/;UID=%u;PARTIAL=0.%zu", folder_url, uid, cap);
       else
-         snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
+         snprintf(url, sizeof(url), "%s/;UID=%u", folder_url, uid);
       curl_easy_setopt(curl, CURLOPT_URL, url);
       memset(&sink, 0, sizeof(sink));
       dctx.last_reject[0] = '\0'; /* a refused command shows up here */
@@ -236,5 +240,6 @@ int email_read_message(const email_conn_t *conn,
    }
    *err = EMAIL_ERR_NONE;
    out->uid = uid;
+   out->uidvalidity = dctx.uidvalidity ? dctx.uidvalidity : uidvalidity;
    return 0;
 }

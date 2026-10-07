@@ -242,6 +242,14 @@ const char *email_wire_error_text(email_err_t err) {
          return "The request isn't valid";
       case EMAIL_ERR_UNAVAILABLE:
          return "Email is turned off";
+      case EMAIL_ERR_NOT_REMOVED:
+         return "Copied, but the original couldn't be removed; don't retry";
+      case EMAIL_ERR_UNDO_EXPIRED:
+         return "This can no longer be undone";
+      case EMAIL_ERR_IN_TRASH:
+         return "It's in Trash or Spam; restore it first";
+      case EMAIL_ERR_OUTCOME_UNKNOWN:
+         return "The server didn't confirm; check the folder";
       case EMAIL_ERR_FAILED:
          break;
    }

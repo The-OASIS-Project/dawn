@@ -23,6 +23,7 @@
  * decoding (with control-byte stripping), and CR/LF header sanitization.
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "tools/email_parse.h"
@@ -757,22 +758,202 @@ static void test_format_mailbox(void) {
 static void test_imap_id_parse(void) {
    char folder[16];
    uint32_t uid = 0;
-   TEST_ASSERT_TRUE(email_imap_id_parse("Archive:42", folder, sizeof(folder), &uid));
+   TEST_ASSERT_TRUE(email_imap_id_parse("Archive:42", folder, sizeof(folder), &uid, NULL));
    TEST_ASSERT_EQUAL_STRING("Archive", folder);
    TEST_ASSERT_EQUAL_UINT32(42, uid);
-   TEST_ASSERT_TRUE(email_imap_id_parse("7", folder, sizeof(folder), &uid));
+   TEST_ASSERT_TRUE(email_imap_id_parse("7", folder, sizeof(folder), &uid, NULL));
    TEST_ASSERT_EQUAL_STRING("INBOX", folder);
    TEST_ASSERT_EQUAL_UINT32(7, uid);
-   TEST_ASSERT_TRUE(email_imap_id_parse("a:b:9", folder, sizeof(folder), &uid));
+   TEST_ASSERT_TRUE(email_imap_id_parse("a:b:9", folder, sizeof(folder), &uid, NULL));
    TEST_ASSERT_EQUAL_STRING("a:b", folder);
 
-   TEST_ASSERT_FALSE(email_imap_id_parse("AVeryLongFolderName:5", folder, sizeof(folder), &uid));
-   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:", folder, sizeof(folder), &uid));
-   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:0", folder, sizeof(folder), &uid));
-   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:-3", folder, sizeof(folder), &uid));
-   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:4294967296", folder, sizeof(folder), &uid));
    TEST_ASSERT_FALSE(
-       email_imap_id_parse("18c2f0a9b1", folder, sizeof(folder), &uid)); /* Gmail id */
+       email_imap_id_parse("AVeryLongFolderName:5", folder, sizeof(folder), &uid, NULL));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:", folder, sizeof(folder), &uid, NULL));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:0", folder, sizeof(folder), &uid, NULL));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:-3", folder, sizeof(folder), &uid, NULL));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:4294967296", folder, sizeof(folder), &uid, NULL));
+   TEST_ASSERT_FALSE(
+       email_imap_id_parse("18c2f0a9b1", folder, sizeof(folder), &uid, NULL)); /* Gmail id */
+}
+
+static void test_imap_id_pin(void) {
+   char folder[16];
+   uint32_t uid = 0, v = 99;
+   TEST_ASSERT_TRUE(email_imap_id_parse("INBOX:12.34", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_EQUAL_STRING("INBOX", folder);
+   TEST_ASSERT_EQUAL_UINT32(12, uid);
+   TEST_ASSERT_EQUAL_UINT32(34, v);
+   TEST_ASSERT_TRUE(email_imap_id_parse("a.b:9.7", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_EQUAL_STRING("a.b", folder);
+   TEST_ASSERT_EQUAL_UINT32(9, uid);
+   TEST_ASSERT_EQUAL_UINT32(7, v);
+   TEST_ASSERT_TRUE(email_imap_id_parse("a.b:9", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_EQUAL_UINT32(0, v); /* no pin */
+   TEST_ASSERT_TRUE(email_imap_id_parse("INBOX:5.4294967295", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_EQUAL_UINT32(4294967295u, v);
+
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:12.", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:12.0", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:5.x", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:5.4294967296", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:5.12345678901", folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_FALSE(email_imap_id_parse("INBOX:.5", folder, sizeof(folder), &uid, &v));
+}
+
+static void test_imap_id_format(void) {
+   char out[16];
+   TEST_ASSERT_TRUE(email_imap_id_format("INBOX", 12, 34, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("INBOX:12.34", out);
+   TEST_ASSERT_TRUE(email_imap_id_format("INBOX", 12, 0, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("INBOX:12", out);
+   /* Never cut: an id that doesn't fit is no id. */
+   TEST_ASSERT_FALSE(email_imap_id_format("INBOX", 12, 4294967295u, out, 12));
+   TEST_ASSERT_EQUAL_STRING("", out);
+   char folder[16];
+   uint32_t uid = 0, v = 0;
+   TEST_ASSERT_TRUE(email_imap_id_format("a.b", 9, 7, out, sizeof(out)));
+   TEST_ASSERT_TRUE(email_imap_id_parse(out, folder, sizeof(folder), &uid, &v));
+   TEST_ASSERT_EQUAL_STRING("a.b", folder);
+   TEST_ASSERT_EQUAL_UINT32(9, uid);
+   TEST_ASSERT_EQUAL_UINT32(7, v);
+}
+
+static bool copyuid(email_copyuid_t *cap, const char *line) {
+   return email_imap_copyuid_line(line, strlen(line), cap);
+}
+
+/* Only a reply to the command DAWN sent: untagged, or tagged with its tag. */
+static void test_reply_tag_ok(void) {
+   TEST_ASSERT_TRUE(email_imap_reply_tag_ok("* OK [COPYUID 7 1 2]", 20, "A0005"));
+   TEST_ASSERT_TRUE(email_imap_reply_tag_ok("A0005 OK [COPYUID 7 1 2] done", 29, "A0005"));
+   TEST_ASSERT_FALSE(email_imap_reply_tag_ok("A0004 OK [COPYUID 7 1 2] done", 29, "A0005"));
+   TEST_ASSERT_FALSE(email_imap_reply_tag_ok("A00055 OK [COPYUID 7 1 2]", 25, "A0005"));
+   TEST_ASSERT_FALSE(email_imap_reply_tag_ok("Subject: A0005 OK", 17, "A0005"));
+   TEST_ASSERT_FALSE(email_imap_reply_tag_ok("A0005 OK", 8, ""));
+   TEST_ASSERT_FALSE(email_imap_reply_tag_ok("*", 1, "A0005"));
+}
+
+/* A folder name is encoded whole or not at all: a cut name could address a
+ * different folder. */
+static void test_url_encode_folder_never_cuts(void) {
+   char out[EMAIL_IMAP_FOLDER_URL_MAX];
+   TEST_ASSERT_TRUE(email_imap_url_encode_folder("INBOX/Sent Items", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("INBOX/Sent%20Items", out);
+   /* 127 bytes of Cyrillic-ish UTF-8 (each byte becomes %XX): fits the max. */
+   char longname[128];
+   for (int i = 0; i < 127; i++)
+      longname[i] = (char)(i % 2 ? 0xB0 : 0xD0);
+   longname[127] = '\0';
+   TEST_ASSERT_TRUE(email_imap_url_encode_folder(longname, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_size_t(127 * 3, strlen(out));
+   char small[256];
+   TEST_ASSERT_FALSE(email_imap_url_encode_folder(longname, small, sizeof(small)));
+   TEST_ASSERT_EQUAL_STRING("", small);
+   char tiny[4];
+   TEST_ASSERT_FALSE(email_imap_url_encode_folder(" ", tiny, 3)); /* "%20" needs 4 */
+   TEST_ASSERT_TRUE(email_imap_url_encode_folder(" ", tiny, 4));
+}
+
+static void test_copyuid_line(void) {
+   email_copyuid_t cap;
+   memset(&cap, 0, sizeof(cap));
+   TEST_ASSERT_TRUE(copyuid(&cap, "* OK [COPYUID 38505 304,319:320 3956:3958] Moved\r\n"));
+   TEST_ASSERT_TRUE(copyuid(&cap, "A005 OK [COPYUID 38505 12 3959] Done\r\n"));
+   TEST_ASSERT_EQUAL_INT(2, cap.count);
+   TEST_ASSERT_EQUAL_UINT32(38505, cap.occ[0].uidvalidity);
+   TEST_ASSERT_EQUAL_STRING("304,319:320", cap.occ[0].src);
+   TEST_ASSERT_EQUAL_STRING("3956:3958", cap.occ[0].dst);
+
+   memset(&cap, 0, sizeof(cap));
+   TEST_ASSERT_FALSE(copyuid(&cap, "* 3 FETCH (UID 3)\r\n"));
+   TEST_ASSERT_FALSE(copyuid(&cap, "* NO [COPYUID 1 2 3] x\r\n"));
+   TEST_ASSERT_FALSE(copyuid(&cap, "OK [COPYUID 1 2 3]\r\n"));            /* no tag */
+   TEST_ASSERT_FALSE(copyuid(&cap, "* OK [COPYUID 0 2 3]\r\n"));          /* v zero */
+   TEST_ASSERT_FALSE(copyuid(&cap, "* OK [COPYUID 4294967296 2 3]\r\n")); /* v too big */
+   TEST_ASSERT_FALSE(copyuid(&cap, "* OK [COPYUID 5 2:* 3:4]\r\n"));      /* '*' */
+   TEST_ASSERT_FALSE(copyuid(&cap, "* OK [COPYUID 5 2 3\r\n"));           /* unclosed */
+   TEST_ASSERT_EQUAL_INT(0, cap.count);
+}
+
+static void test_copyuid_map(void) {
+   email_copyuid_t cap;
+   memset(&cap, 0, sizeof(cap));
+   const uint32_t sent[] = { 304, 319, 320, 400 };
+   uint32_t dest[4], v = 0;
+   /* No COPYUID at all: nothing known. */
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_NONE, email_imap_copyuid_map(&cap, sent, 4, dest, &v));
+
+   copyuid(&cap, "* OK [COPYUID 38505 304,319:320 3956:3958] Moved\r\n");
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_MAPPED, email_imap_copyuid_map(&cap, sent, 4, dest, &v));
+   TEST_ASSERT_EQUAL_UINT32(38505, v);
+   TEST_ASSERT_EQUAL_UINT32(3956, dest[0]);
+   TEST_ASSERT_EQUAL_UINT32(3957, dest[1]);
+   TEST_ASSERT_EQUAL_UINT32(3958, dest[2]);
+   TEST_ASSERT_EQUAL_UINT32(0, dest[3]); /* not moved */
+
+   /* A MOVE answered in pieces. */
+   copyuid(&cap, "* OK [COPYUID 38505 400 3990] Moved\r\n");
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_MAPPED, email_imap_copyuid_map(&cap, sent, 4, dest, &v));
+   TEST_ASSERT_EQUAL_UINT32(3990, dest[3]);
+
+   /* A reversed range reads ascending. */
+   memset(&cap, 0, sizeof(cap));
+   copyuid(&cap, "* OK [COPYUID 9 320:319 11:10] x\r\n");
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_MAPPED, email_imap_copyuid_map(&cap, sent, 4, dest, &v));
+   TEST_ASSERT_EQUAL_UINT32(10, dest[1]);
+   TEST_ASSERT_EQUAL_UINT32(11, dest[2]);
+
+   /* Untrusted: no undo for any of them. */
+   const char *bad[] = {
+      "* OK [COPYUID 9 304,319 10] x\r\n",    /* counts differ */
+      "* OK [COPYUID 9 999 10] x\r\n",        /* a uid DAWN didn't send */
+      "* OK [COPYUID 9 304,304 10,11] x\r\n", /* the same source twice */
+      "* OK [COPYUID 9 1:4294967295 1:4294967295] x\r\n",
+      "* OK [COPYUID 9 304 0] x\r\n", /* destination zero */
+   };
+   for (size_t b = 0; b < sizeof(bad) / sizeof(bad[0]); b++) {
+      memset(&cap, 0, sizeof(cap));
+      copyuid(&cap, bad[b]);
+      TEST_ASSERT_EQUAL_INT_MESSAGE(EMAIL_COPYUID_UNTRUSTED,
+                                    email_imap_copyuid_map(&cap, sent, 4, dest, &v), bad[b]);
+      for (int i = 0; i < 4; i++)
+         TEST_ASSERT_EQUAL_UINT32(0, dest[i]);
+   }
+   /* Two epochs in one reply. */
+   memset(&cap, 0, sizeof(cap));
+   copyuid(&cap, "* OK [COPYUID 9 304 10] x\r\n");
+   copyuid(&cap, "* OK [COPYUID 8 319 11] x\r\n");
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_UNTRUSTED, email_imap_copyuid_map(&cap, sent, 4, dest, &v));
+   /* More occurrences than kept. */
+   memset(&cap, 0, sizeof(cap));
+   for (int i = 0; i <= EMAIL_COPYUID_OCC_MAX; i++)
+      copyuid(&cap, "* OK [COPYUID 9 304 10] x\r\n");
+   TEST_ASSERT_TRUE(cap.overflow);
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_UNTRUSTED, email_imap_copyuid_map(&cap, sent, 4, dest, &v));
+   /* Too many terms. */
+   char line[1024] = "* OK [COPYUID 9 ";
+   for (int i = 0; i < 101; i++)
+      snprintf(line + strlen(line), sizeof(line) - strlen(line), "%s%d", i ? "," : "", 1000 + i);
+   snprintf(line + strlen(line), sizeof(line) - strlen(line), " 1:101] x\r\n");
+   uint32_t many[101], many_dest[101];
+   for (int i = 0; i < 101; i++)
+      many[i] = 1000 + (uint32_t)i;
+   memset(&cap, 0, sizeof(cap));
+   copyuid(&cap, line);
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_UNTRUSTED,
+                         email_imap_copyuid_map(&cap, many, 101, many_dest, &v));
+   /* The same set in 100 terms maps. */
+   line[strlen("* OK [COPYUID 9 ")] = '\0';
+   for (int i = 0; i < 100; i++)
+      snprintf(line + strlen(line), sizeof(line) - strlen(line), "%s%d", i ? "," : "", 1000 + i);
+   snprintf(line + strlen(line), sizeof(line) - strlen(line), " 1:100] x\r\n");
+   memset(&cap, 0, sizeof(cap));
+   copyuid(&cap, line);
+   TEST_ASSERT_EQUAL_INT(EMAIL_COPYUID_MAPPED,
+                         email_imap_copyuid_map(&cap, many, 101, many_dest, &v));
+   TEST_ASSERT_EQUAL_UINT32(100, many_dest[99]);
+   TEST_ASSERT_EQUAL_UINT32(0, many_dest[100]);
 }
 
 int main(void) {
@@ -841,6 +1022,12 @@ int main(void) {
    RUN_TEST(test_select_uids_collapses_duplicates);
    RUN_TEST(test_exists_line);
    RUN_TEST(test_imap_id_parse);
+   RUN_TEST(test_imap_id_pin);
+   RUN_TEST(test_imap_id_format);
+   RUN_TEST(test_reply_tag_ok);
+   RUN_TEST(test_url_encode_folder_never_cuts);
+   RUN_TEST(test_copyuid_line);
+   RUN_TEST(test_copyuid_map);
    RUN_TEST(test_format_mailbox);
    return UNITY_END();
 }

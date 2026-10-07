@@ -192,7 +192,7 @@ static bool msg_id_ok(const char *id, bool is_imap) {
       return gmail_message_id_valid(id);
    char folder[PANEL_FOLDER_MAX + 1];
    uint32_t uid = 0;
-   return email_imap_id_parse(id, folder, sizeof(folder), &uid) &&
+   return email_imap_id_parse(id, folder, sizeof(folder), &uid, NULL) &&
           email_service_validate_folder_name(folder);
 }
 

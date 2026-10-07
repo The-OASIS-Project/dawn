@@ -21,7 +21,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 │                                   │   one task per account            │
 ├───────────────────────────────────────────────────────────────────────┤
 │                     SERVICE LAYER                                     │
-│  email_service.c, email_service_read.c                               │
+│  email_service.c, email_service_read.c, email_service_move.c        │
+│  → Trash/archive batches + undo (email_undo.c tokens, 60 s)          │
 │  → Multi-account routing (dispatches to correct backend per account) │
 │  → Two-step confirmation for send and trash (draft → confirm)        │
 │  → Per-account read-only flag                                        │
@@ -30,8 +31,9 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 │              BACKEND A                     BACKEND B                  │
 │  email_client.c (IMAP/SMTP)    gmail_client.c (Gmail REST API)      │
 │  email_imap_read.c (read)      gmail_read.c, gmail_parts.c          │
-│  email_imap_move.c (trash,     gmail_flags.c (read/unread, counts)  │
-│   archive, folder roles)                                             │
+│  email_imap_batch.c (trash,    gmail_flags.c (read/unread, counts)  │
+│   archive, undo; COPYUID)      gmail_move.c (trash, archive, undo)  │
+│  email_imap_move.c (folder roles)                                    │
 │  email_imap_flags.c (\Seen, STATUS); one IMAP login per account at a │
 │   time: email_account_lease.c                                        │
 ├───────────────────────────────────────────────────────────────────────┤
@@ -134,17 +136,35 @@ Content-IDs are limited to RFC 5322 atext.
 A trash confirmation reads headers only. On IMAP that is `FETCH (ENVELOPE)`,
 which doesn't mark the message read; on Gmail it is `format=metadata`.
 
-## Moving a message (trash, archive)
+## Moving messages (trash, archive) and undo
 
-`email_imap_move.c` moves exactly one message, to the folder the server marks
-for the role (`\Trash`, `\Archive`; `\All` on Gmail), or else a known name at
-the top of the user's folders. It never uses another user's or a shared
-namespace.
+`email_service_move.c` moves up to 50 messages of one account per call, to the
+folder the server marks for the role (`\Trash`, `\Archive`; `\All` on Gmail), or
+else a known name at the top of the user's folders (`email_imap_move.c` finds and
+caches the roles). It never uses another user's or a shared namespace.
 
-- **The move.** `UID MOVE`, else `UID COPY` + `STORE \Deleted` + `UID EXPUNGE` of
-  that one UID. A bare `EXPUNGE` is never sent.
-- **Before it.** A read-only `UID FETCH` first confirms the message exists.
-- **No folder for the role.** The move is refused, never guessed.
+- **IMAP ids are pinned.** An id is `folder:uid.v`, `v` the mailbox's UIDVALIDITY,
+  and every SELECT for it carries `;UIDVALIDITY=v`: a mailbox rebuilt since the id
+  was issued answers NOT_FOUND rather than the wrong message. Old ids without
+  `.v` still work, unpinned.
+- **The IMAP move** (`email_imap_batch.c`): one login per call, ids grouped by
+  (folder, epoch). Per group a read-only `UID FETCH` confirms which exist, then
+  `UID MOVE` of those, else `UID COPY` + `STORE \Deleted` + `UID EXPUNGE` of those
+  UIDs (no UIDPLUS: left marked deleted). A bare `EXPUNGE` is never sent.
+  Stopping is honoured between groups only.
+- **Where each message landed** comes from COPYUID (RFC 4315), read only while
+  the MOVE or COPY is in flight and only from its own tagged reply or untagged
+  lines, mapped only onto UIDs DAWN sent.
+- **Gmail** (`gmail_move.c`): per message, labels read first (already there, or
+  an archive from Trash/Spam, is answered without moving), paced to 40 calls a
+  second per account.
+- **No folder for the role.** The move is refused, never guessed; a role folder
+  removed since (TRYCREATE) is forgotten and refused the same way.
+- **Undo** (`email_undo.c`): a move from the panel gets a token per message,
+  random, single use, bound to the user, the account and its server and login,
+  kept 60 s in memory. An undo checks the message is still where it went, moves it
+  back, and reads its new row. Every move and undo is told to the user's panels
+  once (`email_changed_notify`).
 
 ## Confirming a send or a trash
 

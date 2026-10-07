@@ -50,83 +50,49 @@ static int resolve_target(int user_id,
    return rc;
 }
 
-/* IMAP: the ids grouped by folder (parsed, never sent as given), at most
- * EMAIL_FLAGS_MAX_FOLDERS folders; ids past that, or that don't parse, are
- * settled in @p results here. */
-typedef struct {
-   char folder[256];
-   uint32_t uids[EMAIL_FLAGS_MAX_IDS];
-   int index[EMAIL_FLAGS_MAX_IDS]; /* each UID's position in the caller's list */
-   int count;
-} folder_group_t;
-
-static int group_by_folder(const char *const *ids,
-                           int n,
-                           folder_group_t *groups,
-                           email_flag_result_t *results) {
-   int ngroups = 0;
-   for (int i = 0; i < n; i++) {
-      char folder[256];
-      uint32_t uid = 0;
-      if (!ids[i] || !email_svc_parse_imap_id(ids[i], folder, sizeof(folder), &uid, false)) {
-         results[i].err = EMAIL_ERR_NOT_FOUND;
-         continue;
-      }
-      int g = 0;
-      while (g < ngroups && strcmp(groups[g].folder, folder) != 0)
-         g++;
-      if (g == ngroups) {
-         if (ngroups == EMAIL_FLAGS_MAX_FOLDERS) {
-            results[i].err = EMAIL_ERR_FAILED; /* too many folders in one call */
-            continue;
-         }
-         snprintf(groups[g].folder, sizeof(groups[g].folder), "%s", folder);
-         groups[g].count = 0;
-         ngroups++;
-      }
-      groups[g].uids[groups[g].count] = uid;
-      groups[g].index[groups[g].count] = i;
-      groups[g].count++;
-   }
-   return ngroups;
-}
-
 static void set_flags_imap(const email_account_t *acct,
                            const char *const *ids,
                            int n,
                            bool unread,
                            email_flag_result_t *results) {
-   folder_group_t *groups = calloc(EMAIL_FLAGS_MAX_FOLDERS, sizeof(*groups));
+   email_imap_group_t *groups = calloc(EMAIL_IMAP_GROUP_MAX_FOLDERS, sizeof(*groups));
    if (!groups)
       return; /* every result stays FAILED */
-   const int ngroups = group_by_folder(ids, n, groups, results);
+   int at_group[EMAIL_IMAP_GROUP_MAX_IDS], at_pos[EMAIL_IMAP_GROUP_MAX_IDS];
+   email_err_t errs[EMAIL_IMAP_GROUP_MAX_IDS];
+   for (int i = 0; i < n; i++)
+      errs[i] = EMAIL_ERR_FAILED;
+   const int ngroups = email_svc_group_imap_ids(ids, n, groups, at_group, at_pos, errs);
 
    email_conn_t conn;
    const int crc = email_svc_build_conn(acct, &conn);
-   if (crc != EMAIL_SVC_CONN_OK) {
-      const email_err_t e = email_svc_conn_err(crc);
-      for (int g = 0; g < ngroups; g++) {
-         for (int k = 0; k < groups[g].count; k++)
-            results[groups[g].index[k]].err = e;
-      }
-   } else if (ngroups > 0) {
-      email_imap_seen_batch_t batches[EMAIL_FLAGS_MAX_FOLDERS];
-      bool updated[EMAIL_FLAGS_MAX_FOLDERS][EMAIL_FLAGS_MAX_IDS];
+   email_imap_seen_batch_t batches[EMAIL_IMAP_GROUP_MAX_FOLDERS];
+   bool updated[EMAIL_IMAP_GROUP_MAX_FOLDERS][EMAIL_IMAP_GROUP_MAX_IDS];
+   const email_err_t conn_err = crc == EMAIL_SVC_CONN_OK ? EMAIL_ERR_NONE : email_svc_conn_err(crc);
+   if (crc == EMAIL_SVC_CONN_OK && ngroups > 0) {
       for (int g = 0; g < ngroups; g++) {
          batches[g] = (email_imap_seen_batch_t){ .folder = groups[g].folder,
+                                                 .uidvalidity = groups[g].uidvalidity,
                                                  .uids = groups[g].uids,
                                                  .n = groups[g].count,
                                                  .updated = updated[g] };
       }
       email_imap_set_seen(&conn, batches, ngroups, !unread);
-      for (int g = 0; g < ngroups; g++) {
-         for (int k = 0; k < groups[g].count; k++) {
-            email_flag_result_t *r = &results[groups[g].index[k]];
-            const bool ok = batches[g].err == EMAIL_ERR_NONE;
-            r->updated = ok && updated[g][k];
-            r->err = r->updated ? EMAIL_ERR_NONE : ok ? EMAIL_ERR_NOT_FOUND : batches[g].err;
-         }
+   }
+   for (int i = 0; i < n; i++) {
+      email_flag_result_t *r = &results[i];
+      const int g = at_group[i];
+      if (g < 0) {
+         r->err = errs[i];
+         continue;
       }
+      if (conn_err != EMAIL_ERR_NONE) {
+         r->err = conn_err;
+         continue;
+      }
+      const bool ok = batches[g].err == EMAIL_ERR_NONE;
+      r->updated = ok && updated[g][at_pos[i]];
+      r->err = r->updated ? EMAIL_ERR_NONE : ok ? EMAIL_ERR_NOT_FOUND : batches[g].err;
    }
    sodium_memzero(&conn, sizeof(conn));
    free(groups);

@@ -1204,6 +1204,43 @@ static void test_prescan_takes_gmime_type(void) {
    }
 }
 
+static void test_gmail_undo_labels(void) {
+   TEST_ASSERT_TRUE(gmail_label_addable("INBOX"));
+   TEST_ASSERT_TRUE(gmail_label_addable("UNREAD"));
+   TEST_ASSERT_TRUE(gmail_label_addable("STARRED"));
+   TEST_ASSERT_TRUE(gmail_label_addable("IMPORTANT"));
+   TEST_ASSERT_TRUE(gmail_label_addable("CATEGORY_UPDATES"));
+   TEST_ASSERT_TRUE(gmail_label_addable("Label_123"));
+   TEST_ASSERT_FALSE(gmail_label_addable("TRASH"));
+   TEST_ASSERT_FALSE(gmail_label_addable("SPAM"));
+   TEST_ASSERT_FALSE(gmail_label_addable("SENT"));
+   TEST_ASSERT_FALSE(gmail_label_addable("DRAFT"));
+   TEST_ASSERT_FALSE(gmail_label_addable("CHAT"));
+   TEST_ASSERT_FALSE(gmail_label_addable("YELLOW_STAR"));
+   TEST_ASSERT_FALSE(gmail_label_addable("Label_1\",\"TRASH"));
+   TEST_ASSERT_FALSE(gmail_label_addable(""));
+   TEST_ASSERT_FALSE(gmail_label_addable(NULL));
+
+   const char *labels[] = { "INBOX", "TRASH", "UNREAD", "Label_7", "SENT", "CATEGORY_SOCIAL" };
+   char packed[EMAIL_UNDO_LABELS_MAX];
+   TEST_ASSERT_EQUAL_INT(0, gmail_labels_pack(labels, 6, packed, sizeof(packed)));
+   TEST_ASSERT_EQUAL_STRING("INBOX,UNREAD,Label_7,CATEGORY_SOCIAL", packed);
+   char small[14];
+   TEST_ASSERT_EQUAL_INT(2, gmail_labels_pack(labels, 6, small, sizeof(small)));
+   TEST_ASSERT_EQUAL_STRING("INBOX,UNREAD", small);
+
+   char body[256];
+   TEST_ASSERT_TRUE(gmail_labels_add_body(packed, false, body, sizeof(body)));
+   TEST_ASSERT_EQUAL_STRING(
+       "{\"addLabelIds\":[\"INBOX\",\"UNREAD\",\"Label_7\",\"CATEGORY_SOCIAL\"]}", body);
+   TEST_ASSERT_TRUE(gmail_labels_add_body(packed, true, body, sizeof(body)));
+   TEST_ASSERT_EQUAL_STRING("{\"addLabelIds\":[\"INBOX\",\"UNREAD\",\"CATEGORY_SOCIAL\"]}", body);
+   TEST_ASSERT_FALSE(gmail_labels_add_body("Label_7", true, body, sizeof(body)));
+   TEST_ASSERT_FALSE(gmail_labels_add_body("", false, body, sizeof(body)));
+   TEST_ASSERT_FALSE(gmail_labels_add_body("TRASH,SPAM", false, body, sizeof(body)));
+   TEST_ASSERT_FALSE(gmail_labels_add_body(packed, false, body, 30)); /* doesn't fit */
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_plain);
@@ -1241,5 +1278,6 @@ int main(void) {
    RUN_TEST(test_prescan_reads_like_gmime);
    RUN_TEST(test_prescan_takes_gmime_type);
    RUN_TEST(test_gmail_header_fields);
+   RUN_TEST(test_gmail_undo_labels);
    return UNITY_END();
 }

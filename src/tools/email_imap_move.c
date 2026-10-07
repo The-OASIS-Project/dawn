@@ -16,13 +16,12 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Trash and archive over IMAP.  The destination is the user's own folder for
- * the role (email_imap_roles.h): the one the server marks, else a known name,
- * never a guess and never another user's or a shared folder.  The move
- * touches only the one message, after checking it exists: UID MOVE when the server has it, else UID
- * COPY + UID STORE \Deleted + UID EXPUNGE of that UID.  A bare EXPUNGE, which
- * purges every message marked \Deleted in the folder (another client's kept
- * mail included), is never sent.
+ * An IMAP account's folder roles, probed on the wire and cached: which folder
+ * trash and archive move to (email_imap_roles.h parses the replies) and whether
+ * the server has MOVE and UIDPLUS.  The destination is the user's own folder
+ * for the role: the one the server marks, else a known name, never a guess and
+ * never another user's or a shared folder.  The moves themselves are in
+ * email_imap_batch.c.
  */
 
 #include <pthread.h>
@@ -35,9 +34,11 @@
 #include "tools/email_client.h"
 #include "tools/email_client_internal.h"
 #include "tools/email_imap_roles.h"
+#include "tools/email_transfer.h"
 
-/* Roles are probed once per account and reused for an hour; a failed move
- * drops them so the next one probes again (a renamed or removed folder). */
+/* Roles are probed once per account and reused for an hour; an account found
+ * without the role's folder drops them, so the next move looks again (the user
+ * may create one).  A move that merely failed keeps them. */
 #define ROLES_CACHE_SLOTS 16
 #define ROLES_TTL_SEC 3600
 
@@ -139,18 +140,6 @@ static bool run(CURL *curl,
    }
    *first = false;
    return true;
-}
-
-/* run() for a command whose reply isn't needed. */
-static bool run_quiet(CURL *curl,
-                      email_instrument_ctx_t *dctx,
-                      const email_conn_t *conn,
-                      const char *cmd,
-                      bool *first) {
-   curl_buffer_t buf;
-   const bool ok = run(curl, dctx, conn, cmd, first, &buf);
-   curl_buffer_free(&buf);
-   return ok;
 }
 
 /* LIST "" <pattern>, the pattern quoted (a namespace prefix comes from the
@@ -270,116 +259,28 @@ out:
    return 0;
 }
 
-typedef enum {
-   MOVE_TO_TRASH,
-   MOVE_TO_ARCHIVE
-} move_role_t;
-
-/* Moves message @p uid of @p folder to the account's folder for @p role. */
-static int imap_move(const email_conn_t *conn, const char *folder, uint32_t uid, move_role_t role) {
-   if (!conn || !folder || !folder[0] || uid == 0) {
-      return EMAIL_CLIENT_RC_FAILURE;
-   }
-   CURL *curl = email_imap_handle_create(conn);
-   if (!curl) {
-      return EMAIL_CLIENT_RC_FAILURE;
-   }
-   email_instrument_ctx_t dctx;
-   email_instrument_attach(curl, &dctx);
+/* Logs in on @p curl's own (no mailbox selected), so a refused login is told
+ * apart from a refused SELECT, then the account's roles. */
+email_err_t email_imap_open_roles(CURL *curl,
+                                  email_instrument_ctx_t *dctx,
+                                  const email_conn_t *conn,
+                                  email_imap_roles_t *roles) {
+   curl_easy_setopt(curl, CURLOPT_URL, conn->imap_url);
+   curl_buffer_t buf;
+   const CURLcode res = email_imap_run_command(curl, dctx, conn, "move", "NOOP", true, &buf);
+   curl_buffer_free(&buf);
+   if (res != CURLE_OK)
+      return email_err_from_curl(res);
    char key[sizeof(((roles_slot_t *)0)->key)];
    roles_key(conn, key, sizeof(key));
-   bool first = true;
-   int rc = EMAIL_CLIENT_RC_FAILURE;
-   char *encoded = NULL;
+   bool first = false;
+   return roles_for(curl, dctx, conn, key, &first, roles) == 0 ? EMAIL_ERR_NONE : EMAIL_ERR_FAILED;
+}
 
-   email_imap_roles_t roles;
-   if (roles_for(curl, &dctx, conn, key, &first, &roles) != 0) {
-      goto done;
-   }
-   const char *dest = role == MOVE_TO_TRASH ? roles.trash : roles.archive;
-   if (!dest[0]) {
-      OLOG_WARNING("email_imap: no %s folder on this account; not moving UID %u",
-                   role == MOVE_TO_TRASH ? "Trash" : "Archive", uid);
-      roles_store(key, NULL); /* the user may create one; look again next time */
-      rc = role == MOVE_TO_TRASH ? EMAIL_CLIENT_RC_NO_TRASH : EMAIL_CLIENT_RC_FOLDER_MISSING;
-      goto done;
-   }
-   if (strcmp(dest, folder) == 0) {
-      rc = EMAIL_CLIENT_RC_ALREADY_THERE;
-      goto done;
-   }
-   char quoted[EMAIL_IMAP_ROLE_FOLDER_MAX * 2 + 3];
-   if (!email_imap_quote_folder(dest, quoted, sizeof(quoted))) {
-      goto done;
-   }
-   encoded = curl_easy_escape(curl, folder, 0);
-   if (!encoded) {
-      goto done;
-   }
-   char url[sizeof(conn->imap_url) + 3 * EMAIL_IMAP_ROLE_FOLDER_MAX + 2];
-   snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded);
-   curl_easy_setopt(curl, CURLOPT_URL, url);
-
-   /* Read-only first: is the message there?  A UID MOVE or COPY of a UID that
-    * doesn't exist is still OK on the wire, so without this a stale id would
-    * report a move that never happened.  It also keeps every mutating command
-    * off the op's first, retry-capable perform. */
-   char cmd[sizeof(quoted) + 64];
-   snprintf(cmd, sizeof(cmd), "UID FETCH %u (UID)", uid);
-   curl_buffer_t found;
-   if (!run(curl, &dctx, conn, cmd, &first, &found)) {
-      curl_buffer_free(&found);
-      goto done;
-   }
-   const bool present = found.data && email_imap_fetch_has_uid(found.data, uid);
-   curl_buffer_free(&found);
-   if (!present) {
-      rc = EMAIL_CLIENT_RC_NOT_FOUND;
-      goto done;
-   }
-
-   if (roles.move) {
-      snprintf(cmd, sizeof(cmd), "UID MOVE %u %s", uid, quoted);
-      if (!run_quiet(curl, &dctx, conn, cmd, &first)) {
-         roles_store(key, NULL);
-         goto done;
-      }
-      rc = 0;
-      goto done;
-   }
-   snprintf(cmd, sizeof(cmd), "UID COPY %u %s", uid, quoted);
-   if (!run_quiet(curl, &dctx, conn, cmd, &first)) {
-      roles_store(key, NULL);
-      goto done;
-   }
-   snprintf(cmd, sizeof(cmd), "UID STORE %u +FLAGS.SILENT (\\Deleted)", uid);
-   if (!run_quiet(curl, &dctx, conn, cmd, &first)) {
-      OLOG_WARNING("email_imap: UID %u copied to \"%s\" but not marked deleted", uid, dest);
-      rc = EMAIL_CLIENT_RC_NOT_REMOVED;
-      goto done;
-   }
-   if (!roles.uidplus) {
-      /* Without UIDPLUS only a bare EXPUNGE would remove it, and that would
-       * also purge every other message marked deleted in the folder. */
-      OLOG_WARNING("email_imap: server has no MOVE or UIDPLUS; UID %u is copied to \"%s\" and "
-                   "left marked deleted in \"%s\"",
-                   uid, dest, folder);
-      rc = EMAIL_CLIENT_RC_LEFT_FLAGGED;
-      goto done;
-   }
-   snprintf(cmd, sizeof(cmd), "UID EXPUNGE %u", uid);
-   if (!run_quiet(curl, &dctx, conn, cmd, &first)) {
-      OLOG_WARNING("email_imap: UID %u marked deleted in \"%s\" but not expunged", uid, folder);
-      rc = EMAIL_CLIENT_RC_NOT_REMOVED;
-      goto done;
-   }
-   rc = 0;
-
-done:
-   email_instrument_op_done(conn->username, "move", curl, &dctx);
-   curl_free(encoded);
-   curl_easy_cleanup(curl);
-   return rc;
+void email_imap_roles_forget(const email_conn_t *conn) {
+   char key[sizeof(((roles_slot_t *)0)->key)];
+   roles_key(conn, key, sizeof(key));
+   roles_store(key, NULL);
 }
 
 /* With s_roles_mutex held: @p key's probe failed within ALL_PROBE_RETRY_SEC. */
@@ -444,14 +345,4 @@ bool email_imap_all_mail_folder(const email_conn_t *conn, char *out, size_t size
       return false;
    snprintf(out, size, "%s", roles.all);
    return true;
-}
-
-int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid) {
-   OLOG_INFO("email_imap: trashing UID %u from \"%s\"", uid, folder ? folder : "");
-   return imap_move(conn, folder, uid, MOVE_TO_TRASH);
-}
-
-int email_archive_message(const email_conn_t *conn, const char *folder, uint32_t uid) {
-   OLOG_INFO("email_imap: archiving UID %u from \"%s\"", uid, folder ? folder : "");
-   return imap_move(conn, folder, uid, MOVE_TO_ARCHIVE);
 }

@@ -44,8 +44,10 @@ static void test_every_code_has_its_own_wire_name(void) {
    TEST_ASSERT_EQUAL_STRING("CANNOT_CALCULATE", email_error_name(EMAIL_ERR_CANNOT_CALCULATE));
    TEST_ASSERT_EQUAL_STRING("INVALID_REQUEST", email_error_name(EMAIL_ERR_INVALID_REQUEST));
    TEST_ASSERT_EQUAL_STRING("UNAVAILABLE", email_error_name(EMAIL_ERR_UNAVAILABLE));
+   TEST_ASSERT_EQUAL_STRING("IN_TRASH", email_error_name(EMAIL_ERR_IN_TRASH));
+   TEST_ASSERT_EQUAL_STRING("OUTCOME_UNKNOWN", email_error_name(EMAIL_ERR_OUTCOME_UNKNOWN));
    /* Every code past FAILED names itself: none falls back to "FAILED". */
-   for (int e = EMAIL_ERR_FAILED + 1; e <= EMAIL_ERR_UNAVAILABLE; e++) {
+   for (int e = EMAIL_ERR_FAILED + 1; e <= EMAIL_ERR_OUTCOME_UNKNOWN; e++) {
       const char *name = email_error_name((email_err_t)e);
       TEST_ASSERT_TRUE(name[0] != '\0');
       TEST_ASSERT_TRUE(strcmp(name, "FAILED") != 0);

@@ -41,6 +41,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "tools/email_parse.h" /* email_copyuid_t */
+
 /**
  * Per-operation debug-capture context. Stack-allocate one per email op and wire
  * it to the handle with email_instrument_attach() before the first perform; it
@@ -61,10 +63,17 @@ typedef struct {
     * counted down from it, so no single SEARCH reply outgrows libcurl's line limit. */
    uint32_t exists;
    bool exists_seen; /* 0 is a valid count (empty mailbox), so presence is tracked apart */
-   /* The last command sent was SELECT/EXAMINE (the capture window).  Assumes each op
-    * opens a fresh connection, so its first perform always issues SELECT; a shared or
-    * persistent connection (CURLSH) could skip it — revisit this if one is added. */
+   /* The last command sent was SELECT/EXAMINE (the capture window).  Each SELECT sent
+    * resets uidvalidity and exists, so an op that selects several mailboxes reads
+    * each one's own; libcurl sends no SELECT for the mailbox already selected, and the
+    * values captured for it then still apply. */
    bool in_select;
+   /* The last command sent was UID MOVE or UID COPY: its answers may carry COPYUID,
+    * recorded into copyuid when the op set it (NULL: not wanted).  Same trust rule
+    * as in_select: only lines answering that command count. */
+   bool in_copymove;
+   char copymove_tag[16]; /* that command's tag: only its tagged reply, or untagged lines */
+   email_copyuid_t *copyuid;
 } email_instrument_ctx_t;
 
 /**

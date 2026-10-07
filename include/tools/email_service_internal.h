@@ -106,16 +106,52 @@ int email_svc_gmail_token_err(const email_account_t *acct,
                               email_err_t *err);
 
 /**
- * @brief An IMAP message id ("folder:uid") split and checked: the folder fits
- *        and passes the allow-list, the uid is valid.  Logged when it isn't
- *        (at debug during a fan-out, where a Gmail id is expected).
+ * @brief An IMAP message id ("folder:uid[.uidvalidity]") split and checked: the
+ *        folder fits and passes the allow-list, the uid is valid.  Logged when it
+ *        isn't (at debug during a fan-out, where a Gmail id is expected).
+ * @param uidvalidity The id's pin, 0 when it has none (may be NULL)
  * @return true when @p folder and @p uid are filled
  */
 bool email_svc_parse_imap_id(const char *message_id,
                              char *folder,
                              size_t folder_size,
                              uint32_t *uid,
+                             uint32_t *uidvalidity,
                              bool fanout);
+
+/* The most ids, and groups, one grouped IMAP call takes (read, flags and moves
+ * share the grouping): the panel's flags and move limits. */
+#define EMAIL_IMAP_GROUP_MAX_IDS EMAIL_FLAGS_MAX_IDS
+#define EMAIL_IMAP_GROUP_MAX_FOLDERS EMAIL_FLAGS_MAX_FOLDERS
+
+/* IMAP ids grouped for one call: one group per (folder, uidvalidity), so one
+ * pinned SELECT each; every UID once per group. */
+typedef struct {
+   char folder[128];
+   uint32_t uidvalidity; /* 0: these ids carry no pin */
+   uint32_t uids[EMAIL_IMAP_GROUP_MAX_IDS];
+   int count;
+} email_imap_group_t;
+
+/**
+ * @brief Group IMAP ids by (folder, uidvalidity), at most EMAIL_IMAP_GROUP_MAX_FOLDERS
+ *        groups (email_service_read.c)
+ *
+ * An unpinned id joins its folder's group when that folder has exactly one;
+ * otherwise it goes in its own unpinned group (a stale epoch's group would
+ * report it missing).  An id that doesn't parse is EMAIL_ERR_NOT_FOUND; one past
+ * the group cap EMAIL_ERR_FAILED.
+ *
+ * @param at_group Per id: its group, or -1 (then @p errs says why)
+ * @param at_pos   Per id: its UID's position in that group (duplicates share one)
+ * @return the number of groups
+ */
+int email_svc_group_imap_ids(const char *const *ids,
+                             int n,
+                             email_imap_group_t *groups,
+                             int *at_group,
+                             int *at_pos,
+                             email_err_t *errs);
 
 /**
  * @brief Read @p message_id from one account (email_service_read without the fan-out)

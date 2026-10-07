@@ -753,7 +753,27 @@ bool email_imap_parse_exists(const char *line, size_t len, uint32_t *out) {
    return true;
 }
 
-bool email_imap_id_parse(const char *message_id, char *folder, size_t folder_size, uint32_t *uid) {
+/* 1-10 digits at *p as a value 1..UINT32_MAX, advancing *p past them. */
+static bool id_u32(const char **p, uint32_t *out) {
+   uint64_t v = 0;
+   int digits = 0;
+   while (isdigit((unsigned char)**p)) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(**p - '0');
+      (*p)++;
+   }
+   if (digits == 0 || v == 0 || v > UINT32_MAX)
+      return false;
+   *out = (uint32_t)v;
+   return true;
+}
+
+bool email_imap_id_parse(const char *message_id,
+                         char *folder,
+                         size_t folder_size,
+                         uint32_t *uid,
+                         uint32_t *uidvalidity) {
    if (!message_id || !folder || folder_size == 0 || !uid)
       return false;
    const char *uid_str = message_id;
@@ -771,12 +791,264 @@ bool email_imap_id_parse(const char *message_id, char *folder, size_t folder_siz
       if (last_colon)
          uid_str = last_colon + 1;
    }
-   if (!isdigit((unsigned char)uid_str[0]))
+   const char *p = uid_str;
+   uint32_t u = 0, v = 0;
+   if (!id_u32(&p, &u))
       return false;
-   char *end = NULL;
-   const unsigned long v = strtoul(uid_str, &end, 10);
-   if (!end || *end != '\0' || v == 0 || v > UINT32_MAX)
+   if (*p == '.') {
+      p++;
+      if (!id_u32(&p, &v))
+         return false;
+   }
+   if (*p != '\0')
       return false;
-   *uid = (uint32_t)v;
+   *uid = u;
+   if (uidvalidity)
+      *uidvalidity = v;
    return true;
+}
+
+
+bool email_imap_url_encode_folder(const char *folder, char *out, size_t out_len) {
+   if (!out || out_len == 0)
+      return false;
+   out[0] = '\0';
+   if (!folder)
+      return false;
+   size_t j = 0;
+   for (size_t i = 0; folder[i]; i++) {
+      const unsigned char c = (unsigned char)folder[i];
+      const bool plain = isalnum(c) || c == '/' || c == '.' || c == '_' || c == '-';
+      if (j + (plain ? 1 : 3) >= out_len) {
+         out[0] = '\0';
+         return false;
+      }
+      if (plain) {
+         out[j++] = (char)c;
+      } else {
+         static const char hex[] = "0123456789ABCDEF";
+         out[j++] = '%';
+         out[j++] = hex[c >> 4];
+         out[j++] = hex[c & 0xF];
+      }
+   }
+   out[j] = '\0';
+   return true;
+}
+
+bool email_imap_id_format(const char *folder,
+                          uint32_t uid,
+                          uint32_t uidvalidity,
+                          char *out,
+                          size_t out_size) {
+   if (!folder || !folder[0] || uid == 0 || !out || out_size == 0)
+      return false;
+   const int w = uidvalidity ? snprintf(out, out_size, "%s:%u.%u", folder, uid, uidvalidity)
+                             : snprintf(out, out_size, "%s:%u", folder, uid);
+   if (w < 0 || (size_t)w >= out_size) {
+      out[0] = '\0';
+      return false;
+   }
+   return true;
+}
+
+/* =============================================================================
+ * COPYUID (RFC 4315): where a MOVE or COPY put each message
+ * ============================================================================= */
+
+/* The most terms one uid set may have before it's refused. */
+#define COPYUID_TERMS_MAX 100
+
+
+bool email_imap_reply_tag_ok(const char *line, size_t len, const char *tag) {
+   if (!line || len < 2)
+      return false;
+   if (line[0] == '*' && line[1] == ' ')
+      return true;
+   if (!tag || !tag[0])
+      return false;
+   const size_t tl = strlen(tag);
+   return len > tl && memcmp(line, tag, tl) == 0 && line[tl] == ' ';
+}
+
+bool email_imap_copyuid_line(const char *line, size_t len, email_copyuid_t *cap) {
+   if (!line || !cap)
+      return false;
+   size_t i = 0;
+   /* The tag: "*" or a tag token, then one space. */
+   while (i < len && line[i] != ' ' && line[i] != '\r' && line[i] != '\n')
+      i++;
+   if (i == 0 || i >= len || line[i] != ' ')
+      return false;
+   i++;
+   static const char kOk[] = "OK [COPYUID ";
+   const size_t klen = sizeof(kOk) - 1;
+   if (len - i < klen)
+      return false;
+   for (size_t k = 0; k < klen; k++) {
+      if (toupper((unsigned char)line[i + k]) != kOk[k])
+         return false;
+   }
+   i += klen;
+   /* uidvalidity */
+   uint64_t v = 0;
+   int digits = 0;
+   while (i < len && isdigit((unsigned char)line[i])) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(line[i] - '0');
+      i++;
+   }
+   if (digits == 0 || v == 0 || v > UINT32_MAX || i >= len || line[i] != ' ')
+      return false;
+   i++;
+   /* Two sets of digits, ':' and ','; then ']'. */
+   size_t starts[2], lens[2];
+   for (int s = 0; s < 2; s++) {
+      starts[s] = i;
+      while (i < len && (isdigit((unsigned char)line[i]) || line[i] == ':' || line[i] == ','))
+         i++;
+      lens[s] = i - starts[s];
+      if (lens[s] == 0 || i >= len || line[i] != (s == 0 ? ' ' : ']'))
+         return false;
+      i++;
+   }
+   if (cap->count >= EMAIL_COPYUID_OCC_MAX || lens[0] >= EMAIL_COPYUID_SET_MAX ||
+       lens[1] >= EMAIL_COPYUID_SET_MAX) {
+      cap->overflow = true;
+      return true;
+   }
+   cap->occ[cap->count].uidvalidity = (uint32_t)v;
+   memcpy(cap->occ[cap->count].src, line + starts[0], lens[0]);
+   cap->occ[cap->count].src[lens[0]] = '\0';
+   memcpy(cap->occ[cap->count].dst, line + starts[1], lens[1]);
+   cap->occ[cap->count].dst[lens[1]] = '\0';
+   cap->count++;
+   return true;
+}
+
+/* Walks a uid set one UID at a time, ranges unexpanded. */
+typedef struct {
+   const char *p;
+   uint64_t cur, end; /* the term being walked; cur > end: take the next term */
+   int terms;
+   bool bad;
+} uid_walk_t;
+
+static bool walk_num(const char **p, uint64_t *out) {
+   uint64_t v = 0;
+   int digits = 0;
+   while (isdigit((unsigned char)**p)) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(**p - '0');
+      (*p)++;
+   }
+   if (digits == 0 || v == 0 || v > UINT32_MAX)
+      return false;
+   *out = v;
+   return true;
+}
+
+/* The next UID of @p w: WALK_UID with *uid, WALK_END, or WALK_BAD for a bad set. */
+enum {
+   WALK_END = 0,
+   WALK_UID = 1,
+   WALK_BAD = 2
+};
+
+static int walk_next(uid_walk_t *w, uint32_t *uid) {
+   if (w->bad)
+      return WALK_BAD;
+   if (w->cur > w->end) {
+      if (*w->p == '\0')
+         return WALK_END;
+      if (w->terms > 0) {
+         if (*w->p != ',') {
+            w->bad = true;
+            return WALK_BAD;
+         }
+         w->p++;
+      }
+      if (++w->terms > COPYUID_TERMS_MAX) {
+         w->bad = true;
+         return WALK_BAD;
+      }
+      uint64_t a = 0, b = 0;
+      if (!walk_num(&w->p, &a)) {
+         w->bad = true;
+         return WALK_BAD;
+      }
+      b = a;
+      if (*w->p == ':') {
+         w->p++;
+         if (!walk_num(&w->p, &b)) {
+            w->bad = true;
+            return WALK_BAD;
+         }
+      }
+      w->cur = a < b ? a : b;
+      w->end = a < b ? b : a;
+   }
+   *uid = (uint32_t)w->cur;
+   w->cur++;
+   return WALK_UID;
+}
+
+email_copyuid_rc_t email_imap_copyuid_map(const email_copyuid_t *cap,
+                                          const uint32_t *sent,
+                                          int n,
+                                          uint32_t *dest,
+                                          uint32_t *dest_v) {
+   if (!dest || n < 0)
+      return EMAIL_COPYUID_UNTRUSTED;
+   for (int i = 0; i < n; i++)
+      dest[i] = 0;
+   if (dest_v)
+      *dest_v = 0;
+   if (!cap || cap->count == 0) {
+      if (cap && cap->overflow)
+         return EMAIL_COPYUID_UNTRUSTED;
+      return EMAIL_COPYUID_NONE;
+   }
+   if (cap->overflow || !sent)
+      return EMAIL_COPYUID_UNTRUSTED;
+   const uint32_t v = cap->occ[0].uidvalidity;
+   int mapped = 0;
+   for (int o = 0; o < cap->count; o++) {
+      if (cap->occ[o].uidvalidity != v)
+         goto bad;
+      uid_walk_t s = { .p = cap->occ[o].src, .cur = 1, .end = 0 };
+      uid_walk_t d = { .p = cap->occ[o].dst, .cur = 1, .end = 0 };
+      for (;;) {
+         uint32_t su = 0, du = 0;
+         const int rs = walk_next(&s, &su);
+         const int rd = walk_next(&d, &du);
+         if (rs == WALK_BAD || rd == WALK_BAD || rs != rd)
+            goto bad; /* a bad set, or the two sets differ in size */
+         if (rs == WALK_END)
+            break;
+         /* Bounded by n: a source UID DAWN didn't send stops the walk, so a
+          * range like 1:4294967295 costs one step, not four billion. */
+         int at = -1;
+         for (int k = 0; k < n; k++) {
+            if (sent[k] == su) {
+               at = k;
+               break;
+            }
+         }
+         if (at < 0 || dest[at] != 0 || ++mapped > n)
+            goto bad;
+         dest[at] = du;
+      }
+   }
+   if (dest_v)
+      *dest_v = v;
+   return EMAIL_COPYUID_MAPPED;
+bad:
+   for (int i = 0; i < n; i++)
+      dest[i] = 0;
+   if (dest_v)
+      *dest_v = 0;
+   return EMAIL_COPYUID_UNTRUSTED;
 }

@@ -463,7 +463,7 @@ static void build_search_query(const email_search_params_t *params,
  * Shared by both batch and single-message fetch paths.
  * ============================================================================= */
 
-static int parse_message_json(struct json_object *root, email_summary_t *out) {
+int gmail_summary_from_json(struct json_object *root, email_summary_t *out) {
    memset(out, 0, sizeof(*out));
 
    /* Extract message ID */
@@ -798,7 +798,7 @@ static int parse_batch_response(const char *resp_data,
       }
 
       if (msg_json) {
-         if (parse_message_json(msg_json, &out[fetched]) == 0)
+         if (gmail_summary_from_json(msg_json, &out[fetched]) == 0)
             fetched++;
          json_object_put(msg_json);
       }
@@ -1233,61 +1233,4 @@ int gmail_list_labels(const char *token, char *out, size_t out_len) {
 
    json_object_put(root);
    return 0;
-}
-
-/* =============================================================================
- * Trash / Archive
- * ============================================================================= */
-
-int gmail_trash_message(const char *token, const char *message_id) {
-   if (!token || !token[0] || !gmail_message_id_valid(message_id)) {
-      OLOG_ERROR("gmail_trash: invalid token or message_id");
-      return 1;
-   }
-
-   char url[256];
-   snprintf(url, sizeof(url), GMAIL_API_BASE "/messages/%s/trash", message_id);
-
-   CURL *curl = gmail_create_curl();
-   if (!curl)
-      return 1;
-
-   curl_buffer_t resp;
-   int rc = gmail_api_post(curl, token, url, "application/json", "{}", &resp);
-   curl_buffer_free(&resp);
-   curl_easy_cleanup(curl);
-
-   if (rc == 0)
-      OLOG_INFO("gmail: trashed message %s", message_id);
-   else
-      OLOG_ERROR("gmail: failed to trash message %s", message_id);
-
-   return rc;
-}
-
-int gmail_archive_message(const char *token, const char *message_id) {
-   if (!token || !token[0] || !gmail_message_id_valid(message_id)) {
-      OLOG_ERROR("gmail_archive: invalid token or message_id");
-      return 1;
-   }
-
-   char url[256];
-   snprintf(url, sizeof(url), GMAIL_API_BASE "/messages/%s/modify", message_id);
-
-   CURL *curl = gmail_create_curl();
-   if (!curl)
-      return 1;
-
-   curl_buffer_t resp;
-   int rc = gmail_api_post(curl, token, url, "application/json",
-                           "{\"removeLabelIds\": [\"INBOX\"]}", &resp);
-   curl_buffer_free(&resp);
-   curl_easy_cleanup(curl);
-
-   if (rc == 0)
-      OLOG_INFO("gmail: archived message %s", message_id);
-   else
-      OLOG_ERROR("gmail: failed to archive message %s", message_id);
-
-   return rc;
 }

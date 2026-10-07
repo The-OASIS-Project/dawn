@@ -154,10 +154,28 @@ typedef enum {
    EMAIL_ERR_CANNOT_CALCULATE,  /* the changes since a state can't be worked out */
    EMAIL_ERR_INVALID_REQUEST,   /* the request itself is malformed or past a limit */
    EMAIL_ERR_UNAVAILABLE,       /* email is turned off */
+   EMAIL_ERR_NOT_REMOVED,       /* copied to the destination; the original couldn't be removed */
+   EMAIL_ERR_UNDO_EXPIRED,      /* the undo token is unknown, used or past its time */
+   EMAIL_ERR_IN_TRASH,          /* archive of a message in Trash or Spam: restore it first */
+   EMAIL_ERR_OUTCOME_UNKNOWN,   /* the command went out but its answer didn't arrive */
 } email_err_t;
 
 /** The wire name of @p err ("AUTH_FAILED", ...; "" for NONE).  email_transfer.c */
 const char *email_error_name(email_err_t err);
+
+/* Where a move sends a message. */
+typedef enum {
+   EMAIL_MOVE_TRASH = 0,
+   EMAIL_MOVE_ARCHIVE,
+} email_move_kind_t;
+
+/* What became of one message in a move. */
+typedef enum {
+   EMAIL_MOVE_FAILED = 0,    /* not moved: see the err beside it */
+   EMAIL_MOVE_DONE,          /* moved */
+   EMAIL_MOVE_ALREADY_THERE, /* already in the destination; nothing done */
+   EMAIL_MOVE_LEFT_FLAGGED,  /* copied and marked \Deleted, left in its folder (no UIDPLUS) */
+} email_move_outcome_t;
 
 /* What a read does to the message's read state. */
 typedef enum {
@@ -206,6 +224,7 @@ typedef struct {
    bool unread_before;    /* unread when it was read (Gmail); false when unknown */
    bool unread_known;     /* unread_after holds the state the read left (with a mark) */
    bool unread_after;     /* unread once the read is done */
+   uint32_t uidvalidity;  /* IMAP: the mailbox epoch the read saw (0 = not seen) */
    email_addr_t *to_list; /* heap; to_count kept of to_total */
    int to_count;
    int to_total;

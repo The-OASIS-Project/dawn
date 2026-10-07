@@ -985,6 +985,11 @@ static char *handle_confirm_trash(struct json_object *details,
                           "Error: the request was stopped before anything was trashed; the trash "
                           "is still staged. If the user says yes again, confirm with the same "
                           "pending id.");
+         if (err == EMAIL_ERR_OUTCOME_UNKNOWN)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the mail server didn't confirm the trash, so the message may "
+                          "or may not have been moved. Don't retry; tell the user to check the "
+                          "folder.");
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to trash email (network or upstream error). Retry "
                        "once; if persistent, the email backend may be unreachable.");
@@ -1031,6 +1036,15 @@ static char *handle_archive(struct json_object *details, int user_id) {
       default:
          if (err == EMAIL_ERR_BUSY)
             return err_error(EMAIL_RC_FAILURE, err, "archive", account, NULL);
+         if (err == EMAIL_ERR_IN_TRASH)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: that message is in Trash or Spam, so it wasn't archived. Tell "
+                          "the user; it has to be restored to the inbox first.");
+         if (err == EMAIL_ERR_OUTCOME_UNKNOWN)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the mail server didn't confirm the archive, so the message may "
+                          "or may not have been moved. Don't retry; tell the user to check the "
+                          "folder.");
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to archive email (network or upstream error). The "
                        "message_id may be invalid (get fresh IDs from 'recent') or the "

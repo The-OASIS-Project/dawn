@@ -280,8 +280,11 @@ int email_service_find_account_by_id(int user_id,
                                      email_account_t *out) {
    if (!out || account_id <= 0)
       return EMAIL_RC_UNKNOWN_ACCOUNT;
-   if (email_db_account_get(account_id, out) != 0)
+   const int drc = email_db_account_get(account_id, out);
+   if (drc == AUTH_DB_NOT_FOUND)
       return EMAIL_RC_UNKNOWN_ACCOUNT;
+   if (drc != AUTH_DB_SUCCESS)
+      return EMAIL_RC_FAILURE; /* the database, not the account: try again */
    if (out->user_id != user_id || (enabled_only && !out->enabled)) {
       sodium_memzero(out, sizeof(*out));
       return EMAIL_RC_UNKNOWN_ACCOUNT;
@@ -1183,6 +1186,15 @@ int email_service_create_pending_trash(int user_id,
       read_rc = email_svc_read_single(&acct, message_id, &headers, &msg, NULL, false);
       email_svc_lease_end(&lease);
    }
+   if (read_rc != 0 && !email_svc_is_gmail_api(&acct)) {
+      /* Its pinned id comes from this read: without it the confirm could move
+       * whatever has the UID by then. */
+      sodium_memzero(&acct, sizeof(acct));
+      return EMAIL_RC_FAILURE;
+   }
+   char canonical_id[sizeof(msg.message_id)];
+   snprintf(canonical_id, sizeof(canonical_id), "%s",
+            read_rc == 0 && msg.message_id[0] ? msg.message_id : message_id);
    char fetched_subject[256] = "(unknown)";
    char fetched_from[128] = "(unknown)";
    if (read_rc == 0) {
@@ -1238,7 +1250,7 @@ int email_service_create_pending_trash(int user_id,
    pt->used = false;
    generate_draft_id(pt->pending_id, sizeof(pt->pending_id));
 
-   snprintf(pt->message_id, sizeof(pt->message_id), "%s", message_id);
+   snprintf(pt->message_id, sizeof(pt->message_id), "%s", canonical_id);
    snprintf(pt->account_name, sizeof(pt->account_name), "%s", acct.name);
    snprintf(pt->subject, sizeof(pt->subject), "%s", fetched_subject);
    snprintf(pt->from, sizeof(pt->from), "%s", fetched_from);
@@ -1250,65 +1262,48 @@ int email_service_create_pending_trash(int user_id,
    return 0;
 }
 
-/* The email_err_t for a move's EMAIL_RC_* (trash, archive). */
-static email_err_t move_err(int rc) {
-   switch (rc) {
-      case EMAIL_RC_OK:
-      case EMAIL_RC_ALREADY_THERE:
-      case EMAIL_RC_LEFT_FLAGGED:
-         return EMAIL_ERR_NONE;
-      case EMAIL_RC_NOT_FOUND:
-         return EMAIL_ERR_NOT_FOUND;
-      case EMAIL_RC_NO_TRASH:
-         return EMAIL_ERR_NO_TRASH;
-      case EMAIL_RC_FOLDER_MISSING:
-         return EMAIL_ERR_FOLDER_MISSING;
+/* The EMAIL_RC_* the tool reports for one message's move. */
+static int move_rc(const email_move_result_t *r) {
+   switch (r->outcome) {
+      case EMAIL_MOVE_DONE:
+         return EMAIL_RC_OK;
+      case EMAIL_MOVE_ALREADY_THERE:
+         return EMAIL_RC_ALREADY_THERE;
+      case EMAIL_MOVE_LEFT_FLAGGED:
+         return EMAIL_RC_LEFT_FLAGGED;
       default:
-         return EMAIL_ERR_FAILED;
+         break;
+   }
+   switch (r->err) {
+      case EMAIL_ERR_NOT_FOUND:
+         return EMAIL_RC_NOT_FOUND;
+      case EMAIL_ERR_NO_TRASH:
+         return EMAIL_RC_NO_TRASH;
+      case EMAIL_ERR_FOLDER_MISSING:
+         return EMAIL_RC_FOLDER_MISSING;
+      case EMAIL_ERR_NOT_REMOVED:
+         return EMAIL_RC_NOT_REMOVED;
+      case EMAIL_ERR_READ_ONLY:
+         return EMAIL_ACCT_RC_READONLY;
+      case EMAIL_ERR_IN_TRASH:
+      case EMAIL_ERR_OUTCOME_UNKNOWN:
+         /* No code of their own: the caller reads *err (the tool words both). */
+         return EMAIL_RC_FAILURE;
+      default:
+         return EMAIL_RC_FAILURE;
    }
 }
 
-/* Move one message to the account's Trash (@p trash) or Archive, on an account
- * already resolved and checked writable. */
-static int execute_move(const email_account_t *acct,
+/* Move one message to the account's Trash or Archive (the tool's paths: no undo). */
+static int execute_move(int user_id,
                         const char *message_id,
-                        bool trash,
+                        email_move_kind_t kind,
                         const email_target_t *target,
                         email_err_t *err) {
-   *err = EMAIL_ERR_FAILED;
-   /* Gmail API path */
-   if (email_svc_is_gmail_api(acct)) {
-      char token[OAUTH_TOKEN_BUF_SIZE];
-      if (email_svc_gmail_token_err(acct, token, sizeof(token), err) != 0)
-         return 1;
-      int rc = trash ? gmail_trash_message(token, message_id)
-                     : gmail_archive_message(token, message_id);
-      sodium_memzero(token, sizeof(token));
-      *err = rc == 0 ? EMAIL_ERR_NONE : EMAIL_ERR_FAILED;
-      return rc;
-   }
-
-   char imap_folder[128];
-   uint32_t uid_val = 0;
-   if (!email_svc_parse_imap_id(message_id, imap_folder, sizeof(imap_folder), &uid_val, false))
-      return 1;
-
-   email_svc_lease_t lease;
-   if (email_svc_lease_begin(acct, target, EMAIL_LEASE_WAIT_SEC, &lease, err) != EMAIL_RC_OK)
-      return EMAIL_RC_FAILURE;
-   email_conn_t conn;
-   int rc = email_svc_build_conn(acct, &conn);
-   if (rc != EMAIL_SVC_CONN_OK) {
-      *err = email_svc_conn_err(rc);
-      rc = 1;
-   } else {
-      rc = trash ? email_trash_message(&conn, imap_folder, uid_val)
-                 : email_archive_message(&conn, imap_folder, uid_val);
-      *err = move_err(rc);
-   }
-   email_svc_lease_end(&lease);
-   sodium_memzero(&conn, sizeof(conn));
-   return rc;
+   email_move_result_t r;
+   email_service_move(user_id, target, &message_id, 1, kind, false, &r, err);
+   *err = r.err;
+   return move_rc(&r);
 }
 
 /* The pending trash @p pending_id of @p user_id (unused, unexpired); the caller
@@ -1422,7 +1417,7 @@ int email_service_confirm_trash(int user_id,
    int rc;
    if (still_staged) {
       const email_target_t leased = { .account_id = acct.id, .lease_held = true };
-      rc = execute_move(&acct, message_id, true, &leased, err);
+      rc = execute_move(user_id, message_id, EMAIL_MOVE_TRASH, &leased, err);
    } else {
       rc = EMAIL_CONFIRM_RC_NOT_FOUND;
    }
@@ -1447,7 +1442,7 @@ int email_service_archive(int user_id,
    if (!message_id || !message_id[0])
       return 1;
 
-   /* Resolve account */
+   /* The account by name, to an id; email_service_move checks it's writable. */
    email_account_t acct;
    const int find_rc = email_svc_resolve(user_id, account_name, target, &acct);
    if (find_rc != EMAIL_RC_OK) {
@@ -1455,15 +1450,10 @@ int email_service_archive(int user_id,
       return 1;
    }
 
-   if (acct.read_only) {
-      sodium_memzero(&acct, sizeof(acct));
-      *err = EMAIL_ERR_READ_ONLY;
-      return EMAIL_ACCT_RC_READONLY;
-   }
-
-   const int rc = execute_move(&acct, message_id, false, target, err);
+   const email_target_t by_id = { .account_id = acct.id,
+                                  .lease_held = target && target->lease_held };
    sodium_memzero(&acct, sizeof(acct));
-   return rc;
+   return execute_move(user_id, message_id, EMAIL_MOVE_ARCHIVE, &by_id, err);
 }
 
 /* =============================================================================

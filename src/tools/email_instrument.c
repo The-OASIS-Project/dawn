@@ -28,6 +28,7 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "logging.h"
@@ -175,6 +176,31 @@ static bool header_out_is_select(const char *data, size_t size) {
    return header_out_verb_in(data, size, kVerbs);
 }
 
+/* "UID MOVE" or "UID COPY": its answers carry COPYUID. */
+static bool header_out_is_copymove(const char *data, size_t size) {
+   size_t i = 0;
+   while (i < size && !isspace((unsigned char)data[i]))
+      i++; /* the tag */
+   while (i < size && (data[i] == ' ' || data[i] == '\t'))
+      i++;
+   static const char kUid[] = "UID ";
+   if (size - i < sizeof(kUid) - 1 + 4)
+      return false;
+   for (size_t k = 0; k < sizeof(kUid) - 1; k++) {
+      if (toupper((unsigned char)data[i + k]) != kUid[k])
+         return false;
+   }
+   i += sizeof(kUid) - 1;
+   const char *verb = data + i;
+   const size_t vlen = size - i;
+   static const char *const kVerbs[] = { "MOVE", "COPY" };
+   for (size_t v = 0; v < 2; v++) {
+      if (vlen > 4 && strncasecmp(verb, kVerbs[v], 4) == 0 && verb[4] == ' ')
+         return true;
+   }
+   return false;
+}
+
 static int email_debug_cb(CURL *handle,
                           curl_infotype type,
                           char *data,
@@ -187,7 +213,8 @@ static int email_debug_cb(CURL *handle,
 
    if (type == CURLINFO_HEADER_IN) {
       /* The SELECT libcurl issues before a custom command reports the mailbox's
-       * UIDVALIDITY; keep the first one so paging cursors can pin the epoch.
+       * UIDVALIDITY.  Each SELECT going out resets it, so this is that mailbox's
+       * epoch (the first value its answer reports), for pinning ids and cursors.
        * Only lines answering a SELECT/EXAMINE count: libcurl also hands us the
        * lines inside IMAP literals, so a crafted subject containing CRLF +
        * "* OK [UIDVALIDITY n]" in a later FETCH must not be able to set it. */
@@ -195,6 +222,11 @@ static int email_debug_cb(CURL *handle,
          email_imap_parse_uidvalidity(data, size, &ctx->uidvalidity);
       if (ctx->in_select && !ctx->exists_seen)
          ctx->exists_seen = email_imap_parse_exists(data, size, &ctx->exists);
+      /* Where a MOVE or COPY put the messages; the same rule: only while that
+       * command's answer is coming in, so a crafted subject in a FETCH can't. */
+      if (ctx->in_copymove && ctx->copyuid &&
+          email_imap_reply_tag_ok(data, size, ctx->copymove_tag))
+         email_imap_copyuid_line(data, size, ctx->copyuid);
 
       /* Server -> client control line.  Capture tagged failures + BYE. */
       if (mem_ci_contains(data, size, " NO ") || mem_ci_contains(data, size, " BAD ") ||
@@ -219,6 +251,24 @@ static int email_debug_cb(CURL *handle,
          ctx->login_seen++;
       /* Any new command ends the previous one's response window. */
       ctx->in_select = header_out_is_select(data, size);
+      if (ctx->in_select) {
+         ctx->uidvalidity = 0; /* this mailbox's own epoch and count */
+         ctx->exists = 0;
+         ctx->exists_seen = false;
+      }
+      ctx->in_copymove = header_out_is_copymove(data, size);
+      ctx->copymove_tag[0] = '\0';
+      if (ctx->in_copymove) {
+         size_t t = 0;
+         while (t < size && t < sizeof(ctx->copymove_tag) - 1 && !isspace((unsigned char)data[t]))
+            t++;
+         if (t < size && isspace((unsigned char)data[t])) {
+            memcpy(ctx->copymove_tag, data, t);
+            ctx->copymove_tag[t] = '\0';
+         } else {
+            ctx->in_copymove = false; /* a tag too long to track: take no COPYUID */
+         }
+      }
    }
    return 0;
 }

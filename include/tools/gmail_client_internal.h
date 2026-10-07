@@ -31,6 +31,7 @@
 
 #include "core/curl_buffer.h"
 #include "tools/email_mime.h"
+#include "tools/email_undo.h" /* EMAIL_UNDO_LABELS_MAX: the labels an undo keeps */
 
 #define GMAIL_API_BASE "https://gmail.googleapis.com/gmail/v1/users/me"
 
@@ -151,5 +152,76 @@ typedef struct {
 int gmail_parts_from_payload(struct json_object *payload, gmail_parts_t *out);
 
 void gmail_parts_free(gmail_parts_t *p);
+
+/** A message's row (sender, subject, date, labels as flags) from its metadata
+ *  or list JSON (gmail_client.c).  @return 0, or 1 */
+int gmail_summary_from_json(struct json_object *root, email_summary_t *out);
+
+/**
+ * @brief Whether a trashed message's label may be added back by an undo
+ *        (gmail_parts.c): INBOX, UNREAD, STARRED, IMPORTANT, CATEGORY_* and user
+ *        labels (Label_*), never TRASH, SPAM, SENT, DRAFT or CHAT, and only
+ *        names of [A-Za-z0-9_] (they go into a JSON body as they are)
+ */
+bool gmail_label_addable(const char *label);
+
+/**
+ * @brief Pack the addable ones of @p labels into @p out as "A,B,C"
+ *        (gmail_parts.c); whatever doesn't fit is left out
+ * @return how many addable labels didn't fit
+ */
+int gmail_labels_pack(const char *const *labels, int n, char *out, size_t out_size);
+
+/**
+ * @brief The body adding @p packed's labels back: {"addLabelIds":["A","B"]}
+ *        (gmail_parts.c)
+ * @param system_only Only the system ones (no Label_*): the retry when a user
+ *                    label was deleted in between
+ * @return false when there's nothing to add or it doesn't fit
+ */
+bool gmail_labels_add_body(const char *packed, bool system_only, char *out, size_t out_size);
+
+/** What a Gmail message is, read before moving it (gmail_move.c). */
+typedef struct {
+   bool in_inbox;
+   bool in_trash;
+   bool in_spam;
+   char keep[EMAIL_UNDO_LABELS_MAX]; /* the labels an undo adds back */
+   int dropped;                      /* addable labels that didn't fit in keep */
+} gmail_move_meta_t;
+
+/**
+ * @brief Read @p id's labels (format=minimal) on @p curl
+ * @return 0, or 1 with @p err set (EMAIL_ERR_NOT_FOUND for a 404)
+ */
+int gmail_move_meta(CURL *curl,
+                    const char *token,
+                    const char *id,
+                    gmail_move_meta_t *meta,
+                    email_err_t *err);
+
+/**
+ * @brief POST /messages/{id}/{action} with @p body on @p curl (gmail_move.c)
+ * @param action "trash", "untrash" or "modify"
+ * @return 0, or 1 with @p err set (NOT_FOUND for a 404, RATE_LIMITED for a 429);
+ *         @p http_code (may be NULL) the status, so a 400 can be told apart
+ */
+int gmail_message_post(CURL *curl,
+                       const char *token,
+                       const char *id,
+                       const char *action,
+                       const char *body,
+                       long *http_code,
+                       email_err_t *err);
+
+/**
+ * @brief @p id's row from a metadata get on @p curl (gmail_move.c)
+ * @return 0, or 1 with @p err set
+ */
+int gmail_message_row(CURL *curl,
+                      const char *token,
+                      const char *id,
+                      email_summary_t *row,
+                      email_err_t *err);
 
 #endif /* GMAIL_CLIENT_INTERNAL_H */

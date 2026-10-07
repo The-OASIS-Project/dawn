@@ -139,10 +139,11 @@ static void set_seen_folder(CURL *curl,
       b->err = EMAIL_ERR_FAILED;
       return;
    }
-   char encoded[256];
-   email_imap_url_encode_folder(b->folder, encoded, sizeof(encoded));
-   char url[sizeof(conn->imap_url) + sizeof(encoded) + 2];
-   snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded);
+   char url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   if (!email_imap_mailbox_url(conn, b->folder, b->uidvalidity, url, sizeof(url))) {
+      b->err = EMAIL_ERR_FAILED;
+      return;
+   }
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    char cmd[sizeof(set) + 48];
@@ -152,7 +153,8 @@ static void set_seen_folder(CURL *curl,
    CURLcode res = email_imap_run_command(curl, dctx, conn, "flags", cmd, false, &buf);
    curl_buffer_free(&buf);
    if (res != CURLE_OK) {
-      /* A folder deleted or renamed elsewhere: its messages aren't there. */
+      /* A folder deleted or renamed elsewhere, or a mailbox rebuilt since the
+       * ids were issued (the pinned SELECT fails): its messages aren't there. */
       b->err = email_imap_select_failed(res == CURLE_LOGIN_DENIED, logins_before, dctx->login_seen)
                    ? EMAIL_ERR_NOT_FOUND
                    : email_err_from_curl(res);

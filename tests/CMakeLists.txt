@@ -602,6 +602,13 @@ dawn_add_unit_test(test_email_parse
    LIBS    unity
    LABEL   ci)
 
+# Undo tokens for trash and archive: single use, expiry, per-user and global caps.
+dawn_add_unit_test(test_email_undo
+   SOURCES test_email_undo.c
+           ${SRC_ROOT}/src/tools/email_undo.c
+   LIBS    dawn_common unity pthread ${SODIUM_LIBRARIES}
+   LABEL   ci)
+
 # The mail panel's cursor and page merge across accounts.
 dawn_add_unit_test(test_email_cursor
    SOURCES test_email_cursor.c
@@ -614,7 +621,7 @@ dawn_add_unit_test(test_email_wire
    SOURCES test_email_wire.c
            ${SRC_ROOT}/src/webui/email_wire.c
            ${SRC_ROOT}/src/tools/email_parse.c
-   LIBS    unity ${JSONC_LIBRARIES}
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_email_imap_state

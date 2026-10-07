@@ -30,6 +30,7 @@
 #include "core/turn_origin.h"
 #include "tools/email_client.h"
 #include "tools/email_db.h"
+#include "tools/email_undo.h"
 
 /* Draft / pending action limits */
 #define EMAIL_MAX_DRAFTS 16
@@ -255,7 +256,8 @@ bool email_service_account_uses_lease(const email_account_t *acct);
 /**
  * @brief The user's account @p account_id
  * @param enabled_only Refuse a disabled account (operations do; account settings don't)
- * @return EMAIL_RC_OK, or EMAIL_RC_UNKNOWN_ACCOUNT when it isn't the user's (or is disabled)
+ * @return EMAIL_RC_OK, EMAIL_RC_UNKNOWN_ACCOUNT when it isn't the user's (or is disabled),
+ *         or EMAIL_RC_FAILURE when the database couldn't answer (try again)
  */
 int email_service_find_account_by_id(int user_id,
                                      int64_t account_id,
@@ -539,7 +541,7 @@ int email_service_create_pending_trash(int user_id,
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
  *         EMAIL_RC_NOT_FOUND (the message is gone), EMAIL_RC_NO_TRASH,
  *         EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED, EMAIL_RC_NOT_REMOVED
- *         (IMAP; see email_trash_message),
+ *         (IMAP; see email_imap_move_batch),
  *         EMAIL_CONFIRM_RC_NOT_FOUND if not found/expired,
  *         EMAIL_CONFIRM_RC_THROTTLED if throttled,
  *         EMAIL_CONFIRM_RC_ACCOUNT_GONE if the account is no longer available or
@@ -558,7 +560,7 @@ int email_service_confirm_trash(int user_id,
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
  *         EMAIL_ACCT_RC_READONLY if the account is read-only, EMAIL_RC_NOT_FOUND,
  *         EMAIL_RC_FOLDER_MISSING, EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED,
- *         EMAIL_RC_NOT_REMOVED (IMAP; see email_archive_message)
+ *         EMAIL_RC_NOT_REMOVED (IMAP; see email_imap_move_batch)
  * @param target The account by id, or NULL to resolve by name (see email_target_t)
  * @param err  Why it failed (may be NULL)
  */
@@ -567,5 +569,112 @@ int email_service_archive(int user_id,
                           const char *message_id,
                           const email_target_t *target,
                           email_err_t *err);
+
+/* =============================================================================
+ * Trash, archive and undo, several messages at a time (email_service_move.c)
+ * ============================================================================= */
+
+/** Most messages one move or undo takes. */
+#define EMAIL_MOVE_MAX_IDS 50
+
+/** One message's share of email_service_move. */
+typedef struct {
+   email_move_outcome_t outcome;
+   email_err_t err;                     /* EMAIL_ERR_NONE unless outcome is EMAIL_MOVE_FAILED */
+   char message_id[192];                /* the id as the server knows it now (IMAP: pinned) */
+   char undo[EMAIL_UNDO_TOKEN_LEN + 1]; /* "" = can't be undone */
+} email_move_result_t;
+
+/**
+ * @brief Move messages of one account to its Trash or Archive
+ *
+ * IMAP: one lease and one login; per (folder, epoch) group a check that the
+ * messages exist, then the move (email_imap_move_batch).  Gmail: per message, its
+ * labels read first (already in Trash, or not in the inbox for an archive, is
+ * EMAIL_MOVE_ALREADY_THERE; an archive of a message in Trash or Spam is
+ * EMAIL_ERR_IN_TRASH), then the move, paced per account; an archive without
+ * @p want_undo skips the read.  With
+ * @p want_undo a moved message gets an undo token (none when the server can't
+ * say where it went, or the token store is full).  Tells the WebUI what left its
+ * folder (email_changed_notify), whatever else happened.
+ *
+ * @param target The account (see email_target_t); its lease is taken unless held
+ * @param ids    At most EMAIL_MOVE_MAX_IDS
+ * @param results One per id, in order.  Callers heap-allocate a full batch
+ *                (EMAIL_MOVE_MAX_IDS results are ~12 KB)
+ * @param err    Out: what ended the whole call, EMAIL_ERR_NONE when it ran
+ * @return EMAIL_RC_OK (see @p results), EMAIL_ACCT_RC_READONLY, an account-lookup
+ *         code, or EMAIL_RC_FAILURE (@p err says why; @p results carry it too)
+ */
+int email_service_move(int user_id,
+                       const email_target_t *target,
+                       const char *const *ids,
+                       int n,
+                       email_move_kind_t kind,
+                       bool want_undo,
+                       email_move_result_t *results,
+                       email_err_t *err);
+
+/** One undo record's result in email_service_undo. */
+typedef struct {
+   email_err_t err;     /* EMAIL_ERR_NONE when it's back */
+   bool retry;          /* it couldn't run this time: release its token, don't finish it */
+   bool row_ok;         /* row holds the message as it is back */
+   email_summary_t row; /* its id pinned to where it is now */
+} email_undo_result_t;
+
+/**
+ * @brief Move messages back where a move took them (records claimed with
+ *        email_undo_claim)
+ *
+ * Under the account's lease the account is resolved again: one no longer the
+ * user's, enabled, writable, or with another server or login is
+ * EMAIL_ERR_UNDO_EXPIRED.  A message no longer where the move put it (Trash
+ * emptied, moved on) is EMAIL_ERR_NOT_FOUND; a folder it came from that is gone,
+ * EMAIL_ERR_FOLDER_MISSING.  Tells the WebUI the restored rows and the ids that
+ * left Trash or Archive (email_changed_notify).
+ *
+ * @param n       At most EMAIL_MOVE_MAX_IDS
+ * @param results results[i] is recs[i]'s: finish its token (email_undo_finish)
+ *                unless retry is set, then release it (email_undo_release).  On
+ *                an early EMAIL_RC_FAILURE with every result's retry set (a
+ *                transient lookup, the lease busy) release them all.  Callers
+ *                heap-allocate a full batch (EMAIL_MOVE_MAX_IDS results are
+ *                ~95 KB, as many records ~55 KB): too big for a tool thread's stack
+ * @return EMAIL_RC_OK (see @p results), or EMAIL_RC_FAILURE (@p err says why;
+ *         EMAIL_ERR_UNDO_EXPIRED when the account changed under every record)
+ */
+int email_service_undo(int user_id,
+                       const email_target_t *target,
+                       const email_undo_rec_t *recs,
+                       int n,
+                       email_undo_result_t *results,
+                       email_err_t *err);
+
+/**
+ * @brief What a move or undo changed on @p account_id, for the user's open mail
+ *        panels: rows that appeared, ids that left their folder, and whether
+ *        the panel should reload (a row couldn't be read, or a message's move
+ *        may have happened without its answer)
+ *
+ * @p kind and @p undo say what moved, because a Gmail id is the same in every
+ * view.  A move's @p destroyed ids left INBOX (archive) or everything but
+ * Trash (trash); an IMAP id names its folder, so it left just that one.  An
+ * undo's @p created rows come back (a Gmail row replaces the one with its id,
+ * which leaves the Trash view for a trash undo); its @p destroyed ids are the
+ * IMAP copies that left Trash or Archive.
+ *
+ * Called with no mutex held (the account's lease may be).  A no-op unless the
+ * WebUI overrides it; the override only queues.
+ */
+void email_changed_notify(int user_id,
+                          int64_t account_id,
+                          email_move_kind_t kind,
+                          bool undo,
+                          const email_summary_t *created,
+                          int nc,
+                          const char *const *destroyed,
+                          int nd,
+                          bool refresh);
 
 #endif /* EMAIL_SERVICE_H */

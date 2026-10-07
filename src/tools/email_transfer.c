@@ -65,6 +65,14 @@ const char *email_error_name(email_err_t err) {
          return "INVALID_REQUEST";
       case EMAIL_ERR_UNAVAILABLE:
          return "UNAVAILABLE";
+      case EMAIL_ERR_NOT_REMOVED:
+         return "NOT_REMOVED";
+      case EMAIL_ERR_UNDO_EXPIRED:
+         return "UNDO_EXPIRED";
+      case EMAIL_ERR_IN_TRASH:
+         return "IN_TRASH";
+      case EMAIL_ERR_OUTCOME_UNKNOWN:
+         return "OUTCOME_UNKNOWN";
       case EMAIL_ERR_FAILED:
          break;
    }

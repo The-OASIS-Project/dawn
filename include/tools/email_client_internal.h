@@ -28,7 +28,9 @@
 
 #include "core/curl_buffer.h"
 #include "tools/email_client.h"
+#include "tools/email_imap_roles.h"
 #include "tools/email_instrument.h"
+#include "tools/email_parse.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,8 +54,17 @@ CURLcode email_imap_run_command(CURL *curl,
                                 bool first,
                                 curl_buffer_t *buf);
 
-/** @p folder percent-encoded for an IMAP URL path, as every IMAP call addresses it. */
-void email_imap_url_encode_folder(const char *folder, char *out, size_t out_len);
+/**
+ * @brief The URL of @p folder on @p conn's server, pinned to @p uidvalidity
+ *        when non-zero (libcurl then refuses the SELECT of a mailbox whose
+ *        epoch changed, as CURLE_REMOTE_FILE_NOT_FOUND)
+ * @return false when it doesn't fit @p out
+ */
+bool email_imap_mailbox_url(const email_conn_t *conn,
+                            const char *folder,
+                            uint32_t uidvalidity,
+                            char *out,
+                            size_t out_size);
 
 /**
  * @brief STATUS INBOX (UNSEEN) on @p curl, before any mailbox is selected on it
@@ -94,6 +105,34 @@ bool email_imap_restore_unseen(CURL *curl,
                                const email_conn_t *conn,
                                const char *folder_url,
                                uint32_t uid);
+
+/**
+ * @brief Log in on @p curl with no mailbox selected (so a refused login is told
+ *        apart from a refused SELECT later), then the account's folder roles,
+ *        cached per account (email_imap_move.c)
+ * @return EMAIL_ERR_NONE, or why it failed
+ */
+email_err_t email_imap_open_roles(CURL *curl,
+                                  email_instrument_ctx_t *dctx,
+                                  const email_conn_t *conn,
+                                  email_imap_roles_t *roles);
+
+/** Drop @p conn's cached roles: the next move probes again (email_imap_move.c). */
+void email_imap_roles_forget(const email_conn_t *conn);
+
+/**
+ * @brief Rows (sender, subject, date, flags) for @p uids in @p folder, on
+ *        @p curl's logged-in connection (email_client.c)
+ * @return 0 with @p out_count rows (a UID that isn't there has none), or 1
+ */
+int email_imap_fetch_summaries(CURL *curl,
+                               const email_conn_t *conn,
+                               const char *folder,
+                               const uint32_t *uids,
+                               int n,
+                               email_summary_t *out,
+                               int max_out,
+                               int *out_count);
 
 #ifdef __cplusplus
 }

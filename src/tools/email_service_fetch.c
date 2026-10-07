@@ -173,6 +173,16 @@ static void stamp_account(email_summary_t *out, int n, const email_account_t *ac
    }
 }
 
+/* IMAP rows' ids as DAWN issues them ("folder:uid.uidvalidity"); a row whose id
+ * wouldn't fit keeps none rather than a cut one. */
+static void imap_row_ids(email_summary_t *out, int n, const char *folder, uint32_t uidvalidity) {
+   for (int i = 0; i < n; i++) {
+      if (!email_imap_id_format(folder, out[i].uid, uidvalidity, out[i].message_id,
+                                sizeof(out[i].message_id)))
+         OLOG_WARNING("email: an IMAP id didn't fit (folder name of %zu bytes)", strlen(folder));
+   }
+}
+
 static int recent_on_account(const email_account_t *acct,
                              const char *folder,
                              int count,
@@ -313,9 +323,9 @@ static int recent_on_account(const email_account_t *acct,
       snprintf(ext->imap_folder, sizeof(ext->imap_folder), "%s", norm.imap_folder);
    }
 
-   /* Populate message_id (folder:uid) for IMAP results, then stamp the account. */
-   for (int i = 0; i < *out_count; i++)
-      snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
+   /* Each row's id, pinned to the epoch this listing saw, then the account. */
+   imap_row_ids(out, *out_count, norm.imap_folder,
+                page.next_uidvalidity ? page.next_uidvalidity : page.uidvalidity);
    stamp_account(out, *out_count, acct);
 
    return rc;
@@ -421,8 +431,8 @@ static int search_single_account(email_account_t *acct,
       snprintf(imap_folder, sizeof(((email_search_report_t *)0)->imap_folder), "%s",
                norm.imap_folder);
 
-   for (int i = 0; i < *out_count; i++)
-      snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
+   imap_row_ids(out, *out_count, norm.imap_folder,
+                page.next_uidvalidity ? page.next_uidvalidity : page.uidvalidity);
    stamp_account(out, *out_count, acct);
 
    /* Surface a timeout as a distinct code so the tool layer can hint the LLM to
