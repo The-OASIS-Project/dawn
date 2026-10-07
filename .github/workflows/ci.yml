@@ -77,6 +77,41 @@ jobs:
         run: ctest --test-dir build-ci -j"$(nproc)" --output-on-failure --no-tests=error -L ci
 
   # -------------------------------------------------------------------------
+  # Sanitizers: the ci unit tests built with AddressSanitizer + UBSan (memory
+  # errors, leaks, undefined behavior) and, separately, ThreadSanitizer (data
+  # races). Any report fails the test that triggered it.
+  # -------------------------------------------------------------------------
+  sanitizers:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, tsan]
+    env:
+      UBSAN_OPTIONS: print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Allow the sanitizers' memory layout
+        # The runner kernel's default mmap randomization (32 bits) breaks GCC 11's
+        # sanitizer runtimes at startup ("unexpected memory mapping").
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Configure (${{ matrix.preset }} preset)
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build CI tests
+        run: make -C build-${{ matrix.preset }} -j"$(nproc)" tests-ci
+
+      - name: Run tests
+        run: ctest --test-dir build-${{ matrix.preset }} -j"$(nproc)" --output-on-failure --no-tests=error -L ci
+
+  # -------------------------------------------------------------------------
   # Coverage: the ci unit tests, instrumented, reported with gcovr (gcovr.cfg
   # picks DAWN's own code). Pushes to main only, so pull requests don't wait on
   # a second build. The summary goes on the run's page; the HTML report is an
