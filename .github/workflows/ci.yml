@@ -65,20 +65,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install dependencies
-        run: |
-          # See format-check job: drop the flaky Google Chrome apt repo first.
-          sudo rm -f /etc/apt/sources.list.d/*google-chrome*
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake build-essential pkg-config \
-            libcurl4-openssl-dev libjson-c-dev libssl-dev libsqlite3-dev \
-            libsodium-dev libspdlog-dev libmosquitto-dev \
-            libflac-dev libsamplerate0-dev libsndfile1-dev \
-            libmpg123-dev libvorbis-dev \
-            libmupdf-dev libfreetype-dev libharfbuzz-dev libzip-dev libxml2-dev \
-            libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev libjpeg-dev \
-            libical-dev libgmime-3.0-dev \
-            libstemmer-dev
+        uses: ./.github/actions/install-ci-deps
 
       - name: Configure (ci preset)
         run: cmake --preset ci
@@ -88,6 +75,54 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build-ci -j"$(nproc)" --output-on-failure --no-tests=error -L ci
+
+  # -------------------------------------------------------------------------
+  # Coverage: the ci unit tests, instrumented, reported with gcovr (gcovr.cfg
+  # picks DAWN's own code). Pushes to main only, so pull requests don't wait on
+  # a second build. The summary goes on the run's page; the HTML report is an
+  # artifact. Unit tests only: WebUI and network paths are covered by the
+  # integration scripts, not counted here.
+  # -------------------------------------------------------------------------
+  coverage:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Install gcovr
+        run: sudo apt-get install -y --no-install-recommends gcovr
+
+      - name: Configure (coverage preset)
+        run: cmake --preset coverage
+
+      - name: Build CI tests
+        run: make -C build-coverage -j"$(nproc)" tests-ci
+
+      - name: Run tests
+        run: ctest --test-dir build-coverage -j"$(nproc)" --output-on-failure --no-tests=error -L ci
+
+      - name: Coverage report
+        run: |
+          mkdir -p coverage
+          gcovr build-coverage --print-summary --html-details coverage/index.html \
+            | tee coverage/summary.txt
+          {
+            echo '### Unit-test coverage (DAWN code, gcovr)'
+            echo '```'
+            cat coverage/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the HTML report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
 
   # -------------------------------------------------------------------------
   # Job 3: Docker Build (~10 min)

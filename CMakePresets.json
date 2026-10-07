@@ -91,6 +91,17 @@
         "ENABLE_AEC": "OFF",
         "ENABLE_VOSK": "ON"
       }
+    },
+    {
+      "name": "coverage",
+      "inherits": "ci",
+      "displayName": "Coverage (CI unit tests, instrumented)",
+      "description": "The ci preset built with --coverage; run the ci tests, then gcovr (settings in gcovr.cfg).",
+      "binaryDir": "${sourceDir}/build-coverage",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "--coverage",
+        "CMAKE_CXX_FLAGS": "--coverage"
+      }
     }
   ],
   "buildPresets": [
