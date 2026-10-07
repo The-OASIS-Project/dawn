@@ -33,6 +33,7 @@
 #include "tools/email_db.h"
 #include "tools/email_service.h"
 #include "tools/oauth_client.h"
+#include "utils/string_utils.h"
 #include "webui/webui_email_exec.h"
 #include "webui/webui_internal.h"
 
@@ -57,6 +58,16 @@ static void echo_req(json_object *payload, json_object *resp_payload) {
  * List Accounts
  * ============================================================================= */
 
+/* Account fields are typed by the user; a bad byte would close the socket on
+ * the whole frame, so they go out well-formed. */
+static void add_text(json_object *o, const char *key, const char *val) {
+   char *fixed = NULL;
+   if (!val || utf8_repair_dup(val, strlen(val), &fixed, NULL) != 0)
+      val = "";
+   json_object_object_add(o, key, json_object_new_string(fixed ? fixed : val));
+   free(fixed);
+}
+
 void handle_email_list_accounts(ws_connection_t *conn, json_object *payload) {
    if (!conn_require_auth(conn))
       return;
@@ -80,18 +91,15 @@ void handle_email_list_accounts(ws_connection_t *conn, json_object *payload) {
       for (int i = 0; i < count; i++) {
          json_object *obj = json_object_new_object();
          json_object_object_add(obj, "id", json_object_new_int64(accounts[i].id));
-         json_object_object_add(obj, "name", json_object_new_string(accounts[i].name));
-         json_object_object_add(obj, "imap_server",
-                                json_object_new_string(accounts[i].imap_server));
+         add_text(obj, "name", accounts[i].name);
+         add_text(obj, "imap_server", accounts[i].imap_server);
          json_object_object_add(obj, "imap_port", json_object_new_int(accounts[i].imap_port));
          json_object_object_add(obj, "imap_ssl", json_object_new_boolean(accounts[i].imap_ssl));
-         json_object_object_add(obj, "smtp_server",
-                                json_object_new_string(accounts[i].smtp_server));
+         add_text(obj, "smtp_server", accounts[i].smtp_server);
          json_object_object_add(obj, "smtp_port", json_object_new_int(accounts[i].smtp_port));
          json_object_object_add(obj, "smtp_ssl", json_object_new_boolean(accounts[i].smtp_ssl));
-         json_object_object_add(obj, "username", json_object_new_string(accounts[i].username));
-         json_object_object_add(obj, "display_name",
-                                json_object_new_string(accounts[i].display_name));
+         add_text(obj, "username", accounts[i].username);
+         add_text(obj, "display_name", accounts[i].display_name);
          json_object_object_add(obj, "has_password",
                                 json_object_new_boolean(accounts[i].encrypted_password_len > 0));
          json_object_object_add(obj, "auth_type", json_object_new_string(accounts[i].auth_type));

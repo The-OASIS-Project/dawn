@@ -80,11 +80,33 @@ static void message(email_message_t *m, char *body, char *html) {
 /* Every string the panel sends is well-formed UTF-8: one bad byte from a
  * mis-declared charset or a cut preview would make the browser drop the socket. */
 static bool well_formed(const char *s) {
+   return utf8_is_valid(s, strlen(s));
+}
+
+/* The repair reads exactly len bytes: a NUL is an ordinary byte, and a lead
+ * byte at the end of a buffer with nothing after it is ill-formed. */
+static void test_repair_is_bounded(void) {
+   char *fixed = NULL;
    size_t n = 0;
-   char *fixed = utf8_repair_dup(s, strlen(s), &n);
-   const bool ok = fixed == NULL;
+   const char after_nul[] = { '<', 'p', '>', '\0', (char)0xff };
+   TEST_ASSERT_FALSE(utf8_is_valid(after_nul, sizeof(after_nul)));
+   TEST_ASSERT_EQUAL_INT(0, utf8_repair_dup(after_nul, sizeof(after_nul), &fixed, &n));
+   TEST_ASSERT_NOT_NULL(fixed);
+   TEST_ASSERT_EQUAL_size_t(7, n);
+   TEST_ASSERT_EQUAL_MEMORY("<p>\0\xef\xbf\xbd", fixed, 7);
    free(fixed);
-   return ok;
+
+   /* A 2-byte lead as the last byte, the next byte (not ours) a valid tail. */
+   const char buf[] = { 'a', (char)0xc3, (char)0xa9 };
+   TEST_ASSERT_FALSE(utf8_is_valid(buf, 2));
+   TEST_ASSERT_TRUE(utf8_is_valid(buf, 3));
+   TEST_ASSERT_EQUAL_INT(0, utf8_repair_dup(buf, 2, &fixed, &n));
+   TEST_ASSERT_EQUAL_size_t(4, n);
+   TEST_ASSERT_EQUAL_MEMORY("a\xef\xbf\xbd", fixed, 4);
+   free(fixed);
+
+   TEST_ASSERT_EQUAL_INT(0, utf8_repair_dup("ok \xc3\xa9", 5, &fixed, &n));
+   TEST_ASSERT_NULL(fixed); /* already well-formed: no copy */
 }
 
 static void test_bad_utf8_never_goes_out(void) {
@@ -367,6 +389,7 @@ int main(void) {
    RUN_TEST(test_the_escape_count_matches_json_c);
    RUN_TEST(test_words_for_codes);
    RUN_TEST(test_bad_utf8_never_goes_out);
+   RUN_TEST(test_repair_is_bounded);
    RUN_TEST(test_email_changed_frame);
    RUN_TEST(test_undo_tokens_are_checked);
    RUN_TEST(test_move_payload);

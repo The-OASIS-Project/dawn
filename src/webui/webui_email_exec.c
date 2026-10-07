@@ -41,6 +41,7 @@
 #include "logging.h"
 #include "tools/email_account_lease.h"
 #include "tools/email_transfer.h"
+#include "utils/string_utils.h"
 
 /* Sessions that can have email work at once. */
 #define EMAIL_EXEC_SESSIONS 64
@@ -182,6 +183,8 @@ bool email_exec_payload_req(json_object *payload, char *out, size_t out_size) {
       if (ch < 0x20 || ch == 0x7f)
          return false; /* echoed in every reply: keep it plain */
    }
+   if (!utf8_is_valid(req, len))
+      return false; /* a bad byte echoed back would close the client's socket */
    memcpy(out, req, len + 1);
    return true;
 }

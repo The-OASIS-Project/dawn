@@ -39,6 +39,7 @@
 #include "tools/email_service.h"
 #include "tools/gmail_client.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 #include "webui/email_cursor.h"
 #include "webui/email_wire.h"
 #include "webui/webui_email_exec.h"
@@ -145,7 +146,7 @@ bool email_panel_text_ok(json_object *v, size_t max) {
       if (c < 0x20 || c == 0x7f)
          return false;
    }
-   return true;
+   return utf8_is_valid(s, len);
 }
 
 /* A string member copied into @p out (1..max bytes, printable): @p present says if it was there. */

@@ -37,7 +37,9 @@
 static void add_str(json_object *o, const char *key, const char *val) {
    if (!val)
       val = "";
-   char *fixed = utf8_repair_dup(val, strlen(val), NULL);
+   char *fixed = NULL;
+   if (utf8_repair_dup(val, strlen(val), &fixed, NULL) != 0)
+      val = ""; /* no memory for the repair: never the raw bytes */
    json_object_object_add(o, key, json_object_new_string(fixed ? fixed : val));
    free(fixed);
 }
@@ -184,10 +186,17 @@ json_object *email_wire_read_payload(int64_t account_id,
    /* Size the frame without serializing the bodies: the small fields once, the
     * bodies by counting their escapes.  The reply is then serialized once. */
    size_t text_len = m->body ? (size_t)m->body_len : 0;
-   char *text_fixed = utf8_repair_dup(m->body ? m->body : "", text_len, &text_len);
-   const char *text = text_fixed ? text_fixed : (m->body ? m->body : "");
-   if (!text_fixed)
+   char *text_fixed = NULL;
+   const char *text = m->body ? m->body : "";
+   if (utf8_repair_dup(text, text_len, &text_fixed, &text_len) != 0) {
+      text = ""; /* no memory for the repair: never the raw bytes */
+      text_len = 0;
+      json_object_object_add(msg, "text_truncated", json_object_new_boolean(1));
+   } else if (text_fixed) {
+      text = text_fixed;
+   } else {
       text_len = m->body ? (size_t)m->body_len : 0;
+   }
    const size_t base = json_len(payload) + FRAME_OVERHEAD + sizeof(",\"body_text\":\"\"") +
                        escaped_len(text, text_len);
    json_object_object_add(msg, "body_text", json_object_new_string_len(text, (int)text_len));
@@ -196,10 +205,17 @@ json_object *email_wire_read_payload(int64_t account_id,
    /* body_html last, cut to what the frame has room for. */
    if (m->body_html && m->body_html_len > 0) {
       size_t full = (size_t)m->body_html_len;
-      char *html_fixed = utf8_repair_dup(m->body_html, full, &full);
-      const char *html = html_fixed ? html_fixed : m->body_html;
-      if (!html_fixed)
+      char *html_fixed = NULL;
+      const char *html = m->body_html;
+      if (utf8_repair_dup(m->body_html, full, &html_fixed, &full) != 0) {
+         html = ""; /* no memory for the repair: never the raw bytes */
+         full = 0;
+         json_object_object_add(msg, "html_truncated", json_object_new_boolean(1));
+      } else if (html_fixed) {
+         html = html_fixed;
+      } else {
          full = (size_t)m->body_html_len;
+      }
       const size_t key = sizeof(",\"body_html\":\"\"");
       const size_t room = frame_max > base + key ? frame_max - base - key : 0;
       size_t len = escaped_prefix(html, full, room);
@@ -246,7 +262,9 @@ json_object *email_wire_changed(int64_t account_id,
    for (int i = 0; destroyed && i < nd; i++) {
       if (!destroyed[i])
          continue;
-      char *fixed = utf8_repair_dup(destroyed[i], strlen(destroyed[i]), NULL);
+      char *fixed = NULL;
+      if (utf8_repair_dup(destroyed[i], strlen(destroyed[i]), &fixed, NULL) != 0)
+         continue; /* no memory for the repair: leave this id out */
       json_object_array_add(gone, json_object_new_string(fixed ? fixed : destroyed[i]));
       free(fixed);
    }
