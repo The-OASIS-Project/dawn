@@ -469,7 +469,7 @@ if(EXISTS ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c)
               ${SRC_ROOT}/dawn_satellite/src/ota_launch_core.c
               ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
       INCLUDES ${SRC_ROOT}/dawn_satellite/include
-      DEFINES OTA_DATA_DIR="/tmp/dawn_test_ota_launch"
+      DEFINES OTA_DATA_DIR="${CMAKE_CURRENT_BINARY_DIR}/dawn_test_ota_launch"
       LIBS    unity
       LABEL   ci)
 
@@ -478,7 +478,7 @@ if(EXISTS ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c)
               ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c
               ${SRC_ROOT}/src/core/ota_manifest.c
       INCLUDES ${SRC_ROOT}/dawn_satellite/include
-      DEFINES OTA_KEYRING_PATH="/tmp/dawn_test_ota_keyring"
+      DEFINES OTA_KEYRING_PATH="${CMAKE_CURRENT_BINARY_DIR}/dawn_test_ota_keyring"
       LIBS    unity ${SODIUM_LIBRARIES} ${JSONC_LIBRARIES}
       LABEL   ci)
 else()
