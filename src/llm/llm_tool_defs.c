@@ -141,7 +141,9 @@ static struct json_object *canonical(struct json_object *v) {
          (void)val;
          keys[k++] = key;
       }
-      qsort(keys, (size_t)k, sizeof(*keys), cmp_key);
+      if (k > 1) { /* keys is NULL for an empty object, and qsort's array must not be */
+         qsort(keys, (size_t)k, sizeof(*keys), cmp_key);
+      }
       struct json_object *out = json_object_new_object();
       for (int i = 0; out && i < k; i++) {
          struct json_object *child = NULL;
