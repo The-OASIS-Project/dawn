@@ -43,6 +43,20 @@ email_err_t email_err_from_curl(CURLcode res);
  */
 void email_transfer_set_cancel(CURL *curl, const atomic_bool *cancel);
 
+/**
+ * @brief Set this thread's transfer cancel flag; every IMAP, SMTP or Gmail handle
+ *        the thread creates from now on ends early once it is set
+ *
+ * For work run on someone else's behalf (a WebUI request on a worker thread): set
+ * it when the work starts and restore the previous one when it ends.
+ *
+ * @return The previous flag (may be NULL)
+ */
+const atomic_bool *email_transfer_scope_cancel(const atomic_bool *cancel);
+
+/** This thread's transfer cancel flag (NULL when none is set). */
+const atomic_bool *email_transfer_thread_cancel(void);
+
 #ifdef __cplusplus
 }
 #endif

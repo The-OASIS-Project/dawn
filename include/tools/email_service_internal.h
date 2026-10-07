@@ -28,6 +28,7 @@
 
 #include "tools/email_client.h"
 #include "tools/email_db.h"
+#include "tools/email_service.h"
 #include "tools/email_types.h"
 
 /* email_svc_build_conn() outcomes. */
@@ -44,6 +45,46 @@ int email_svc_find_account(int user_id, const char *account_name, email_account_
 
 /** The email_err_t for an account lookup's EMAIL_RC_* (NO_ACCOUNTS, UNKNOWN_ACCOUNT, ...). */
 email_err_t email_svc_account_err(int rc);
+
+/** The email_err_t for a failed email_svc_build_conn() (EMAIL_SVC_CONN_*). */
+email_err_t email_svc_conn_err(int conn_rc);
+
+/**
+ * @brief The account an operation runs on: @p target's id (the user's, enabled),
+ *        else the one named @p account_name (email_svc_find_account)
+ */
+int email_svc_resolve(int user_id,
+                      const char *account_name,
+                      const email_target_t *target,
+                      email_account_t *out);
+
+/* An IMAP account's lease as one operation took it (or found it held). */
+typedef struct {
+   int64_t account_id;
+   bool taken; /* this operation took it, so it releases it */
+} email_svc_lease_t;
+
+/**
+ * @brief Take @p acct's lease for one operation, unless the account needs none
+ *        (Gmail API) or @p target says the caller holds it (@c lease_held)
+ *
+ * Waits behind other callers up to @p wait_s seconds (0: only if free now),
+ * giving up early when the thread's transfer cancel flag is set.  Taken only by
+ * the public email_service_* entry points, never by the email_svc_* helpers
+ * they call.
+ *
+ * @return EMAIL_RC_OK (end it with email_svc_lease_end), or EMAIL_RC_FAILURE with
+ *         @p err EMAIL_ERR_BUSY (timed out, or too many accounts in use),
+ *         EMAIL_ERR_CANCELLED or EMAIL_ERR_FAILED
+ */
+int email_svc_lease_begin(const email_account_t *acct,
+                          const email_target_t *target,
+                          int wait_s,
+                          email_svc_lease_t *lease,
+                          email_err_t *err);
+
+/** Release what email_svc_lease_begin took (no-op when it took nothing). */
+void email_svc_lease_end(email_svc_lease_t *lease);
 
 /** Whether @p acct is read through the Gmail API (OAuth on gmail.com). */
 bool email_svc_is_gmail_api(const email_account_t *acct);

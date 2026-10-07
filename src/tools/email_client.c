@@ -144,6 +144,7 @@ CURL *email_imap_handle_create(const email_conn_t *conn) {
    if (strstr(conn->imap_url, "imap://") != NULL) {
       curl_easy_setopt(curl, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);
    }
+   email_transfer_set_cancel(curl, email_transfer_thread_cancel());
 
    return curl;
 }
@@ -170,6 +171,7 @@ static CURL *create_smtp_handle(const email_conn_t *conn) {
    if (strstr(conn->smtp_url, "smtp://") != NULL) {
       curl_easy_setopt(curl, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);
    }
+   email_transfer_set_cancel(curl, email_transfer_thread_cancel());
 
    return curl;
 }
@@ -832,7 +834,12 @@ int email_fetch_recent(const email_conn_t *conn,
                        email_imap_page_t *page,
                        email_summary_t *out,
                        int max_out,
-                       int *out_count) {
+                       int *out_count,
+                       email_err_t *err) {
+   email_err_t err_local;
+   if (!err)
+      err = &err_local;
+   *err = EMAIL_ERR_FAILED;
    *out_count = 0;
    page_reset_outputs(page);
 
@@ -869,6 +876,8 @@ int email_fetch_recent(const email_conn_t *conn,
    CURLcode res = CURLE_OK;
    if (imap_windowed_search(curl, &dctx, conn, "recent", unread_only ? " UNSEEN" : "", page, count,
                             EMAIL_IMAP_TIMEOUT_SEC, rev_uids, &rev_count, &res) != 0) {
+      if (res != CURLE_OK)
+         *err = email_err_from_curl(res);
       email_instrument_op_done(conn->username, "recent", curl, &dctx);
       curl_easy_cleanup(curl);
       return 1;
@@ -883,6 +892,8 @@ int email_fetch_recent(const email_conn_t *conn,
    /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
     * an error, not a successful-looking empty mailbox (the digest would then
     * treat a broken account as healthy). */
+   if (fetch_rc == 0)
+      *err = EMAIL_ERR_NONE;
    return fetch_rc;
 }
 
@@ -1069,13 +1080,12 @@ int email_search(const email_conn_t *conn,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
-                 bool *auth_denied,
-                 bool *timed_out) {
+                 email_err_t *err) {
+   email_err_t err_local;
+   if (!err)
+      err = &err_local;
+   *err = EMAIL_ERR_FAILED;
    *out_count = 0;
-   if (auth_denied)
-      *auth_denied = false;
-   if (timed_out)
-      *timed_out = false;
    page_reset_outputs(page);
 
    if (max_out > EMAIL_MAX_FETCH_RESULTS)
@@ -1144,10 +1154,8 @@ int email_search(const email_conn_t *conn,
    }
    if (imap_windowed_search(curl, &dctx, conn, "search", search_cmd, page, max_out,
                             EMAIL_IMAP_SEARCH_TIMEOUT_SEC, rev_uids, &rev_count, &res) != 0) {
-      if (auth_denied && res == CURLE_LOGIN_DENIED)
-         *auth_denied = true;
-      if (timed_out && res == CURLE_OPERATION_TIMEDOUT)
-         *timed_out = true;
+      if (res != CURLE_OK)
+         *err = email_err_from_curl(res);
       email_instrument_op_done(conn->username, "search", curl, &dctx);
       curl_easy_cleanup(curl);
       return 1;
@@ -1161,6 +1169,8 @@ int email_search(const email_conn_t *conn,
    /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
     * an error, not a successful-looking empty mailbox (the digest would then
     * treat a broken account as healthy). */
+   if (fetch_rc == 0)
+      *err = EMAIL_ERR_NONE;
    return fetch_rc;
 }
 
@@ -1253,11 +1263,9 @@ int email_send(const email_conn_t *conn,
  * Public API: Test Connection
  * ============================================================================= */
 
-int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok) {
-   *imap_ok = false;
-   *smtp_ok = false;
-
-   /* Test IMAP: connect to INBOX */
+bool email_test_imap(const email_conn_t *conn) {
+   bool ok = false;
+   /* Connect to INBOX */
    CURL *curl = email_imap_handle_create(conn);
    if (curl) {
       /* Instrument for the same on-wire-login count + rejection capture as the
@@ -1278,8 +1286,8 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
       CURLcode res = curl_easy_perform(curl);
-      *imap_ok = (res == CURLE_OK);
-      if (!*imap_ok) {
+      ok = (res == CURLE_OK);
+      if (!ok) {
          if (res == CURLE_LOGIN_DENIED)
             email_instrument_note_denied(conn->username, &dctx, "test-connection");
          else
@@ -1289,22 +1297,25 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
    }
+   return ok;
+}
 
-   /* Test SMTP: EHLO only (CURLOPT_CONNECT_ONLY) */
-   curl = create_smtp_handle(conn);
+bool email_test_smtp(const email_conn_t *conn) {
+   bool ok = false;
+   /* EHLO only (CURLOPT_CONNECT_ONLY) */
+   CURL *curl = create_smtp_handle(conn);
    if (curl) {
       curl_easy_setopt(curl, CURLOPT_URL, conn->smtp_url);
       curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1L);
 
       CURLcode res = curl_easy_perform(curl);
-      *smtp_ok = (res == CURLE_OK);
-      if (!*smtp_ok) {
+      ok = (res == CURLE_OK);
+      if (!ok) {
          OLOG_WARNING("email: SMTP test failed: %s", curl_easy_strerror(res));
       }
       curl_easy_cleanup(curl);
    }
-
-   return (*imap_ok && *smtp_ok) ? 0 : 1;
+   return ok;
 }
 
 /* =============================================================================

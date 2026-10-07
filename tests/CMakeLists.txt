@@ -498,6 +498,22 @@ dawn_add_unit_test(test_briefing_prompt
    LIBS    dawn_common unity
    LABEL   ci)
 
+# One IMAP connection per account: the lease's FIFO handover, cancel, timeout
+# and release hook.  NDEBUG so a re-take by the holder returns instead of asserting.
+dawn_add_unit_test(test_email_account_lease
+   SOURCES test_email_account_lease.c
+           ${SRC_ROOT}/src/tools/email_account_lease.c
+   LIBS    dawn_common unity pthread
+   DEFINES NDEBUG
+   LABEL   ci)
+
+# Email failure codes on the wire, curl results as codes, the per-thread cancel.
+dawn_add_unit_test(test_email_transfer
+   SOURCES test_email_transfer.c
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    unity pthread ${CURL_LIBRARIES}
+   LABEL   ci)
+
 # An IMAP account's capabilities and Trash/Archive folders, from its replies.
 dawn_add_unit_test(test_email_imap_roles
    SOURCES test_email_imap_roles.c

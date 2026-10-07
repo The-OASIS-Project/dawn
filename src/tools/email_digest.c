@@ -212,7 +212,7 @@ static bool digest_fetch_account(int user_id,
        * service layer normalizes per backend. */
       int rc = email_service_recent(user_id, acct->username, "inbox", want, unread_only,
                                     tok_in[0] ? tok_in : NULL, batch, EMAIL_MAX_FETCH_RESULTS,
-                                    &out_count, tok_out, sizeof(tok_out));
+                                    &out_count, tok_out, sizeof(tok_out), NULL, NULL);
       if (rc != EMAIL_RC_OK) {
          if (st.pages == 0) {
             strbuf_appendf(status, "  %s <%s>: unavailable (fetch error — check account/OAuth)\n",

@@ -118,9 +118,7 @@ int email_svc_read_single(const email_account_t *acct,
    const int crc = email_svc_build_conn(acct, &conn);
    if (crc != EMAIL_SVC_CONN_OK) {
       sodium_memzero(&conn, sizeof(conn));
-      *err = crc == EMAIL_SVC_CONN_REVOKED ? EMAIL_ERR_AUTH_REVOKED
-             : crc == EMAIL_SVC_CONN_AUTH  ? EMAIL_ERR_AUTH_FAILED
-                                           : EMAIL_ERR_FAILED;
+      *err = email_svc_conn_err(crc);
       return EMAIL_RC_FAILURE;
    }
    const int rc = email_read_message(&conn, folder, uid, &o, out, err);
@@ -131,11 +129,41 @@ int email_svc_read_single(const email_account_t *acct,
    return EMAIL_RC_OK;
 }
 
+/* One account's read under its lease (taken here unless @p target). */
+static int read_leased(const email_account_t *acct,
+                       const char *message_id,
+                       const email_read_opts_t *opts,
+                       email_message_t *out,
+                       const email_target_t *target,
+                       email_err_t *err,
+                       bool fanout) {
+   /* A fan-out probing an IMAP account with a Gmail id: not here, and no reason
+    * to wait for the account's lease to find that out. */
+   if (fanout && !email_svc_is_gmail_api(acct)) {
+      char folder[128];
+      uint32_t uid = 0;
+      if (!email_svc_parse_imap_id(message_id, folder, sizeof(folder), &uid, true)) {
+         *err = EMAIL_ERR_NOT_FOUND;
+         return EMAIL_RC_NOT_FOUND;
+      }
+   }
+   /* A fan-out reports a busy account rather than wait it out: the accounts
+    * after it shouldn't wait behind it one after another. */
+   email_svc_lease_t lease;
+   const int wait_s = fanout ? EMAIL_LEASE_FANOUT_WAIT_SEC : EMAIL_LEASE_WAIT_SEC;
+   if (email_svc_lease_begin(acct, target, wait_s, &lease, err) != EMAIL_RC_OK)
+      return EMAIL_RC_FAILURE;
+   const int rc = email_svc_read_single(acct, message_id, opts, out, err, fanout);
+   email_svc_lease_end(&lease);
+   return rc;
+}
+
 int email_service_read(int user_id,
                        const char *account_name,
                        const char *message_id,
                        const email_read_opts_t *opts,
                        email_message_t *out,
+                       const email_target_t *target,
                        email_err_t *err) {
    email_err_t err_local;
    if (!err)
@@ -144,14 +172,16 @@ int email_service_read(int user_id,
    if (!message_id || !message_id[0] || !opts)
       return EMAIL_RC_FAILURE;
 
-   if (account_name && account_name[0]) {
+   if (target || (account_name && account_name[0])) {
       email_account_t acct;
-      const int find_rc = email_svc_find_account(user_id, account_name, &acct);
+      const int find_rc = email_svc_resolve(user_id, account_name, target, &acct);
       if (find_rc != EMAIL_RC_OK) {
          *err = email_svc_account_err(find_rc);
          return find_rc;
       }
-      return email_svc_read_single(&acct, message_id, opts, out, err, false);
+      const int rc = read_leased(&acct, message_id, opts, out, target, err, false);
+      sodium_memzero(&acct, sizeof(acct));
+      return rc;
    }
 
    /* No account named: try each enabled one until the message turns up.  A
@@ -170,18 +200,21 @@ int email_service_read(int user_id,
          continue;
       enabled_seen = true;
       email_err_t e = EMAIL_ERR_NONE;
-      const int rc = email_svc_read_single(&accounts[i], message_id, opts, out, &e, true);
+      const int rc = read_leased(&accounts[i], message_id, opts, out, NULL, &e, true);
       if (rc == EMAIL_RC_OK) {
+         sodium_memzero(accounts, sizeof(accounts));
          *err = EMAIL_ERR_NONE;
          return EMAIL_RC_OK;
       }
       if (e == EMAIL_ERR_CANCELLED) {
+         sodium_memzero(accounts, sizeof(accounts));
          *err = e;
          return EMAIL_RC_FAILURE;
       }
       if (rc != EMAIL_RC_NOT_FOUND && first_real == EMAIL_ERR_NONE)
          first_real = e;
    }
+   sodium_memzero(accounts, sizeof(accounts));
    /* "All disabled" (enable one) vs "in no mailbox" (a stale id) vs a real failure. */
    if (!enabled_seen) {
       *err = EMAIL_ERR_NO_ACCOUNT;

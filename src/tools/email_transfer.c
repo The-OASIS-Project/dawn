@@ -49,6 +49,18 @@ const char *email_error_name(email_err_t err) {
          return "ACCOUNT_NOT_FOUND";
       case EMAIL_ERR_CANCELLED:
          return "CANCELLED";
+      case EMAIL_ERR_CURSOR_STALE:
+         return "CURSOR_STALE";
+      case EMAIL_ERR_SUPERSEDED:
+         return "SUPERSEDED";
+      case EMAIL_ERR_UNSUPPORTED_QUERY:
+         return "UNSUPPORTED_QUERY";
+      case EMAIL_ERR_BUSY:
+         return "BUSY";
+      case EMAIL_ERR_SHUTTING_DOWN:
+         return "SHUTTING_DOWN";
+      case EMAIL_ERR_CANNOT_CALCULATE:
+         return "CANNOT_CALCULATE";
       case EMAIL_ERR_FAILED:
          break;
    }
@@ -97,4 +109,17 @@ void email_transfer_set_cancel(CURL *curl, const atomic_bool *cancel) {
    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, cancel_progress);
    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, (void *)cancel);
    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+}
+
+/* Thread-local, so a worker serving one request can't stop another's transfers. */
+static __thread const atomic_bool *s_thread_cancel;
+
+const atomic_bool *email_transfer_scope_cancel(const atomic_bool *cancel) {
+   const atomic_bool *prev = s_thread_cancel;
+   s_thread_cancel = cancel;
+   return prev;
+}
+
+const atomic_bool *email_transfer_thread_cancel(void) {
+   return s_thread_cancel;
 }

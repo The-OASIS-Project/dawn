@@ -145,7 +145,13 @@ typedef enum {
    EMAIL_ERR_NO_TRASH,          /* no Trash folder */
    EMAIL_ERR_NO_ACCOUNT,        /* the user has no enabled email account */
    EMAIL_ERR_ACCOUNT_NOT_FOUND, /* no enabled account by that name */
-   EMAIL_ERR_CANCELLED,         /* stopped by the caller (email_read_opts_t.cancel) */
+   EMAIL_ERR_CANCELLED,         /* stopped by the caller (a cancel flag) */
+   EMAIL_ERR_CURSOR_STALE,      /* a paging cursor no longer applies: start over */
+   EMAIL_ERR_SUPERSEDED,        /* replaced by a newer request before it ran */
+   EMAIL_ERR_UNSUPPORTED_QUERY, /* the account can't run this query (IMAP: non-ASCII) */
+   EMAIL_ERR_BUSY,              /* the account or the server's email workers are busy */
+   EMAIL_ERR_SHUTTING_DOWN,     /* the daemon is stopping */
+   EMAIL_ERR_CANNOT_CALCULATE,  /* the changes since a state can't be worked out */
 } email_err_t;
 
 /** The wire name of @p err ("AUTH_FAILED", ...; "" for NONE).  email_transfer.c */

@@ -340,6 +340,8 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_tool.c
         src/tools/email_service.c
         src/tools/email_service_read.c
+        src/tools/email_service_fetch.c
+        src/tools/email_account_lease.c
         src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c

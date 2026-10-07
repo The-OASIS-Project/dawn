@@ -57,6 +57,7 @@ typedef struct {
  * @param folder       IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
  * @param unread_only  If true, only fetch unread (UNSEEN) emails
  * @param page         Optional paging cursor (NULL = first page, no cursor out)
+ * @param err          Why it failed (may be NULL)
  * @return 0 on success, 1 on failure (page->stale set when the cursor's epoch changed)
  */
 int email_fetch_recent(const email_conn_t *conn,
@@ -66,7 +67,8 @@ int email_fetch_recent(const email_conn_t *conn,
                        email_imap_page_t *page,
                        email_summary_t *out,
                        int max_out,
-                       int *out_count);
+                       int *out_count,
+                       email_err_t *err);
 
 /**
  * @brief Read a message by UID from an IMAP folder (email_mime.h does the reading)
@@ -90,13 +92,10 @@ int email_read_message(const email_conn_t *conn,
 /**
  * @brief Search emails by criteria in an IMAP folder.
  * @param folder  IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
- * @param auth_denied  Optional out (may be NULL): set true when the failure was
- *                     an IMAP login/credential rejection (CURLE_LOGIN_DENIED),
- *                     so the caller can surface an actionable "login failed".
- * @param timed_out    Optional out (may be NULL): set true when the failure was
- *                     a transfer timeout (CURLE_OPERATION_TIMEDOUT) — typically a
- *                     large mailbox with no server-side full-text index, so the
- *                     caller can hint the LLM to bound the search with a date.
+ * @param err     Why it failed (may be NULL): EMAIL_ERR_AUTH_FAILED for a refused
+ *                login, EMAIL_ERR_TIMEOUT for a search that ran out of time
+ *                (typically a large mailbox with no server-side full-text index,
+ *                so the caller can suggest bounding it with a date), ...
  * @return 0 on success, 1 on failure
  */
 int email_search(const email_conn_t *conn,
@@ -106,8 +105,7 @@ int email_search(const email_conn_t *conn,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
-                 bool *auth_denied,
-                 bool *timed_out);
+                 email_err_t *err);
 
 /**
  * @brief Does @p iso parse as a valid IMAP search date (YYYY-MM-DD)?
@@ -136,13 +134,11 @@ int email_send(const email_conn_t *conn,
                const char *subject,
                const char *body);
 
-/**
- * @brief Test IMAP and SMTP connectivity.
- * @param imap_ok  Output: true if IMAP connected successfully
- * @param smtp_ok  Output: true if SMTP connected successfully
- * @return 0 if both succeeded, 1 if either failed
- */
-int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok);
+/** Test IMAP connectivity (log in and look at INBOX); true if it worked. */
+bool email_test_imap(const email_conn_t *conn);
+
+/** Test SMTP connectivity (connect only); true if it worked. */
+bool email_test_smtp(const email_conn_t *conn);
 
 /* Trash / archive results (0 = done).  The values match the service's
  * EMAIL_RC_* codes of the same names so they pass through. */

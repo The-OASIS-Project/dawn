@@ -50,6 +50,7 @@
 #include "logging.h"
 #include "tools/email_mime.h"
 #include "tools/email_parse.h"
+#include "tools/email_transfer.h"
 #include "tools/gmail_client_internal.h"
 #include "tools/html_parser.h"
 
@@ -107,6 +108,7 @@ CURL *gmail_create_curl(void) {
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+   email_transfer_set_cancel(curl, email_transfer_thread_cancel());
 
    return curl;
 }

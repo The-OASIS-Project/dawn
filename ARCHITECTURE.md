@@ -468,6 +468,13 @@ Per-module locks (scoped to a single subsystem):
   document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (LEAF: never held across a database call; a rebuild reads pages outside it, then installs; scoring holds only this)
   memory_embeddings_entity::s_ent.mutex (src/memory/memory_embeddings_entity.c) — per-user entity-embedding copies (LEAF: held only to look up, score and install; a copy is read from the DB and name-stemmed with no cache lock held; invalidation is lock-free atomics, safe under the auth_db lock)
   memory_extraction::s_extraction_mutex + s_extraction_cond (src/memory/memory_extraction.c) — per-user extraction slots (leaf); the cond var lets a forget wait out a user's in-flight extraction (memory_extraction_hold_user)
+  email_account_lease::s_mutex (src/tools/email_account_lease.c) — the per-account IMAP lease table (held only to queue, hand over or
+                                                                     drop a waiter, never across I/O).  The LEASE itself is the outermost
+                                                                     email lock: its holder may take the OAuth per-account mutex and then the
+                                                                     auth_db lock; nothing takes it while holding those, the draft/trash
+                                                                     mutexes or s_conn_registry_mutex; the release hook runs with no lease mutex held.
+                                                                     A thread re-taking its own lease is caught; a ticket holder has no thread,
+                                                                     so code running under a ticket's lease checks email_lease_is_held
   ...and similar per-tool mutexes in src/tools/*.c
 ```
 

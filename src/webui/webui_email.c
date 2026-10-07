@@ -38,9 +38,9 @@
  * ============================================================================= */
 
 static bool verify_account_owner(ws_connection_t *conn, int64_t account_id, email_account_t *out) {
-   if (email_db_account_get(account_id, out) != 0)
-      return false;
-   return out->user_id == conn->auth_user_id;
+   /* Disabled accounts too: these are the account's own settings. */
+   return email_service_find_account_by_id(conn->auth_user_id, account_id, false, out) ==
+          EMAIL_RC_OK;
 }
 
 /* =============================================================================
@@ -422,23 +422,34 @@ void handle_email_test_connection(ws_connection_t *conn, json_object *payload) {
                                 json_object_new_string("Account not found or access denied"));
       } else {
          bool imap_ok = false, smtp_ok = false;
-         email_service_test_connection(account_id, &imap_ok, &smtp_ok);
+         email_err_t test_err = EMAIL_ERR_NONE;
+         email_service_test_connection(conn->auth_user_id, account_id, NULL, &imap_ok, &smtp_ok,
+                                       &test_err);
 
+         const bool imap_busy = test_err == EMAIL_ERR_BUSY;
          json_object_object_add(resp_payload, "imap_ok", json_object_new_boolean(imap_ok));
          json_object_object_add(resp_payload, "smtp_ok", json_object_new_boolean(smtp_ok));
+         if (imap_busy) /* not tested, not failed */
+            json_object_object_add(resp_payload, "imap_busy", json_object_new_boolean(1));
 
          if (imap_ok && smtp_ok) {
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
          } else {
             json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
             char err[256];
-            if (!imap_ok && !smtp_ok)
+            if (imap_busy)
+               snprintf(err, sizeof(err), "IMAP busy, try again in a moment (SMTP %s)",
+                        smtp_ok ? "OK" : "failed");
+            else if (!imap_ok && !smtp_ok)
                snprintf(err, sizeof(err), "Both IMAP and SMTP connection failed");
             else if (!imap_ok)
                snprintf(err, sizeof(err), "IMAP connection failed (SMTP OK)");
             else
                snprintf(err, sizeof(err), "SMTP connection failed (IMAP OK)");
             json_object_object_add(resp_payload, "error", json_object_new_string(err));
+            if (test_err != EMAIL_ERR_NONE)
+               json_object_object_add(resp_payload, "error_code",
+                                      json_object_new_string(email_error_name(test_err)));
          }
       }
    }
