@@ -54,6 +54,10 @@ static const char *const s_features[] = {
     * each body and builds the inlined form itself, so a document can't end its
     * own span. */
    "document_attachments",
+   /* A text frame may carry from_visual: true for a prompt sent by a rendered
+    * visual; no confirm counts in that turn.  A client sends a visual's prompt
+    * only to a daemon advertising this, never as an ordinary turn. */
+   "visual_prompt_guard",
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has
