@@ -1420,6 +1420,42 @@ static void resolve_config_path(const char *raw, char *resolved, size_t resolved
    }
 }
 
+/**
+ * @brief The once-per-second work the main thread drives, in both server and
+ *        local-voice mode.
+ *
+ * One list for both main loops, so a periodic task added for one mode can't be
+ * missing from the other (the OTA rollout tick once was: server-mode rollouts
+ * never fanned out or timed out).
+ *
+ * The list is explicit on purpose.  Each entry is a different subsystem's
+ * periodic work, and with a handful of them one function is the easiest thing
+ * to read.  The planned replacement is a registry: each subsystem calls
+ * heartbeat_register(name, fn) from its init and both loops call
+ * heartbeat_run(now), which removes the #ifdef and this file's knowledge of
+ * who ticks.  It becomes worth its indirection when code this file can't name
+ * needs a tick (tools loaded as plugins), or when ticks need different
+ * intervals; build it then, not before.
+ */
+static void main_heartbeat_tick(time_t now) {
+   /* OTA fleet rollout: canary/wave deadlines and deferred fan-out delivery. */
+   ota_rollout_tick(now);
+   /* SAGE proactive-attention heartbeat. */
+   attention_tick(now);
+   /* Evict finalized/abandoned live-partial replay-ring entries. */
+   conv_stream_evict_stale(now);
+   /* Delayed embedding retry after an embed failure (one atomic load when idle). */
+   memory_embeddings_tick(now);
+   /* Per-call usage rows to the database (queued off the provider paths). */
+   llm_cache_monitor_flush();
+#ifdef ENABLE_WEBUI
+   /* Background-job completion monitor (dirty-gated). */
+   jobs_monitor_tick(now);
+   /* Live watch_readings gauge stream to subscribed Watches panels. */
+   webui_watch_readings_tick();
+#endif
+}
+
 int main(int argc, char *argv[]) {
    char *input_text = NULL;
    char *command_text = NULL;
@@ -2662,44 +2698,20 @@ mqtt_disabled:
                 g_config.webui.port);
       while (!quit) {
          sleep(1);
-         /* SAGE heartbeat (server mode has no per-second loop of its own). */
-         time_t now_srv = time(NULL);
-         attention_tick(now_srv);
-         conv_stream_evict_stale(now_srv);
-         memory_embeddings_tick(now_srv);
-         llm_cache_monitor_flush(); /* per-call usage rows to the database */
-#ifdef ENABLE_WEBUI
-         jobs_monitor_tick(now_srv);
-         webui_watch_readings_tick();
-#endif
+         main_heartbeat_tick(time(NULL));
       }
       goto server_shutdown;
    }
 
    OLOG_INFO("Listening...\n");
    while (!quit) {
-      /* OTA fleet-rollout heartbeat: canary-deadline check + deferred fan-out
-       * delivery. Gated to once per second (a 600s canary timeout needs no finer). */
+      /* This loop runs many times a second; the heartbeat runs once per second. */
       {
-         static time_t s_last_rollout_tick = 0;
-         time_t now_rollout = time(NULL);
-         if (now_rollout != s_last_rollout_tick) {
-            s_last_rollout_tick = now_rollout;
-            ota_rollout_tick(now_rollout);
-            /* SAGE proactive-attention heartbeat (same once-per-second cadence). */
-            attention_tick(now_rollout);
-            /* Evict finalized/abandoned live-partial replay-ring entries. */
-            conv_stream_evict_stale(now_rollout);
-            /* Delayed embedding retry after an embed failure (one atomic load when idle). */
-            memory_embeddings_tick(now_rollout);
-            /* Per-call usage rows to the database (queued off the provider paths). */
-            llm_cache_monitor_flush();
-#ifdef ENABLE_WEBUI
-            /* Background-job completion monitor (dirty-gated). */
-            jobs_monitor_tick(now_rollout);
-            /* Live watch_readings gauge stream to subscribed Watches panels. */
-            webui_watch_readings_tick();
-#endif
+         static time_t s_last_heartbeat = 0;
+         time_t now = time(NULL);
+         if (now != s_last_heartbeat) {
+            s_last_heartbeat = now;
+            main_heartbeat_tick(now);
          }
       }
 
