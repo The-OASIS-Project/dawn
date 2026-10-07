@@ -807,6 +807,11 @@ static char *handle_confirm_send(struct json_object *details,
                        "Error: not confirmed. A confirm counts only in the user's reply right "
                        "after the read-back; the conversation has moved on since. Prepare it "
                        "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_FROM_VISUAL:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. This turn came from a rendered visual, not the "
+                       "user, and a visual can't approve anything. Prepare it again, read it "
+                       "back, and confirm only when the user replies themselves.");
       case EMAIL_CONFIRM_RC_OTHER_SESSION:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: not confirmed. This was prepared in another session (another "
@@ -922,6 +927,11 @@ static char *handle_confirm_trash(struct json_object *details,
                        "Error: not confirmed. A confirm counts only in the user's reply right "
                        "after the read-back; the conversation has moved on since. Prepare it "
                        "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_FROM_VISUAL:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. This turn came from a rendered visual, not the "
+                       "user, and a visual can't approve anything. Prepare it again, read it "
+                       "back, and confirm only when the user replies themselves.");
       case EMAIL_CONFIRM_RC_OTHER_SESSION:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: not confirmed. This was prepared in another session (another "

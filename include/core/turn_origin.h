@@ -27,6 +27,10 @@
  * reply code may come in any later turn of the same session: the code is the
  * proof the next-turn rule stands in for.
  *
+ * A turn a rendered visual started (its script asked for it through the
+ * bridge, not the person typing) confirms nothing: a visual is model-written
+ * and can act on load or after any click on the page.
+ *
  * Capturing an origin needs the session unit (src/core/session_history.c);
  * checking one needs nothing, so a module that only stores and checks them
  * includes this header alone.
@@ -50,6 +54,9 @@ typedef struct {
     * the confirming side (turn_origin_check's @p now); ignored on a stored
     * origin. */
    bool code_redeemed;
+   /* The turn was started by a rendered visual's prompt, not the person.  Read
+    * only from the confirming side; ignored on a stored origin. */
+   bool from_visual;
 } turn_origin_t;
 
 typedef enum {
@@ -57,6 +64,7 @@ typedef enum {
    TURN_ORIGIN_OTHER_SESSION, /* another session, or not made in a live turn */
    TURN_ORIGIN_SAME_TURN,     /* the turn that made it, or no live turn now */
    TURN_ORIGIN_NOT_NEXT,      /* later than the turn right after it */
+   TURN_ORIGIN_FROM_VISUAL,   /* a turn a rendered visual started */
 } turn_origin_rc_t;
 
 /**
@@ -68,6 +76,8 @@ static inline turn_origin_rc_t turn_origin_check(const turn_origin_t *made,
                                                  const turn_origin_t *now) {
    if (!made || !now || made->turn_token == 0 || made->session_id != now->session_id)
       return TURN_ORIGIN_OTHER_SESSION;
+   if (now->from_visual)
+      return TURN_ORIGIN_FROM_VISUAL; /* not the person, whatever the words */
    if (now->turn_token == 0 || now->turn_token == made->turn_token)
       return TURN_ORIGIN_SAME_TURN; /* not a person's later turn */
    if (now->code_redeemed)
@@ -82,6 +92,7 @@ static inline turn_origin_rc_t turn_origin_check(const turn_origin_t *made,
 static inline turn_origin_t turn_origin_stored(const turn_origin_t *origin) {
    turn_origin_t stored = *origin;
    stored.code_redeemed = false;
+   stored.from_visual = false;
    return stored;
 }
 
@@ -92,6 +103,8 @@ static inline const char *turn_origin_refusal(turn_origin_rc_t rc) {
          return "in the turn that prepared it";
       case TURN_ORIGIN_NOT_NEXT:
          return "later than the turn right after it";
+      case TURN_ORIGIN_FROM_VISUAL:
+         return "in a turn a rendered visual started";
       default:
          return "from another session";
    }
@@ -107,6 +120,10 @@ static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
       case TURN_ORIGIN_NOT_NEXT:
          return "the conversation moved on since its preview. Prepare it again and read it "
                 "back to the user.";
+      case TURN_ORIGIN_FROM_VISUAL:
+         return "this turn came from a rendered visual, not the user, and a visual can't "
+                "approve anything. Prepare it again, read it back, and confirm only when the "
+                "user replies themselves.";
       default:
          return "it was prepared in another conversation. Prepare it again here.";
    }
@@ -117,7 +134,8 @@ static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
  *        a running turn the user started (session_turn_user_originated) in
  *        the command context's session
  *
- * code_redeemed is copied from session_call_code_redeemed().
+ * code_redeemed is copied from session_call_code_redeemed(); from_visual from
+ * the running turn (session_turn_mark_from_visual).
  *
  * @param out Receives the origin (zeroed on false)
  * @return false with no command context, in a job's session, on a background

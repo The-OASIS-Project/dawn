@@ -271,7 +271,15 @@ static void dispatch_text_frame(ws_connection_t *conn, struct json_object *paylo
       }
       webui_turn_ref_set(ref);
    }
+   /* A prompt a rendered visual sent through its bridge: the turn it starts
+    * can't confirm anything (only a strict true counts; anything else is the
+    * person's own message). */
+   struct json_object *visual_obj = NULL;
+   webui_turn_from_visual_set(json_object_object_get_ex(payload, "from_visual", &visual_obj) &&
+                              json_object_is_type(visual_obj, json_type_boolean) &&
+                              json_object_get_boolean(visual_obj));
    text_turn_from_payload(conn, payload);
+   webui_turn_from_visual_set(false);
    webui_turn_ref_set(NULL);
 }
 

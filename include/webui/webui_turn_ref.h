@@ -52,6 +52,17 @@ void webui_turn_ref_set(const char *ref);
 const char *webui_turn_ref_get(void);
 
 /**
+ * @brief Whether the text turn this thread is handling came from a rendered
+ *        visual's prompt (the frame's from_visual), held like the turn ref:
+ *        set around one frame's handling, copied into the turn's work, and
+ *        cleared after.  Such a turn confirms nothing.
+ */
+void webui_turn_from_visual_set(bool from_visual);
+
+/** The calling thread's from_visual flag (false when unset). */
+bool webui_turn_from_visual_get(void);
+
+/**
  * @brief Whether @p ref is a client_ref a text turn may carry: 1 to
  *        WEBUI_CLIENT_REF_MAX printable ASCII characters (0x20-0x7e).
  */

@@ -570,6 +570,7 @@ typedef struct session {
    bool turn_active;               // between session_turn_begin() and _end()
    bool turn_awaits_conversation;  // typed first message; conversation created after
    bool turn_background;           // a reinvoke / background turn, not the user's
+   bool turn_from_visual;          // started by a rendered visual's prompt, not the person
    uint32_t turn_number;           // turns begun on this session (the running one's number)
    bool turn_context_reset;        // the live history it wrote was reset under it (a clear)
    char *turn_pending_user;        // persisted form of a user message not yet written

@@ -156,6 +156,7 @@ typedef struct {
 #define EMAIL_CONFIRM_RC_OTHER_SESSION 8 /* confirmed from another session than the draft's */
 #define EMAIL_CONFIRM_RC_SAME_TURN 9     /* confirmed in the turn that prepared it */
 #define EMAIL_CONFIRM_RC_NOT_NEXT 21     /* confirmed later than the turn right after it */
+#define EMAIL_CONFIRM_RC_FROM_VISUAL 23  /* confirmed in a turn a rendered visual started */
 
 /** A refused turn_origin_check as this module's confirm code. */
 static inline int email_confirm_rc(turn_origin_rc_t rc) {
@@ -166,6 +167,8 @@ static inline int email_confirm_rc(turn_origin_rc_t rc) {
          return EMAIL_CONFIRM_RC_SAME_TURN;
       case TURN_ORIGIN_NOT_NEXT:
          return EMAIL_CONFIRM_RC_NOT_NEXT;
+      case TURN_ORIGIN_FROM_VISUAL:
+         return EMAIL_CONFIRM_RC_FROM_VISUAL;
       default:
          return EMAIL_CONFIRM_RC_OTHER_SESSION;
    }

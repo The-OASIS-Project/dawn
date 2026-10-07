@@ -1435,17 +1435,24 @@
       }
    }
 
-   function sendTextMessage(text) {
+   /**
+    * Send a text turn.  opts.fromVisual: the text is a rendered visual's prompt
+    * (its bridge), not the person's: the frame says so, so the daemon lets no
+    * confirm count in that turn, and the user's pending attachments and images
+    * stay for their own next message.
+    */
+   function sendTextMessage(text, opts) {
       if (!DawnWS.isConnected()) {
          console.error('WebSocket not connected');
          return false;
       }
+      const fromVisual = !!(opts && opts.fromVisual);
 
       // Attached documents go as their own field: the daemon defuses each body
       // (someone else's text) and builds the inlined form the transcript shows.
       const messageText = text;
       let attachments = null;
-      if (typeof DawnDocuments !== 'undefined') {
+      if (!fromVisual && typeof DawnDocuments !== 'undefined') {
          const docs = DawnDocuments.getAndClearDocuments();
          if (docs.length > 0) {
             attachments = docs.map((d) => {
@@ -1473,6 +1480,9 @@
          type: 'text',
          payload: { text: messageText },
       };
+      if (fromVisual) {
+         msg.payload.from_visual = true;
+      }
       if (attachments) {
          msg.payload.attachments = attachments;
       }
@@ -1494,13 +1504,14 @@
       // markers and persists the turn itself, then echoes server_saved=true so the
       // client skips its own save. An id the daemon can't use (gone, another
       // user's) fails the turn with an error frame; nothing is sent without it.
-      const pendingImageIds = DawnVision.getPendingImageIds();
+      const pendingImageIds = fromVisual ? [] : DawnVision.getPendingImageIds();
       if (pendingImageIds.length > 0) {
          msg.payload.image_ids = pendingImageIds;
          // Retained only for local display of the just-sent turn (no longer a save key).
          pendingThumbnailsForSave = pendingImageIds;
          DawnVision.clearImages(); // Clear after adding to message
-      } else {
+      } else if (!fromVisual) {
+         // A visual's prompt leaves the previews of the user's own send alone.
          pendingThumbnailsForSave = [];
       }
 
@@ -2738,6 +2749,11 @@
    window.DAWN.getVisualizationMode = DawnVisualization.getMode;
    window.DAWN.toggleFFTDebug = DawnVisualization.toggleFFTDebug;
    window.DAWN.updateLlmMiniSummary = updateLlmMiniSummary;
+   // A rendered visual's prompt (visual-render.js bridge): sent as its own turn,
+   // marked, without touching the user's draft.
+   window.DAWN.sendVisualPrompt = function (text) {
+      return sendTextMessage(text, { fromVisual: true });
+   };
 
    // Test helper for console access
    // Usage: DAWN.send({type: 'get_my_settings'})

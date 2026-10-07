@@ -22,6 +22,8 @@
  * read-back), or in any later turn when the user approved it by reply code.
  */
 
+#include <string.h>
+
 #include "core/turn_origin.h"
 #include "tools/email_service.h"
 #include "unity.h"
@@ -90,6 +92,29 @@ static void test_code_redeemed(void) {
    TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OTHER_SESSION, turn_origin_check(&made, &other));
 }
 
+/* A turn a rendered visual started confirms nothing, whatever it says: not the
+ * next turn, not with a code, and it is refused before any other check. */
+static void test_from_visual_refused(void) {
+   const turn_origin_t made = { .session_id = 7, .turn_token = 100, .turn_number = 4 };
+   turn_origin_t reply = { .session_id = 7, .turn_token = 160, .turn_number = 5 };
+   reply.from_visual = true;
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_FROM_VISUAL, turn_origin_check(&made, &reply));
+   reply.code_redeemed = true;
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_FROM_VISUAL, turn_origin_check(&made, &reply));
+   /* Another session stays another session. */
+   reply.session_id = 8;
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OTHER_SESSION, turn_origin_check(&made, &reply));
+   /* Staging in a visual's turn is fine: a stored origin drops the flag, so the
+    * user's own reply next turn confirms it. */
+   turn_origin_t staged = { .session_id = 7, .turn_token = 100, .turn_number = 4 };
+   staged.from_visual = true;
+   const turn_origin_t stored = turn_origin_stored(&staged);
+   TEST_ASSERT_FALSE(stored.from_visual);
+   const turn_origin_t user = { .session_id = 7, .turn_token = 160, .turn_number = 5 };
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OK, turn_origin_check(&stored, &user));
+   TEST_ASSERT_NOT_NULL(strstr(turn_origin_retry_hint(TURN_ORIGIN_FROM_VISUAL), "visual"));
+}
+
 /* Email reports a refusal with its own confirm codes. */
 static void test_email_codes(void) {
    TEST_ASSERT_EQUAL_INT(EMAIL_RC_OK, email_confirm_rc(TURN_ORIGIN_OK));
@@ -97,6 +122,7 @@ static void test_email_codes(void) {
    TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_NOT_NEXT, email_confirm_rc(TURN_ORIGIN_NOT_NEXT));
    TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_OTHER_SESSION,
                          email_confirm_rc(TURN_ORIGIN_OTHER_SESSION));
+   TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_FROM_VISUAL, email_confirm_rc(TURN_ORIGIN_FROM_VISUAL));
 }
 
 int main(void) {
@@ -107,6 +133,7 @@ int main(void) {
    RUN_TEST(test_other_session_refused);
    RUN_TEST(test_no_turn_refused);
    RUN_TEST(test_code_redeemed);
+   RUN_TEST(test_from_visual_refused);
    RUN_TEST(test_email_codes);
    return UNITY_END();
 }

@@ -158,6 +158,12 @@ void session_turn_mark_background(session_t *session) {
    (void)session;
 }
 
+static int s_from_visual_marks;
+void session_turn_mark_from_visual(session_t *session) {
+   (void)session;
+   s_from_visual_marks++;
+}
+
 void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may_load) {
    (void)session;
    (void)conv_id;
@@ -224,6 +230,20 @@ static void test_image_only_turn_runs(void) {
    json_object_put(question);
 }
 
+/* A visual's prompt marks its turn, so no confirm counts in it; a typed one
+ * doesn't. */
+static void test_from_visual_marks_the_turn(void) {
+   s_from_visual_marks = 0;
+   const text_input_dispatch_opts_t typed = { .conversation_id = 3, .auth_user_id = 1 };
+   free(core_text_input_dispatch(s_session, "hello", &typed));
+   TEST_ASSERT_EQUAL_INT(0, s_from_visual_marks);
+   const text_input_dispatch_opts_t visual = { .conversation_id = 3,
+                                               .auth_user_id = 1,
+                                               .from_visual = true };
+   free(core_text_input_dispatch(s_session, "yes", &visual));
+   TEST_ASSERT_EQUAL_INT(1, s_from_visual_marks);
+}
+
 /* A NULL text is never a turn, question or not. */
 static void test_null_text_is_refused(void) {
    struct json_object *question = image_only_question();
@@ -238,5 +258,6 @@ int main(void) {
    RUN_TEST(test_empty_text_without_a_question_is_refused);
    RUN_TEST(test_image_only_turn_runs);
    RUN_TEST(test_null_text_is_refused);
+   RUN_TEST(test_from_visual_marks_the_turn);
    return UNITY_END();
 }

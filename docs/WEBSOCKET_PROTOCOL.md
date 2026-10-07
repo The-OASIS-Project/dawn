@@ -156,6 +156,14 @@ Send a text message to the AI, with the images attached to it by id.
   deltas, the reply, other viewers' copies) don't carry it. A `client_ref` that isn't a
   string of that shape (`null`, a number, empty, too long, or with other characters) refuses
   the frame with `INVALID_CLIENT_REF` (that error carries no ref).
+- `from_visual` — optional, `true` only when the text is a rendered visual's prompt (a
+  `render_visual` iframe's `sendPrompt` bridge), not the person typing. A visual is written by
+  the model, and its script can run on load or after any click, so the daemon lets **no
+  confirm** count in a turn it starts, whatever the words: an email send or trash, a call or
+  text, a document delete, a door, a research run. The model is told to prepare the action
+  again and wait for the person's own reply. A client should send bridge prompts this way,
+  never by typing them into the user's draft, and only after a click (a first filter). Any
+  value other than `true` is the person's own message.
 - `image_ids` — optional; the ids the `POST /api/images` HTTP upload returned (see
   `docs/arch/subsystems/vision-documents.md`), at most `[vision] max_images` (default 5).
   **The only way to attach an image:** the daemon reads the stored files, sends them to the

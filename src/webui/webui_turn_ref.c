@@ -35,6 +35,18 @@ const char *webui_turn_ref_get(void) {
    return t_turn_ref[0] ? t_turn_ref : NULL;
 }
 
+/* Whether that turn's text came from a rendered visual (see
+ * webui_turn_from_visual_set). */
+static __thread bool t_turn_from_visual;
+
+void webui_turn_from_visual_set(bool from_visual) {
+   t_turn_from_visual = from_visual;
+}
+
+bool webui_turn_from_visual_get(void) {
+   return t_turn_from_visual;
+}
+
 bool webui_client_ref_valid(const char *ref) {
    if (!ref || !ref[0]) {
       return false;
