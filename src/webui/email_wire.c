@@ -21,17 +21,25 @@
 
 #include "webui/email_wire.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "tools/email_parse.h"
+#include "utils/string_utils.h"
 
 #define JSON_FLAGS (JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE)
 /* Room for the frame around the payload: {"type":"email_read_response","payload":…,
  * "req":…,"success":…}, the req escaping to at most twice its length. */
 #define FRAME_OVERHEAD (128 + 2 * EMAIL_WIRE_REQ_MAX)
 
+/* Mail text is whatever the sender sent: a bad byte would make the browser
+ * close the socket on the whole frame, so every string goes out well-formed. */
 static void add_str(json_object *o, const char *key, const char *val) {
-   json_object_object_add(o, key, json_object_new_string(val ? val : ""));
+   if (!val)
+      val = "";
+   char *fixed = utf8_repair_dup(val, strlen(val), NULL);
+   json_object_object_add(o, key, json_object_new_string(fixed ? fixed : val));
+   free(fixed);
 }
 
 json_object *email_wire_row(int64_t account_id, const email_summary_t *s, bool flags_known) {
@@ -175,25 +183,33 @@ json_object *email_wire_read_payload(int64_t account_id,
 
    /* Size the frame without serializing the bodies: the small fields once, the
     * bodies by counting their escapes.  The reply is then serialized once. */
-   const char *text = m->body ? m->body : "";
-   const size_t text_len = m->body ? (size_t)m->body_len : 0;
+   size_t text_len = m->body ? (size_t)m->body_len : 0;
+   char *text_fixed = utf8_repair_dup(m->body ? m->body : "", text_len, &text_len);
+   const char *text = text_fixed ? text_fixed : (m->body ? m->body : "");
+   if (!text_fixed)
+      text_len = m->body ? (size_t)m->body_len : 0;
    const size_t base = json_len(payload) + FRAME_OVERHEAD + sizeof(",\"body_text\":\"\"") +
                        escaped_len(text, text_len);
    json_object_object_add(msg, "body_text", json_object_new_string_len(text, (int)text_len));
+   free(text_fixed);
 
    /* body_html last, cut to what the frame has room for. */
    if (m->body_html && m->body_html_len > 0) {
+      size_t full = (size_t)m->body_html_len;
+      char *html_fixed = utf8_repair_dup(m->body_html, full, &full);
+      const char *html = html_fixed ? html_fixed : m->body_html;
+      if (!html_fixed)
+         full = (size_t)m->body_html_len;
       const size_t key = sizeof(",\"body_html\":\"\"");
       const size_t room = frame_max > base + key ? frame_max - base - key : 0;
-      const size_t full = (size_t)m->body_html_len;
-      size_t len = escaped_prefix(m->body_html, full, room);
+      size_t len = escaped_prefix(html, full, room);
       if (len < full)
-         len = utf8_floor(m->body_html, len);
+         len = utf8_floor(html, len);
       if (len < full)
          json_object_object_add(msg, "html_truncated", json_object_new_boolean(1));
       if (len > 0)
-         json_object_object_add(msg, "body_html",
-                                json_object_new_string_len(m->body_html, (int)len));
+         json_object_object_add(msg, "body_html", json_object_new_string_len(html, (int)len));
+      free(html_fixed);
    }
    return payload;
 }

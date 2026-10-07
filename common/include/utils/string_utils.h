@@ -114,6 +114,22 @@ extern "C" {
 size_t utf8_valid_seq_len(const char *s);
 
 /**
+ * @brief A copy of @p s with every ill-formed UTF-8 byte replaced by U+FFFD
+ *
+ * Everything else, newlines and tabs included, is kept as it is.  For text
+ * from outside (mail, the web) that must go out as a WebSocket text frame or
+ * JSON: a single bad byte would otherwise make the receiver drop the frame.
+ *
+ * @param s       text, read up to @p len bytes or a NUL, whichever is first
+ * @param len     its length in bytes
+ * @param out_len set to the copy's length (may be NULL)
+ * @return NULL when @p s is already well-formed (use it as it is), otherwise
+ *         a malloc'd, NUL-terminated copy the caller frees.  NULL as well on
+ *         an allocation failure, with @p out_len set to 0.
+ */
+char *utf8_repair_dup(const char *s, size_t len, size_t *out_len);
+
+/**
  * @brief Sanitize string for safe use in JSON and LLM APIs
  *
  * Removes or replaces characters that cause problems with JSON parsing or

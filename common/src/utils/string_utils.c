@@ -26,6 +26,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -194,6 +195,53 @@ size_t utf8_valid_seq_len(const char *str) {
          return 0;
    }
    return n;
+}
+
+char *utf8_repair_dup(const char *s, size_t len, size_t *out_len) {
+   if (out_len)
+      *out_len = 0;
+   if (!s)
+      return NULL;
+   /* Count first: most text is already fine and needs no copy. */
+   size_t bad = 0;
+   for (size_t i = 0; i < len && s[i];) {
+      const unsigned char c = (unsigned char)s[i];
+      if (c < 0x80) {
+         i++;
+         continue;
+      }
+      const size_t n = utf8_valid_seq_len(s + i);
+      if (n && i + n <= len) {
+         i += n;
+      } else {
+         bad++;
+         i++;
+      }
+   }
+   if (bad == 0)
+      return NULL;
+   const size_t cap = len + bad * 2 + 1; /* each bad byte becomes 3 */
+   char *out = malloc(cap);
+   if (!out)
+      return NULL;
+   size_t o = 0;
+   for (size_t i = 0; i < len && s[i];) {
+      const unsigned char c = (unsigned char)s[i];
+      size_t n = c < 0x80 ? 1 : utf8_valid_seq_len(s + i);
+      if (n && i + n <= len) {
+         memcpy(out + o, s + i, n);
+         o += n;
+         i += n;
+      } else {
+         memcpy(out + o, "\xEF\xBF\xBD", 3);
+         o += 3;
+         i++;
+      }
+   }
+   out[o] = '\0';
+   if (out_len)
+      *out_len = o;
+   return out;
 }
 
 void sanitize_utf8_for_json(char *str) {

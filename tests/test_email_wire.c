@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "unity.h"
+#include "utils/string_utils.h"
 #include "webui/email_wire.h"
 
 void setUp(void) {
@@ -74,6 +75,46 @@ static void message(email_message_t *m, char *body, char *html) {
    m->body_len = (int)strlen(body);
    m->body_html = html;
    m->body_html_len = html ? strlen(html) : 0;
+}
+
+/* Every string the panel sends is well-formed UTF-8: one bad byte from a
+ * mis-declared charset or a cut preview would make the browser drop the socket. */
+static bool well_formed(const char *s) {
+   size_t n = 0;
+   char *fixed = utf8_repair_dup(s, strlen(s), &n);
+   const bool ok = fixed == NULL;
+   free(fixed);
+   return ok;
+}
+
+static void test_bad_utf8_never_goes_out(void) {
+   email_summary_t s;
+   memset(&s, 0, sizeof(s));
+   snprintf(s.message_id, sizeof(s.message_id), "INBOX:42.7");
+   snprintf(s.subject, sizeof(s.subject), "Caf\xe9 r\xe9sum\xe9"); /* Latin-1 */
+   snprintf(s.preview, sizeof(s.preview), "ok \xc3");              /* cut mid-sequence */
+   snprintf(s.from_name, sizeof(s.from_name), "Zo\xc3\xab");       /* fine as is */
+   json_object *r = email_wire_row(1, &s, false);
+   const char *subject = json_object_get_string(get(r, "subject"));
+   TEST_ASSERT_TRUE(well_formed(subject));
+   TEST_ASSERT_EQUAL_STRING("Caf\xef\xbf\xbd r\xef\xbf\xbdsum\xef\xbf\xbd", subject);
+   TEST_ASSERT_EQUAL_STRING("ok \xef\xbf\xbd", json_object_get_string(get(r, "preview")));
+   TEST_ASSERT_EQUAL_STRING("Zo\xc3\xab", json_object_get_string(get(r, "from_name")));
+   TEST_ASSERT_TRUE(well_formed(json_object_to_json_string(r)));
+   json_object_put(r);
+
+   email_message_t m;
+   char body[] = "line one\n\xff line two\t";
+   char html[] = "<p>\xe9t\xe9</p>";
+   message(&m, body, html);
+   json_object *p = email_wire_read_payload(1, &m, true, 1 << 20);
+   json_object *msg = get(p, "message");
+   TEST_ASSERT_EQUAL_STRING("line one\n\xef\xbf\xbd line two\t",
+                            json_object_get_string(get(msg, "body_text")));
+   TEST_ASSERT_EQUAL_STRING("<p>\xef\xbf\xbdt\xef\xbf\xbd</p>",
+                            json_object_get_string(get(msg, "body_html")));
+   TEST_ASSERT_TRUE(well_formed(json_object_to_json_string(p)));
+   json_object_put(p);
 }
 
 static void test_read_payload(void) {
@@ -210,5 +251,6 @@ int main(void) {
    RUN_TEST(test_html_is_cut_to_the_frame);
    RUN_TEST(test_the_escape_count_matches_json_c);
    RUN_TEST(test_words_for_codes);
+   RUN_TEST(test_bad_utf8_never_goes_out);
    return UNITY_END();
 }
