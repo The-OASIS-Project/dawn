@@ -372,6 +372,18 @@ static void strip_quotes(const char *src, char *dst, size_t dst_len) {
    dst[j] = '\0';
 }
 
+/* Append " before:<t+1>" to @p query: Gmail's before:/after: take a Unix time in
+ * seconds as well as a date, and before: is exclusive, so this keeps the rows
+ * dated at or before @p at_or_before.  Unchanged if it wouldn't fit. */
+static void gmail_append_before(char *query, size_t size, time_t at_or_before) {
+   const size_t len = strlen(query);
+   char add[32];
+   const int n = snprintf(add, sizeof(add), "%sbefore:%lld", len ? " " : "",
+                          (long long)at_or_before + 1);
+   if (n > 0 && len + (size_t)n < size)
+      memcpy(query + len, add, (size_t)n + 1);
+}
+
 static void build_search_query(const email_search_params_t *params,
                                const char *label_query,
                                char *query,
@@ -398,7 +410,7 @@ static void build_search_query(const email_search_params_t *params,
    }
 
    if (params->text[0]) {
-      char safe[128];
+      char safe[sizeof(params->text)];
       strip_quotes(params->text, safe, sizeof(safe));
       if (pos > 0)
          query[pos++] = ' ';
@@ -440,6 +452,8 @@ static void build_search_query(const email_search_params_t *params,
 
    if (pos < (int)query_len)
       query[pos] = '\0';
+   if (params->gmail_at_or_before > 0)
+      gmail_append_before(query, query_len, (time_t)params->gmail_at_or_before);
 }
 
 /* =============================================================================
@@ -853,6 +867,7 @@ int gmail_fetch_recent(const char *token,
                        const char *label_query,
                        int count,
                        bool unread_only,
+                       time_t at_or_before,
                        const char *page_token,
                        email_summary_t *out,
                        int max_out,
@@ -884,11 +899,10 @@ int gmail_fetch_recent(const char *token,
 
    /* Build query */
    const char *lq = (label_query && label_query[0]) ? label_query : "in:inbox";
-   char query[256];
-   if (unread_only)
-      snprintf(query, sizeof(query), "%s is:unread", lq);
-   else
-      snprintf(query, sizeof(query), "%s", lq);
+   char query[320];
+   int qlen = snprintf(query, sizeof(query), "%s%s", lq, unread_only ? " is:unread" : "");
+   if (at_or_before > 0 && qlen > 0 && (size_t)qlen < sizeof(query))
+      gmail_append_before(query, sizeof(query), at_or_before);
 
    /* Fetch message IDs */
    /* Zeroed: a list entry without an "id" leaves its slot untouched, and

@@ -292,7 +292,7 @@ void email_imap_roles_from_list(const char *response,
       return;
    out->trash[0] = '\0';
    out->archive[0] = '\0';
-   char all[EMAIL_IMAP_ROLE_FOLDER_MAX] = "";
+   out->all[0] = '\0';
    bool trash_marked = false;
    bool archive_marked = false;
    int trash_rank = -1;
@@ -317,8 +317,8 @@ void email_imap_roles_from_list(const char *response,
          snprintf(out->archive, sizeof(out->archive), "%s", name);
          archive_marked = true;
       }
-      if (out->gmail && !all[0] && has_attr(attrs, "\\All")) {
-         snprintf(all, sizeof(all), "%s", name);
+      if (!out->all[0] && has_attr(attrs, "\\All")) {
+         snprintf(out->all, sizeof(out->all), "%s", name);
       }
       const int tr = name_rank(name, delim, ns, k_trash_names);
       if (tr >= 0 && (trash_rank < 0 || tr < trash_rank)) {
@@ -336,7 +336,10 @@ void email_imap_roles_from_list(const char *response,
       snprintf(out->trash, sizeof(out->trash), "%s", trash_by_name);
    }
    if (!archive_marked) {
-      snprintf(out->archive, sizeof(out->archive), "%s", all[0] ? all : archive_by_name);
+      /* Archive into \All only on Gmail, where it means "out of the inbox";
+       * elsewhere a copy there would be a second copy. */
+      snprintf(out->archive, sizeof(out->archive), "%s",
+               out->gmail && out->all[0] ? out->all : archive_by_name);
    }
 }
 

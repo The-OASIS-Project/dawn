@@ -56,6 +56,30 @@ static const char *const s_features[] = {
    "document_attachments",
 };
 
+/* The email panel's check (webui_email_panel.c); a build without the panel has
+ * none, and the flag isn't advertised.  Must match its declaration in
+ * webui/webui_email_panel.h (not included here: that header pulls in the WebUI). */
+bool webui_email_client_enabled(void) __attribute__((weak));
+
+/* Flags that depend on how the daemon runs, each with its check.  Same rules
+ * as s_features. */
+static const struct {
+   const char *name;
+   bool (*on)(void);
+} s_runtime_features[] = {
+   /* The mail panel's verbs answer: email_list, email_search, email_read,
+    * email_set_flags, email_unread_counts (docs/WEBSOCKET_PROTOCOL.md, Email). */
+   { "email_client", webui_email_client_enabled },
+};
+
+static bool append_feature(char *out, size_t size, size_t *len, bool first, const char *name) {
+   const int n = snprintf(out + *len, size - *len, "%s\"%s\"", first ? "" : ",", name);
+   if (n < 0 || (size_t)n >= size - *len)
+      return false;
+   *len += (size_t)n;
+   return true;
+}
+
 size_t webui_protocol_json_members(char *out, size_t size) {
    if (!out || size == 0) {
       return 0;
@@ -67,13 +91,22 @@ size_t webui_protocol_json_members(char *out, size_t size) {
       return 0;
    }
    len = (size_t)n;
+   bool first = true;
    for (size_t i = 0; i < sizeof(s_features) / sizeof(s_features[0]); i++) {
-      n = snprintf(out + len, size - len, "%s\"%s\"", i ? "," : "", s_features[i]);
-      if (n < 0 || (size_t)n >= size - len) {
+      if (!append_feature(out, size, &len, first, s_features[i])) {
          out[0] = '\0';
          return 0;
       }
-      len += (size_t)n;
+      first = false;
+   }
+   for (size_t i = 0; i < sizeof(s_runtime_features) / sizeof(s_runtime_features[0]); i++) {
+      if (!s_runtime_features[i].on || !s_runtime_features[i].on())
+         continue;
+      if (!append_feature(out, size, &len, first, s_runtime_features[i].name)) {
+         out[0] = '\0';
+         return 0;
+      }
+      first = false;
    }
    if (len + 2 > size) {
       out[0] = '\0';

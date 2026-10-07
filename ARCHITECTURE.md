@@ -197,8 +197,11 @@ Layer 4 (Application) — deps: everything below
 │                               no-ops, and the WebUI-only pieces are left out (messaging channels, the job and
 │                               deep_research tools, the OAuth and code-project handlers, Home Assistant's
 │                               realtime connection)
-│   └── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
-│                               taken by ticket so no worker waits on an account, replies by session id
+│   ├── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
+│   │                           taken by ticket so no worker waits on an account, replies by session id
+│   └── webui_email_panel.c     The mail panel's verbs (email_list/_search/_read/_set_flags/_unread_counts),
+│                               with the pure email_cursor.c (paging across accounts) and email_wire.c
+│                               (rows, read frames within their size budget)
 └── src/core/{job_worker,research_worker}.c   Detached background-job sequencers*
 ```
 

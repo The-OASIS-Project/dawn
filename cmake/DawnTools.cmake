@@ -346,6 +346,7 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c
+        src/tools/email_imap_read.c
         src/tools/email_imap_move.c
         src/tools/email_imap_roles.c
         src/tools/email_imap_flags.c
@@ -397,13 +398,16 @@ if((DAWN_ENABLE_CALENDAR_TOOL OR DAWN_ENABLE_EMAIL_TOOL) AND ENABLE_WEBUI)
     list(APPEND TOOL_SOURCES src/webui/webui_oauth.c)
 endif()
 
-# The email account panel and its executor are WebUI surfaces too.
+# The email account panel, the mail panel and their executor are WebUI surfaces too.
 if(DAWN_ENABLE_EMAIL_TOOL AND ENABLE_WEBUI)
     list(APPEND TOOL_SOURCES
+        src/webui/email_cursor.c
+        src/webui/email_wire.c
         src/webui/webui_email.c
         src/webui/webui_email_exec.c
         src/webui/webui_email_exec_policy.c
-        src/webui/webui_email_exec_send.c)
+        src/webui/webui_email_exec_send.c
+        src/webui/webui_email_panel.c)
 endif()
 
 # SFX Tool (sound effect playback)

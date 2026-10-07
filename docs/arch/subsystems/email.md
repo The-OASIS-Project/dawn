@@ -1,6 +1,6 @@
 # Email Subsystem
 
-Source: `src/tools/email_*.c`, `src/webui/webui_email.c`
+Source: `src/tools/email_*.c`, `src/tools/gmail_*.c`; the WebUI: `src/webui/webui_email*.c`, `src/webui/email_cursor.c`, `src/webui/email_wire.c`
 
 Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main doc for layer rules, threading model, and lock ordering.
 
@@ -12,11 +12,13 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│                     LLM TOOL INTERFACE                                │
-│  email_tool.c                                                        │
-│  Actions: recent | read | search | folders | send | confirm_send     │
-│           | accounts | trash | confirm_trash | archive               │
-│  → TOOL_CAP_DANGEROUS: compile-time + runtime gates                  │
+│   LLM TOOL INTERFACE              │  WEBUI MAIL PANEL (Aurora)        │
+│  email_tool.c                     │  webui_email_panel.c: email_list, │
+│  recent | read | search | folders │   _search, _read, _set_flags,     │
+│  | send | confirm_send | accounts │   _unread_counts (email_cursor.c, │
+│  | trash | confirm_trash | archive│   email_wire.c: paging, frames)   │
+│  → TOOL_CAP_DANGEROUS gates       │  webui_email_exec.c: 4 workers,   │
+│                                   │   one task per account            │
 ├───────────────────────────────────────────────────────────────────────┤
 │                     SERVICE LAYER                                     │
 │  email_service.c, email_service_read.c                               │
@@ -27,8 +29,11 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ├───────────────────────────────────────────────────────────────────────┤
 │              BACKEND A                     BACKEND B                  │
 │  email_client.c (IMAP/SMTP)    gmail_client.c (Gmail REST API)      │
-│  email_imap_move.c (trash,     gmail_read.c, gmail_parts.c          │
-│   archive)                                                           │
+│  email_imap_read.c (read)      gmail_read.c, gmail_parts.c          │
+│  email_imap_move.c (trash,     gmail_flags.c (read/unread, counts)  │
+│   archive, folder roles)                                             │
+│  email_imap_flags.c (\Seen, STATUS); one IMAP login per account at a │
+│   time: email_account_lease.c                                        │
 ├───────────────────────────────────────────────────────────────────────┤
 │                     READING A MESSAGE                                 │
 │  email_mime.c (GMime) + email_display.c: one policy, both backends   │

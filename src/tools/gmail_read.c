@@ -175,7 +175,8 @@ int gmail_read_message(const char *token,
    if (!token || !token[0] || !message_id || !opts)
       return 1;
    if (!gmail_message_id_valid(message_id)) {
-      OLOG_ERROR("gmail: invalid message ID '%s'", message_id);
+      /* Not echoed: it can come from a client. */
+      OLOG_ERROR("gmail: invalid message ID (%zu bytes)", strlen(message_id));
       return 1;
    }
    snprintf(out->message_id, sizeof(out->message_id), "%s", message_id);

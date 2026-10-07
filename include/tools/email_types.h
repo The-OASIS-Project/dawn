@@ -152,6 +152,8 @@ typedef enum {
    EMAIL_ERR_BUSY,              /* the account or the server's email workers are busy */
    EMAIL_ERR_SHUTTING_DOWN,     /* the daemon is stopping */
    EMAIL_ERR_CANNOT_CALCULATE,  /* the changes since a state can't be worked out */
+   EMAIL_ERR_INVALID_REQUEST,   /* the request itself is malformed or past a limit */
+   EMAIL_ERR_UNAVAILABLE,       /* email is turned off */
 } email_err_t;
 
 /** The wire name of @p err ("AUTH_FAILED", ...; "" for NONE).  email_transfer.c */
@@ -222,15 +224,19 @@ typedef struct {
    bool attachments_truncated; /* more attachments than listed (cap, cut fetch, limits) */
 } email_message_t;
 
+/* The longest free-text search query, in bytes. */
+#define EMAIL_SEARCH_TEXT_MAX 256
+
 typedef struct {
    char from[128];
    char subject[128];
-   char text[128];
-   char since[16]; /* YYYY-MM-DD, validated via strptime/strftime */
+   char text[EMAIL_SEARCH_TEXT_MAX + 1]; /* the free-text query (the panel's search box) */
+   char since[16];                       /* YYYY-MM-DD, validated via strptime/strftime */
    char before[16];
    bool unread_only;                      /* Only match UNSEEN messages */
    char folder[256];                      /* Folder/label or normalized Gmail query fragment */
    char page_token[EMAIL_PAGE_TOKEN_LEN]; /* Paging cursor, Gmail or IMAP (empty = first page) */
+   int64_t gmail_at_or_before; /* Gmail: only rows dated at or before this (epoch s; 0 = none) */
 } email_search_params_t;
 
 /**

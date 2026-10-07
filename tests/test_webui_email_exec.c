@@ -246,6 +246,29 @@ static void run_load(int rounds, int hold_ms, pthread_t *holder) {
       pthread_join(th[i], NULL);
 }
 
+static void test_a_req_is_echoed_only_when_plain(void) {
+   char out[EMAIL_EXEC_REQ_MAX + 1];
+   json_object *p = json_tokener_parse("{\"req\":\"l-17\"}");
+   TEST_ASSERT_TRUE(email_exec_payload_req(p, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("l-17", out);
+   json_object_put(p);
+   /* A control character, a DEL, too long, not a string: ignored. */
+   p = json_tokener_parse("{\"req\":\"a\\nb\"}");
+   TEST_ASSERT_FALSE(email_exec_payload_req(p, out, sizeof(out)));
+   json_object_put(p);
+   p = json_tokener_parse("{\"req\":\"a\\u007fb\"}");
+   TEST_ASSERT_FALSE(email_exec_payload_req(p, out, sizeof(out)));
+   json_object_put(p);
+   char big[128];
+   snprintf(big, sizeof(big), "{\"req\":\"%065d\"}", 0);
+   p = json_tokener_parse(big);
+   TEST_ASSERT_FALSE(email_exec_payload_req(p, out, sizeof(out)));
+   json_object_put(p);
+   p = json_tokener_parse("{\"req\":7}");
+   TEST_ASSERT_FALSE(email_exec_payload_req(p, out, sizeof(out)));
+   json_object_put(p);
+}
+
 static void test_every_request_is_answered_once_and_freed_once(void) {
    pthread_t holder;
    run_load(30, 20, &holder);
@@ -346,6 +369,7 @@ int main(void) {
    pthread_create(&dog, NULL, watchdog, NULL);
    pthread_detach(dog);
    UNITY_BEGIN();
+   RUN_TEST(test_a_req_is_echoed_only_when_plain);
    RUN_TEST(test_every_request_is_answered_once_and_freed_once);
    RUN_TEST(test_a_supersede_racing_a_finishing_task_frees_once);
    RUN_TEST(test_one_user_cant_hold_every_worker);

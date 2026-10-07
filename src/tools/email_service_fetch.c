@@ -50,6 +50,7 @@ static bool is_gmail_imap_server(const email_account_t *acct) {
 typedef struct {
    char gmail_query[256]; /* Gmail search fragment (e.g. "in:sent", "label:\"Receipts\"") */
    char imap_folder[128]; /* IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail") */
+   bool imap_all;         /* "all" on a generic IMAP server: the folder it marks \All, if any */
 } folder_norm_t;
 
 /** Normalization map entry */
@@ -101,8 +102,10 @@ static void normalize_folder(const char *folder, const email_account_t *acct, fo
          } else if (folder_map[i].imap_generic) {
             snprintf(out->imap_folder, sizeof(out->imap_folder), "%s", folder_map[i].imap_generic);
          } else {
-            /* Unsupported on generic IMAP — fall back to INBOX */
+            /* Not named on generic IMAP: INBOX, unless (for "all") the server
+             * marks a folder \All, looked up once connected (imap_all_folder). */
             snprintf(out->imap_folder, sizeof(out->imap_folder), "INBOX");
+            out->imap_all = strcasecmp(folder_map[i].user_name, "all") == 0;
          }
          return;
       }
@@ -114,6 +117,16 @@ static void normalize_folder(const char *folder, const email_account_t *acct, fo
    strip_folder_quotes(folder, safe, sizeof(safe));
    snprintf(out->gmail_query, sizeof(out->gmail_query), "label:\"%s\"", safe);
    snprintf(out->imap_folder, sizeof(out->imap_folder), "%s", folder);
+}
+
+/* "all" on a generic IMAP server: the folder it marks \All (RFC 6154), when it
+ * marks one; else INBOX stays. */
+static void imap_all_folder(const email_conn_t *conn, folder_norm_t *norm) {
+   if (!norm->imap_all)
+      return;
+   char all[sizeof(norm->imap_folder)];
+   if (email_imap_all_mail_folder(conn, all, sizeof(all)) && validate_folder_name(all))
+      snprintf(norm->imap_folder, sizeof(norm->imap_folder), "%s", all);
 }
 
 /* =============================================================================
@@ -170,7 +183,7 @@ static int recent_on_account(const email_account_t *acct,
                              int *out_count,
                              char *next_page_token,
                              size_t npt_len,
-                             int *inbox_unread,
+                             email_page_ext_t *ext,
                              const email_target_t *target,
                              email_err_t *err);
 
@@ -185,15 +198,18 @@ int email_service_recent(int user_id,
                          int *out_count,
                          char *next_page_token,
                          size_t npt_len,
-                         int *inbox_unread,
+                         email_page_ext_t *ext,
                          const email_target_t *target,
                          email_err_t *err) {
    email_err_t err_local;
    if (!err)
       err = &err_local;
    *err = EMAIL_ERR_FAILED;
-   if (inbox_unread)
-      *inbox_unread = -1;
+   if (ext) {
+      ext->inbox_unread = -1;
+      ext->uidvalidity = 0;
+      ext->imap_folder[0] = '\0';
+   }
 
    /* Copy the incoming cursor before clearing the outgoing one, so a caller may
     * pass the same buffer for both (page N's token in, page N+1's out). */
@@ -218,7 +234,7 @@ int email_service_recent(int user_id,
    if (count <= 0)
       count = acct.max_recent > 0 ? acct.max_recent : EMAIL_MAX_RECENT_DEFAULT;
    const int rc = recent_on_account(&acct, folder, count, unread_only, page_token, out, max,
-                                    out_count, next_page_token, npt_len, inbox_unread, target, err);
+                                    out_count, next_page_token, npt_len, ext, target, err);
    sodium_memzero(&acct, sizeof(acct));
    return rc;
 }
@@ -234,7 +250,7 @@ static int recent_on_account(const email_account_t *acct,
                              int *out_count,
                              char *next_page_token,
                              size_t npt_len,
-                             int *inbox_unread,
+                             email_page_ext_t *ext,
                              const email_target_t *target,
                              email_err_t *err) {
    folder_norm_t norm;
@@ -242,7 +258,9 @@ static int recent_on_account(const email_account_t *acct,
    /* The unread count comes with the inbox's first page only: decided on the
     * folder asked for, since other folders can fall back to INBOX on IMAP. */
    const bool asked_inbox = !folder || !folder[0] || strcasecmp(folder, "inbox") == 0;
-   const bool want_unread = inbox_unread && asked_inbox && !(page_token && page_token[0]);
+   const bool want_unread = ext && ext->want_inbox_unread && asked_inbox &&
+                            !(page_token && page_token[0]) && !ext->at_or_before;
+   int *inbox_unread = ext ? &ext->inbox_unread : NULL;
 
    /* Gmail API path */
    if (email_svc_is_gmail_api(acct)) {
@@ -253,9 +271,9 @@ static int recent_on_account(const email_account_t *acct,
       char token[OAUTH_TOKEN_BUF_SIZE];
       if (email_svc_gmail_token_err(acct, token, sizeof(token), err) != 0)
          return 1;
-      int rc = gmail_fetch_recent(token, norm.gmail_query, count, unread_only, page_token, out, max,
-                                  out_count, next_page_token, npt_len,
-                                  want_unread ? inbox_unread : NULL);
+      int rc = gmail_fetch_recent(token, norm.gmail_query, count, unread_only,
+                                  ext ? ext->at_or_before : 0, page_token, out, max, out_count,
+                                  next_page_token, npt_len, want_unread ? inbox_unread : NULL);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
       *err = rc == 0 ? EMAIL_ERR_NONE : EMAIL_ERR_FAILED;
@@ -278,6 +296,7 @@ static int recent_on_account(const email_account_t *acct,
       *err = email_svc_conn_err(rc);
       rc = 1;
    } else {
+      imap_all_folder(&conn, &norm);
       rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, &page, out, max,
                               out_count, want_unread ? inbox_unread : NULL, err);
    }
@@ -289,6 +308,10 @@ static int recent_on_account(const email_account_t *acct,
    }
    if (rc == 0)
       imap_page_to_token(&page, next_page_token, npt_len);
+   if (ext) {
+      ext->uidvalidity = page.next_uidvalidity ? page.next_uidvalidity : page.uidvalidity;
+      snprintf(ext->imap_folder, sizeof(ext->imap_folder), "%s", norm.imap_folder);
+   }
 
    /* Populate message_id (folder:uid) for IMAP results, then stamp the account. */
    for (int i = 0; i < *out_count; i++)
@@ -322,6 +345,8 @@ static int search_single_account(email_account_t *acct,
                                  size_t npt_len,
                                  const email_target_t *target,
                                  int lease_wait_s,
+                                 uint32_t *uidvalidity,
+                                 char *imap_folder,
                                  email_err_t *err) {
    /* Work on a copy so the caller may hand back the previous page's token buffer
     * as next_page_token (see email_service_recent). */
@@ -379,6 +404,7 @@ static int search_single_account(email_account_t *acct,
       *err = email_svc_conn_err(rc);
       rc = 1;
    } else {
+      imap_all_folder(&conn, &norm);
       rc = email_search(&conn, norm.imap_folder, params, &page, out, max, out_count, err);
    }
    email_svc_lease_end(&lease);
@@ -389,6 +415,11 @@ static int search_single_account(email_account_t *acct,
    }
    if (rc == 0)
       imap_page_to_token(&page, next_page_token, npt_len);
+   if (uidvalidity)
+      *uidvalidity = page.next_uidvalidity ? page.next_uidvalidity : page.uidvalidity;
+   if (imap_folder) /* the folder searched, as resolved ("all" may name the server's own) */
+      snprintf(imap_folder, sizeof(((email_search_report_t *)0)->imap_folder), "%s",
+               norm.imap_folder);
 
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
@@ -453,7 +484,8 @@ int email_service_search(int user_id,
          return find_rc;
       }
       const int rc = search_single_account(&acct, params, out, max, out_count, next_page_token,
-                                           npt_len, target, EMAIL_LEASE_WAIT_SEC, &report->err);
+                                           npt_len, target, EMAIL_LEASE_WAIT_SEC,
+                                           &report->uidvalidity, report->imap_folder, &report->err);
       sodium_memzero(&acct, sizeof(acct));
       return rc;
    }
@@ -487,7 +519,8 @@ int email_service_search(int user_id,
       /* A busy account is reported, not waited out: the others shouldn't wait
        * behind it one after another. */
       int rc = search_single_account(&accounts[i], params, out + total, remaining, &this_count,
-                                     NULL, 0, NULL, EMAIL_LEASE_FANOUT_WAIT_SEC, &acct_err);
+                                     NULL, 0, NULL, EMAIL_LEASE_FANOUT_WAIT_SEC, NULL, NULL,
+                                     &acct_err);
       if (rc == 0) {
          total += this_count;
       } else if (acct_err == EMAIL_ERR_CANCELLED) {

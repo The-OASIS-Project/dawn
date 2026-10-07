@@ -173,6 +173,11 @@ bool email_exec_payload_req(json_object *payload, char *out, size_t out_size) {
    const size_t len = req ? strlen(req) : 0;
    if (!req || len > EMAIL_EXEC_REQ_MAX || len >= out_size)
       return false;
+   for (size_t i = 0; i < len; i++) {
+      const unsigned char ch = (unsigned char)req[i];
+      if (ch < 0x20 || ch == 0x7f)
+         return false; /* echoed in every reply: keep it plain */
+   }
    memcpy(out, req, len + 1);
    return true;
 }

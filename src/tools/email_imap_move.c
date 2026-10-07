@@ -50,6 +50,17 @@ typedef struct {
 static roles_slot_t s_roles[ROLES_CACHE_SLOTS];
 static pthread_mutex_t s_roles_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* An account whose roles probe failed for "all" isn't probed again for a while
+ * (one extra failing login per request otherwise); it lists INBOX meanwhile. */
+#define ALL_PROBE_RETRY_SEC 300
+
+typedef struct {
+   char key[sizeof(((roles_slot_t *)0)->key)];
+   time_t at;
+} probe_fail_t;
+
+static probe_fail_t s_probe_failed[ROLES_CACHE_SLOTS];
+
 /* The cache key of @p conn's account: its server and login. */
 static void roles_key(const email_conn_t *conn, char *key, size_t size) {
    snprintf(key, size, "%s\n%s", conn->imap_url, conn->username);
@@ -369,6 +380,70 @@ done:
    curl_free(encoded);
    curl_easy_cleanup(curl);
    return rc;
+}
+
+/* With s_roles_mutex held: @p key's probe failed within ALL_PROBE_RETRY_SEC. */
+static bool probe_failed_recently_locked(const char *key, time_t now) {
+   for (int i = 0; i < ROLES_CACHE_SLOTS; i++) {
+      if (s_probe_failed[i].key[0] && strcmp(s_probe_failed[i].key, key) == 0)
+         return now - s_probe_failed[i].at < ALL_PROBE_RETRY_SEC;
+   }
+   return false;
+}
+
+/* Records (@p failed) or clears @p key's failed probe. */
+static void probe_note(const char *key, bool failed) {
+   const time_t now = time(NULL);
+   pthread_mutex_lock(&s_roles_mutex);
+   int slot = -1, oldest = 0;
+   for (int i = 0; i < ROLES_CACHE_SLOTS; i++) {
+      if (s_probe_failed[i].key[0] && strcmp(s_probe_failed[i].key, key) == 0)
+         slot = i;
+      if (s_probe_failed[i].at < s_probe_failed[oldest].at)
+         oldest = i;
+   }
+   if (!failed) {
+      if (slot >= 0)
+         memset(&s_probe_failed[slot], 0, sizeof(s_probe_failed[slot]));
+   } else {
+      if (slot < 0)
+         slot = oldest; /* an empty slot has at == 0, so it's the oldest */
+      snprintf(s_probe_failed[slot].key, sizeof(s_probe_failed[slot].key), "%s", key);
+      s_probe_failed[slot].at = now;
+   }
+   pthread_mutex_unlock(&s_roles_mutex);
+}
+
+bool email_imap_all_mail_folder(const email_conn_t *conn, char *out, size_t size) {
+   if (!conn || !out || size == 0)
+      return false;
+   out[0] = '\0';
+   char key[sizeof(((roles_slot_t *)0)->key)];
+   roles_key(conn, key, sizeof(key));
+   email_imap_roles_t roles;
+   if (!roles_cached(key, &roles)) {
+      pthread_mutex_lock(&s_roles_mutex);
+      const bool skip = probe_failed_recently_locked(key, time(NULL));
+      pthread_mutex_unlock(&s_roles_mutex);
+      if (skip)
+         return false;
+      CURL *curl = email_imap_handle_create(conn);
+      if (!curl)
+         return false;
+      email_instrument_ctx_t dctx;
+      email_instrument_attach(curl, &dctx);
+      bool first = true;
+      const int rc = roles_for(curl, &dctx, conn, key, &first, &roles);
+      email_instrument_op_done(conn->username, "roles", curl, &dctx);
+      curl_easy_cleanup(curl);
+      probe_note(key, rc != 0);
+      if (rc != 0)
+         return false;
+   }
+   if (!roles.all[0] || strlen(roles.all) >= size)
+      return false;
+   snprintf(out, size, "%s", roles.all);
+   return true;
 }
 
 int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid) {

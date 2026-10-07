@@ -83,6 +83,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `email_client` | 2026-10-07 | The mail panel's verbs answer: `email_list`, `email_search`, `email_read`, `email_set_flags`, `email_unread_counts` (see Email). Advertised only while email is turned on (`[email] enabled`) and its service is up; a build without the WebUI or the email tool never advertises it. |
 | `document_attachments` | 2026-10-02 | A `text` frame may carry its documents as `attachments` (`[{filename, size, content, blob_id?}]`): the daemon defuses each body and filename and builds the `[ATTACHED DOCUMENT: …]…[END DOCUMENT]` text itself, so a document can't end its own span. Without it, inline the documents into `text` as before. Every daemon with it also has `turn_refs`. |
 | `turn_refs` | 2026-10-02 | A `text` frame may carry `client_ref`: the turn's own user `transcript` echo and every `error` raised for that turn (refused at receipt, refused or failed when it runs) carry it back unchanged, so a client knows which of its turns an error belongs to. Without it, refusals name no turn. |
 | `image_only_turns` | 2026-10-01 | A `text` turn with no words (empty, absent or whitespace `text`) but at least one `image_ids` entry runs with just the images; one with neither is refused with `EMPTY_MESSAGE` instead of being dropped silently. Without it, require text with an image: older daemons drop a turn with no text without a reply. |
@@ -1190,6 +1191,178 @@ Authenticated; each user sees only their own accounts' events.
   - `start_date`/`end_date`: `YYYY-MM-DD`, only meaningful when `all_day` is true.
   - `start`/`end` (top level): echo the resolved window.
 
+### Email
+
+Every email verb is per user (the logged-in connection's account) and may carry `req`: a
+string of at most 64 bytes with no control characters, echoed in its reply's payload, so a
+client can match replies to requests. A `req` that's longer, has a control character or
+isn't a string is ignored (the reply carries none). Every reply is `<verb>_response` with `{success, error_code?, error?, req?, …}`.
+`error_code` is one of the names below; `error` is a sentence for people.
+
+| `error_code` | Meaning |
+|---|---|
+| `INVALID_REQUEST` | A member is missing, of the wrong type, or past a limit |
+| `UNAVAILABLE` | Email is turned off |
+| `NO_ACCOUNT` / `ACCOUNT_NOT_FOUND` | The user has no enabled account / not one with that id |
+| `AUTH_FAILED` / `AUTH_REVOKED` | The server refused the login / the OAuth grant was revoked (reconnect) |
+| `UNREACHABLE` / `TIMEOUT` / `RATE_LIMITED` | Network, server or provider trouble; try again |
+| `NOT_FOUND` | No such message |
+| `UNSUPPORTED_QUERY` | This account can't run the search (IMAP: non-ASCII text) |
+| `CURSOR_STALE` | The cursor no longer applies: start again without one |
+| `BUSY` | Too many email requests at once (per session or per user); try again shortly |
+| `SUPERSEDED` | A newer request of the same kind replaced this one before it finished: ignore it |
+| `SHUTTING_DOWN` | The daemon is stopping |
+| `CANCELLED` / `FAILED` | Stopped / anything else |
+
+Every request gets exactly one reply, even when it's refused or replaced. Email work runs
+off the socket's thread, so replies may come back in a different order than the requests
+went out: match on `req`.
+
+#### Account settings
+
+`email_list_accounts` (no payload) returns `accounts: [{id, name, imap_server, imap_port,
+imap_ssl, smtp_server, smtp_port, smtp_ssl, username, display_name, has_password, auth_type,
+oauth_account_key, enabled, read_only, max_recent, max_body_chars, digest_depth}]` and
+`limits: {max_recent_max, max_recent_default, digest_depth_max, digest_depth_default,
+body_chars_min, body_chars_max}`. Passwords never leave the daemon.
+
+| Request | Payload | Notes |
+|---|---|---|
+| `email_add_account` | `{name, imap_server, smtp_server, username, password?, auth_type?, imap_port?, imap_ssl?, smtp_port?, smtp_ssl?, display_name?, read_only?, oauth_account_key?}` | `auth_type` `"app_password"` (needs `password`) or `"oauth"` (needs `oauth_account_key`) |
+| `email_update_account` | `{id, …any of the above, max_recent?, max_body_chars?, digest_depth?}` | An out-of-range number is refused, not dropped |
+| `email_remove_account` | `{id}` | |
+| `email_set_read_only` | `{id, read_only}` | A read-only account can't send, trash or archive |
+| `email_set_enabled` | `{id, enabled}` | |
+| `email_test_connection` | `{id, req?}` | Runs the IMAP and SMTP logins: `{imap_ok, smtp_ok, imap_busy?, error_code?}`. `imap_busy`: IMAP wasn't tested because the account was in use |
+
+#### The mail panel (flag `email_client`)
+
+Limits: `account_ids` 1–16 distinct ids; `message_ids` 1–50; a message id under 192 bytes;
+`query` 1–256 bytes; `limit` 1–50 (default 25); `cursor` up to 16 KB. Text members may not
+contain control characters, and a message id must have the shape of its account's ids. Past a
+limit, or with an id of the wrong shape, the request is refused with `INVALID_REQUEST`.
+
+**A row** (`email_list`, `email_search`):
+
+```json
+{"account_id": 3, "message_id": "INBOX:4211", "thread_id": "18c2…", "from_name": "Ann",
+ "from_addr": "ann@example.com", "subject": "Lunch", "date": 1759831200, "preview": "",
+ "unread": true, "starred": false, "important": true}
+```
+
+`date` is the server's receive time in epoch seconds. `thread_id`, `starred` and
+`important` are there only where the backend has them (Gmail). `preview` is the
+provider's snippet, and `""` on IMAP accounts. A `message_id` is opaque: pass it back as is.
+
+##### `email_list` / `email_search`
+
+```json
+{"type": "email_list", "payload": {"account_ids": [3, 5], "folder": "inbox",
+ "unread_only": false, "limit": 25, "cursor": null, "req": "l-17"}}
+{"type": "email_search", "payload": {"query": "invoice", "unread_only": false, "limit": 25,
+ "req": "s-4"}}
+```
+
+Omitted `account_ids` means every enabled account. `folder` (list only) defaults to
+`"inbox"`; `sent`, `trash`, `spam`, `drafts`, `starred`, `important`, `all` and a label or
+folder name work too. Search looks through all mail where the backend has it: Gmail (without
+Spam and Trash), and IMAP servers that mark an All Mail folder (`\All`); on other IMAP servers,
+the inbox. (If the server's folder list can't be read, it's asked again after 5 minutes;
+meanwhile the inbox is searched.)
+
+```json
+{"type": "email_list_response", "payload": {"success": true, "req": "l-17",
+ "rows": [ … ], "cursor": "eyJ2Ijox…",
+ "partial": [{"account_id": 5, "error_code": "AUTH_FAILED", "error": "The server refused the login"}],
+ "accounts": [{"account_id": 3, "inbox_unread": 12, "status": "ok"},
+              {"account_id": 5, "inbox_unread": null, "status": "auth_failed"}]}}
+```
+
+- **Rows** come newest first across the accounts. Within an account they keep its own
+  order (IMAP: by UID), so the merged list can be slightly out of date order. Each page
+  resumes exactly where the last one stopped for every account. A Gmail account resumes by
+  date, so mail arriving or leaving between pages doesn't shift it (no row twice, none
+  skipped; a page can change `limit`). Gmail pages that come back with nothing to show but
+  more after them don't end the list.
+- **`cursor`**: send it back unchanged, with the same other members, for the next page;
+  `null` means there is no more. It's opaque. A cursor presented with a different filter
+  (accounts, folder, query, `unread_only`), naming an account that's gone or not the
+  user's, or one the server no longer accepts (a rebuilt IMAP mailbox, or an `all` that now
+  reads a different folder than when the cursor was made) is refused with `CURSOR_STALE`:
+  start again without one. A page can hold fewer than `limit` rows while
+  `cursor` is still set.
+- **`partial`**: accounts that failed this page, and ids asked for that aren't the user's
+  enabled accounts (`ACCOUNT_NOT_FOUND`). The other accounts still return rows. A failed
+  account keeps its place in `cursor`, so a load-more tries it again (the cursor isn't null
+  while one is left); rows from an account that recovers after a failure may arrive out of
+  date order with the ones already shown.
+- **`accounts`** (first page of `email_list` for the inbox only, no cursor): each account's
+  inbox unread count, on the same login as the list. `inbox_unread` is `null` when it isn't
+  known. `status`: `ok`, `auth_revoked`, `auth_failed` or `unreachable` (timeouts and rate
+  limits count as unreachable).
+
+A newer `email_list` or `email_search` from the same session replaces one still running
+(that one is answered `SUPERSEDED`).
+
+##### `email_read`
+
+```json
+{"type": "email_read", "payload": {"account_id": 3, "message_id": "INBOX:4211",
+ "mark_read": true, "req": "r-9"}}
+{"type": "email_read_response", "payload": {"success": true, "req": "r-9", "unread": false,
+ "message": {"account_id": 3, "message_id": "INBOX:4211", "subject": "Lunch",
+   "from_name": "Ann", "from_addr": "ann@example.com",
+   "to": [{"name": "", "addr": "me@example.com"}], "cc": [], "to_total": 40,
+   "reply_to": {"name": "", "addr": "list@example.com"}, "date": 1759831200,
+   "body_text": "…", "body_html": "<p>…</p>", "text_truncated": false,
+   "html_truncated": false,
+   "attachments": [{"part_id": "2", "filename": "menu.pdf", "mime": "application/pdf",
+                    "size": 48211, "inline": false}]}}}
+```
+
+- `to_total` / `cc_total` appear when the list was cut at 32; `reply_to` when the message
+  has one; `content_id` on an attachment when it has one; `attachments_truncated` when
+  more than 16 exist.
+- `body_text` is at most 256 KB. `body_html` is the decoded HTML, at most 1 MB, and cut
+  further (with `html_truncated`) so the whole frame stays within 1.5 MB.
+- **`body_html` is the sender's HTML, unsanitized. It must never reach `innerHTML`, or any
+  other HTML sink, in any DAWN client.** Render it only in a frame sandboxed *without*
+  `allow-same-origin` and *without* `allow-scripts`, or sanitize it (e.g. DOMPurify) before
+  any HTML sink. Aurora is served same-origin with DAWN under `/aurora`: HTML that escapes
+  runs with the user's DAWN session and WebSocket.
+- **Read state.** `mark_read` (default `true`) leaves the message read. `false` leaves it as
+  it was: on IMAP the fetch itself marks the message read, so DAWN marks it unread again
+  right after (even if the read failed partway); another client may see it read for that
+  moment. `unread` is the message's state after the call, as it really ended up.
+- A newer `email_read` from the same session replaces one still waiting (not one already
+  running).
+
+##### `email_set_flags`
+
+```json
+{"type": "email_set_flags", "payload": {"account_id": 3, "message_ids": ["INBOX:4211"],
+ "unread": true, "req": "f-2"}}
+{"type": "email_set_flags_response", "payload": {"success": true, "req": "f-2",
+ "updated": ["INBOX:4211"], "failed": []}}
+```
+
+Marks messages read (`unread: false`) or unread. Only the read state ever changes, so it
+works on read-only accounts. `failed: [{message_id, error_code, error}]`: `NOT_FOUND` for a
+message that isn't there (on Gmail a batch the provider accepts reports every id updated).
+Repeating it is harmless. On IMAP the messages may span at most 8 folders per call.
+
+##### `email_unread_counts`
+
+```json
+{"type": "email_unread_counts", "payload": {"req": "c-1"}}
+{"type": "email_unread_counts_response", "payload": {"success": true, "req": "c-1",
+ "accounts": [{"account_id": 3, "inbox_unread": 12, "status": "ok"}]}}
+```
+
+Every enabled account's inbox unread count, with the same `status` values as the list's
+`accounts`. For refreshing: the first page of `email_list` for the inbox already carries
+them.
+
 ### DAP2 Satellite Messages
 
 These messages are only accepted from satellite connections (identified by
@@ -2221,6 +2394,18 @@ Satellites also receive the same streaming messages as WebUI clients:
 | Request | Response |
 |---------|----------|
 | `get_config` | `get_config_response` |
+| `email_list_accounts` | `email_list_accounts_response` |
+| `email_add_account` | `email_add_account_response` |
+| `email_update_account` | `email_update_account_response` |
+| `email_remove_account` | `email_remove_account_response` |
+| `email_set_read_only` | `email_set_read_only_response` |
+| `email_set_enabled` | `email_set_enabled_response` |
+| `email_test_connection` | `email_test_connection_response` |
+| `email_list` | `email_list_response` |
+| `email_search` | `email_search_response` |
+| `email_read` | `email_read_response` |
+| `email_set_flags` | `email_set_flags_response` |
+| `email_unread_counts` | `email_unread_counts_response` |
 | `set_config` | `set_config_response` |
 | `set_secrets` | `set_secrets_response` |
 | `get_audio_devices` | `get_audio_devices_response` |
@@ -2309,6 +2494,9 @@ All `*_response` messages follow a common pattern:
 | `src/webui/webui_satellite.c` | DAP2 satellite registration and queries |
 | `src/webui/webui_music.c` | Music streaming, search, library, queue |
 | `src/webui/webui_history.c` | Conversation CRUD, search, context |
+| `src/webui/webui_email.c` | Email account settings, test connection |
+| `src/webui/webui_email_panel.c` | The mail panel's verbs (list, search, read, flags, counts) |
+| `src/webui/webui_email_exec.c` | Email work off the socket thread, one task per account |
 | `src/webui/webui_memory.c` | Memory facts, preferences, summaries |
 | `src/webui/webui_admin.c` | User management (CRUD, unlock) |
 | `src/webui/webui_session.c` | Session list and revocation |

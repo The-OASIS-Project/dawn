@@ -36,6 +36,7 @@
  *                         If NULL/empty, defaults to "in:inbox".
  * @param count            Number of messages to fetch
  * @param unread_only      If true, only fetch unread messages
+ * @param at_or_before     Only messages dated at or before this (epoch s); 0 = no bound
  * @param page_token       Pagination token from previous call (NULL for first page)
  * @param out              Output array of email summaries
  * @param max_out          Size of output array
@@ -50,6 +51,7 @@ int gmail_fetch_recent(const char *token,
                        const char *label_query,
                        int count,
                        bool unread_only,
+                       time_t at_or_before,
                        const char *page_token,
                        email_summary_t *out,
                        int max_out,

@@ -66,7 +66,8 @@ static void loggable_id(const char *id, char *out, size_t out_size) {
    size_t j = 0;
    for (size_t i = 0; id && id[i] && i < 64 && j + 1 < out_size; i++) {
       const unsigned char c = (unsigned char)id[i];
-      out[j++] = (c < 0x20 || c == 0x7f) ? '?' : (char)c;
+      /* Printable ASCII only: no control bytes, and no UTF-8 that could carry a C1 control. */
+      out[j++] = (c < 0x20 || c >= 0x7f) ? '?' : (char)c;
    }
    out[j] = '\0';
 }

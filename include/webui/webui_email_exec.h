@@ -37,6 +37,7 @@
 #include <stdint.h>
 
 #include "tools/email_service.h"
+#include "webui/email_wire.h"
 #include "webui/webui_email_exec_policy.h"
 
 #ifdef __cplusplus
@@ -52,8 +53,8 @@ extern "C" {
 #define EMAIL_EXEC_WORKERS 4
 #define EMAIL_EXEC_USER_WORKERS (EMAIL_EXEC_WORKERS / 2) /* while others have work waiting */
 #define EMAIL_EXEC_STACK_BYTES (1024 * 1024)
-#define EMAIL_EXEC_MAX_TASKS 16 /* accounts one request may span */
-#define EMAIL_EXEC_REQ_MAX 64   /* the client's req, in bytes */
+#define EMAIL_EXEC_MAX_TASKS 16               /* accounts one request may span */
+#define EMAIL_EXEC_REQ_MAX EMAIL_WIRE_REQ_MAX /* the client's req, in bytes */
 #define EMAIL_EXEC_VERB_MAX 48
 
 /** What one account task gets. */
@@ -117,8 +118,9 @@ char *webui_email_exec_refusal_json(const char *verb, email_err_t code, const ch
 
 /**
  * @brief The client's optional request id from a verb's payload
- * @return true when it is a string of at most EMAIL_EXEC_REQ_MAX bytes (copied
- *         into @p out); a missing or longer one is ignored
+ * @return true when it is a string of at most EMAIL_EXEC_REQ_MAX bytes with no
+ *         control characters (copied into @p out); a missing, longer or
+ *         control-character one is ignored
  */
 bool email_exec_payload_req(json_object *payload, char *out, size_t out_size);
 

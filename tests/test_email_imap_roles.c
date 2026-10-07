@@ -66,6 +66,7 @@ static void test_gmail(void) {
                               NULL, &r);
    TEST_ASSERT_EQUAL_STRING("[Gmail]/Trash", r.trash);
    TEST_ASSERT_EQUAL_STRING("[Gmail]/All Mail", r.archive);
+   TEST_ASSERT_EQUAL_STRING("[Gmail]/All Mail", r.all);
 }
 
 static void test_outlook_marked(void) {
@@ -137,6 +138,8 @@ static void test_all_mail_only_on_gmail(void) {
    email_imap_roles_from_list("* LIST (\\All) \"/\" virtual/All\r\n* LIST () \"/\" Archive\r\n",
                               NULL, &r);
    TEST_ASSERT_EQUAL_STRING("Archive", r.archive);
+   /* Still the folder search looks through for "all". */
+   TEST_ASSERT_EQUAL_STRING("virtual/All", r.all);
 }
 
 static void test_namespace(void) {

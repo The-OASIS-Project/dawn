@@ -72,6 +72,7 @@
 #include "webui/webui_stocks.h"
 #endif
 #include "webui/webui_email.h"
+#include "webui/webui_email_panel.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
 #include "webui/webui_ota.h"
@@ -1462,6 +1463,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_email_set_enabled(conn, payload);
       }
+   }
+   /* The mail panel: payload optional where every member is. */
+   else if (strcmp(type, "email_list") == 0) {
+      handle_email_list(conn, payload);
+   } else if (strcmp(type, "email_search") == 0) {
+      handle_email_search(conn, payload);
+   } else if (strcmp(type, "email_read") == 0) {
+      handle_email_read(conn, payload);
+   } else if (strcmp(type, "email_set_flags") == 0) {
+      handle_email_set_flags(conn, payload);
+   } else if (strcmp(type, "email_unread_counts") == 0) {
+      handle_email_unread_counts(conn, payload);
    }
 #endif /* DAWN_ENABLE_EMAIL_TOOL */
    /* Watches (SAGE proactive attention) — per-user attention_rules CRUD */

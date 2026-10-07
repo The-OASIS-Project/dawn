@@ -61,6 +61,10 @@ const char *email_error_name(email_err_t err) {
          return "SHUTTING_DOWN";
       case EMAIL_ERR_CANNOT_CALCULATE:
          return "CANNOT_CALCULATE";
+      case EMAIL_ERR_INVALID_REQUEST:
+         return "INVALID_REQUEST";
+      case EMAIL_ERR_UNAVAILABLE:
+         return "UNAVAILABLE";
       case EMAIL_ERR_FAILED:
          break;
    }

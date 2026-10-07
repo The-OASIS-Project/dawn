@@ -73,7 +73,19 @@ typedef struct {
    email_err_t err;                                 /* why it failed; NONE on success */
    email_acct_failure_t failed[EMAIL_MAX_ACCOUNTS]; /* accounts a fan-out couldn't search */
    int failed_count;
+   uint32_t uidvalidity;  /* one IMAP account: the mailbox epoch seen (0 = not seen) */
+   char imap_folder[128]; /* one IMAP account: the folder searched ("" = not reached) */
 } email_search_report_t;
+
+/* What a paging caller (the mail panel) wants with a page of email_service_recent
+ * beyond the rows; pass NULL for none. */
+typedef struct {
+   bool want_inbox_unread; /* in: the INBOX's unread count (inbox, first page only) */
+   time_t at_or_before;    /* in, Gmail: only rows dated at or before this (0 = no bound) */
+   int inbox_unread;       /* out: -1 when unknown or not asked */
+   uint32_t uidvalidity;   /* out, IMAP: the mailbox epoch seen (0 = not seen) */
+   char imap_folder[128];  /* out, IMAP: the folder listed ("" = not reached) */
+} email_page_ext_t;
 
 
 typedef struct {
@@ -286,9 +298,7 @@ bool email_service_is_gmail_account(const email_account_t *acct);
  *                         token on an IMAP account (or a stale IMAP cursor) returns
  *                         EMAIL_RC_INVALID_PAGE_TOKEN.
  * @param next_page_token  Filled when more (older) messages remain; empty otherwise.
- * @param inbox_unread     Optional: the INBOX's unread count, on the inbox's first
- *                         page only (IMAP: on the same login); -1 when it couldn't be
- *                         had.  NULL to skip it.
+ * @param ext              Optional paging extras (email_page_ext_t), or NULL
  * @param target             The account by id, or NULL to resolve by name (see email_target_t)
  * @param err              Why it failed (may be NULL)
  * @note @p page_token and @p next_page_token may be the same buffer (the input is
@@ -305,7 +315,7 @@ int email_service_recent(int user_id,
                          int *out_count,
                          char *next_page_token,
                          size_t npt_len,
-                         int *inbox_unread,
+                         email_page_ext_t *ext,
                          const email_target_t *target,
                          email_err_t *err);
 

@@ -26,6 +26,12 @@
 #include "unity.h"
 #include "webui/webui_protocol.h"
 
+/* The mail panel's check: here, whatever the test says. */
+static bool s_email_on;
+bool webui_email_client_enabled(void) {
+   return s_email_on;
+}
+
 void setUp(void) {
 }
 
@@ -70,6 +76,23 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    json_object_put(root);
 }
 
+/* email_client is advertised only while the mail panel can answer. */
+static void test_email_client_follows_its_check(void) {
+   char members[WEBUI_PROTOCOL_JSON_MAX];
+   s_email_on = false;
+   TEST_ASSERT_TRUE(webui_protocol_json_members(members, sizeof(members)) > 0);
+   TEST_ASSERT_NULL(strstr(members, "\"email_client\""));
+   s_email_on = true;
+   TEST_ASSERT_TRUE(webui_protocol_json_members(members, sizeof(members)) > 0);
+   TEST_ASSERT_NOT_NULL(strstr(members, "\"email_client\""));
+   char object[WEBUI_PROTOCOL_JSON_MAX + 2];
+   snprintf(object, sizeof(object), "{%s}", members);
+   struct json_object *root = json_tokener_parse(object);
+   TEST_ASSERT_NOT_NULL(root);
+   json_object_put(root);
+   s_email_on = false;
+}
+
 static void test_too_small_a_buffer_gives_nothing(void) {
    char tiny[8] = "x";
    TEST_ASSERT_EQUAL_size_t(0, webui_protocol_json_members(tiny, sizeof(tiny)));
@@ -98,6 +121,7 @@ static void test_a_client_is_noted_once(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_the_members_are_the_version_and_the_flags);
+   RUN_TEST(test_email_client_follows_its_check);
    RUN_TEST(test_too_small_a_buffer_gives_nothing);
    RUN_TEST(test_a_client_is_noted_once);
    return UNITY_END();

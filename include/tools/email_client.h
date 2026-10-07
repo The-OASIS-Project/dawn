@@ -220,4 +220,12 @@ int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t u
  */
 int email_archive_message(const email_conn_t *conn, const char *folder, uint32_t uid);
 
+/**
+ * @brief The folder the server marks \All (all of the user's mail), from the
+ *        cached folder roles (probed on a login of its own when not cached;
+ *        a failed probe isn't retried for 5 minutes)
+ * @return false when none is marked (or it couldn't be learned): @p out is ""
+ */
+bool email_imap_all_mail_folder(const email_conn_t *conn, char *out, size_t size);
+
 #endif /* EMAIL_CLIENT_H */

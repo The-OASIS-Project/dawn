@@ -602,6 +602,21 @@ dawn_add_unit_test(test_email_parse
    LIBS    unity
    LABEL   ci)
 
+# The mail panel's cursor and page merge across accounts.
+dawn_add_unit_test(test_email_cursor
+   SOURCES test_email_cursor.c
+           ${SRC_ROOT}/src/webui/email_cursor.c
+   LIBS    unity sodium ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# The mail panel's wire shapes and the read frame budget.
+dawn_add_unit_test(test_email_wire
+   SOURCES test_email_wire.c
+           ${SRC_ROOT}/src/webui/email_wire.c
+           ${SRC_ROOT}/src/tools/email_parse.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_email_imap_state
    SOURCES test_email_imap_state.c
            ${SRC_ROOT}/src/tools/email_imap_state.c
