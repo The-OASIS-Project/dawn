@@ -112,6 +112,39 @@ jobs:
         run: ctest --test-dir build-${{ matrix.preset }} -j"$(nproc)" --output-on-failure --no-tests=error -L ci
 
   # -------------------------------------------------------------------------
+  # clang-tidy: bugprone, cert and the clang static analyzer over DAWN's own
+  # sources (.clang-tidy has the checks and the reasons for those turned off).
+  # Any finding fails. The version is pinned by hash, so a local run of
+  # scripts/run_clang_tidy.py reports the same findings. Configure only: the
+  # ci preset with the WebUI on covers every source but the code-projects
+  # feature (needs libgit2 >= 1.6, not in apt), the Whisper backend (a
+  # submodule) and the TUI.
+  # -------------------------------------------------------------------------
+  clang-tidy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Install the WebUI's libraries and the pinned clang-tidy
+        run: |
+          sudo apt-get install -y --no-install-recommends libwebsockets-dev libopus-dev
+          python3 -m venv "$RUNNER_TEMP/tidy"
+          "$RUNNER_TEMP/tidy/bin/pip" install --require-hashes -r .github/clang-tidy-requirements.txt
+
+      - name: Configure (ci preset, WebUI on)
+        run: |
+          cmake --preset ci -DENABLE_WEBUI=ON -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON
+          make -C build-ci models_toml_builtin
+
+      - name: Run clang-tidy
+        run: scripts/run_clang_tidy.py build-ci --clang-tidy "$RUNNER_TEMP/tidy/bin/clang-tidy"
+
+  # -------------------------------------------------------------------------
   # Coverage: the ci unit tests, instrumented, reported with gcovr (gcovr.cfg
   # picks DAWN's own code). Pushes to main only, so pull requests don't wait on
   # a second build. The summary goes on the run's page; the HTML report is an
