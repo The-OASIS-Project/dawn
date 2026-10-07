@@ -38,6 +38,8 @@ import sys
 import time
 from pathlib import Path
 
+from anthropic_request import anthropic_body, text_of
+
 # Bumped when the snapshot file format changes in an incompatible way (e.g.,
 # bench DDL adds a non-default column or the dia_map JSON shape changes).
 # Embedded into cache keys so old snapshots auto-invalidate on upgrade.
@@ -510,13 +512,8 @@ def _anthropic_call(model, system, user_prompt, api_key, temperature=0.0,
    transient failures.  Non-transient errors propagate as raw exceptions and
    get classified by the retry wrapper."""
    import urllib.request
-   payload = json.dumps({
-      "model": model,
-      "max_tokens": max_tokens,
-      "temperature": temperature,
-      "system": system,
-      "messages": [{"role": "user", "content": user_prompt}],
-   }).encode("utf-8")
+   payload = json.dumps(anthropic_body(model, system, user_prompt, temperature,
+                                       max_tokens)).encode("utf-8")
    req = urllib.request.Request(
       "https://api.anthropic.com/v1/messages",
       data=payload,
@@ -528,12 +525,7 @@ def _anthropic_call(model, system, user_prompt, api_key, temperature=0.0,
       method="POST")
    with urllib.request.urlopen(req, timeout=timeout) as resp:
       body = resp.read().decode("utf-8")
-   data = json.loads(body)
-   blocks = data.get("content", [])
-   for b in blocks:
-      if b.get("type") == "text":
-         return b.get("text", "")
-   return ""
+   return text_of(json.loads(body))
 
 
 def _openai_call(model, system, user_prompt, api_key, temperature=0.0,

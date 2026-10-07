@@ -12,6 +12,28 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-07 — Claude Haiku 5.5 added; default model shortlists refreshed
+
+**What changed.** Claude Haiku 5.5 (`claude-haiku-5-5`, on OpenRouter
+`anthropic/claude-haiku-5.5`) is supported: a 1M-token context, reasoning that
+can be turned off, and about a tenth of Haiku 4.5's price. The built-in Claude
+and OpenRouter shortlists in the model switcher now list Haiku 4.5, Haiku 5.5,
+Sonnet 5.5 and Opus 5.5 in place of Sonnet 5, Opus 4.8 and Opus 5. The default
+Claude model is still Haiku 4.5.
+
+**What you need to do.**
+- Nothing, if you've saved your settings from the WebUI before: your own model
+  lists are kept. To add Haiku 5.5, add it in Settings → Language Model.
+- If you keep your own `models.toml` (in `./`, `~/.config/dawn/` or
+  `/etc/dawn/`), merge in the new `claude-haiku-5-5` rows from the shipped
+  file: the `[anthropic]` context window, the `[thinking.anthropic]` row, and
+  the `[mid_system]` list (which also gains `claude-sonnet-5-5`). Without them
+  Haiku 5.5 still works, but with a 200K window, with reasoning that can't be
+  turned off (memory extraction and summaries then pay for it), and without
+  mid-conversation instructions.
+
+---
+
 ## 2026-10-06 — Device data relayed over MQTT is read, not acted on
 
 **What changed.** When a device answers over MQTT and DAWN speaks its data to

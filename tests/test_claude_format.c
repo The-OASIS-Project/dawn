@@ -353,6 +353,28 @@ static void test_utility_call_gets_the_cheapest_legal_setting(void) {
    json_object_put(req);
 }
 
+/* Haiku 5.5 takes no budget mode: a budget pick goes out as adaptive, and a
+ * utility call (extraction, compaction) turns thinking off rather than
+ * running at the model's default effort.  No sampling parameters: 400 there. */
+static void test_haiku_5_5_never_gets_a_budget(void) {
+   s_mode = "enabled";
+   s_effort = "low";
+   json_object *req = request_for("claude-haiku-5-5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("low", effort_of(req));
+   json_object *t = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "thinking", &t));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(t, "budget_tokens", NULL));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(req, "temperature", NULL));
+   json_object_put(req);
+
+   s_suppressed = true;
+   req = request_for("claude-haiku-5-5");
+   TEST_ASSERT_EQUAL_STRING("disabled", thinking_type(req));
+   TEST_ASSERT_NULL(effort_of(req));
+   json_object_put(req);
+}
+
 /* An earlier tool call with no thinking block (adaptive chose not to think)
  * no longer turns reasoning off for the conversation. */
 static void test_tool_use_without_thinking_keeps_reasoning(void) {
@@ -567,6 +589,7 @@ int main(void) {
    RUN_TEST(test_openrouter_slug_gets_its_models_rules);
    RUN_TEST(test_budget_model_gets_enabled_with_budget);
    RUN_TEST(test_utility_call_gets_the_cheapest_legal_setting);
+   RUN_TEST(test_haiku_5_5_never_gets_a_budget);
    RUN_TEST(test_tool_use_without_thinking_keeps_reasoning);
    RUN_TEST(test_final_answer_replays_its_blocks);
    RUN_TEST(test_results_without_their_call_become_notes);

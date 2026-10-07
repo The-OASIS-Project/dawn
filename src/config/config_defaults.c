@@ -134,9 +134,9 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.cloud.claude_models_count = 4;
    safe_strscpy(config->llm.cloud.claude_models[0],
                 LLM_DEFAULT_CLAUDE_MODEL); /* claude-haiku-4-5 */
-   safe_strscpy(config->llm.cloud.claude_models[1], "claude-sonnet-5");
-   safe_strscpy(config->llm.cloud.claude_models[2], "claude-opus-4-8");
-   safe_strscpy(config->llm.cloud.claude_models[3], "claude-opus-5");
+   safe_strscpy(config->llm.cloud.claude_models[1], "claude-haiku-5-5");
+   safe_strscpy(config->llm.cloud.claude_models[2], "claude-sonnet-5-5");
+   safe_strscpy(config->llm.cloud.claude_models[3], "claude-opus-5-5");
    config->llm.cloud.claude_default_model_idx = 0;
 
    /* Default Gemini model list (first entry is default) */
@@ -158,9 +158,9 @@ void config_set_defaults(dawn_config_t *config) {
    safe_strscpy(config->llm.cloud.openrouter_models[4], "openai/gpt-5.4-mini");
    safe_strscpy(config->llm.cloud.openrouter_models[5], "openai/gpt-5.4-nano");
    safe_strscpy(config->llm.cloud.openrouter_models[6], "anthropic/claude-haiku-4.5");
-   safe_strscpy(config->llm.cloud.openrouter_models[7], "anthropic/claude-sonnet-5");
-   safe_strscpy(config->llm.cloud.openrouter_models[8], "anthropic/claude-opus-4.8");
-   safe_strscpy(config->llm.cloud.openrouter_models[9], "anthropic/claude-opus-5");
+   safe_strscpy(config->llm.cloud.openrouter_models[7], "anthropic/claude-haiku-5.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[8], "anthropic/claude-sonnet-5.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[9], "anthropic/claude-opus-5.5");
    safe_strscpy(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
    safe_strscpy(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
    config->llm.cloud.openrouter_default_model_idx = 0; /* openai/gpt-5.6-luna */

@@ -50,6 +50,7 @@
 #include "core/embedding_engine.h"
 #include "core/time_query_parser.h"
 #include "dawn_error.h"
+#include "llm/llm_context.h"
 #include "tools/document_db.h"
 
 /* =============================================================================
@@ -1159,6 +1160,11 @@ int main(int argc, char *argv[]) {
    /* Memory-pipeline mode uses BENCH_MEMORY_DDL; default mode uses bench's
     * existing setup_db() which has an incompatible users-table schema. */
    if (memory_pipeline) {
+      /* Extraction's LLM calls read models.toml (each model's reasoning modes)
+       * the way the daemon's do; without it every Claude model gets the
+       * fallback rules, which Haiku 4.5 rejects. */
+      if (llm_context_init() != 0)
+         return 1;
       if (bench_mp_init() != 0)
          return 1;
       s_memory_pipeline_mode = true;
@@ -1217,9 +1223,11 @@ int main(int argc, char *argv[]) {
 
    /* Cleanup */
    embedding_engine_cleanup();
-   if (memory_pipeline)
+   if (memory_pipeline) {
       bench_mp_teardown();
-   else
+      llm_context_cleanup();
+   } else {
       teardown_db();
+   }
    return 0;
 }

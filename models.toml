@@ -65,13 +65,14 @@
 
 [anthropic]
 # 1M context is GA at standard pricing since March 2026 (no beta header). The
-# newest flagships carry it; Haiku and older models remain at 200K.
+# newest models carry it (Haiku from 5.5 on); Haiku 4.5 and older remain at 200K.
 "claude-opus-5" = 1000000
 "claude-opus-4-8" = 1000000
 "claude-opus-4-7" = 1000000
 "claude-opus-4-6" = 1000000
 "claude-sonnet-4-6" = 1000000
 "claude-sonnet-5-5" = 1000000
+"claude-haiku-5-5" = 1000000
 "claude-sonnet-5" = 1000000
 "claude-fable-5" = 1000000
 "claude-mythos-5" = 1000000
@@ -163,14 +164,17 @@
 # they're known.  Better no reasoning parameters than ones a model rejects.
 #
 # Anthropic rows were read from the Models API (capabilities.thinking/effort)
-# and a thinking.type "disabled" probe per model, 2026-09-28.  OpenAI and
-# Gemini rows encode DAWN's shipped effort rules for those families.
+# and a thinking.type "disabled" probe per model, 2026-09-28 (Claude Haiku 5.5:
+# 2026-10-07).  On the 5.x rows "disabled" takes no effort above high; DAWN
+# sends no effort with it.  OpenAI and Gemini rows encode DAWN's shipped
+# effort rules for those families.
 
 [thinking.anthropic]
 "claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-sonnet-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-haiku-5-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-sonnet-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-opus-4-8" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-opus-4-7" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
@@ -229,10 +233,11 @@
 # stays byte for byte what the conversation started with.  Any other model gets
 # them as an "[Operator note]" in the user turn, which every model takes.
 # Prefixes, matched like the tables above.  Source: platform.claude.com
-# (mid-conversation system messages), Sep 2026; Claude Sonnet 5 doesn't take them.
+# (mid-conversation system messages), Oct 2026; Claude Sonnet 5 doesn't take them.
 
 [mid_system]
-anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"]
+anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5", "claude-sonnet-5-5",
+             "claude-haiku-5-5"]
 
 # ---------------------------------------------------------------------------
 # The Anthropic models that take a tool defined inside a {"role": "system"}
@@ -241,7 +246,8 @@ anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mytho
 # adds or changes mid-conversation is sent where it happened, so the
 # conversation's `tools` stay byte for byte what it started with and its
 # reasoning stays valid.  Any other model (or another host) gets the change
-# folded into `tools`, a declared boundary.  Same models as [mid_system].
+# folded into `tools`, a declared boundary.  The [mid_system] models whose
+# support for it is documented (not yet Claude Sonnet 5.5 or Haiku 5.5).
 # Prefixes, matched like the tables above.  Source: platform.claude.com
 # (mid-conversation system messages and tool changes), Sep 2026.
 
