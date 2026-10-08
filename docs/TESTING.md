@@ -1,8 +1,8 @@
 # How DAWN Is Tested
 
 What tests and checks DAWN has, what each one covers, what runs on every change, and what isn't covered.
-Numbers are as of October 2026. The size and test counts reproduce with `scripts/code_metrics.sh`, the
-coverage with the commands in [Coverage](#coverage).
+`scripts/code_metrics.sh` gives the current size and test counts. The coverage figures are as of
+October 2026; [Coverage](#coverage) has the commands that recompute them.
 
 ## Contents
 
@@ -21,13 +21,12 @@ coverage with the commands in [Coverage](#coverage).
 
 ## At a glance
 
-DAWN is about 224,000 lines of first-party C and C++ in the daemon, plus the WebUI, satellites, admin CLI
-and tests (387,000 lines in all, comments and blank lines not counted; `scripts/code_metrics.sh` gives
-the breakdown).
+`scripts/code_metrics.sh` gives DAWN's current size by area (first-party code only), its function sizes
+and complexity, and the test counts.
 
 | Layer | What | Runs |
 |---|---|---|
-| Unit tests | 194 suites, 2,892 test functions, 12,105 assertions (Unity) | every commit (hook) and every push (CI) |
+| Unit tests | one standalone program per suite (Unity) | every commit (hook) and every push (CI) |
 | Invariant checks | 9 build-time rules + 2 source checks | every build, every push |
 | Sanitizers | the unit tests under ASan + UBSan, and under TSan | every push |
 | Static analysis | clang-tidy (bugprone, cert, the clang static analyzer), CodeQL, `-Wall -Werror` at `-O2` | every push and pull request; CodeQL weekly too |
@@ -44,11 +43,11 @@ temporary path (`tests/test_tmp.h`), so suites run in parallel without sharing s
 
 Suites carry a ctest label:
 
-- **`ci`** (194 in the `ci` preset): no hardware, no models, no network. These run everywhere.
-- **`hardware`** (5): need a GPU, ONNX Runtime models or audio devices, and run on the developer's
+- **`ci`**: no hardware, no models, no network. These run everywhere.
+- **`hardware`**: need a GPU, ONNX Runtime models or audio devices, and run on the developer's
   Jetson.
 
-The `debug` preset registers one more `ci` suite than the `ci` preset: `test_code_project_git` needs
+The `debug` preset registers a `ci` suite the `ci` preset can't build: `test_code_project_git` needs
 libgit2 1.6 or later, which Ubuntu 22.04 doesn't package.
 
 ## Build-time invariant checks
@@ -139,7 +138,7 @@ Unit-test line coverage, measured by the `coverage` preset and gcovr (`gcovr.cfg
 not the tests or vendored code).
 
 **What the number means.** gcovr counts only files a test compiles. Unit tests compile 300 of DAWN's 526
-C and C++ source files, about half of the code by lines (115,000 of 220,000). In those files, **61.7% of
+C and C++ source files, about half of the code by lines. In those files, **61.7% of
 lines** and 49.9% of branches run. Across all of DAWN's code, unit tests run roughly a third of it. The rest
 (the WebUI server, `dawn.c`'s main loop, MQTT, ASR and TTS engines, the network clients) is exercised by
 the integration scripts and by use, and isn't counted here.
