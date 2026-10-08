@@ -42,7 +42,7 @@ OWN = (os.path.join(ROOT, "src") + os.sep, os.path.join(ROOT, "common", "src") +
 FINDING = re.compile(r": (error|warning): .*\[[\w.,-]+\]$", re.M)
 
 
-def own_database(build, outdir):
+def own_database(build, outdir, skip):
     """Write a compile database with one entry per DAWN source into outdir.
 
     A test build compiles many sources into several test programs, and
@@ -56,7 +56,7 @@ def own_database(build, outdir):
     chosen = {}
     for e in entries:
         p = os.path.normpath(os.path.join(e.get("directory", ""), e["file"]))
-        if not p.startswith(OWN):
+        if not p.startswith(OWN) or os.path.relpath(p, ROOT) in skip:
             continue
         cmd = e.get("command") or " ".join(e.get("arguments", []))
         if p not in chosen or "CMakeFiles/dawn.dir/" in cmd:
@@ -77,6 +77,8 @@ def main():
     ap.add_argument("build", help="build directory holding compile_commands.json")
     ap.add_argument("--clang-tidy", default="clang-tidy", help="clang-tidy binary")
     ap.add_argument("-j", type=int, default=os.cpu_count() or 1, help="parallel jobs")
+    ap.add_argument("--skip", action="append", default=[], metavar="PATH",
+                    help="a source to leave out (path from the repository root); repeatable")
     args = ap.parse_args()
 
     ver = subprocess.run([args.clang_tidy, "--version"], capture_output=True, text=True).stdout
@@ -85,14 +87,15 @@ def main():
 
     findings = failed = 0
     with tempfile.TemporaryDirectory() as db:
-        files = own_database(os.path.abspath(args.build), db)
+        files = own_database(os.path.abspath(args.build), db, set(args.skip))
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.j) as pool:
             for path, n, rc, out in pool.map(lambda p: run_one(args.clang_tidy, db, p), files):
                 if n or rc:
                     print(out.rstrip(), flush=True)
                     findings += n
                     failed += 1
-    print(f"clang-tidy: {len(files)} files, {findings} findings in {failed} files")
+    skipped = f", {len(args.skip)} skipped" if args.skip else ""
+    print(f"clang-tidy: {len(files)} files{skipped}, {findings} findings in {failed} files")
     return 1 if failed else 0
 
 

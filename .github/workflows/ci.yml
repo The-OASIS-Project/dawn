@@ -118,7 +118,8 @@ jobs:
   # scripts/run_clang_tidy.py reports the same findings. Configure only: the
   # ci preset with the WebUI on covers every source but the code-projects
   # feature (needs libgit2 >= 1.6, not in apt), the Whisper backend (a
-  # submodule) and the TUI.
+  # submodule), the TUI, and the two files that include ONNX Runtime's headers
+  # (not packaged for Ubuntu), which are skipped by name.
   # -------------------------------------------------------------------------
   clang-tidy:
     runs-on: ubuntu-22.04
@@ -130,9 +131,10 @@ jobs:
       - name: Install dependencies
         uses: ./.github/actions/install-ci-deps
 
-      - name: Install the WebUI's libraries and the pinned clang-tidy
+      - name: Install the WebUI's and audio libraries and the pinned clang-tidy
         run: |
-          sudo apt-get install -y --no-install-recommends libwebsockets-dev libopus-dev
+          sudo apt-get install -y --no-install-recommends libwebsockets-dev libopus-dev \
+            libasound2-dev libpulse-dev
           python3 -m venv "$RUNNER_TEMP/tidy"
           "$RUNNER_TEMP/tidy/bin/pip" install --require-hashes -r .github/clang-tidy-requirements.txt
 
@@ -142,7 +144,9 @@ jobs:
           make -C build-ci models_toml_builtin
 
       - name: Run clang-tidy
-        run: scripts/run_clang_tidy.py build-ci --clang-tidy "$RUNNER_TEMP/tidy/bin/clang-tidy"
+        run: >
+          scripts/run_clang_tidy.py build-ci --clang-tidy "$RUNNER_TEMP/tidy/bin/clang-tidy"
+          --skip src/memory/memory_embed_onnx.c --skip src/tts/text_to_speech.cpp
 
   # -------------------------------------------------------------------------
   # Fuzzing: libFuzzer harnesses (with ASan + UBSan) for code that reads

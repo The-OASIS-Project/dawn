@@ -47,9 +47,23 @@ for h in "${harnesses[@]}"; do
       libs=$(pkg-config --libs ${LIBS[$h]})
    fi
    echo "== $h: build"
+   flags=(-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined
+          -Iinclude -Icommon/include)
+   # C++ sources compile as C++17, as the CMake build does; the rest link with them.
+   inputs=("tests/fuzz/fuzz_$h.c")
+   for src in ${SOURCES[$h]}; do
+      if [[ "$src" == *.cpp ]]; then
+         obj="$dir/$(basename "$src" .cpp).o"
+         # shellcheck disable=SC2086
+         "$CLANG" -x c++ -std=c++17 "${flags[@]}" -fsanitize=fuzzer-no-link ${CFLAGS_EXTRA[$h]:-} \
+            -c "$src" -o "$obj"
+         inputs+=("$obj")
+      else
+         inputs+=("$src")
+      fi
+   done
    # shellcheck disable=SC2086
-   "$CLANG" -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
-      -Iinclude -Icommon/include $cflags ${CFLAGS_EXTRA[$h]:-} "tests/fuzz/fuzz_$h.c" ${SOURCES[$h]} $libs ${LINK[$h]:-} \
+   "$CLANG" "${flags[@]}" $cflags ${CFLAGS_EXTRA[$h]:-} "${inputs[@]}" $libs ${LINK[$h]:-} \
       -o "$dir/fuzz_$h"
    dict=()
    [ -f "tests/fuzz/$h.dict" ] && dict=(-dict="tests/fuzz/$h.dict")

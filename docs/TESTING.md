@@ -229,4 +229,6 @@ On a GitHub-hosted Ubuntu 22.04 runner the sanitizers need `sudo sysctl -w vm.mm
 - **Hardware paths** (audio devices, GPU ASR, TTS) are tested on the developer's Jetson (`hardware`
   label), not in CI.
 - **Code-projects** (the coding harness) needs libgit2 1.6 or later, so its git suite and its sources'
-  clang-tidy pass run on the developer's machine, not in CI.
+  clang-tidy pass run on the developer's machine, not in CI. The same goes for clang-tidy on the two files
+  that include ONNX Runtime's headers (`memory_embed_onnx.c`, `text_to_speech.cpp`), which isn't packaged
+  for Ubuntu.
