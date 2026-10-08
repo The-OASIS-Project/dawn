@@ -1431,10 +1431,9 @@ static time_t calculate_next_recurrence(const sched_event_t *event) {
     * original_time is always in the user's local timezone (any offset suffix
     * from ISO 8601 input is intentionally ignored by sscanf). */
    int hour = 0, minute = 0;
-   if (event->original_time[0]) {
-      sscanf(event->original_time, "%d:%d", &hour, &minute);
-   } else {
-      /* Fall back to fire_at time */
+   if (!event->original_time[0] || sscanf(event->original_time, "%d:%d", &hour, &minute) != 2 ||
+       hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      /* None stored, or not HH:MM: the time it was set to fire at */
       struct tm tm_fire;
       localtime_r(&event->fire_at, &tm_fire);
       hour = tm_fire.tm_hour;

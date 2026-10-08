@@ -534,6 +534,8 @@ static char *append_block_directive(char *base, const char *text) {
    char *out = malloc(blen + 2 + tlen + 1);
    if (out == NULL)
       return base;
+   /* the next memcpy copies tlen + 1 bytes, NUL included */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(out, base, blen);
    out[blen] = '\n';
    out[blen + 1] = '\n';

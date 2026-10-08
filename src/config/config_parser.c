@@ -34,7 +34,7 @@
 
 #include "dawn_error.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "utils/string_utils.h"
 
 /* =============================================================================
@@ -59,7 +59,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                         \
       toml_datum_t d = toml_int_in(table, key); \
       if (d.ok) {                               \
-         dest = (int)d.u.i;                     \
+         (dest) = (int)d.u.i;                   \
       }                                         \
    } while (0)
 
@@ -67,7 +67,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                            \
       toml_datum_t d = toml_double_in(table, key); \
       if (d.ok) {                                  \
-         dest = (float)d.u.d;                      \
+         (dest) = (float)d.u.d;                    \
       }                                            \
    } while (0)
 
@@ -75,7 +75,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                          \
       toml_datum_t d = toml_bool_in(table, key); \
       if (d.ok) {                                \
-         dest = d.u.b ? true : false;            \
+         (dest) = d.u.b ? true : false;          \
       }                                          \
    } while (0)
 
@@ -83,7 +83,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                         \
       toml_datum_t d = toml_int_in(table, key); \
       if (d.ok && d.u.i >= 0) {                 \
-         dest = (size_t)d.u.i;                  \
+         (dest) = (size_t)d.u.i;                \
       }                                         \
    } while (0)
 
@@ -2546,6 +2546,8 @@ int config_backup_file(const char *path) {
    /* Copy contents */
    char buffer[4096];
    size_t bytes;
+   /* a short read ends the copy loop; the position is not used */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Stream)
    while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0) {
       if (fwrite(buffer, 1, bytes, dst) != bytes) {
          OLOG_ERROR("Failed to write backup file: %s", backup_path);

@@ -125,6 +125,8 @@ static int parse_string_array(struct json_object *array,
       }
       bool seen = false;
       for (int j = 0; j < count && !seen; j++) {
+         /* hud_discovery_name_ok(NULL) is false */
+         // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
          seen = strcmp(storage[j], str) == 0;
       }
       if (seen) {

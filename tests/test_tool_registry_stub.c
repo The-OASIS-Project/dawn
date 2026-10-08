@@ -35,7 +35,7 @@
 #include "core/session_manager.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
-#include "tools/toml.h"
+#include "toml.h"
 
 /* ============================================================================
  * Global config stubs (extern'd in dawn_config.h)

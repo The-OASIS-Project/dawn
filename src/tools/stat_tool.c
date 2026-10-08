@@ -34,8 +34,8 @@
 #include "core/stat_service.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "toml.h"
 #include "tools/stat_render.h"
-#include "tools/toml.h"
 #include "tools/tool_registry.h"
 
 /* Heap buffer for a `trend` series result.  Worst case ~49 points × (label +

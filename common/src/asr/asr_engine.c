@@ -227,6 +227,8 @@ void asr_engine_cleanup(asr_engine_context_t *ctx) {
 asr_engine_type_t asr_engine_get_type(asr_engine_context_t *ctx) {
    if (!ctx) {
       DAWN_LOG_ERROR("ASR engine: get_type called with NULL context");
+      /* No engine: a value that matches neither type, as callers expect */
+      // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
       return (asr_engine_type_t)-1;
    }
    return ctx->engine_type;

@@ -27,6 +27,7 @@
 #include <stddef.h>
 #include <unistd.h>
 
+#include "test_tmp.h"
 #include "unity.h"
 
 /* Public return codes (auth/auth_db.h): SUCCESS = 0, FAILURE = 1. Declared
@@ -34,7 +35,7 @@
 #define MIG_SUCCESS 0
 int auth_db_migrations_v72(sqlite3 *db);
 
-static const char *TEST_DB = "/tmp/dawn_test_mig_v72.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
 static sqlite3 *db = NULL;
 
 void setUp(void) {
@@ -148,6 +149,7 @@ static void test_migrate_when_columns_present(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_mig_v72.db");
    UNITY_BEGIN();
    RUN_TEST(test_migrate_from_pre_v72);
    RUN_TEST(test_idempotent_rerun);

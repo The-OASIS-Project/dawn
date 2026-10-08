@@ -228,7 +228,7 @@ static int tg_send_text(int user_id,
       curl_easy_setopt(s_send_curl, CURLOPT_URL, url);
       curl_easy_setopt(s_send_curl, CURLOPT_POST, 1L);
       curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDS, body_str);
-      curl_apply_dawn_defaults(s_send_curl, TG_USER_AGENT, 30L, &resp);
+      curl_apply_dawn_defaults(s_send_curl, TG_USER_AGENT, MESSAGING_SEND_TIMEOUT_SEC, &resp);
       struct curl_slist *hdrs = NULL;
       hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
       curl_easy_setopt(s_send_curl, CURLOPT_HTTPHEADER, hdrs);

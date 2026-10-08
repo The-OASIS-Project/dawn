@@ -35,14 +35,17 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_storage.h"
+#include "test_tmp.h"
 #include "unity.h"
 
-static const char *TEST_DB = "/tmp/dawn_test_auth_db_storage.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
+static char TEST_DB_WAL[TEST_TMP_PATH_MAX + 4];
+static char TEST_DB_SHM[TEST_TMP_PATH_MAX + 4];
 
 static void remove_db(void) {
    unlink(TEST_DB);
-   unlink("/tmp/dawn_test_auth_db_storage.db-wal");
-   unlink("/tmp/dawn_test_auth_db_storage.db-shm");
+   unlink(TEST_DB_WAL);
+   unlink(TEST_DB_SHM);
 }
 
 void setUp(void) {
@@ -126,7 +129,7 @@ static void test_the_storage_thread_checkpoints(void) {
    sqlite3_close(db);
    /* The next write restarts the WAL and cuts it to the limit. */
    main_exec("INSERT INTO burst VALUES (1)");
-   TEST_ASSERT_TRUE(file_size("/tmp/dawn_test_auth_db_storage.db-wal") <= AUTH_DB_WAL_SIZE_LIMIT);
+   TEST_ASSERT_TRUE(file_size(TEST_DB_WAL) <= AUTH_DB_WAL_SIZE_LIMIT);
    /* An admin TRUNCATE checkpoint still works beside the thread. */
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_checkpoint());
 }
@@ -194,6 +197,9 @@ static void test_a_vacuum_pass_shares_the_mutex(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_auth_db_storage.db");
+   snprintf(TEST_DB_WAL, sizeof(TEST_DB_WAL), "%s-wal", TEST_DB);
+   snprintf(TEST_DB_SHM, sizeof(TEST_DB_SHM), "%s-shm", TEST_DB);
    UNITY_BEGIN();
    RUN_TEST(test_a_new_database);
    RUN_TEST(test_an_existing_file_is_converted);

@@ -621,16 +621,23 @@ static int messaging_tool_init(void) {
 }
 
 static void messaging_tool_cleanup(void) {
-   if (g_secrets.slack_app_token[0] != '\0' && g_secrets.slack_bot_token[0] != '\0') {
-      messaging_slack_shutdown();
+   /* In-flight sends finish while the drivers they send through are still up.
+    * One that hasn't, past its own timeout, keeps them: the process is exiting,
+    * and a driver torn down under a live send is a crash on the way out. */
+   if (messaging_engine_quiesce() == SUCCESS) {
+      if (g_secrets.slack_app_token[0] != '\0' && g_secrets.slack_bot_token[0] != '\0') {
+         messaging_slack_shutdown();
+      }
+      if (g_secrets.discord_bot_token[0] != '\0') {
+         messaging_discord_shutdown();
+      }
+      if (g_secrets.telegram_bot_token[0] != '\0') {
+         messaging_telegram_shutdown();
+      }
+      messaging_sms_shutdown();
+   } else {
+      OLOG_WARNING("messaging: a send is still running; leaving the drivers up");
    }
-   if (g_secrets.discord_bot_token[0] != '\0') {
-      messaging_discord_shutdown();
-   }
-   if (g_secrets.telegram_bot_token[0] != '\0') {
-      messaging_telegram_shutdown();
-   }
-   messaging_sms_shutdown();
    messaging_engine_shutdown();
 }
 

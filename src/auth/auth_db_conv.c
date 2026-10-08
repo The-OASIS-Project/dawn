@@ -147,7 +147,7 @@ int conv_db_create_ex(int user_id,
       memcpy(safe_title, title, cut);
       safe_title[cut] = '\0';
    } else {
-      strcpy(safe_title, webui ? "New Conversation" : "Voice Conversation");
+      safe_strscpy(safe_title, webui ? "New Conversation" : "Voice Conversation");
    }
 
    AUTH_DB_LOCK_OR_FAIL();

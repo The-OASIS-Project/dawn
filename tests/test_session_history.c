@@ -219,6 +219,12 @@ void setUp(void) {
 void tearDown(void) {
    session_turn_end(s);
    atomic_store(&s->viewed_conversation_id, 0);
+   /* The message references an ended turn holds, as session_free() releases them. */
+   json_object_put(s->turn_user_msg);
+   json_object_put(s->unclaimed_user_msg);
+   json_object_put(s->unclaimed_reply_msg);
+   json_object_put(s->claimed_user_msg);
+   json_object_put(s->claimed_reply_msg);
    json_object_put(s->conversation_history);
    pthread_mutex_destroy(&s->history_mutex);
    pthread_mutex_destroy(&s->llm_config_mutex);

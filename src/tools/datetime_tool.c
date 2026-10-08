@@ -23,6 +23,7 @@
 
 #include "tools/datetime_tool.h"
 
+#include <sodium.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -114,8 +115,7 @@ static char *date_tool_callback(const char *action, char *value, int *should_res
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       /* Direct mode: use TTS with personality */
-      srand(time(NULL));
-      int choice = rand() % 3;
+      int choice = (int)randombytes_uniform(3);
 
       result = malloc(256);
       if (!result) {
@@ -131,7 +131,7 @@ static char *date_tool_callback(const char *action, char *value, int *should_res
          case 1:
             snprintf(result, 256, "In case you've forgotten, Sir, it's %s today.", buffer);
             break;
-         case 2:
+         default:
             snprintf(result, 256, "The current date is %s.", buffer);
             break;
       }
@@ -170,8 +170,7 @@ static char *time_tool_callback(const char *action, char *value, int *should_res
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       /* Direct mode: use TTS with personality */
-      srand(time(NULL));
-      int choice = rand() % 4;
+      int choice = (int)randombytes_uniform(4);
 
       result = malloc(256);
       if (!result) {
@@ -194,7 +193,7 @@ static char *time_tool_callback(const char *action, char *value, int *should_res
                      "Oh, you want to know the time again? It's %s, not that I'm keeping track.",
                      buffer);
             break;
-         case 3:
+         default:
             snprintf(result, 256, "The time is %s.", buffer);
             break;
       }

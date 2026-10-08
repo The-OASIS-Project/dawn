@@ -30,9 +30,10 @@
 #include "auth/auth_db.h"
 #include "core/focus/focus_handles.h"
 #include "core/session_manager.h"
+#include "test_tmp.h"
 #include "unity.h"
 
-static const char *TEST_DB = "/tmp/dawn_test_focus_handles.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
 static int user_id = 0;
 
 static session_t *new_session(void) {
@@ -152,6 +153,7 @@ static void test_another_conversation_starts_over(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_focus_handles.db");
    UNITY_BEGIN();
    RUN_TEST(test_first_turn_handles_are_saved_with_the_conversation);
    RUN_TEST(test_handles_survive_a_reload);

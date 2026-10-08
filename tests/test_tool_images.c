@@ -657,6 +657,7 @@ static void test_delete_takes_only_what_the_conversation_owns(void) {
                                       .images = held,
                                       .images_bind_later = true };
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, 1, &later, NULL));
+   free(held);
    char text[128];
    snprintf(text, sizeof(text), "as before [IMAGE:%s]", quoted);
    const conv_message_row_t reply = { .role = "assistant", .content = text };

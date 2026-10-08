@@ -36,11 +36,12 @@
 #include "auth/auth_db_messages.h"
 #include "auth/auth_db_withdraw.h"
 #include "core/message_kind.h"
+#include "test_tmp.h"
 #include "unity.h"
 
 
-static const char *TEST_DB = "/tmp/dawn_test_kind_prefix.db";
-static const char *OLD_DB = "/tmp/dawn_test_kind_prefix_v93.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
+static char OLD_DB[TEST_TMP_PATH_MAX];
 static int alice_id = 0;
 static int bob_id = 0;
 
@@ -1424,6 +1425,8 @@ static void test_deleting_a_conversation_drops_its_handles(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_kind_prefix.db");
+   test_tmp_path(OLD_DB, sizeof(OLD_DB), "dawn_test_kind_prefix_v93.db");
    UNITY_BEGIN();
    RUN_TEST(test_display_reads_skip_kind_rows);
    RUN_TEST(test_replay_read_returns_kind_rows_in_order);

@@ -194,9 +194,11 @@ static const char *const s_error_strings[] = {
    [HA_ERR_NOT_CONNECTED] = "Home Assistant not connected",
    [HA_ERR_NETWORK] = "Network error",
    [HA_ERR_API] = "API error",
+   // NOLINTBEGIN(bugprone-suspicious-missing-comma): one message split across lines
    [HA_ERR_ENTITY_NOT_FOUND] =
        "Entity not found.  Call action='list' first to see the user's configured "
        "entities and match against their friendly_name or entity_id.",
+   // NOLINTEND(bugprone-suspicious-missing-comma)
    [HA_ERR_INVALID_PARAM] = "Invalid parameter",
    [HA_ERR_RATE_LIMITED] = "Rate limited",
    [HA_ERR_MEMORY] = "Memory allocation failed",

@@ -281,6 +281,8 @@ static int fact_search_hybrid_impl(int user_id,
    const int produced = (kw_count > max) ? max : kw_count;
    for (int i = 0; i < produced; i++) {
       out_facts[i] = kw_facts[i];
+      /* kw_scores is written for every i < kw_count */
+      // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Assign)
       out_scores[i] = (float)kw_scores[i];
    }
    *out_count = produced;
@@ -329,7 +331,7 @@ int memory_search_execute(int user_id,
                           int *out_count) {
    if (out_count != NULL)
       *out_count = 0;
-   if (out_facts == NULL || out_scores == NULL || max <= 0)
+   if (out_facts == NULL || out_scores == NULL || out_count == NULL || max <= 0)
       return FAILURE;
    if (query == NULL || query[0] == '\0')
       return SUCCESS;

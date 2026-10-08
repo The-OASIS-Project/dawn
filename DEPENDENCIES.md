@@ -11,7 +11,7 @@ This document tracks all third-party dependencies used by the DAWN project.
 | Chart.js | 4.4.1 | MIT | [GitHub](https://github.com/chartjs/Chart.js) | Charts in the visual-render tool (loaded into a sandboxed iframe) |
 | qrcode-generator | 2.0.4 | MIT | [GitHub](https://github.com/kazuhikoarase/qrcode-generator) | QR code generation for satellite pairing in the admin UI |
 
-**Local copies**: `www/js/marked.min.js`, `www/js/purify.min.js`, `www/js/vendor/chart.umd.js`, `www/js/vendor/qrcode-generator-v2.0.4.js`
+**Local copies**: `www/js/vendor/` (`marked.min.js`, `purify.min.js`, `chart.umd.js`, `qrcode-generator-v2.0.4.js`)
 
 ## WebUI (Fonts)
 
@@ -77,11 +77,26 @@ This document tracks all third-party dependencies used by the DAWN project.
 
 | Library | License | Purpose |
 |---------|---------|---------|
-| Piper | MIT | Neural TTS engine |
+| Piper | MIT | Neural TTS engine (its C++ core is vendored in `third_party/piper`, see below) |
 | ONNX Runtime | MIT | ML inference for Piper, and also the Silero VAD and the local (`onnx`) embedding provider |
 | piper-phonemize | MIT | Text-to-phoneme conversion |
 | spdlog / fmt | MIT | Logging libraries Piper links against |
 | espeak-ng | GPL 3.0 | Phonemizer backend |
+
+### Vendored in the repository (`third_party/`)
+
+Carried as source, not linked from the system. Versions, upstream links and the changes DAWN
+made are in [third_party/README.md](third_party/README.md).
+
+| Library | License | Purpose |
+|---------|---------|---------|
+| nlohmann/json 3.11.2 | MIT | JSON in Piper's voice config (`json.hpp`) |
+| tomlc99 | MIT | Parsing `dawn.toml`, `secrets.toml` and `models.toml`; also the satellite's config |
+| tinyexpr | Zlib | The calculator tool's expression evaluator |
+| utf8-cpp | Boost Software License 1.0 | UTF-8 handling in Piper |
+| Piper (C++ core) | MIT | Text-to-audio over ONNX Runtime |
+| Vosk API header | Apache 2.0 | Builds with Vosk only |
+| Unity 2.6.3 | MIT | Unit-test framework |
 
 ### CUDA (Jetson Only)
 
@@ -154,10 +169,10 @@ The Apache 2.0 licence text that the Mem0 attribution (below, and `NOTICE`) refe
 ### WebUI Libraries
 ```bash
 # marked.js
-curl -sL "https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js" -o www/js/marked.min.js
+curl -sL "https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js" -o www/js/vendor/marked.min.js
 
 # DOMPurify
-curl -sL "https://cdn.jsdelivr.net/npm/dompurify@latest/dist/purify.min.js" -o www/js/purify.min.js
+curl -sL "https://cdn.jsdelivr.net/npm/dompurify@latest/dist/purify.min.js" -o www/js/vendor/purify.min.js
 ```
 
 ### System Libraries

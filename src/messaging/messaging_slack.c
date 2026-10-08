@@ -824,7 +824,7 @@ static int sk_send_text(int user_id,
       curl_easy_setopt(s_send_curl, CURLOPT_URL, SK_API_POST_MESSAGE_URL);
       curl_easy_setopt(s_send_curl, CURLOPT_POST, 1L);
       curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDS, body_str);
-      curl_apply_dawn_defaults(s_send_curl, SK_USER_AGENT, 30L, &resp);
+      curl_apply_dawn_defaults(s_send_curl, SK_USER_AGENT, MESSAGING_SEND_TIMEOUT_SEC, &resp);
 
       struct curl_slist *hdrs = NULL;
       hdrs = curl_slist_append(hdrs, "Content-Type: application/json; charset=utf-8");

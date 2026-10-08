@@ -297,7 +297,7 @@ void handle_get_config(ws_connection_t *conn) {
          const char *_str = json_object_get_string(_val); \
          if (_str) {                                      \
             safe_strscpy(dest, _str);                     \
-            dest[sizeof(dest) - 1] = '\0';                \
+            (dest)[sizeof(dest) - 1] = '\0';              \
          }                                                \
       }                                                   \
    } while (0)
@@ -306,7 +306,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = json_object_get_int(_val);              \
+         (dest) = json_object_get_int(_val);            \
       }                                                 \
    } while (0)
 
@@ -314,7 +314,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = json_object_get_boolean(_val);          \
+         (dest) = json_object_get_boolean(_val);        \
       }                                                 \
    } while (0)
 
@@ -322,7 +322,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = (float)json_object_get_double(_val);    \
+         (dest) = (float)json_object_get_double(_val);  \
       }                                                 \
    } while (0)
 
@@ -330,7 +330,7 @@ void handle_get_config(ws_connection_t *conn) {
    do {                                                 \
       struct json_object *_val;                         \
       if (json_object_object_get_ex(obj, key, &_val)) { \
-         dest = (size_t)json_object_get_int64(_val);    \
+         (dest) = (size_t)json_object_get_int64(_val);  \
       }                                                 \
    } while (0)
 
@@ -1722,6 +1722,8 @@ static size_t run_whitelisted_command(const char *cmd, char *output, size_t outp
       return 0;
    }
 
+   /* runs only an exact match of four constant commands (is_command_whitelisted) */
+   // NOLINTNEXTLINE(cert-env33-c)
    FILE *fp = popen(cmd, "r");
    if (!fp) {
       OLOG_WARNING("WebUI: popen failed for command");
@@ -2160,8 +2162,12 @@ static json_object *scan_network_interfaces(void) {
 
    /* Always include common options first */
    json_object_array_add(addresses, json_object_new_string("0.0.0.0"));
+   /* safe_strscpy evaluates dst once; its other uses are inside sizeof/typeof */
+   // NOLINTNEXTLINE(bugprone-macro-repeated-side-effects)
    safe_strscpy(seen_ips[seen_count++], "0.0.0.0");
    json_object_array_add(addresses, json_object_new_string("127.0.0.1"));
+   /* safe_strscpy evaluates dst once; its other uses are inside sizeof/typeof */
+   // NOLINTNEXTLINE(bugprone-macro-repeated-side-effects)
    safe_strscpy(seen_ips[seen_count++], "127.0.0.1");
 
    /* Get actual interface addresses */
@@ -2189,6 +2195,8 @@ static json_object *scan_network_interfaces(void) {
                   }
                }
                if (!duplicate && seen_count < 16) {
+                  /* safe_strscpy evaluates dst once; its other uses are inside sizeof/typeof */
+                  // NOLINTNEXTLINE(bugprone-macro-repeated-side-effects)
                   safe_strscpy(seen_ips[seen_count++], ip_str);
                   json_object_array_add(addresses, json_object_new_string(ip_str));
                }

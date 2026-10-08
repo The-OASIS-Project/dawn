@@ -109,6 +109,8 @@ static int read_file_into(const char *path, char *buf, size_t buf_size, size_t *
  */
 static void append_separator(char *buf, size_t buf_size, size_t *offset) {
    if (*offset + SEPARATOR_LEN < buf_size - 1) {
+      /* append into a buffer the caller NUL-terminates */
+      // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
       memcpy(buf + *offset, SEPARATOR, SEPARATOR_LEN);
       *offset += SEPARATOR_LEN;
    }
@@ -265,6 +267,8 @@ int instruction_loader_load(const char *tool_name, const char *modules, char **o
    }
 
    /* Shrink buffer to actual size */
+   /* offset is bounded by the capped file size */
+   // NOLINTNEXTLINE(clang-analyzer-optin.taint.TaintedAlloc)
    char *result = (char *)realloc(buf, offset + 1);
    *output = result ? result : buf;
 

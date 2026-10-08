@@ -3,3 +3,5 @@ build*/
 *.min.js
 *.min.css
 www/js/vendor/
+# Fuzz seeds are byte-exact inputs, malformed on purpose
+tests/fuzz/corpus_*/

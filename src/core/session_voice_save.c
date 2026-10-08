@@ -267,7 +267,7 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
             memcpy(title, content, max_len);
             title[max_len] = '\0';
             utf8_trim_incomplete(title);
-            strcat(title, "...");
+            memcpy(title + strlen(title), "...", sizeof("..."));
          }
       }
       break;

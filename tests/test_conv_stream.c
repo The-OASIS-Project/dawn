@@ -208,7 +208,9 @@ static void test_abandoned_active_evicted(void) {
 
    /* Within the active max-age it survives; past it, the backstop reclaims it. */
    conv_stream_evict_stale(now + CONV_STREAM_ACTIVE_MAX_AGE_SEC - 1);
-   TEST_ASSERT_NOT_NULL(conv_stream_dup_partial(310, NULL, NULL, NULL));
+   char *partial = conv_stream_dup_partial(310, NULL, NULL, NULL);
+   TEST_ASSERT_NOT_NULL(partial);
+   free(partial);
    conv_stream_evict_stale(now + CONV_STREAM_ACTIVE_MAX_AGE_SEC + 1);
    TEST_ASSERT_NULL(conv_stream_dup_partial(310, NULL, NULL, NULL));
 }

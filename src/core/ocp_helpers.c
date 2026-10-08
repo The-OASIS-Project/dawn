@@ -116,6 +116,8 @@ bool ocp_sha256_file(const char *filepath, char *hex_out) {
 
    unsigned char buffer[8192];
    size_t bytes_read;
+   /* a short read ends the loop; a read error fails the checksum compare */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Stream)
    while ((bytes_read = fread(buffer, 1, sizeof(buffer), f)) > 0) {
       if (EVP_DigestUpdate(ctx, buffer, bytes_read) != 1) {
          OLOG_ERROR("ocp_sha256_file: Failed to update hash");

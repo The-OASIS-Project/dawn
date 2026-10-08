@@ -12,7 +12,7 @@
 # (prebuilt aarch64), piper-phonemize, libvosk (prebuilt aarch64). whisper.cpp is
 # NOT baked in — it's a repo submodule built during the satellite compile.
 # =============================================================================
-ARG BASE_IMAGE=debian:trixie-slim
+ARG BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 FROM ${BASE_IMAGE}
 
 # Pinned dep versions — MUST match scripts/lib/libs.sh.

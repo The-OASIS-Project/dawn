@@ -26,6 +26,7 @@
 
 #include "core/iso8601.h"
 
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -49,7 +50,8 @@ void iso8601_format_date(int year, int month, int day, char *out, size_t out_siz
 /**
  * @brief Parse timezone offset from ISO 8601 suffix.
  *
- * Handles 'Z' (UTC), '+HH:MM', '-HH:MM' suffixes.
+ * Handles 'Z' (UTC) and an offset of +HH, +HH:MM or +HHMM (or '-'), read by
+ * digit position; a one-digit hour is accepted only before a colon (+5:30).
  *
  * @param suffix Pointer to the timezone part of the string (after seconds).
  * @param offset_sec Output: offset from UTC in seconds (e.g., -18000 for -05:00).
@@ -65,13 +67,25 @@ static bool parse_tz_offset(const char *suffix, int *offset_sec) {
    }
 
    if (suffix[0] == '+' || suffix[0] == '-') {
-      int tz_h = 0, tz_m = 0;
-      if (sscanf(suffix + 1, "%d:%d", &tz_h, &tz_m) >= 1) {
-         *offset_sec = (tz_h * 3600 + tz_m * 60);
-         if (suffix[0] == '-')
-            *offset_sec = -*offset_sec;
-         return true;
-      }
+      const char *p = suffix + 1;
+      int digits = 0, tz_h = 0, tz_m = 0;
+      while (digits < 2 && isdigit((unsigned char)p[digits]))
+         tz_h = tz_h * 10 + (p[digits++] - '0');
+      if (digits == 0)
+         return false;
+      p += digits;
+      if (*p == ':')
+         p++;
+      else if (digits < 2)
+         p = ""; /* +5 has no minutes; +530 is ambiguous and not read */
+      if (isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1]))
+         tz_m = (p[0] - '0') * 10 + (p[1] - '0');
+      if (tz_h > 14 || tz_m > 59 || (tz_h == 14 && tz_m > 0))
+         return false;
+      *offset_sec = tz_h * 3600 + tz_m * 60;
+      if (suffix[0] == '-')
+         *offset_sec = -*offset_sec;
+      return true;
    }
 
    return false;
@@ -105,10 +119,19 @@ time_t iso8601_parse(const char *iso_str) {
       return result;
    }
 
-   /* Full ISO 8601 */
+   /* Full ISO 8601; a space between date and time is accepted as well as 'T' */
    int year, month, day, hour = 0, min = 0, sec = 0;
-   int parsed = sscanf(iso_str, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &min, &sec);
+   int parsed = sscanf(iso_str, "%d-%d-%d%*1[T ]%d:%d:%d", &year, &month, &day, &hour, &min, &sec);
    if (parsed < 3)
+      return -1;
+   /* Out of range is an error, not something for mktime to roll over (Feb 31 isn't Mar 3) */
+   static const int days_in[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+   if (month < 1 || month > 12)
+      return -1;
+   const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+   const int last_day = days_in[month - 1] + (month == 2 && leap);
+   if (day < 1 || day > last_day || hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 ||
+       sec > 60)
       return -1;
 
    tm_info.tm_year = year - 1900;
@@ -120,7 +143,7 @@ time_t iso8601_parse(const char *iso_str) {
 
    /* Find timezone suffix after the time portion */
    const char *tz_start = iso_str;
-   const char *t_pos = strchr(iso_str, 'T');
+   const char *t_pos = strpbrk(iso_str, "T ");
    if (t_pos) {
       tz_start = t_pos + 1;
       /* Skip past HH:MM:SS digits */

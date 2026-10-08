@@ -32,7 +32,7 @@
 #include "core/suit_service.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "tools/tool_registry.h"
 
 #define SUIT_RESULT_MAX 1024
