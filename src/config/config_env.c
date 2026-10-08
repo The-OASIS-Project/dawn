@@ -94,14 +94,24 @@
       }                                                                                      \
    } while (0)
 
-#define ENV_BOOL(env_name, dest)                                                   \
-   do {                                                                            \
-      const char *val = getenv(env_name);                                          \
-      if (val) {                                                                   \
-         (dest) = (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 ||        \
-                   strcasecmp(val, "yes") == 0);                                   \
-         OLOG_INFO("Config override: %s=%s", env_name, (dest) ? "true" : "false"); \
-      }                                                                            \
+#define ENV_BOOL(env_name, dest)                                                                \
+   do {                                                                                         \
+      const char *val = getenv(env_name);                                                       \
+      if (val) {                                                                                \
+         int b_ = -1;                                                                           \
+         if (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 ||                           \
+             strcasecmp(val, "yes") == 0 || strcasecmp(val, "on") == 0)                         \
+            b_ = 1;                                                                             \
+         else if (strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0 ||                     \
+                  strcasecmp(val, "no") == 0 || strcasecmp(val, "off") == 0)                    \
+            b_ = 0;                                                                             \
+         if (b_ < 0) {                                                                          \
+            OLOG_WARNING("Config override: %s=%s (not true or false, ignored)", env_name, val); \
+         } else {                                                                               \
+            (dest) = (b_ == 1);                                                                 \
+            OLOG_INFO("Config override: %s=%s", env_name, (dest) ? "true" : "false");           \
+         }                                                                                      \
+      }                                                                                         \
    } while (0)
 
 #define ENV_SIZE_T(env_name, dest)                                                              \

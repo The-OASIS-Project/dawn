@@ -252,10 +252,7 @@ int url_fetcher_is_initialized(void) {
 // Whitelist Functions
 // =============================================================================
 
-/**
- * @brief Parse CIDR notation into network and mask
- */
-static int parse_cidr(const char *cidr, unsigned int *network, unsigned int *netmask) {
+int url_fetcher_parse_cidr(const char *cidr, unsigned int *network, unsigned int *netmask) {
    char ip_part[64];
    int prefix_len;
 
@@ -356,7 +353,7 @@ int url_whitelist_add(const char *entry) {
       OLOG_INFO("url_fetcher: Added URL to whitelist: %s", entry);
    } else if (strchr(entry, '/') != NULL) {
       // CIDR notation
-      if (parse_cidr(entry, &wl->network, &wl->netmask)) {
+      if (url_fetcher_parse_cidr(entry, &wl->network, &wl->netmask)) {
          wl->type = WHITELIST_TYPE_CIDR_V4;
          OLOG_INFO("url_fetcher: Added CIDR to whitelist: %s", entry);
       } else {

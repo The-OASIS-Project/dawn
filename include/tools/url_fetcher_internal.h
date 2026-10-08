@@ -52,6 +52,16 @@ int flaresolverr_fallback_fetch(const char *url,
 bool flaresolverr_is_enabled_and_available(void);
 
 /**
+ * @brief Parse an IPv4 whitelist entry in CIDR notation ("10.0.0.0/8").
+ *
+ * The prefix must be a whole number 0-32: "10.0.0.0/", "/abc" or "/33" is not
+ * a CIDR (the entry is then taken as a host name).
+ *
+ * @return 1 with the network (masked) and netmask in host byte order, or 0.
+ */
+int url_fetcher_parse_cidr(const char *cidr, unsigned int *network, unsigned int *netmask);
+
+/**
  * @brief Pluggable-provider entry point invoked from the 5 fallback sites
  *        in url_fetcher.c. Reads `g_config.url_fetcher.fallback` ONCE (TOCTOU
  *        guard) and dispatches to FlareSolverr or Tavily. On Tavily failure,

@@ -23,6 +23,7 @@
 #include "tools/tavily_rate_limit.h"
 #include "tools/url_fetch_tavily.h"
 #include "tools/url_fetcher.h"
+#include "tools/url_fetcher_internal.h"
 #include "unity.h"
 
 /* The Tavily fallback isn't under test: never configured */
@@ -68,6 +69,23 @@ static void test_userinfo_does_not_hide_the_host(void) {
    TEST_ASSERT_TRUE(url_is_blocked("http://user@[::1]/"));
 }
 
+/* A whitelist CIDR needs a whole prefix 0-32: a missing or bad one is not
+ * read as /0, which would match every address. */
+static void test_cidr_prefix(void) {
+   unsigned int net = 0, mask = 0;
+   TEST_ASSERT_EQUAL_INT(1, url_fetcher_parse_cidr("10.1.2.3/8", &net, &mask));
+   TEST_ASSERT_EQUAL_HEX32(0x0A000000, net);
+   TEST_ASSERT_EQUAL_HEX32(0xFF000000, mask);
+   TEST_ASSERT_EQUAL_INT(1, url_fetcher_parse_cidr("192.168.1.7/32", &net, &mask));
+   TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFF, mask);
+
+   const char *bad[] = { "10.0.0.0/",   "10.0.0.0/abc", "10.0.0.0/33", "10.0.0.0/-1",
+                         "10.0.0.0/8x", "300.0.0.0/8",  "10.0.0.0",    NULL };
+   for (int i = 0; bad[i]; i++) {
+      TEST_ASSERT_EQUAL_INT_MESSAGE(0, url_fetcher_parse_cidr(bad[i], &net, &mask), bad[i]);
+   }
+}
+
 static void test_public_address_allowed(void) {
    TEST_ASSERT_FALSE(url_is_blocked("http://93.184.216.34/"));
 }
@@ -81,6 +99,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_private_addresses_blocked);
    RUN_TEST(test_userinfo_does_not_hide_the_host);
+   RUN_TEST(test_cidr_prefix);
    RUN_TEST(test_public_address_allowed);
    RUN_TEST(test_invalid_url_blocked);
    return UNITY_END();
