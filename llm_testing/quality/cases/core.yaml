@@ -1,0 +1,231 @@
+# Core cases (rubric v1).  Ported from the old native suite's intents, scored on
+# outcomes.  Dates are symbolic ({today}, {tomorrow}, ...), resolved against the
+# run's frozen clock.  See llm_testing/quality/score.py for the check kinds.
+
+# --- music -------------------------------------------------------------------
+- id: music_genre
+  category: music
+  turns: ["Play some jazz music"]
+  checks:
+    tool_args: [{tool: music, match: {action: [play, enqueue]}}]
+    world: {playing_log: [{match: {genre: "~jazz"}}]}
+  judge: [concise, persona]
+
+- id: music_stop
+  category: music
+  turns: ["Stop the music"]
+  checks:
+    tool_args: [{tool: music, match: {action: [stop, pause]}}]
+
+- id: music_voice_phrasing
+  category: voice
+  surface: webui-spoken
+  turns: ["uh play something by miles davis"]
+  checks:
+    tool_args: [{tool: music, match: {action: [play, enqueue]}}]
+    world: {playing_log: [{match: {artist: "~miles"}}]}
+    speakable: true
+
+# --- context use: time and date are in the turn context ------------------------
+- id: context_time
+  category: context
+  turns: ["What time is it?"]
+  checks:
+    forbidden_tools: [time]
+    answer_contains: [["9:30", "nine thirty", "half past nine"]]
+
+- id: context_date
+  category: context
+  turns: ["What's today's date?"]
+  checks:
+    forbidden_tools: [date]
+    answer_contains: [["{weekday}"]]
+
+- id: context_relative_date
+  category: context
+  turns: ["What day of the week is it tomorrow?"]
+  checks:
+    forbidden_tools: [date, time]
+    answer_contains: [["Wednesday"]]
+  note: frozen clock is a Tuesday
+
+# --- weather ------------------------------------------------------------------
+- id: weather_location
+  category: weather
+  turns: ["What's the weather in Seattle, Washington?"]
+  state: {weather: {Seattle: "rain showers, 52°F, high 55°F, low 46°F."}}
+  checks:
+    tool_args: [{tool: weather, match: {location: "~seattle"}}]
+    answer_contains: [["52"]]
+
+- id: weather_default_location
+  category: weather
+  turns: ["What's the weather like outside?"]
+  checks:
+    tools_required: [weather]
+    answer_contains: [["58"]]
+
+- id: weather_tomorrow
+  category: weather
+  turns: ["Will I need an umbrella tomorrow?"]
+  checks:
+    tool_args: [{tool: weather, match: {action: [tomorrow, week]}}]
+    answer_contains: [["rain", "umbrella"]]
+
+# --- search -------------------------------------------------------------------
+- id: search_news
+  category: search
+  turns: ["What's the latest news about SpaceX?"]
+  state: {search: {SpaceX: "1. SpaceX completes its ninth Starship flight test (Oct 2026)."}}
+  checks:
+    tool_args: [{tool: search, match: {query: "~spacex"}}]
+    answer_contains: [["starship"]]
+
+- id: search_fact
+  category: search
+  turns: ["Look up who won the Super Bowl last year"]
+  state: {search: {"Super Bowl": "1. The Philadelphia Eagles won Super Bowl LIX on February 9, 2025."}}
+  checks:
+    tool_args: [{tool: search, match: {query: "~super bowl"}}]
+    answer_contains: [["eagles"]]
+
+# --- calculator ---------------------------------------------------------------
+- id: calc_easy
+  category: calculator
+  turns: ["What's 47 times 89?"]
+  checks:
+    answer_contains: [["4183"]]
+  note: answering directly or with the calculator are both fine
+
+- id: calc_hard
+  category: calculator
+  turns: ["What's 3847 times 2913?"]
+  checks:
+    tools_required: [calculator]
+    answer_contains: [["11206311"]]
+
+- id: calc_percent
+  category: calculator
+  turns: ["What's 18.5 percent of 2,347.60?"]
+  checks:
+    answer_contains: [["434.31", "434.3"]]
+
+# --- scheduler ----------------------------------------------------------------
+- id: reminder_tomorrow
+  category: scheduler
+  turns: ["Remind me to call the machine shop at 3pm tomorrow"]
+  checks:
+    tool_args: [{tool: scheduler, match: {action: create}}]
+    world: {reminders: [{match: {fire_at: "~{tomorrow}T15:00"}}]}
+
+- id: timer_minutes
+  category: scheduler
+  turns: ["Set a timer for 10 minutes"]
+  checks:
+    tool_args: [{tool: scheduler, match: {action: create}}]
+
+# --- calendar -----------------------------------------------------------------
+- id: calendar_today
+  category: calendar
+  turns: ["What's on my calendar today?"]
+  state: {events: [{title: "Dentist", start: "{today} 14:00"}, {title: "Team sync", start: "{today} 16:30"}]}
+  checks:
+    tools_required: [calendar]
+    answer_contains: [["dentist"], ["sync"]]
+
+- id: multi_step_meeting_reminder
+  category: multi_step
+  turns: ["Remind me 30 minutes before my next meeting"]
+  state: {events: [{title: "Budget review", start: "{today}T13:00:00-07:00"}]}
+  checks:
+    tools_required: [calendar, scheduler]
+    world: {reminders: [{match: {fire_at: "~{today}T12:30"}}]}
+
+- id: multi_tools
+  category: multi_step
+  turns: ["Play some music and check my calendar for today"]
+  state: {events: [{title: "Dentist", start: "{today} 14:00"}]}
+  checks:
+    tools_required: [music, calendar]
+    answer_contains: [["dentist"]]
+
+# --- email (confirm flow) -----------------------------------------------------
+- id: email_check
+  category: email
+  turns: ["Check my email"]
+  state: {inbox: [{id: "m1", from: "Dana Lee", subject: "Invoice for October"}]}
+  checks:
+    tools_required: [email]
+    answer_contains: [["invoice"]]
+
+- id: email_send_confirm
+  category: confirm
+  turns: ["Email bob@example.com and tell him lunch is moved to Friday", "Yes, send it."]
+  checks:
+    world: {sent: [{match: {to: "~bob@example.com"}}]}
+    confirm_order: true
+
+- id: email_send_needs_yes
+  category: confirm
+  turns: ["Email bob@example.com and tell him lunch is moved to Friday"]
+  checks:
+    world: {drafts: [{match: {to: "~bob@example.com"}}]}
+    world_absent: {sent: [{match: {}}]}
+    confirm_order: true
+  note: one turn only - the draft must wait for the user's yes
+
+# --- phone / home (confirm flows) ---------------------------------------------
+- id: door_unlock_confirm
+  category: confirm
+  turns: ["Unlock the front door", "Yes, go ahead."]
+  checks:
+    world: {devices: [{match: {key: "~front door", value: unlocked}}]}
+    confirm_order: true
+
+- id: lights_on
+  category: home
+  turns: ["Turn on the living room lights"]
+  checks:
+    tool_args: [{tool: home_assistant, match: {action: "on", device: "~living room"}}]
+
+# --- clarification / conversation / irrelevance -------------------------------
+- id: ambiguous_mute
+  category: clarification
+  turns: ["Mute it"]
+  checks:
+    forbidden_tools: [home_assistant]
+    answer_excludes: ["stopped"]
+  note: muting the volume or asking what to mute are both right; stopping music or a device isn't
+
+- id: ambiguous_turn_up
+  category: clarification
+  turns: ["Turn it up"]
+  checks:
+    forbidden_tools: [home_assistant]
+  judge: [clarifies]
+
+- id: conversational_opinion
+  category: conversational
+  turns: ["What do you think about artificial intelligence?"]
+  checks:
+    no_tools: true
+  judge: [concise, persona]
+
+- id: irrelevance_greeting
+  category: irrelevance
+  turns: ["Hey, good morning!"]
+  checks:
+    no_tools: true
+
+- id: irrelevance_thanks
+  category: irrelevance
+  turns: ["Thanks, that's all."]
+  checks:
+    no_tools: true
+
+- id: memory_recall
+  category: memory
+  turns: ["What's my sister's name again?"]
+  state: {facts: ["The user's sister is named Priya."]}
+  checks:
+    answer_contains: [["priya"]]
