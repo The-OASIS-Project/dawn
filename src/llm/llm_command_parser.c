@@ -40,8 +40,8 @@
  * =============================================================================
  * Tool use is native function calling: the LLM receives tool schemas via the
  * provider API (OpenAI function calling / Claude tool_use / llama.cpp --jinja).
- * NATIVE_TOOLS_RULES is the minimal behavior prompt used when tools are enabled;
- * when tools are disabled only the prose OUTPUT_FORMATTING_RULES apply.
+ * RESPONSE_RULES (the reply's length, asking when something is missing) apply
+ * always; NATIVE_TOOLS_RULES follow them when tools are enabled.
  *
  * The legacy <command>-tag transport (LLM emits JSON tags parsed from its output)
  * was retired 2026-08 — native tool calling reaches every provider and hits the
@@ -50,24 +50,15 @@
 
 // clang-format off
 
-/* Rules for native tool calling mode (default) */
+/* The tool rules, numbered after RESPONSE_RULES (tools enabled only). */
 static const char *NATIVE_TOOLS_RULES =
-   "RULES\n"
-   "1. Keep responses concise and conversational.\n"
-   "2. Use available tools when the user requests actions or information.\n"
-   "3. If a request is ambiguous, ask for clarification.\n"
-   "4. After tool execution, summarize the results briefly. Do not call the same tool again.\n"
+   "3. Use available tools when the user requests actions or information.\n"
+   "4. After a tool runs, tell the user the result in a sentence or two. Don't repeat a call "
+   "you already made with the same arguments.\n"
    "5. Search results include snippets with key information. Answer from snippets directly.\n"
    "   Only fetch a URL if the user asks for details about a specific article.\n"
    "6. Do NOT lead responses with weather, time, or location info unless explicitly asked.\n"
-   "   Vary your greetings and openers. The user's context below is for tool use only.\n"
-   "7. For \"what do we know / what's the status / where do things stand / tell me about\" "
-   "questions about a topic, person, or project, call `recall` FIRST. It gathers across memory, "
-   "notes, documents, and calendar in one pass and points you to the exact sources.\n"
-   "   Do NOT jump straight to a single memory or document search for these — that misses "
-   "cross-source context. Example: \"what's my wrist status?\" → call `recall` first, then drill "
-   "into a specific source only if needed. Go direct to one source only when you already know "
-   "exactly which item holds the answer.\n";
+   "   Vary your greetings and openers. The user's context below is for tool use only.\n";
 
 // clang-format off
 static const char *PLAN_EXECUTOR_PROMPT =
@@ -97,11 +88,20 @@ static const char *PLAN_EXECUTOR_PROMPT =
    "- You need to reason about intermediate results\n";
 // clang-format on
 
-/* Output-formatting rules that apply whether tools are enabled or disabled.
- * Kept separate from the tool instructions because they shape prose, not tool use. */
-static const char *OUTPUT_FORMATTING_RULES =
-    "When writing a mathematical factorial, spell it out as \"N factorial\" (for example "
-    "\"52 factorial\"), not the symbol \"52!\", so it is read correctly when spoken aloud.\n";
+/* The rules for the reply itself, which apply whether tools are enabled or
+ * not; the tool rules continue their numbering. */
+static const char *RESPONSE_RULES =
+    "RULES\n"
+    "1. Match the length to the request. A quick question or a command gets a sentence or two. "
+    "Advice and explanations can run longer, as a list when that reads better. A brief "
+    "in-character remark is welcome; padding isn't: don't restate the question, don't repeat "
+    "what you just did, and don't end with a menu of offers.\n"
+    "2. If a request is missing something you need, check first: when a tool or the user's "
+    "context can tell you (the calendar for a meeting's place, the player for what's playing), "
+    "use it. Ask only when nothing you can check would tell you (what, who, which device, which "
+    "time): one short question that covers what's missing. Don't guess, and don't answer a "
+    "different question. A tool that previews an action and asks the user to confirm already "
+    "does the asking: call it.\n";
 
 // clang-format on
 
@@ -217,10 +217,10 @@ static int build_system_instructions_to_buffer(bool tools_on, char *buffer, size
    int len = 0;
    int cap = (int)buffer_size;
 
-   /* Prose output-format rules first — apply whether or not tools are enabled. */
-   instr_appendf(buffer, cap, &len, "%s", OUTPUT_FORMATTING_RULES);
+   /* The reply rules first: they apply whether or not tools are enabled. */
+   instr_appendf(buffer, cap, &len, "%s", RESPONSE_RULES);
 
-   /* Tools off = prose rules only; tools on = native tool rules. */
+   /* Tools off = the reply rules only; tools on = the tool rules after them. */
    if (!tools_on) {
       return len;
    }

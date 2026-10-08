@@ -484,9 +484,9 @@ int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_si
    if (unavail_count > 0) {
       int w = snprintf(buffer + len, buffer_size - len,
                        "\nNote: The following tools are installed but not currently "
-                       "available (hardware offline or not configured): %s. If the user "
-                       "asks about these capabilities, let them know the feature exists "
-                       "but is not reachable right now.\n",
+                       "available (hardware offline or not configured): %s. Don't bring this "
+                       "up unless the user asks for one of them; then tell them the feature "
+                       "exists but isn't reachable right now.\n",
                        unavailable);
       if (w > 0 && (size_t)w < buffer_size - len) {
          len += w;
@@ -498,9 +498,9 @@ int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_si
    if (disabled_count > 0 && (size_t)len < buffer_size - 1) {
       int w = snprintf(buffer + len, buffer_size - len,
                        "\nNote: The following tools are disabled by the administrator "
-                       "for this %s session: %s. If the user asks about these "
-                       "capabilities, let them know the feature exists but is not "
-                       "enabled in this context.\n",
+                       "for this %s session: %s. Don't bring this up unless the user "
+                       "asks for one of them; then tell them the feature exists but isn't "
+                       "enabled here.\n",
                        session_label, session_disabled);
       if (w > 0 && (size_t)w < buffer_size - len) {
          len += w;

@@ -253,9 +253,13 @@ static void test_direction_is_a_note_elsewhere(void) {
    TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(messages));
    struct json_object *blocks = field(json_object_array_get_idx(messages, 0), "content");
    TEST_ASSERT_EQUAL_INT(4, (int)json_object_array_length(blocks));
-   /* The last user turn: it carries the conversation breakpoint too. */
+   /* Ahead of the user's words, which end the turn and carry the conversation
+    * breakpoint. */
    TEST_ASSERT_EQUAL_STRING("{\"type\":\"text\",\"text\":\"[Operator note] Answer briefly: "
-                            "voice.\",\"cache_control\":{\"type\":\"ephemeral\"}}",
+                            "voice.\"}",
+                            str(json_object_array_get_idx(blocks, 2)));
+   TEST_ASSERT_EQUAL_STRING("{\"type\":\"text\",\"text\":\"Good morning\",\"cache_control\":"
+                            "{\"type\":\"ephemeral\"}}",
                             str(json_object_array_get_idx(blocks, 3)));
    TEST_ASSERT_NULL(strstr(str(field(req, "system")), "Answer briefly"));
    json_object_put(req);

@@ -51,7 +51,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
   (`core/pending_slots`). Opening blinds or an awning acts directly (`ha_classify_call` tells
   the gate it's an action, so a text needs its reply code). Lock, close and off act directly.
   Unlock can't be scheduled; a scheduled open of a door is refused when it fires.
-- **Area-aware**: satellite user mapping injects `HomeAssistant_Area=[X]` into LLM system prompt.
+- **Area-aware**: a satellite mapped to an area tells the model, with the turn's standing directions, to use that area for requests that don't name a room.
 - **Feature guard**: `DAWN_ENABLE_HOMEASSISTANT_TOOL` CMake option. (DAWN's standalone SmartThings tool was removed in May 2026 — its upstream OAuth flow was permanently broken by an AWS WAF rule. Install Home Assistant via `docs/HOMEASSISTANT_SETUP.md` and use HA's own SmartThings integration if you need SmartThings device coverage.)
 - **Entity cache**: avoids per-request API calls; refreshed on configurable interval.
 

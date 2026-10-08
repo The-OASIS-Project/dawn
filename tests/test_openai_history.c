@@ -193,7 +193,8 @@ static void test_partial_turn_keeps_its_reasoning(void) {
 }
 
 /* A turn's context in front of its question as one string, a direction as an
- * operator's note after it; no marks on the wire; an image question keeps both. */
+ * operator's note ahead of its words; no marks on the wire; an image question
+ * keeps both. */
 static void test_request_context_for_chat(void) {
    json_object *history = json_tokener_parse(
        "[{\"role\":\"system\",\"content\":\"P\"},"
@@ -205,13 +206,13 @@ static void test_request_context_for_chat(void) {
    json_object *prepared = llm_openai_prepare_chat_history(history, "api.example.com#00000000",
                                                            "m");
    TEST_ASSERT_EQUAL_STRING("[{\"role\":\"system\",\"content\":\"P\"},{\"role\":\"user\","
-                            "\"content\":\"MEM\\n\\nCTX\\n\\nHi\\n\\n[Operator note] D\"}]",
+                            "\"content\":\"MEM\\n\\nCTX\\n\\n[Operator note] D\\n\\nHi\"}]",
                             json_object_to_json_string_ext(prepared, JSON_C_TO_STRING_PLAIN));
    json_object_put(prepared);
    json_object_put(history);
 
    /* An image question (its images parts of its own message, as the dispatch
-    * builds it): its context in front, the image after its text, the note last. */
+    * builds it): its context in front, then the note, then its text and image. */
    history = json_tokener_parse(
        "[{\"role\":\"system\",\"content\":\"P\"},"
        "{\"role\":\"user\",\"content\":["
@@ -224,8 +225,8 @@ static void test_request_context_for_chat(void) {
    TEST_ASSERT_EQUAL_STRING(
        "[{\"role\":\"system\",\"content\":\"P\"},{\"role\":\"user\",\"content\":["
        "{\"type\":\"text\",\"text\":\"MEM\"},{\"type\":\"text\",\"text\":\"CTX\"},"
-       "{\"type\":\"text\",\"text\":\"Hi\"},{\"type\":\"image_url\",\"image_url\":{\"url\":"
-       "\"data:image\\/png;base64,iVBO\"}},{\"type\":\"text\",\"text\":\"[Operator note] D\"}]}]",
+       "{\"type\":\"text\",\"text\":\"[Operator note] D\"},{\"type\":\"text\",\"text\":\"Hi\"},"
+       "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image\\/png;base64,iVBO\"}}]}]",
        json_object_to_json_string_ext(prepared, JSON_C_TO_STRING_PLAIN));
    json_object_put(prepared);
    json_object_put(history);
@@ -290,7 +291,10 @@ static void test_other_servers_get_a_tagged_note(void) {
    TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(prepared));
    const char *q = json_object_get_string(
        json_object_object_get(json_object_array_get_idx(prepared, 1), "content"));
-   TEST_ASSERT_NOT_NULL(strstr(q, "[Operator note dawn-feed] Room=Kitchen."));
+   const char *note = strstr(q, "[Operator note dawn-feed] Room=Kitchen.");
+   TEST_ASSERT_NOT_NULL(note);
+   /* Ahead of the user's words: the question is what the model reads last. */
+   TEST_ASSERT_EQUAL_STRING("Q", q + strlen(q) - 1);
    json_object_put(prepared);
    json_object_put(history);
 }
