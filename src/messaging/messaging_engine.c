@@ -291,12 +291,10 @@ int messaging_engine_init(void) {
    return MESSAGING_SUCCESS;
 }
 
-void messaging_engine_shutdown(void) {
-   if (!atomic_load(&s_initialized)) {
+void messaging_engine_quiesce(void) {
+   if (!atomic_load(&s_initialized) || atomic_exchange(&s_shutdown_requested, true)) {
       return;
    }
-
-   atomic_store(&s_shutdown_requested, true);
 
    /* Wake worker so it can exit. */
    pthread_mutex_lock(&s_inbound_mutex);
@@ -309,11 +307,18 @@ void messaging_engine_shutdown(void) {
    }
 
    /* Async sends (link confirmations, verification codes) run on their own
-    * threads; let them finish while their drivers are still up. */
+    * threads; the caller shuts the drivers down only after this returns. */
    if (engine_wait_async_sends(MESSAGING_ASYNC_SEND_DRAIN_MS) != SUCCESS) {
       OLOG_WARNING("messaging: async sends still running after %d ms; shutting down anyway",
                    MESSAGING_ASYNC_SEND_DRAIN_MS);
    }
+}
+
+void messaging_engine_shutdown(void) {
+   if (!atomic_load(&s_initialized)) {
+      return;
+   }
+   messaging_engine_quiesce();
 
    /* Destroy any retained sessions.  Using session_destroy (vs the
     * old session_release-only path) triggers memory extraction for

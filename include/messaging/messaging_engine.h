@@ -82,8 +82,17 @@ typedef enum {
 int messaging_engine_init(void);
 
 /**
- * @brief Shut the engine down.  Stops the worker drain.  Drivers are
- *        torn down separately by their own shutdown calls.
+ * @brief Stop taking work: the worker exits and in-flight async sends
+ *        (link confirmations, verification codes) are waited for, bounded.
+ *        Call before shutting the drivers down, so those sends still have
+ *        them.  Idempotent; messaging_engine_shutdown() calls it too.
+ */
+void messaging_engine_quiesce(void);
+
+/**
+ * @brief Shut the engine down: quiesce if not done yet, then destroy its
+ *        sessions and drop anything still queued.  Drivers are torn down
+ *        separately by their own shutdown calls, between the two.
  */
 void messaging_engine_shutdown(void);
 

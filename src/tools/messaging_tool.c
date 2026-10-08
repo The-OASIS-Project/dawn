@@ -621,6 +621,8 @@ static int messaging_tool_init(void) {
 }
 
 static void messaging_tool_cleanup(void) {
+   /* In-flight sends finish while the drivers they send through are still up. */
+   messaging_engine_quiesce();
    if (g_secrets.slack_app_token[0] != '\0' && g_secrets.slack_bot_token[0] != '\0') {
       messaging_slack_shutdown();
    }
