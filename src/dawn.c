@@ -148,6 +148,7 @@
 #ifdef ENABLE_AEC
 #include "audio/aec_processor.h"
 #endif
+#include "git_sha.h"
 #include "version.h"
 
 /* Configuration */
@@ -1600,7 +1601,7 @@ int main(int argc, char *argv[]) {
    // Save argv early for potential restart via execve()
    dawn_save_argv(argc, argv);
 
-   OLOG_INFO("%s Version %s: %s\n", APP_NAME, VERSION_NUMBER, GIT_SHA);
+   OLOG_INFO("%s Version %s: %s\n", APP_NAME, VERSION_NUMBER, dawn_git_sha);
 
    // Initialize curl globally and register cleanup handler
    curl_global_init(CURL_GLOBAL_DEFAULT);

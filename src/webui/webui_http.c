@@ -36,6 +36,7 @@
 #include "config/dawn_config.h"
 #include "core/ota.h"
 #include "core/rate_limiter.h"
+#include "git_sha.h"
 #include "logging.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
@@ -1700,7 +1701,7 @@ int callback_http(struct lws *wsi,
                      "{\"status\":\"ok\",\"version\":\"%s\",\"git_sha\":\"%s\","
                      "\"uptime_seconds\":%ld,\"state\":\"%s\",\"queries\":%u,"
                      "\"active_sessions\":%d}",
-                     VERSION_NUMBER, GIT_SHA, (long)metrics_get_uptime(),
+                     VERSION_NUMBER, dawn_git_sha, (long)metrics_get_uptime(),
                      dawn_state_name(snapshot.current_state), snapshot.queries_total,
                      s_client_count);
 

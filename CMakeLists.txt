@@ -59,8 +59,8 @@ add_definitions(-DPLATFORM_${PLATFORM})
 message(STATUS "Building for platform: ${PLATFORM}")
 
 # VERSION_NUMBER is the single source of truth in include/version.h — do NOT also
-# define it here (a -D would redefine the header's value and warn).  Only GIT_SHA,
-# computed at configure time, is passed through as a -D below.
+# define it here (a -D would redefine the header's value and warn).  GIT_SHA,
+# computed at configure time, is compiled in through a generated file below.
 
 # GIT_SHA may be supplied externally with -DGIT_SHA=... — the Docker build does
 # this, since its build context excludes .git (so the git command below can't
@@ -86,8 +86,12 @@ if(GIT_SHA STREQUAL "")
     set(GIT_SHA "unknown")
 endif()
 
-# Pass the Git SHA to the compiler (VERSION_NUMBER lives in include/version.h).
-add_definitions(-DGIT_SHA=\"${GIT_SHA}\")
+# The Git SHA goes into one generated source file (include/git_sha.h), not a -D:
+# a -D reaches every target defined after it, whisper.cpp and its CUDA kernels
+# included, so each new commit rebuilt all of them.  configure_file rewrites the
+# file only when the hash changes.  (VERSION_NUMBER lives in include/version.h.)
+configure_file(${CMAKE_SOURCE_DIR}/cmake/git_sha.c.in ${CMAKE_BINARY_DIR}/generated/git_sha.c
+               @ONLY)
 
 # Include directories for new source layout
 include_directories(include)
@@ -1085,6 +1089,8 @@ endif()
 if(AEC_ENABLED)
     list(APPEND DAWN_SOURCES ${AEC_SOURCES})
 endif()
+
+list(APPEND DAWN_SOURCES ${CMAKE_BINARY_DIR}/generated/git_sha.c)
 
 add_executable(dawn ${DAWN_SOURCES})
 add_dependencies(dawn models_toml_builtin)
