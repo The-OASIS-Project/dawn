@@ -42,6 +42,10 @@
 #define DECODE_CHUNK (64 * 1024)
 /* Between two pieces of body text. */
 #define BODY_JOIN "\n\n"
+/* Before a plain form read in place of an HTML one with no text */
+#define PLAIN_FORM_NOTE                                                              \
+   "[The text above is this email's plain-text version: its HTML has no text (only " \
+   "images, or it couldn't be read), so the reader may not have seen it.]"
 
 /* =============================================================================
  * Setup
@@ -465,6 +469,8 @@ typedef struct {
    char *text;
    size_t len;
    size_t limit;
+   bool as_shown; /* an alternative's HTML branch first (email_read_opts_t.text_as_shown) */
+   bool hid;      /* an HTML piece had text its reader never sees, left out */
    bool cut;
    bool oom;
 } walk_ctx_t;
@@ -505,13 +511,15 @@ static bool looks_like_html(const char *s, size_t len) {
 
 /* @p part's HTML as text, at most @p limit bytes.  Markup never reaches the
  * text: when the HTML can't be read, the piece is empty and *cut is set. */
-static char *html_as_text(const email_mime_part_t *part, size_t limit, bool *cut) {
+static char *html_as_text(const email_mime_part_t *part, size_t limit, bool *cut, bool *hid) {
    size_t len = 0;
    char *html = decode_part(part, HTML_FOR_TEXT_MAX, &len, cut);
    if (!html)
       return NULL;
    char *text = NULL;
-   const int rc = html_extract_text_plain(html, len, &text);
+   bool dropped = false;
+   const int rc = html_extract_text_plain_ex(html, len, &text, &dropped);
+   *hid = *hid || dropped;
    free(html);
    if (rc != HTML_PARSE_SUCCESS || !text) {
       free(text);
@@ -549,6 +557,31 @@ static const email_mime_part_t *resolve(const email_mime_part_t *parts,
    return local;
 }
 
+/* @p piece (taken) appended to the text, after BODY_JOIN; a blank piece adds
+ * nothing (and leaves an alternative's other form to be read). */
+static void append_piece(walk_ctx_t *c, char *piece) {
+   const size_t sep = c->len ? strlen(BODY_JOIN) : 0;
+   const size_t plen = strlen(piece);
+   size_t k = 0;
+   while (k < plen && isspace((unsigned char)piece[k]))
+      k++;
+   if (k == plen) {
+      free(piece);
+      return;
+   }
+   char *n = realloc(c->text, c->len + sep + plen + 1);
+   if (!n) {
+      free(piece);
+      c->oom = true;
+      return;
+   }
+   c->text = n;
+   memcpy(c->text + c->len, BODY_JOIN, sep);
+   memcpy(c->text + c->len + sep, piece, plen + 1);
+   c->len += sep + plen;
+   free(piece);
+}
+
 /* Reads body leaf @p i and appends it to the text. */
 static void read_leaf(walk_ctx_t *c, int i) {
    if (c->len >= c->limit) {
@@ -571,36 +604,17 @@ static void read_leaf(walk_ctx_t *c, int i) {
       piece = decode_part(p, room, &plen, &cut);
       if (piece && looks_like_html(piece, plen)) {
          free(piece);
-         piece = html_as_text(p, room, &cut);
+         piece = html_as_text(p, room, &cut, &c->hid);
       }
    } else {
-      piece = html_as_text(p, room, &cut);
+      piece = html_as_text(p, room, &cut, &c->hid);
    }
    if (!piece) {
       c->oom = true;
       return;
    }
-   plen = strlen(piece);
    c->cut = c->cut || cut;
-   /* A blank piece adds nothing (and leaves an alternative's other form to be read). */
-   size_t k = 0;
-   while (k < plen && isspace((unsigned char)piece[k]))
-      k++;
-   if (k == plen) {
-      free(piece);
-      return;
-   }
-   char *n = realloc(c->text, c->len + sep + plen + 1);
-   if (!n) {
-      free(piece);
-      c->oom = true;
-      return;
-   }
-   c->text = n;
-   memcpy(c->text + c->len, BODY_JOIN, sep);
-   memcpy(c->text + c->len + sep, piece, plen + 1);
-   c->len += sep + plen;
-   free(piece);
+   append_piece(c, piece);
 }
 
 /* Marks the body leaves of every branch of alternative @p i but @p chosen:
@@ -629,12 +643,40 @@ static void text_walk(walk_ctx_t *c, int i) {
       return;
    }
    if (is_subtype(p, "alternative")) {
-      const int chosen = choose_branch(c->parts, c->count, i, true);
+      /* As shown: the HTML a reader saw, not a plain form a sender can make
+       * say something else. */
+      int chosen = c->as_shown ? choose_branch(c->parts, c->count, i, false) : -1;
+      if (chosen < 0)
+         chosen = choose_branch(c->parts, c->count, i, true);
       mark_other_forms(c, i, chosen);
       if (chosen < 0)
          return;
       const size_t before = c->len;
+      /* This branch's own hidden text, apart from earlier parts' */
+      const bool hid_before = c->hid;
+      c->hid = false;
       text_walk(c, chosen);
+      const bool branch_hid = c->hid;
+      c->hid = hid_before || branch_hid;
+      if (c->as_shown && c->len == before && !c->oom) {
+         /* The HTML gave no text.  When its text was hidden, there is none
+          * to read: the plain form isn't what the reader saw.  When it had
+          * none (only images) or couldn't be read, the plain form is read,
+          * saying so. */
+         const int plain = choose_branch(c->parts, c->count, i, true);
+         if (!branch_hid && plain >= 0 && plain != chosen) {
+            text_walk(c, plain);
+            if (c->len > before && !c->oom && c->len + sizeof(PLAIN_FORM_NOTE) < c->limit) {
+               char *note = strdup(PLAIN_FORM_NOTE);
+               if (!note) {
+                  c->oom = true;
+                  return;
+               }
+               append_piece(c, note);
+            }
+         }
+         return;
+      }
       /* A plain branch with no text in it (blank, or only markup): the HTML
        * branch is the message. */
       const int html = choose_branch(c->parts, c->count, i, false);
@@ -713,6 +755,7 @@ int email_mime_apply(const email_mime_part_t *parts,
                     .used = used,
                     .fetch = fetch,
                     .fetch_ctx = fetch_ctx,
+                    .as_shown = opts->text_as_shown,
                     .limit = opts->max_text_chars > 0 ? (size_t)opts->max_text_chars
                                                       : EMAIL_MAX_READ_BODY_LEN };
    walk_top(&c);
@@ -744,6 +787,7 @@ int email_mime_apply(const email_mime_part_t *parts,
    out->body_len = (int)strlen(out->body);
    /* A message cut before any of its text was reached has lost it. */
    out->text_truncated = c.cut || (parts_cut && out->body_len == 0);
+   out->hidden_text = c.hid;
 
    const int html = html_top(parts, count);
    if (html >= 0)

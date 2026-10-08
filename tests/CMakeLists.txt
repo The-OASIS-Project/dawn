@@ -548,6 +548,8 @@ if(DAWN_ENABLE_EMAIL_TOOL)
                ${SRC_ROOT}/src/tools/email_display.c
                ${SRC_ROOT}/src/tools/gmail_parts.c
                ${SRC_ROOT}/src/tools/html_parser.c
+               ${SRC_ROOT}/src/tools/html_hidden.c
+               ${SRC_ROOT}/src/tools/html_hidden_css.c
       LIBS     dawn_common unity ${GMIME_LINK_LIBRARIES} ${JSONC_LIBRARIES}
       INCLUDES ${GMIME_INCLUDE_DIRS}
       LABEL    ci)
@@ -904,6 +906,8 @@ dawn_add_unit_test(test_document_extract
    SOURCES test_document_extract.c
            ${SRC_ROOT}/src/tools/document_extract.c
            ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
    LIBS    dawn_common unity
    INCLUDES ${SRC_ROOT}/include
    LABEL   ci)
@@ -2057,6 +2061,8 @@ dawn_add_unit_test(test_device_types
 dawn_add_unit_test(test_html_parser
    SOURCES test_html_parser.c
            ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
    LIBS    dawn_common unity
    LABEL   ci)
 
@@ -2124,6 +2130,8 @@ dawn_add_unit_test(test_summarizer_quality
            ${SRC_ROOT}/src/tools/tfidf_summarizer.c
            ${SRC_ROOT}/src/tools/url_fetcher.c
            ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_defaults.c
            ${SRC_ROOT}/src/config/config_env.c

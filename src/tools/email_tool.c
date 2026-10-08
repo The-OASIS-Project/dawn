@@ -496,7 +496,9 @@ static char *handle_read(struct json_object *details, int user_id) {
    const char *account = json_get_str(details, "account");
 
    /* The account's own body cap; never HTML (the model reads text). */
-   const email_read_opts_t opts = { .fetch_bytes = EMAIL_READ_FETCH_TOOL };
+   /* The text a person reading the message sees: its HTML form when it has
+    * one, so a plain alternative can't tell the model something else. */
+   const email_read_opts_t opts = { .fetch_bytes = EMAIL_READ_FETCH_TOOL, .text_as_shown = true };
    email_message_t msg = { 0 };
    email_err_t err = EMAIL_ERR_NONE;
    int rc = email_service_read(user_id, account, message_id, &opts, &msg, NULL, &err);

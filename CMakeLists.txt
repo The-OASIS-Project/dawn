@@ -692,6 +692,8 @@ set(DAWN_SOURCES
     src/tools/url_fetch_tavily.c
     src/tools/url_snippet_cache.c
     src/tools/html_parser.c
+    src/tools/html_hidden.c
+    src/tools/html_hidden_css.c
     src/core/time_query_parser.c
     src/core/market_hours.c
     src/core/iso8601.c

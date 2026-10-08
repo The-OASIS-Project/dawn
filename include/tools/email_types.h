@@ -190,6 +190,8 @@ typedef struct {
    int max_text_chars;        /* body_text cap, in bytes */
    size_t max_html_bytes;     /* body_html cap (only with want_html) */
    bool want_html;            /* produce body_html (never for the LLM) */
+   bool text_as_shown;        /* body_text from the HTML form when there is one (what a
+                               * reader saw; its hidden text dropped), else text/plain */
    bool headers_only;         /* no body is fetched: From and Subject are filled (Date on
                                * Gmail); nothing else is promised */
    const atomic_bool *cancel; /* set it to stop the read's transfers (may be NULL) */
@@ -237,6 +239,7 @@ typedef struct {
    char *body_html;       /* heap, valid UTF-8 but NOT HTML-sanitized; only with want_html */
    size_t body_html_len;
    bool text_truncated; /* body is not the whole text (cap, cut fetch or limits) */
+   bool hidden_text;    /* the HTML had text its reader never sees, left out of body */
    bool html_truncated;
    email_attachment_t *attachments; /* heap */
    int attachment_count;

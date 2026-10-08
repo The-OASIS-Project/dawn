@@ -29,6 +29,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "tools/html_hidden.h"
 #include "utils/string_utils.h"
 
 // =============================================================================
@@ -83,6 +84,8 @@ typedef struct {
    size_t link_text_pos;
 
    int plain_text;  // Plain text mode: skip markdown formatting (tables, links, headings)
+   int hide;        // Plain mode: text here is hidden from a reader (html_hidden.h)
+   int dropped;     // Plain mode: hidden text was left out
 
    // Base URL for resolving relative links
    char base_url[512];
@@ -103,17 +106,8 @@ typedef struct {
  * This scanner respects single and double-quoted attribute values.
  */
 static const char *find_tag_end(const char *start, const char *end) {
-   int in_single = 0;
-   int in_double = 0;
-   for (const char *p = start; p < end; p++) {
-      if (*p == '"' && !in_single)
-         in_double = !in_double;
-      else if (*p == '\'' && !in_double)
-         in_single = !in_single;
-      else if (*p == '>' && !in_single && !in_double)
-         return p;
-   }
-   return NULL;
+   /* As a browser reads it: a quote opens a string only as a value */
+   return html_tag_end(start, end);
 }
 
 /* Tags with no closing tag (HTML void elements): a search for one scans to
@@ -164,12 +158,17 @@ static void close_missing(missing_close_t *m,
       safe_strncpy(m->name[m->count++], tag_name, sizeof(m->name[0]));
 }
 
+/* The '>' of @p tag_name's closing tag at or after @p html: "</name" then
+ * '>', '/' or whitespace, as a browser ends raw text ("</script >"). */
 static const char *find_closing_tag(const char *html, const char *tag_name) {
-   char close_tag[72];  // tag_name(64) + "</>" + null = 68 bytes, round up
-   snprintf(close_tag, sizeof(close_tag), "</%s>", tag_name);
-   const char *found = strcasestr_portable(html, close_tag);
-   if (found) {
-      return found + strlen(close_tag) - 1;
+   char close_tag[72];  // tag_name(64) + "</" + null, round up
+   snprintf(close_tag, sizeof(close_tag), "</%s", tag_name);
+   const size_t n = strlen(close_tag);
+   for (const char *found = strcasestr_portable(html, close_tag); found;
+        found = strcasestr_portable(found + n, close_tag)) {
+      const char c = found[n];
+      if (c == '>' || c == '/' || isspace((unsigned char)c))
+         return strchr(found + n, '>');
    }
    return NULL;
 }
@@ -249,6 +248,18 @@ static int is_skip_tag(const char *tag_name, size_t len) {
       default:
          return 0;
    }
+}
+
+/* Plain mode (an email): elements whose content a reader never sees as text
+ * the page parses (raw text, or not shown). */
+static int is_plain_raw_tag(const char *tag_name) {
+   static const char *const k_raw[] = { "title",    "textarea",  "xmp", "noembed",
+                                        "noframes", "plaintext", NULL };
+   for (int i = 0; k_raw[i]; i++) {
+      if (strcmp(tag_name, k_raw[i]) == 0)
+         return 1;
+   }
+   return 0;
 }
 
 /* Forward declaration for extract_attr (defined later) */
@@ -413,7 +424,65 @@ static void resolve_url(const char *href,
 /**
  * @brief Write character to output buffer, growing if needed
  */
+/* The length of a spacer at @p p (a no-break or zero-width space, a soft
+ * hyphen, a byte-order mark: what senders pad preheaders with), or 0. */
+static size_t spacer_len(const char *p, const char *end) {
+   static const char *const k_spacers[] = { "\xC2\xA0",
+                                            "\xC2\xAD",
+                                            "\xE2\x80\x8B",
+                                            "\xE2\x80\x8C",
+                                            "\xE2\x80\x8D",
+                                            "\xE2\x80\xAF",
+                                            "\xE2\x81\xA0",
+                                            "\xE3\x80\x80",
+                                            "\xEF\xBB\xBF",
+                                            "\xCD\x8F",
+                                            NULL };
+   for (int i = 0; k_spacers[i]; i++) {
+      const size_t n = strlen(k_spacers[i]);
+      if ((size_t)(end - p) >= n && memcmp(p, k_spacers[i], n) == 0)
+         return n;
+   }
+   return 0;
+}
+
+/* The length of a character reference to a spacer at @p p ("&zwnj;",
+ * "&#8203;", ...: preheader padding), or 0. */
+static size_t entity_spacer_len(const char *p, const char *end) {
+   static const char *const k_refs[] = { "&nbsp;",   "&zwnj;",   "&zwj;",    "&shy;",   "&ensp;",
+                                         "&emsp;",   "&thinsp;", "&hairsp;", "&#160;",  "&#173;",
+                                         "&#847;",   "&#8203;",  "&#8204;",  "&#8205;", "&#8239;",
+                                         "&#65279;", "&#xa0;",   "&#xad;",   "&#x34f;", "&#x200b;",
+                                         "&#x200c;", "&#x200d;", "&#xfeff;", NULL };
+   for (int i = 0; k_refs[i]; i++) {
+      const size_t n = strlen(k_refs[i]);
+      if ((size_t)(end - p) >= n && strncasecmp(p, k_refs[i], n) == 0)
+         return n;
+   }
+   return 0;
+}
+
+/* Whether @p s holds anything but whitespace and spacers. */
+static bool has_visible_text(const char *s) {
+   const char *end = s + strlen(s);
+   for (const char *p = s; p < end;) {
+      const size_t spacer = spacer_len(p, end);
+      if (spacer) {
+         p += spacer;
+         continue;
+      }
+      if (!isspace((unsigned char)*p))
+         return true;
+      p++;
+   }
+   return false;
+}
+
 static void emit_char(html_parser_state_t *state, char c) {
+   if (state->hide) {
+      state->dropped = state->dropped || !isspace((unsigned char)c);
+      return;
+   }
    if (state->out_pos >= state->out_capacity - 1) {
       size_t new_cap = state->out_capacity * 2;
       // Prevent unbounded growth - cap at maximum size
@@ -446,6 +515,14 @@ static void emit_char(html_parser_state_t *state, char c) {
 static void emit_str_n(html_parser_state_t *state, const char *s, size_t len) {
    if (len == 0 || !s)
       return;
+   if (state->hide) {
+      char tmp[64];
+      const size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
+      memcpy(tmp, s, n);
+      tmp[n] = '\0';
+      state->dropped = state->dropped || has_visible_text(tmp) || n < len;
+      return;
+   }
 
    // Ensure capacity for entire string plus null terminator
    size_t needed = state->out_pos + len + 1;
@@ -1356,7 +1433,8 @@ static int html_extract_internal(const char *html,
                                  size_t html_len,
                                  char **out_text,
                                  const char *base_url,
-                                 int plain_text) {
+                                 int plain_text,
+                                 bool *hidden_dropped) {
    if (!html || !out_text) {
       return HTML_PARSE_ERROR_INVALID_INPUT;
    }
@@ -1393,27 +1471,43 @@ static int html_extract_internal(const char *html,
    const char *p = html;
    const char *end = html + html_len;
 
-   // Try to find <body> to skip header cruft
-   const char *body = strcasestr_portable(html, "<body");
-   if (body) {
-      // Skip to after the opening body tag
-      const char *body_end = find_tag_end(body + 1, end);
-      if (body_end)
-         p = body_end + 1;
+   /* An email read as text: what its reader sees (plain_text mode). */
+   html_vis_t *vis = NULL;
+   if (plain_text) {
+      vis = html_vis_new(html, html_len);
+      if (!vis) {
+         free(state.output);
+         return HTML_PARSE_ERROR_ALLOC;
+      }
+      /* The <html> and <body> tags (outside comments) are skipped below;
+       * their styles still apply to everything in them. */
+      const char *tag;
+      const char *tag_end;
+      if (html_vis_root(vis, false, &tag, &tag_end))
+         html_vis_open(vis, "html", tag, tag_end, false);
+      if (html_vis_root(vis, true, &tag, &tag_end)) {
+         html_vis_open(vis, "body", tag, tag_end, false);
+         p = tag_end + 1;
+      }
+   } else {
+      // Try to find <body> to skip header cruft
+      const char *body = strcasestr_portable(html, "<body");
+      if (body) {
+         // Skip to after the opening body tag
+         const char *body_end = find_tag_end(body + 1, end);
+         if (body_end)
+            p = body_end + 1;
+      }
    }
+   state.hide = vis && html_vis_hidden(vis);
 
    missing_close_t missing = { .budget = 4 * html_len };
-   int no_comment_end = 0; /* no "-->" left: a later "<!--" can't find one either */
 
    while (p < end) {
-      // HTML comment
-      if (!no_comment_end && strncmp(p, "<!--", 4) == 0) {
-         const char *comment_end = strstr(p + 4, "-->");
-         if (comment_end) {
-            p = comment_end + 3;
-            continue;
-         }
-         no_comment_end = 1;
+      // HTML comment, ended as a browser ends it (one never ended runs to the end)
+      if (strncmp(p, "<!--", 4) == 0) {
+         p = html_comment_end(p, end);
+         continue;
       }
 
       // Start of tag
@@ -1446,6 +1540,17 @@ static int html_extract_internal(const char *html,
             name_len++;
          }
          tag_name[name_len] = '\0';
+
+         /* An email's raw-text elements (a reader sees none of them as
+          * markup, most not at all): their content is skipped whole, and one
+          * never closed takes the rest of the document with it. */
+         if (plain_text && !is_closing && is_plain_raw_tag(tag_name)) {
+            const char *close = find_closing_tag(p, tag_name);
+            if (!close)
+               break;
+            p = close + 1;
+            continue;
+         }
 
          // Check for skip tags
          if (!is_closing && is_skip_tag(tag_name, name_len)) {
@@ -1490,8 +1595,17 @@ static int html_extract_internal(const char *html,
 
          if (is_closing) {
             handle_tag_close(&state, tag_name);
+            if (vis) {
+               html_vis_close(vis, tag_name);
+               state.hide = html_vis_hidden(vis);
+            }
          } else {
+            /* The whole tag is read, not the capped copy */
+            if (vis)
+               state.hide = html_vis_open(vis, tag_name, tag_start, tag_end, is_void_tag(tag_name));
             handle_tag_open(&state, tag_name, tag_content);
+            if (vis)
+               state.hide = html_vis_hidden(vis);
          }
 
          p = tag_end + 1;
@@ -1502,6 +1616,16 @@ static int html_extract_internal(const char *html,
       if (*p == '&') {
          char decoded[16];
          int consumed = decode_entity(p, decoded);
+         if (state.hide) {
+            const size_t spacer = entity_spacer_len(p, end);
+            if (spacer) {
+               p += spacer;
+               continue;
+            }
+            state.dropped = state.dropped || has_visible_text(decoded);
+            p += consumed;
+            continue;
+         }
 
          if (state.in_link) {
             // Accumulate link text
@@ -1544,6 +1668,16 @@ static int html_extract_internal(const char *html,
       }
 
       // Regular text
+      if (state.hide) {
+         const size_t spacer = spacer_len(p, end);
+         if (spacer) {
+            p += spacer;
+            continue;
+         }
+         state.dropped = state.dropped || !isspace((unsigned char)*p);
+         p++;
+         continue;
+      }
       if (state.in_link) {
          if (state.link_text_pos < sizeof(state.link_text) - 1) {
             state.link_text[state.link_text_pos++] = *p;
@@ -1584,6 +1718,9 @@ static int html_extract_internal(const char *html,
       return HTML_PARSE_ERROR_EMPTY;
    }
 
+   html_vis_free(vis);
+   if (hidden_dropped)
+      *hidden_dropped = state.dropped != 0;
    *out_text = state.output;
    return HTML_PARSE_SUCCESS;
 }
@@ -1592,15 +1729,24 @@ int html_extract_text_with_base(const char *html,
                                 size_t html_len,
                                 char **out_text,
                                 const char *base_url) {
-   return html_extract_internal(html, html_len, out_text, base_url, 0);
+   return html_extract_internal(html, html_len, out_text, base_url, 0, NULL);
 }
 
 int html_extract_text(const char *html, size_t html_len, char **out_text) {
-   return html_extract_internal(html, html_len, out_text, NULL, 0);
+   return html_extract_internal(html, html_len, out_text, NULL, 0, NULL);
 }
 
 int html_extract_text_plain(const char *html, size_t html_len, char **out_text) {
-   return html_extract_internal(html, html_len, out_text, NULL, 1);
+   return html_extract_internal(html, html_len, out_text, NULL, 1, NULL);
+}
+
+int html_extract_text_plain_ex(const char *html,
+                               size_t html_len,
+                               char **out_text,
+                               bool *hidden_dropped) {
+   if (hidden_dropped)
+      *hidden_dropped = false;
+   return html_extract_internal(html, html_len, out_text, NULL, 1, hidden_dropped);
 }
 
 #undef EMIT_LIT
