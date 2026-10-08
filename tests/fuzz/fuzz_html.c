@@ -45,12 +45,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
    memcpy(html, data, size);
    html[size] = '\0';
 
+   /* Each call writes text before check() reads it: the order of a call's
+    * arguments isn't specified in C. */
    char *text = NULL;
-   check(html_extract_text(html, size, &text), text);
+   int rc = html_extract_text(html, size, &text);
+   check(rc, text);
    text = NULL;
-   check(html_extract_text_with_base(html, size, &text, "https://example.com/a/b/page.html"), text);
+   rc = html_extract_text_with_base(html, size, &text, "https://example.com/a/b/page.html");
+   check(rc, text);
    text = NULL;
-   check(html_extract_text_plain(html, size, &text), text);
+   rc = html_extract_text_plain(html, size, &text);
+   check(rc, text);
 
    free(html);
    return 0;

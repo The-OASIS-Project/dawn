@@ -318,6 +318,10 @@ static caldav_error_t discover_principal(CURL *curl,
       return CALDAV_ERR_PARSE;
 
    xmlXPathContextPtr ctx = xmlXPathNewContext(doc);
+   if (!ctx) {
+      xmlFreeDoc(doc);
+      return CALDAV_ERR_ALLOC;
+   }
    register_namespaces(ctx);
 
    /* Look for current-user-principal/href */
@@ -363,6 +367,10 @@ static caldav_error_t discover_calendar_home(CURL *curl,
       return CALDAV_ERR_PARSE;
 
    xmlXPathContextPtr ctx = xmlXPathNewContext(doc);
+   if (!ctx) {
+      xmlFreeDoc(doc);
+      return CALDAV_ERR_ALLOC;
+   }
    register_namespaces(ctx);
 
    char href[512] = { 0 };
@@ -415,6 +423,10 @@ static caldav_error_t discover_collections(CURL *curl,
       return CALDAV_ERR_PARSE;
 
    xmlXPathContextPtr ctx = xmlXPathNewContext(doc);
+   if (!ctx) {
+      xmlFreeDoc(doc);
+      return CALDAV_ERR_ALLOC;
+   }
    register_namespaces(ctx);
 
    /* Find all response elements */
@@ -597,6 +609,10 @@ caldav_error_t caldav_get_ctag(const char *calendar_url,
       return CALDAV_ERR_PARSE;
 
    xmlXPathContextPtr ctx = xmlXPathNewContext(doc);
+   if (!ctx) {
+      xmlFreeDoc(doc);
+      return CALDAV_ERR_ALLOC;
+   }
    register_namespaces(ctx);
    xpath_text(ctx, xmlDocGetRootElement(doc), "//cs:getctag", ctag_out, ctag_len);
    xmlXPathFreeContext(ctx);
@@ -704,6 +720,10 @@ caldav_error_t caldav_parse_events(const char *xml,
       return CALDAV_ERR_PARSE;
 
    xmlXPathContextPtr ctx = xmlXPathNewContext(doc);
+   if (!ctx) {
+      xmlFreeDoc(doc);
+      return CALDAV_ERR_ALLOC;
+   }
    register_namespaces(ctx);
 
    xmlXPathObjectPtr responses = xmlXPathEvalExpression((const xmlChar *)"//d:response", ctx);

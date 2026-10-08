@@ -43,7 +43,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
       caldav_sync_change_t *changes = NULL;
       int count = 0;
       int cap = 0;
-      char token[1024];
+      char token[1024] = "";
       bool more = false;
       if (caldav_parse_sync_page(xml, (int)size, BASE_URL, &changes, &count, &cap, token,
                                  sizeof(token), &more) == CALDAV_OK) {
