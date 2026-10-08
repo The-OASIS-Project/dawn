@@ -1,0 +1,1 @@
+<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/calendars/user/home/</d:href><d:status>HTTP/1.1 507 Insufficient Storage</d:status></d:response><d:sync-token>tok-2</d:sync-token></d:multistatus>

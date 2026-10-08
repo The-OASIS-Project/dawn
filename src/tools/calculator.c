@@ -28,17 +28,17 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
-#include <pthread.h>
+#include <sodium.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <time.h>
 
 #include "logging.h"
+#include "tinyexpr.h"
 #include "tools/calculator_bignum.h"
-#include "tools/tinyexpr.h"
 
 #define RESULT_BUFFER_SIZE 256
 
@@ -147,13 +147,6 @@ static const unit_def_t units[] = {
 
    { NULL, NULL, 0.0 }
 };
-
-/* Thread-safe one-time random seed initialization */
-static pthread_once_t rand_init_once = PTHREAD_ONCE_INIT;
-
-static void init_random_seed(void) {
-   srand((unsigned int)time(NULL));
-}
 
 static const unit_def_t *find_unit(const char *name) {
    for (int i = 0; units[i].name != NULL; i++) {
@@ -522,9 +515,6 @@ char *calculator_random(const char *value_str) {
       return NULL;
    }
 
-   /* Thread-safe one-time initialization */
-   pthread_once(&rand_init_once, init_random_seed);
-
    long long min_val = 0, max_val = 0;
 
    /* Parse "MIN to MAX" or just "MAX" */
@@ -547,27 +537,23 @@ char *calculator_random(const char *value_str) {
       max_val = tmp;
    }
 
-   // Check for overflow: if max_val - min_val would overflow, limit range
-   // Also check if range exceeds RAND_MAX for unbiased results
-   unsigned long long range;
-   bool range_clamped = false;
-   if (max_val > 0 && min_val < 0 &&
-       (unsigned long long)max_val - (unsigned long long)min_val > (unsigned long long)LLONG_MAX) {
-      // Overflow detected - limit to RAND_MAX
-      range = (unsigned long long)RAND_MAX;
-      range_clamped = true;
+   /* Uniform over the whole range: span is max - min, exact in unsigned arithmetic */
+   const uint64_t span = (uint64_t)max_val - (uint64_t)min_val;
+   uint64_t offset;
+   if (span < UINT32_MAX) {
+      offset = randombytes_uniform((uint32_t)(span + 1));
    } else {
-      range = (unsigned long long)(max_val - min_val) + 1;
-      if (range > (unsigned long long)RAND_MAX + 1) {
-         range = (unsigned long long)RAND_MAX + 1;
-         range_clamped = true;
-      }
+      /* Reject the top partial block so every value is equally likely */
+      const uint64_t limit = (span == UINT64_MAX) ? UINT64_MAX
+                                                  : UINT64_MAX - (UINT64_MAX % (span + 1));
+      do {
+         randombytes_buf(&offset, sizeof(offset));
+      } while (span != UINT64_MAX && offset >= limit);
+      if (span != UINT64_MAX)
+         offset %= span + 1;
    }
-   if (range_clamped) {
-      OLOG_WARNING("Calculator: Random range clamped to RAND_MAX (%d)", RAND_MAX);
-   }
-
-   long long result = min_val + (long long)(rand() % range);
+   const uint64_t drawn = (uint64_t)min_val + offset; /* lands back inside [min, max] */
+   long long result = (long long)drawn;
 
    OLOG_INFO("Calculator: Random %lld to %lld = %lld", min_val, max_val, result);
    snprintf(buf, RESULT_BUFFER_SIZE, "%lld", result);

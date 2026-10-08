@@ -37,11 +37,11 @@
 #include "core/tool_call_policy.h"
 #include "core/turn_origin.h"
 #include "logging.h"
+#include "toml.h"
 #include "tools/phone_audio_config.h"
 #include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
 #include "tools/phone_service.h"
-#include "tools/toml.h"
 #include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -237,14 +237,20 @@ static uint32_t pending_id_arg(struct json_object *details) {
 /* Take this session's pending item of @p kind, the one the confirm names, for
  * its confirm: copied to @p out and cleared.  NULL on success, else the error
  * to return (one named wrong, or confirmed in the wrong turn, stays). */
-static char *take_pending(const turn_origin_t *origin,
-                          int user_id,
-                          int kind,
-                          uint32_t item_id,
-                          const char *what,
-                          phone_pending_t *out) {
+/* True with *out filled when the staged item is taken.  False otherwise, with
+ * *err the refusal to return (NULL if even that couldn't be allocated): "found"
+ * is never inferred from a NULL message. */
+static bool take_pending(const turn_origin_t *origin,
+                         int user_id,
+                         int kind,
+                         uint32_t item_id,
+                         const char *what,
+                         phone_pending_t *out,
+                         char **err) {
+   *err = NULL;
    if (item_id == 0) {
-      return tool_pending_missing_id(what);
+      *err = tool_pending_missing_id(what);
+      return false;
    }
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_phone_tool_mutex);
@@ -252,12 +258,13 @@ static char *take_pending(const turn_origin_t *origin,
                                                    pending_slots_now(), out, sizeof(*out), &orc);
    pthread_mutex_unlock(&s_phone_tool_mutex);
    if (rc == PENDING_FOUND) {
-      return NULL;
+      return true;
    }
    if (rc == PENDING_NOT_NOW) {
       OLOG_WARNING("phone_tool: confirm of %s refused (%s)", what, turn_origin_refusal(orc));
    }
-   return tool_pending_take_refusal(rc, orc, what);
+   *err = tool_pending_take_refusal(rc, orc, what);
+   return false;
 }
 
 /* Forward decl — used in the delete-preview handlers before the definition. */
@@ -465,9 +472,9 @@ static char *handle_confirm_call(struct json_object *details,
                                  int user_id,
                                  const turn_origin_t *origin) {
    phone_pending_t p;
-   char *err = take_pending(origin, user_id, PHONE_PENDING_CALL, pending_id_arg(details), "call",
-                            &p);
-   if (err) {
+   char *err = NULL;
+   if (!take_pending(origin, user_id, PHONE_PENDING_CALL, pending_id_arg(details), "call", &p,
+                     &err)) {
       return err;
    }
    char result[RESULT_BUF_SIZE];
@@ -559,9 +566,9 @@ static char *handle_confirm_sms(struct json_object *details,
                                 int user_id,
                                 const turn_origin_t *origin) {
    phone_pending_t p;
-   char *err = take_pending(origin, user_id, PHONE_PENDING_SMS, pending_id_arg(details), "text",
-                            &p);
-   if (err) {
+   char *err = NULL;
+   if (!take_pending(origin, user_id, PHONE_PENDING_SMS, pending_id_arg(details), "text", &p,
+                     &err)) {
       return err;
    }
    char result[RESULT_BUF_SIZE];
@@ -792,10 +799,11 @@ static char *handle_confirm_delete_sms(struct json_object *details,
                                        int user_id,
                                        const turn_origin_t *origin) {
    phone_pending_t p;
-   char *err = take_pending(origin, user_id, PHONE_PENDING_DELETE_SMS, pending_id_arg(details),
-                            "SMS deletion", &p);
-   if (err)
+   char *err = NULL;
+   if (!take_pending(origin, user_id, PHONE_PENDING_DELETE_SMS, pending_id_arg(details),
+                     "SMS deletion", &p, &err)) {
       return err;
+   }
 
    if (!check_delete_rate_limit(user_id)) {
       OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,
@@ -940,10 +948,11 @@ static char *handle_confirm_delete_call(struct json_object *details,
                                         int user_id,
                                         const turn_origin_t *origin) {
    phone_pending_t p;
-   char *err = take_pending(origin, user_id, PHONE_PENDING_DELETE_CALL, pending_id_arg(details),
-                            "call-record deletion", &p);
-   if (err)
+   char *err = NULL;
+   if (!take_pending(origin, user_id, PHONE_PENDING_DELETE_CALL, pending_id_arg(details),
+                     "call-record deletion", &p, &err)) {
       return err;
+   }
 
    if (!check_delete_rate_limit(user_id)) {
       OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,

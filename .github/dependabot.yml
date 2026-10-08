@@ -1,0 +1,31 @@
+# Dependabot: pull requests that keep pinned dependencies current.
+#
+# - GitHub Actions are pinned to commit SHAs in the workflows; grouped into one
+#   weekly PR.
+# - Docker base images are pinned to digests (Dockerfile, Dockerfile.cuda).
+#   dawn_satellite/Dockerfile.pibase and .pibuild take the base through
+#   ARG BASE_IMAGE, which Dependabot doesn't follow; update those digests by hand.
+# - Submodules (whisper.cpp, webrtc-audio-processing) monthly: an update needs a
+#   CUDA build and test on a Jetson before it merges.
+# - npm is left out on purpose: its only package is Prettier, and a Prettier
+#   upgrade reformats the tree, so it's a deliberate change, not a bot PR.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: monthly

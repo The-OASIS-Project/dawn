@@ -26,9 +26,9 @@
 #include <string.h>
 #include <sys/time.h>
 
-#include "asr/vosk_api.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "vosk_api.h"
 
 /**
  * @brief Vosk-specific context structure

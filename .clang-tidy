@@ -1,0 +1,53 @@
+# clang-tidy configuration for DAWN's own code (CI pins the version: see
+# .github/clang-tidy-requirements.txt).
+#
+# Enabled: bugprone-*, the clang static analyzer (clang-analyzer-*) and cert-*.
+# Turned off, each because it flags idiomatic code rather than bugs here:
+#   cert-err33-c                       every unchecked printf/snprintf/fclose return
+#   bugprone-easily-swappable-parameters   any two adjacent parameters of one type
+#   bugprone-implicit-widening-of-multiplication-result   int products used as sizes
+#   bugprone-narrowing-conversions     every int/size_t/double conversion
+#   bugprone-multi-level-implicit-pointer-conversion   char ** passed to free()
+#   bugprone-assignment-in-if-condition   the house style for "if ((p = f()))"
+#   bugprone-reserved-identifier, cert-dcl37-c, cert-dcl51-cpp   names with leading underscores
+#   bugprone-casting-through-void      the standard C idiom for void * callback context
+#   clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+#                                      every memcpy/memset/snprintf (the "_s" Annex K API)
+#   cert-err34-c                       every atoi/sscanf, including ones range-checked right after
+#                                      (a bad value reads as 0; check that 0 is out of range or
+#                                      means "not given")
+#   bugprone-branch-clone              separate conditions that take the same action, written
+#                                      apart on purpose
+#   clang-analyzer-deadcode.DeadStores the trailing "pos += snprintf(...)" and
+#                                      "rc = sqlite3_step(...)" of a sequence
+#   clang-analyzer-optin.performance.Padding   struct layout advice, not a bug
+#
+# A finding that is a false positive is suppressed where it occurs, with
+# "NOLINT(check): <reason>".
+
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  cert-*,
+  -cert-err33-c,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-narrowing-conversions,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-reserved-identifier,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -bugprone-casting-through-void,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -cert-err34-c,
+  -bugprone-branch-clone,
+  -clang-analyzer-deadcode.DeadStores,
+  -clang-analyzer-optin.performance.Padding
+
+WarningsAsErrors: "*"
+
+# Headers: DAWN's own, not vendored or submodule code.
+HeaderFilterRegex: ".*"
+ExcludeHeaderFilterRegex: ".*/(third_party|whisper\\.cpp|webrtc-audio-processing)/.*"

@@ -671,6 +671,7 @@ static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn)
    if (!pcm_data || pcm_samples == 0 || !conn->session) {
       OLOG_WARNING("Always-on: no audio or session for command transcribe");
       free(spec_text);
+      free(pcm_data);
       vad_silero_reset(ctx->vad_ctx);
       always_on_processing_complete(ctx);
       return;
@@ -990,7 +991,7 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
          pthread_mutex_unlock(&ctx->mutex);
 
          /* Capitalize first letter of the extracted command */
-         if (cmd && cmd[0] >= 'a' && cmd[0] <= 'z') {
+         if (cmd[0] >= 'a' && cmd[0] <= 'z') { /* cmd non-NULL: checked above */
             cmd[0] -= 32;
          }
 

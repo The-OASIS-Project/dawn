@@ -47,7 +47,7 @@
 #include "audio/flac_playback.h"
 #include "dawn.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "tools/tool_registry.h"
 
 /* =============================================================================

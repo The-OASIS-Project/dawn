@@ -50,6 +50,8 @@ char *llm_context_with_tag(const char *text, const char *tag) {
         p = strstr(from, LLM_CONTEXT_TAG_PLACEHOLDER)) {
       memcpy(out + off, from, (size_t)(p - from));
       off += (size_t)(p - from);
+      /* the final memcpy copies the rest of the text with its NUL */
+      // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
       memcpy(out + off, t, strlen(t));
       off += strlen(t);
       from = p + ph;

@@ -1,0 +1,7 @@
+# CodeQL configuration: analyze DAWN's own code, not the code it vendors
+# (third_party/README.md lists it; report issues there upstream).
+name: DAWN CodeQL config
+
+paths-ignore:
+  - third_party
+  - www/js/vendor

@@ -1,3 +1,8 @@
+/*
+ * From rhasspy/piper (src/cpp/wavfile.hpp), unmodified. MIT License,
+ * Copyright (c) 2022 Michael Hansen. See LICENSE in this directory.
+ */
+
 #ifndef WAVFILE_H_
 #define WAVFILE_H_
 

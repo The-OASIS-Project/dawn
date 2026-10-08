@@ -1404,6 +1404,8 @@ static void audio_worker_end(session_t *session) {
 
 static void *audio_worker_thread(void *arg) {
    audio_work_t *work = (audio_work_t *)arg;
+   /* work is never NULL: turn_queue_enqueue refuses NULL work */
+   // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
    session_t *session = work->session;
    uint8_t *audio_data = work->audio_data;
    size_t audio_len = work->audio_len;

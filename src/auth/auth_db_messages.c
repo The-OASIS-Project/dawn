@@ -585,7 +585,14 @@ int conv_db_add_rows(int64_t conv_id,
       }
    }
 
-   AUTH_DB_LOCK_OR_FAIL();
+   pthread_mutex_lock(&s_db.mutex);
+   if (!s_db.initialized) { /* AUTH_DB_LOCK_OR_FAIL, but freeing ids */
+      pthread_mutex_unlock(&s_db.mutex);
+      if (!ids_out) {
+         free(ids);
+      }
+      return AUTH_DB_FAILURE;
+   }
    if (auth_db_txn_begin_locked("messages") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       if (!ids_out) {

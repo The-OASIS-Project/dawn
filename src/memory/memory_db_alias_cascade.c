@@ -211,6 +211,7 @@ static int stage2_candidates(int user_id,
       }
 
       alias_candidate_t *c = &out[*out_count];
+      memset(c, 0, sizeof(*c)); /* is_user_self_token: false, as for every Stage 2 candidate */
       c->entity_id = e.id;
       safe_strscpy(c->canonical_name, e.canonical_name);
       safe_strscpy(c->entity_type, e.entity_type);

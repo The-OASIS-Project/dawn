@@ -53,6 +53,8 @@ static void put(text_buf_t *t, const char *s, size_t n) {
       t->buf = grown;
       t->cap = cap;
    }
+   /* buf is NULL only while cap is 0, and put() grows it first */
+   // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
    memcpy(t->buf + t->len, s, n);
    t->len += n;
    t->buf[t->len] = '\0';

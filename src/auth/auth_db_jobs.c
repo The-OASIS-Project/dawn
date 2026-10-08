@@ -52,11 +52,7 @@
 /* Copy a possibly-NULL text column into a fixed buffer, always NUL-terminated. */
 static void job_copy_text(sqlite3_stmt *st, int col, char *dst, size_t n) {
    const char *s = (const char *)sqlite3_column_text(st, col);
-   if (s && n > 0) {
-      safe_strncpy(dst, s, n);
-   } else if (n > 0) {
-      dst[0] = '\0';
-   }
+   snprintf(dst, n, "%s", s ? s : "");
 }
 
 /* Unpack a full job_record_t from a row selected with JOB_SELECT_COLS order. */

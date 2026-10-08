@@ -35,7 +35,7 @@
 #include <stdio.h>
 
 #include "audio/phone_apm.h"
-#include "tools/toml.h"
+#include "toml.h"
 
 /* Downlink soft-limiter small-signal gain: valid range (0 = "use bridge default"). */
 #define PHONE_DOWNLINK_GAIN_MAX 32.0f

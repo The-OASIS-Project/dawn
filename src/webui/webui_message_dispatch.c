@@ -217,6 +217,7 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
    if (text[strspn(text, " \t\r\n")] == '\0') {
       if (image_id_count == 0) {
          send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
+         free(built);
          return;
       }
       text = "";
@@ -263,6 +264,8 @@ static void dispatch_text_frame(ws_connection_t *conn, struct json_object *paylo
       const bool is_string = json_object_is_type(ref_obj, json_type_string);
       const char *ref = is_string ? json_object_get_string(ref_obj) : NULL;
       if (!webui_client_ref_valid(ref) ||
+          /* webui_client_ref_valid(NULL) is false, so strlen never sees NULL */
+          // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
           (size_t)json_object_get_string_len(ref_obj) != strlen(ref)) {
          send_error_impl(conn->wsi, "INVALID_CLIENT_REF",
                          "client_ref must be 1 to 64 printable ASCII characters");
@@ -317,7 +320,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
        * session is created on `init` BEFORE authentication, and this response
        * exposes the full system prompt AND the native-tools schema. */
       if (!conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       /* The system prompt for debugging: the conversation's frozen prompt
        * and each instruction change and standing direction since. */
@@ -390,7 +393,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else if (strcmp(type, "restart") == 0) {
       /* Admin-only operation */
       if (!conn_require_admin(conn)) {
-         return;
+         goto done;
       }
 
       /* Request application restart */
@@ -413,7 +416,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else if (strcmp(type, "set_llm_runtime") == 0) {
       /* Admin-only: affects all clients */
       if (!conn_require_admin(conn)) {
-         return;
+         goto done;
       }
       /* Switch LLM type or provider at runtime (immediate effect, no restart) */
       struct json_object *response = json_object_new_object();
@@ -832,7 +835,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       /* Session reconnection with stored token.  A login ended since this
        * connection opened reconnects nothing (and the connection closes). */
       if (payload && conn->authenticated && !webui_conn_login_valid(conn)) {
-         return;
+         goto done;
       }
       if (payload) {
          struct json_object *token_obj;
@@ -944,7 +947,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                            OLOG_ERROR("WebUI: Failed to generate session token");
                            session_destroy(conn->session->session_id);
                            conn->session = NULL;
-                           return;
+                           goto done;
                         }
                         register_token(conn->session_token, conn->session->session_id);
                         queue_init_messages(conn, conn->session_token);
@@ -1489,7 +1492,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* TTS control (per-connection) */
    else if (strcmp(type, "set_tts_enabled") == 0) {
       if (!conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       if (payload) {
          struct json_object *enabled_obj;
@@ -1505,34 +1508,34 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
     * an UNAUTHORIZED error, so we must short-circuit before it fires. */
    else if (strcmp(type, "music_subscribe") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       handle_music_subscribe(conn, payload);
    } else if (strcmp(type, "music_unsubscribe") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       handle_music_unsubscribe(conn);
    } else if (strcmp(type, "music_control") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       if (payload) {
          handle_music_control(conn, payload);
       }
    } else if (strcmp(type, "music_search") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       handle_music_search(conn, payload);
    } else if (strcmp(type, "music_library") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       handle_music_library(conn, payload);
    } else if (strcmp(type, "music_queue") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       if (payload) {
          handle_music_queue(conn, payload);
@@ -1543,9 +1546,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       /* Answer / reject a ringing call, or hang up an active one, from a
        * browser banner / in-call panel button. */
       if (!conn_require_auth(conn))
-         return;
+         goto done;
       if (!payload)
-         return;
+         goto done;
 
       json_object *action_obj = NULL;
       json_object_object_get_ex(payload, "action", &action_obj);
@@ -1560,18 +1563,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else if (strcmp(type, "phone_status") == 0) {
       /* Client asks for the current active call (reconnect rehydration). */
       if (!conn_require_auth(conn))
-         return;
+         goto done;
       webui_phone_send_status(conn);
    } else if (strcmp(type, "jobs_request") == 0) {
       /* Client asks for its complete ACTIVE job set (connect/reconnect). */
       if (!conn_require_auth(conn))
-         return;
+         goto done;
       webui_jobs_send_snapshot(conn);
    } else if (strcmp(type, "list_jobs") == 0) {
       /* Client asks for a page of TERMINAL jobs.  Separate from the snapshot
        * because history is unbounded — see src/webui/webui_jobs.c. */
       if (!conn_require_auth(conn))
-         return;
+         goto done;
       int64_t before_created_at = 0, before_id = 0;
       int limit = 0;
       if (payload) {
@@ -1587,13 +1590,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
       if (!conn_require_auth(conn))
-         return;
+         goto done;
       webui_jobs_handle_action(conn, payload);
    } else if (strcmp(type, "scheduler_action") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn))
-         return;
+         goto done;
       if (!payload)
-         return;
+         goto done;
 
       json_object *action_obj, *event_id_obj, *snooze_obj;
       json_object_object_get_ex(payload, "action", &action_obj);
@@ -1681,17 +1684,17 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* Always-on voice mode */
    else if (strcmp(type, "always_on_enable") == 0) {
       if (!conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       handle_always_on_enable(conn, payload);
    } else if (strcmp(type, "always_on_disable") == 0) {
       if (!conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       handle_always_on_disable(conn);
    } else if (strcmp(type, "always_on_state_request") == 0) {
       if (!conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       /* Client re-sync (e.g., tab returned from background) */
       const char *state_name = conn->always_on
@@ -1700,7 +1703,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       send_always_on_state(conn->wsi, state_name);
    } else if (strcmp(type, "session_keepalive_enable") == 0) {
       if (!conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       /* Informed consent recorded server-side (the client showed a security
        * warning the user accepted). Persist on the session row so renewal in
@@ -1712,7 +1715,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       }
    } else if (strcmp(type, "session_keepalive_disable") == 0) {
       if (!conn_require_auth(conn)) {
-         return;
+         goto done;
       }
       conn->session_keepalive = false;
       if (auth_db_set_session_keepalive(conn->auth_session_token, false) == AUTH_DB_SUCCESS) {
@@ -1765,6 +1768,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       OLOG_WARNING("WebUI: Unknown message type: %s", type);
    }
 
+done: /* every early exit: the frame and its parse are this function's to free */
    json_object_put(root);
    free(json_str);
 }

@@ -62,7 +62,9 @@ extern "C" {
  *
  * Thread-safe.  Wakes the LWS event loop via lws_cancel_service().
  *
- * @param resp Response to queue (copied, caller retains ownership of strings)
+ * @param resp Response to queue.  The struct is copied, and its heap strings
+ *             pass to the queue, which frees them (free_response) once sent or
+ *             dropped; the caller must not free or reuse them.
  */
 void queue_response(ws_response_t *resp);
 

@@ -145,7 +145,7 @@ set(SATELLITE_SOURCES
     src/audio_playback.c
     src/satellite_state.c
     src/satellite_config.c
-    src/toml.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tomlc99/toml.c
 )
 
 # Protocol-specific sources
@@ -205,6 +205,8 @@ endif()
 # sources above stay gated; only the header search path is widened.
 include_directories(src)
 include_directories(include)
+# Vendored TOML parser, shared with the daemon (third_party/README.md).
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tomlc99")
 
 # CUDA configuration — shared module handles auto-detection
 # Note: PLATFORM is not set in satellite builds; CUDA toolkit simply won't be found on RPi
@@ -257,7 +259,7 @@ if(EXISTS "${DAWN_COMMON_DIR}/CMakeLists.txt")
 
     add_subdirectory("${DAWN_COMMON_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dawn_common")
     include_directories("${DAWN_COMMON_DIR}/include")
-    # Also include main project's include for piper.hpp, json.hpp etc
+    # The main project's headers (Piper's come from dawn_common_tts's include dirs)
     include_directories("${CMAKE_CURRENT_SOURCE_DIR}/../include")
     message(STATUS "Using dawn_common library from parent project")
 else()

@@ -260,7 +260,7 @@ static int forget_in_tx_locked(int user_id,
 #define FORGET_STEP(sql, field)                                            \
    do {                                                                    \
       if (ok && run_forget_sql_locked(sql, user_id, ids, &n) == SUCCESS) { \
-         field += n;                                                       \
+         (field) += n;                                                     \
       } else {                                                             \
          ok = false;                                                       \
       }                                                                    \

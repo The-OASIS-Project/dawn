@@ -28,13 +28,14 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "test_tmp.h"
 #include "unity.h"
 
 #define MIG_SUCCESS 0
 int auth_db_migrations_v72(sqlite3 *db);
 int auth_db_migrations_v75(sqlite3 *db);
 
-static const char *TEST_DB = "/tmp/dawn_test_mig_v75.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
 static sqlite3 *db = NULL;
 
 void setUp(void) {
@@ -199,6 +200,7 @@ static void test_v75_index_covers_list_scan(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_mig_v75.db");
    UNITY_BEGIN();
    RUN_TEST(test_v75_adds_column_tables_indexes);
    RUN_TEST(test_v75_idempotent);

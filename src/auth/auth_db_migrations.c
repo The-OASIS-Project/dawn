@@ -1249,6 +1249,8 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
             "ALTER TABLE memory_preferences ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
             "ALTER TABLE memory_preferences ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
             "ALTER TABLE memory_preferences ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            /* one SQL statement split across lines */
+            // NOLINTNEXTLINE(bugprone-suspicious-missing-comma)
             "ALTER TABLE conversations      ADD COLUMN last_extracted_msg_id  INTEGER NOT NULL "
             "DEFAULT 0",
             NULL,

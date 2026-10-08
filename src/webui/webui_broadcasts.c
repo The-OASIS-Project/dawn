@@ -135,6 +135,8 @@ void deliver_missed_notifications(ws_connection_t *conn) {
       queue_response(&resp);
    }
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    OLOG_INFO("WebUI: Delivered %d missed notification(s) to user %d", count, conn->auth_user_id);
 }
 
@@ -211,6 +213,8 @@ void scheduler_broadcast_notification(const sched_event_t *event, const char *te
                              .type = WS_RESP_SCHEDULER_NOTIFICATION,
                              .scheduler_json = { .json = json_copy } };
       queue_response(&resp);
+      /* queue_response() takes ownership of the response strings (freed by free_response) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       sent++;
    }
 
@@ -304,6 +308,8 @@ void scheduler_broadcast_briefing_notification(const sched_event_t *event,
                              .type = WS_RESP_SCHEDULER_NOTIFICATION,
                              .scheduler_json = { .json = json_copy } };
       queue_response(&resp);
+      /* queue_response() takes ownership of the response strings (freed by free_response) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       sent++;
    }
 
@@ -641,6 +647,8 @@ int broadcast_json_to_admins(json_object *root, bool browsers_only) {
                              .type = WS_RESP_JSON,
                              .generic_json = { .json = json_copy } };
       queue_response(&resp);
+      /* queue_response() takes ownership of the response strings (freed by free_response) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       sent++;
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
@@ -1438,6 +1446,8 @@ void webui_broadcast_context_injection(int user_id,
                              .type = WS_RESP_JSON,
                              .generic_json = { .json = json_copy } };
       queue_response(&resp);
+      /* queue_response() takes ownership of the response strings (freed by free_response) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       sent++;
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
@@ -1517,6 +1527,8 @@ void webui_broadcast_context_citations(int user_id,
                              .type = WS_RESP_JSON,
                              .generic_json = { .json = json_copy } };
       queue_response(&resp);
+      /* queue_response() takes ownership of the response strings (freed by free_response) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       sent++;
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);

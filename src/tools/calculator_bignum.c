@@ -62,6 +62,8 @@ static void bn_init(bignum_t *a) {
 }
 
 static void bn_free(bignum_t *a) {
+   /* bn_move overwrites dst's limbs with src's, so the freed pointer is never used again */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    free(a->limb);
    a->limb = NULL;
    a->n = 0;
@@ -200,6 +202,8 @@ static bool bn_to_u64(const bignum_t *a, uint64_t *out) {
    }
    uint64_t v = 0;
    for (size_t i = a->n; i > 0; i--) {
+      /* bn_free leaves n = 0, so the loop never reads a freed limb (bn_move's struct copy) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       if (v > (UINT64_MAX - a->limb[i - 1]) / BN_BASE) {
          return false;
       }
@@ -312,7 +316,9 @@ static bool bn_sub(bignum_t *r, const bignum_t *a, const bignum_t *b) {
       bn_free(&nb);
       return false;
    }
-   memcpy(nb.limb, b->limb, b->n * sizeof(*b->limb));
+   if (b->n > 0) { /* a zero has no limbs, and memcpy's source must not be NULL */
+      memcpy(nb.limb, b->limb, b->n * sizeof(*b->limb));
+   }
    nb.n = b->n;
    nb.sign = -b->sign;
    bool ok = bn_add(r, a, &nb);
@@ -334,6 +340,8 @@ static bool bn_mul(bignum_t *r, const bignum_t *a, const bignum_t *b) {
       bn_free(&t);
       return false;
    }
+   /* bn_mul returns early for a zero operand, so t.limb is allocated */
+   // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
    memset(t.limb, 0, rn * sizeof(*t.limb));
    for (size_t i = 0; i < a->n; i++) {
       uint64_t carry = 0;
@@ -547,7 +555,9 @@ static void parse_power(exact_ctx_t *c, bignum_t *out) {
       if (!bn_reserve(&base, out->n ? out->n : 1)) {
          ok = false;
       } else {
-         memcpy(base.limb, out->limb, out->n * sizeof(*out->limb));
+         if (out->n > 0) { /* a zero has no limbs, and memcpy's source must not be NULL */
+            memcpy(base.limb, out->limb, out->n * sizeof(*out->limb));
+         }
          base.n = out->n;
          base.sign = out->sign;
       }

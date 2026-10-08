@@ -107,7 +107,7 @@ static char *replace_all(const char *s, const char *needle, const char *repl) {
       }
       r = m + nlen;
    }
-   strcpy(w, r);
+   memcpy(w, r, strlen(r) + 1);
    return out;
 }
 
@@ -253,11 +253,10 @@ char *code_project_namemap_scrub(const char *cbm_result) {
    memcpy(snap, s_map, (size_t)n * sizeof(snap[0]));
    pthread_mutex_unlock(&s_mtx);
 
-   char *cur = malloc(strlen(cbm_result) + 1);
+   char *cur = strdup(cbm_result);
    if (cur == NULL) {
       return NULL;
    }
-   strcpy(cur, cbm_result);
    if (n == 0) {
       return cur;
    }

@@ -30,7 +30,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y clang-format-14
 
       - name: Install Prettier
-        run: npm install
+        run: npm ci
 
       - name: Check formatting
         run: ./format_code.sh --check
@@ -65,20 +65,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install dependencies
-        run: |
-          # See format-check job: drop the flaky Google Chrome apt repo first.
-          sudo rm -f /etc/apt/sources.list.d/*google-chrome*
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake build-essential pkg-config \
-            libcurl4-openssl-dev libjson-c-dev libssl-dev libsqlite3-dev \
-            libsodium-dev libspdlog-dev libmosquitto-dev \
-            libflac-dev libsamplerate0-dev libsndfile1-dev \
-            libmpg123-dev libvorbis-dev \
-            libmupdf-dev libfreetype-dev libharfbuzz-dev libzip-dev libxml2-dev \
-            libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev libjpeg-dev \
-            libical-dev libgmime-3.0-dev \
-            libstemmer-dev
+        uses: ./.github/actions/install-ci-deps
 
       - name: Configure (ci preset)
         run: cmake --preset ci
@@ -88,6 +75,166 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build-ci -j"$(nproc)" --output-on-failure --no-tests=error -L ci
+
+  # -------------------------------------------------------------------------
+  # Sanitizers: the ci unit tests built with AddressSanitizer + UBSan (memory
+  # errors, leaks, undefined behavior) and, separately, ThreadSanitizer (data
+  # races). Any report fails the test that triggered it.
+  # -------------------------------------------------------------------------
+  sanitizers:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, tsan]
+    env:
+      UBSAN_OPTIONS: print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Allow the sanitizers' memory layout
+        # The runner kernel's default mmap randomization (32 bits) breaks GCC 11's
+        # sanitizer runtimes at startup ("unexpected memory mapping").
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Configure (${{ matrix.preset }} preset)
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build CI tests
+        run: make -C build-${{ matrix.preset }} -j"$(nproc)" tests-ci
+
+      - name: Run tests
+        run: ctest --test-dir build-${{ matrix.preset }} -j"$(nproc)" --output-on-failure --no-tests=error -L ci
+
+  # -------------------------------------------------------------------------
+  # clang-tidy: bugprone, cert and the clang static analyzer over DAWN's own
+  # sources (.clang-tidy has the checks and the reasons for those turned off).
+  # Any finding fails. The version is pinned by hash, so a local run of
+  # scripts/run_clang_tidy.py reports the same findings. Configure only: the
+  # ci preset with the WebUI on covers every source but the code-projects
+  # feature (needs libgit2 >= 1.6, not in apt), the Whisper backend (a
+  # submodule), the TUI, and the two files that include ONNX Runtime's headers
+  # (not packaged for Ubuntu), which are skipped by name.
+  # -------------------------------------------------------------------------
+  clang-tidy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Install the WebUI's and audio libraries and the pinned clang-tidy
+        run: |
+          sudo apt-get install -y --no-install-recommends libwebsockets-dev libopus-dev \
+            libasound2-dev libpulse-dev
+          python3 -m venv "$RUNNER_TEMP/tidy"
+          "$RUNNER_TEMP/tidy/bin/pip" install --require-hashes -r .github/clang-tidy-requirements.txt
+
+      - name: Configure (ci preset, WebUI on)
+        run: |
+          cmake --preset ci -DENABLE_WEBUI=ON -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON
+          make -C build-ci models_toml_builtin
+
+      - name: Run clang-tidy
+        run: >
+          scripts/run_clang_tidy.py build-ci --clang-tidy "$RUNNER_TEMP/tidy/bin/clang-tidy"
+          --skip src/memory/memory_embed_onnx.c --skip src/tts/text_to_speech.cpp
+
+  # -------------------------------------------------------------------------
+  # Fuzzing: libFuzzer harnesses (with ASan + UBSan) for code that reads
+  # outsiders' bytes: email, HTML, text shown to the model, text about to be
+  # spoken. 60 s each from the tracked seeds (tests/fuzz/corpus_*); a crash,
+  # leak or sanitizer report fails the job and its input is uploaded.
+  # tests/fuzz/run_fuzzers.sh runs the same thing locally.
+  # -------------------------------------------------------------------------
+  fuzz:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Allow the sanitizers' memory layout
+        # The runner kernel's default mmap randomization (32 bits) breaks older
+        # sanitizer runtimes at startup ("unexpected memory mapping").
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Fuzz
+        env:
+          CLANG: clang-15
+          OUT: ${{ runner.temp }}/fuzz
+        run: tests/fuzz/run_fuzzers.sh 60
+
+      - name: Upload the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fuzz-failures
+          path: |
+            ${{ runner.temp }}/fuzz/*/crash-*
+            ${{ runner.temp }}/fuzz/*/leak-*
+            ${{ runner.temp }}/fuzz/*/timeout-*
+            ${{ runner.temp }}/fuzz/*/oom-*
+          retention-days: 14
+
+  # -------------------------------------------------------------------------
+  # Coverage: the ci unit tests, instrumented, reported with gcovr (gcovr.cfg
+  # picks DAWN's own code). Pushes to main only, so pull requests don't wait on
+  # a second build. The summary goes on the run's page; the HTML report is an
+  # artifact. Unit tests only: WebUI and network paths are covered by the
+  # integration scripts, not counted here.
+  # -------------------------------------------------------------------------
+  coverage:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Install gcovr
+        run: sudo apt-get install -y --no-install-recommends gcovr
+
+      - name: Configure (coverage preset)
+        run: cmake --preset coverage
+
+      - name: Build CI tests
+        run: make -C build-coverage -j"$(nproc)" tests-ci
+
+      - name: Run tests
+        run: ctest --test-dir build-coverage -j"$(nproc)" --output-on-failure --no-tests=error -L ci
+
+      - name: Coverage report
+        run: |
+          mkdir -p coverage
+          gcovr build-coverage --print-summary --html-details coverage/index.html \
+            | tee coverage/summary.txt
+          {
+            echo '### Unit-test coverage (DAWN code, gcovr)'
+            echo '```'
+            cat coverage/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the HTML report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
 
   # -------------------------------------------------------------------------
   # Job 3: Docker Build (~10 min)

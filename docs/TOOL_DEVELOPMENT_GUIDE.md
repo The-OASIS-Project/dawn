@@ -554,7 +554,7 @@ int mytool_tool_register(void);
 #include <string.h>
 
 /* TOML parsing */
-#include "tools/toml.h"
+#include "toml.h"
 
 /* =============================================================================
  * Tool Configuration

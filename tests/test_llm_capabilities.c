@@ -27,7 +27,7 @@
 #include "config/dawn_config.h"
 #include "llm/llm_capabilities.h"
 #include "llm/llm_local_provider.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "unity.h"
 
 /* ---- stubs ---- */

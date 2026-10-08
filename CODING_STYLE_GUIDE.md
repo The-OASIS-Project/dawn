@@ -325,7 +325,7 @@ int read_sensor(i2c_bus_t *bus, uint8_t address, float *result);
   - **`time_t` sentinels**: static `parse_iso8601` helpers return `(time_t)-1` to mirror `mktime()`'s standard failure convention
   - **Internal static index/slot finders**: private-to-file functions (e.g., `hash_lookup`, `find_free_slot`, `vocab_lookup`) return -1 as "not found" sentinel — never exposed in public API
   - **fd/socket creation**: `create_listening_socket` returns -1 per POSIX socket convention
-  - **Vendored code**: `src/tools/toml.c` (third-party, MIT) is unmodified
+  - **Vendored code**: everything under `third_party/` keeps its upstream conventions (see `third_party/README.md`)
   - **Domain "not available" sentinels**: public getters where -1 is a semantically meaningful "not available" value distinct from all valid returns (e.g., `component_status_get_hud_age` returns -1 if never received)
   - **`common/` shared library**: buffer-writing functions in common/ use -1 for error since common/ has its own error codes (`TTS_SUCCESS`/`TTS_FAILURE`), not `dawn_error.h`
 

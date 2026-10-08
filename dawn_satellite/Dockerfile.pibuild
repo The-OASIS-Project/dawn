@@ -17,7 +17,7 @@
 # the Pi's distro changes, bump this to match.  Override at build time:
 #   docker build --build-arg BASE_IMAGE=debian:bookworm-slim ...
 # or via build-pi.sh:  BASE_IMAGE=debian:bookworm-slim ./dawn_satellite/build-pi.sh
-ARG BASE_IMAGE=debian:trixie-slim
+ARG BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 FROM ${BASE_IMAGE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

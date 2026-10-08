@@ -29,7 +29,7 @@
 #include "config/config_parser.h"
 #include "logging.h"
 #include "models_toml_builtin.h" /* generated: MODELS_TOML_BUILTIN (cmake/embed_text.cmake) */
-#include "tools/toml.h"
+#include "toml.h"
 
 /* Locate models.toml via the config search path (cwd, then ~/.config/dawn, then
  * /etc/dawn — mirroring dawn.toml).  Returns true and fills `out` on the first hit. */
