@@ -121,6 +121,13 @@ static void test_parse_basic_format_offset(void) {
    /* -0500 without the colon: 15:30 at -05:00 == 20:30 UTC (not 500 hours). */
    TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc + 5 * 3600,
                            (int64_t)iso8601_parse("2026-02-19T15:30:00-0500"));
+   /* Read by position: +0030 is thirty minutes, not a 30-hour offset. */
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc - 30 * 60,
+                           (int64_t)iso8601_parse("2026-02-19T15:30:00+0030"));
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc - (5 * 3600 + 30 * 60),
+                           (int64_t)iso8601_parse("2026-02-19T15:30:00+0530"));
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc + 5 * 3600,
+                           (int64_t)iso8601_parse("2026-02-19T15:30:00-05"));
 }
 
 static void test_parse_space_separator_keeps_the_time(void) {
@@ -135,12 +142,22 @@ static void test_parse_out_of_range_returns_minus_one(void) {
    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-40T15:30"));
    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-19T25:00"));
    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-19T15:61"));
+   /* A day the month doesn't have isn't rolled into the next month. */
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-31T15:30"));
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-02-29T15:30"));
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2026-04-31T15:30"));
+   TEST_ASSERT_NOT_EQUAL((int64_t)-1, (int64_t)iso8601_parse("2024-02-29T15:30"));
+   TEST_ASSERT_NOT_EQUAL((int64_t)-1, (int64_t)iso8601_parse("2000-02-29T15:30"));
+   TEST_ASSERT_EQUAL_INT64(-1, (int64_t)iso8601_parse("2100-02-29T15:30"));
 }
 
 static void test_parse_out_of_range_offset_is_ignored(void) {
    /* +25:00 isn't an offset: the time is read as local (UTC here). */
    TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc,
                            (int64_t)iso8601_parse("2026-02-19T15:30:00+25:00"));
+   /* Offsets stop at +14:00. */
+   TEST_ASSERT_EQUAL_INT64((int64_t)s_2026_02_19_153000_utc,
+                           (int64_t)iso8601_parse("2026-02-19T15:30:00+14:30"));
 }
 
 static void test_parse_time_only_returns_today_or_tomorrow(void) {

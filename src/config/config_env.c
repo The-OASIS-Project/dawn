@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,7 +85,7 @@
          char *end_;                                                                         \
          errno = 0;                                                                          \
          float v_ = strtof(val, &end_);                                                      \
-         if (end_ == val || *end_ != '\0' || errno != 0) {                                   \
+         if (end_ == val || *end_ != '\0' || errno != 0 || !isfinite(v_)) {                  \
             OLOG_WARNING("Config override: %s=%s (invalid number, ignored)", env_name, val); \
          } else {                                                                            \
             (dest) = v_;                                                                     \
@@ -103,20 +104,20 @@
       }                                                                            \
    } while (0)
 
-#define ENV_SIZE_T(env_name, dest)                                                           \
-   do {                                                                                      \
-      const char *val = getenv(env_name);                                                    \
-      if (val) {                                                                             \
-         char *end_;                                                                         \
-         errno = 0;                                                                          \
-         unsigned long long v_ = strtoull(val, &end_, 10);                                   \
-         if (val[0] == '-' || end_ == val || *end_ != '\0' || errno != 0 || v_ > SIZE_MAX) { \
-            OLOG_WARNING("Config override: %s=%s (invalid size, ignored)", env_name, val);   \
-         } else {                                                                            \
-            (dest) = (size_t)v_;                                                             \
-            OLOG_INFO("Config override: %s=%zu", env_name, (dest));                          \
-         }                                                                                   \
-      }                                                                                      \
+#define ENV_SIZE_T(env_name, dest)                                                              \
+   do {                                                                                         \
+      const char *val = getenv(env_name);                                                       \
+      if (val) {                                                                                \
+         char *end_;                                                                            \
+         errno = 0;                                                                             \
+         unsigned long long v_ = strtoull(val, &end_, 10);                                      \
+         if (strchr(val, '-') || end_ == val || *end_ != '\0' || errno != 0 || v_ > SIZE_MAX) { \
+            OLOG_WARNING("Config override: %s=%s (invalid size, ignored)", env_name, val);      \
+         } else {                                                                               \
+            (dest) = (size_t)v_;                                                                \
+            OLOG_INFO("Config override: %s=%zu", env_name, (dest));                             \
+         }                                                                                      \
+      }                                                                                         \
    } while (0)
 
 /* =============================================================================
