@@ -145,6 +145,46 @@ jobs:
         run: scripts/run_clang_tidy.py build-ci --clang-tidy "$RUNNER_TEMP/tidy/bin/clang-tidy"
 
   # -------------------------------------------------------------------------
+  # Fuzzing: libFuzzer harnesses (with ASan + UBSan) for code that reads
+  # outsiders' bytes: email, HTML, text shown to the model, text about to be
+  # spoken. 60 s each from the tracked seeds (tests/fuzz/corpus_*); a crash,
+  # leak or sanitizer report fails the job and its input is uploaded.
+  # tests/fuzz/run_fuzzers.sh runs the same thing locally.
+  # -------------------------------------------------------------------------
+  fuzz:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-deps
+
+      - name: Allow the sanitizers' memory layout
+        # The runner kernel's default mmap randomization (32 bits) breaks older
+        # sanitizer runtimes at startup ("unexpected memory mapping").
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Fuzz
+        env:
+          CLANG: clang-15
+          OUT: ${{ runner.temp }}/fuzz
+        run: tests/fuzz/run_fuzzers.sh 60
+
+      - name: Upload the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fuzz-failures
+          path: |
+            ${{ runner.temp }}/fuzz/*/crash-*
+            ${{ runner.temp }}/fuzz/*/leak-*
+            ${{ runner.temp }}/fuzz/*/timeout-*
+            ${{ runner.temp }}/fuzz/*/oom-*
+          retention-days: 14
+
+  # -------------------------------------------------------------------------
   # Coverage: the ci unit tests, instrumented, reported with gcovr (gcovr.cfg
   # picks DAWN's own code). Pushes to main only, so pull requests don't wait on
   # a second build. The summary goes on the run's page; the HTML report is an

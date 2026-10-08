@@ -19,8 +19,8 @@
  * libFuzzer harness for reading email (email_mime.c): any bytes as a raw
  * RFC 822 message (the IMAP path), as an address header, and, when they parse
  * as JSON, as a Gmail format=full payload (gmail_parts.c).  Mail arrives
- * from anyone, so this is the parser's hostile-input test.  Built only on
- * request: tests/fuzz/build_fuzz_email_mime.sh.
+ * from anyone, so this is the parser's hostile-input test.  Built by
+ * tests/fuzz/run_fuzzers.sh.
  */
 
 #include <json-c/json.h>
