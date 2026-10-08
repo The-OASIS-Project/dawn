@@ -294,6 +294,8 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[docs/CLOUD_DEPLOYMENT.md](docs/CLOUD_DEPLOYMENT.md)** | Cloud deployment architecture and status |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | System architecture, data flow, and threading model |
 | **[CODING_STYLE_GUIDE.md](CODING_STYLE_GUIDE.md)** | Code formatting and development standards |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | Building, testing and submitting a change |
+| **[docs/TESTING.md](docs/TESTING.md)** | How DAWN is tested: unit tests, sanitizers, static analysis, fuzzing, coverage |
 | **[docs/LLM_INTEGRATION_GUIDE.md](docs/LLM_INTEGRATION_GUIDE.md)** | LLM setup for cloud and local providers |
 | **[docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md)** | Home Assistant integration setup |
 | **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** | Link Telegram / Slack / Discord / SMS to DAWN |
@@ -317,12 +319,8 @@ These features are not required but extend what DAWN can do. Each links to its s
 ## Contributing
 
 Contributions are welcome! DAWN is part of The OASIS Project and is licensed under GPLv3.
-
-- Follow the coding standards in [CODING_STYLE_GUIDE.md](CODING_STYLE_GUIDE.md)
-- Run `./install-git-hooks.sh` once. The pre-commit hook checks the formatting of what you stage and, when code changes, builds and runs the CI test suite; the pre-push hook runs the suite too
-- Format code with `./format_code.sh --changed` before committing
-- Add tests for new features
-- See [ARCHITECTURE.md](ARCHITECTURE.md) for system design context
+[CONTRIBUTING.md](CONTRIBUTING.md) covers building, the git hooks, the coding standards and how a change
+gets into `main`; [docs/TESTING.md](docs/TESTING.md) describes the tests and checks every change runs.
 
 ---
 
