@@ -50,6 +50,9 @@
 #include "webui/webui_server.h"
 #endif
 
+/* The answer's share of max_tokens beside a thinking budget. */
+#define CLAUDE_ANSWER_TOKENS_MIN 4096
+
 /**
  * @brief Check if current session is remote (WebSocket or DAP)
  */
@@ -729,12 +732,13 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                    ? llm_budget_tokens_for_effort(thinking.effort)
                                    : 0;
 
-   /* max_tokens must exceed a thinking budget: leave room for the answer. */
+   /* max_tokens covers a thinking budget and the answer: leave the answer at
+    * least CLAUDE_ANSWER_TOKENS_MIN (a memory extraction's JSON runs ~2K). */
    int max_tokens = g_config.llm.max_tokens;
-   if (thinking_budget > 0 && max_tokens <= thinking_budget) {
-      max_tokens = thinking_budget + 4096;
-      OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + 4096 response buffer)", max_tokens,
-                thinking_budget);
+   if (thinking_budget > 0 && max_tokens < thinking_budget + CLAUDE_ANSWER_TOKENS_MIN) {
+      max_tokens = thinking_budget + CLAUDE_ANSWER_TOKENS_MIN;
+      OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + %d for the answer)", max_tokens,
+                thinking_budget, CLAUDE_ANSWER_TOKENS_MIN);
    }
    json_object_object_add(claude_request, "max_tokens", json_object_new_int(max_tokens));
 

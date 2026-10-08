@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "unity.h"
 
@@ -213,9 +214,24 @@ static void test_openai_repeat_within_turn_blocked(void) {
    json_object_put(history);
 }
 
+/* The real accessor reads the call's own config: a tools-off call's reasoning
+ * effort (memory extraction) is that config's, and nothing outside a call. */
+static void test_utility_effort_comes_from_the_current_config(void) {
+   TEST_ASSERT_EQUAL_STRING("", llm_get_current_utility_effort());
+   llm_resolved_config_t cfg;
+   memset(&cfg, 0, sizeof(cfg));
+   llm_tools_set_current_config(&cfg);
+   TEST_ASSERT_EQUAL_STRING("", llm_get_current_utility_effort());
+   strcpy(cfg.utility_effort, "medium");
+   TEST_ASSERT_EQUAL_STRING("medium", llm_get_current_utility_effort());
+   llm_tools_set_current_config(NULL);
+   TEST_ASSERT_EQUAL_STRING("", llm_get_current_utility_effort());
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_claude_repeat_across_turns_allowed);
+   RUN_TEST(test_utility_effort_comes_from_the_current_config);
    RUN_TEST(test_claude_repeat_within_turn_blocked);
    RUN_TEST(test_claude_repeat_no_args_blocked);
    RUN_TEST(test_claude_different_args_allowed);

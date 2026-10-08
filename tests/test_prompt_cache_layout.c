@@ -68,6 +68,9 @@ bool llm_tools_enabled(const llm_resolved_config_t *c) {
    (void)c;
    return s_tools_on;
 }
+const char *llm_get_current_utility_effort(void) {
+   return "";
+}
 bool llm_tools_suppressed(void) {
    return false;
 }

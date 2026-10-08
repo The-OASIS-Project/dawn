@@ -756,6 +756,14 @@ const char *llm_get_current_thinking_mode(void);
 const char *llm_get_current_reasoning_effort(void);
 
 /**
+ * @brief The reasoning effort the current tools-off call asked for
+ *
+ * The utility_effort of the thread-local resolved config, or "" when there is
+ * none (the call gets the model's cheapest setting).
+ */
+const char *llm_get_current_utility_effort(void);
+
+/**
  * @brief The thinking budget for a budget level
  *
  * "low" | "medium" | "high" | "xhigh" (and "max") name the [llm.thinking]

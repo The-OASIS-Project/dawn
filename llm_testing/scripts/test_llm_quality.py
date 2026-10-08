@@ -15,6 +15,11 @@ import time
 from typing import Dict, List, Tuple
 import requests
 
+# The benchmarks' per-model rule for which Claude models take temperature.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                                "benchmarks"))
+from anthropic_request import takes_temperature  # noqa: E402
+
 SERVER = "http://127.0.0.1:8080"
 
 # =============================================================================
@@ -464,8 +469,8 @@ def query_llm_claude(prompt: str, max_tokens: int) -> Tuple[str, float, Dict]:
             "system": SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": prompt}]
         }
-        # Newer Claude models (Opus 4.7+) deprecated temperature — omit for those
-        if "opus" not in CLOUD_MODEL.lower():
+        # Claude Opus 4.7 and later, Sonnet 5+ and Haiku 5.5 reject temperature
+        if takes_temperature(CLOUD_MODEL):
             payload["temperature"] = 0.7
 
         response = requests.post(

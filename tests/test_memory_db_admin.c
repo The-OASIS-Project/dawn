@@ -393,6 +393,25 @@ void test_estimate_uses_real_template_size(void) {
    TEST_ASSERT_TRUE(est.cost_high_usd >= est.cost_low_usd);
 }
 
+void test_estimate_haiku_5_5_has_its_own_rate(void) {
+   strncpy(g_config.memory.extraction_provider, "claude",
+           sizeof(g_config.memory.extraction_provider) - 1);
+   strncpy(g_config.memory.extraction_model, "claude-haiku-4-5",
+           sizeof(g_config.memory.extraction_model) - 1);
+   memory_db_admin_cost_estimate_t old_est = { 0 };
+   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &old_est));
+   TEST_ASSERT_TRUE(old_est.cost_high_usd > 0.0);
+
+   strncpy(g_config.memory.extraction_model, "claude-haiku-5-5",
+           sizeof(g_config.memory.extraction_model) - 1);
+   memory_db_admin_cost_estimate_t est = { 0 };
+   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &est));
+   TEST_ASSERT_TRUE(est.rates_known);
+   /* A tenth of Haiku 4.5's rate, not the generic Claude fallback's. */
+   TEST_ASSERT_DOUBLE_WITHIN(old_est.cost_high_usd * 0.001, old_est.cost_high_usd / 10.0,
+                             est.cost_high_usd);
+}
+
 void test_estimate_unknown_local_provider_marks_uncosted(void) {
    strncpy(g_config.memory.extraction_provider, "local",
            sizeof(g_config.memory.extraction_provider) - 1);
@@ -591,6 +610,7 @@ int main(void) {
    RUN_TEST(test_reset_derived_resets_conversation_high_water_marks);
    RUN_TEST(test_reset_derived_invalid_user_fails);
    RUN_TEST(test_estimate_uses_real_template_size);
+   RUN_TEST(test_estimate_haiku_5_5_has_its_own_rate);
    RUN_TEST(test_estimate_unknown_local_provider_marks_uncosted);
    RUN_TEST(test_estimate_after_reset_includes_all_conversations);
    RUN_TEST(test_worker_is_running_starts_false);

@@ -624,7 +624,7 @@
                type: 'text',
                label: 'Compaction Model',
                hint:
-                  'Model name for compaction (e.g., claude-haiku-4-5 — the same tier validated for ' +
+                  'Model name for compaction (e.g., claude-haiku-5-5 — the same tier validated for ' +
                   'memory extraction). A "vendor/model" slug when the provider is OpenRouter. Leave ' +
                   'empty for provider default.',
                advanced: true,
@@ -869,8 +869,9 @@
                label: 'Extraction Model',
                hint:
                   'Model for memory extraction (populated based on provider). ' +
-                  'Haiku-tier validated as the sweet spot — larger Claude models do ' +
-                  'not produce better extraction (see benchmarks/README.md). A "vendor/model" ' +
+                  'Recommended: claude-haiku-5-5 with Extraction Reasoning "medium" (best ' +
+                  "measured extraction, at a fraction of larger models' cost; see " +
+                  'benchmarks/README.md). A "vendor/model" ' +
                   'slug when the provider is OpenRouter; empty = OpenRouter default.',
                dynamicKey: 'memory_extraction_models',
                id: 'memory-extraction-model',
@@ -883,6 +884,19 @@
                max: 600000,
                step: 1000,
                hint: 'LLM timeout for memory fact extraction (default 120s)',
+               advanced: true,
+            },
+            extraction_effort: {
+               type: 'select',
+               label: 'Extraction Reasoning',
+               options: ['off', 'low', 'medium', 'high'],
+               default: 'off',
+               hint:
+                  'How hard the extraction model reasons before writing facts. "off" uses the ' +
+                  'model\'s cheapest setting. On Claude Haiku 5.5, "medium" raised LoCoMo answer ' +
+                  'accuracy from 72% to 77% (mean of two runs) at about 2.4x the output tokens. ' +
+                  'Fact extraction only. On a local model that shares its server with chat, ' +
+                  'leave off unless tested: reasoning keeps the server busy longer.',
                advanced: true,
             },
             silent_observe_provider: {
