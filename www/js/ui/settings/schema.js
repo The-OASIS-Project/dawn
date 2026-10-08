@@ -870,7 +870,7 @@
                hint:
                   'Model for memory extraction (populated based on provider). ' +
                   'Recommended: claude-haiku-5-5 with Extraction Reasoning "medium" (best ' +
-                  'measured extraction, at a fraction of larger models\' cost; see ' +
+                  "measured extraction, at a fraction of larger models' cost; see " +
                   'benchmarks/README.md). A "vendor/model" ' +
                   'slug when the provider is OpenRouter; empty = OpenRouter default.',
                dynamicKey: 'memory_extraction_models',
@@ -893,7 +893,7 @@
                default: 'off',
                hint:
                   'How hard the extraction model reasons before writing facts. "off" uses the ' +
-                  "model's cheapest setting. On Claude Haiku 5.5, \"medium\" raised LoCoMo answer " +
+                  'model\'s cheapest setting. On Claude Haiku 5.5, "medium" raised LoCoMo answer ' +
                   'accuracy from 72% to 77% (mean of two runs) at about 2.4x the output tokens. ' +
                   'Fact extraction only. On a local model that shares its server with chat, ' +
                   'leave off unless tested: reasoning keeps the server busy longer.',
