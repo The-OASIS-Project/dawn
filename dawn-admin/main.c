@@ -30,6 +30,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "cmd_llm.h"
 #include "password_prompt.h"
 #include "socket_client.h"
 #include "utils/string_utils.h"
@@ -161,6 +162,9 @@ static void print_usage(const char *prog) {
            "                                       dropped reasoning per provider/model/kind\n");
    fprintf(stderr, "\nMCP Bridge (coding harness):\n");
    fprintf(stderr,
+           "  llm capture --user <name> --out <dir> [--requests N]\n"
+           "                                       Write a user's next N LLM requests to <dir>\n"
+           "  llm capture --stop                   Stop capturing\n"
            "  mcp list                             List connected MCP servers + tool counts\n"
            "  mcp grant <user> <alias>             Grant a user access to an MCP server\n"
            "  mcp revoke <user> <alias>            Revoke a user's access\n"
@@ -2687,6 +2691,10 @@ int main(int argc, char *argv[]) {
       }
       fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
       return 1;
+   }
+
+   if (strcmp(cmd, "llm") == 0) {
+      return cmd_llm(argc, argv);
    }
 
    if (strcmp(cmd, "mcp") == 0) {

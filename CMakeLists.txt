@@ -601,6 +601,7 @@ set(DAWN_SOURCES
     src/llm/llm_openai_history.c
     src/llm/llm_openai_responses.c
     src/llm/llm_openai_responses_input.c
+    src/llm/llm_request_capture.c
     src/llm/llm_claude.c
     src/llm/llm_claude_format.c
     src/llm/llm_claude_tools.c
@@ -1052,6 +1053,7 @@ if(ENABLE_AUTH)
         src/auth/admin_socket_research.c
         src/auth/admin_socket_schwab.c
         src/auth/admin_socket_cache.c
+        src/auth/admin_socket_llm.c
         src/auth/auth_db_session.c
         src/auth/auth_db_rate_limit.c
         src/auth/auth_db_audit.c
@@ -1388,6 +1390,7 @@ add_subdirectory(tests EXCLUDE_FROM_ALL)
 if(ENABLE_AUTH)
     add_executable(dawn-admin
         dawn-admin/main.c
+        dawn-admin/cmd_llm.c
         dawn-admin/socket_client.c
         dawn-admin/password_prompt.c)
     target_include_directories(dawn-admin PRIVATE ${CMAKE_SOURCE_DIR}/include)

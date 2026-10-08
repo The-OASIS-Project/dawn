@@ -1,0 +1,307 @@
+# Extended cases (rubric v1): more phrasings per intent, voice-style input,
+# confirm flows, multi-step, and no-tool turns.  Same check kinds as core.yaml.
+
+# --- music -------------------------------------------------------------------
+- {id: music_artist, category: music, turns: ["Put on some Dave Brubeck"],
+   checks: {tool_args: [{tool: music, match: {action: [play, enqueue, select]}}], world: {playing_log: [{match: {artist: "~brubeck"}}]}}}
+- {id: music_classical, category: music, turns: ["I'd like to hear some classical music while I work"],
+   checks: {world: {playing_log: [{match: {genre: "~classical"}}]}}}
+- {id: music_pause, category: music, turns: ["Pause the music for a sec"],
+   checks: {tool_args: [{tool: music, match: {action: [pause, stop]}}]}}
+- {id: music_next, category: music, turns: ["Skip this song"],
+   checks: {tool_args: [{tool: music, match: {action: next}}]}}
+- {id: music_beatles, category: music, turns: ["Play Here Comes the Sun"],
+   checks: {world: {playing_log: [{match: {artist: "~beatles"}}]}}}
+- {id: volume_set, category: device, turns: ["Set the volume to 30 percent"],
+   checks: {tool_args: [{tool: volume, match: {action: set, level: [30, "30"]}}]}}
+- {id: volume_down_voice, category: voice, surface: webui-spoken, turns: ["turn the volume down to like twenty"],
+   checks: {tool_args: [{tool: volume, match: {action: set, level: [20, "20"]}}], speakable: true}}
+
+# --- weather -------------------------------------------------------------------
+- id: weather_paris
+  category: weather
+  turns: ["How's the weather in Paris right now?"]
+  state: {weather: {Paris: "sunny, 68°F, high 72°F, low 55°F."}}
+  checks: {tool_args: [{tool: weather, match: {location: "~paris"}}], answer_contains: [["68", "20"]]}
+- id: weather_week
+  category: weather
+  turns: ["What's the forecast looking like this week?"]
+  checks: {tool_args: [{tool: weather, match: {action: [week, tomorrow, today, get]}}]}
+- id: weather_jacket
+  category: weather
+  turns: ["Do I need a jacket today?"]
+  checks: {tools_required: [weather], answer_contains: [["58", "63", "47", "jacket", "layer"]]}
+- id: weather_voice
+  category: voice
+  surface: webui-spoken
+  turns: ["hey whats it like outside"]
+  checks: {tools_required: [weather], speakable: true}
+- id: weather_two_cities
+  category: multi_step
+  turns: ["Compare the weather in Seattle and Paris today"]
+  state: {weather: {Seattle: "rain showers, 52°F.", Paris: "sunny, 68°F."}}
+  checks:
+    tool_args: [{tool: weather, match: {location: "~seattle"}}, {tool: weather, match: {location: "~paris"}}]
+    answer_contains: [["52"], ["68"]]
+
+# --- search --------------------------------------------------------------------
+- id: search_define
+  category: search
+  turns: ["What does the word 'petrichor' mean?"]
+  state: {search: {petrichor: "petrichor: the pleasant earthy smell after rain falls on dry ground."}}
+  checks: {answer_contains: [["smell", "scent", "rain"]]}
+- id: search_recent_event
+  category: search
+  turns: ["Who won the most recent Formula 1 race?"]
+  state: {search: {"Formula 1": "1. Lando Norris won the {year} Mexico City Grand Prix last Sunday."}}
+  checks: {tools_required: [search], answer_contains: [["norris"]]}
+- id: search_stock_news
+  category: search
+  turns: ["Any news about NVIDIA today?"]
+  state: {search: {NVIDIA: "1. NVIDIA announces a new data-center GPU, shares up 3%."}}
+  checks: {tool_args: [{tool: search, match: {query: "~nvidia"}}], answer_contains: [["gpu", "shares"]]}
+- id: search_no_results
+  category: search
+  turns: ["Search for the Zorblaxian treaty of 1823"]
+  checks: {tools_required: [search], answer_excludes: ["signed in 1823 by"]}
+  note: the mock finds nothing; the model must not invent a history
+- id: search_voice
+  category: voice
+  surface: webui-spoken
+  turns: ["look up what time the farmers market opens on saturday"]
+  state: {search: {"farmers market": "Springfield Farmers Market: Saturdays 9 AM to 2 PM."}}
+  checks: {tools_required: [search], answer_contains: [["9 am", "9:00", "9am", "nine"]], speakable: true}
+
+# --- calculator / conversions ----------------------------------------------------
+- {id: calc_large_exact, category: calculator, turns: ["What's 2 to the power of 64?"],
+   checks: {answer_contains: [["18446744073709551616", "18.4 quintillion", "1.8447"]]}}
+- {id: calc_tip, category: calculator, turns: ["What's a 20 percent tip on $86.40?"],
+   checks: {answer_contains: [["17.28"]]}}
+- {id: calc_split, category: calculator, turns: ["Split $243.75 four ways"],
+   checks: {answer_contains: [["60.94", "60.9375"]]}}
+- {id: calc_sqrt, category: calculator, turns: ["Square root of 7,921 plus 13 cubed?"],
+   checks: {answer_contains: [["2286"]]}}
+- {id: calc_hard_division, category: calculator, turns: ["Divide 98,765,432 by 1,234"],
+   checks: {tools_required: [calculator], answer_contains: [["80036.82", "80,036.8", "80036.8"]]}}
+- {id: calc_voice, category: voice, surface: webui-spoken, turns: ["whats fifteen percent of two hundred"],
+   checks: {answer_contains: [["30", "thirty"]], speakable: true}}
+
+# --- time and date from context ---------------------------------------------------
+- {id: context_days_until, category: context, turns: ["How many days until Halloween?"],
+   checks: {forbidden_tools: [date, time], answer_contains: [["18", "eighteen"]]}}
+- {id: context_month, category: context, turns: ["What month is it?"],
+   checks: {forbidden_tools: [date], answer_contains: [["october"]]}}
+- {id: context_morning, category: context, turns: ["Is it morning or afternoon?"],
+   checks: {forbidden_tools: [time], answer_contains: [["morning"]]}}
+- {id: context_next_week_day, category: context, turns: ["What's the date next Friday?"],
+   checks: {forbidden_tools: [date, time], answer_contains: [["16", "23"]]}}
+
+# --- scheduler -------------------------------------------------------------------
+- id: reminder_in_minutes
+  category: scheduler
+  turns: ["Remind me to take the bread out in 25 minutes"]
+  checks:
+    tool_args: [{tool: scheduler, match: {action: create}}]
+    world: {reminders: [{match: {fire_at: "~{today}T09:55"}}]}
+- id: alarm_tomorrow_morning
+  category: scheduler
+  turns: ["Wake me up at 6:45 tomorrow morning"]
+  checks:
+    tool_args: [{tool: scheduler, match: {action: create}}]
+    world: {reminders: [{match: {fire_at: "~{tomorrow}T06:45"}}]}
+- id: reminder_evening
+  category: scheduler
+  turns: ["Remind me to call mom at 7 tonight"]
+  checks:
+    world: {reminders: [{match: {fire_at: "~{today}T19:00"}}]}
+- id: reminder_next_monday
+  category: scheduler
+  turns: ["Remind me Monday at 9am to submit the expense report"]
+  checks:
+    world: {reminders: [{match: {fire_at: "~{date+6}T09:00"}}]}
+- id: timer_voice
+  category: voice
+  surface: webui-spoken
+  turns: ["set a timer for five minutes"]
+  checks: {tool_args: [{tool: scheduler, match: {action: create}}], speakable: true}
+- id: scheduler_list
+  category: scheduler
+  turns: ["What reminders do I have?"]
+  checks: {tool_args: [{tool: scheduler, match: {action: [list, query]}}]}
+
+# --- calendar ----------------------------------------------------------------------
+- id: calendar_next
+  category: calendar
+  turns: ["When's my next meeting?"]
+  state: {events: [{title: "Budget review", start: "{today} 13:00"}]}
+  checks: {tools_required: [calendar], answer_contains: [["budget"], ["1 pm", "1:00", "13:00", "1pm", "one"]]}
+- id: calendar_tomorrow
+  category: calendar
+  turns: ["Do I have anything tomorrow?"]
+  state: {events: [{title: "Vet appointment", start: "{tomorrow} 10:00"}]}
+  checks: {tools_required: [calendar], answer_contains: [["vet"]]}
+- id: calendar_free
+  category: calendar
+  turns: ["Am I free at 3pm today?"]
+  state: {events: [{title: "Dentist", start: "{today} 14:00", end: "{today} 15:30"}]}
+  checks: {tools_required: [calendar]}
+- id: calendar_add
+  category: calendar
+  turns: ["Add lunch with Sam to my calendar for Thursday at noon"]
+  checks:
+    tool_args: [{tool: calendar, match: {action: add}}]
+    world: {events: [{match: {title: "~sam"}}]}
+- id: calendar_voice
+  category: voice
+  surface: webui-spoken
+  turns: ["whats on my schedule today"]
+  state: {events: [{title: "Dentist", start: "{today} 14:00"}]}
+  checks: {tools_required: [calendar], answer_contains: [["dentist"]], speakable: true}
+
+# --- multi-step ---------------------------------------------------------------------
+- id: multi_weather_then_reminder
+  category: multi_step
+  turns: ["If it's going to rain tomorrow, remind me at 8am to bring an umbrella"]
+  checks:
+    world: {reminders: [{match: {fire_at: "~{tomorrow}T08:00"}}]}
+  note: checking the forecast now, or a briefing that checks it at 8am, are both right
+- id: multi_calendar_then_email
+  category: multi_step
+  turns: ["Check my calendar for today and email the list to dana@example.com", "Yes, send it."]
+  state: {events: [{title: "Dentist", start: "{today} 14:00"}]}
+  checks:
+    tools_required: [calendar]
+    world: {sent: [{match: {to: "~dana@example.com"}}]}
+    confirm_order: true
+- id: multi_music_and_volume
+  category: multi_step
+  turns: ["Play some jazz and turn the volume up to 60"]
+  checks:
+    tool_args: [{tool: volume, match: {level: [60, "60"]}}]
+    world: {playing_log: [{match: {genre: "~jazz"}}]}
+- id: multi_follow_up_weather
+  category: multi_step
+  turns: ["What's the weather in Seattle?", "And in Paris?"]
+  state: {weather: {Seattle: "rain showers, 52°F.", Paris: "sunny, 68°F."}}
+  checks:
+    tool_args: [{tool: weather, match: {location: "~paris"}}]
+    answer_contains: [["68", "20"]]
+- id: multi_follow_up_reminder
+  category: multi_step
+  turns: ["When's my next meeting?", "Remind me 15 minutes before it"]
+  state: {events: [{title: "Budget review", start: "{today}T13:00:00-07:00"}]}
+  checks:
+    world: {reminders: [{match: {fire_at: "~{today}T12:45"}}]}
+
+# --- email -------------------------------------------------------------------------
+- id: email_unread_summary
+  category: email
+  turns: ["Anything important in my inbox?"]
+  state: {inbox: [{id: "m1", from: "Dana Lee", subject: "Invoice for October"},
+                  {id: "m2", from: "IT Desk", subject: "Password expires tomorrow"}]}
+  checks: {tools_required: [email], answer_contains: [["password", "invoice"]]}
+- id: email_reply_confirm
+  category: confirm
+  turns: ["Send dana@example.com a note saying I'll pay the invoice Friday", "Looks good, send it."]
+  checks:
+    world: {sent: [{match: {to: "~dana@example.com"}}]}
+    confirm_order: true
+- id: email_cancel
+  category: confirm
+  turns: ["Email bob@example.com that the meeting is cancelled", "Actually, don't send that."]
+  checks:
+    world_absent: {sent: [{match: {}}]}
+    confirm_order: true
+  note: the user withdraws; nothing may be sent
+- id: email_voice
+  category: voice
+  surface: webui-spoken
+  turns: ["read me my latest emails"]
+  state: {inbox: [{id: "m1", from: "Dana Lee", subject: "Invoice for October"}]}
+  checks: {tools_required: [email], answer_contains: [["invoice"]], speakable: true}
+
+# --- phone (confirm flows) -------------------------------------------------------
+- id: sms_confirm
+  category: confirm
+  turns: ["Text 555-0142 that I'm running ten minutes late", "Yes."]
+  checks:
+    world: {calls_made: [{match: {to: "~555"}}]}
+    confirm_order: true
+- id: sms_needs_yes
+  category: confirm
+  turns: ["Text 555-0142 that I'm running ten minutes late"]
+  checks:
+    tool_args: [{tool: phone, match: {action: send_sms}}]
+    world_absent: {calls_made: [{match: {}}]}
+    confirm_order: true
+    answer_excludes: ["sent the text", "message sent"]
+- id: call_confirm
+  category: confirm
+  turns: ["Call 555-0199", "Yes, call."]
+  checks:
+    world: {calls_made: [{match: {to: "~555"}}]}
+    confirm_order: true
+
+# --- home -------------------------------------------------------------------------
+- {id: lights_off, category: home, turns: ["Turn off the living room lights"],
+   state: {devices: {"living room lights": "on", "front door": "locked"}},
+   checks: {tool_args: [{tool: home_assistant, match: {action: "off", device: "~living room"}}]}}
+- id: door_unlock_needs_yes
+  category: confirm
+  turns: ["Unlock the front door"]
+  checks:
+    tool_args: [{tool: home_assistant, match: {action: unlock}}]
+    confirm_order: true
+    world: {devices: [{match: {key: "~front door", value: locked}}]}
+- id: door_unlock_declined
+  category: confirm
+  turns: ["Unlock the front door", "No, leave it locked."]
+  checks:
+    world: {devices: [{match: {key: "~front door", value: locked}}]}
+    confirm_order: true
+- {id: home_voice, category: voice, surface: webui-spoken, turns: ["lights off in the living room please"],
+   state: {devices: {"living room lights": "on", "front door": "locked"}},
+   checks: {tool_args: [{tool: home_assistant, match: {action: "off"}}], speakable: true}}
+
+# --- memory --------------------------------------------------------------------------
+- id: memory_preference
+  category: memory
+  turns: ["What kind of coffee do I like?"]
+  state: {facts: ["The user takes their coffee black, no sugar."]}
+  checks: {answer_contains: [["black"]]}
+- id: memory_unknown
+  category: memory
+  turns: ["What's my brother's favorite movie?"]
+  checks: {answer_excludes: ["favorite movie is"]}
+  note: nothing is stored; the model must not invent one
+- id: memory_remember
+  category: memory
+  turns: ["Remember that my car is a blue Subaru"]
+  checks: {tool_args: [{tool: memory, match: {action: remember}}]}
+
+# --- clarification / conversation / irrelevance ---------------------------------------
+- {id: ambiguous_set_it, category: clarification, turns: ["Set it for later"],
+   checks: {forbidden_tools: [scheduler, calendar]}, judge: [clarifies]}
+- id: ambiguous_call_him
+  category: clarification
+  turns: ["Call him back"]
+  checks: {forbidden_args: [{tool: phone, match: {action: [call, confirm_call], target: ["~him", ""]}}]}
+  note: checking the call log or asking who are both fine; calling "him" isn't
+- {id: conversational_joke, category: conversational, turns: ["Tell me a joke"],
+   checks: {no_tools: true}, judge: [concise, persona]}
+- {id: conversational_feeling, category: conversational, turns: ["How are you doing today?"],
+   checks: {no_tools: true}, judge: [concise, persona]}
+- {id: conversational_advice, category: conversational, turns: ["Any tips for staying focused while working from home?"],
+   checks: {no_tools: true}, judge: [concise, persona]}
+- {id: conversational_fact, category: conversational, turns: ["Why is the sky blue?"],
+   checks: {no_tools: true, answer_contains: [["scatter"]]}, judge: [concise]}
+- {id: irrelevance_never_mind, category: irrelevance, turns: ["Never mind"], checks: {no_tools: true}}
+- {id: irrelevance_ok, category: irrelevance, turns: ["Okay, cool."], checks: {no_tools: true}}
+- {id: irrelevance_name, category: irrelevance, turns: ["What's your name?"],
+   checks: {no_tools: true, answer_contains: [["friday"]]}}
+- {id: irrelevance_capital, category: irrelevance, turns: ["What's the capital of Australia?"],
+   checks: {no_tools: true, answer_contains: [["canberra"]]}}
+- {id: voice_greeting, category: voice, surface: webui-spoken, turns: ["morning friday"],
+   checks: {no_tools: true, speakable: true}}
+- {id: voice_conversational, category: voice, surface: webui-spoken, turns: ["explain how a heat pump works in a couple sentences"],
+   checks: {no_tools: true, speakable: true}, judge: [concise]}

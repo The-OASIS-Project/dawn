@@ -45,6 +45,9 @@ extern "C" {
  * admin_socket.c. */
 int send_response(int client_fd, admin_resp_code_t code);
 int send_text_response(int client_fd, admin_resp_code_t code, const char *text);
+/* Verify the admin_auth_prefix_t at the start of @p payload: 0 for an admin's
+ * credentials, FAILURE otherwise.  @p auth_size receives the prefix's length. */
+int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *auth_size);
 
 /* Phase 6.5 entity-merge handlers (admin_socket_memory_entity.c).  Dispatched
  * from handle_client() in admin_socket.c against ADMIN_MSG_MEMORY_ENTITY_*
@@ -120,6 +123,9 @@ int handle_schwab_auth_url_cmd(int client_fd, const char *payload, uint16_t payl
 int handle_schwab_auth_complete_cmd(int client_fd, const char *payload, uint16_t payload_len);
 int handle_schwab_status_cmd(int client_fd, const char *payload, uint16_t payload_len);
 #endif
+
+/* LLM request capture for the quality suite (admin_socket_llm.c) */
+int handle_llm_capture_cmd(int client_fd, const char *payload, uint16_t payload_len);
 
 /* Prompt-cache stats (admin_socket_cache.c) */
 int handle_cache_stats_cmd(int client_fd, const char *payload, uint16_t payload_len);

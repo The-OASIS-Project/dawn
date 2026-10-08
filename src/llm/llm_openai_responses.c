@@ -52,6 +52,7 @@
 #include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
+#include "llm/llm_request_capture.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
@@ -1000,6 +1001,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_RESPONSES_ENDPOINT);
       curl_easy_setopt(curl, CURLOPT_URL, full_url);
       curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload);
+      llm_request_capture("openai-responses", full_url, headers, payload);
       curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, responses_write_callback);
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &rctx);
