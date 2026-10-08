@@ -47,6 +47,7 @@
 /* --- stand-ins for the rest of the engine -------------------------------- */
 
 atomic_bool s_initialized = true;
+atomic_bool s_shutdown_requested = false;
 dawn_config_t g_config;
 rate_limiter_t s_outbound_per_user_limiter;
 static rate_limit_entry_t s_outbound_entries[8];
@@ -561,6 +562,28 @@ static void test_link_command_forms(void) {
 }
 
 /* A user holds only a few live link codes. */
+/* Once shutdown has begun, no new async send starts: the drain that follows
+ * would otherwise race a send it never saw. */
+static void test_no_async_send_after_quiesce(void) {
+   TEST_ASSERT_EQUAL_INT(SUCCESS, engine_wait_async_sends(MESSAGING_ASYNC_SEND_DRAIN_MS));
+   pthread_mutex_lock(&s_sent_mutex);
+   const int before = s_sent_count;
+   pthread_mutex_unlock(&s_sent_mutex);
+
+   atomic_store(&s_shutdown_requested, true);
+   engine_send_async(&s_telegram, s_user_a, "4242", "{\"id\":\"4242\"}", "late");
+   TEST_ASSERT_EQUAL_INT(SUCCESS, engine_wait_async_sends(0)); /* nothing in flight */
+   atomic_store(&s_shutdown_requested, false);
+
+   pthread_mutex_lock(&s_sent_mutex);
+   TEST_ASSERT_EQUAL_INT(before, s_sent_count);
+   pthread_mutex_unlock(&s_sent_mutex);
+
+   /* And a send after that starts as usual. */
+   engine_send_async(&s_telegram, s_user_a, "4242", "{\"id\":\"4242\"}", "on time");
+   wait_sends(before + 1);
+}
+
 static void test_link_code_cap(void) {
    char code[MESSAGING_LINK_CODE_BUF_SIZE];
    for (int i = 0; i < 5; i++) {
@@ -586,5 +609,6 @@ int main(void) {
    RUN_TEST(test_number_cap_across_accounts);
    RUN_TEST(test_link_command_forms);
    RUN_TEST(test_link_code_cap);
+   RUN_TEST(test_no_async_send_after_quiesce);
    return UNITY_END();
 }

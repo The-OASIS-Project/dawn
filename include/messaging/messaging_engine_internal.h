@@ -65,8 +65,9 @@ struct json_object;
  * and inbound files, which all build the blob at their send sites. */
 #define MESSAGING_ADDRESS_JSON_BUF_SIZE 256
 /* How long shutdown waits for async sends still running (a confirmation or a
- * verification code going out); one that's still running after this is left. */
-#define MESSAGING_ASYNC_SEND_DRAIN_MS 5000
+ * verification code going out): longer than one send can take.  If one is still
+ * running after this, the drivers are left up (see messaging_engine_quiesce). */
+#define MESSAGING_ASYNC_SEND_DRAIN_MS ((int)(MESSAGING_SEND_TIMEOUT_SEC + 5) * 1000)
 
 /* =============================================================================
  * Cross-file types

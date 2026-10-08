@@ -28,6 +28,7 @@
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sodium.h>
@@ -403,12 +404,20 @@ static void send_async_impl(const messaging_driver_t *drv,
    pthread_attr_setstacksize(&attr, 64 * 1024);
 
    pthread_t tid;
+   /* Counted before the flag is read: quiesce sets the flag, then waits for the
+    * count, so a send either is waited for or doesn't start. */
    atomic_fetch_add(&s_async_inflight, 1);
-   int rc = pthread_create(&tid, &attr, async_send_thread, item);
+   const bool closing = atomic_load(&s_shutdown_requested);
+   int rc = closing ? EAGAIN : pthread_create(&tid, &attr, async_send_thread, item);
    pthread_attr_destroy(&attr);
    if (rc != 0) {
       atomic_fetch_sub(&s_async_inflight, 1);
-      OLOG_WARNING("messaging: async-send pthread_create failed (rc=%d); dropping send", rc);
+      if (closing) {
+         OLOG_INFO("messaging: shutting down; dropping send to %s",
+                   item->provider_address[0] ? item->provider_address : "(no addr)");
+      } else {
+         OLOG_WARNING("messaging: async-send pthread_create failed (rc=%d); dropping send", rc);
+      }
       if (item->log_text) {
          sodium_memzero(item->text, strlen(item->text));
       }
