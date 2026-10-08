@@ -43,6 +43,7 @@
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_cache.h"
 #include "llm/llm_openai_internal.h"
+#include "llm/llm_request_capture.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -354,6 +355,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
       curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
+      llm_request_capture("openai-chat", full_url, headers, payload);
       curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
@@ -692,6 +694,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
       curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
+      llm_request_capture("openai-chat", full_url, headers, payload);
       curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, streaming_write_callback);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&streaming_ctx);

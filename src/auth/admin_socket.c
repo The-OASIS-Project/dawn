@@ -127,7 +127,6 @@ static int send_list_response(int client_fd,
                               uint16_t data_len,
                               uint16_t item_count,
                               uint16_t flags);
-static int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *auth_size);
 static int secure_compare(const char *a, const char *b, size_t len);
 
 /* =============================================================================
@@ -857,7 +856,7 @@ static const char DUMMY_PASSWORD_HASH[] = "$argon2id$v=19$m=16384,t=3,p=1$AAAAAA
  * @param auth_size Output: size consumed by auth prefix (header + credentials)
  * @return 0 on success, non-zero on failure
  */
-static int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *auth_size) {
+int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *auth_size) {
    if (payload_len < sizeof(admin_auth_prefix_t)) {
       return FAILURE;
    }
@@ -2326,6 +2325,9 @@ static int handle_client(int client_fd) {
 
       case ADMIN_MSG_CACHE_STATS:
          return handle_cache_stats_cmd(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_LLM_CAPTURE:
+         return handle_llm_capture_cmd(client_fd, payload, header.payload_len);
 
 #ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL
       /* Deep-research operator commands (headless benchmark spawn path, §16). */

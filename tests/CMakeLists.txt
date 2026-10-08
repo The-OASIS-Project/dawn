@@ -1495,6 +1495,12 @@ dawn_add_unit_test(test_admin_cache_stats
    LIBS    dawn_common unity
    LABEL   ci)
 
+dawn_add_unit_test(test_llm_request_capture
+   SOURCES test_llm_request_capture.c
+           ${SRC_ROOT}/src/llm/llm_request_capture.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} ${CURL_LIBRARIES} pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_scheduled_context
    SOURCES test_scheduled_context.c
            ${SRC_ROOT}/src/core/scheduled_context.c
@@ -2118,6 +2124,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_request_capture.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
@@ -2230,6 +2237,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_request_capture.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
