@@ -591,7 +591,7 @@ int email_service_search(int user_id,
       report->err = EMAIL_ERR_NO_ACCOUNT;
       return EMAIL_RC_NO_ACCOUNTS;
    }
-   /* The enabled ones, in list order (the order their results are merged in). */
+   /* The enabled ones, in list order (the order a date tie is merged in). */
    int enabled = 0;
    for (int i = 0; i < acct_count; i++) {
       if (!accounts[i].enabled)
@@ -607,10 +607,8 @@ int email_service_search(int user_id,
    }
 
    /* Every account at once: the search takes as long as the slowest one, not
-    * all of them added up.  Each is asked for max rows, and the merge takes
-    * what the one-at-a-time search would have (an account's newest rows, up
-    * to what max leaves); where a listed message vanished before its fetch,
-    * the next one fills its place. */
+    * all of them added up.  The rows are then merged newest first across the
+    * accounts, so the limit keeps the newest mail wherever it is. */
    fanout_search_t fs = { .accounts = accounts, .params = params };
    email_fanout_slot_t slots[EMAIL_MAX_ACCOUNTS];
    if (email_fanout_run(enabled, max, fanout_search_one, &fs, slots) != 0) {
@@ -635,7 +633,7 @@ int email_service_search(int user_id,
    email_fanout_free(slots, enabled);
    sodium_memzero(accounts, sizeof(accounts));
    if (!whole) {
-      /* Stopped: what was found before the stopped account is kept. */
+      /* Stopped: what was found is kept. */
       *out_count = total;
       report->err = EMAIL_ERR_CANCELLED;
       return EMAIL_RC_FAILURE;

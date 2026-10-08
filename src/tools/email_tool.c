@@ -591,6 +591,8 @@ static char *handle_search(struct json_object *details, int user_id) {
                                  &report);
 
    if (rc != EMAIL_RC_OK) {
+      if (report.err == EMAIL_ERR_CANCELLED)
+         return err_error(rc, report.err, "search", account, params.folder);
       /* Every enabled account failed.  Name them (with 'login failed' where known)
        * instead of the generic backend-error message, so the user gets an
        * actionable report rather than a silent/opaque failure. */

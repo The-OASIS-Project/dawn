@@ -399,7 +399,8 @@ int email_service_unread_count(int user_id,
  * @param report   Optional out (may be NULL): why it failed, and which accounts a
  *                 multi-account search couldn't reach
  * @note Paging (params->page_token / next_page_token) applies to a single-account
- *       search only; a multi-account search always returns the first page, and
+ *       search only; a multi-account search searches every account at once,
+ *       returns the newest @p max rows across them (each account's newest), and
  *       reports an account in use elsewhere for EMAIL_LEASE_FANOUT_WAIT_SEC as
  *       EMAIL_ERR_BUSY in @p report rather than waiting it out.  On an
  *       IMAP account a query with non-ASCII text fails as EMAIL_ERR_UNSUPPORTED_QUERY

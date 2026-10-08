@@ -107,6 +107,23 @@ int email_fanout_run(int n, int max, email_fanout_fn fn, void *ctx, email_fanout
    return 0;
 }
 
+/* One row of one account, for the merge's sort. */
+typedef struct {
+   time_t date;
+   int slot;
+   int row;
+} merge_key_t;
+
+/* Newest first; a tie keeps account, then row, order (qsort isn't stable). */
+static int cmp_merge_key(const void *a, const void *b) {
+   const merge_key_t *x = a, *y = b;
+   if (x->date != y->date)
+      return x->date < y->date ? 1 : -1;
+   if (x->slot != y->slot)
+      return x->slot < y->slot ? -1 : 1;
+   return x->row < y->row ? -1 : (x->row > y->row);
+}
+
 bool email_fanout_merge(const email_fanout_slot_t *slots,
                         int n,
                         int max,
@@ -114,23 +131,45 @@ bool email_fanout_merge(const email_fanout_slot_t *slots,
                         int *total_out,
                         email_fanout_fail_fn on_fail,
                         void *ctx) {
-   int total = 0;
-   for (int i = 0; i < n && total < max; i++) {
+   bool whole = true;
+   size_t rows = 0;
+   for (int i = 0; i < n; i++) {
       const email_fanout_slot_t *s = &slots[i];
       if (s->rc == 0) {
-         int take = s->count < max - total ? s->count : max - total;
-         if (take > 0)
-            memcpy(out + total, s->rows, sizeof(*out) * (size_t)take);
-         total += take;
+         rows += (size_t)s->count;
       } else if (s->err == EMAIL_ERR_CANCELLED) {
-         *total_out = total;
-         return false;
+         whole = false;
       } else if (on_fail) {
          on_fail(ctx, i, s);
       }
    }
+
+   /* Sorted by date alone, not by each account's own order: an old message
+    * re-filed into a folder (a new UID, its old date) mustn't hold back that
+    * account's newer mail. */
+   int total = 0;
+   merge_key_t *keys = rows ? malloc(rows * sizeof(*keys)) : NULL;
+   if (keys) {
+      size_t k = 0;
+      for (int i = 0; i < n; i++) {
+         if (slots[i].rc != 0)
+            continue;
+         for (int r = 0; r < slots[i].count; r++)
+            keys[k++] = (merge_key_t){ .date = slots[i].rows[r].date, .slot = i, .row = r };
+      }
+      qsort(keys, rows, sizeof(*keys), cmp_merge_key);
+      for (size_t k2 = 0; k2 < rows && total < max; k2++)
+         out[total++] = slots[keys[k2].slot].rows[keys[k2].row];
+      free(keys);
+   } else {
+      /* Out of memory: each account's rows in turn, still within max. */
+      for (int i = 0; i < n && total < max; i++) {
+         for (int r = 0; slots[i].rc == 0 && r < slots[i].count && total < max; r++)
+            out[total++] = slots[i].rows[r];
+      }
+   }
    *total_out = total;
-   return true;
+   return whole;
 }
 
 void email_fanout_free(email_fanout_slot_t *slots, int n) {

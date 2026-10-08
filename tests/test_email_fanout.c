@@ -16,8 +16,8 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Searching every account at once (email_fanout): the merge gives what the
- * one-at-a-time search gave, the searches overlap, and each runs under the
+ * Searching every account at once (email_fanout): the merge keeps the newest
+ * rows across accounts, the searches overlap, and each runs under the
  * caller's cancel flag.
  */
 
@@ -37,9 +37,11 @@ void setUp(void) {
 void tearDown(void) {
 }
 
-/* A stub account: how many rows it has, how it fails, how long it takes. */
+/* A stub account: its rows' dates (newest first), how it fails, how long it
+ * takes. */
 typedef struct {
    int rows;
+   time_t dates[8];
    int rc;
    email_err_t err;
    int sleep_ms;
@@ -56,8 +58,10 @@ static void stub_search(void *ctx, int index, email_fanout_slot_t *slot, int max
    if (a->rc != 0)
       return;
    int n = a->rows < max ? a->rows : max;
-   for (int i = 0; i < n; i++)
+   for (int i = 0; i < n; i++) {
       snprintf(slot->rows[i].subject, sizeof(slot->rows[i].subject), "a%d-%d", index, i);
+      slot->rows[i].date = a->dates[i];
+   }
    slot->count = n;
 }
 
@@ -72,68 +76,57 @@ static void note_fail(void *ctx, int index, const email_fanout_slot_t *slot) {
    f->failed[f->count++] = index;
 }
 
-/* The one-at-a-time search: each account asked for what max leaves. */
-static bool sequential(stub_acct_t *a,
-                       int n,
-                       int max,
-                       email_summary_t *out,
-                       int *total,
-                       fails_t *fails) {
-   *total = 0;
-   for (int i = 0; i < n && *total < max; i++) {
-      email_fanout_slot_t slot = { .rows = out + *total };
-      stub_search(a, i, &slot, max - *total);
-      if (slot.rc == 0)
-         *total += slot.count;
-      else if (slot.err == EMAIL_ERR_CANCELLED)
-         return false;
-      else
-         note_fail(fails, i, &slot);
-   }
-   return true;
-}
-
-static void check_same(stub_acct_t *a, int n, int max) {
-   static email_summary_t seq[64], par[64];
-   memset(seq, 0, sizeof(seq));
-   memset(par, 0, sizeof(par));
-   fails_t sf = { 0 }, pf = { 0 };
-   int st = 0, pt = 0;
-   const bool sw = sequential(a, n, max, seq, &st, &sf);
-
+/* Run the fan-out and merge; the merged subjects joined by spaces into @p got. */
+static bool fan_merge(stub_acct_t *a, int n, int max, char *got, size_t got_len, fails_t *fails) {
    email_fanout_slot_t slots[16];
+   static email_summary_t out[64];
+   int total = 0;
    TEST_ASSERT_EQUAL_INT(0, email_fanout_run(n, max, stub_search, a, slots));
-   const bool pw = email_fanout_merge(slots, n, max, par, &pt, note_fail, &pf);
+   const bool whole = email_fanout_merge(slots, n, max, out, &total, note_fail, fails);
    email_fanout_free(slots, n);
-
-   TEST_ASSERT_EQUAL(sw, pw);
-   TEST_ASSERT_EQUAL_INT(st, pt);
-   for (int i = 0; i < st; i++)
-      TEST_ASSERT_EQUAL_STRING(seq[i].subject, par[i].subject);
-   TEST_ASSERT_EQUAL_INT(sf.count, pf.count);
-   for (int i = 0; i < sf.count; i++)
-      TEST_ASSERT_EQUAL_INT(sf.failed[i], pf.failed[i]);
+   got[0] = '\0';
+   for (int i = 0; i < total; i++) {
+      size_t used = strlen(got);
+      snprintf(got + used, got_len - used, "%s%s", i ? " " : "", out[i].subject);
+   }
+   return whole;
 }
 
-static void test_merge_matches_sequential(void) {
-   /* Fills max partway through: the later accounts' rows are dropped. */
-   stub_acct_t a1[] = { { .rows = 3 }, { .rows = 30 }, { .rows = 30 }, { .rows = 5 } };
-   check_same(a1, 4, 50);
-   /* Nothing fills it: everything, in order. */
-   stub_acct_t a2[] = { { .rows = 3 }, { .rows = 0 }, { .rows = 7 } };
-   check_same(a2, 3, 50);
-   /* A failure within the window is reported; one after max is not. */
-   stub_acct_t a3[] = { { .rows = 2 },
+static void test_merge_newest_across_accounts(void) {
+   char got[512];
+   /* Interleaved by date; the limit keeps the newest, whatever the account. */
+   stub_acct_t a1[] = { { .rows = 3, .dates = { 90, 50, 10 } },
+                        { .rows = 3, .dates = { 100, 60, 55 } } };
+   fails_t f = { 0 };
+   TEST_ASSERT_TRUE(fan_merge(a1, 2, 4, got, sizeof(got), &f));
+   TEST_ASSERT_EQUAL_STRING("a1-0 a0-0 a1-1 a1-2", got);
+   TEST_ASSERT_EQUAL_INT(0, f.count);
+
+   /* By date alone: an old row at the head of an account (a re-filed message)
+    * doesn't hold back its newer ones; a tie goes to the earlier account. */
+   stub_acct_t a2[] = { { .rows = 2, .dates = { 50, 70 } }, { .rows = 1, .dates = { 50 } } };
+   memset(&f, 0, sizeof(f));
+   TEST_ASSERT_TRUE(fan_merge(a2, 2, 10, got, sizeof(got), &f));
+   TEST_ASSERT_EQUAL_STRING("a0-1 a0-0 a1-0", got);
+
+   /* Every failed account is reported, wherever it sits. */
+   stub_acct_t a3[] = { { .rows = 2, .dates = { 9, 8 } },
                         { .rc = 1, .err = EMAIL_ERR_AUTH_FAILED },
-                        { .rows = 60 },
+                        { .rows = 1, .dates = { 7 } },
                         { .rc = 1, .err = EMAIL_ERR_TIMEOUT } };
-   check_same(a3, 4, 50);
-   /* A cancelled account within the window stops the merge. */
-   stub_acct_t a4[] = { { .rows = 4 }, { .rc = 1, .err = EMAIL_ERR_CANCELLED }, { .rows = 9 } };
-   check_same(a4, 3, 50);
-   /* One cancelled after max is reached doesn't. */
-   stub_acct_t a5[] = { { .rows = 50 }, { .rc = 1, .err = EMAIL_ERR_CANCELLED } };
-   check_same(a5, 2, 50);
+   memset(&f, 0, sizeof(f));
+   TEST_ASSERT_TRUE(fan_merge(a3, 4, 2, got, sizeof(got), &f));
+   TEST_ASSERT_EQUAL_STRING("a0-0 a0-1", got);
+   TEST_ASSERT_EQUAL_INT(2, f.count);
+   TEST_ASSERT_EQUAL_INT(1, f.failed[0]);
+   TEST_ASSERT_EQUAL_INT(3, f.failed[1]);
+
+   /* A cancelled account makes the result partial; what was found is kept. */
+   stub_acct_t a4[] = { { .rows = 1, .dates = { 5 } }, { .rc = 1, .err = EMAIL_ERR_CANCELLED } };
+   memset(&f, 0, sizeof(f));
+   TEST_ASSERT_FALSE(fan_merge(a4, 2, 10, got, sizeof(got), &f));
+   TEST_ASSERT_EQUAL_STRING("a0-0", got);
+   TEST_ASSERT_EQUAL_INT(0, f.count);
 }
 
 static void test_searches_overlap_under_callers_cancel(void) {
@@ -164,7 +157,7 @@ static void test_searches_overlap_under_callers_cancel(void) {
 
 int main(void) {
    UNITY_BEGIN();
-   RUN_TEST(test_merge_matches_sequential);
+   RUN_TEST(test_merge_newest_across_accounts);
    RUN_TEST(test_searches_overlap_under_callers_cancel);
    return UNITY_END();
 }

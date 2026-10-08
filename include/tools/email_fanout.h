@@ -17,8 +17,7 @@
  * the project author(s).
  *
  * Searching every account of a user at once: each account on its own thread,
- * then the results merged as if the accounts had been searched one after
- * another until enough rows were found.
+ * then the results merged newest first across the accounts.
  */
 
 #ifndef EMAIL_FANOUT_H
@@ -65,14 +64,14 @@ int email_fanout_run(int n, int max, email_fanout_fn fn, void *ctx, email_fanout
 typedef void (*email_fanout_fail_fn)(void *ctx, int index, const email_fanout_slot_t *slot);
 
 /**
- * @brief Merge @p slots into @p out as the one-at-a-time search would have
+ * @brief Merge @p slots into @p out: the newest @p max rows across all accounts
  *
- * Accounts in order; each adds its newest rows up to what @p max leaves.  Once
- * @p max rows are in, the rest count as never searched (their failures aren't
- * reported).  An account stopped before then stops the merge.
+ * By date, a tie keeping account order.  Every failed account is reported
+ * through @p on_fail (any of them may have held newer rows), except a
+ * cancelled one, which makes the result false.
  *
  * @param total_out Rows in @p out
- * @return false when an account in the window was cancelled
+ * @return false when an account was cancelled (the rows merged are still in @p out)
  */
 bool email_fanout_merge(const email_fanout_slot_t *slots,
                         int n,
