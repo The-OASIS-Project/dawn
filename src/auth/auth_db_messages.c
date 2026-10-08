@@ -61,92 +61,76 @@ _Static_assert(IMAGE_FILENAME_MAX <= CONV_IMAGE_FILENAME_MAX,
  * the database lock, since clearing a row frees its blocks' pages. */
 #define GC_BATCH_ROWS 32
 
-int auth_db_messages_prepare(void) {
-   static const struct {
-      const char *name;
-      const char *sql;
-      sqlite3_stmt **stmt;
-   } stmts[] = {
-      /* A context row's question (?12) must be a row of the same conversation
-       * a turn's context goes in front of: a user message, ordinary or an
-       * envelope. */
-      { "msg_add",
-        "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
-        "reasoning, llm_blocks_len, llm_blocks, created_at, is_error, kind, context_of, images) "
-        "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?14 "
-        "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?13) "
-        "AND (?12 IS NULL OR EXISTS (SELECT 1 FROM messages q WHERE q.id = ?12 "
-        "AND q.conversation_id = ?1 AND q.role = 'user' "
-        "AND (q.kind IS NULL OR q.kind = 'envelope')))",
-        &s_db.stmt_msg_add },
-      /* A row's blocks load only past the budget cutoff (?4) and the
-       * conversation's reasoning floor (a declared boundary left the reasoning at
-       * or below it behind), and none while a withdrawal's floor is pending
-       * (auth_db_withdraw.h); the column is read nowhere else.  llm_blocks_len
-       * sits before the blocks, so testing it never reads them. */
-      { "msg_get_llm",
-        "SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-        "CASE WHEN m.id > MAX(?4, c.reasoning_floor_msg_id) AND c.reasoning_floor_pending = 0 "
-        "AND m.llm_blocks_len IS NOT NULL "
-        "THEN m.llm_blocks END, "
-        "m.created_at, m.is_error, m.kind, m.context_of, m.images FROM messages m "
-        "INNER JOIN conversations c ON m.conversation_id = c.id "
-        "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 ORDER BY m.id ASC",
-        &s_db.stmt_msg_get_llm },
-      { "msg_bind_images", IMAGES_BIND_SQL, &s_db.stmt_msg_bind_images },
-      { "msg_ref_captures", IMAGES_REF_SQL("source = 5"), &s_db.stmt_msg_ref_captures },
-      { "msg_ref_uploads", IMAGES_REF_SQL("source IN (0, 3)"), &s_db.stmt_msg_ref_uploads },
-      /* kind-rows: sizes the replay read's own rows. */
-      { "msg_llm_sizes",
-        "SELECT m.id, m.llm_blocks_len FROM messages m "
-        "INNER JOIN conversations c ON m.conversation_id = c.id "
-        "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 "
-        "AND m.id > c.reasoning_floor_msg_id AND c.reasoning_floor_pending = 0 "
-        "AND m.llm_blocks_len IS NOT NULL "
-        "ORDER BY m.id DESC",
-        &s_db.stmt_msg_llm_sizes },
-      /* The v67 watermark, with a monotonic guard so a stale async compaction
-       * can't rewind one a later pass already advanced. */
-      { "conv_set_watermark",
-        "UPDATE conversations SET compaction_summary = ?, context_watermark_msg_id = ? "
-        "WHERE id = ? AND user_id = ? AND ? >= context_watermark_msg_id",
-        &s_db.stmt_conv_set_watermark },
-      /* kind-rows: clears blocks, whatever the row. */
-      { "msg_gc_blocks",
-        "UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id IN ("
-        "SELECT id FROM messages WHERE conversation_id = ? AND id <= ? "
-        "AND llm_blocks_len IS NOT NULL LIMIT " STRINGIFY(GC_BATCH_ROWS) ")",
-        &s_db.stmt_msg_gc_blocks },
-      /* kind-rows: clears blocks, whatever the row. */
-      { "msg_sweep_blocks",
-        "UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id IN ("
-        "SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id "
-        "WHERE m.llm_blocks_len IS NOT NULL AND m.id <= c.context_watermark_msg_id "
-        "LIMIT " STRINGIFY(GC_BATCH_ROWS) ")",
-        &s_db.stmt_msg_sweep_blocks },
-   };
+/* Each statement is prepared and finalized from this one table. */
+static const auth_db_stmt_def_t s_msg_stmts[] = {
+   /* A context row's question (?12) must be a row of the same conversation
+    * a turn's context goes in front of: a user message, ordinary or an
+    * envelope. */
+   { "msg_add",
+     "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
+     "reasoning, llm_blocks_len, llm_blocks, created_at, is_error, kind, context_of, images) "
+     "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?14 "
+     "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?13) "
+     "AND (?12 IS NULL OR EXISTS (SELECT 1 FROM messages q WHERE q.id = ?12 "
+     "AND q.conversation_id = ?1 AND q.role = 'user' "
+     "AND (q.kind IS NULL OR q.kind = 'envelope')))",
+     &s_db.stmt_msg_add },
+   /* A row's blocks load only past the budget cutoff (?4) and the
+    * conversation's reasoning floor (a declared boundary left the reasoning at
+    * or below it behind), and none while a withdrawal's floor is pending
+    * (auth_db_withdraw.h); the column is read nowhere else.  llm_blocks_len
+    * sits before the blocks, so testing it never reads them. */
+   { "msg_get_llm",
+     "SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, "
+     "CASE WHEN m.id > MAX(?4, c.reasoning_floor_msg_id) AND c.reasoning_floor_pending = 0 "
+     "AND m.llm_blocks_len IS NOT NULL "
+     "THEN m.llm_blocks END, "
+     "m.created_at, m.is_error, m.kind, m.context_of, m.images FROM messages m "
+     "INNER JOIN conversations c ON m.conversation_id = c.id "
+     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 ORDER BY m.id ASC",
+     &s_db.stmt_msg_get_llm },
+   { "msg_bind_images", IMAGES_BIND_SQL, &s_db.stmt_msg_bind_images },
+   { "msg_ref_captures", IMAGES_REF_SQL("source = 5"), &s_db.stmt_msg_ref_captures },
+   { "msg_ref_uploads", IMAGES_REF_SQL("source IN (0, 3)"), &s_db.stmt_msg_ref_uploads },
+   /* kind-rows: sizes the replay read's own rows. */
+   { "msg_llm_sizes",
+     "SELECT m.id, m.llm_blocks_len FROM messages m "
+     "INNER JOIN conversations c ON m.conversation_id = c.id "
+     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 "
+     "AND m.id > c.reasoning_floor_msg_id AND c.reasoning_floor_pending = 0 "
+     "AND m.llm_blocks_len IS NOT NULL "
+     "ORDER BY m.id DESC",
+     &s_db.stmt_msg_llm_sizes },
+   /* The v67 watermark, with a monotonic guard so a stale async compaction
+    * can't rewind one a later pass already advanced. */
+   { "conv_set_watermark",
+     "UPDATE conversations SET compaction_summary = ?, context_watermark_msg_id = ? "
+     "WHERE id = ? AND user_id = ? AND ? >= context_watermark_msg_id",
+     &s_db.stmt_conv_set_watermark },
+   /* kind-rows: clears blocks, whatever the row. */
+   { "msg_gc_blocks",
+     "UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id IN ("
+     "SELECT id FROM messages WHERE conversation_id = ? AND id <= ? "
+     "AND llm_blocks_len IS NOT NULL LIMIT " STRINGIFY(GC_BATCH_ROWS) ")",
+     &s_db.stmt_msg_gc_blocks },
+   /* kind-rows: clears blocks, whatever the row. */
+   { "msg_sweep_blocks",
+     "UPDATE messages SET llm_blocks = NULL, llm_blocks_len = NULL WHERE id IN ("
+     "SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+     "WHERE m.llm_blocks_len IS NOT NULL AND m.id <= c.context_watermark_msg_id "
+     "LIMIT " STRINGIFY(GC_BATCH_ROWS) ")",
+     &s_db.stmt_msg_sweep_blocks },
+};
+#define MSG_STMT_COUNT (sizeof(s_msg_stmts) / sizeof(s_msg_stmts[0]))
+_Static_assert(MSG_STMT_COUNT == AUTH_DB_MESSAGES_STMT_COUNT,
+               "update AUTH_DB_MESSAGES_STMT_COUNT in auth_db_internal.h");
 
-   for (size_t i = 0; i < sizeof(stmts) / sizeof(stmts[0]); i++) {
-      if (sqlite3_prepare_v2(s_db.db, stmts[i].sql, -1, stmts[i].stmt, NULL) != SQLITE_OK) {
-         OLOG_ERROR("auth_db: prepare %s failed: %s", stmts[i].name, sqlite3_errmsg(s_db.db));
-         return AUTH_DB_FAILURE;
-      }
-   }
-   return AUTH_DB_SUCCESS;
+int auth_db_messages_prepare(void) {
+   return auth_db_stmts_prepare(s_msg_stmts, MSG_STMT_COUNT);
 }
 
 void auth_db_messages_finalize(void) {
-   sqlite3_stmt **stmts[] = { &s_db.stmt_msg_add,         &s_db.stmt_msg_get_llm,
-                              &s_db.stmt_msg_llm_sizes,   &s_db.stmt_conv_set_watermark,
-                              &s_db.stmt_msg_gc_blocks,   &s_db.stmt_msg_sweep_blocks,
-                              &s_db.stmt_msg_bind_images, &s_db.stmt_msg_ref_captures,
-                              &s_db.stmt_msg_ref_uploads };
-   for (size_t i = 0; i < sizeof(stmts) / sizeof(stmts[0]); i++) {
-      if (*stmts[i]) {
-         sqlite3_finalize(*stmts[i]);
-         *stmts[i] = NULL;
-      }
-   }
+   auth_db_stmts_finalize(s_msg_stmts, MSG_STMT_COUNT);
 }
 
 static void bind_text_or_null(sqlite3_stmt *st, int idx, const char *text) {

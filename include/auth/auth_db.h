@@ -2787,16 +2787,4 @@ int auth_db_list_session_metrics(const session_metrics_filter_t *filter,
 int auth_db_get_metrics_aggregate(const session_metrics_filter_t *filter,
                                   session_metrics_t *totals);
 
-/**
- * @brief Delete old session metrics (retention cleanup)
- *
- * Deletes metrics older than the specified number of days.
- * Called automatically during auth_db_run_cleanup().
- *
- * @param retention_days Delete metrics older than this many days
- * @param deleted_out Output: number of deleted entries (can be NULL)
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
- */
-int auth_db_cleanup_session_metrics(int retention_days, int *deleted_out);
-
 #endif /* AUTH_DB_H */

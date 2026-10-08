@@ -244,10 +244,6 @@ static void init_wake_words(void) {
 // Array of words/phrases used to signal the end of an interaction with the AI.
 static char *goodbyeWords[] = { "good bye", "goodbye", "good night", "bye", "quit", "exit" };
 
-// Array of predefined responses the AI can use upon recognizing a wake word/phrase.
-const char *wakeResponses[] = { "Hello Sir.", "At your service Sir.", "Yes Sir?",
-                                "How may I assist you Sir?", "Listening Sir." };
-
 // Spoken when a cancel phrase stops a reply, so the user knows it was heard.
 static const char *cancelResponses[] = { "Stopped, Sir.", "Standing by, Sir.", "Okay, Sir." };
 
@@ -872,58 +868,6 @@ static char *normalize_wake_word_text(const char *input) {
    return normalized;
 }
 
-/**
- * Parses a JSON string to extract the value of the "text" field.
- *
- * @param input A JSON string expected to contain a "text" field.
- * @return A dynamically allocated string containing the value of the "text" field.
- *         The caller is responsible for freeing this string.
- *         Returns NULL on error, including JSON parsing errors, missing "text" field,
- *         or memory allocation failures.
- */
-char *getTextResponse(const char *input) {
-   struct json_object *parsed_json;
-   struct json_object *text_object;
-   char *return_text = NULL;
-
-   // Parse the JSON data
-   parsed_json = json_tokener_parse(input);
-   if (parsed_json == NULL) {
-      OLOG_ERROR("Error: Unable to process text response.\n");
-      return NULL;
-   }
-
-   // Get the "text" object from the JSON
-   if (json_object_object_get_ex(parsed_json, "text", &text_object)) {
-      const char *input_text = json_object_get_string(text_object);
-      if (input_text == NULL) {
-         OLOG_ERROR("Error: Unable to get string from input text.\n");
-         json_object_put(parsed_json);
-         return NULL;
-      }
-
-      const size_t input_len = strlen(input_text);
-      return_text = malloc(input_len + 1);
-      if (return_text == NULL) {
-         OLOG_ERROR("malloc() failed in getTextResponse().\n");
-         json_object_put(parsed_json);
-         return NULL;
-      }
-
-      // Directly copy the input text into the return buffer
-      memcpy(return_text, input_text, input_len + 1);
-
-      // Debugging: Print the extracted text
-      OLOG_INFO("Input Text: %s\n", return_text);
-   } else {
-      OLOG_ERROR("Error: 'text' field not found in JSON.\n");
-   }
-
-   // Cleanup and return
-   json_object_put(parsed_json);
-   return return_text;
-}
-
 // Legacy openAlsaPcmCaptureDevice() and openPulseaudioCaptureDevice() removed.
 // Audio capture is now handled by audio_capture_thread using the audio_backend API.
 
@@ -952,25 +896,6 @@ const char *timeOfDayGreeting(void) {
    } else {
       return evening_greeting;  // Evening greeting for 6 PM onwards.
    }
-}
-
-/**
- * Selects a random acknowledgment response to a wake word detection.
- *
- * This function is designed to provide variability in the AI's response to
- * being activated by a wake word. It randomly selects one of the predefined
- * responses from the global `wakeResponses` array each time it's called.
- *
- * @return A pointer to a constant character string containing the selected wake word
- * acknowledgment. The return value points to an element within the global `wakeResponses` array and
- *         should not be modified or freed.
- */
-const char *wakeWordAcknowledgment() {
-   int numWakeResponses = sizeof(wakeResponses) /
-                          sizeof(wakeResponses[0]);  // Calculate the number of available responses.
-   int choice = (int)randombytes_uniform((uint32_t)numWakeResponses);
-
-   return wakeResponses[choice];  // Return the randomly selected wake word acknowledgment.
 }
 
 /**

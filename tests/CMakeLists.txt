@@ -1740,6 +1740,13 @@ dawn_add_unit_test(test_conv_db_events
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# The auth database's cached statements: each prepared once, finalize leaves none.
+dawn_add_unit_test(test_auth_db_statements
+   SOURCES test_auth_db_statements.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # messages.llm_blocks: replay-only read, assistant-only CHECK, watermark GC,
 # edit trigger, and the v92 re-render of legacy voice rows.
 dawn_add_unit_test(test_conv_db_llm_blocks

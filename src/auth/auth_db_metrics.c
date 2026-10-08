@@ -378,42 +378,6 @@ int auth_db_get_metrics_aggregate(const session_metrics_filter_t *filter,
    return AUTH_DB_SUCCESS;
 }
 
-int auth_db_cleanup_session_metrics(int retention_days, int *deleted_out) {
-   if (retention_days <= 0) {
-      retention_days = SESSION_METRICS_RETENTION_DAYS;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   /* Cast to time_t before multiplication to prevent integer overflow */
-   time_t cutoff = time(NULL) - ((time_t)retention_days * 24 * 60 * 60);
-
-   sqlite3_reset(s_db.stmt_metrics_delete_old);
-   sqlite3_bind_int64(s_db.stmt_metrics_delete_old, 1, (sqlite3_int64)cutoff);
-
-   int rc = sqlite3_step(s_db.stmt_metrics_delete_old);
-   sqlite3_reset(s_db.stmt_metrics_delete_old);
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("auth_db: failed to cleanup old metrics: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-
-   int deleted = sqlite3_changes(s_db.db);
-   if (deleted > 0) {
-      OLOG_INFO("auth_db: cleaned up %d old session metrics (older than %d days)", deleted,
-                retention_days);
-   }
-
-   AUTH_DB_UNLOCK();
-
-   if (deleted_out) {
-      *deleted_out = deleted;
-   }
-   return AUTH_DB_SUCCESS;
-}
-
 int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
    if (!rows || count <= 0) {
       return AUTH_DB_SUCCESS;
