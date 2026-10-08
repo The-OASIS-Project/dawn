@@ -43,6 +43,7 @@
 #include "tools/email_display.h"
 #include "tools/email_parse.h"
 #include "tools/email_service.h"
+#include "tools/email_transfer.h"
 #include "tools/oauth_client.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
@@ -1257,6 +1258,14 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
                     "turn. Tell the user what you would do, and let them ask for it.");
    }
 
+   /* The user's Stop ends a read's transfers and lease waits.  Not one that
+    * acts: a send or move cut short may have happened anyway, unreported. */
+   session_t *session = session_get_command_context();
+   const bool stoppable = session && !email_action_acts(action);
+   const atomic_bool *prev_cancel = NULL;
+   if (stoppable)
+      prev_cancel = email_transfer_scope_cancel(&session->cancel_requested);
+
    char *result = NULL;
 
    if (strcmp(action, "accounts") == 0) {
@@ -1291,6 +1300,8 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
       result = strdup(buf);
    }
 
+   if (stoppable)
+      email_transfer_scope_cancel(prev_cancel);
    json_object_put(details);
    return result;
 }

@@ -33,6 +33,7 @@
 #include "tools/email_client.h"
 #include "tools/email_client_internal.h"
 #include "tools/email_db.h"
+#include "tools/email_fanout.h"
 #include "tools/email_parse.h"
 #include "tools/email_service.h"
 #include "tools/email_service_internal.h"
@@ -168,6 +169,13 @@ static bool is_imap_page_token(const char *page_token) {
  * is the single point that labels every row (contract in email_service.h).  The
  * address (username) is the unambiguous inbox identifier — the display name may
  * be a generic label like "Gmail" that doesn't say which account it is. */
+/* Why a transfer failed, given the backend said only "failed": a transfer the
+ * caller stopped (its cancel flag set) fails the same way, and is a cancel. */
+static email_err_t failed_or_stopped(void) {
+   const atomic_bool *cancel = email_transfer_thread_cancel();
+   return cancel && atomic_load(cancel) ? EMAIL_ERR_CANCELLED : EMAIL_ERR_FAILED;
+}
+
 static void stamp_account(email_summary_t *out, int n, const email_account_t *acct) {
    for (int i = 0; i < n; i++) {
       snprintf(out[i].account_name, sizeof(out[i].account_name), "%s", acct->name);
@@ -288,7 +296,7 @@ static int recent_on_account(const email_account_t *acct,
                                   next_page_token, npt_len, want_unread ? inbox_unread : NULL);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
-      *err = rc == 0 ? EMAIL_ERR_NONE : EMAIL_ERR_FAILED;
+      *err = rc == 0 ? EMAIL_ERR_NONE : failed_or_stopped();
       return rc;
    }
 
@@ -405,7 +413,7 @@ static int search_single_account(email_account_t *acct,
                             npt_len);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
-      *err = rc == 0 ? EMAIL_ERR_NONE : EMAIL_ERR_FAILED;
+      *err = rc == 0 ? EMAIL_ERR_NONE : failed_or_stopped();
       return rc;
    }
 
@@ -455,6 +463,8 @@ static int search_single_account(email_account_t *acct,
 
    /* Surface a timeout as a distinct code so the tool layer can hint the LLM to
     * bound the search with a date (large mailbox / no server FTS index). */
+   if (rc != 0 && *err == EMAIL_ERR_FAILED)
+      *err = failed_or_stopped();
    if (rc != 0 && *err == EMAIL_ERR_TIMEOUT)
       return EMAIL_RC_TIMEOUT;
    return rc;
@@ -473,6 +483,53 @@ static const char *search_failure_reason(email_err_t err) {
          return "busy with another request";
       default:
          return "unreachable";
+   }
+}
+
+/* One account of a search across all of them (email_fanout_run). */
+typedef struct {
+   email_account_t *accounts;
+   const email_search_params_t *params;
+} fanout_search_t;
+
+static void fanout_search_one(void *ctx, int index, email_fanout_slot_t *slot, int max) {
+   fanout_search_t *fs = ctx;
+   /* A busy account is reported, not waited out. */
+   slot->rc = search_single_account(&fs->accounts[index], fs->params, slot->rows, max, &slot->count,
+                                    NULL, 0, NULL, EMAIL_LEASE_FANOUT_WAIT_SEC, NULL, NULL,
+                                    &slot->err);
+}
+
+/* The accounts a search across all of them couldn't search (email_fanout_merge). */
+typedef struct {
+   const email_account_t *accounts;
+   char *warn_out;
+   size_t warn_len;
+   email_search_report_t *report;
+   int any_error;
+   int any_timeout;
+} fanout_fail_t;
+
+static void fanout_failed(void *ctx, int index, const email_fanout_slot_t *slot) {
+   fanout_fail_t *ff = ctx;
+   const email_account_t *acct = &ff->accounts[index];
+   /* Logged, and in warn_out so the model can tell the user the results are
+    * partial: an auth failure would otherwise be invisible when other accounts
+    * return matches. */
+   ff->any_error = 1;
+   if (slot->rc == EMAIL_RC_TIMEOUT)
+      ff->any_timeout = 1;
+   const char *reason = search_failure_reason(slot->err);
+   OLOG_WARNING("email: search failed for account '%s' (rc=%d, %s)", acct->name, slot->rc, reason);
+   if (ff->warn_out && ff->warn_len > 0) {
+      size_t used = strlen(ff->warn_out);
+      snprintf(ff->warn_out + used, ff->warn_len - used, "%s%s (%s)", used > 0 ? ", " : "",
+               acct->name, reason);
+   }
+   if (ff->report->failed_count < EMAIL_MAX_ACCOUNTS) {
+      ff->report->failed[ff->report->failed_count].account_id = acct->id;
+      ff->report->failed[ff->report->failed_count].err = slot->err;
+      ff->report->failed_count++;
    }
 }
 
@@ -502,6 +559,8 @@ int email_service_search(int user_id,
 
    if (!validate_folder_name(params->folder))
       return EMAIL_RC_INVALID_FOLDER;
+   if (max <= 0)
+      return EMAIL_RC_FAILURE;
 
    /* One account (by id, or named) — search just that one */
    if (target || (account_name && account_name[0])) {
@@ -532,65 +591,62 @@ int email_service_search(int user_id,
       report->err = EMAIL_ERR_NO_ACCOUNT;
       return EMAIL_RC_NO_ACCOUNTS;
    }
-   int enabled_seen = 0;
-   int any_error = 0;
-   int any_timeout = 0;
-   int total = 0;
-   for (int i = 0; i < acct_count && total < max; i++) {
+   /* The enabled ones, in list order (the order their results are merged in). */
+   int enabled = 0;
+   for (int i = 0; i < acct_count; i++) {
       if (!accounts[i].enabled)
          continue;
-      enabled_seen = 1;
-
-      int this_count = 0;
-      int remaining = max - total;
-      email_err_t acct_err = EMAIL_ERR_NONE;
-      /* A busy account is reported, not waited out: the others shouldn't wait
-       * behind it one after another. */
-      int rc = search_single_account(&accounts[i], params, out + total, remaining, &this_count,
-                                     NULL, 0, NULL, EMAIL_LEASE_FANOUT_WAIT_SEC, NULL, NULL,
-                                     &acct_err);
-      if (rc == 0) {
-         total += this_count;
-      } else if (acct_err == EMAIL_ERR_CANCELLED) {
-         /* Stopped: the rest of the accounts shouldn't be searched either. */
-         sodium_memzero(accounts, sizeof(accounts));
-         *out_count = total;
-         report->err = EMAIL_ERR_CANCELLED;
-         return EMAIL_RC_FAILURE;
-      } else {
-         /* Per-account transport/upstream failure.  Logged (not silent) so a
-          * genuine backend problem is diagnosable from the log; the search still
-          * continues across the remaining accounts.  Also surfaced to warn_out so
-          * the LLM can tell the user results are partial — an auth failure would
-          * otherwise be completely invisible when other accounts return matches. */
-         any_error = 1;
-         if (rc == EMAIL_RC_TIMEOUT)
-            any_timeout = 1;
-         const char *reason = search_failure_reason(acct_err);
-         OLOG_WARNING("email: search failed for account '%s' (rc=%d, %s)", accounts[i].name, rc,
-                      reason);
-         if (warn_out && warn_len > 0) {
-            size_t used = strlen(warn_out);
-            snprintf(warn_out + used, warn_len - used, "%s%s (%s)", used > 0 ? ", " : "",
-                     accounts[i].name, reason);
-         }
-         if (report->failed_count < EMAIL_MAX_ACCOUNTS) {
-            report->failed[report->failed_count].account_id = accounts[i].id;
-            report->failed[report->failed_count].err = acct_err;
-            report->failed_count++;
-         }
-      }
+      if (enabled != i)
+         accounts[enabled] = accounts[i];
+      enabled++;
    }
+   if (enabled == 0) {
+      sodium_memzero(accounts, sizeof(accounts));
+      report->err = EMAIL_ERR_NO_ACCOUNT;
+      return EMAIL_RC_NO_ACCOUNTS;
+   }
+
+   /* Every account at once: the search takes as long as the slowest one, not
+    * all of them added up.  Each is asked for max rows, and the merge takes
+    * what the one-at-a-time search would have (an account's newest rows, up
+    * to what max leaves); where a listed message vanished before its fetch,
+    * the next one fills its place. */
+   fanout_search_t fs = { .accounts = accounts, .params = params };
+   email_fanout_slot_t slots[EMAIL_MAX_ACCOUNTS];
+   if (email_fanout_run(enabled, max, fanout_search_one, &fs, slots) != 0) {
+      sodium_memzero(accounts, sizeof(accounts));
+      return EMAIL_RC_FAILURE;
+   }
+   for (int i = 0; i < enabled; i++) {
+      if (slots[i].rc == 0)
+         OLOG_INFO("email: search '%s' %lld ms, %d results", accounts[i].name,
+                   (long long)slots[i].ms, slots[i].count);
+      else
+         OLOG_INFO("email: search '%s' %lld ms, failed (%s)", accounts[i].name,
+                   (long long)slots[i].ms, search_failure_reason(slots[i].err));
+   }
+
+   fanout_fail_t ff = { .accounts = accounts,
+                        .warn_out = warn_out,
+                        .warn_len = warn_len,
+                        .report = report };
+   int total = 0;
+   const bool whole = email_fanout_merge(slots, enabled, max, out, &total, fanout_failed, &ff);
+   email_fanout_free(slots, enabled);
    sodium_memzero(accounts, sizeof(accounts));
+   if (!whole) {
+      /* Stopped: what was found before the stopped account is kept. */
+      *out_count = total;
+      report->err = EMAIL_ERR_CANCELLED;
+      return EMAIL_RC_FAILURE;
+   }
+   const int any_error = ff.any_error;
+   const int any_timeout = ff.any_timeout;
 
    *out_count = total;
    if (total > 0) {
       report->err = EMAIL_ERR_NONE;
       return EMAIL_RC_OK;
-   }
-   if (!enabled_seen) {
-      report->err = EMAIL_ERR_NO_ACCOUNT;
-      return EMAIL_RC_NO_ACCOUNTS;
    }
    /* Zero results across all enabled accounts: distinguish a genuine no-match
     * (every account searched OK, just nothing matched) from a real failure (at

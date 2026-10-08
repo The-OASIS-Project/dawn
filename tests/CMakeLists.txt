@@ -532,6 +532,14 @@ dawn_add_unit_test(test_email_transfer
    LIBS    unity pthread ${CURL_LIBRARIES}
    LABEL   ci)
 
+# Searching every account at once: same results as one at a time, overlapping.
+dawn_add_unit_test(test_email_fanout
+   SOURCES test_email_fanout.c
+           ${SRC_ROOT}/src/tools/email_fanout.c
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    unity pthread ${CURL_LIBRARIES}
+   LABEL   ci)
+
 # An IMAP account's capabilities and Trash/Archive folders, from its replies.
 dawn_add_unit_test(test_email_imap_roles
    SOURCES test_email_imap_roles.c

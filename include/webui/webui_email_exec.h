@@ -36,6 +36,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tools/email_fanout.h"
 #include "tools/email_service.h"
 #include "webui/email_wire.h"
 #include "webui/webui_email_exec_policy.h"
@@ -52,7 +53,7 @@ extern "C" {
 
 #define EMAIL_EXEC_WORKERS 4
 #define EMAIL_EXEC_USER_WORKERS (EMAIL_EXEC_WORKERS / 2) /* while others have work waiting */
-#define EMAIL_EXEC_STACK_BYTES (1024 * 1024)
+#define EMAIL_EXEC_STACK_BYTES EMAIL_WORKER_STACK_BYTES
 #define EMAIL_EXEC_MAX_TASKS 16               /* accounts one request may span */
 #define EMAIL_EXEC_REQ_MAX EMAIL_WIRE_REQ_MAX /* the client's req, in bytes */
 #define EMAIL_EXEC_VERB_MAX 48
