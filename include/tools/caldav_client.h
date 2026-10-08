@@ -175,6 +175,37 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
 void caldav_event_list_free(caldav_event_list_t *list);
 
 /**
+ * The events in a calendar-query REPORT response (a multistatus document):
+ * each <d:response>'s href (resolved against @p calendar_url), etag and
+ * calendar-data, with the VEVENT's fields read by libical.  The HTTP half of
+ * caldav_fetch_events(); separate so the parse can be tested without a server.
+ * Caller frees @p result with caldav_event_list_free(), whatever it returns.
+ */
+caldav_error_t caldav_parse_events(const char *xml,
+                                   size_t len,
+                                   const char *calendar_url,
+                                   caldav_event_list_t *result);
+
+/**
+ * Parse one sync-collection multistatus page.
+ *
+ * Appends one caldav_sync_change_t per <d:response> (gone = the response carried
+ * a 404 status) to *@p changes (grown as needed: *@p count used of *@p cap),
+ * writes the page's <d:sync-token> to @p token_out, and sets *@p more_out true
+ * if the page signalled truncation (a 507 status anywhere) so the caller
+ * re-issues with the new token to fetch the next page.
+ */
+caldav_error_t caldav_parse_sync_page(const char *xml,
+                                      int len,
+                                      const char *base_url,
+                                      caldav_sync_change_t **changes,
+                                      int *count,
+                                      int *cap,
+                                      char *token_out,
+                                      size_t token_len,
+                                      bool *more_out);
+
+/**
  * RFC 6578 sync-collection REPORT: enumerate changes since a sync-token.
  *
  * @param sync_token_in  Prior token for an incremental run, or "" / NULL to

@@ -31,6 +31,7 @@
 #include <libxml/tree.h>
 #include <libxml/xpath.h>
 #include <libxml/xpathInternals.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,11 @@
 
 #define CALDAV_TIMEOUT_SEC 30
 #define CALDAV_MAX_RESPONSE_SIZE (4 * 1024 * 1024) /* 4 MB */
+
+/* No network fetches from inside the XML; a malformed response is an error
+ * return, not lines on stderr (the server is whoever the account points at). */
+#define CALDAV_XML_FLAGS \
+   (XML_PARSE_NONET | XML_PARSE_NOBLANKS | XML_PARSE_NOERROR | XML_PARSE_NOWARNING)
 
 /* XML namespace URIs */
 #define NS_DAV "DAV:"
@@ -307,8 +313,7 @@ static caldav_error_t discover_principal(CURL *curl,
    if (err != CALDAV_OK)
       return err;
 
-   xmlDocPtr doc = xmlReadMemory(resp->data, (int)resp->size, NULL, NULL,
-                                 XML_PARSE_NONET | XML_PARSE_NOBLANKS);
+   xmlDocPtr doc = xmlReadMemory(resp->data, (int)resp->size, NULL, NULL, CALDAV_XML_FLAGS);
    if (!doc)
       return CALDAV_ERR_PARSE;
 
@@ -353,8 +358,7 @@ static caldav_error_t discover_calendar_home(CURL *curl,
    if (err != CALDAV_OK)
       return err;
 
-   xmlDocPtr doc = xmlReadMemory(resp->data, (int)resp->size, NULL, NULL,
-                                 XML_PARSE_NONET | XML_PARSE_NOBLANKS);
+   xmlDocPtr doc = xmlReadMemory(resp->data, (int)resp->size, NULL, NULL, CALDAV_XML_FLAGS);
    if (!doc)
       return CALDAV_ERR_PARSE;
 
@@ -406,8 +410,7 @@ static caldav_error_t discover_collections(CURL *curl,
    if (err != CALDAV_OK)
       return err;
 
-   xmlDocPtr doc = xmlReadMemory(resp->data, (int)resp->size, NULL, NULL,
-                                 XML_PARSE_NONET | XML_PARSE_NOBLANKS);
+   xmlDocPtr doc = xmlReadMemory(resp->data, (int)resp->size, NULL, NULL, CALDAV_XML_FLAGS);
    if (!doc)
       return CALDAV_ERR_PARSE;
 
@@ -588,8 +591,7 @@ caldav_error_t caldav_get_ctag(const char *calendar_url,
       return err;
    }
 
-   xmlDocPtr doc = xmlReadMemory(resp.data, (int)resp.size, NULL, NULL,
-                                 XML_PARSE_NONET | XML_PARSE_NOBLANKS);
+   xmlDocPtr doc = xmlReadMemory(resp.data, (int)resp.size, NULL, NULL, CALDAV_XML_FLAGS);
    curl_buffer_free(&resp);
    if (!doc)
       return CALDAV_ERR_PARSE;
@@ -682,10 +684,22 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
       return err;
    }
 
-   /* Parse multistatus response */
-   xmlDocPtr doc = xmlReadMemory(resp.data, (int)resp.size, NULL, NULL,
-                                 XML_PARSE_NONET | XML_PARSE_NOBLANKS);
+   err = caldav_parse_events(resp.data, resp.size, calendar_url, result);
    curl_buffer_free(&resp);
+   return err;
+}
+
+caldav_error_t caldav_parse_events(const char *xml,
+                                   size_t len,
+                                   const char *calendar_url,
+                                   caldav_event_list_t *result) {
+   result->events = NULL;
+   result->count = 0;
+   if (len > INT_MAX)
+      return CALDAV_ERR_PARSE;
+
+   /* Parse multistatus response */
+   xmlDocPtr doc = xmlReadMemory(xml, (int)len, NULL, NULL, CALDAV_XML_FLAGS);
    if (!doc)
       return CALDAV_ERR_PARSE;
 
@@ -895,15 +909,7 @@ static int sync_changes_reserve(caldav_sync_change_t **arr, int *cap, int need) 
    return 0;
 }
 
-/**
- * Parse one sync-collection multistatus page.
- *
- * Appends one caldav_sync_change_t per <d:response> (gone = the response carried
- * a 404 status), writes the page's <d:sync-token> to token_out, and sets
- * *more_out true if the page signalled truncation (a 507 status anywhere) so the
- * caller re-issues with the new token to fetch the next page.
- */
-static caldav_error_t parse_sync_page(const char *xml,
+caldav_error_t caldav_parse_sync_page(const char *xml,
                                       int len,
                                       const char *base_url,
                                       caldav_sync_change_t **changes,
@@ -913,7 +919,7 @@ static caldav_error_t parse_sync_page(const char *xml,
                                       size_t token_len,
                                       bool *more_out) {
    *more_out = false;
-   xmlDocPtr doc = xmlReadMemory(xml, len, NULL, NULL, XML_PARSE_NONET | XML_PARSE_NOBLANKS);
+   xmlDocPtr doc = xmlReadMemory(xml, len, NULL, NULL, CALDAV_XML_FLAGS);
    if (!doc)
       return CALDAV_ERR_PARSE;
 
@@ -1127,8 +1133,9 @@ caldav_error_t caldav_sync_collection(const char *calendar_url,
       }
 
       bool more = false;
-      caldav_error_t prc = parse_sync_page(resp.data, (int)resp.size, calendar_url, &changes,
-                                           &count, &cap, latest_token, sizeof(latest_token), &more);
+      caldav_error_t prc = caldav_parse_sync_page(resp.data, (int)resp.size, calendar_url, &changes,
+                                                  &count, &cap, latest_token, sizeof(latest_token),
+                                                  &more);
       if (prc != CALDAV_OK) {
          rc = prc;
          break;

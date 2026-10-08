@@ -1456,6 +1456,17 @@ dawn_add_unit_test(test_iso8601
    LIBS    unity
    LABEL   ci)
 
+# Reading CalDAV responses (multistatus XML, iCalendar via libical), no server.
+if(LIBXML2_FOUND AND LIBICAL_FOUND)
+   dawn_add_unit_test(test_caldav_parse
+      SOURCES test_caldav_parse.c
+              ${SRC_ROOT}/src/tools/caldav_client.c
+      LIBS    dawn_common unity ${LIBXML2_LIBRARIES} ${LIBICAL_LIBRARIES} ${CURL_LIBRARIES}
+      LABEL   ci)
+   target_include_directories(test_caldav_parse PRIVATE ${LIBXML2_INCLUDE_DIRS})
+   target_compile_definitions(test_caldav_parse PRIVATE DAWN_ENABLE_CALENDAR_TOOL)
+endif()
+
 # The URL fetcher's private-address block (IP literals only, no network).
 dawn_add_unit_test(test_url_whitelist
    SOURCES test_url_whitelist.c
