@@ -75,8 +75,9 @@ suite that triggered it.
 
 ## Static analysis
 
-- **clang-tidy**, version pinned by hash (`.github/clang-tidy-requirements.txt`), over every source in
-  `src/` and `common/src/`. Checks: `bugprone-*`, `cert-*` and the clang static analyzer
+- **clang-tidy**, version pinned by hash (`.github/clang-tidy-requirements.txt`), over the sources in
+  `src/` and `common/src/` that the build being checked compiles (CI's build leaves a few out; see
+  [Not covered](#not-covered)). Checks: `bugprone-*`, `cert-*` and the clang static analyzer
   (`clang-analyzer-*`). `.clang-tidy` makes every finding an error, and lists each check that is turned off
   with its reason. A false positive is suppressed where it occurs, with the reason beside it.
   `scripts/run_clang_tidy.py` runs it.
@@ -171,7 +172,7 @@ On every push and pull request (`.github/workflows/ci.yml`), in parallel:
 | `source-checks` | invariants that need no build |
 | `unit-tests` | the `ci` preset: build the suites, run `ctest -L ci` |
 | `sanitizers` | the same suites under `asan` and under `tsan` |
-| `clang-tidy` | the pinned clang-tidy over every DAWN source; any finding fails |
+| `clang-tidy` | the pinned clang-tidy over the DAWN sources the `ci` build (WebUI on) compiles; any finding fails |
 | `fuzz` | each libFuzzer harness for 60 seconds |
 | `docker-build` | the full image, `-Wall -Werror` at `-O2`; the daemon links and runs `--help` |
 | `satellite-build` | the Raspberry Pi satellite, headless |
@@ -229,6 +230,7 @@ On a GitHub-hosted Ubuntu 22.04 runner the sanitizers need `sudo sysctl -w vm.mm
 - **Hardware paths** (audio devices, GPU ASR, TTS) are tested on the developer's Jetson (`hardware`
   label), not in CI.
 - **Code-projects** (the coding harness) needs libgit2 1.6 or later, so its git suite and its sources'
-  clang-tidy pass run on the developer's machine, not in CI. The same goes for clang-tidy on the two files
-  that include ONNX Runtime's headers (`memory_embed_onnx.c`, `text_to_speech.cpp`), which isn't packaged
-  for Ubuntu.
+  clang-tidy pass run on the developer's machine, not in CI. The same goes for clang-tidy on the Whisper
+  backend (a submodule CI doesn't fetch), the terminal UI (off in the `ci` preset) and the two files that
+  include ONNX Runtime's headers (`memory_embed_onnx.c`, `text_to_speech.cpp`), which isn't packaged for
+  Ubuntu. The full local run (`scripts/run_clang_tidy.py build-debug`) covers all of them.
