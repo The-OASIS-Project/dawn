@@ -244,10 +244,6 @@ void url_fetcher_cleanup(void) {
    pthread_mutex_unlock(&module_mutex);
 }
 
-int url_fetcher_is_initialized(void) {
-   return __atomic_load_n(&module_initialized, __ATOMIC_ACQUIRE);
-}
-
 // =============================================================================
 // Whitelist Functions
 // =============================================================================
@@ -320,10 +316,6 @@ void url_whitelist_clear(void) {
    }
    whitelist_count = 0;
    pthread_mutex_unlock(&module_mutex);
-}
-
-int url_whitelist_count(void) {
-   return __atomic_load_n(&whitelist_count, __ATOMIC_ACQUIRE);
 }
 
 int url_whitelist_add(const char *entry) {

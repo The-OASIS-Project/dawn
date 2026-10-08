@@ -185,11 +185,6 @@ void weather_service_cleanup(void) {
    OLOG_INFO("weather_service: Cleanup complete");
 }
 
-int weather_service_is_initialized(void) {
-   // Use atomic load for thread-safe access without full mutex lock
-   return __atomic_load_n(&module_initialized, __ATOMIC_ACQUIRE);
-}
-
 // US state abbreviation to full name mapping
 static const struct {
    const char *abbrev;

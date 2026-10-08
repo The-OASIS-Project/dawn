@@ -46,13 +46,20 @@ const char *llm_get_current_thinking_mode(void) {
 const char *llm_get_current_reasoning_effort(void) {
    return "medium";
 }
+static bool s_suppressed;
+static const char *s_utility_effort = "";
 bool llm_tools_suppressed(void) {
-   return false;
+   return s_suppressed;
+}
+const char *llm_get_current_utility_effort(void) {
+   return s_utility_effort;
 }
 
 static toml_table_t *s_root;
 
 void setUp(void) {
+   s_suppressed = false;
+   s_utility_effort = "";
    s_local = LOCAL_PROVIDER_LLAMA_CPP;
 }
 void tearDown(void) {
@@ -123,6 +130,71 @@ static void test_budget_claude_uses_budget_levels(void) {
    llm_thinking_resolved_t r = resolve(CLOUD_PROVIDER_CLAUDE, "claude-haiku-4-5", "enabled", "max");
    assert_resolved(r, LLM_THINK_ENABLED, "xhigh", true); /* nearest budget level */
    TEST_ASSERT_TRUE(r.budget);
+}
+
+/* Haiku 5.5 is adaptive-only plus an off switch: no budget mode, unlike 4.5. */
+static void test_haiku_5_5_is_adaptive_with_an_off_switch(void) {
+   llm_thinking_caps_t caps;
+   llm_thinking_caps(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "claude-haiku-5-5", &caps);
+   TEST_ASSERT_EQUAL_INT(2, caps.mode_count);
+   TEST_ASSERT_EQUAL_INT(LLM_THINK_DISABLED, caps.modes[0].mode);
+   TEST_ASSERT_EQUAL_INT(LLM_THINK_ADAPTIVE, caps.modes[1].mode);
+   TEST_ASSERT_FALSE(caps.modes[1].budget);
+   TEST_ASSERT_EQUAL_INT(5, caps.modes[1].effort_count); /* low..max */
+
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-haiku-5-5", "disabled", "high"),
+                   LLM_THINK_DISABLED, "", false);
+   /* A budget pick (what 4.5 took) becomes adaptive at the same level. */
+   llm_thinking_resolved_t r = resolve(CLOUD_PROVIDER_CLAUDE, "claude-haiku-5-5", "enabled",
+                                       "xhigh");
+   assert_resolved(r, LLM_THINK_ADAPTIVE, "xhigh", false);
+   TEST_ASSERT_FALSE(r.budget);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENROUTER, "anthropic/claude-haiku-5.5", "disabled",
+                           "low"),
+                   LLM_THINK_DISABLED, "", false);
+}
+
+static llm_thinking_resolved_t resolve_utility(const char *model, const char *effort) {
+   s_suppressed = true;
+   s_utility_effort = effort;
+   llm_thinking_resolved_t r;
+   llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, model, &r);
+   return r;
+}
+
+/* A tools-off call (extraction) gets the cheapest setting unless it asked for
+ * reasoning: then the model's first reasoning mode at that effort. */
+static void test_utility_call_with_an_effort_reasons(void) {
+   llm_thinking_resolved_t r = resolve_utility("claude-haiku-5-5", "");
+   assert_resolved(r, LLM_THINK_DISABLED, "", false); /* unchanged: cheapest */
+
+   r = resolve_utility("claude-haiku-5-5", "medium");
+   TEST_ASSERT_EQUAL_STRING("adaptive", llm_think_mode_name(r.mode));
+   TEST_ASSERT_EQUAL_STRING("medium", r.effort);
+   /* A model that also lists a budget mode takes adaptive, its first. */
+   r = resolve_utility("claude-sonnet-4-6", "medium");
+   TEST_ASSERT_EQUAL_STRING("adaptive", llm_think_mode_name(r.mode));
+   /* A budget-only model takes a budget at that level. */
+   r = resolve_utility("claude-haiku-4-5", "medium");
+   TEST_ASSERT_EQUAL_STRING("enabled", llm_think_mode_name(r.mode));
+   TEST_ASSERT_TRUE(r.budget);
+   TEST_ASSERT_EQUAL_STRING("medium", r.effort);
+   /* An adaptive-only model honors the effort instead of its lowest. */
+   r = resolve_utility("claude-opus-5-5", "high");
+   TEST_ASSERT_EQUAL_STRING("adaptive", llm_think_mode_name(r.mode));
+   TEST_ASSERT_EQUAL_STRING("high", r.effort);
+   /* Not a tools-off call: the effort is ignored, the session's mode applies. */
+   s_suppressed = false;
+   llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "claude-haiku-5-5", &r);
+   TEST_ASSERT_EQUAL_STRING("disabled", llm_think_mode_name(r.mode));
+}
+
+static void test_mid_system_models(void) {
+   TEST_ASSERT_TRUE(llm_model_mid_system("claude-haiku-5-5"));
+   TEST_ASSERT_TRUE(llm_model_mid_system("claude-sonnet-5-5"));
+   TEST_ASSERT_TRUE(llm_model_mid_system("claude-opus-5-5"));
+   TEST_ASSERT_FALSE(llm_model_mid_system("claude-sonnet-5"));
+   TEST_ASSERT_FALSE(llm_model_mid_system("claude-haiku-4-5"));
 }
 
 static void test_claude_with_both_shapes_honours_the_pick(void) {
@@ -316,11 +388,15 @@ int main(void) {
       return 1;
    }
    llm_capabilities_load_registry(s_root);
+   llm_capabilities_load_mid_system(s_root);
 
    UNITY_BEGIN();
    RUN_TEST(test_adaptive_only_claude_has_no_off_switch);
    RUN_TEST(test_claude_that_accepts_disabled);
    RUN_TEST(test_budget_claude_uses_budget_levels);
+   RUN_TEST(test_haiku_5_5_is_adaptive_with_an_off_switch);
+   RUN_TEST(test_mid_system_models);
+   RUN_TEST(test_utility_call_with_an_effort_reasons);
    RUN_TEST(test_claude_with_both_shapes_honours_the_pick);
    RUN_TEST(test_openai_rows);
    RUN_TEST(test_gemini_rows);

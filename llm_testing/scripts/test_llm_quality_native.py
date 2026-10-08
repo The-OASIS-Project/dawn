@@ -30,7 +30,13 @@ from typing import Dict, List, Tuple
 
 import requests
 
+# Claude's reasoning fields as DAWN sends them with thinking off (models.toml).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                                "benchmarks"))
+from anthropic_request import thinking_fields  # noqa: E402
+
 SERVER = "http://127.0.0.1:8080"
+WITH_TIME = True
 
 # =============================================================================
 # System prompt — persona + concise rules ONLY.  The tool grammar now lives in
@@ -289,6 +295,9 @@ def query_llm_claude(prompt: str, max_tokens: int) -> Tuple[str, List[Dict], flo
     payload = {"model": CLOUD_MODEL, "max_tokens": max(max_tokens, 512),
                "system": SYSTEM_PROMPT, "tools": claude_tools(),
                "messages": [{"role": "user", "content": prompt}]}
+    # Thinking as DAWN sends it with [llm.thinking] mode = "disabled": newer
+    # models otherwise think at their default effort, which DAWN never asks for.
+    payload.update(thinking_fields(CLOUD_MODEL))
     try:
         start = time.time()
         r = requests.post("https://api.anthropic.com/v1/messages",
@@ -343,7 +352,23 @@ def query_llm_local(prompt: str, max_tokens: int) -> Tuple[str, List[Dict], floa
         return None, [], 0, {"error": str(e)}
 
 
+def turn_head() -> str:
+    """The time line DAWN puts at the head of every user turn
+    (prompt_turn_head() in src/core/prompt_sections.c): without it a model
+    must guess today's date or spend the single-shot test asking for it."""
+    now = time.localtime()
+    off = time.strftime("%z", now)
+    off = f"{off[:3]}:{off[3:]}" if len(off) == 5 else "Z"
+    return ("[system_time] Current time: "
+            f"{time.strftime('%A, %Y-%m-%d %H:%M %Z', now)} "
+            f"(ISO: {time.strftime('%Y-%m-%dT%H:%M:%S', now)}{off}).  This timestamp is "
+            "fresh as of this turn; use it for relative-time computations and tool args "
+            "like `fire_at`.  The `time` tool is only needed for sub-second precision.\n")
+
+
 def query_llm(prompt: str, max_tokens: int = 200):
+    if WITH_TIME:
+        prompt = turn_head() + prompt
     if BACKEND == "claude":
         return query_llm_claude(prompt, max_tokens)
     if BACKEND == "openai":
@@ -570,7 +595,10 @@ if __name__ == "__main__":
     ap.add_argument("--cloud", choices=["claude", "openai"])
     ap.add_argument("--model")
     ap.add_argument("--api-key")
+    ap.add_argument("--no-time", action="store_true",
+                    help="Leave out DAWN's per-turn [system_time] line (older runs had none)")
     args = ap.parse_args()
+    WITH_TIME = not args.no_time
 
     if args.cloud:
         if not args.model:

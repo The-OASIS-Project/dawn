@@ -43,6 +43,65 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-08 — Memory extraction: Claude Haiku 5.5 with reasoning is now recommended
+
+**What changed.**
+- A new setting, `[memory] extraction_effort` ("Extraction Reasoning" in
+  Settings → Memory System), lets the model that pulls facts out of your
+  conversations think before it writes them: `"off"`, `"low"`, `"medium"` or
+  `"high"`. It defaults to `"off"`, which is how extraction has always run.
+- The recommended memory setup is now Claude Haiku 5.5 with `"medium"`
+  reasoning, replacing Claude Haiku 4.5. In DAWN's memory benchmark it
+  remembers better (LoCoMo answer accuracy 73% → 77%) at about a fifth of
+  Haiku 4.5's cost. The recommended compaction model moves to Haiku 5.5 too.
+- Your settings don't change on their own: DAWN keeps the extraction and
+  compaction models you already have.
+
+**What you need to do.** Optional, but recommended if you use Claude for
+memory extraction:
+1. In Settings → Memory System, set **Extraction Model** to
+   `claude-haiku-5-5` and **Extraction Reasoning** to `medium`.
+2. If you compact with a dedicated model, set **Compaction Model** (Settings →
+   Language Model) to `claude-haiku-5-5`.
+
+Or in `dawn.toml`:
+```toml
+[memory]
+extraction_model = "claude-haiku-5-5"
+extraction_effort = "medium"
+
+[llm]
+compact_model = "claude-haiku-5-5"
+```
+Extraction runs in the background after a conversation, so reasoning doesn't
+slow your replies. If your extraction runs on a local model on the same server
+as DAWN, leave Extraction Reasoning off unless you've tested it: longer
+extraction keeps that server busy.
+
+---
+
+## 2026-10-07 — Claude Haiku 5.5 added; default model shortlists refreshed
+
+**What changed.** Claude Haiku 5.5 (`claude-haiku-5-5`, on OpenRouter
+`anthropic/claude-haiku-5.5`) is supported: a 1M-token context, reasoning that
+can be turned off, and about a tenth of Haiku 4.5's price. The built-in Claude
+and OpenRouter shortlists in the model switcher now list Haiku 4.5, Haiku 5.5,
+Sonnet 5.5 and Opus 5.5 in place of Sonnet 5, Opus 4.8 and Opus 5. The default
+Claude model is still Haiku 4.5.
+
+**What you need to do.**
+- Nothing, if you've saved your settings from the WebUI before: your own model
+  lists are kept. To add Haiku 5.5, add it in Settings → Language Model.
+- If you keep your own `models.toml` (in `./`, `~/.config/dawn/` or
+  `/etc/dawn/`), merge in the new `claude-haiku-5-5` rows from the shipped
+  file: the `[anthropic]` context window, the `[thinking.anthropic]` row, and
+  the `[mid_system]` list (which also gains `claude-sonnet-5-5`). Without them
+  Haiku 5.5 still works, but with a 200K window, with reasoning that can't be
+  turned off (memory extraction and summaries then pay for it), and without
+  mid-conversation instructions.
+
+---
+
 ## 2026-10-07 — Old conversation copies in `logs/` are safe to delete
 
 **What changed.** Versions from December 2025 until 2026-09-30 saved a full copy

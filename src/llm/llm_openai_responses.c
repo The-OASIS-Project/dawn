@@ -188,7 +188,8 @@ static struct json_object *flatten_tools_for_responses(struct json_object *cc_to
 /* The request's reasoning effort: the session's mode and effort resolved
  * against the model (models.toml [thinking.openai]).  "disabled" is effort
  * "none"; a model that can't turn reasoning off, or a utility call, gets its
- * lowest level.  Always explicit: an omitted effort runs OpenAI's default. */
+ * lowest level (a utility call with its own utility_effort gets that).  Always explicit: an omitted
+ * effort runs OpenAI's default. */
 static const char *select_reasoning_effort(const char *model_name,
                                            llm_thinking_resolved_t *resolved) {
    llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name, resolved);
