@@ -537,8 +537,17 @@ void llm_thinking_resolve_current(llm_type_t type,
    }
    llm_thinking_caps_t caps;
    llm_thinking_caps(type, provider, model, &caps);
+   /* A tools-off call gets the model's cheapest setting, unless it asked for
+    * reasoning (memory extraction's [memory] extraction_effort): then the
+    * model's first reasoning mode at that effort. */
+   const bool utility = llm_tools_suppressed();
+   const char *utility_effort = utility ? llm_get_current_utility_effort() : "";
+   if (utility_effort[0]) {
+      llm_thinking_resolve(&caps, "auto", utility_effort, false, out);
+      return;
+   }
    llm_thinking_resolve(&caps, llm_get_current_thinking_mode(), llm_get_current_reasoning_effort(),
-                        llm_tools_suppressed(), out);
+                        utility, out);
 }
 
 int llm_thinking_budget_size(const char *level) {

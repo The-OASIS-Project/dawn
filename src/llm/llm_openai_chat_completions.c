@@ -168,7 +168,7 @@ static json_object *local_template_kwargs(bool thinking) {
 static void add_local_thinking_params(json_object *root) {
    /* The session's mode and effort, resolved for the local provider in use
     * (llama.cpp: off or a fixed budget; Ollama: think on or off).  A utility
-    * call resolves to off. */
+    * call resolves to off, or to its own utility_effort when it set one. */
    llm_thinking_resolved_t thinking;
    llm_thinking_resolve_current(LLM_LOCAL, CLOUD_PROVIDER_NONE, NULL, &thinking);
    const bool on = thinking.controllable && thinking.mode != LLM_THINK_DISABLED;
@@ -293,6 +293,14 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
 
    if (model_name && model_name[0] != '\0') {
       json_object_object_add(root, "model", json_object_new_string(model_name));
+   }
+
+   /* Reasoning as the streaming request sends it: a tools-off call (memory
+    * extraction, compaction) gets its own setting, not the server's default. */
+   if (api_key == NULL) {
+      add_local_thinking_params(root);
+   } else {
+      add_cloud_reasoning_effort(root, model_name, base_url);
    }
 
    json_object_object_add(root, "messages", converted_history);

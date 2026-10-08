@@ -2253,6 +2253,10 @@ const char *llm_get_current_reasoning_effort(void) {
    return LLM_REASONING_EFFORT_DEFAULT;
 }
 
+const char *llm_get_current_utility_effort(void) {
+   return tl_current_config ? tl_current_config->utility_effort : "";
+}
+
 int llm_budget_tokens_for_effort(const char *effort) {
    /* The level's size (the capability module owns the levels), capped for
     * the current model below. */

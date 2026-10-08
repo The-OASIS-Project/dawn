@@ -191,8 +191,10 @@ void llm_thinking_resolve(const llm_thinking_caps_t *caps,
  *
  * The session's thinking mode and effort (llm_get_current_thinking_mode /
  * llm_get_current_reasoning_effort) against the model's capabilities, as a
- * utility call when tools are suppressed for it.  What every request builder
- * sends.  For a local model, detects the local provider first if nothing has
+ * utility call when tools are suppressed for it.  A utility call whose config
+ * sets utility_effort (memory extraction's [memory] extraction_effort) gets the
+ * model's first reasoning mode at that effort instead.  What every request
+ * builder sends.  For a local model, detects the local provider first if nothing has
  * (a request can't send budget levels it may not have).
  */
 void llm_thinking_resolve_current(llm_type_t type,

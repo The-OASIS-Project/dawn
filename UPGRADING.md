@@ -12,6 +12,24 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-08 — New opt-in setting: reasoning for memory extraction
+
+**What changed.** A new setting, `[memory] extraction_effort` ("Extraction
+Reasoning" in Settings → Memory System), lets the model that pulls facts out of your
+conversations think before it writes them: `"off"`, `"low"`, `"medium"` or
+`"high"`. It defaults to `"off"`, which is how extraction has always run, so
+nothing changes unless you turn it on.
+
+**What you need to do.** Nothing. If you use Claude Haiku 5.5 for extraction,
+`"medium"` is recommended: in DAWN's memory benchmark it remembered noticeably
+better (LoCoMo answer accuracy 72% → 77%) for more output tokens, still a
+fraction of what Haiku 4.5 costs. Extraction runs in the background after a
+conversation, so it doesn't slow your replies. If your extraction runs on a
+local model on the same server as DAWN, leave it off unless you've tested it:
+longer extraction keeps that server busy.
+
+---
+
 ## 2026-10-07 — Claude Haiku 5.5 added; default model shortlists refreshed
 
 **What changed.** Claude Haiku 5.5 (`claude-haiku-5-5`, on OpenRouter

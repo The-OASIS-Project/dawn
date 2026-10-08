@@ -1495,6 +1495,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->memory.extraction_model));
    json_object_object_add(memory, "extraction_timeout_ms",
                           json_object_new_int(config->memory.extraction_timeout_ms));
+   json_object_object_add(memory, "extraction_effort",
+                          json_object_new_string(config->memory.extraction_effort));
    json_object_object_add(memory, "paraphrase_dedup_enabled",
                           json_object_new_boolean(config->memory.paraphrase_dedup_enabled));
    json_object_object_add(memory, "paraphrase_dedup_threshold",
@@ -2465,6 +2467,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    write_toml_string(fp, "extraction_provider", config->memory.extraction_provider);
    write_toml_string(fp, "extraction_model", config->memory.extraction_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);
+   write_toml_string(fp, "extraction_effort", config->memory.extraction_effort);
    fprintf(fp, "paraphrase_dedup_enabled = %s\n",
            config->memory.paraphrase_dedup_enabled ? "true" : "false");
    fprintf(fp, "paraphrase_dedup_threshold = %.2f\n", config->memory.paraphrase_dedup_threshold);

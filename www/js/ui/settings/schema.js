@@ -885,6 +885,19 @@
                hint: 'LLM timeout for memory fact extraction (default 120s)',
                advanced: true,
             },
+            extraction_effort: {
+               type: 'select',
+               label: 'Extraction Reasoning',
+               options: ['off', 'low', 'medium', 'high'],
+               default: 'off',
+               hint:
+                  'How hard the extraction model reasons before writing facts. "off" uses the ' +
+                  "model's cheapest setting. On Claude Haiku 5.5, \"medium\" raised LoCoMo answer " +
+                  'accuracy from 72% to 77% (mean of two runs) at about 2.4x the output tokens. ' +
+                  'Fact extraction only. On a local model that shares its server with chat, ' +
+                  'leave off unless tested: reasoning keeps the server busy longer.',
+               advanced: true,
+            },
             silent_observe_provider: {
                type: 'select',
                label: 'Silent-Observe Provider',

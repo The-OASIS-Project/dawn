@@ -77,6 +77,10 @@ bool llm_tools_enabled(const llm_resolved_config_t *c) {
 bool llm_tools_suppressed(void) {
    return s_suppressed;
 }
+static const char *s_utility_effort = "";
+const char *llm_get_current_utility_effort(void) {
+   return s_utility_effort;
+}
 int llm_budget_tokens_for_effort(const char *effort) {
    return (effort && strcmp(effort, "low") == 0) ? 1024 : 8192;
 }
@@ -148,6 +152,7 @@ void setUp(void) {
    g_config.llm.max_tokens = 4096;
    s_mode = "disabled";
    s_effort = "medium";
+   s_utility_effort = "";
    s_suppressed = false;
 }
 void tearDown(void) {
@@ -372,6 +377,13 @@ static void test_haiku_5_5_never_gets_a_budget(void) {
    req = request_for("claude-haiku-5-5");
    TEST_ASSERT_EQUAL_STRING("disabled", thinking_type(req));
    TEST_ASSERT_NULL(effort_of(req));
+   json_object_put(req);
+
+   /* Extraction with [memory] extraction_effort: adaptive at that effort. */
+   s_utility_effort = "medium";
+   req = request_for("claude-haiku-5-5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("medium", effort_of(req));
    json_object_put(req);
 }
 

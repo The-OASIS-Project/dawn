@@ -1209,6 +1209,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "extraction_provider",
                                              "extraction_model",
                                              "extraction_timeout_ms",
+                                             "extraction_effort",
                                              "paraphrase_dedup_enabled",
                                              "paraphrase_dedup_threshold",
                                              "note_extraction_guard",
@@ -1238,6 +1239,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    PARSE_STRING(table, "extraction_provider", config->extraction_provider);
    PARSE_STRING(table, "extraction_model", config->extraction_model);
    PARSE_INT(table, "extraction_timeout_ms", config->extraction_timeout_ms);
+   PARSE_STRING(table, "extraction_effort", config->extraction_effort);
    PARSE_BOOL(table, "paraphrase_dedup_enabled", config->paraphrase_dedup_enabled);
    PARSE_DOUBLE(table, "paraphrase_dedup_threshold", config->paraphrase_dedup_threshold);
    CONFIG_CLAMP(config->paraphrase_dedup_threshold, 0.5f, 1.0f);
@@ -1751,6 +1753,16 @@ void config_clamp_memory(memory_config_t *config) {
       return;
    }
    CONFIG_CLAMP(config->fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN, MEMORY_FACT_CACHE_MB_MAX);
+
+   /* extraction_effort: "off" or an effort level; anything else is "off". */
+   if (strcmp(config->extraction_effort, "off") != 0 &&
+       strcmp(config->extraction_effort, "low") != 0 &&
+       strcmp(config->extraction_effort, "medium") != 0 &&
+       strcmp(config->extraction_effort, "high") != 0) {
+      OLOG_WARNING("Invalid [memory] extraction_effort '%s'; using 'off'",
+                   config->extraction_effort);
+      safe_strscpy(config->extraction_effort, "off");
+   }
 
    /* Clamp context_budget_tokens to valid range */
    if (config->context_budget_tokens < 100) {

@@ -779,6 +779,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_STR(section, "extraction_provider", config->memory.extraction_provider);
       JSON_TO_CONFIG_STR(section, "extraction_model", config->memory.extraction_model);
       JSON_TO_CONFIG_INT(section, "extraction_timeout_ms", config->memory.extraction_timeout_ms);
+      JSON_TO_CONFIG_STR(section, "extraction_effort", config->memory.extraction_effort);
       JSON_TO_CONFIG_BOOL(section, "note_extraction_guard", config->memory.note_extraction_guard);
       JSON_TO_CONFIG_BOOL(section, "pruning_enabled", config->memory.pruning_enabled);
       JSON_TO_CONFIG_INT(section, "prune_superseded_days", config->memory.prune_superseded_days);

@@ -1614,6 +1614,11 @@ static void *extraction_thread(void *arg) {
                                         "memory_extraction") != SUCCESS) {
       goto cleanup;
    }
+   /* Reasoning for this call ([memory] extraction_effort).  The session-model
+    * fallback below and the other memory-model calls keep the cheapest setting. */
+   if (strcmp(g_config.memory.extraction_effort, "off") != 0) {
+      safe_strscpy(extraction_config.utility_effort, g_config.memory.extraction_effort);
+   }
 
    /* Log the RESOLVED provider/model (post-gateway), not the raw config — under the
     * OpenRouter gateway the resolver rewrites these, and logging g_config here would

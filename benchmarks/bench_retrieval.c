@@ -912,6 +912,8 @@ static void print_usage(const char *prog) {
            "  --extraction-model <name>        Override extraction model (e.g.,\n"
            "                                   claude-haiku-4-5, claude-sonnet-4-6).\n"
            "                                   Used by the four-model sweep.\n"
+           "  --extraction-effort <e>          Override [memory] extraction_effort\n"
+           "                                   (off, low, medium, high).\n"
            "  --search-score-floor <float>     Override g_config.memory.search_score_floor\n"
            "                                   for memory-pipeline mode. 0.0 disables the\n"
            "                                   floor (baseline = pre-2026-05-13 behavior);\n"
@@ -959,6 +961,7 @@ int main(int argc, char *argv[]) {
       { "config", required_argument, 0, 'C' },
       { "extraction-provider", required_argument, 0, 'X' },
       { "extraction-model", required_argument, 0, 'Y' },
+      { "extraction-effort", required_argument, 0, 'Z' },
       { "search-score-floor", required_argument, 0, 'F' },
       { "graph-query-scoring", required_argument, 0, 'Q' },
       { "entity-bonus", required_argument, 0, 'E' },
@@ -971,6 +974,7 @@ int main(int argc, char *argv[]) {
    const char *config_path = "./dawn.toml";
    const char *extraction_provider_override = NULL;
    const char *extraction_model_override = NULL;
+   const char *extraction_effort_override = NULL;
    /* search_score_floor override: sentinel < 0 means "leave g_config alone";
     * any >= 0 value (including 0.0) means "override g_config after load".
     * The 0.0 override is meaningful — it represents the pre-2026-05-13
@@ -984,7 +988,7 @@ int main(int argc, char *argv[]) {
    float entity_bonus_override = -1.0f;
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:F:Q:E:MSrh", long_options,
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:Z:F:Q:E:MSrh", long_options,
                              NULL)) != -1) {
       switch (opt) {
          case 'p':
@@ -1034,6 +1038,9 @@ int main(int argc, char *argv[]) {
             break;
          case 'Y':
             extraction_model_override = optarg;
+            break;
+         case 'Z':
+            extraction_effort_override = optarg;
             break;
          case 'F':
             search_score_floor_override = (float)atof(optarg);
@@ -1105,6 +1112,11 @@ int main(int argc, char *argv[]) {
          snprintf(g_config.memory.extraction_model, sizeof(g_config.memory.extraction_model), "%s",
                   extraction_model_override);
       }
+      if (extraction_effort_override && extraction_effort_override[0]) {
+         snprintf(g_config.memory.extraction_effort, sizeof(g_config.memory.extraction_effort),
+                  "%s", extraction_effort_override);
+         config_clamp_memory(&g_config.memory); /* an unknown value becomes "off" */
+      }
       /* Post-load floor override: 0.0 represents the pre-2026-05-13 baseline
        * (floor disabled), 0.30 is the new default — wire so sweeps can
        * traverse the full range without rebuilding. */
@@ -1137,9 +1149,10 @@ int main(int argc, char *argv[]) {
    } else {
       memset(&g_config, 0, sizeof(g_config));
       memset(&g_secrets, 0, sizeof(g_secrets));
-      if (extraction_provider_override || extraction_model_override) {
-         fprintf(stderr, "bench: --extraction-provider/--extraction-model require "
-                         "--memory-pipeline; ignored in default mode\n");
+      if (extraction_provider_override || extraction_model_override || extraction_effort_override) {
+         fprintf(stderr,
+                 "bench: --extraction-provider/--extraction-model/--extraction-effort require "
+                 "--memory-pipeline; ignored in default mode\n");
       }
    }
 
@@ -1207,9 +1220,10 @@ int main(int argc, char *argv[]) {
               "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","
               "\"mode\":\"memory-pipeline\","
               "\"extraction_provider\":\"%s\",\"extraction_model\":\"%s\","
-              "\"extraction_prompt_sha256\":\"%s\"}\n",
+              "\"extraction_effort\":\"%s\",\"extraction_prompt_sha256\":\"%s\"}\n",
               embedding_engine_dims(), provider, g_config.memory.extraction_provider,
-              g_config.memory.extraction_model, bench_mp_extraction_prompt_sha256());
+              g_config.memory.extraction_model, g_config.memory.extraction_effort,
+              bench_mp_extraction_prompt_sha256());
    } else {
       fprintf(stdout,
               "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","

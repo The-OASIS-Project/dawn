@@ -159,6 +159,8 @@ typedef struct {
    bool suppress_tools;                          /**< Force tools off for this call (internal) */
    char thinking_mode[LLM_THINKING_MODE_MAX];    /**< Thinking: disabled, auto, enabled */
    char reasoning_effort[LLM_THINKING_MODE_MAX]; /**< Reasoning effort: low, medium, high */
+   char utility_effort[LLM_THINKING_MODE_MAX];   /**< A tools-off call's reasoning effort; empty =
+                                                    the model's cheapest setting */
    int timeout_ms; /**< Per-request timeout (0 = use global default) */
 } llm_resolved_config_t;
 

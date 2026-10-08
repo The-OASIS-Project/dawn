@@ -318,6 +318,7 @@ void config_set_defaults(dawn_config_t *config) {
    safe_strscpy(config->memory.extraction_provider, "local");
    safe_strscpy(config->memory.extraction_model, "qwen2.5:7b");
    config->memory.extraction_timeout_ms = 120000; /* 2 minutes for fact extraction */
+   safe_strscpy(config->memory.extraction_effort, "off");
    config->memory.pruning_enabled = true;
    config->memory.prune_superseded_days = 30; /* Delete old superseded facts after 30 days */
    config->memory.prune_stale_days = 180; /* Delete unused low-confidence facts after 6 months */

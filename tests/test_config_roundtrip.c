@@ -260,6 +260,26 @@ static void test_memory_citation_roundtrip(void) {
    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, g_read.memory.citation_reinforcement_boost);
 }
 
+/* --- [memory] extraction_effort ------------------------------------------- */
+
+static void test_memory_extraction_effort_roundtrip(void) {
+   /* Default is "off"; a dropped key would silently turn extraction reasoning
+    * back off on the next WebUI settings save. */
+   snprintf(g_written.memory.extraction_effort, sizeof(g_written.memory.extraction_effort),
+            "medium");
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_STRING("medium", g_read.memory.extraction_effort);
+}
+
+/* An unknown value falls back to "off" (the file and the WebUI share the clamp). */
+static void test_memory_extraction_effort_clamps(void) {
+   snprintf(g_written.memory.extraction_effort, sizeof(g_written.memory.extraction_effort), "max");
+   config_clamp_memory(&g_written.memory);
+   TEST_ASSERT_EQUAL_STRING("off", g_written.memory.extraction_effort);
+}
+
 static void test_focus_document_min_relevance_roundtrip(void) {
    /* A non-default value must survive: a dropped key would silently revert to the
     * default on the next WebUI settings save. */
@@ -540,6 +560,8 @@ static void test_control_characters_survive_the_round_trip(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
+   RUN_TEST(test_memory_extraction_effort_roundtrip);
+   RUN_TEST(test_memory_extraction_effort_clamps);
    RUN_TEST(test_asr_roundtrip);
    RUN_TEST(test_vad_roundtrip);
    RUN_TEST(test_research_roundtrip);

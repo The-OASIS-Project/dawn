@@ -567,6 +567,14 @@
                                   # (entity over-fragmentation). A larger tier is not a free win here.
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
+# extraction_effort = "off"       # Reasoning for fact extraction: "off" (the model's cheapest
+                                  # setting), "low", "medium" or "high".  Adaptive thinking where the
+                                  # model has it, a thinking budget ([llm.thinking] budget_*) on
+                                  # budget-only models.  On claude-haiku-5-5, "medium" raised LoCoMo
+                                  # recall_generation from 0.721 to 0.769 (mean of two runs) at about
+                                  # 2.4x the output tokens; extraction runs in the background.
+                                  # Reasoning tokens count against [llm] max_tokens: keep it at
+                                  # the default (16384) or higher when this is on.
 # note_extraction_guard = true    # Keep reference text filed via the document_manage
                                   # save_note/save_text tool out of semantic memory
                                   # facts. At extraction time the filed bodies (and

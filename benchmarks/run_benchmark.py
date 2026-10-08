@@ -83,6 +83,7 @@ class BenchRetrieval:
       config_path=None,
       extraction_provider="",
       extraction_model="",
+      extraction_effort="",
       search_score_floor=None,
       graph_query_scoring=None,
       entity_bonus=None,
@@ -111,6 +112,8 @@ class BenchRetrieval:
             cmd += ["--extraction-provider", extraction_provider]
          if extraction_model:
             cmd += ["--extraction-model", extraction_model]
+         if extraction_effort:
+            cmd += ["--extraction-effort", extraction_effort]
          if config_path:
             cmd += ["--config", config_path]
          # Floor override: 0.0 is a meaningful value (baseline = no floor),
@@ -1429,6 +1432,13 @@ def _locomo_conv_content_hash(conv):
    return h.hexdigest()
 
 
+def _effort_key_part(engine):
+   """The snapshot key's extraction-effort part: empty for "off" (and engines
+   too old to report it), so caches made before the setting stay valid."""
+   effort = engine.ready_info.get("extraction_effort", "off") or "off"
+   return [] if effort == "off" else [f"effort={effort}"]
+
+
 def _snapshot_cache_paths(cache_dir, engine, conv_idx, conv):
    """Build (db_path, map_path, key) for a single LoCoMo conversation.
    Cache key includes everything that would change the extracted state:
@@ -1449,6 +1459,7 @@ def _snapshot_cache_paths(cache_dir, engine, conv_idx, conv):
       f"v{SNAPSHOT_FORMAT_VERSION}",
       engine.ready_info.get("extraction_provider", ""),
       engine.ready_info.get("extraction_model", ""),
+      *_effort_key_part(engine),
       prompt_hash,
       engine.provider,
       str(engine.dims),
@@ -1948,6 +1959,7 @@ def run_locomo_memory(engines, dataset_path, limit=0, top_k=10, cache_dir=None,
       "prompt_style": prompt_style,
       "extraction_provider": primary_engine.ready_info.get("extraction_provider", ""),
       "extraction_model": primary_engine.ready_info.get("extraction_model", ""),
+      "extraction_effort": primary_engine.ready_info.get("extraction_effort", "off"),
       "extraction_prompt_sha256": primary_engine.ready_info.get(
          "extraction_prompt_sha256", ""),
       "avg_recall_reach": sum(all_recall) / len(all_recall) if all_recall else 0,
@@ -2079,6 +2091,7 @@ def _lme_snapshot_paths(cache_dir, engine, qidx, entry):
       f"v{SNAPSHOT_FORMAT_VERSION}",
       engine.ready_info.get("extraction_provider", ""),
       engine.ready_info.get("extraction_model", ""),
+      *_effort_key_part(engine),
       prompt_hash,
       engine.provider,
       str(engine.dims),
@@ -2330,6 +2343,7 @@ def run_longmemeval_memory(engines, dataset_path, limit=0, top_k=10, cache_dir=N
       "question_types": sorted(question_types) if question_types else "all",
       "extraction_provider": primary_engine.ready_info.get("extraction_provider", ""),
       "extraction_model": primary_engine.ready_info.get("extraction_model", ""),
+      "extraction_effort": primary_engine.ready_info.get("extraction_effort", "off"),
       "extraction_prompt_sha256": primary_engine.ready_info.get(
          "extraction_prompt_sha256", ""),
       "total_q_evaluated": total_q_evaluated,
@@ -2790,6 +2804,14 @@ def main():
       "to load extraction_provider/extraction_model.",
    )
    parser.add_argument(
+      "--extraction-effort",
+      default="",
+      dest="extraction_effort",
+      choices=["", "off", "low", "medium", "high"],
+      help="Override [memory] extraction_effort for --memory-pipeline runs (default: "
+      "dawn.toml's).  Part of the snapshot cache key when not 'off'.",
+   )
+   parser.add_argument(
       "--cache-dir",
       default="./benchmarks/snapshots",
       dest="cache_dir",
@@ -3049,6 +3071,7 @@ def _spawn_engine(args, extraction_provider, extraction_model):
       config_path=args.config_path if args.memory_pipeline else None,
       extraction_provider=extraction_provider,
       extraction_model=extraction_model,
+      extraction_effort=args.extraction_effort if args.memory_pipeline else "",
       search_score_floor=args.search_score_floor,
       graph_query_scoring=args.graph_query_scoring,
       entity_bonus=args.entity_bonus,
