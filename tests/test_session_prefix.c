@@ -55,6 +55,7 @@
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_turn_blocks.h"
 #include "memory/memory_history_loader.h"
+#include "test_tmp.h"
 #include "unity.h"
 
 dawn_config_t g_config;
@@ -549,7 +550,7 @@ static void test_an_envelope_gets_its_context_apart(void) {
 
 /* ---- saving a turn with its conversation (real auth_db) ---- */
 
-static const char *TEST_DB = "/tmp/dawn_test_session_prefix.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
 
 typedef struct {
    int count;
@@ -2314,6 +2315,7 @@ static void test_images_past_an_unsaved_row_wait_for_the_save(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_session_prefix.db");
    UNITY_BEGIN();
    RUN_TEST(test_turns_append_and_never_rewrite);
    RUN_TEST(test_adopting_an_older_history);

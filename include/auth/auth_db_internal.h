@@ -405,9 +405,10 @@
    "  digest_depth INTEGER NOT NULL DEFAULT " STRINGIFY(EMAIL_DEFAULT_DIGEST_DEPTH) ","
 
 /* =============================================================================
- * Database State Structure (~408 bytes in BSS)
+ * Database State Structure
  *
- * Contains the SQLite database handle, mutex, and all 43 prepared statements.
+ * The SQLite database handle, mutex, and the cached prepared statements, each
+ * prepared and finalized from a table (auth_db_statements.c, auth_db_messages.c).
  * Allocated statically in auth_db_core.c, not on heap.
  * ============================================================================= */
 
@@ -702,7 +703,7 @@ typedef struct {
 
    /* === Generic blob store statements (blob_store.c via document_original_store.c) ===
     * Inserted before the OAuth group so stmt_oauth_list_accounts stays the last
-    * field (the _Static_assert + finalize memset bound depend on it). */
+    * field (the statement-count check below depends on it). */
    sqlite3_stmt *stmt_blob_create;
    sqlite3_stmt *stmt_blob_get;
    sqlite3_stmt *stmt_blob_get_file;
@@ -728,24 +729,45 @@ typedef struct {
    sqlite3_stmt *stmt_oauth_list_accounts;
 } auth_db_state_t;
 
-/* Ensure last_stmt_end covers all statement fields (catches reorder bugs).
- * Both invariants protect the memset region in auth_db_finalize_statements():
- *   1. stmt_oauth_list_accounts (the named upper bound) must come after
- *      stmt_create_user (the named lower bound) — else last - first
- *      underflows size_t and memset clears far too much.
- *   2. stmt_oauth_list_accounts must be the actual last field in
- *      auth_db_state_t — else a struct append silently leaks the new
- *      statement pointer (memset skips it, and the finalize chain
- *      forgets to call sqlite3_finalize on it).
- * If you append a new sqlite3_stmt* field, also update both the named
- * upper bound here AND the matching last_stmt_end in
- * auth_db_finalize_statements(). */
-_Static_assert(offsetof(auth_db_state_t, stmt_oauth_list_accounts) >
-                   offsetof(auth_db_state_t, stmt_create_user),
-               "stmt_oauth_list_accounts must be after stmt_create_user");
+/* The statements are the fields from stmt_create_user to the end of the struct.
+ * auth_db_statements.c checks that its table and auth_db_messages.c's list as
+ * many statements as that range holds, so a statement field added without a
+ * table entry fails the build.  These two keep the range the whole set: a new
+ * field outside it (before stmt_create_user, or after stmt_oauth_list_accounts)
+ * fails here instead. */
+#define AUTH_DB_STMT_FIRST stmt_create_user
+#define AUTH_DB_STMT_LAST stmt_oauth_list_accounts
+#define AUTH_DB_STMT_FIELDS                                                  \
+   ((offsetof(auth_db_state_t, AUTH_DB_STMT_LAST) + sizeof(sqlite3_stmt *) - \
+     offsetof(auth_db_state_t, AUTH_DB_STMT_FIRST)) /                        \
+    sizeof(sqlite3_stmt *))
+_Static_assert(offsetof(auth_db_state_t, AUTH_DB_STMT_FIRST) ==
+                   offsetof(auth_db_state_t, last_vacuum) + sizeof(time_t),
+               "stmt_create_user must be the first statement field, right after last_vacuum");
 _Static_assert(sizeof(auth_db_state_t) ==
-                   offsetof(auth_db_state_t, stmt_oauth_list_accounts) + sizeof(sqlite3_stmt *),
-               "stmt_oauth_list_accounts must be the last field — update memset bounds");
+                   offsetof(auth_db_state_t, AUTH_DB_STMT_LAST) + sizeof(sqlite3_stmt *),
+               "stmt_oauth_list_accounts must be the last field");
+
+/** A cached statement: prepared at init, finalized at shutdown, from one table. */
+typedef struct {
+   const char *name; /**< For the log line */
+   const char *sql;
+   sqlite3_stmt **stmt;
+   bool optional; /**< A failure warns and leaves it NULL instead of failing init */
+} auth_db_stmt_def_t;
+
+/** How many statements auth_db_messages.c's table holds (checked there). */
+#define AUTH_DB_MESSAGES_STMT_COUNT 9
+
+/**
+ * @brief Prepare each statement in @p defs, in order.
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE at the first required statement that
+ *         fails (those prepared so far stay prepared, for the caller's finalize).
+ */
+int auth_db_stmts_prepare(const auth_db_stmt_def_t *defs, size_t n);
+
+/** Finalize each statement in @p defs and set it NULL; safe on NULL or repeated calls. */
+void auth_db_stmts_finalize(const auth_db_stmt_def_t *defs, size_t n);
 
 /* =============================================================================
  * Shared State (defined in auth_db_core.c)
@@ -1225,21 +1247,20 @@ int auth_db_migrations_v75(sqlite3 *db);
  * @brief Prepare every cached sqlite3_stmt* in s_db.
  *
  * Defined in auth_db_statements.c.  Called after auth_db_create_schema().
- * On any prepare failure returns AUTH_DB_FAILURE without rolling back
- * partial preparations — auth_db_shutdown() cleans up via
+ * On a required prepare's failure returns AUTH_DB_FAILURE without rolling back
+ * partial preparations; the caller (auth_db_init) then calls
  * auth_db_finalize_statements().
  *
- * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE on first prepare error.
+ * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE when a required statement fails to prepare.
  */
 int auth_db_prepare_statements(void);
 
 /**
  * @brief Finalize every cached sqlite3_stmt* in s_db.
  *
- * Defined in auth_db_statements.c.  Tolerates partially-prepared state so
- * it is safe to call from auth_db_shutdown() after a
- * auth_db_prepare_statements() failure.  Zeros the statement pointers via
- * memset on the contiguous statement region of s_db.
+ * Defined in auth_db_statements.c.  Tolerates partially-prepared state, so it
+ * is safe after an auth_db_prepare_statements() failure; each statement is set
+ * NULL as it is finalized.
  */
 void auth_db_finalize_statements(void);
 

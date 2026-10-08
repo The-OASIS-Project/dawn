@@ -32,7 +32,7 @@
 #include "utils/string_utils.h"
 
 /* TOML parsing */
-#include "tools/toml.h"
+#include "toml.h"
 
 /* =============================================================================
  * Tool Configuration
@@ -160,6 +160,8 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
    /* All security checks passed - execute shutdown */
    OLOG_INFO("Shutdown command authorized, initiating system shutdown");
 
+   /* constant command; runs only when enabled and after the passphrase check */
+   // NOLINTNEXTLINE(cert-env33-c)
    int ret = system("sudo shutdown -h now");
    if (ret != 0) {
       OLOG_ERROR("Shutdown command failed with return code: %d", ret);

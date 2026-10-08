@@ -1,0 +1,28 @@
+# The apt packages the ci-preset build needs, in one place for every job that
+# builds it (unit tests, coverage). Use after checkout:
+#
+#   - uses: ./.github/actions/install-ci-deps
+
+name: Install CI build dependencies
+description: Install the apt packages DAWN's ci-preset build needs.
+
+runs:
+  using: composite
+  steps:
+    - name: Install packages
+      shell: bash
+      run: |
+        # The runner image's Google Chrome apt repository is often unreachable and
+        # would fail apt-get update; DAWN doesn't need it.
+        sudo rm -f /etc/apt/sources.list.d/*google-chrome*
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          cmake build-essential pkg-config \
+          libcurl4-openssl-dev libjson-c-dev libssl-dev libsqlite3-dev \
+          libsodium-dev libspdlog-dev libmosquitto-dev \
+          libflac-dev libsamplerate0-dev libsndfile1-dev \
+          libmpg123-dev libvorbis-dev \
+          libmupdf-dev libfreetype-dev libharfbuzz-dev libzip-dev libxml2-dev \
+          libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev libjpeg-dev \
+          libical-dev libgmime-3.0-dev \
+          libstemmer-dev

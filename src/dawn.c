@@ -29,6 +29,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sodium.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -243,10 +244,6 @@ static void init_wake_words(void) {
 // Array of words/phrases used to signal the end of an interaction with the AI.
 static char *goodbyeWords[] = { "good bye", "goodbye", "good night", "bye", "quit", "exit" };
 
-// Array of predefined responses the AI can use upon recognizing a wake word/phrase.
-const char *wakeResponses[] = { "Hello Sir.", "At your service Sir.", "Yes Sir?",
-                                "How may I assist you Sir?", "Listening Sir." };
-
 // Spoken when a cancel phrase stops a reply, so the user knows it was heard.
 static const char *cancelResponses[] = { "Stopped, Sir.", "Standing by, Sir.", "Okay, Sir." };
 
@@ -441,7 +438,7 @@ static void acknowledge_cancel(void) {
    pthread_mutex_unlock(&tts_mutex);
    const size_t n = sizeof(cancelResponses) / sizeof(cancelResponses[0]);
    OLOG_INFO("Cancel phrase: reply stopped, confirming");
-   text_to_speech(cancelResponses[(size_t)rand() % n]);
+   text_to_speech(cancelResponses[randombytes_uniform((uint32_t)n)]);
 }
 
 /* Keep @p command (ownership taken) to answer once the pipeline is free,
@@ -636,9 +633,13 @@ void signal_handler(int signal) {
        * `quit`, a worker that asked "is the daemon going down?" got `false` and
        * filed an interrupted job as "failed: no response from model" — which
        * reads terminal to the user and is not what happened. */
+      /* only an atomic store (job_manager.c), safe in a signal handler */
+      // NOLINTNEXTLINE(bugprone-signal-handler,cert-sig30-c,cert-msc54-cpp)
       job_manager_note_shutdown_requested();
 #endif
       // Request LLM interrupt (safe to call from signal handler - uses sig_atomic_t)
+      /* only an atomic store to a sig_atomic_t, safe in a signal handler */
+      // NOLINTNEXTLINE(bugprone-signal-handler,cert-sig30-c,cert-msc54-cpp)
       llm_request_interrupt();
       quit = 1;
    }
@@ -867,57 +868,6 @@ static char *normalize_wake_word_text(const char *input) {
    return normalized;
 }
 
-/**
- * Parses a JSON string to extract the value of the "text" field.
- *
- * @param input A JSON string expected to contain a "text" field.
- * @return A dynamically allocated string containing the value of the "text" field.
- *         The caller is responsible for freeing this string.
- *         Returns NULL on error, including JSON parsing errors, missing "text" field,
- *         or memory allocation failures.
- */
-char *getTextResponse(const char *input) {
-   struct json_object *parsed_json;
-   struct json_object *text_object;
-   char *return_text = NULL;
-
-   // Parse the JSON data
-   parsed_json = json_tokener_parse(input);
-   if (parsed_json == NULL) {
-      OLOG_ERROR("Error: Unable to process text response.\n");
-      return NULL;
-   }
-
-   // Get the "text" object from the JSON
-   if (json_object_object_get_ex(parsed_json, "text", &text_object)) {
-      const char *input_text = json_object_get_string(text_object);
-      if (input_text == NULL) {
-         OLOG_ERROR("Error: Unable to get string from input text.\n");
-         json_object_put(parsed_json);
-         return NULL;
-      }
-
-      return_text = malloc((strlen(input_text) + 1) * sizeof(char));
-      if (return_text == NULL) {
-         OLOG_ERROR("malloc() failed in getTextResponse().\n");
-         json_object_put(parsed_json);
-         return NULL;
-      }
-
-      // Directly copy the input text into the return buffer
-      strcpy(return_text, input_text);
-
-      // Debugging: Print the extracted text
-      OLOG_INFO("Input Text: %s\n", return_text);
-   } else {
-      OLOG_ERROR("Error: 'text' field not found in JSON.\n");
-   }
-
-   // Cleanup and return
-   json_object_put(parsed_json);
-   return return_text;
-}
-
 // Legacy openAlsaPcmCaptureDevice() and openPulseaudioCaptureDevice() removed.
 // Audio capture is now handled by audio_capture_thread using the audio_backend API.
 
@@ -946,28 +896,6 @@ const char *timeOfDayGreeting(void) {
    } else {
       return evening_greeting;  // Evening greeting for 6 PM onwards.
    }
-}
-
-/**
- * Selects a random acknowledgment response to a wake word detection.
- *
- * This function is designed to provide variability in the AI's response to
- * being activated by a wake word. It randomly selects one of the predefined
- * responses from the global `wakeResponses` array each time it's called.
- *
- * @return A pointer to a constant character string containing the selected wake word
- * acknowledgment. The return value points to an element within the global `wakeResponses` array and
- *         should not be modified or freed.
- */
-const char *wakeWordAcknowledgment() {
-   int numWakeResponses = sizeof(wakeResponses) /
-                          sizeof(wakeResponses[0]);  // Calculate the number of available responses.
-   int choice;
-
-   srand(time(NULL));                   // Seed the random number generator.
-   choice = rand() % numWakeResponses;  // Generate a random index to select a response.
-
-   return wakeResponses[choice];  // Return the randomly selected wake word acknowledgment.
 }
 
 /**
@@ -1603,19 +1531,16 @@ int main(int argc, char *argv[]) {
    curl_global_init(CURL_GLOBAL_DEFAULT);
    atexit(curl_global_cleanup);
 
-#if defined(ENABLE_TUI) && defined(ENABLE_AEC)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::R::Tt:B", long_options,
-                             &option_index)) != -1) {
-#elif defined(ENABLE_TUI)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::Tt:B", long_options,
-                             &option_index)) != -1) {
-#elif defined(ENABLE_AEC)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::R::B", long_options,
-                             &option_index)) != -1) {
-#else
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::B", long_options,
-                             &option_index)) != -1) {
+   /* Short options; -R (AEC) and -T/-t (TUI) exist only when built in. */
+   static const char short_options[] = "c:d:hl:LCDm:P:A:W:w:M:r::a::"
+#ifdef ENABLE_AEC
+                                       "R::"
 #endif
+#ifdef ENABLE_TUI
+                                       "Tt:"
+#endif
+                                       "B";
+   while ((opt = getopt_long(argc, argv, short_options, long_options, &option_index)) != -1) {
       switch (opt) {
          case 'c':
             safe_strscpy(pcm_capture_device, optarg);
@@ -1765,12 +1690,21 @@ int main(int argc, char *argv[]) {
             OLOG_INFO("Search summarization backend: %s (CLI override)",
                       search_summarizer_backend_name(summarizer_config.backend));
             break;
-         case 257:  // --summarize-threshold
-            summarizer_config.threshold_bytes = (size_t)atol(optarg);
+         case 257: {  // --summarize-threshold
+            char *end = NULL;
+            errno = 0;
+            const unsigned long long bytes = strtoull(optarg, &end, 10);
+            if (optarg[0] == '-' || end == optarg || *end != '\0' || errno != 0 ||
+                bytes > SIZE_MAX) {
+               fprintf(stderr, "--summarize-threshold needs a byte count, got '%s'\n", optarg);
+               exit(EXIT_FAILURE);
+            }
+            summarizer_config.threshold_bytes = (size_t)bytes;
             cli_overrides |= CLI_OVERRIDE_SUMMARIZER_THRESHOLD;
             OLOG_INFO("Search summarization threshold: %zu bytes (CLI override)",
                       summarizer_config.threshold_bytes);
             break;
+         }
          case 258:  // --config
             config_path = optarg;
             break;
@@ -2285,6 +2219,7 @@ int main(int argc, char *argv[]) {
       mosq = mosquitto_new(NULL, true, NULL);
       if (mosq == NULL) {
          OLOG_ERROR("Error: Out of memory.\n");
+         free(max_buff);
          return 1;
       }
 
@@ -2384,6 +2319,7 @@ int main(int argc, char *argv[]) {
          OLOG_ERROR("Error on mosquitto_connect(): %s\n", mosquitto_strerror(rc));
          OLOG_ERROR("  Hint: Check Mosquitto is running: sudo systemctl status mosquitto");
          OLOG_ERROR("  Hint: Verify [mqtt] broker and port in dawn.toml (default: 127.0.0.1:1883)");
+         free(max_buff);
          return 1;
       } else {
          OLOG_INFO("Connected to local MQTT server.\n");
@@ -4010,6 +3946,8 @@ mqtt_disabled:
                if (ignoreCount < numIgnoreWords &&
                    command_processing_mode == CMD_MODE_DIRECT_ONLY) {
                   OLOG_WARNING("Input ignored. Found in ignore list.\n");
+                  free(command_text);
+                  command_text = NULL;
                   silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
                   recState = DAWN_STATE_SILENCE;
 
@@ -4317,6 +4255,7 @@ server_shutdown:
    audio_backend_cleanup();
 
    free(max_buff);
+   free(command_text); /* an utterance still held at shutdown */
 
    // Note: preroll_buffer is statically allocated, no free needed
 

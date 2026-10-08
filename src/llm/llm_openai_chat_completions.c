@@ -255,7 +255,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                                     const char *api_key,
                                     const char *model) {
    CURL *curl_handle = NULL;
-   CURLcode res = -1;
+   CURLcode res = CURLE_FAILED_INIT;
    struct curl_slist *headers = NULL;
    char full_url[2048 + 20] = "";
 
@@ -567,7 +567,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
                                         int iteration,
                                         llm_tool_response_t *result) {
    CURL *curl_handle = NULL;
-   CURLcode res = -1;
+   CURLcode res = CURLE_FAILED_INIT;
    struct curl_slist *headers = NULL;
    char full_url[2048 + 20] = "";
    const char *payload = NULL;

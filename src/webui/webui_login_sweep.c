@@ -109,6 +109,8 @@ bool webui_conn_end_login(ws_connection_t *conn, const char *reason) {
    if (conn->wsi) {
       /* Closed from its next writeable callback, once the frame is out
        * (callback_websocket); the timeout closes it if that never comes. */
+      /* An application close code (4000-4999), which lws passes through */
+      // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
       lws_close_reason(conn->wsi, (enum lws_close_status)WEBUI_CLOSE_LOGGED_OUT,
                        (unsigned char *)"logged out", 10);
       lws_callback_on_writable(conn->wsi);

@@ -646,13 +646,6 @@ static int relation_adapter_query(int user_id,
    for (int i = 0; i < subject_count; i++)
       per_subject_quota[i] = floor_per + (i < remainder ? 1 : 0);
 
-   /* Working buffer sized to max_candidates. */
-   focus_candidate_t *out = calloc((size_t)max_candidates, sizeof(*out));
-   if (out == NULL) {
-      OLOG_ERROR("relation_adapter: OOM allocating candidate array");
-      return FAILURE;
-   }
-
    /* Hard refuse work above the static array cap — keeps the stack
     * arrays defensible without a runtime allocation.  Today the
     * upstream config_validate.c clamps top_k at 64, so this branch is
@@ -660,6 +653,13 @@ static int relation_adapter_query(int user_id,
    if (max_candidates > RELATION_ADAPTER_MAX_CANDIDATES_CAP) {
       OLOG_ERROR("relation_adapter: max_candidates=%d exceeds cap %d — refusing", max_candidates,
                  RELATION_ADAPTER_MAX_CANDIDATES_CAP);
+      return FAILURE;
+   }
+
+   /* Working buffer sized to max_candidates. */
+   focus_candidate_t *out = calloc((size_t)max_candidates, sizeof(*out));
+   if (out == NULL) {
+      OLOG_ERROR("relation_adapter: OOM allocating candidate array");
       return FAILURE;
    }
 

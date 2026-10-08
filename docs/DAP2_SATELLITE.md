@@ -1081,7 +1081,7 @@ wscat -c ws://localhost:3000
 5. [x] ~~**TTS ducking during music**~~ - Volume ducks to 30% during voice activity (wake word, recording, processing), hard-pauses during TTS
 6. [x] ~~**Multi-satellite routing**~~ - Per-session room context in system prompt; daemon knows which room each query originates from
 7. [ ] **Speaker identification** - Personalized responses per user
-8. [x] ~~**Location-aware queries**~~ - Room context injected into system prompt: local session via `Room=X` in `get_localization_context()` (from `dawn.toml` `room`), DAP2 sessions via `session_append_satellite_context()` (from satellite `location` field + admin-assigned `HomeAssistant_Area`)
+8. [x] ~~**Location-aware queries**~~ - Room context sent with the turn's standing directions (`build_directives` in `prompt_builder.c`), as a sentence: the local session's room from `dawn.toml` `room`, a satellite's `location` field and its admin-assigned Home Assistant area
 9. [x] ~~**Satellite user management**~~ - Persistent satellite-to-user mapping via `satellite_mappings` DB table (schema v21). WebUI admin panel for user assignment, HA area dropdown, delete. Mapped satellites inherit user's music queue, memory extraction, and personalized prompt. Force-reconnect on config change.
 
 ## Troubleshooting

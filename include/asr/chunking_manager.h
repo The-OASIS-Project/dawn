@@ -215,16 +215,6 @@ int chunking_manager_is_finalizing(chunking_manager_t *cm);
 size_t chunking_manager_get_buffer_usage(chunking_manager_t *cm);
 
 /**
- * @brief Get buffer usage as percentage
- *
- * Returns buffer fullness as a percentage (0.0 to 100.0).
- *
- * @param cm Chunking manager instance
- * @return Buffer usage percentage
- */
-float chunking_manager_get_buffer_percent(chunking_manager_t *cm);
-
-/**
  * @brief Get number of chunks finalized so far
  *
  * Returns the count of chunks that have been finalized for the current
@@ -236,16 +226,6 @@ float chunking_manager_get_buffer_percent(chunking_manager_t *cm);
  * @note Added per architecture review GAP #3 (chunk count query)
  */
 size_t chunking_manager_get_num_chunks(chunking_manager_t *cm);
-
-/**
- * @brief Get buffer capacity in samples
- *
- * Returns the maximum buffer capacity (default: 15s * 16000 = 240000 samples).
- *
- * @param cm Chunking manager instance
- * @return Buffer capacity in samples
- */
-size_t chunking_manager_get_buffer_capacity(chunking_manager_t *cm);
 
 #ifdef __cplusplus
 }

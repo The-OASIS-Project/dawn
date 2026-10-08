@@ -28,7 +28,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Dependencies
 # -----------------------------------------------------------------------------
-FROM debian:bookworm-slim AS dawn-deps
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS dawn-deps
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -135,7 +135,7 @@ RUN cmake --install build-server --prefix /opt/dawn
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime
 # -----------------------------------------------------------------------------
-FROM debian:bookworm-slim AS dawn-runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS dawn-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 

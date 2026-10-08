@@ -24,7 +24,7 @@
 #include <string.h>
 
 #include "llm/llm_pricing.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "unity.h"
 
 static toml_table_t *s_root;

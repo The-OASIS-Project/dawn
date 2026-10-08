@@ -44,7 +44,7 @@
 #include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "unity.h"
 
 /* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */

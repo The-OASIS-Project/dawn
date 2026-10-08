@@ -201,10 +201,6 @@ size_t strbuf_len(const strbuf_t *sb) {
    return sb ? sb->len : 0;
 }
 
-size_t strbuf_cap(const strbuf_t *sb) {
-   return sb ? sb->cap : 0;
-}
-
 const char *strbuf_str(const strbuf_t *sb) {
    if (!sb || !sb->buf)
       return "";

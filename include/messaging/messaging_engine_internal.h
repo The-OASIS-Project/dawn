@@ -64,6 +64,10 @@ struct json_object;
  * Discord/Slack extras (guild_id, team_id).  Shared by the channels, link,
  * and inbound files, which all build the blob at their send sites. */
 #define MESSAGING_ADDRESS_JSON_BUF_SIZE 256
+/* How long shutdown waits for async sends still running (a confirmation or a
+ * verification code going out): longer than one send can take.  If one is still
+ * running after this, the drivers are left up (see messaging_engine_quiesce). */
+#define MESSAGING_ASYNC_SEND_DRAIN_MS ((int)(MESSAGING_SEND_TIMEOUT_SEC + 5) * 1000)
 
 /* =============================================================================
  * Cross-file types
@@ -315,6 +319,16 @@ void engine_send_async(const messaging_driver_t *drv,
                        const char *provider_address,
                        const char *address_json,
                        const char *text);
+/**
+ * @brief Wait until no async send is still running.
+ *
+ * Each send runs on its own detached thread and uses its driver (and, when a
+ * verification code fails to go, the database), so shutdown waits for them.
+ *
+ * @param timeout_ms How long to wait at most
+ * @return SUCCESS when none is running, FAILURE if some still were at the timeout
+ */
+int engine_wait_async_sends(int timeout_ms);
 void link_attempt_log(const char *provider,
                       const char *sender_address,
                       const char *code_tried,

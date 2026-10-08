@@ -38,9 +38,10 @@
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "test_config_roundtrip_stub.h"
+#include "test_tmp.h"
 #include "unity.h"
 
-#define RT_PATH "test_config_roundtrip.tmp.toml"
+static char RT_PATH[TEST_TMP_PATH_MAX];
 
 /* sizeof(dawn_config_t) is ~47 KB, so two is ~92 KB — survivable on the
  * main stack, but static keeps this independent of the test runner's limits. */
@@ -558,6 +559,7 @@ static void test_control_characters_survive_the_round_trip(void) {
 }
 
 int main(void) {
+   test_tmp_path(RT_PATH, sizeof(RT_PATH), "test_config_roundtrip.toml");
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
    RUN_TEST(test_memory_extraction_effort_roundtrip);

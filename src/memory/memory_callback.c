@@ -1797,8 +1797,11 @@ static char *memory_action_save_contact(int user_id, const char *value) {
 
    if (entity_id_str[0]) {
       /* Explicit entity_id provided — use it directly (disambiguation resolved) */
-      entity_id = atoll(entity_id_str);
-      if (entity_id <= 0)
+      char *end = NULL;
+      errno = 0;
+      entity_id = strtoll(entity_id_str, &end, 10);
+      /* 0 is valid: the disambiguation prompt offers it as "create new" */
+      if (errno != 0 || end == entity_id_str || *end != '\0' || entity_id < 0)
          return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid entity_id");
    } else {
       /* Check for exact canonical match first */

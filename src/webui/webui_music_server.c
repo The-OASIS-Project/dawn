@@ -266,6 +266,8 @@ static int callback_music_websocket(struct lws *wsi,
                      const char *response = "{\"type\":\"auth_ok\"}";
                      unsigned char buf[LWS_PRE + 64];
                      size_t response_len = strlen(response);
+                     /* WebSocket frame sent by length (lws_write), never read as a C string */
+                     // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
                      memcpy(&buf[LWS_PRE], response, response_len);
                      lws_write(wsi, &buf[LWS_PRE], response_len, LWS_WRITE_TEXT);
                   } else {
@@ -274,6 +276,8 @@ static int callback_music_websocket(struct lws *wsi,
                          "{\"type\":\"auth_failed\",\"reason\":\"invalid_token\"}";
                      unsigned char buf[LWS_PRE + 64];
                      size_t response_len = strlen(response);
+                     /* WebSocket frame sent by length (lws_write), never read as a C string */
+                     // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
                      memcpy(&buf[LWS_PRE], response, response_len);
                      lws_write(wsi, &buf[LWS_PRE], response_len, LWS_WRITE_TEXT);
                      json_object_put(msg);

@@ -146,6 +146,134 @@ struct json_object *llm_history_context_part(const char *text, message_kind_t ki
    return part;
 }
 
+static bool is_note(struct json_object *msg) {
+   const message_kind_t k = llm_history_kind_of(msg);
+   return (k == MESSAGE_KIND_DIRECTIVE || k == MESSAGE_KIND_INSTRUCTION) && is_role(msg, "system");
+}
+
+/* A copy of @p msg (its keys shared) whose content is @p parts (taken). */
+static struct json_object *with_parts(struct json_object *msg, struct json_object *parts) {
+   struct json_object *copy = json_object_new_object();
+   if (!copy) {
+      json_object_put(parts);
+      return NULL;
+   }
+   json_object_object_foreach(msg, key, val) {
+      if (strcmp(key, "content") != 0) {
+         json_object_object_add(copy, key, json_object_get(val));
+      }
+   }
+   json_object_object_add(copy, "content", parts);
+   return copy;
+}
+
+/* @p msg's content as parts with the note parts of @p notes (messages
+ * [first, end) of @p history) after its leading context parts. */
+static struct json_object *parts_with_notes(struct json_object *msg,
+                                            struct json_object *history,
+                                            size_t first,
+                                            size_t end,
+                                            const char *label) {
+   struct json_object *parts = json_object_new_array();
+   if (!parts) {
+      return NULL;
+   }
+   struct json_object *content = NULL;
+   json_object_object_get_ex(msg, "content", &content);
+   struct json_object *own = json_object_is_type(content, json_type_array) ? content : NULL;
+   const size_t n = own ? json_object_array_length(own) : 0;
+   size_t lead = 0;
+   while (lead < n &&
+          llm_history_kind_of(json_object_array_get_idx(own, lead)) != MESSAGE_KIND_NONE) {
+      json_object_array_add(parts, json_object_get(json_object_array_get_idx(own, lead)));
+      lead++;
+   }
+   for (size_t j = first; j < end; j++) {
+      struct json_object *note = json_object_array_get_idx(history, j);
+      const char *text = str_field(note, "content");
+      const size_t len = strlen(label) + strlen(text ? text : "") + 1;
+      char *headed = malloc(len);
+      struct json_object *part = NULL;
+      if (headed) {
+         snprintf(headed, len, "%s%s", label, text ? text : "");
+         part = llm_history_context_part(headed, llm_history_kind_of(note));
+         free(headed);
+      }
+      if (!part) {
+         json_object_put(parts);
+         return NULL;
+      }
+      json_object_array_add(parts, part);
+   }
+   for (size_t i = lead; i < n; i++) {
+      json_object_array_add(parts, json_object_get(json_object_array_get_idx(own, i)));
+   }
+   const char *text = own ? NULL : str_field(msg, "content");
+   if (text && *text) {
+      struct json_object *words = json_object_new_object();
+      if (!words) {
+         json_object_put(parts);
+         return NULL;
+      }
+      json_object_object_add(words, "type", json_object_new_string("text"));
+      json_object_object_add(words, "text", json_object_new_string(text));
+      json_object_array_add(parts, words);
+   }
+   return parts;
+}
+
+struct json_object *llm_history_notes_before_words(struct json_object *history) {
+   char label[LLM_CONTEXT_TAG_MAX + 24];
+   llm_operator_note_label(llm_history_tag(history), label, sizeof(label));
+   const size_t n = json_object_is_type(history, json_type_array)
+                        ? json_object_array_length(history)
+                        : 0;
+   struct json_object *out = json_object_new_array();
+   for (size_t i = 0; out && i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      size_t end = i + 1;
+      while (end < n && is_note(json_object_array_get_idx(history, end))) {
+         end++;
+      }
+      if (end == i + 1 || !llm_history_is_question(msg)) {
+         json_object_array_add(out, json_object_get(msg));
+         continue;
+      }
+      /* An envelope's notes go in the context message in front of it, or in
+       * one of their own there: DAWN's text never shares a message with
+       * untrusted text (an earlier envelope is not a context message). */
+      const bool envelope = llm_history_kind_of(msg) == MESSAGE_KIND_ENVELOPE;
+      const size_t have = json_object_array_length(out);
+      struct json_object *prev = have ? json_object_array_get_idx(out, have - 1) : NULL;
+      const bool into_prev = envelope && prev && is_role(prev, "user") &&
+                             llm_history_kind_of(prev) == MESSAGE_KIND_NONE &&
+                             llm_history_is_context(prev);
+      struct json_object *holder = !envelope ? msg : into_prev ? prev : NULL;
+      struct json_object *empty = holder ? NULL : json_object_new_object();
+      struct json_object *parts = (holder || empty) ? parts_with_notes(holder ? holder : empty,
+                                                                       history, i + 1, end, label)
+                                                    : NULL;
+      json_object_put(empty);
+      struct json_object *noted = !parts   ? NULL
+                                  : holder ? with_parts(holder, parts)
+                                           : llm_history_context_message(parts);
+      if (!noted) {
+         json_object_put(out);
+         return NULL;
+      }
+      if (into_prev) {
+         json_object_array_put_idx(out, have - 1, noted);
+      } else {
+         json_object_array_add(out, noted);
+      }
+      if (envelope) {
+         json_object_array_add(out, json_object_get(msg));
+      }
+      i = end - 1;
+   }
+   return out;
+}
+
 /* A loaded row that becomes a part of its turn's question. */
 static bool folds_into_question(struct json_object *msg) {
    const message_kind_t k = llm_history_kind_of(msg);

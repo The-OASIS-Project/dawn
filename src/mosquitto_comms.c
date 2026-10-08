@@ -165,8 +165,8 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
             pending_command_result = temp;
 
             // Copy the new string to the end
-            strcpy(pending_command_result + dest_len, " ");
-            strcpy(pending_command_result + dest_len + 1, callback_result);
+            pending_command_result[dest_len] = ' ';
+            memcpy(pending_command_result + dest_len + 1, callback_result, src_len + 1);
          }
       }
 

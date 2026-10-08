@@ -579,6 +579,8 @@ static void webui_music_send_state_impl(ws_connection_t *conn,
                           .music_json = { .json = json_copy } };
    queue_response(&resp);
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    json_object_put(response);
 }
 
@@ -635,6 +637,8 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
                           .music_json = { .json = json_copy } };
    queue_response(&resp);
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    json_object_put(response);
 }
 

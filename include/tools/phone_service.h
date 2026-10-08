@@ -222,15 +222,6 @@ phone_state_t phone_service_get_state(void);
 void phone_service_handle_event(const char *payload, int payload_len);
 
 /**
- * @brief Handle a response from echo/response (called from command_router).
- *
- * This is for responses that need state machine updates beyond what
- * command_router_wait already provides (e.g., call_connected arriving
- * before dial response).
- */
-void phone_service_handle_response(const char *payload, int payload_len);
-
-/**
  * @brief Get the phone service configuration (for tool layer).
  */
 const phone_service_config_t *phone_service_get_config(void);

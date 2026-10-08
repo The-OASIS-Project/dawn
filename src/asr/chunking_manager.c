@@ -374,23 +374,9 @@ size_t chunking_manager_get_buffer_usage(chunking_manager_t *cm) {
    return cm->buffer_samples;
 }
 
-float chunking_manager_get_buffer_percent(chunking_manager_t *cm) {
-   if (!cm || cm->buffer_capacity == 0) {
-      return 0.0f;
-   }
-   return (float)cm->buffer_samples / (float)cm->buffer_capacity * 100.0f;
-}
-
 size_t chunking_manager_get_num_chunks(chunking_manager_t *cm) {
    if (!cm) {
       return 0;
    }
    return cm->num_chunks;
-}
-
-size_t chunking_manager_get_buffer_capacity(chunking_manager_t *cm) {
-   if (!cm) {
-      return 0;
-   }
-   return cm->buffer_capacity;
 }

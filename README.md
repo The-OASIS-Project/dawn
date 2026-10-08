@@ -1,5 +1,8 @@
 # D.A.W.N. — Your Own Personal, Private AI Assistant
 
+[![CI](https://github.com/The-OASIS-Project/dawn/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/The-OASIS-Project/dawn/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/The-OASIS-Project/dawn/badge)](https://scorecard.dev/viewer/?uri=github.com/The-OASIS-Project/dawn)
+
 **D.A.W.N.** is the central intelligence layer of [The OASIS Project](https://github.com/The-OASIS-Project) — an open-source voice-controlled AI assistant built for embedded Linux hardware. Think JARVIS from *Iron Man*, but real: an always-listening, conversational AI that controls your smart home, answers questions, searches the web, plays music, and more — running on hardware you own.
 
 DAWN was designed from the ground up to be the closest thing to a production-quality JARVIS that actually exists. It listens for a wake word, understands natural speech, reasons about your request, and responds in a natural voice — all in real time. It remembers you — your preferences, your routines, the people and things you care about — and gets better the more you use it. It can run entirely offline with a local LLM, or connect to cloud providers like OpenAI, Claude, and Gemini. Multi-room satellite devices bring voice control to every room in your home, just like having JARVIS in every room of 10880 Malibu Point.
@@ -291,6 +294,8 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[docs/CLOUD_DEPLOYMENT.md](docs/CLOUD_DEPLOYMENT.md)** | Cloud deployment architecture and status |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | System architecture, data flow, and threading model |
 | **[CODING_STYLE_GUIDE.md](CODING_STYLE_GUIDE.md)** | Code formatting and development standards |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | Building, testing and submitting a change |
+| **[docs/TESTING.md](docs/TESTING.md)** | How DAWN is tested: unit tests, sanitizers, static analysis, fuzzing, coverage |
 | **[docs/LLM_INTEGRATION_GUIDE.md](docs/LLM_INTEGRATION_GUIDE.md)** | LLM setup for cloud and local providers |
 | **[docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md)** | Home Assistant integration setup |
 | **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** | Link Telegram / Slack / Discord / SMS to DAWN |
@@ -302,6 +307,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[docs/SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md)** | Charles Schwab setup for the stocks tool |
 | **[docs/SECURITY_HARDENING_GUIDE.md](docs/SECURITY_HARDENING_GUIDE.md)** | Deployment checklist, internet exposure and penetration-testing procedures |
 | **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)** | What DAWN defends against, and the known gaps |
+| **[SECURITY.md](SECURITY.md)** | How to report a vulnerability privately |
 | **[docs/TOOL_DEVELOPMENT_GUIDE.md](docs/TOOL_DEVELOPMENT_GUIDE.md)** | Guide for adding new LLM tools |
 | **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)** | Code Projects (coding harness): import/link repos + cbm server setup |
 | **[atlas archive](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive)** | Historical design docs (memory, RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.) |
@@ -313,12 +319,8 @@ These features are not required but extend what DAWN can do. Each links to its s
 ## Contributing
 
 Contributions are welcome! DAWN is part of The OASIS Project and is licensed under GPLv3.
-
-- Follow the coding standards in [CODING_STYLE_GUIDE.md](CODING_STYLE_GUIDE.md)
-- Run `./install-git-hooks.sh` once. The pre-commit hook checks the formatting of what you stage and, when code changes, builds and runs the CI test suite; the pre-push hook runs the suite too
-- Format code with `./format_code.sh --changed` before committing
-- Add tests for new features
-- See [ARCHITECTURE.md](ARCHITECTURE.md) for system design context
+[CONTRIBUTING.md](CONTRIBUTING.md) covers building, the git hooks, the coding standards and how a change
+gets into `main`; [docs/TESTING.md](docs/TESTING.md) describes the tests and checks every change runs.
 
 ---
 

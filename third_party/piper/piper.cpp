@@ -1,4 +1,15 @@
-#include "tts/piper.hpp"
+/*
+ * Adapted from rhasspy/piper (src/cpp/piper.cpp), MIT License,
+ * Copyright (c) 2022 Michael Hansen. See LICENSE in this directory.
+ *
+ * Changed for DAWN: textToAudio() takes a tts_stop_processing flag and stops
+ * between sentences when it is set (so speech can be interrupted); the ONNX
+ * session sets 4 intra-op threads (upstream leaves ONNX Runtime's default); the
+ * synthesis result's timing fields start at zero; the include paths.  piper.hpp
+ * carries the matching textToAudio() signature change.
+ */
+
+#include "piper.hpp"
 
 #include <espeak-ng/speak_lib.h>
 #include <onnxruntime_cxx_api.h>

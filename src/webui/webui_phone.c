@@ -150,6 +150,8 @@ void webui_phone_send_status(ws_connection_t *conn) {
                           .type = WS_RESP_JSON,
                           .generic_json = { .json = json_str } };
    queue_response(&resp);
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
 }
 
 /* =============================================================================

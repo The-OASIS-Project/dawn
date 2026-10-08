@@ -25,8 +25,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "toml.h"
 #include "tools/phone_audio_config.h"
-#include "tools/toml.h"
 #include "unity.h"
 
 void setUp(void) {

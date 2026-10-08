@@ -493,7 +493,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
                                    int iteration,
                                    llm_tool_response_t *result) {
    CURL *curl_handle = NULL;
-   CURLcode res = -1;
+   CURLcode res = CURLE_FAILED_INIT;
    struct curl_slist *headers = NULL;
    char full_url[2048 + 20] = "";
    const char *payload = NULL;

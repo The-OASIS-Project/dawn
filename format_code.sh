@@ -43,17 +43,11 @@ EXCLUDE_DIRS=(
    "vendor"
    "third_party"
    "external"
-   "utf8"
    "whisper.cpp"
    "webrtc-audio-processing"
 )
 
 EXCLUDE_FILES=(
-   "json.hpp"  # Third-party library
-   "piper.c"
-   "piper.h"
-   "utf8.h"
-   "vosk_api.h"
    "tweetnacl.c"  # Vendored public-domain Ed25519 (ESP32 OTA) — keep verbatim
    "tweetnacl.h"  # ditto
 )

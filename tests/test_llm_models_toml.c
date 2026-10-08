@@ -26,7 +26,7 @@
 #include <unistd.h>
 
 #include "llm/llm_models_toml.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "unity.h"
 
 /* ---- stubs ---- */

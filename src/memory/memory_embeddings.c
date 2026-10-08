@@ -260,6 +260,8 @@ static int cache_load(int user_id) {
       return FAILURE;
    }
    for (int i = 0; i < s_cache.count; i++) {
+      /* count only grows after norms[i] is written */
+      // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
       unit_sum_add(s_cache.unit_sum, s_cache.embeddings + (size_t)i * (size_t)dims, dims,
                    s_cache.norms[i]);
    }

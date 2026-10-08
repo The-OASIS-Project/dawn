@@ -682,10 +682,12 @@ static json_object *with_note(json_object *msg, const char *label, const char *n
 
 /* @p history with its request context rendered for chat completions, in place
  * and in order: a turn's context in front of its question, and a directive or
- * instruction change as a system message where @p system_notes, else as an
- * operator's note (headed with the conversation's tag) after the user message
- * before it (a mid-conversation system message isn't one every server and
- * local template takes).  Other messages are shared.  New array (caller puts),
+ * instruction change as a system message where @p system_notes (a
+ * mid-conversation system message isn't one every server and local template
+ * takes).  Otherwise a turn's notes are already in its question
+ * (llm_history_notes_before_words), and one still here (after a reply or tool
+ * results) is an operator's note, headed with the conversation's tag, after the
+ * user message before it.  Other messages are shared.  New array (caller puts),
  * or NULL. */
 static json_object *render_context_for_chat(struct json_object *history, bool system_notes) {
    const size_t n = json_object_array_length(history);
@@ -796,7 +798,15 @@ static json_object *render_turns_from_blocks(struct json_object *history,
 json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history,
                                              const char *carrier,
                                              const char *model) {
-   json_object *in_place = render_context_for_chat(conversation_history, takes_mid_system(carrier));
+   const bool system_notes = takes_mid_system(carrier);
+   /* Notes as text go in the question, ahead of the user's words. */
+   json_object *noted = system_notes ? NULL : llm_history_notes_before_words(conversation_history);
+   if (!system_notes && !noted) {
+      return NULL;
+   }
+   json_object *in_place = render_context_for_chat(noted ? noted : conversation_history,
+                                                   system_notes);
+   json_object_put(noted);
    if (!in_place) {
       return NULL;
    }

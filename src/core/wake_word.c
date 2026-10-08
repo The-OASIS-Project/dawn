@@ -141,6 +141,8 @@ static bool match_phrase(const char *normalized, const char **list, size_t count
       normalized++;
    }
    size_t n = strlen(normalized);
+   /* n <= strlen(normalized) (wake_word_normalize terminates it), so [n - 1] is in bounds */
+   // NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult)
    while (n > 0 && normalized[n - 1] == ' ') {
       n--;
    }

@@ -32,9 +32,10 @@
 #include "auth/auth_db_tool_results.h"
 #include "core/session_manager.h"
 #include "core/tool_result_store.h"
+#include "test_tmp.h"
 #include "unity.h"
 
-static const char *TEST_DB = "/tmp/dawn_test_tool_result_store.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
 
 /* The calling thread's turn token (session_manager.c): set by a test that
  * plays a turn. */
@@ -615,6 +616,7 @@ static void test_a_stale_thread_and_a_nul(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_tool_result_store.db");
    UNITY_BEGIN();
    RUN_TEST(test_scope_of_a_bound_result);
    RUN_TEST(test_a_guest_stores_nothing);

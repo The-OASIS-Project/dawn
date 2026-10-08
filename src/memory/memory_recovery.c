@@ -201,6 +201,8 @@ static bool wait_for_user_extraction(int user_id) {
       if (waited >= RECOVERY_PER_CONV_WAIT_SEC) {
          return false;
       }
+      /* s_pass_mutex only serializes recovery passes, never a hot path */
+      // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
       sleep(RECOVERY_POLL_INTERVAL_SEC);
       waited += RECOVERY_POLL_INTERVAL_SEC;
    }

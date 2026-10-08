@@ -36,6 +36,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +56,7 @@ typedef struct {
    int listen_fd;
    int port;
    pthread_t thread;
-   volatile sig_atomic_t stop;
+   atomic_int stop; /* written by the test thread, read by the server thread */
 
    pthread_mutex_t mtx;
    int sse_fd;

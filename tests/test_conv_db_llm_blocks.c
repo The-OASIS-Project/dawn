@@ -29,12 +29,13 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
+#include "test_tmp.h"
 #include "unity.h"
 
 int auth_db_migrations_v92(sqlite3 *db);
 int auth_db_migrations_v93(sqlite3 *db);
 
-static const char *TEST_DB = "/tmp/dawn_test_llm_blocks.db";
+static char TEST_DB[TEST_TMP_PATH_MAX];
 static int alice_id = 0;
 static int bob_id = 0;
 
@@ -506,6 +507,7 @@ static void test_v93_notes_for_lost_tool_calls(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_test_llm_blocks.db");
    UNITY_BEGIN();
    RUN_TEST(test_blocks_round_trip_through_replay_read_only);
    RUN_TEST(test_replay_read_checks_the_owner);

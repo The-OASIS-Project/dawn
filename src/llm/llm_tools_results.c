@@ -190,6 +190,8 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
                             args_str ? args_str : "", args_str ? strlen(args_str) : 0, true);
       if (call->args_truncated) {
          OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
+                      /* a NULL string is passed with n = 0 and never read */
+                      // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
                       strlen(args_str), LLM_TOOLS_ARGS_LEN - 1);
       }
    }
@@ -285,6 +287,8 @@ int llm_tools_parse_claude_response(struct json_object *response, tool_call_list
                             input_str ? input_str : "", input_str ? strlen(input_str) : 0, true);
       if (call->args_truncated) {
          OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
+                      /* a NULL string is passed with n = 0 and never read */
+                      // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
                       strlen(input_str), LLM_TOOLS_ARGS_LEN - 1);
       }
    }

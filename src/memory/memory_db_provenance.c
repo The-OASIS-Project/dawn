@@ -170,10 +170,14 @@ static int build_in_clause(char *sql,
       return MEMORY_DB_FAILURE;
    for (int i = 1; i < n; i++) {
       int written = snprintf(sql + off, sql_size - (size_t)off, ",%lld", (long long)ids[i]);
+      /* off and written are snprintf results bounded by a small SQL buffer */
+      // NOLINTNEXTLINE(bugprone-misplaced-widening-cast)
       if (written < 0 || (size_t)(off + written) >= sql_size - 2)
          return MEMORY_DB_FAILURE;
       off += written;
    }
+   /* off and written are snprintf results bounded by a small SQL buffer */
+   // NOLINTNEXTLINE(bugprone-misplaced-widening-cast)
    if ((size_t)(off + 2) >= sql_size)
       return MEMORY_DB_FAILURE;
    sql[off++] = ')';

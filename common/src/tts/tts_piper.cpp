@@ -39,7 +39,7 @@
 #include "logging_common.h"
 
 /* Include Piper headers */
-#include "tts/piper.hpp"
+#include "piper.hpp"
 
 /**
  * @brief Internal TTS context structure
@@ -217,8 +217,7 @@ void tts_piper_cleanup(tts_piper_context_t *ctx) {
 
    try {
       piper::terminate(ctx->config);
-   } catch (...) {
-      /* Ignore exceptions during cleanup */
+   } catch (...) {  // NOLINT(bugprone-empty-catch): cleanup must not throw; nothing to recover
    }
 
    delete ctx;
