@@ -156,8 +156,9 @@ static char *build_identity_block(int user_id) {
  * question (memory_build_context). */
 static const char k_memory_instructions_footer[] =
     "\n\nIMPORTANT MEMORY INSTRUCTIONS:\n"
-    "- The USER MEMORY block you're shown is only a summary. ALWAYS use the memory tool with "
-    "action='search' when the user asks about something not shown there.\n"
+    "- Before saying you don't know something about the user, look it up: the memory tool "
+    "(action='search') for a specific fact, or `recall` for a broad question. The USER MEMORY "
+    "block and the turn's retrieved items are only part of what's stored.\n"
     "- If your first search returns nothing relevant, try again with related "
     "terms, entity names, or broader keywords. For example, if asked about "
     "'OASIS timeline', also try 'DAWN timeline' since projects are related.\n"
@@ -314,8 +315,8 @@ static void user_context_text(const auth_user_settings_t *settings,
  * The same base for every surface (get_command_prompt_parts): what differs by
  * surface is a standing direction (build_directives), so a conversation
  * continued from another surface keeps its prompt.  In order:
- *   - identity_override: a replace-mode persona, and that it wins
- *   - persona, rules: the base prompt
+ *   - identity_override or persona: a replace-mode persona, else the base one
+ *   - rules: the base prompt's rules
  *   - tool_defaults: the configured location / units / timezone, for a guest
  *     only (a user's own settings are their user_context)
  *   - user_context: the user's location / timezone / units / persona traits
@@ -341,16 +342,15 @@ static int build_stable_sections(int user_id, composed_prompt_t *out) {
                                 strcmp(settings.persona_mode, "replace") == 0;
 
    int err = 0;
+   /* A replace-mode persona takes the base persona's place: the model gets
+    * one identity, not two with an instruction to ignore one. */
    if (replace_persona) {
-      char override[AUTH_PERSONA_DESC_MAX + 256];
-      snprintf(override, sizeof(override),
-               "## Your Identity\n%s\n\n"
-               "IMPORTANT: Use the identity above. Ignore any conflicting persona descriptions "
-               "that follow.",
-               settings.persona_description);
+      char override[AUTH_PERSONA_DESC_MAX + 32];
+      snprintf(override, sizeof(override), "## Your Identity\n%s", settings.persona_description);
       err |= prompt_sections_add(out, "identity_override", "who you are", override);
+   } else {
+      err |= prompt_sections_add(out, "persona", "your persona", base.persona);
    }
-   err |= prompt_sections_add(out, "persona", "your persona", base.persona);
    err |= prompt_sections_add(out, "rules", "your operating rules", base.rules);
    if (user_id <= 0)
       err |= prompt_sections_add(out, "tool_defaults", "the tool defaults", base.tool_defaults);
@@ -403,35 +403,33 @@ static char *append_messaging_context(char *base, session_t *dispatch) {
    if (provider == NULL || provider[0] == '\0')
       return base;
 
-   /* Explicit, actionable context block.  The bare "Key=value." shape
-    * (mirroring Room=/HomeAssistant_Area=) was too terse for the LLM —
-    * it saw the data but didn't connect it to the scheduler tool's
-    * deliver_to default rule.  This longer form spells out (a) what
-    * surface the user is on RIGHT NOW, (b) the exact channel name
-    * usable as deliver_to, and (c) the inference rule inline so Claude
-    * doesn't have to traverse the full scheduler descriptor to find
-    * it.  Stable across turns of a session, so it caches cleanly. */
-   char ctx[512];
+   /* Explicit, actionable context block.  A bare "Key=value." shape was too
+    * terse: the model saw the data but didn't connect it to the scheduler
+    * tool's deliver_to default.  This says (a) which surface the user is on,
+    * (b) the channel name usable as deliver_to, and (c) the rule inline, and
+    * for SMS how a reply should read.  Stable across a session's turns, so it
+    * caches cleanly. */
+   static const char sms_format[] =
+       " This is a text message: reply in short plain text, a few sentences at most, with no "
+       "markdown, lists or links unless the user asks.";
+   const char *format = strcmp(provider, "sms") == 0 ? sms_format : "";
+   char ctx[768];
    ctx[0] = '\0';
    int len;
    if (channel && channel[0]) {
       len = snprintf(ctx, sizeof(ctx),
-                     "\n\nYou are responding through the %s messaging channel "
-                     "\"%s\" RIGHT NOW.  This is where the user is reading your "
-                     "replies.  When scheduling events for this user (scheduler "
-                     "tool), default the `deliver_to` field to \"%s\" so the "
-                     "result reaches them on this surface — unless the user "
-                     "explicitly names a different channel or asks for "
-                     "local-only.",
-                     provider, channel, channel);
+                     "\n\nYou're replying through the %s channel \"%s\"; the user reads your "
+                     "replies there. When you schedule something for them (scheduler tool), set "
+                     "deliver_to to \"%s\" so it reaches them here, unless they name a different "
+                     "channel or ask for it to stay local.%s",
+                     provider, channel, channel, format);
    } else {
       /* Provider known but no channel display_name (uncommon — only if
        * messaging_channels.display_name is NULL).  Surface what we have
        * so the LLM at least knows the surface. */
       len = snprintf(ctx, sizeof(ctx),
-                     "\n\nYou are responding through the %s messaging surface "
-                     "RIGHT NOW.  The user is reading your replies on %s.",
-                     provider, provider);
+                     "\n\nYou're replying through %s; the user reads your replies there.%s",
+                     provider, format);
    }
    if (len < 0 || (size_t)len >= sizeof(ctx)) {
       return base;
@@ -450,7 +448,7 @@ static char *append_messaging_context(char *base, session_t *dispatch) {
 }
 
 /**
- * @brief Append a DAP2 satellite's Room / HomeAssistant_Area lines.
+ * @brief Append the room a DAP2 satellite is in, and its Home Assistant area.
  *
  * One of the surface's standing directions (build_directives): the room the
  * satellite is in, and its Home Assistant area when mapped (satellite_db
@@ -469,20 +467,23 @@ static char *append_satellite_context(char *base, session_t *dispatch) {
       return base;
 
    /* satellite_db lookup is best-effort — failure just means no ha_area
-    * suffix; we still emit the Room=... line. */
+    * suffix; we still emit the room sentence. */
    satellite_mapping_t mapping;
    const char *ha_area = NULL;
    if (satellite_db_get(dispatch->identity.uuid, &mapping) == 0 && mapping.ha_area[0] != '\0')
       ha_area = mapping.ha_area;
 
-   /* Build the suffix in a stack buffer to mirror the live-history
-    * shape exactly.  Format is "\nRoom=X.\nHomeAssistant_Area=[Y].". */
-   char ctx[192];
+   /* A sentence, not "Room=X." alone: the bare key=value form gives the model
+    * the data without saying what it is for. */
+   char ctx[320];
    ctx[0] = '\0';
-   int len = snprintf(ctx, sizeof(ctx), "\nRoom=%s.", room);
+   int len = snprintf(ctx, sizeof(ctx),
+                      "\nYou're speaking with the user through the satellite "
+                      "in the %s.",
+                      room);
    if (len < 0 || (size_t)len >= sizeof(ctx)) {
       /* Room name doesn't fit — skip the suffix entirely rather than
-       * emitting a truncated Room= line. */
+       * emitting a truncated sentence. */
       return base;
    }
    if (ha_area != NULL && len < (int)sizeof(ctx) - 1) {
@@ -495,7 +496,9 @@ static char *append_satellite_context(char *base, session_t *dispatch) {
                *p == ' ' || *p == '-' || *p == '_'))
             *p = '_';
       }
-      snprintf(ctx + len, sizeof(ctx) - len, "\nHomeAssistant_Area=[%s].", safe_area);
+      snprintf(ctx + len, sizeof(ctx) - len,
+               " For Home Assistant requests that don't name a room, use the \"%s\" area.",
+               safe_area);
    }
 
    const size_t base_len = strlen(base);
@@ -553,16 +556,12 @@ static char *append_block_directive(char *base, const char *text) {
  * refused at execution, llm_tools_enabled_for_session: a conversation's frozen
  * tool set still lists it, and this direction is what says it can't be used.) */
 static const char JOB_HEADLESS_DIRECTIVE[] =
-    "[Background task mode] You're completing this task as an autonomous background agent rather "
-    "than in a live conversation. The person who requested it isn't available right now, so "
-    "there's "
-    "no chance to ask follow-up questions, confirm details, or wait for input — proceed with "
-    "reasonable assumptions and finish the task in full using the tools available to you. Your "
-    "response is the deliverable: it's saved and delivered to the user once you're done, so "
-    "provide "
-    "the complete, self-contained result — the actual findings or output — rather than a plan, a "
-    "progress update, or a note that you'll get started or follow up later. You also can't start "
-    "additional background jobs, so carry the work through to completion yourself in this session.";
+    "[Background task mode] You're completing this task as a background agent, not in a live "
+    "conversation. The person who asked isn't available, so you can't ask questions or wait for "
+    "input: make reasonable assumptions and finish the task with the tools you have. Your reply "
+    "is the deliverable and reaches the user when you're done, so give the complete result (the "
+    "findings or output itself), not a plan, a progress update, or a promise to follow up. You "
+    "can't start other background jobs; do the work yourself in this session.";
 
 /* Add @p text to a directive set, a blank line apart (leading newlines of the
  * piece dropped).  Takes @p set. */
@@ -612,8 +611,9 @@ static char *build_directives(session_t *dispatch) {
       free(channel);
    }
    if (dispatch->type == SESSION_TYPE_LOCAL && g_config.general.room[0] != '\0') {
-      char room_line[sizeof(g_config.general.room) + 16];
-      snprintf(room_line, sizeof(room_line), "Room=%s.", g_config.general.room);
+      char room_line[sizeof(g_config.general.room) + 48];
+      snprintf(room_line, sizeof(room_line), "The user is talking to you from the %s.",
+               g_config.general.room);
       set = add_directive(set, room_line);
    }
    if (dispatch->type == SESSION_TYPE_LOCAL || dispatch->type == SESSION_TYPE_DAP2 ||

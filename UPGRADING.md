@@ -12,6 +12,37 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-08 — Replies sized to the question; text messages kept short
+
+**What changed.**
+- Friday's base rules now say how long a reply should be (a sentence or two for
+  a quick request, longer for advice or explanations) and to ask one short
+  question when a request is missing something, instead of guessing.
+- Replies by SMS are short plain text, without markdown or links.
+- A satellite tells Friday the room it's in as a sentence, and that its Home
+  Assistant area is the one to use when you don't name a room.
+- On models that can't take a system message mid-conversation (among them
+  Claude Haiku 4.5 and Sonnet 5, and most local models), DAWN's notes about the
+  surface now come before your words in the message, so your question is the
+  last thing the model reads. A short first message such as "turn it up" no
+  longer gets an answer about offline hardware.
+- A persona set to be "used instead of the base" (My Settings → Persona) is now
+  the only persona Friday gets. Before, the base persona was sent too, with an
+  instruction to ignore it.
+- Each existing conversation misses the prompt cache once, on its next turn,
+  then caches as before.
+
+**What you need to do.**
+- If your persona replaces the base one and you want Friday to keep something
+  the base persona (`[persona] description` in `dawn.toml`) told her, such as
+  the OASIS project list, add it to your own persona.
+- If you set your own spoken-reply directions (`[tts] voice_directive` or
+  `voice_directive_webui`): the rule about saying factorials in words ("52
+  factorial", not "52!") moved from the base prompt into the built-in
+  spoken-reply directions, so add it to yours if you want it.
+
+---
+
 ## 2026-10-08 — Memory extraction: Claude Haiku 5.5 with reasoning is now recommended
 
 **What changed.**

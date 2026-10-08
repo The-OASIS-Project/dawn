@@ -170,6 +170,18 @@ bool llm_history_is_unsaved_context(struct json_object *msg);
 struct json_object *llm_history_context_message(struct json_object *parts);
 
 /**
+ * @p history with each turn's notes (the directive and instruction messages
+ * that follow a question) moved into that question as parts after its context
+ * and before the user's words, each headed with the operator-note label.  For
+ * a model that takes no system message mid-conversation: the last thing it
+ * reads is the user's question, not DAWN's note.  An envelope's notes join
+ * the context message in front of it, or one of their own there, never the
+ * envelope; a note with no question before it stays where it is.  New array sharing the messages it
+ * doesn't change (caller puts), or NULL on allocation failure.
+ */
+struct json_object *llm_history_notes_before_words(struct json_object *history);
+
+/**
  * Fold loaded rows into the in-memory shape, from index @p from on.
  *
  * A row saved naming its question (LLM_HISTORY_CONTEXT_OF_KEY) goes with it,
@@ -177,7 +189,8 @@ struct json_object *llm_history_context_message(struct json_object *parts);
  * at the front of the question (for an envelope, a message of their own just
  * before it: DAWN's context never shares a message with untrusted text), other
  * request context (a directive, an instruction change) follows it, each in row
- * order.  A named question not in
+ * order (a renderer for a model without mid-conversation system messages moves
+ * those into the question: llm_history_notes_before_words).  A named question not in
  * the load takes its rows with it.
  *
  * A row saved without one follows its position: turn-context and memory rows
