@@ -67,7 +67,10 @@ typedef void (*email_fanout_fail_fn)(void *ctx, int index, const email_fanout_sl
 /**
  * @brief Merge @p slots into @p out: the newest @p max rows across all accounts
  *
- * By date, a tie keeping account order.  Every failed account is reported
+ * By date, a tie keeping account order.  Unlike the mail panel's merge
+ * (email_merge_page), which keeps each account's own order for its paging
+ * cursor, this has no cursor to keep, so an old message re-filed with a new
+ * UID can't hold back newer mail.  Every failed account is reported
  * through @p on_fail (any of them may have held newer rows), except a
  * cancelled one, which makes the result false.
  *

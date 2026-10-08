@@ -222,6 +222,8 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
 | `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
+| `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
+| `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -339,8 +341,13 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │
 │  Email exec      — 4 workers, started on the first     │
-│                    WebUI email request: the panel's    │
-│                    email work, off the lws thread      │
+│                    WebUI email request and kept until  │
+│                    shutdown: the panel's email work,   │
+│                    off the lws thread                  │
+│  Email fan-out   — transient, one per enabled account  │
+│                    (≤16) for an all-accounts email     │
+│                    search from the tool, joined before │
+│                    the search returns                  │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -485,12 +492,14 @@ Per-module locks (scoped to a single subsystem):
                                                                      auth_db lock; nothing takes it while holding those, the draft/trash
                                                                      mutexes or s_conn_registry_mutex; the release hook runs with no lease mutex held.
                                                                      A thread re-taking its own lease is caught; a ticket holder has no thread,
-                                                                     so code running under a ticket's lease checks email_lease_is_held
+                                                                     so code running under a ticket's lease asserts email_lease_is_held
+                                                                     (that the account's lease is held by someone, not that it is this
+                                                                     ticket's: a debug check, not a guard)
   webui_email_exec::s_mutex (src/webui/webui_email_exec.c) — the WebUI email executor's run queue, sessions' slots and which
                                                                      user each worker serves.  Taken BEFORE the lease mutex (a worker asks for a
                                                                      lease, a cancel withdraws a ticket) and before a join's deliver_mutex; never
-                                                                     held while releasing a lease (the release may call the hook, which takes it)
-                                                                     or while running account work.  A request's free_ctx takes no locks (it may
+                                                                     held while releasing a lease or setting the lease hook (either may call the
+                                                                     hook, which takes it) or while running account work.  A request's free_ctx takes no locks (it may
                                                                      run under s_mutex)
   webui_email_exec join->deliver_mutex (src/webui/webui_email_exec.c) — one per request: its cancel and its result's send are
                                                                      ordered by it (a cancelled request's result is never sent).  Order: s_mutex →

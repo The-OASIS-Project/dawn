@@ -86,7 +86,8 @@ if(GIT_SHA STREQUAL "")
     set(GIT_SHA "unknown")
 endif()
 
-# The Git SHA goes into one generated source file (include/git_sha.h), not a -D:
+# The Git SHA goes into one generated source file (generated/git_sha.c, from
+# cmake/git_sha.c.in, declared in include/git_sha.h), not a -D:
 # a -D reaches every target defined after it, whisper.cpp and its CUDA kernels
 # included, so each new commit rebuilt all of them.  configure_file rewrites the
 # file only when the hash changes.  (VERSION_NUMBER lives in include/version.h.)

@@ -169,13 +169,6 @@ static bool is_imap_page_token(const char *page_token) {
  * is the single point that labels every row (contract in email_service.h).  The
  * address (username) is the unambiguous inbox identifier — the display name may
  * be a generic label like "Gmail" that doesn't say which account it is. */
-/* Why a transfer failed, given the backend said only "failed": a transfer the
- * caller stopped (its cancel flag set) fails the same way, and is a cancel. */
-static email_err_t failed_or_stopped(void) {
-   const atomic_bool *cancel = email_transfer_thread_cancel();
-   return cancel && atomic_load(cancel) ? EMAIL_ERR_CANCELLED : EMAIL_ERR_FAILED;
-}
-
 static void stamp_account(email_summary_t *out, int n, const email_account_t *acct) {
    for (int i = 0; i < n; i++) {
       snprintf(out[i].account_name, sizeof(out[i].account_name), "%s", acct->name);
@@ -298,7 +291,7 @@ static int recent_on_account(const email_account_t *acct,
                                   ext ? &ext->rows_missing : NULL);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
-      *err = rc == 0 ? EMAIL_ERR_NONE : failed_or_stopped();
+      *err = rc == 0 ? EMAIL_ERR_NONE : email_transfer_failure();
       return rc;
    }
 
@@ -416,7 +409,7 @@ static int search_single_account(email_account_t *acct,
                             npt_len, missing);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
-      *err = rc == 0 ? EMAIL_ERR_NONE : failed_or_stopped();
+      *err = rc == 0 ? EMAIL_ERR_NONE : email_transfer_failure();
       return rc;
    }
 
@@ -467,7 +460,7 @@ static int search_single_account(email_account_t *acct,
    /* Surface a timeout as a distinct code so the tool layer can hint the LLM to
     * bound the search with a date (large mailbox / no server FTS index). */
    if (rc != 0 && *err == EMAIL_ERR_FAILED)
-      *err = failed_or_stopped();
+      *err = email_transfer_failure();
    if (rc != 0 && *err == EMAIL_ERR_TIMEOUT)
       return EMAIL_RC_TIMEOUT;
    return rc;

@@ -97,23 +97,28 @@ static void test_parse_by_content_id(void) {
    TEST_ASSERT_EQUAL_STRING("a1", rows[0].message_id);
    TEST_ASSERT_EQUAL_STRING("b2", rows[1].message_id);
 
-   /* A 401 and a 200 that doesn't parse stay pending; a lowercase Content-Id
-    * still matches; a part without one is ignored. */
-   unsigned char st2[4] = { 0 };
-   email_summary_t r2[4];
+   /* A 401 and a 403 not for rate are given up; a 200 that doesn't parse and
+    * a rate-limit 403 stay pending; a lowercase Content-Id still matches; a
+    * part without one is ignored. */
+   unsigned char st2[5] = { 0 };
+   email_summary_t r2[5];
    memset(r2, 0, sizeof(r2));
    resp[0] = '\0';
    add_part(resp, sizeof(resp), 0, 401, "{}");
+   add_part(resp, sizeof(resp), 3, 403,
+            "{\"error\":{\"errors\":[{\"reason\":\"rateLimitExceeded\"}]}}");
+   add_part(resp, sizeof(resp), 4, 403, "{\"error\":{\"errors\":[{\"reason\":\"forbidden\"}]}}");
    add_part(resp, sizeof(resp), 1, 200, "{\"id\":");
    strcat(resp, "--" B "\r\nContent-Type: application/http\r\ncontent-id: <response-2>\r\n\r\n"
                 "HTTP/1.1 200 OK\r\n\r\n{\"id\":\"c3\"}\r\n");
    strcat(resp, "--" B "\r\nContent-Type: application/http\r\n\r\nHTTP/1.1 200 OK\r\n\r\n{}\r\n");
    strcat(resp, "--" B "--\r\n");
-   TEST_ASSERT_EQUAL_INT(1, gmail_batch_parse(resp, B, 4, r2, st2));
-   TEST_ASSERT_EQUAL(GMAIL_BATCH_PENDING, st2[0]);
+   TEST_ASSERT_EQUAL_INT(1, gmail_batch_parse(resp, B, 5, r2, st2));
+   TEST_ASSERT_EQUAL(GMAIL_BATCH_FAILED, st2[0]); /* a lapsed token: not asked again */
    TEST_ASSERT_EQUAL(GMAIL_BATCH_PENDING, st2[1]);
    TEST_ASSERT_EQUAL(GMAIL_BATCH_DONE, st2[2]);
-   TEST_ASSERT_EQUAL(GMAIL_BATCH_PENDING, st2[3]);
+   TEST_ASSERT_EQUAL(GMAIL_BATCH_PENDING, st2[3]); /* a 403 for rate: asked again */
+   TEST_ASSERT_EQUAL(GMAIL_BATCH_FAILED, st2[4]);  /* another 403: given up */
 
    /* An empty or headerless reply reads nothing. */
    TEST_ASSERT_EQUAL_INT(0, gmail_batch_parse(NULL, B, 5, rows, state));

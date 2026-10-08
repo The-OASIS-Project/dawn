@@ -404,7 +404,10 @@ static void list_gmail(list_ctx_t *c, list_acct_t *a, const email_exec_task_ctx_
       a->missing += pr.missing;
       have += email_cursor_gmail_filter(a->rows + have, count, &a->from, &skip_left);
       more = npt[0] != '\0';
-      if (!more)
+      /* Gmail refusing rows: asking for more pages would only draw more
+       * refusals.  The account is marked partial; a refused row older than the
+       * last one shown comes on a later page, a newer one only on a reload. */
+      if (!more || pr.missing > 0)
          break;
       snprintf(tok, sizeof(tok), "%s", npt);
    }
@@ -414,7 +417,7 @@ static void list_gmail(list_ctx_t *c, list_acct_t *a, const email_exec_task_ctx_
    if (email_cursor_gmail_order(a->rows, have) && !atomic_exchange(&s_order_logged, true))
       OLOG_WARNING("email panel: account %lld listed out of date order; sorted",
                    (long long)a->from.account_id);
-   if (have == 0 && more)
+   if (have == 0 && more && a->missing == 0)
       OLOG_WARNING("email panel: account %lld: %d pages with nothing to show%s",
                    (long long)a->from.account_id, GMAIL_FETCH_PAGES,
                    a->from.next_date > 0 ? "; stepping past one crowded second" : "");
@@ -487,6 +490,7 @@ static json_object *list_finish(void *ctx, const int64_t *account_ids, int n) {
          .next_before_uid = a->next_before,
          .next_uidvalidity = a->next_v,
          .next_folder_hash = a->next_f,
+         .refused = a->missing > 0,
       };
    }
    email_merge_pick_t picks[PANEL_LIMIT_MAX];

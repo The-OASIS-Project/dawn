@@ -85,6 +85,10 @@ static bool css_number(const char *s, double *out, const char **end) {
             e = e * 10 + (*q - '0');
          q++;
       }
+      /* Past 10^±330 a double is already inf or 0: scaling further is only
+       * work a hostile style could repeat per number ("1e3999"). */
+      if (e > 330)
+         e = 330;
       while (e-- > 0)
          v = esign > 0 ? v * 10.0 : v / 10.0;
       p = q;

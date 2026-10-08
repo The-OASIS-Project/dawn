@@ -1102,7 +1102,7 @@ int email_service_list_folders(int user_id,
       } else {
          rc = gmail_list_labels(token, out, out_len);
          if (rc != 0 && err)
-            *err = EMAIL_ERR_FAILED;
+            *err = email_transfer_failure();
       }
       sodium_memzero(token, sizeof(token));
       sodium_memzero(&acct, sizeof(acct));
@@ -1119,7 +1119,7 @@ int email_service_list_folders(int user_id,
    if (conn_rc == EMAIL_SVC_CONN_OK) {
       rc = email_list_folders(&conn, out, out_len);
       if (rc != 0 && err)
-         *err = EMAIL_ERR_FAILED;
+         *err = email_transfer_failure();
    } else {
       rc = EMAIL_RC_FAILURE;
       if (err)

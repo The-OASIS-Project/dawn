@@ -125,9 +125,10 @@ struct html_vis {
    int buckets[VIS_BUCKETS];
    uint32_t seed; /* per document: a sender can't aim names at one bucket */
    vis_frame_t stack[VIS_DEPTH_MAX];
-   int depth;      /* frames in use */
-   int overflow;   /* opens past VIS_DEPTH_MAX, still to close */
-   int hide_level; /* overflow level an untracked element started hiding at, 0 none */
+   int depth;                  /* frames in use */
+   int overflow;               /* opens past VIS_DEPTH_MAX, still to close */
+   int hide_level;             /* overflow level an untracked element started hiding at, 0 none */
+   char hide_tag[VIS_TAG_MAX]; /* that element's name: only its end tag ends the hiding */
    unsigned long work;
    bool exhausted;
    const char *html_tag, *html_tag_end, *body_tag, *body_tag_end;
@@ -1168,10 +1169,17 @@ bool html_vis_open(html_vis_t *vis,
    if (is_void)
       return hidden;
    if (vis->overflow > 0 || vis->depth >= VIS_DEPTH_MAX) {
-      /* Untracked: counted; a hidden one hides the rest until it closes */
+      /* Untracked: counted.  A hidden one hides until its own end tag, if
+       * nothing opens inside it; once something does, a browser may ignore
+       * that end tag (a <p> or a table cell open inside it), which can't be
+       * told apart here, so the rest of the page is hidden. */
       vis->overflow++;
-      if (hidden && vis->hide_level == 0)
+      if (vis->hide_level > 0) {
+         vis->exhausted = true;
+      } else if (hidden) {
          vis->hide_level = vis->overflow;
+         snprintf(vis->hide_tag, sizeof(vis->hide_tag), "%s", tag_name);
+      }
       return html_vis_hidden(vis);
    }
    vis->stack[vis->depth++] = f;
@@ -1197,9 +1205,13 @@ void html_vis_close(html_vis_t *vis, const char *tag_name) {
    if (!vis || !tag_name || !isalpha((unsigned char)tag_name[0]))
       return;
    if (vis->overflow > 0) {
-      if (vis->hide_level == vis->overflow)
+      /* Only the hidden element's own end tag ends the hiding: a stray end
+       * tag a browser ignores must not. */
+      if (vis->hide_level > 0 && strcasecmp(tag_name, vis->hide_tag) == 0)
          vis->hide_level = 0;
-      vis->overflow--;
+      /* Leaving the untracked depth while still hiding keeps hiding the rest */
+      if (vis->overflow > 1 || vis->hide_level == 0)
+         vis->overflow--;
       return;
    }
    char tag[VIS_TAG_MAX];

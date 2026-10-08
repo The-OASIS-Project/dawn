@@ -159,6 +159,7 @@ typedef struct {
    uint32_t next_before_uid;
    uint32_t next_uidvalidity; /* the mailbox epoch this fetch saw (0 = not seen) */
    uint32_t next_folder_hash; /* IMAP: the folder this fetch read (0 = not known) */
+   bool refused;              /* Gmail: some listed rows couldn't be fetched (mostly rate limits) */
 } email_merge_in_t;
 
 typedef struct {
@@ -170,8 +171,12 @@ typedef struct {
  * @brief Merge one page across accounts
  *
  * Newest first by date, comparing only each account's next row (ties go to
- * the earlier account).  The page ends at @p limit rows, or as soon as an
- * account still fetching runs out of fetched rows, since its next row can't be
+ * the earlier account).  Each account keeps its own order (IMAP by UID), so
+ * an IMAP message re-filed with an old date can hold back that account's
+ * newer rows: the price of a cursor that records an exact position per
+ * account.  The tool's all-accounts search has no cursor and sorts by date
+ * alone (email_fanout_merge); don't make one match the other.  The page ends at @p limit rows, or
+ * as soon as an account still fetching runs out of fetched rows, since its next row can't be
  * placed.  Failed accounts and accounts whose fetch had no rows don't take
  * part.
  *

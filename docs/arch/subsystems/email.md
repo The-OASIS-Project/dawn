@@ -74,10 +74,9 @@ Display names are quoted in the To and From headers (`email_format_mailbox`).
 Both backends end in one reader, `email_mime.c`, the only file that uses GMime.
 The backends hand over the message in different forms:
 
-- **IMAP** fetches the raw RFC 822 bytes, bounded: 512 KB for the LLM tool (a
-  2 MB cap, `EMAIL_READ_FETCH_PANEL`, is reserved for the planned email panel's
-  read path and not in use yet). A larger message comes back cut and reads as
-  truncated; it is never refused. A read-specific curl sink stops the transfer at
+- **IMAP** fetches the raw RFC 822 bytes, bounded: 512 KB for the LLM tool, 2 MB
+  for the mail panel's read (`EMAIL_READ_FETCH_PANEL`). A larger message comes
+  back cut and reads as truncated; it is never refused. A read-specific curl sink stops the transfer at
   the cap.
   - **Pre-scan.** Before GMime sees the bytes, `email_mime_prescan` cuts the
     message at the first limit it passes. It counts boundary lines, and every line
@@ -85,6 +84,13 @@ The backends hand over the message in different forms:
     whatever the line looks like). It also caps one header's folded length and a
     line's length. GMime builds a message's whole tree before anything can stop it,
     and a few MB of tiny parts or headers can cost hundreds of MB to parse.
+  - **Address headers.** GMime's address parsing costs time quadratic in the
+    entries without an '@' (and group colons), and it re-parses every header of an
+    address type when another arrives. The pre-scan counts such entries across all
+    address headers, skipping quotes and comments as GMime does, and cuts past
+    1,000; a header block may hold at most 4 headers of each type GMime parses.
+    Gmail's header values, which skip the pre-scan, are each cut at 1,000 such
+    entries (`email_mime_addr_list`).
   - **No-copy parse.** GMime reads over the fetched buffer with `persist_stream` on,
     so a part's content is a window on that buffer, not a copy.
 - **Gmail** reads `format=full`. That gives the MIME tree with each text part's
@@ -119,9 +125,18 @@ sees the message's structure. It does the rest:
     removed. Line and paragraph separators become line breaks.
 - **Produces HTML only on request.** `body_html` (raw; whoever shows it must
   sanitize it) exists only when `want_html` is set, capped by `max_html_bytes`.
-  The LLM tool never asks for it. These fields, `EMAIL_READ_HTML_PANEL`, the
-  read's `cancel` hook and `email_error_name()` are reserved for the planned email
-  panel's read path; nothing uses them yet.
+  The LLM tool never asks for it; the mail panel's read does
+  (`EMAIL_READ_HTML_PANEL`).
+- **Reads only the text a person would see.** HTML becomes text through
+  `html_extract_text_plain_ex`, which drops what a mail client hides: `hidden`,
+  `display:none`, `visibility:hidden`, zero size, clipped or transparent text,
+  `<head>` and the like, from inline styles and from the message's own `<style>`
+  rules (a bounded cascade in `html_hidden.c` / `html_hidden_css.c`, with a work
+  budget past which the rest reads as hidden). So an instruction styled out of
+  sight doesn't reach the model. The message records that text was dropped
+  (`hidden_text`). When the HTML shows no text (only images, or it couldn't be
+  read), the plain-text version is used, with a note that the reader may not have
+  seen it.
 - **Lists every other leaf as an attachment**: part id, filename, type,
   Content-ID, size, and whether it's inline.
 - **Sets truncation flags**: `text_truncated`, `html_truncated` and
@@ -137,6 +152,29 @@ Content-IDs are limited to RFC 5322 atext.
 
 A trash confirmation reads headers only. On IMAP that is `FETCH (ENVELOPE)`,
 which doesn't mark the message read; on Gmail it is `format=metadata`.
+
+## Searching every account
+
+A tool `search` with no account searches every enabled account at once, one thread
+each (`email_fanout.c`, joined before the call returns; Stop ends them all, since
+each runs under the caller's cancel flag). An IMAP account busy elsewhere for 10 s
+is reported, not waited out. The rows are merged newest first by date across the
+accounts, and the limit keeps the newest; each failed account is reported. One
+log line per account gives its time, which names a slow server.
+
+The mail panel pages differently: its tasks run on the email executor, and its
+merge (`email_merge_page`) keeps each account's own order, comparing only each
+account's next row, because its cursor must record an exact position per account.
+The tool has no cursor across accounts, so it can sort freely.
+
+**Gmail lists in two steps**: the ids (`messages.list`), then each message's
+headers in batch requests of 20 (`gmail_batch.c`). Gmail refuses some parts of a
+batch when a user's requests come fast (429, or a 403 naming a rate limit); those,
+and server errors, are asked for again after 1 s and then 2 s. A 401 or another
+403 isn't retried. Rows keep the listing's order. Any still refused are counted, not
+dropped: the tool says the list is incomplete, the panel marks the account partial
+(RATE_LIMITED), the digest notes it, and reply states stay unknown. Search terms
+lose quotes and currency signs, with which Gmail matches nothing.
 
 ## Moving messages (trash, archive) and undo
 

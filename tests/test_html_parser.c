@@ -596,6 +596,50 @@ static void test_hostile_visibility_is_bounded(void) {
    free(html);
 }
 
+/* A style full of huge exponents ("1e3999"): each number's scaling stops
+ * where a double saturates, not after thousands of steps. */
+static void test_hostile_exponents_are_bounded(void) {
+   const size_t cap = 2 * 1024 * 1024;
+   char *html = malloc(cap);
+   TEST_ASSERT_NOT_NULL(html);
+   size_t n = (size_t)snprintf(html, cap, "<i style=\"color:rgb(");
+   while (n + 32 < cap)
+      n += (size_t)snprintf(html + n, cap - n, "1e3999 ");
+   n += (size_t)snprintf(html + n, cap - n, ")\">x</i>");
+   struct timespec t;
+   clock_gettime(CLOCK_MONOTONIC, &t);
+   char *out = NULL;
+   html_extract_text_plain(html, n, &out);
+   TEST_ASSERT_LESS_THAN_INT(1000, elapsed_ms(&t)); /* 2.5 s before the cap */
+   free(out);
+   free(html);
+}
+
+/* Deeper than the filter tracks: a stray end tag (</x>) can't end a hidden
+ * element, and once anything opens inside one (where a browser may ignore its
+ * end tag: a <p>, a table cell) the rest of the page stays hidden. */
+static void test_deep_nesting_hidden_stays_hidden(void) {
+   static const char *const tails[] = {
+      "<div style=\"display:none\"></x>SECRET</div>",
+      "<span style=\"display:none\"><p></span>SECRET</p>",
+      "<div style=\"display:none\"><table><td></div>SECRET</td></table></div>",
+   };
+   for (size_t k = 0; k < sizeof(tails) / sizeof(tails[0]); k++) {
+      char html[8192] = "SHOWN";
+      for (int i = 0; i < 300; i++)
+         strcat(html, "<div>");
+      strcat(html, tails[k]);
+      char *out = NULL;
+      bool dropped = false;
+      TEST_ASSERT_EQUAL_INT(HTML_PARSE_SUCCESS,
+                            html_extract_text_plain_ex(html, strlen(html), &out, &dropped));
+      TEST_ASSERT_TRUE(dropped);
+      TEST_ASSERT_NOT_NULL(strstr(out, "SHOWN"));
+      TEST_ASSERT_NULL_MESSAGE(strstr(out, "SECRET"), tails[k]);
+      free(out);
+   }
+}
+
 static void test_hostile_pages_are_linear(void) {
    check_linear("<input>");
    check_linear("<meta x>");
@@ -655,6 +699,8 @@ int main(void) {
    RUN_TEST(test_plain_drops_hidden_elements);
    RUN_TEST(test_plain_keeps_visible_elements);
    RUN_TEST(test_hostile_visibility_is_bounded);
+   RUN_TEST(test_hostile_exponents_are_bounded);
+   RUN_TEST(test_deep_nesting_hidden_stays_hidden);
 
    /* Error handling */
    RUN_TEST(test_null_input);

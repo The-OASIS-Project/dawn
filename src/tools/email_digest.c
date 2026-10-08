@@ -44,6 +44,7 @@
 #include "tools/email_digest_internal.h"
 #include "tools/email_parse.h"
 #include "tools/email_service.h"
+#include "tools/email_transfer.h"
 #include "tools/email_types.h"
 #include "tools/tool_registry.h"
 
@@ -329,9 +330,13 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    int ok_accounts = 0;
    int total_unread = 0;
 
+   bool stopped = false;
    for (int a = 0; a < n_acct; a++) {
       if (!accounts[a].enabled)
          continue;
+      /* Stopped: what's left would only fail and read as broken accounts. */
+      if ((stopped = email_transfer_stopped()))
+         break;
       enabled_accounts++;
       if (digest_fetch_account(user_id, &accounts[a], opts->unread_only, cutoff, batch, &rows,
                                &status, &total_unread))
@@ -340,6 +345,12 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
 
    email_summary_t *merged = rows.v;
    int merged_n = rows.n;
+   if (stopped || email_transfer_stopped()) {
+      strbuf_free(&status);
+      free(batch);
+      free(merged);
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: the request was stopped.");
+   }
 
    if (merged_n > 1)
       qsort(merged, merged_n, sizeof(email_summary_t), cmp_summary_date_desc);

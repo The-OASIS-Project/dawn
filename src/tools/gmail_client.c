@@ -669,7 +669,7 @@ static int gmail_batch_fetch_metadata(CURL *curl,
    for (int i = 0; i < id_count; i++) {
       if (state[i] == GMAIL_BATCH_DONE && *out_count < max_out)
          out[(*out_count)++] = rows[i];
-      else if (state[i] == GMAIL_BATCH_PENDING)
+      else if (state[i] == GMAIL_BATCH_PENDING || state[i] == GMAIL_BATCH_FAILED)
          missing++;
    }
    if (missing > 0 && !stopped)
@@ -680,8 +680,7 @@ static int gmail_batch_fetch_metadata(CURL *curl,
    free(rows);
    free(state);
    free(which);
-   const atomic_bool *cancel = email_transfer_thread_cancel();
-   if (stopped || (cancel && atomic_load(cancel)))
+   if (stopped || email_transfer_stopped())
       return 1; /* the caller reads a stopped transfer as cancelled */
    return *out_count == 0 && request_failed ? 1 : 0;
 }

@@ -452,15 +452,15 @@ static bool next_position(const email_merge_in_t *in, int emitted, email_cursor_
 
    /* Gmail */
    if (in->row_count == 0) {
-      if (!in->more)
+      if (!in->more && !in->refused)
          return false;
       /* Pages came back with nothing to show but more past them: from the
        * newest (empty pages), keep the position for the next request; past a
        * resume second (every row was one already emitted, more of that second
        * than the fetch reaches), step past that second rather than fetch it
        * again. */
-      if (in->from.next_date <= 1)
-         return true;
+      if (in->from.next_date <= 1 || in->refused)
+         return true; /* refused rows: ask again from here, don't step past them */
       gmail_position(in, 0, in->from.next_date - 1, out);
       return true;
    }

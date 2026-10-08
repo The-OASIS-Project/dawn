@@ -143,3 +143,11 @@ const atomic_bool *email_transfer_scope_cancel(const atomic_bool *cancel) {
 const atomic_bool *email_transfer_thread_cancel(void) {
    return s_thread_cancel;
 }
+
+bool email_transfer_stopped(void) {
+   return s_thread_cancel && atomic_load(s_thread_cancel);
+}
+
+email_err_t email_transfer_failure(void) {
+   return email_transfer_stopped() ? EMAIL_ERR_CANCELLED : EMAIL_ERR_FAILED;
+}

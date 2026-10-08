@@ -172,9 +172,10 @@ typedef struct {
 
 /* A listed message's fetch. */
 enum {
-   GMAIL_BATCH_PENDING = 0,
-   GMAIL_BATCH_DONE,
-   GMAIL_BATCH_GONE
+   GMAIL_BATCH_PENDING = 0, /* not read yet: asked for (again) */
+   GMAIL_BATCH_DONE,        /* read */
+   GMAIL_BATCH_GONE,        /* deleted since the listing: left out */
+   GMAIL_BATCH_FAILED,      /* refused for good (401, a 403 not for rate): counted missing */
 };
 
 /** The batch request body asking for the rows of ids[which[0..n-1]] (each
@@ -184,10 +185,11 @@ char *gmail_batch_body(const gmail_msg_id_t *ids, const int *which, int n);
 /**
  * @brief Read a batch reply into rows[i] for each part answering index i
  *
- * A row read sets state[i] DONE; a refusal that asks us to slow down (429,
- * 403), a lapsed token (401) or a server error leaves it PENDING, to ask
- * again; any other answer (a message deleted since the listing) sets GONE.  Parts for an index out
- * of range or not PENDING are ignored.
+ * A row read sets state[i] DONE; a refusal that asks us to slow down (429, a
+ * 403 naming a rate limit) or a server error leaves it PENDING, to ask again;
+ * a lapsed token (401) or another 403 sets FAILED (not asked again, counted
+ * missing); any other answer (a message deleted since the listing) sets GONE.
+ * Parts for an index out of range or not PENDING are ignored.
  *
  * @return rows read
  */

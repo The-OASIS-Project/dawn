@@ -1408,8 +1408,9 @@ archive takes the message out of the inbox. IMAP: the folder the server marks `\
   that `error_code`; otherwise it's `done` and `failed`, even if the call stopped partway.
 
 **Queueing.** Archive, trash and undo share one queue per session: one runs, up to 3 wait
-in order behind it, none is ever replaced; a 5th is `BUSY`, and so is one that would take
-the user past their limit of live email requests. A move that started isn't cancelled
+in order behind it, none is ever replaced; a 5th is `BUSY`. Only a move that would run
+at once counts toward the user's limit of live email requests (and is `BUSY` past it); one
+that waits behind another doesn't. A move that started isn't cancelled
 midway: its login and its first folder (IMAP) or message (Gmail) always run, and a stop
 between folders leaves the rest where they were. So a started move always moves something
 and always sends `email_changed`; a stop waits at most for that first folder or message

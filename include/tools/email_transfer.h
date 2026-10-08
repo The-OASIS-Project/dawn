@@ -60,6 +60,14 @@ const atomic_bool *email_transfer_scope_cancel(const atomic_bool *cancel);
 /** This thread's transfer cancel flag (NULL when none is set). */
 const atomic_bool *email_transfer_thread_cancel(void);
 
+/** Why a transfer failed when the backend says only "failed": EMAIL_ERR_CANCELLED
+ *  when this thread's cancel flag is set (a stopped transfer fails the same
+ *  way), else EMAIL_ERR_FAILED. */
+email_err_t email_transfer_failure(void);
+
+/** Whether this thread's transfers have been stopped. */
+bool email_transfer_stopped(void);
+
 #ifdef __cplusplus
 }
 #endif

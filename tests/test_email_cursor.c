@@ -537,6 +537,22 @@ static void test_gmail_positions(void) {
    memset(&next, 0, sizeof(next));
    TEST_ASSERT_FALSE(email_merge_page(in, 1, 6, picks, &pc, &next));
    TEST_ASSERT_EQUAL_INT(0, next.count);
+
+   /* Every row of a resumed fetch refused by Gmail: the position stays, so
+    * the next page asks again rather than stepping past second 899 (or
+    * treating the account as done). */
+   email_merge_in_t ref = { .account_id = 8,
+                            .more = true,
+                            .refused = true,
+                            .from = { .account_id = 8, .next_date = 899, .emitted = 1 } };
+   memset(&next, 0, sizeof(next));
+   TEST_ASSERT_TRUE(email_merge_page(&ref, 1, 6, picks, &pc, &next));
+   TEST_ASSERT_EQUAL_INT64(899, (int64_t)next.pos[0].next_date);
+   TEST_ASSERT_EQUAL_INT(1, next.pos[0].emitted);
+   ref.more = false;
+   memset(&next, 0, sizeof(next));
+   TEST_ASSERT_TRUE(email_merge_page(&ref, 1, 6, picks, &pc, &next));
+   TEST_ASSERT_EQUAL_INT64(899, (int64_t)next.pos[0].next_date);
 }
 
 /* =============================================================================

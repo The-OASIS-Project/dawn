@@ -92,6 +92,18 @@ static int part_index(const char *headers, const char *end) {
    return v >= 0 && v < 1000000 ? (int)v : -1;
 }
 
+/* Whether a 403 part's body names a rate limit (rateLimitExceeded or
+ * userRateLimitExceeded), the only 403s a retry can fix. */
+static bool rate_limit_body(const char *part, const char *end) {
+   static const char key[] = "RateLimitExceeded";
+   const size_t klen = sizeof(key) - 1;
+   for (const char *q = part; q + klen <= end; q++) {
+      if (strncasecmp(q, key, klen) == 0)
+         return true;
+   }
+   return false;
+}
+
 int gmail_batch_parse(const char *resp,
                       const char *boundary,
                       int n_ids,
@@ -123,11 +135,18 @@ int gmail_batch_parse(const char *resp,
       int code = 0;
       if (sscanf(http, "HTTP/1.1 %d", &code) != 1)
          continue;
-      /* Refused as too many requests (429, or 403 rateLimitExceeded), a passing
-       * server error, or a lapsed token: asked for again, and counted missing
-       * if never answered, so a row is never dropped without a word. */
-      if (code == 429 || code == 403 || code == 401 || code >= 500)
+      /* Too many requests (429, or a 403 naming a rate limit) or a passing
+       * server error: asked for again.  A lapsed token (401) or another 403
+       * won't change on a retry: given up, but still counted missing, so a
+       * row is never dropped without a word. */
+      if (code == 429 || code >= 500)
          continue;
+      if (code == 403 && rate_limit_body(http, end))
+         continue;
+      if (code == 401 || code == 403) {
+         state[i] = GMAIL_BATCH_FAILED;
+         continue;
+      }
       if (code != 200) {
          state[i] = GMAIL_BATCH_GONE; /* deleted since the listing, and the like */
          continue;

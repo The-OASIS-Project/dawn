@@ -550,10 +550,18 @@ static void *worker_main(void *arg) {
    return NULL;
 }
 
+/* The lease hook, set once before any worker can queue a ticket.  Not under
+ * s_mutex: setting it may grant queued tickets and run the hook, which takes
+ * s_mutex. */
+static pthread_once_t s_hook_once = PTHREAD_ONCE_INIT;
+
+static void set_lease_hook(void) {
+   email_lease_set_hook(lease_hook);
+}
+
 /* With s_mutex held: the workers wait on it until it's released. */
 static void start_workers_locked(void) {
    s_started = true;
-   email_lease_set_hook(lease_hook);
    pthread_attr_t attr;
    pthread_attr_init(&attr);
    pthread_attr_setstacksize(&attr, EMAIL_EXEC_STACK_BYTES);
@@ -635,6 +643,7 @@ int webui_email_exec_submit(const email_exec_request_t *r) {
    exec_notice_t notice[EMAIL_EXEC_SESSION_JOINS + 2];
    int n_cancelled = 0;
 
+   pthread_once(&s_hook_once, set_lease_hook);
    pthread_mutex_lock(&s_mutex);
    email_err_t refuse = EMAIL_ERR_NONE;
    exec_session_t *s = NULL;
