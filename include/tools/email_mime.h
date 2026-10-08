@@ -48,6 +48,15 @@ extern "C" {
 /* Address headers (To, Cc, From, ...) together: GMime builds every address
  * in them, at a cost that grows faster than their number. */
 #define EMAIL_MIME_PRESCAN_ADDRESS_BYTES (256 * 1024)
+/* Entries without an '@' in address headers, all together: GMime's parse of
+ * them costs time quadratic in their number (a header folded over 13,000 of
+ * them takes it 1.6 s).  Real lists have few: a name with a comma in it is
+ * one ("Doe, John" quoted, or a sloppy mailer's unquoted Doe, John <j@x>),
+ * and so is a group's colon (undisclosed-recipients:;). */
+#define EMAIL_MIME_PRESCAN_BARE_ADDRESSES 1000
+/* Headers of one address type (To, Cc, ...) in one header block: GMime parses
+ * them all again each time another arrives.  Real mail has one of each. */
+#define EMAIL_MIME_PRESCAN_ADDRESS_REPEATS 4
 /* An address header longer than this is cut (at an address boundary) before
  * it is parsed: building a list costs per address, and only 32 are kept. */
 #define EMAIL_MIME_ADDR_VALUE_MAX (64 * 1024)

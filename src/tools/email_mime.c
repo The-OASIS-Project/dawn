@@ -906,6 +906,74 @@ static int list_from(InternetAddressList *list,
    return 0;
 }
 
+/* Address entries GMime parses with no '@', and group colons: its loose parse
+ * of each reads on through the entries after it until an '@', '<', ';', ':'
+ * or the end, so their cost is quadratic in their number.  Counted as GMime splits a list:
+ * a ',' or ';' outside quotes and comments ends an entry; comments (nested,
+ * with escapes) are skipped, as GMime skips them, so an '@' or '"' inside one
+ * counts for nothing.  The state carries over a folded line. */
+typedef struct {
+   int bare;    /* entries ended so far with no '@' */
+   int comment; /* comment depth */
+   bool quote;
+   bool at;   /* the entry being read has an '@' */
+   bool text; /* ... and anything at all */
+} bare_scan_t;
+
+/* Scans @p text into @p b; returns the offset of the separator that took the
+ * count past @p limit, or @p len. */
+static size_t bare_scan(bare_scan_t *b, const char *text, size_t len, int limit) {
+   for (size_t i = 0; i < len; i++) {
+      const char c = text[i];
+      if (b->comment > 0) {
+         if (c == '\\' && i + 1 < len)
+            i++;
+         else if (c == '(')
+            b->comment++;
+         else if (c == ')')
+            b->comment--;
+         continue;
+      }
+      if (b->quote) {
+         if (c == '\\' && i + 1 < len)
+            i++;
+         else if (c == '"')
+            b->quote = false;
+         continue;
+      }
+      if (c == '(') {
+         b->comment = 1;
+      } else if (c == '"') {
+         b->quote = true;
+         b->text = true;
+      } else if (c == ',' || c == ';') {
+         if (b->text && !b->at && ++b->bare > limit)
+            return i;
+         b->at = false;
+         b->text = false;
+      } else if (c == ':') {
+         /* A group's colon: GMime's parse pays for each one too */
+         if (++b->bare > limit)
+            return i;
+         b->text = true;
+      } else if (c == '@') {
+         b->at = true;
+      } else if (c != ' ' && c != '\t') {
+         b->text = true;
+      }
+   }
+   return len;
+}
+
+/* A header ended: its last entry, quote or comment doesn't carry into the
+ * next. */
+static void bare_scan_end_header(bare_scan_t *b) {
+   b->comment = 0;
+   b->quote = false;
+   b->at = false;
+   b->text = false;
+}
+
 int email_mime_addr_list(const char *value,
                          int cap,
                          email_addr_t **list_out,
@@ -923,9 +991,13 @@ int email_mime_addr_list(const char *value,
    char *cut = NULL;
    int beyond = 0;
    const size_t len = strlen(value);
-   if (len > EMAIL_MIME_ADDR_VALUE_MAX) {
-      size_t at = EMAIL_MIME_ADDR_VALUE_MAX;
-      while (at > 0 && value[at] != ',')
+   /* Past the bare-entry budget, cut at the entry that went over (a value
+    * from Gmail's API never passed the prescan). */
+   bare_scan_t bs = { 0 };
+   const size_t bare_at = bare_scan(&bs, value, len, EMAIL_MIME_PRESCAN_BARE_ADDRESSES);
+   if (len > EMAIL_MIME_ADDR_VALUE_MAX || bare_at < len) {
+      size_t at = bare_at < EMAIL_MIME_ADDR_VALUE_MAX ? bare_at : EMAIL_MIME_ADDR_VALUE_MAX;
+      while (at > 0 && value[at] != ',' && value[at] != ';')
          at--;
       cut = malloc(at + 1);
       if (!cut)
@@ -1044,6 +1116,17 @@ static bool address_header(const char *name) {
    return false;
 }
 
+/* Which of the address headers GMime parses into its message's lists (it
+ * leaves the Resent-* ones as text): 0-5, or -1. */
+static int parsed_address_type(const char *name) {
+   static const char *const k_names[] = { "sender", "from", "reply-to", "to", "cc", "bcc" };
+   for (int i = 0; i < 6; i++) {
+      if (strcmp(name, k_names[i]) == 0)
+         return i;
+   }
+   return -1;
+}
+
 /* The boundaries a message declares.  GMime ends a part only at a line that
  * starts with "--" and one of them, so only those lines open a part's
  * headers; a body's "-->", "--- a/file" or "-- " signature doesn't.  When the
@@ -1094,6 +1177,8 @@ typedef struct {
    bool address;         /* the header being read holds addresses */
    size_t header_bytes;  /* the header being read, folded lines included */
    size_t address_bytes; /* every address header so far */
+   bare_scan_t bare;     /* address entries without an '@', all headers together */
+   int addr_count[6];    /* this header block's headers of each type GMime parses */
    /* The Content-Type being read, unfolded, until it ends */
    char ct[PRESCAN_CONTENT_TYPE_MAX];
    size_t ct_len;
@@ -1150,6 +1235,7 @@ static void end_header(prescan_t *st) {
    st->ct_len = 0;
    st->ct_too_long = false;
    st->address = false;
+   bare_scan_end_header(&st->bare);
    st->header_bytes = 0;
 }
 
@@ -1187,6 +1273,7 @@ size_t email_mime_prescan(const char *raw, size_t raw_len, bool *cut_out) {
             goto cut;
          const bool keep = st->in_header && st->message_next;
          end_header(st);
+         memset(st->addr_count, 0, sizeof(st->addr_count));
          /* Inside the headers of a part that opens a message, a boundary
           * line doesn't end what GMime will read as that message's headers. */
          if (!keep) {
@@ -1198,6 +1285,7 @@ size_t email_mime_prescan(const char *raw, size_t raw_len, bool *cut_out) {
       } else if (st->in_header) {
          if (text == 0) {
             end_header(st);
+            memset(st->addr_count, 0, sizeof(st->addr_count));
             st->in_header = st->message_next ||
                             (st->digest && st->block_is_part && !st->block_has_type);
             st->message_next = false;
@@ -1208,6 +1296,9 @@ size_t email_mime_prescan(const char *raw, size_t raw_len, bool *cut_out) {
             if (st->header_bytes > EMAIL_MIME_PRESCAN_HEADER_BYTES)
                goto cut;
             if (st->address && (st->address_bytes += len) > EMAIL_MIME_PRESCAN_ADDRESS_BYTES)
+               goto cut;
+            if (st->address &&
+                bare_scan(&st->bare, line, text, EMAIL_MIME_PRESCAN_BARE_ADDRESSES) < text)
                goto cut;
             if (st->in_ct)
                ct_append(st, line, text);
@@ -1222,6 +1313,18 @@ size_t email_mime_prescan(const char *raw, size_t raw_len, bool *cut_out) {
             header_name(line, text, name, sizeof(name));
             st->address = address_header(name);
             if (st->address && (st->address_bytes += len) > EMAIL_MIME_PRESCAN_ADDRESS_BYTES)
+               goto cut;
+            if (st->address) {
+               const char *colon = memchr(line, ':', text);
+               const size_t vlen = colon ? text - (size_t)(colon + 1 - line) : 0;
+               if (colon &&
+                   bare_scan(&st->bare, colon + 1, vlen, EMAIL_MIME_PRESCAN_BARE_ADDRESSES) < vlen)
+                  goto cut;
+            }
+            /* GMime parses every header of a type again each time another
+             * arrives: their cost is quadratic in how many there are. */
+            const int type = parsed_address_type(name);
+            if (type >= 0 && ++st->addr_count[type] > EMAIL_MIME_PRESCAN_ADDRESS_REPEATS)
                goto cut;
             if (strcmp(name, "content-type") == 0) {
                st->in_ct = true;

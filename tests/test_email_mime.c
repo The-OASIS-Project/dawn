@@ -856,6 +856,116 @@ static void test_header_bombs(void) {
    }
 }
 
+/* A To header of @p bare entries without an '@' (one per folded line),
+ * then @p valid real addresses and @p quoted ones with a comma in their
+ * quoted name, then a body. */
+static char *address_list_message(int bare, int valid, int quoted, size_t *len_out) {
+   char *raw = malloc((size_t)(bare * 8 + valid * 40 + quoted * 60) + 256);
+   size_t o = (size_t)sprintf(raw, "From: a@example.com\r\nTo: x@example.com,\r\n");
+   for (int i = 0; i < bare; i++)
+      o += (size_t)sprintf(raw + o, " b,\r\n");
+   for (int i = 0; i < valid; i++)
+      o += (size_t)sprintf(raw + o, " user%d@example.com,\r\n", i);
+   for (int i = 0; i < quoted; i++)
+      o += (size_t)sprintf(raw + o, " \"Doe, John %d\" <j%d@example.com>,\r\n", i, i);
+   o += (size_t)sprintf(raw + o, " last@example.com\r\n\r\nbody\r\n");
+   *len_out = o;
+   return raw;
+}
+
+/* Entries without an '@' cost GMime time quadratic in their number: past
+ * the budget the message is cut before GMime sees them.  Real lists, quoted
+ * names with commas included, stay whole. */
+static void test_bare_address_budget(void) {
+   size_t len = 0;
+   bool cut = false;
+   char *raw = address_list_message(EMAIL_MIME_PRESCAN_BARE_ADDRESSES + 500, 0, 0, &len);
+   TEST_ASSERT_LESS_THAN_size_t(len, email_mime_prescan(raw, len, &cut));
+   TEST_ASSERT_TRUE(cut);
+   free(raw);
+
+   raw = address_list_message(EMAIL_MIME_PRESCAN_BARE_ADDRESSES - 100, 0, 0, &len);
+   cut = false;
+   TEST_ASSERT_EQUAL_size_t(len, email_mime_prescan(raw, len, &cut));
+   TEST_ASSERT_FALSE(cut);
+   free(raw);
+
+   /* An '@' or a quote inside a comment counts for nothing: GMime skips
+    * comments, so the entries around them are still bare */
+   const int n = EMAIL_MIME_PRESCAN_BARE_ADDRESSES + 500;
+   raw = malloc((size_t)n * 16 + 256);
+   size_t o = (size_t)sprintf(raw, "From: a@example.com\r\nTo: x@example.com,\r\n");
+   for (int i = 0; i < n; i++)
+      o += (size_t)sprintf(raw + o, " b (@),\r\n");
+   o += (size_t)sprintf(raw + o, " last@example.com\r\n\r\nbody\r\n");
+   cut = false;
+   TEST_ASSERT_LESS_THAN_size_t(o, email_mime_prescan(raw, o, &cut));
+   TEST_ASSERT_TRUE(cut);
+   o = (size_t)sprintf(raw, "From: a@example.com\r\nTo: (\")\r\n");
+   for (int i = 0; i < n; i++)
+      o += (size_t)sprintf(raw + o, " b,\r\n");
+   o += (size_t)sprintf(raw + o, " (\") x@y.z\r\n\r\nbody\r\n");
+   cut = false;
+   TEST_ASSERT_LESS_THAN_size_t(o, email_mime_prescan(raw, o, &cut));
+   TEST_ASSERT_TRUE(cut);
+   free(raw);
+
+   /* Group colons count too: each costs GMime a parse */
+   raw = malloc((size_t)n * 4 + 256);
+   o = (size_t)sprintf(raw, "From: a@example.com\r\nTo: u@example.com,");
+   for (int i = 0; i < n; i++)
+      o += (size_t)sprintf(raw + o, "b:");
+   o += (size_t)sprintf(raw + o, ",x@y.z\r\n\r\nbody\r\n");
+   cut = false;
+   TEST_ASSERT_LESS_THAN_size_t(o, email_mime_prescan(raw, o, &cut));
+   TEST_ASSERT_TRUE(cut);
+   free(raw);
+
+   /* Many headers of one address type: GMime parses them all again per
+    * header, so past a few the message is cut */
+   raw = malloc(64 * 1024);
+   for (int repeats = EMAIL_MIME_PRESCAN_ADDRESS_REPEATS;
+        repeats <= EMAIL_MIME_PRESCAN_ADDRESS_REPEATS + 1; repeats++) {
+      o = (size_t)sprintf(raw, "From: a@example.com\r\n");
+      for (int i = 0; i < repeats; i++)
+         o += (size_t)sprintf(raw + o, "To: u%d@example.com\r\n", i);
+      o += (size_t)sprintf(raw + o, "\r\nbody\r\n");
+      cut = false;
+      const size_t at = email_mime_prescan(raw, o, &cut);
+      TEST_ASSERT_EQUAL(repeats > EMAIL_MIME_PRESCAN_ADDRESS_REPEATS, cut);
+      TEST_ASSERT_EQUAL(repeats > EMAIL_MIME_PRESCAN_ADDRESS_REPEATS, at < o);
+   }
+   free(raw);
+
+   /* A header value parsed on its own (Gmail's API gives values, not a
+    * message) is cut at the same budget, and still counts what it cut */
+   char *v = malloc((size_t)n * 4 + 64);
+   o = 0;
+   for (int i = 0; i < n; i++)
+      o += (size_t)sprintf(v + o, "b, ");
+   sprintf(v + o, "x@y.z");
+   email_addr_t *list = NULL;
+   int count = 0;
+   int total = 0;
+   const long t = now_ms();
+   TEST_ASSERT_EQUAL_INT(0, email_mime_addr_list(v, EMAIL_MAX_ADDRS, &list, &count, &total));
+   TEST_ASSERT_LESS_THAN_INT(BOMB_MS, now_ms() - t); /* uncut, seconds */
+   TEST_ASSERT_TRUE(total >= 1);
+   free(list);
+   free(v);
+
+   raw = address_list_message(0, 1500, 500, &len);
+   cut = false;
+   TEST_ASSERT_EQUAL_size_t(len, email_mime_prescan(raw, len, &cut));
+   TEST_ASSERT_FALSE(cut);
+   email_message_t m;
+   memset(&m, 0, sizeof(m));
+   TEST_ASSERT_EQUAL_INT(0, email_mime_parse_raw(raw, len, false, &TOOL, &m));
+   TEST_ASSERT_EQUAL_STRING("body\r\n", m.body);
+   email_message_free(&m);
+   free(raw);
+}
+
 /* =============================================================================
  * The Gmail walk: format=full JSON gives the same part ids and body as the
  * raw message
@@ -1355,6 +1465,7 @@ int main(void) {
    RUN_TEST(test_part_id_fits);
    RUN_TEST(test_long_address_header);
    RUN_TEST(test_header_bombs);
+   RUN_TEST(test_bare_address_budget);
    RUN_TEST(test_gmail_walk);
    RUN_TEST(test_base64url);
    RUN_TEST(test_plain_with_angle_brackets);
