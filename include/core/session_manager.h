@@ -947,8 +947,8 @@ static inline bool session_saved_whole(const session_t *s) {
 }
 
 /** Whether the session's turn was spoken (speech-transcribed, so a name in it
- *  may be misheard): a voice surface, or a WebUI turn whose input was voice.
- *  (A WebUI re-engagement turn keeps the last turn's value.) */
+ *  may be misheard): a voice surface, or a WebUI turn whose input was voice
+ *  (never a WebUI re-engagement turn: its input is a job's result). */
 static inline bool session_turn_spoken(session_t *s) {
    return s != NULL && (session_saved_whole(s) ||
                         (s->type == SESSION_TYPE_WEBUI && atomic_load(&s->input_was_voice)));

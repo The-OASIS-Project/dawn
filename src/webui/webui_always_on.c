@@ -1418,11 +1418,28 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn, session_t *sessi
             ctx->state_entry_ms = now;
          if (always_on_processing_expired(now, ctx->state_entry_ms, ctx->processing_since_ms,
                                           running)) {
+            /* A spoken turn still running is the command we're waiting on (or
+             * one before it): stopped, as Stop would, so its answer doesn't
+             * arrive minutes later and the next command doesn't queue behind
+             * it.  A typed turn is the user's own; ours runs after it. */
+            const bool spoken = running && atomic_load(&session->input_was_voice);
+            const char *notice;
+            if (spoken) {
+               session_cancel_turn(session);
+               notice = "That took too long, so I'm stopping it.";
+            } else if (running) {
+               notice = "Still busy with an earlier request; your command will run after it.";
+            } else {
+               notice = "Lost track of that request. Please ask again.";
+            }
             OLOG_ERROR("Always-on: stopped waiting for the answer after %lld ms (%s), listening",
                        (long long)(now - ctx->processing_since_ms),
-                       running ? "turn still running" : "no turn running");
+                       spoken    ? "spoken turn cancelled"
+                       : running ? "typed turn running"
+                                 : "no turn running");
             reset_for_listening_locked(ctx, now);
             send_always_on_state(ctx->wsi, "listening");
+            webui_send_error_ex(session, "ALWAYS_ON_GAVE_UP", notice, WS_SEVERITY_WARNING);
          }
          break;
       }

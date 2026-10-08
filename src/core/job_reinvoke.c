@@ -480,6 +480,7 @@ static void *reinvoke_turn_entry(void *arg) {
 
    session_turn_begin(live, parent, m->user_id); /* also tags the stream */
    session_begin_turn_flags(live);
+   live->input_was_voice = false; /* a job's result, not the user's speech */
    atomic_fetch_add(&live->turn_in_flight, 1);
 
    /* Clear a stale pending_visual left by a PRIOR turn on this viewer's session (e.g. a

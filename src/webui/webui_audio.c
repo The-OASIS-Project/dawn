@@ -1423,7 +1423,12 @@ static void *audio_worker_thread(void *arg) {
    /* Passed the supersede check — this turn is now in flight.  Guards
     * session_cleanup_expired from reaping a still-generating voice turn and makes
     * conv_has_turn_in_flight see it (parity with text_worker_thread).  Every exit
-    * BELOW this point releases via audio_worker_end (decrement-then-release). */
+    * BELOW this point releases via audio_worker_end (decrement-then-release).
+    * Its input is voice, flagged before it counts as in flight (always-on's
+    * watchdog reads the two together; the prompt builder's ASR hint reads the
+    * flag).  Correctness relies on per-session turn serialization; atomic_bool
+    * guards visibility, not logical interleave. */
+   session->input_was_voice = true;
    atomic_fetch_add(&session->turn_in_flight, 1);
 
    OLOG_INFO("WebUI: Processing audio for session %u (%zu bytes, %s)", session->session_id,
@@ -1570,11 +1575,6 @@ static void *audio_worker_thread(void *arg) {
                                          transcript, NULL, 0);
    }
 
-   /* This turn's input is ASR-transcribed (voice) — flag it before dispatch so
-    * the prompt builder injects the ASR-disambiguation hint for this turn.
-    * Correctness relies on per-session turn serialization (one dispatch in flight
-    * per session); atomic_bool guards visibility, not logical interleave. */
-   session->input_was_voice = true;
 
    /* Refresh events_observable for THIS turn.  The voice worker calls the LLM directly
     * (session_llm_call_with_tts_no_add below) and never passes through
