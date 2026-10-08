@@ -116,6 +116,8 @@ static void set_state(always_on_ctx_t *ctx, always_on_state_t new_state) {
    always_on_state_t old = atomic_load(&ctx->state);
    atomic_store(&ctx->state, new_state);
    ctx->state_entry_ms = now_ms();
+   if (new_state == ALWAYS_ON_PROCESSING && old != ALWAYS_ON_PROCESSING)
+      ctx->processing_since_ms = ctx->state_entry_ms;
    /* Every state transition invalidates any speculative decode: a stale in-flight
     * decode's store is dropped (generation bump) and any stored result is freed.
     * Entering an armable state (WAKE_CHECK = a fresh utterance, or RECORDING = the
@@ -129,6 +131,29 @@ static void set_state(always_on_ctx_t *ctx, always_on_state_t new_state) {
    }
    OLOG_INFO("Always-on state: %s -> %s", always_on_state_name(old),
              always_on_state_name(new_state));
+}
+
+/* Back to listening after PROCESSING, with ctx->mutex held: the buffer and
+ * VAD reset for the next utterance, a cooldown to drain in-flight echo, and
+ * last_audio_ms pushed past the no-audio auto-disable (the server drops audio
+ * in PROCESSING without counting it, and the client unmutes only after a long
+ * reply's TTS, which can take minutes). */
+static void reset_for_listening_locked(always_on_ctx_t *ctx, int64_t now) {
+   ctx->valid_len = 0;
+   ctx->read_pos = 0;
+   ctx->write_pos = 0;
+   vad_silero_reset(ctx->vad_ctx);
+   ctx->cooldown_until_ms = now + ALWAYS_ON_COOLDOWN_MS;
+   ctx->last_audio_ms = now + ALWAYS_ON_LISTEN_GRACE_MS;
+   set_state(ctx, ALWAYS_ON_LISTENING);
+}
+
+/* PROCESSING ends with no answer to wait for (no turn started, a duplicate,
+ * nothing heard): back to listening, and the client told so it stops showing
+ * "thinking".  LWS thread, ctx->mutex not held. */
+static void processing_done_listening(always_on_ctx_t *ctx) {
+   always_on_processing_complete(ctx);
+   send_always_on_state(ctx->wsi, "listening");
 }
 
 /**
@@ -182,7 +207,7 @@ void always_on_note_tts_activity(always_on_ctx_t *ctx) {
    if (!ctx)
       return;
    /* Progress signal: each streamed TTS sentence resets the PROCESSING watchdog
-    * clock so a long, TTS-paced reply doesn't false-trip "LLM stalled". Only
+    * clock so a long, TTS-paced reply doesn't trip the watchdog. Only
     * bumps while actually answering (state == PROCESSING); a genuinely hung turn
     * emits no TTS, so the watchdog still recovers it. Reuses state_entry_ms, the
     * same field the timeout reads — matching the existing lockless access. */
@@ -672,7 +697,7 @@ static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn)
       OLOG_WARNING("Always-on: no audio or session for command transcribe");
       free(spec_text);
       vad_silero_reset(ctx->vad_ctx);
-      always_on_processing_complete(ctx);
+      processing_done_listening(ctx);
       return;
    }
 
@@ -682,7 +707,7 @@ static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn)
       free(spec_text);
       free(pcm_data);
       vad_silero_reset(ctx->vad_ctx);
-      always_on_processing_complete(ctx);
+      processing_done_listening(ctx);
       return;
    }
 
@@ -715,7 +740,7 @@ static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn)
       free(pcm_data);
       free(work);
       vad_silero_reset(ctx->vad_ctx);
-      always_on_processing_complete(ctx);
+      processing_done_listening(ctx);
    }
 }
 
@@ -1003,11 +1028,15 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
              * "idle" send would leave it wedged in PROCESSING). */
             if (utterance_dedup_check(session->session_id)) {
                OLOG_INFO("Always-on: Dedup suppressed duplicate utterance: \"%s\"", cmd);
-               always_on_processing_complete(ctx);
+               processing_done_listening(ctx);
             } else {
                /* Always-on voice: this turn's input is ASR-transcribed.  Passed
                 * as input_was_voice=true; the worker stamps it before dispatch. */
-               webui_process_text_input(session, cmd, /*input_was_voice=*/true);
+               if (webui_process_text_input(session, cmd, /*input_was_voice=*/true) != 0) {
+                  /* No turn started (queue full, out of memory): nothing will
+                   * end PROCESSING, so end it here. */
+                  processing_done_listening(ctx);
+               }
             }
          }
          free(cmd);
@@ -1075,23 +1104,35 @@ static void always_on_consume_cmd_result(always_on_ctx_t *ctx, void *conn_ptr) {
    ctx->cmd_transcript = NULL;
    pthread_mutex_unlock(&ctx->mutex);
 
+   /* A transcript that came back after the wait was given up belongs to no
+    * one: always-on is already listening, perhaps to a new utterance. */
+   if (atomic_load(&ctx->state) != ALWAYS_ON_PROCESSING) {
+      OLOG_WARNING("Always-on: a command transcript came back too late; dropped");
+      free(transcript);
+      return;
+   }
+
    if (transcript && session) {
       /* Cross-device dedup: drop a duplicate of a command another device
        * already handled; reset the state machine like the ASR-fail path. */
       if (utterance_dedup_check(session->session_id)) {
          OLOG_INFO("Always-on: Dedup suppressed duplicate utterance: \"%s\"", transcript);
          free(transcript);
-         always_on_processing_complete(ctx);
+         processing_done_listening(ctx);
       } else {
          /* Always-on voice: this turn's input is ASR-transcribed.  Passed as
           * input_was_voice=true; the worker stamps it before dispatch. */
-         webui_process_text_input(session, transcript, /*input_was_voice=*/true);
+         const int rc = webui_process_text_input(session, transcript, /*input_was_voice=*/true);
          free(transcript);
+         if (rc != 0) {
+            /* No turn started: nothing will end PROCESSING, so end it here. */
+            processing_done_listening(ctx);
+         }
       }
    } else {
       free(transcript);
       /* ASR failed or no session — return to listening */
-      always_on_processing_complete(ctx);
+      processing_done_listening(ctx);
    }
 }
 
@@ -1285,7 +1326,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
    return 0;
 }
 
-bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
+bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn, session_t *session) {
    if (!ctx) {
       return false;
    }
@@ -1369,13 +1410,22 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
          break;
       }
 
-      case ALWAYS_ON_PROCESSING:
-         if (elapsed >= ALWAYS_ON_PROCESSING_TIMEOUT_MS) {
-            OLOG_ERROR("Always-on: PROCESSING timeout (LLM stalled), returning to LISTENING");
-            vad_silero_reset(ctx->vad_ctx);
-            set_state(ctx, ALWAYS_ON_LISTENING);
+      case ALWAYS_ON_PROCESSING: {
+         /* A running turn is progress: a turn busy in a tool speaks nothing.
+          * Any turn on the session counts; its end ("idle") ends PROCESSING. */
+         const bool running = session && atomic_load(&session->turn_in_flight) > 0;
+         if (running)
+            ctx->state_entry_ms = now;
+         if (always_on_processing_expired(now, ctx->state_entry_ms, ctx->processing_since_ms,
+                                          running)) {
+            OLOG_ERROR("Always-on: stopped waiting for the answer after %lld ms (%s), listening",
+                       (long long)(now - ctx->processing_since_ms),
+                       running ? "turn still running" : "no turn running");
+            reset_for_listening_locked(ctx, now);
+            send_always_on_state(ctx->wsi, "listening");
          }
          break;
+      }
 
       default:
          break;
@@ -1403,23 +1453,6 @@ void always_on_processing_complete(always_on_ctx_t *ctx) {
    }
 
    pthread_mutex_lock(&ctx->mutex);
-
-   /* Reset buffer and VAD state for next utterance */
-   ctx->valid_len = 0;
-   ctx->read_pos = 0;
-   ctx->write_pos = 0;
-   vad_silero_reset(ctx->vad_ctx);
-
-   /* Set cooldown to drain any in-flight echo frames */
-   int64_t now = now_ms();
-   ctx->cooldown_until_ms = now + ALWAYS_ON_COOLDOWN_MS;
-
-   /* Push last_audio_ms into the future to prevent no-audio auto-disable.
-    * The client defers unmute until TTS playback finishes (can be 2+ minutes
-    * for long responses). Grace = 3 minutes covers even very long TTS. */
-   ctx->last_audio_ms = now + 180000;
-
-   set_state(ctx, ALWAYS_ON_LISTENING);
-
+   reset_for_listening_locked(ctx, now_ms());
    pthread_mutex_unlock(&ctx->mutex);
 }

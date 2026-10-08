@@ -1873,6 +1873,12 @@ dawn_add_unit_test(test_llm_tool_views
    LIBS    unity m
    LABEL   ci)
 
+# When always-on stops waiting for a turn's answer.
+dawn_add_unit_test(test_always_on_watchdog
+   SOURCES test_always_on_watchdog.c
+   LIBS    unity
+   LABEL   ci)
+
 # The WebUI protocol's version and feature flags.
 dawn_add_unit_test(test_webui_protocol
    SOURCES test_webui_protocol.c

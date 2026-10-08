@@ -977,7 +977,7 @@ void process_one_response(void) {
          free(resp.audio.data);
          /* Progress signal for the always-on PROCESSING watchdog: a long,
           * TTS-paced reply keeps streaming audio, so treat each drained frame as
-          * progress (prevents a false "LLM stalled" timeout). Done HERE on the
+          * progress (keeps the PROCESSING watchdog from firing). Done HERE on the
           * LWS service thread — same thread as always_on_destroy — so touching
           * conn->always_on is lifetime-safe (a worker-thread bump would race the
           * ctx free; security/arch review). NULL-safe + PROCESSING-gated inside. */

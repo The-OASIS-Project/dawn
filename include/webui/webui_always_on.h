@@ -48,6 +48,7 @@
 #include "asr/vad_silero.h"
 #include "audio/resampler.h"
 #include "core/spec_slot.h"
+#include "webui/always_on_watchdog.h"
 
 /* Forward decl — only used by handle_always_on_enable below.  Including
  * <json-c/json.h> here would pull json-c into every TU that uses
@@ -80,11 +81,13 @@ extern "C" {
  * to LISTENING rather than holding the recording open to RECORDING_TIMEOUT (30s).
  * Distinct from RECORDING_TIMEOUT, which bounds a command already in progress. */
 #define ALWAYS_ON_NO_COMMAND_TIMEOUT_MS 6000
-#define ALWAYS_ON_PROCESSING_TIMEOUT_MS 30000
 #define ALWAYS_ON_NO_AUDIO_TIMEOUT_MS 60000
 
 /** Post-TTS cooldown: discard audio for this long after returning to LISTENING */
 #define ALWAYS_ON_COOLDOWN_MS 300
+/* After an answer, no-audio auto-disable waits this long: the client unmutes
+ * only once a long reply's TTS has played. */
+#define ALWAYS_ON_LISTEN_GRACE_MS 180000
 
 /** Rate limiting: max bytes per second per connection.
  * Must accommodate 48kHz/16-bit/mono raw PCM (96,000 B/s) + margin for timing
@@ -113,6 +116,8 @@ typedef enum {
  * Context (per-connection, allocated on enable, freed on disable/disconnect)
  * ============================================================================= */
 
+struct session;
+
 typedef struct always_on_ctx {
    _Atomic always_on_state_t state;
    _Atomic int refcount; /**< Reference count: 1=LWS thread, +1 per in-flight worker */
@@ -132,12 +137,13 @@ typedef struct always_on_ctx {
    uint32_t client_sample_rate;   /**< From enable message (validated) */
 
    /* Timing */
-   int64_t last_speech_ms;    /**< Last VAD speech detection */
-   int64_t last_audio_ms;     /**< Last audio frame received (for auto-disable) */
-   int64_t wake_word_ms;      /**< When wake word was detected */
-   int64_t state_entry_ms;    /**< When current state was entered */
-   int64_t cooldown_until_ms; /**< Post-TTS cooldown: discard audio until this time */
-   size_t wake_start_pos;     /**< Buffer read_pos saved when entering WAKE_CHECK */
+   int64_t last_speech_ms; /**< Last VAD speech detection */
+   int64_t last_audio_ms;  /**< Last audio frame received (for auto-disable) */
+   int64_t wake_word_ms;   /**< When wake word was detected */
+   int64_t state_entry_ms; /**< When current state was entered (in PROCESSING: last progress) */
+   int64_t processing_since_ms; /**< When PROCESSING was entered (the watchdog's hard limit) */
+   int64_t cooldown_until_ms;   /**< Post-TTS cooldown: discard audio until this time */
+   size_t wake_start_pos;       /**< Buffer read_pos saved when entering WAKE_CHECK */
 
    /* Rate limiting */
    int64_t rate_window_start_ms; /**< Start of current 1-second rate window */
@@ -218,9 +224,11 @@ int always_on_process_audio(always_on_ctx_t *ctx,
  *
  * @param ctx Always-on context
  * @param conn Connection context (ws_connection_t *)
+ * @param session The connection's session, retained by the caller for the call
+ *        (NULL when detached): a running turn on it is progress
  * @return true if always-on was auto-disabled
  */
-bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn);
+bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn, struct session *session);
 
 /**
  * @brief Get current state (lock-free atomic read)
@@ -258,7 +266,8 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn);
  * @brief Notify that processing is complete (response sent)
  *
  * Transitions from PROCESSING back to LISTENING with cooldown.
- * Called after TTS audio has been fully sent to the client.
+ * Called when the turn's answer has been sent (its "idle" state), and when
+ * there is no answer to wait for (no turn started, a duplicate, nothing heard).
  *
  * @param ctx Always-on context
  */
@@ -280,7 +289,7 @@ void send_always_on_state(struct lws *wsi, const char *state_name);
  *
  * Call as TTS audio frames are sent to the answering connection. While the
  * context is in PROCESSING, this resets the watchdog clock — a long, TTS-paced
- * reply then can't trip the "LLM stalled" timeout, while a genuinely hung turn
+ * reply then can't trip the PROCESSING watchdog, while a genuinely hung turn
  * (no TTS) still recovers. NULL-safe (no-op when always-on is inactive).
  *
  * THREAD SAFETY: call ONLY from the LWS service thread (e.g. the response-queue

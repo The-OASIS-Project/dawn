@@ -1471,7 +1471,7 @@ static void *webui_thread_func(void *arg) {
 
             for (int j = 0; j < ao_count; j++) {
                ws_connection_t *c = ao_conn[j];
-               if (always_on_check_timeouts(c->always_on, c)) {
+               if (always_on_check_timeouts(c->always_on, c, ao_session[j])) {
                   /* Auto-disabled — clean up (lws thread; single-threaded field). */
                   send_always_on_state(c->wsi, "disabled");
                   always_on_destroy(c->always_on);
