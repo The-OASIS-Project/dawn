@@ -12,21 +12,40 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
-## 2026-10-08 — New opt-in setting: reasoning for memory extraction
+## 2026-10-08 — Memory extraction: Claude Haiku 5.5 with reasoning is now recommended
 
-**What changed.** A new setting, `[memory] extraction_effort` ("Extraction
-Reasoning" in Settings → Memory System), lets the model that pulls facts out of your
-conversations think before it writes them: `"off"`, `"low"`, `"medium"` or
-`"high"`. It defaults to `"off"`, which is how extraction has always run, so
-nothing changes unless you turn it on.
+**What changed.**
+- A new setting, `[memory] extraction_effort` ("Extraction Reasoning" in
+  Settings → Memory System), lets the model that pulls facts out of your
+  conversations think before it writes them: `"off"`, `"low"`, `"medium"` or
+  `"high"`. It defaults to `"off"`, which is how extraction has always run.
+- The recommended memory setup is now Claude Haiku 5.5 with `"medium"`
+  reasoning, replacing Claude Haiku 4.5. In DAWN's memory benchmark it
+  remembers better (LoCoMo answer accuracy 73% → 77%) at about a fifth of
+  Haiku 4.5's cost. The recommended compaction model moves to Haiku 5.5 too.
+- Your settings don't change on their own: DAWN keeps the extraction and
+  compaction models you already have.
 
-**What you need to do.** Nothing. If you use Claude Haiku 5.5 for extraction,
-`"medium"` is recommended: in DAWN's memory benchmark it remembered noticeably
-better (LoCoMo answer accuracy 72% → 77%) for more output tokens, still a
-fraction of what Haiku 4.5 costs. Extraction runs in the background after a
-conversation, so it doesn't slow your replies. If your extraction runs on a
-local model on the same server as DAWN, leave it off unless you've tested it:
-longer extraction keeps that server busy.
+**What you need to do.** Optional, but recommended if you use Claude for
+memory extraction:
+1. In Settings → Memory System, set **Extraction Model** to
+   `claude-haiku-5-5` and **Extraction Reasoning** to `medium`.
+2. If you compact with a dedicated model, set **Compaction Model** (Settings →
+   Language Model) to `claude-haiku-5-5`.
+
+Or in `dawn.toml`:
+```toml
+[memory]
+extraction_model = "claude-haiku-5-5"
+extraction_effort = "medium"
+
+[llm]
+compact_model = "claude-haiku-5-5"
+```
+Extraction runs in the background after a conversation, so reasoning doesn't
+slow your replies. If your extraction runs on a local model on the same server
+as DAWN, leave Extraction Reasoning off unless you've tested it: longer
+extraction keeps that server busy.
 
 ---
 

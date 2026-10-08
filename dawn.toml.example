@@ -185,7 +185,7 @@
                                   # dedicated (cheaper) model instead of your chat model — RECOMMENDED.
 # compact_provider = "claude"     # Dedicated compaction provider: claude/openai/gemini/openrouter/local
                                   # (used only when compact_use_session = false).
-# compact_model = "claude-haiku-4-5"  # Dedicated compaction model. RECOMMENDED: claude-haiku-4-5 —
+# compact_model = "claude-haiku-5-5"  # Dedicated compaction model. RECOMMENDED: claude-haiku-5-5 —
                                   # compaction is a summarization pass, so a small fast model keeps it
                                   # cheap (same reasoning as extraction; not separately benchmarked). A
                                   # "vendor/model" slug when compact_provider = "openrouter".
@@ -557,14 +557,16 @@
 # enabled = true                  # Enable persistent user memory
 # context_budget_tokens = 800     # Max tokens for memory context in system prompt
 # extraction_provider = "claude"  # Fact-extraction provider: "local", "openai", "claude", "openrouter"
-# extraction_model = "claude-haiku-4-5"  # RECOMMENDED. A "vendor/model" slug when extraction_provider
-                                  # = "openrouter" (empty = OpenRouter default). Needs claude_api_key in
-                                  # secrets.toml; for a fully-offline setup use provider = "local" plus
-                                  # a local model such as "qwen2.5:7b".
-                                  # Why Haiku: validated by the four-model LoCoMo sweep (see
-                                  # benchmarks/README.md "four-model extraction sweep results") — Sonnet
-                                  # beats Haiku by only +1.7 pp recall_generation and Opus is *worse*
-                                  # (entity over-fragmentation). A larger tier is not a free win here.
+# extraction_model = "claude-haiku-5-5"  # RECOMMENDED, with extraction_effort = "medium" below.  A
+                                  # "vendor/model" slug when extraction_provider = "openrouter" (empty =
+                                  # OpenRouter default). Needs claude_api_key in secrets.toml; for a
+                                  # fully-offline setup use provider = "local" plus a local model such
+                                  # as "qwen2.5:7b".
+                                  # Why Haiku 5.5: LoCoMo recall_generation 0.769 at extraction_effort
+                                  # "medium" vs 0.728 for claude-haiku-4-5, at about a fifth of the
+                                  # cost (benchmarks/README.md).  Larger tiers aren't a free win: in
+                                  # the four-model sweep Sonnet beat Haiku 4.5 by only +1.7 pp and Opus
+                                  # was *worse* (entity over-fragmentation).
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
 # extraction_effort = "off"       # Reasoning for fact extraction: "off" (the model's cheapest

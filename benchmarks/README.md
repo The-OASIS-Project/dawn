@@ -564,10 +564,37 @@ Per-category `recall_generation`:
   Bottleneck is extraction-side date loss, not model strength.
   Highest-leverage future improvement target.
 
-**Practical recommendation:** keep `extraction_model = claude-haiku-4-5`
-(and `compact_model = claude-haiku-4-5` by extension). Going to a
-larger Claude tier is not a free win — Opus actively hurts. Raw data:
-`benchmarks/snapshots/sweep_results.json`.
+Going to a larger Claude tier is not a free win: Opus actively hurts.
+Raw data: `benchmarks/snapshots/sweep_results.json`.
+
+#### Claude Haiku 5.5 extraction (October 2026)
+
+Full LoCoMo under the **leader-comparable** Mem0 protocol (the canonical
+run above: generator and judge `gpt-4o-mini`, `--prompt-style mem0`,
+`--with-source`, `--exclude-categories 5`; n=1536), so these numbers are
+not on the May table's scale.  `--extraction-effort` sets
+`[memory] extraction_effort`.
+
+| Extraction | gen | ent | cat-1 | cat-2 | cat-3 | cat-4 | cost vs 4.5 | time/session |
+|---|---|---|---|---|---|---|---|---|
+| `claude-haiku-4-5` | 0.7279 | 0.731 | 0.723 | 0.676 | 0.500 | 0.774 | 100% | 16 s |
+| `claude-haiku-5-5`, effort off | 0.7214 | 0.704 | 0.759 | 0.704 | 0.522 | 0.737 | 11% | 6 s |
+| `claude-haiku-5-5`, effort low | 0.7601 | 0.759 | 0.738 | 0.785 | 0.522 | 0.791 | 15% | 12 s |
+| `claude-haiku-5-5`, effort medium | **0.7689** | 0.759 | 0.752 | 0.779 | 0.533 | 0.803 | 19% | 18 s |
+
+Low and medium are means of two runs (low 0.7637 / 0.7565, medium
+0.7721 / 0.7656); a re-run of one setting moves `gen` by about 0.7 pp.
+Medium beats low by +0.85 pp in both pairs, but pooled that is not
+significant (McNemar p = 0.22).  Cost is per extraction call at list
+prices, measured on LoCoMo conv 0's 19 sessions: Haiku 5.5 reads ~42%
+more input tokens for the same text (new tokenizer), and medium writes
+~2.4x the output tokens of effort off, at a tenth of Haiku 4.5's price.
+`bench_temporal_arithmetic.py` agrees: 79.5% (4.5), 71.8% (5.5 off),
+89.7% (low), 92.3% (medium).
+
+**Practical recommendation:** `extraction_model = claude-haiku-5-5` with
+`extraction_effort = "medium"`, and `compact_model = claude-haiku-5-5` by
+extension (compaction isn't benchmarked).
 
 ### Save results to JSON
 

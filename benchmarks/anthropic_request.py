@@ -86,10 +86,27 @@ def takes_temperature(model):
     return bool(_longest(_SAMPLING_PREFIXES, model))
 
 
+def thinking_fields(model):
+    """The reasoning fields a thinking-free call sends @p model, as DAWN does
+    with thinking off: {} for models before Opus 4.7 (no thinking unless
+    asked), "disabled" where models.toml says the model can turn it off,
+    else adaptive at "low" (or at DAWN_BENCH_THINKING_EFFORT when set)."""
+    global _can_disable
+    if takes_temperature(model):
+        return {}
+    if _can_disable is None:
+        _can_disable = _load_thinking_rows()
+    effort = os.environ.get("DAWN_BENCH_THINKING_EFFORT", "")
+    if effort:
+        return {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}}
+    if _longest(_can_disable, model):
+        return {"thinking": {"type": "disabled"}}
+    return {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}
+
+
 def anthropic_body(model, system, user_prompt, temperature, max_tokens):
     """A Messages API body for one system + user turn that @p model accepts.
     @p temperature applies only to models that take it."""
-    global _can_disable
     body = {
         "model": model,
         "max_tokens": max_tokens,
@@ -99,18 +116,8 @@ def anthropic_body(model, system, user_prompt, temperature, max_tokens):
     if takes_temperature(model):
         body["temperature"] = temperature
         return body
-    if _can_disable is None:
-        _can_disable = _load_thinking_rows()
-    effort = os.environ.get("DAWN_BENCH_THINKING_EFFORT", "")
-    if effort:
-        body["thinking"] = {"type": "adaptive"}
-        body["output_config"] = {"effort": effort}
-        body["max_tokens"] = max(max_tokens, ADAPTIVE_MIN_MAX_TOKENS)
-    elif _longest(_can_disable, model):
-        body["thinking"] = {"type": "disabled"}
-    else:
-        body["thinking"] = {"type": "adaptive"}
-        body["output_config"] = {"effort": "low"}
+    body.update(thinking_fields(model))
+    if body["thinking"]["type"] == "adaptive":
         body["max_tokens"] = max(max_tokens, ADAPTIVE_MIN_MAX_TOKENS)
     return body
 
