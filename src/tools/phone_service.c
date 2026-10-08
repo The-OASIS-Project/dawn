@@ -995,14 +995,6 @@ void phone_service_handle_event(const char *payload, int payload_len) {
    json_object_put(root);
 }
 
-void phone_service_handle_response(const char *payload, int payload_len) {
-   /* echo/response messages with request_id are handled by command_router.
-    * This is for any additional state tracking needed. Currently unused —
-    * reserved for handling cross-topic ordering edge cases. */
-   (void)payload;
-   (void)payload_len;
-}
-
 /* =============================================================================
  * Public API (called from phone_tool.c)
  * ============================================================================= */

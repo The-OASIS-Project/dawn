@@ -73,13 +73,6 @@ int url_fetcher_init(void);
 void url_fetcher_cleanup(void);
 
 /**
- * @brief Check if the URL fetcher module is initialized
- *
- * @return 1 always (module is stateless and always ready)
- */
-int url_fetcher_is_initialized(void);
-
-/**
  * @brief Fetch URL and extract readable Markdown content
  *
  * Downloads the URL, validates Content-Type, converts HTML to Markdown,
@@ -182,13 +175,6 @@ int url_whitelist_remove(const char *entry);
  * @brief Clear all whitelist entries
  */
 void url_whitelist_clear(void);
-
-/**
- * @brief Get the number of whitelist entries
- *
- * @return Number of entries currently in the whitelist
- */
-int url_whitelist_count(void);
 
 /**
  * @brief Get human-readable error message

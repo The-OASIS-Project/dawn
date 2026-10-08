@@ -194,10 +194,6 @@ void webui_audio_cleanup(void) {
    pthread_mutex_unlock(&s_audio_mutex);
 }
 
-bool webui_audio_is_initialized(void) {
-   return atomic_load(&s_initialized);
-}
-
 /* =============================================================================
  * Opus Decoding Functions
  * ============================================================================= */

@@ -204,10 +204,6 @@ void search_summarizer_cleanup(void) {
    OLOG_INFO("search_summarizer: Cleanup complete");
 }
 
-int search_summarizer_is_initialized(void) {
-   return __atomic_load_n(&g_initialized, __ATOMIC_ACQUIRE);
-}
-
 const summarizer_config_t *search_summarizer_get_config(void) {
    if (!g_initialized) {
       return NULL;

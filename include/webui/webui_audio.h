@@ -113,13 +113,6 @@ int webui_audio_init(void);
  */
 void webui_audio_cleanup(void);
 
-/**
- * @brief Check if WebUI audio subsystem is initialized
- *
- * @return true if initialized and ready, false otherwise
- */
-bool webui_audio_is_initialized(void);
-
 /* =============================================================================
  * Opus Decoding Functions
  * ============================================================================= */
