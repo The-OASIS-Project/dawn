@@ -239,7 +239,7 @@ def extract_prompt_template_from_c(c_path):
     src = Path(c_path).read_text()
 
     decl = re.search(
-        r"static\s+const\s+char\s*\*\s*EXTRACTION_PROMPT_TEMPLATE\s*=\s*",
+        r"(?:static\s+)?const\s+char\s*\*\s*(?:MEMORY_)?EXTRACTION_PROMPT_TEMPLATE\s*=\s*",
         src)
     if not decl:
         sys.exit(f"error: EXTRACTION_PROMPT_TEMPLATE declaration not found in {c_path}")
@@ -998,12 +998,14 @@ def build_conversation_json(turns):
 
 def build_extraction_prompt(template, anchor_iso, conversation_json,
                             existing_profile="(none)"):
-    """Apply the same %s formatting production uses
-    (memory_extraction.c:914): anchor_line, conversation_json,
-    existing_profile.  anchor_line is empty when no anchor is known;
-    here we always provide one because each test case has a date."""
+    """Apply the same %s formatting production uses (memory_extraction.c,
+    the extraction prompt's snprintf): anchor_line, conversation_json,
+    existing_profile, expiry_block.  anchor_line is empty when no anchor is
+    known; here we always provide one because each test case has a date.
+    expiry_block is empty, as in production while [memory] expire_enabled
+    is off (the default)."""
     anchor_line = f"Conversation anchor: {anchor_iso}\n\n"
-    return template % (anchor_line, conversation_json, existing_profile)
+    return template % (anchor_line, conversation_json, existing_profile, "")
 
 
 def parse_extraction_response(raw):

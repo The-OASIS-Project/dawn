@@ -19,8 +19,12 @@
 # An unlisted model is treated as the newest kind: no sampling parameters,
 # adaptive at "low".
 #
+# DAWN_BENCH_THINKING_EFFORT=<effort> runs the newer models with adaptive
+# thinking at that effort instead, to compare a model with thinking on.
+#
 # License: GPLv3 — same as the calling benchmarks.
 
+import os
 import re
 from pathlib import Path
 
@@ -97,7 +101,12 @@ def anthropic_body(model, system, user_prompt, temperature, max_tokens):
         return body
     if _can_disable is None:
         _can_disable = _load_thinking_rows()
-    if _longest(_can_disable, model):
+    effort = os.environ.get("DAWN_BENCH_THINKING_EFFORT", "")
+    if effort:
+        body["thinking"] = {"type": "adaptive"}
+        body["output_config"] = {"effort": effort}
+        body["max_tokens"] = max(max_tokens, ADAPTIVE_MIN_MAX_TOKENS)
+    elif _longest(_can_disable, model):
         body["thinking"] = {"type": "disabled"}
     else:
         body["thinking"] = {"type": "adaptive"}
