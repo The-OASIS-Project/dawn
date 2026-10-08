@@ -247,6 +247,7 @@ typedef struct {
    uint32_t next_v;  /* the mailbox epoch this fetch saw */
    uint32_t next_f;  /* IMAP: the folder this fetch read (email_cursor_folder_hash) */
    int inbox_unread; /* -1 unknown */
+   int missing;      /* Gmail: rows listed but not fetched (Gmail kept refusing) */
 } list_acct_t;
 
 typedef struct {
@@ -271,6 +272,7 @@ typedef struct {
    int inbox_unread;     /* out: -1 unknown */
    uint32_t uidvalidity; /* out, IMAP: the mailbox epoch seen */
    char folder[128];     /* out, IMAP: the folder read, as the server resolved it */
+   int missing;          /* out, Gmail: rows listed but not fetched */
 } page_req_t;
 
 /* One page from one account. */
@@ -288,6 +290,7 @@ static email_err_t fetch_page(const list_ctx_t *c,
    pr->inbox_unread = -1;
    pr->uidvalidity = 0;
    pr->folder[0] = '\0';
+   pr->missing = 0;
    if (!c->search) {
       email_page_ext_t ext = { .want_inbox_unread = pr->want_unread,
                                .at_or_before = pr->at_or_before };
@@ -296,6 +299,7 @@ static email_err_t fetch_page(const list_ctx_t *c,
       pr->inbox_unread = ext.inbox_unread;
       pr->uidvalidity = ext.uidvalidity;
       snprintf(pr->folder, sizeof(pr->folder), "%s", ext.imap_folder);
+      pr->missing = ext.rows_missing;
    } else {
       email_search_params_t p;
       memset(&p, 0, sizeof(p));
@@ -310,6 +314,7 @@ static email_err_t fetch_page(const list_ctx_t *c,
       err = rep.err;
       pr->uidvalidity = rep.uidvalidity;
       snprintf(pr->folder, sizeof(pr->folder), "%s", rep.imap_folder);
+      pr->missing = rep.rows_missing;
    }
    if (rc == EMAIL_RC_OK)
       return EMAIL_ERR_NONE;
@@ -396,6 +401,7 @@ static void list_gmail(list_ctx_t *c, list_acct_t *a, const email_exec_task_ctx_
          /* A failed top-up isn't the account failing: the cursor resumes by date. */
          break;
       }
+      a->missing += pr.missing;
       have += email_cursor_gmail_filter(a->rows + have, count, &a->from, &skip_left);
       more = npt[0] != '\0';
       if (!more)
@@ -514,6 +520,8 @@ static json_object *list_finish(void *ctx, const int64_t *account_ids, int n) {
    for (int i = 0; i < c->n; i++) {
       if (c->acct[i].err != EMAIL_ERR_NONE)
          add_partial(partial, c->acct[i].from.account_id, c->acct[i].err);
+      else if (c->acct[i].missing > 0) /* listed, but Gmail kept refusing some rows */
+         add_partial(partial, c->acct[i].from.account_id, EMAIL_ERR_RATE_LIMITED);
    }
    json_object_object_add(payload, "partial", partial);
 

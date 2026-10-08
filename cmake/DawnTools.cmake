@@ -360,6 +360,7 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_display.c
         src/tools/email_transfer.c
         src/tools/email_parse.c
+        src/tools/gmail_batch.c
         src/tools/gmail_client.c
         src/tools/gmail_read.c
         src/tools/gmail_flags.c

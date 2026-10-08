@@ -563,6 +563,23 @@ if(DAWN_ENABLE_EMAIL_TOOL)
       LABEL    ci)
 endif()
 
+# The Gmail batch metadata fetch without the network: parts matched back by
+# Content-ID (a rate-limited part asked for again), search terms cleaned.
+if(DAWN_ENABLE_EMAIL_TOOL)
+   dawn_add_unit_test(test_gmail_batch
+      SOURCES  test_gmail_batch.c
+               ${SRC_ROOT}/src/tools/gmail_batch.c
+               ${SRC_ROOT}/src/tools/email_mime.c
+               ${SRC_ROOT}/src/tools/email_display.c
+               ${SRC_ROOT}/src/tools/gmail_parts.c
+               ${SRC_ROOT}/src/tools/html_parser.c
+               ${SRC_ROOT}/src/tools/html_hidden.c
+               ${SRC_ROOT}/src/tools/html_hidden_css.c
+      LIBS     dawn_common unity ${GMIME_LINK_LIBRARIES} ${JSONC_LIBRARIES} ${CURL_LIBRARIES}
+      INCLUDES ${GMIME_INCLUDE_DIRS}
+      LABEL    ci)
+endif()
+
 # The confirm rule: the same session, the next turn (any later one by code).
 dawn_add_unit_test(test_turn_origin
    SOURCES test_turn_origin.c

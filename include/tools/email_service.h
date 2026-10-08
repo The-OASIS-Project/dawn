@@ -76,6 +76,7 @@ typedef struct {
    int failed_count;
    uint32_t uidvalidity;  /* one IMAP account: the mailbox epoch seen (0 = not seen) */
    char imap_folder[128]; /* one IMAP account: the folder searched ("" = not reached) */
+   int rows_missing;      /* Gmail: matching rows left out (Gmail kept refusing them) */
 } email_search_report_t;
 
 /* What a paging caller (the mail panel) wants with a page of email_service_recent
@@ -86,6 +87,7 @@ typedef struct {
    int inbox_unread;       /* out: -1 when unknown or not asked */
    uint32_t uidvalidity;   /* out, IMAP: the mailbox epoch seen (0 = not seen) */
    char imap_folder[128];  /* out, IMAP: the folder listed ("" = not reached) */
+   int rows_missing;       /* out, Gmail: listed rows left out (Gmail kept refusing them) */
 } email_page_ext_t;
 
 

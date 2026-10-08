@@ -234,6 +234,20 @@ static int append_page_token(char *buf, int pos, const char *token) {
    return append_bounded(buf, pos, line);
 }
 
+/* After a listing Gmail cut short: it kept refusing some matching messages as
+ * too many requests, so the list (or "none") isn't the whole answer. */
+static int append_missing_note(char *buf, int pos, int missing) {
+   if (missing <= 0)
+      return pos;
+   char line[256];
+   snprintf(line, sizeof(line),
+            "\n\nNote: %d more matching message(s) couldn't be fetched from Gmail (most often "
+            "it asking us to slow down), so this list is incomplete. Tell the user, and try "
+            "again in a moment.",
+            missing);
+   return append_bounded(buf, pos, line);
+}
+
 static char *email_rc_to_error(int rc, const char *op, const char *account, const char *folder) {
    char *msg = malloc(384);
    if (!msg)
@@ -375,9 +389,10 @@ static char *handle_recent(struct json_object *details, int user_id) {
    int out_count = 0;
    char next_page_token[256] = { 0 };
    email_err_t err = EMAIL_ERR_NONE;
+   email_page_ext_t ext = { 0 };
    int rc = email_service_recent(user_id, account, folder, count, unread_only, page_token, emails,
                                  MAX_EMAIL_RESULTS, &out_count, next_page_token,
-                                 sizeof(next_page_token), NULL, NULL, &err);
+                                 sizeof(next_page_token), &ext, NULL, &err);
 
    if (rc != EMAIL_RC_OK)
       return err_error(rc, err, "recent", account, folder);
@@ -390,7 +405,9 @@ static char *handle_recent(struct json_object *details, int user_id) {
 
    int pos = 0;
    bool cut = false;
-   if (out_count == 0 && next_page_token[0]) {
+   if (out_count == 0 && ext.rows_missing > 0) {
+      pos += snprintf(buf, RESULT_BUF_SIZE, "No emails could be fetched.");
+   } else if (out_count == 0 && next_page_token[0]) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
    } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No recent emails found.");
@@ -401,6 +418,7 @@ static char *handle_recent(struct json_object *details, int user_id) {
 
    if (next_page_token[0] && !cut)
       pos = append_page_token(buf, pos, next_page_token);
+   pos = append_missing_note(buf, pos, ext.rows_missing);
 
    return buf;
 }
@@ -652,7 +670,9 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    int pos = 0;
    bool cut = false;
-   if (out_count == 0 && next_page_token[0]) {
+   if (out_count == 0 && report.rows_missing > 0) {
+      pos += snprintf(buf, RESULT_BUF_SIZE, "No emails could be fetched.");
+   } else if (out_count == 0 && next_page_token[0]) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
    } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No emails matching your search criteria.");
@@ -663,6 +683,7 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    if (next_page_token[0] && !cut)
       pos = append_page_token(buf, pos, next_page_token);
+   pos = append_missing_note(buf, pos, report.rows_missing);
 
    /* Partial result: some accounts succeeded, others couldn't be reached.  Surface
     * it so the LLM tells the user rather than silently presenting incomplete results

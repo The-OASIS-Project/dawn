@@ -154,8 +154,52 @@ int gmail_parts_from_payload(struct json_object *payload, gmail_parts_t *out);
 void gmail_parts_free(gmail_parts_t *p);
 
 /** A message's row (sender, subject, date, labels as flags) from its metadata
- *  or list JSON (gmail_client.c).  @return 0, or 1 */
+ *  or list JSON (gmail_batch.c).  @return 0, or 1 */
 int gmail_summary_from_json(struct json_object *root, email_summary_t *out);
+
+/* The batch metadata fetch (gmail_batch.c, run by gmail_client.c). */
+#define GMAIL_BATCH_BOUNDARY "dawn_gmail_batch"
+/* Messages per batch request: Google advises at most 50, and larger batches
+ * draw "too many concurrent requests" refusals for some of their messages. */
+#define GMAIL_BATCH_SIZE 20
+/* Rounds after the first that ask again for the refused messages, waiting
+ * 1 s then 2 s first (Google: back off at least one second). */
+#define GMAIL_BATCH_RETRIES 2
+
+typedef struct {
+   char id[64];
+} gmail_msg_id_t;
+
+/* A listed message's fetch. */
+enum {
+   GMAIL_BATCH_PENDING = 0,
+   GMAIL_BATCH_DONE,
+   GMAIL_BATCH_GONE
+};
+
+/** The batch request body asking for the rows of ids[which[0..n-1]] (each
+ *  part's Content-ID is its index in @p ids).  @return heap string, or NULL */
+char *gmail_batch_body(const gmail_msg_id_t *ids, const int *which, int n);
+
+/**
+ * @brief Read a batch reply into rows[i] for each part answering index i
+ *
+ * A row read sets state[i] DONE; a refusal that asks us to slow down (429,
+ * 403), a lapsed token (401) or a server error leaves it PENDING, to ask
+ * again; any other answer (a message deleted since the listing) sets GONE.  Parts for an index out
+ * of range or not PENDING are ignored.
+ *
+ * @return rows read
+ */
+int gmail_batch_parse(const char *resp,
+                      const char *boundary,
+                      int n_ids,
+                      email_summary_t *rows,
+                      unsigned char *state);
+
+/** @p src as a term inside a quoted Gmail query: no quotes, and no currency
+ *  signs ($ € £ ¥), with which Gmail matches nothing. */
+void gmail_query_term(const char *src, char *dst, size_t dst_len);
 
 /**
  * @brief Whether a trashed message's label may be added back by an undo

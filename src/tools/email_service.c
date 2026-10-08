@@ -636,15 +636,17 @@ void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nro
       /* Resolve by username: display names are not unique, so two "Gmail"
        * accounts must not share one sent-search or cross-tag each other's rows.
        * account_addr is stamped from acct->username, so it is the stable key. */
+      email_search_report_t rep;
       int rc = email_service_search(user_id, accts[a].username, &params, sent,
                                     EMAIL_MAX_FETCH_RESULTS, &sent_count, npt, sizeof(npt), NULL, 0,
-                                    NULL, NULL);
+                                    NULL, &rep);
       if (rc != EMAIL_RC_OK) {
          OLOG_INFO("email_reply: acct='%s' enrichable=%d sent-search FAILED (rc=%d) — rows UNKNOWN",
                    accts[a].name, enrichable, rc);
          continue; /* rows for this account stay UNKNOWN */
       }
-      bool sent_truncated = (npt[0] != '\0');
+      /* Sent mail Gmail kept refusing is unseen too. */
+      bool sent_truncated = (npt[0] != '\0') || rep.rows_missing > 0;
 
       int yes = 0, no = 0, unknown = 0;
       for (int r = 0; r < nrows; r++) {

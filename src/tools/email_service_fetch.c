@@ -228,6 +228,7 @@ int email_service_recent(int user_id,
    if (ext) {
       ext->inbox_unread = -1;
       ext->uidvalidity = 0;
+      ext->rows_missing = 0;
       ext->imap_folder[0] = '\0';
    }
 
@@ -293,7 +294,8 @@ static int recent_on_account(const email_account_t *acct,
          return 1;
       int rc = gmail_fetch_recent(token, norm.gmail_query, count, unread_only,
                                   ext ? ext->at_or_before : 0, page_token, out, max, out_count,
-                                  next_page_token, npt_len, want_unread ? inbox_unread : NULL);
+                                  next_page_token, npt_len, want_unread ? inbox_unread : NULL,
+                                  ext ? &ext->rows_missing : NULL);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
       *err = rc == 0 ? EMAIL_ERR_NONE : failed_or_stopped();
@@ -383,7 +385,8 @@ static int search_single_account(email_account_t *acct,
                                  int lease_wait_s,
                                  uint32_t *uidvalidity,
                                  char *imap_folder,
-                                 email_err_t *err) {
+                                 email_err_t *err,
+                                 int *missing) {
    /* Work on a copy so the caller may hand back the previous page's token buffer
     * as next_page_token (see email_service_recent). */
    email_search_params_t local_params = *params;
@@ -410,7 +413,7 @@ static int search_single_account(email_account_t *acct,
       if (email_svc_gmail_token_err(acct, token, sizeof(token), err) != 0)
          return 1;
       int rc = gmail_search(token, &gmail_params, max, out, max, out_count, next_page_token,
-                            npt_len);
+                            npt_len, missing);
       sodium_memzero(token, sizeof(token));
       stamp_account(out, *out_count, acct);
       *err = rc == 0 ? EMAIL_ERR_NONE : failed_or_stopped();
@@ -497,7 +500,7 @@ static void fanout_search_one(void *ctx, int index, email_fanout_slot_t *slot, i
    /* A busy account is reported, not waited out. */
    slot->rc = search_single_account(&fs->accounts[index], fs->params, slot->rows, max, &slot->count,
                                     NULL, 0, NULL, EMAIL_LEASE_FANOUT_WAIT_SEC, NULL, NULL,
-                                    &slot->err);
+                                    &slot->err, &slot->missing);
 }
 
 /* The accounts a search across all of them couldn't search (email_fanout_merge). */
@@ -572,7 +575,8 @@ int email_service_search(int user_id,
       }
       const int rc = search_single_account(&acct, params, out, max, out_count, next_page_token,
                                            npt_len, target, EMAIL_LEASE_WAIT_SEC,
-                                           &report->uidvalidity, report->imap_folder, &report->err);
+                                           &report->uidvalidity, report->imap_folder, &report->err,
+                                           &report->rows_missing);
       sodium_memzero(&acct, sizeof(acct));
       return rc;
    }
@@ -630,6 +634,10 @@ int email_service_search(int user_id,
                         .report = report };
    int total = 0;
    const bool whole = email_fanout_merge(slots, enabled, max, out, &total, fanout_failed, &ff);
+   for (int i = 0; i < enabled; i++) {
+      if (slots[i].rc == 0)
+         report->rows_missing += slots[i].missing;
+   }
    email_fanout_free(slots, enabled);
    sodium_memzero(accounts, sizeof(accounts));
    if (!whole) {

@@ -45,7 +45,10 @@
  * @param npt_len          Size of next_page_token buffer
  * @param inbox_unread     Optional: the INBOX's unread count, asked on the
  *                         same connection (-1 when it can't be had)
- * @return 0 on success, 1 on failure
+ * @param missing_out      Optional: listed messages left out because Gmail kept
+ *                         refusing them as too many requests
+ * @return 0, even when some rows are missing (see @p missing_out); 1 when nothing
+ *         was fetched and a request failed, or the caller stopped the transfer
  */
 int gmail_fetch_recent(const char *token,
                        const char *label_query,
@@ -58,7 +61,8 @@ int gmail_fetch_recent(const char *token,
                        int *out_count,
                        char *next_page_token,
                        size_t npt_len,
-                       int *inbox_unread);
+                       int *inbox_unread,
+                       int *missing_out);
 
 
 /** Whether @p id has the shape of a Gmail message id (hex, bounded). */
@@ -92,7 +96,10 @@ int gmail_read_message(const char *token,
  * @param out_count        Output: number of results written
  * @param next_page_token  Output: token for next page (empty if no more pages)
  * @param npt_len          Size of next_page_token buffer
- * @return 0 on success, 1 on failure
+ * @param missing_out      Optional: listed messages left out because Gmail kept
+ *                         refusing them as too many requests
+ * @return 0, even when some rows are missing (see @p missing_out); 1 when nothing
+ *         was fetched and a request failed, or the caller stopped the transfer
  */
 int gmail_search(const char *token,
                  const email_search_params_t *params,
@@ -101,7 +108,8 @@ int gmail_search(const char *token,
                  int max_out,
                  int *out_count,
                  char *next_page_token,
-                 size_t npt_len);
+                 size_t npt_len,
+                 int *missing_out);
 
 /**
  * @brief Send an email via Gmail API.

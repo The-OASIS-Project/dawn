@@ -41,6 +41,7 @@ typedef struct {
    email_summary_t *rows; /* max rows, newest first; owned (email_fanout_free) */
    int count;
    int cap;         /* rows allocated */
+   int missing;     /* rows the search found but couldn't fetch (Gmail refusing) */
    int rc;          /* 0, or the search's failure code */
    email_err_t err; /* why it failed (EMAIL_ERR_CANCELLED: stopped) */
    int64_t ms;      /* how long it took */
