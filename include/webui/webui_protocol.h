@@ -59,6 +59,35 @@ struct json_object;
  */
 void webui_protocol_note_client(struct json_object *payload, bool *noted);
 
+/* The longest client request id (`req`) a reply echoes, in bytes. */
+#define WEBUI_REQ_MAX 64
+
+/**
+ * @brief Whether a client string is safe to echo back or log: at most
+ *        WEBUI_REQ_MAX bytes of valid UTF-8 with no control characters.
+ */
+bool webui_protocol_echo_ok(const char *s);
+
+/**
+ * @brief The client's optional request id from a message's payload.
+ * @return true when `req` is a string of at most @p max bytes (and shorter than
+ *         @p out_size) with no control characters and valid UTF-8, copied into
+ *         @p out; anything else is ignored (false), since it is echoed back.
+ */
+bool webui_protocol_payload_req(struct json_object *payload,
+                                size_t max,
+                                char *out,
+                                size_t out_size);
+
+/**
+ * @brief The error frame answering a message type this daemon doesn't handle:
+ *        code UNKNOWN_TYPE, the type echoed as `request_type` and @p req as `req`
+ *        (each only when safe to echo), so a client fails at once instead of
+ *        waiting out its timeout.
+ * @return A heap JSON string (caller frees), or NULL on allocation failure.
+ */
+char *webui_protocol_unknown_type_json(const char *type, const char *req);
+
 #ifdef __cplusplus
 }
 #endif

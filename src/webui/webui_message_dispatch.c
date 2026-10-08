@@ -83,6 +83,7 @@
 /* handle_cancel_message and handle_ping are defined at the bottom of this TU. */
 static void handle_cancel_message(ws_connection_t *conn);
 static void handle_ping(ws_connection_t *conn, struct json_object *payload);
+static void dispatch_message(ws_connection_t *conn, const char *type, struct json_object *payload);
 
 /* handle_always_on_enable / handle_always_on_disable moved to
  * webui_always_on.c (next to always_on_create / always_on_destroy);
@@ -299,19 +300,24 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       return;
    }
 
-   /* Get message type */
-   struct json_object *type_obj;
-   if (!json_object_object_get_ex(root, "type", &type_obj)) {
-      OLOG_WARNING("WebUI: JSON missing 'type' field");
-      json_object_put(root);
-      free(json_str);
-      return;
+   /* The type must be a string with no NUL inside: `"type": null` is found but
+    * NULL, and an embedded NUL would dispatch on a prefix. */
+   struct json_object *type_obj = NULL;
+   if (!json_object_object_get_ex(root, "type", &type_obj) ||
+       !json_object_is_type(type_obj, json_type_string) ||
+       strlen(json_object_get_string(type_obj)) != (size_t)json_object_get_string_len(type_obj)) {
+      OLOG_WARNING("WebUI: JSON missing a string 'type' field");
+   } else {
+      struct json_object *payload = NULL;
+      json_object_object_get_ex(root, "payload", &payload);
+      dispatch_message(conn, json_object_get_string(type_obj), payload);
    }
+   json_object_put(root);
+   free(json_str);
+}
 
-   const char *type = json_object_get_string(type_obj);
-   struct json_object *payload;
-   json_object_object_get_ex(root, "payload", &payload);
-
+/* Handlers return early freely: handle_json_message owns the parsed frame. */
+static void dispatch_message(ws_connection_t *conn, const char *type, struct json_object *payload) {
    if (strcmp(type, "text") == 0) {
       /* Text input from user, with the images attached to it by id */
       dispatch_text_frame(conn, payload);
@@ -1786,14 +1792,22 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (conn->is_satellite) {
          handle_ota_reject(conn, payload);
       }
-   } else if (strncmp(type, "ha_", sizeof("ha_") - 1) == 0) {
-      OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", type);
    } else {
-      OLOG_WARNING("WebUI: Unknown message type: %s", type);
+      /* Answered, so a client fails at once instead of waiting out its timeout.
+       * The browser sends ha_* whether or not the feature is compiled in. */
+      const char *shown = webui_protocol_echo_ok(type) ? type : "(unprintable)";
+      if (strncmp(type, "ha_", sizeof("ha_") - 1) == 0)
+         OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", shown);
+      else
+         OLOG_WARNING("WebUI: Unknown message type: %s", shown);
+      char req[WEBUI_REQ_MAX + 1];
+      char *reply = webui_protocol_unknown_type_json(
+          type, webui_protocol_payload_req(payload, WEBUI_REQ_MAX, req, sizeof(req)) ? req : NULL);
+      if (reply) {
+         send_json_message(conn->wsi, reply);
+         free(reply);
+      }
    }
-
-   json_object_put(root);
-   free(json_str);
 }
 
 static void handle_cancel_message(ws_connection_t *conn) {

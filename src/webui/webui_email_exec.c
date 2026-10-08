@@ -41,7 +41,7 @@
 #include "logging.h"
 #include "tools/email_account_lease.h"
 #include "tools/email_transfer.h"
-#include "utils/string_utils.h"
+#include "webui/webui_protocol.h"
 
 /* Sessions that can have email work at once. */
 #define EMAIL_EXEC_SESSIONS 64
@@ -170,23 +170,7 @@ char *webui_email_exec_refusal_json(const char *verb, email_err_t code, const ch
 }
 
 bool email_exec_payload_req(json_object *payload, char *out, size_t out_size) {
-   json_object *req_obj;
-   if (!payload || !out || out_size == 0 || !json_object_object_get_ex(payload, "req", &req_obj) ||
-       !json_object_is_type(req_obj, json_type_string))
-      return false;
-   const char *req = json_object_get_string(req_obj);
-   const size_t len = req ? strlen(req) : 0;
-   if (!req || len > EMAIL_EXEC_REQ_MAX || len >= out_size)
-      return false;
-   for (size_t i = 0; i < len; i++) {
-      const unsigned char ch = (unsigned char)req[i];
-      if (ch < 0x20 || ch == 0x7f)
-         return false; /* echoed in every reply: keep it plain */
-   }
-   if (!utf8_is_valid(req, len))
-      return false; /* a bad byte echoed back would close the client's socket */
-   memcpy(out, req, len + 1);
-   return true;
+   return webui_protocol_payload_req(payload, EMAIL_EXEC_REQ_MAX, out, out_size);
 }
 
 static void send_refusal(uint32_t session_id,

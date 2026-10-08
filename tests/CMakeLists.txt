@@ -518,6 +518,7 @@ dawn_add_unit_test(test_webui_email_exec_policy
 dawn_add_unit_test(test_webui_email_exec
    SOURCES test_webui_email_exec.c
            ${SRC_ROOT}/src/webui/webui_email_exec.c
+           ${SRC_ROOT}/src/webui/webui_protocol.c
            ${SRC_ROOT}/src/webui/webui_email_exec_policy.c
            ${SRC_ROOT}/src/tools/email_account_lease.c
            ${SRC_ROOT}/src/tools/email_transfer.c

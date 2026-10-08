@@ -245,6 +245,12 @@
                   DawnToast.show(msg.payload.message, severity);
                   break;
                }
+               if (msg.payload.code === 'UNKNOWN_TYPE') {
+                  // A message for a feature this build lacks (ha_* without Home
+                  // Assistant): nothing for the user to see.
+                  console.warn('Server does not handle message type:', msg.payload.request_type);
+                  break;
+               }
                console.error('Server error:', msg.payload);
                // Handle max clients error - don't auto-reconnect
                if (msg.payload.code === 'MAX_CLIENTS') {

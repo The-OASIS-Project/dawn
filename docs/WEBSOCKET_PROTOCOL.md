@@ -1848,6 +1848,12 @@ Error or informational notification.
   each refusal is one frame.
 - `client_ref`: on an error raised for a `text` turn that carried one (flag `turn_refs`), the
   same string, unchanged; absent otherwise.
+- A message whose `type` this daemon doesn't handle (older daemon, or a feature not compiled
+  in) is answered with `UNKNOWN_TYPE`, severity `"error"`, so a client can fail at once instead
+  of waiting out its timeout. The frame carries `request_type` (the type sent) and `req` (the
+  payload's `req`), each only when it is at most 64 bytes of valid UTF-8 with no control
+  characters. Daemons before this answer nothing; no feature flag marks it. The error is sent
+  at once, so it can arrive before replies to earlier requests: match it by `req`, not by order.
 
 #### `force_logout`
 This connection's login ended: a logout (from this or another tab), a login over it
