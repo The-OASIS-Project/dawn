@@ -253,7 +253,7 @@ typedef struct {
 /* Default fallback models when no models are configured
  * Updated: 2026-08 - Update these when new model generations are released */
 #define LLM_DEFAULT_OPENAI_MODEL "gpt-5.6-luna"
-#define LLM_DEFAULT_CLAUDE_MODEL "claude-haiku-4-5"
+#define LLM_DEFAULT_CLAUDE_MODEL "claude-haiku-5-5"
 #define LLM_DEFAULT_GEMINI_MODEL "gemini-3.7-flash"
 #define LLM_DEFAULT_OPENROUTER_MODEL "openai/gpt-5.6-luna"
 
