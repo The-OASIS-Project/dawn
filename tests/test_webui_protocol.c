@@ -21,10 +21,17 @@
 
 #include <json-c/json.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "unity.h"
 #include "webui/webui_protocol.h"
+
+/* The mail panel's check: here, whatever the test says. */
+static bool s_email_on;
+bool webui_email_client_enabled(void) {
+   return s_email_on;
+}
 
 void setUp(void) {
 }
@@ -51,6 +58,7 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    bool image_turns = false;
    bool image_only = false;
    bool turn_refs = false;
+   bool visual_guard = false;
    bool attachments = false;
    for (size_t i = 0; i < json_object_array_length(features); i++) {
       const char *f = json_object_get_string(json_object_array_get_idx(features, i));
@@ -59,6 +67,7 @@ static void test_the_members_are_the_version_and_the_flags(void) {
       image_turns = image_turns || strcmp(f, "image_turns_by_id") == 0;
       image_only = image_only || strcmp(f, "image_only_turns") == 0;
       turn_refs = turn_refs || strcmp(f, "turn_refs") == 0;
+      visual_guard = visual_guard || strcmp(f, "visual_prompt_guard") == 0;
       attachments = attachments || strcmp(f, "document_attachments") == 0;
    }
    TEST_ASSERT_TRUE(logout);
@@ -66,8 +75,26 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    TEST_ASSERT_TRUE(image_turns);
    TEST_ASSERT_TRUE(image_only);
    TEST_ASSERT_TRUE(turn_refs);
+   TEST_ASSERT_TRUE(visual_guard);
    TEST_ASSERT_TRUE(attachments);
    json_object_put(root);
+}
+
+/* email_client is advertised only while the mail panel can answer. */
+static void test_email_client_follows_its_check(void) {
+   char members[WEBUI_PROTOCOL_JSON_MAX];
+   s_email_on = false;
+   TEST_ASSERT_TRUE(webui_protocol_json_members(members, sizeof(members)) > 0);
+   TEST_ASSERT_NULL(strstr(members, "\"email_client\""));
+   s_email_on = true;
+   TEST_ASSERT_TRUE(webui_protocol_json_members(members, sizeof(members)) > 0);
+   TEST_ASSERT_NOT_NULL(strstr(members, "\"email_client\""));
+   char object[WEBUI_PROTOCOL_JSON_MAX + 2];
+   snprintf(object, sizeof(object), "{%s}", members);
+   struct json_object *root = json_tokener_parse(object);
+   TEST_ASSERT_NOT_NULL(root);
+   json_object_put(root);
+   s_email_on = false;
 }
 
 static void test_too_small_a_buffer_gives_nothing(void) {
@@ -95,10 +122,98 @@ static void test_a_client_is_noted_once(void) {
    json_object_put(ok);
 }
 
+/* req is echoed only when it is plain: a string, short, no controls, valid
+ * UTF-8, no embedded NUL. */
+static void test_req_is_taken_only_when_safe_to_echo(void) {
+   char out[WEBUI_REQ_MAX + 1];
+   const char *bad[] = {
+      "{}",
+      "{\"req\":7}",
+      "{\"req\":\"a\\u0001b\"}",
+      "{\"req\":\"a\\u0000b\"}",
+      "{\"req\":\"x\\u007f\"}",
+   };
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      struct json_object *p = json_tokener_parse(bad[i]);
+      TEST_ASSERT_NOT_NULL_MESSAGE(p, bad[i]);
+      TEST_ASSERT_FALSE_MESSAGE(webui_protocol_payload_req(p, WEBUI_REQ_MAX, out, sizeof(out)),
+                                bad[i]);
+      json_object_put(p);
+   }
+   TEST_ASSERT_FALSE(webui_protocol_payload_req(NULL, WEBUI_REQ_MAX, out, sizeof(out)));
+
+   /* invalid UTF-8 (a lone continuation byte) */
+   struct json_object *p = json_object_new_object();
+   json_object_object_add(p, "req", json_object_new_string("ab\x80"));
+   TEST_ASSERT_FALSE(webui_protocol_payload_req(p, WEBUI_REQ_MAX, out, sizeof(out)));
+   json_object_put(p);
+
+   char longer[WEBUI_REQ_MAX + 2];
+   memset(longer, 'r', sizeof(longer) - 1);
+   longer[sizeof(longer) - 1] = '\0';
+   p = json_object_new_object();
+   json_object_object_add(p, "req", json_object_new_string(longer));
+   TEST_ASSERT_FALSE(webui_protocol_payload_req(p, WEBUI_REQ_MAX, out, sizeof(out)));
+   longer[WEBUI_REQ_MAX] = '\0'; /* exactly the max */
+   json_object_object_add(p, "req", json_object_new_string(longer));
+   TEST_ASSERT_TRUE(webui_protocol_payload_req(p, WEBUI_REQ_MAX, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING(longer, out);
+   json_object_put(p);
+
+   p = json_tokener_parse("{\"req\":\"r-\\u00e9-1\"}");
+   TEST_ASSERT_TRUE(webui_protocol_payload_req(p, WEBUI_REQ_MAX, out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("r-\xc3\xa9-1", out);
+   json_object_put(p);
+}
+
+/* UNKNOWN_TYPE echoes the type and req when they are safe, and omits them
+ * otherwise. */
+static void test_unknown_type_echoes_what_is_safe(void) {
+   char *json = webui_protocol_unknown_type_json("email_frobnicate", "q7");
+   TEST_ASSERT_NOT_NULL(json);
+   struct json_object *o = json_tokener_parse(json);
+   TEST_ASSERT_NOT_NULL(o);
+   struct json_object *payload, *f;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "type", &f));
+   TEST_ASSERT_EQUAL_STRING("error", json_object_get_string(f));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "payload", &payload));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(payload, "code", &f));
+   TEST_ASSERT_EQUAL_STRING("UNKNOWN_TYPE", json_object_get_string(f));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(payload, "request_type", &f));
+   TEST_ASSERT_EQUAL_STRING("email_frobnicate", json_object_get_string(f));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(payload, "req", &f));
+   TEST_ASSERT_EQUAL_STRING("q7", json_object_get_string(f));
+   json_object_put(o);
+   free(json);
+
+   char longer[WEBUI_REQ_MAX + 2];
+   memset(longer, 't', sizeof(longer) - 1);
+   longer[sizeof(longer) - 1] = '\0';
+   json = webui_protocol_unknown_type_json(longer, NULL);
+   TEST_ASSERT_NOT_NULL(json);
+   o = json_tokener_parse(json);
+   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "payload", &payload));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(payload, "request_type", &f));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(payload, "req", &f));
+   json_object_put(o);
+   free(json);
+
+   json = webui_protocol_unknown_type_json("bad\xff", NULL);
+   TEST_ASSERT_NOT_NULL(json);
+   o = json_tokener_parse(json);
+   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "payload", &payload));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(payload, "request_type", &f));
+   json_object_put(o);
+   free(json);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_the_members_are_the_version_and_the_flags);
+   RUN_TEST(test_email_client_follows_its_check);
    RUN_TEST(test_too_small_a_buffer_gives_nothing);
    RUN_TEST(test_a_client_is_noted_once);
+   RUN_TEST(test_req_is_taken_only_when_safe_to_echo);
+   RUN_TEST(test_unknown_type_echoes_what_is_safe);
    return UNITY_END();
 }

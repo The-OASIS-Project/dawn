@@ -36,24 +36,33 @@
  *                         If NULL/empty, defaults to "in:inbox".
  * @param count            Number of messages to fetch
  * @param unread_only      If true, only fetch unread messages
+ * @param at_or_before     Only messages dated at or before this (epoch s); 0 = no bound
  * @param page_token       Pagination token from previous call (NULL for first page)
  * @param out              Output array of email summaries
  * @param max_out          Size of output array
  * @param out_count        Output: number of results written
  * @param next_page_token  Output: token for next page (empty if no more pages)
  * @param npt_len          Size of next_page_token buffer
- * @return 0 on success, 1 on failure
+ * @param inbox_unread     Optional: the INBOX's unread count, asked on the
+ *                         same connection (-1 when it can't be had)
+ * @param missing_out      Optional: listed messages left out because Gmail kept
+ *                         refusing them as too many requests
+ * @return 0, even when some rows are missing (see @p missing_out); 1 when nothing
+ *         was fetched and a request failed, or the caller stopped the transfer
  */
 int gmail_fetch_recent(const char *token,
                        const char *label_query,
                        int count,
                        bool unread_only,
+                       time_t at_or_before,
                        const char *page_token,
                        email_summary_t *out,
                        int max_out,
                        int *out_count,
                        char *next_page_token,
-                       size_t npt_len);
+                       size_t npt_len,
+                       int *inbox_unread,
+                       int *missing_out);
 
 
 /** Whether @p id has the shape of a Gmail message id (hex, bounded). */
@@ -87,7 +96,10 @@ int gmail_read_message(const char *token,
  * @param out_count        Output: number of results written
  * @param next_page_token  Output: token for next page (empty if no more pages)
  * @param npt_len          Size of next_page_token buffer
- * @return 0 on success, 1 on failure
+ * @param missing_out      Optional: listed messages left out because Gmail kept
+ *                         refusing them as too many requests
+ * @return 0, even when some rows are missing (see @p missing_out); 1 when nothing
+ *         was fetched and a request failed, or the caller stopped the transfer
  */
 int gmail_search(const char *token,
                  const email_search_params_t *params,
@@ -96,7 +108,8 @@ int gmail_search(const char *token,
                  int max_out,
                  int *out_count,
                  char *next_page_token,
-                 size_t npt_len);
+                 size_t npt_len,
+                 int *missing_out);
 
 /**
  * @brief Send an email via Gmail API.
@@ -135,20 +148,33 @@ int gmail_test_connection(const char *token, char *email_out, size_t email_len);
  */
 int gmail_list_labels(const char *token, char *out, size_t out_len);
 
-/**
- * @brief Move a message to Trash.
- * @param token       Bearer access token
- * @param message_id  Gmail hex message ID
- * @return 0 on success, 1 on failure
- */
-int gmail_trash_message(const char *token, const char *message_id);
+/** The most ids one gmail_set_unread call takes (one batchModify). */
+#define GMAIL_FLAGS_MAX_IDS 50
 
 /**
- * @brief Archive a message (remove from Inbox, keep in All Mail).
- * @param token       Bearer access token
- * @param message_id  Gmail hex message ID
- * @return 0 on success, 1 on failure
+ * @brief Add or remove UNREAD on messages (nothing else): one batchModify, or
+ *        each message on its own when the batch is refused (gmail_flags.c)
+ *
+ * batchModify answers for the batch, not per message, so an id not in the
+ * mailbox reads as updated when the batch succeeds.  An id that isn't a Gmail
+ * id is EMAIL_ERR_NOT_FOUND without asking.
+ *
+ * @param n       At most GMAIL_FLAGS_MAX_IDS
+ * @param updated Per id: true when it was done
+ * @param errs    Per id: why it wasn't (EMAIL_ERR_NONE when it was)
+ * @return 0, or 1 when the request couldn't be made (see @p errs)
  */
-int gmail_archive_message(const char *token, const char *message_id);
+int gmail_set_unread(const char *token,
+                     const char *const *ids,
+                     int n,
+                     bool unread,
+                     bool *updated,
+                     email_err_t *errs);
+
+/**
+ * @brief The INBOX's unread count (labels/INBOX messagesUnread) (gmail_flags.c)
+ * @return 0 with @p unread set, or 1 (@p err says why)
+ */
+int gmail_inbox_unread(const char *token, int *unread, email_err_t *err);
 
 #endif /* GMAIL_CLIENT_H */

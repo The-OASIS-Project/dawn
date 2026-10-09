@@ -146,6 +146,10 @@ typedef struct {
    bool is_background_turn;
    bool is_job_conversation;
 
+   /* The text came from a rendered visual's prompt (a WebUI bridge), not the
+    * person typing: the turn is marked so no confirm counts in it. */
+   bool from_visual;
+
    /* A new chat's first message: conversation_id is 0 because the client creates
     * the conversation after sending it.  The user message is kept for the turn's
     * worker to write once the conversation exists (session_turn_set_pending). */

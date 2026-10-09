@@ -1,6 +1,6 @@
 # Email Subsystem
 
-Source: `src/tools/email_*.c`, `src/webui/webui_email.c`
+Source: `src/tools/email_*.c`, `src/tools/gmail_*.c`; the WebUI: `src/webui/webui_email*.c`, `src/webui/email_cursor.c`, `src/webui/email_wire.c`
 
 Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main doc for layer rules, threading model, and lock ordering.
 
@@ -12,14 +12,19 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│                     LLM TOOL INTERFACE                                │
-│  email_tool.c                                                        │
-│  Actions: recent | read | search | folders | send | confirm_send     │
-│           | accounts | trash | confirm_trash | archive               │
-│  → TOOL_CAP_DANGEROUS: compile-time + runtime gates                  │
+│   LLM TOOL INTERFACE              │  WEBUI MAIL PANEL (Aurora)        │
+│  email_tool.c                     │  webui_email_panel.c: email_list, │
+│  recent | read | search | folders │   _search, _read, _set_flags,     │
+│  | send | confirm_send | accounts │   _unread_counts (email_cursor.c, │
+│  | trash | confirm_trash | archive│   email_wire.c: paging, frames)   │
+│                                   │  webui_email_panel_move.c:        │
+│                                   │   _archive, _trash, _undo         │
+│  → TOOL_CAP_DANGEROUS gates       │  webui_email_exec.c: 4 workers,   │
+│                                   │   one task per account            │
 ├───────────────────────────────────────────────────────────────────────┤
 │                     SERVICE LAYER                                     │
-│  email_service.c, email_service_read.c                               │
+│  email_service.c, email_service_read.c, email_service_move.c        │
+│  → Trash/archive batches + undo (email_undo.c tokens, 60 s)          │
 │  → Multi-account routing (dispatches to correct backend per account) │
 │  → Two-step confirmation for send and trash (draft → confirm)        │
 │  → Per-account read-only flag                                        │
@@ -27,8 +32,12 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ├───────────────────────────────────────────────────────────────────────┤
 │              BACKEND A                     BACKEND B                  │
 │  email_client.c (IMAP/SMTP)    gmail_client.c (Gmail REST API)      │
-│  email_imap_move.c (trash,     gmail_read.c, gmail_parts.c          │
-│   archive)                                                           │
+│  email_imap_read.c (read)      gmail_read.c, gmail_parts.c          │
+│  email_imap_batch.c (trash,    gmail_flags.c (read/unread, counts)  │
+│   archive, undo; COPYUID)      gmail_move.c (trash, archive, undo)  │
+│  email_imap_move.c (folder roles)                                    │
+│  email_imap_flags.c (\Seen, STATUS); one IMAP login per account at a │
+│   time: email_account_lease.c                                        │
 ├───────────────────────────────────────────────────────────────────────┤
 │                     READING A MESSAGE                                 │
 │  email_mime.c (GMime) + email_display.c: one policy, both backends   │
@@ -65,10 +74,9 @@ Display names are quoted in the To and From headers (`email_format_mailbox`).
 Both backends end in one reader, `email_mime.c`, the only file that uses GMime.
 The backends hand over the message in different forms:
 
-- **IMAP** fetches the raw RFC 822 bytes, bounded: 512 KB for the LLM tool (a
-  2 MB cap, `EMAIL_READ_FETCH_PANEL`, is reserved for the planned email panel's
-  read path and not in use yet). A larger message comes back cut and reads as
-  truncated; it is never refused. A read-specific curl sink stops the transfer at
+- **IMAP** fetches the raw RFC 822 bytes, bounded: 512 KB for the LLM tool, 2 MB
+  for the mail panel's read (`EMAIL_READ_FETCH_PANEL`). A larger message comes
+  back cut and reads as truncated; it is never refused. A read-specific curl sink stops the transfer at
   the cap.
   - **Pre-scan.** Before GMime sees the bytes, `email_mime_prescan` cuts the
     message at the first limit it passes. It counts boundary lines, and every line
@@ -76,6 +84,13 @@ The backends hand over the message in different forms:
     whatever the line looks like). It also caps one header's folded length and a
     line's length. GMime builds a message's whole tree before anything can stop it,
     and a few MB of tiny parts or headers can cost hundreds of MB to parse.
+  - **Address headers.** GMime's address parsing costs time quadratic in the
+    entries without an '@' (and group colons), and it re-parses every header of an
+    address type when another arrives. The pre-scan counts such entries across all
+    address headers, skipping quotes and comments as GMime does, and cuts past
+    1,000; a header block may hold at most 4 headers of each type GMime parses.
+    Gmail's header values, which skip the pre-scan, are each cut at 1,000 such
+    entries (`email_mime_addr_list`).
   - **No-copy parse.** GMime reads over the fetched buffer with `persist_stream` on,
     so a part's content is a window on that buffer, not a copy.
 - **Gmail** reads `format=full`. That gives the MIME tree with each text part's
@@ -110,9 +125,18 @@ sees the message's structure. It does the rest:
     removed. Line and paragraph separators become line breaks.
 - **Produces HTML only on request.** `body_html` (raw; whoever shows it must
   sanitize it) exists only when `want_html` is set, capped by `max_html_bytes`.
-  The LLM tool never asks for it. These fields, `EMAIL_READ_HTML_PANEL`, the
-  read's `cancel` hook and `email_error_name()` are reserved for the planned email
-  panel's read path; nothing uses them yet.
+  The LLM tool never asks for it; the mail panel's read does
+  (`EMAIL_READ_HTML_PANEL`).
+- **Reads only the text a person would see.** HTML becomes text through
+  `html_extract_text_plain_ex`, which drops what a mail client hides: `hidden`,
+  `display:none`, `visibility:hidden`, zero size, clipped or transparent text,
+  `<head>` and the like, from inline styles and from the message's own `<style>`
+  rules (a bounded cascade in `html_hidden.c` / `html_hidden_css.c`, with a work
+  budget past which the rest reads as hidden). So an instruction styled out of
+  sight doesn't reach the model. The message records that text was dropped
+  (`hidden_text`). When the HTML shows no text (only images, or it couldn't be
+  read), the plain-text version is used, with a note that the reader may not have
+  seen it.
 - **Lists every other leaf as an attachment**: part id, filename, type,
   Content-ID, size, and whether it's inline.
 - **Sets truncation flags**: `text_truncated`, `html_truncated` and
@@ -129,17 +153,72 @@ Content-IDs are limited to RFC 5322 atext.
 A trash confirmation reads headers only. On IMAP that is `FETCH (ENVELOPE)`,
 which doesn't mark the message read; on Gmail it is `format=metadata`.
 
-## Moving a message (trash, archive)
+## Searching every account
 
-`email_imap_move.c` moves exactly one message, to the folder the server marks
-for the role (`\Trash`, `\Archive`; `\All` on Gmail), or else a known name at
-the top of the user's folders. It never uses another user's or a shared
-namespace.
+A tool `search` with no account searches every enabled account at once, one thread
+each (`email_fanout.c`, joined before the call returns; Stop ends them all, since
+each runs under the caller's cancel flag). An IMAP account busy elsewhere for 10 s
+is reported, not waited out. The rows are merged newest first by date across the
+accounts, and the limit keeps the newest; each failed account is reported. One
+log line per account gives its time, which names a slow server.
 
-- **The move.** `UID MOVE`, else `UID COPY` + `STORE \Deleted` + `UID EXPUNGE` of
-  that one UID. A bare `EXPUNGE` is never sent.
-- **Before it.** A read-only `UID FETCH` first confirms the message exists.
-- **No folder for the role.** The move is refused, never guessed.
+The mail panel pages differently: its tasks run on the email executor, and its
+merge (`email_merge_page`) keeps each account's own order, comparing only each
+account's next row, because its cursor must record an exact position per account.
+The tool has no cursor across accounts, so it can sort freely.
+
+**Gmail lists in two steps**: the ids (`messages.list`), then each message's
+headers in batch requests of 20 (`gmail_batch.c`). Gmail refuses some parts of a
+batch when a user's requests come fast (429, or a 403 naming a rate limit); those,
+and server errors, are asked for again after 1 s and then 2 s. A 401 or another
+403 isn't retried. Rows keep the listing's order. Any still refused are counted, not
+dropped: the tool says the list is incomplete, the panel marks the account partial
+(RATE_LIMITED), the digest notes it, and reply states stay unknown. Search terms
+lose quotes and currency signs, with which Gmail matches nothing.
+
+## Moving messages (trash, archive) and undo
+
+`email_service_move.c` moves up to 50 messages of one account per call, to the
+folder the server marks for the role (`\Trash`, `\Archive`; `\All` on Gmail), or
+else a known name at the top of the user's folders (`email_imap_move.c` finds and
+caches the roles). It never uses another user's or a shared namespace.
+
+- **IMAP ids are pinned.** An id is `folder:uid.v`, `v` the mailbox's UIDVALIDITY,
+  and every SELECT for it carries `;UIDVALIDITY=v`: a mailbox rebuilt since the id
+  was issued answers NOT_FOUND rather than the wrong message. Old ids without
+  `.v` still work, unpinned.
+- **The IMAP move** (`email_imap_batch.c`): one login per call, ids grouped by
+  (folder, epoch). Per group a read-only `UID FETCH` confirms which exist, then
+  `UID MOVE` of those, else `UID COPY` + `STORE \Deleted` + `UID EXPUNGE` of those
+  UIDs (no UIDPLUS: left marked deleted). A bare `EXPUNGE` is never sent.
+  Stopping is honoured between groups only.
+- **Where each message landed** comes from COPYUID (RFC 4315), read only while
+  the MOVE or COPY is in flight and only from its own tagged reply or untagged
+  lines, mapped only onto UIDs DAWN sent.
+- **Gmail** (`gmail_move.c`): per message, labels read first (already there, or
+  an archive from Trash/Spam, is answered without moving), paced to 40 calls a
+  second per account.
+- **No folder for the role.** The move is refused, never guessed; a role folder
+  removed since (TRYCREATE) is forgotten and refused the same way.
+- **Undo** (`email_undo.c`): a move from the panel gets a token per message,
+  random, single use, bound to the user, the account and its server and login,
+  kept 60 s in memory. An undo checks the message is still where it went, moves it
+  back, and reads its new row. Every move and undo is told to the user's panels
+  once (`email_changed_notify`).
+- **What an account can do.** The panel's account list says whether each account
+  can trash and archive (`email_service_account_caps`). Gmail always can; for
+  IMAP it's whether the server has a folder for the role, learned from a move or,
+  at most once an hour per account, from the account's first inbox page. A probe
+  that fails is tried again on the next page. Each cached entry has a generation
+  number: removing or changing the account forgets it, and a probe that started
+  before that can't write its answer back.
+- **The panel's moves run in order.** Archive, trash and undo go to the
+  executor's MOVE slot: one running and three queued per session, first in
+  first out, and a newer request never replaces a queued one. A fifth is BUSY.
+  A move that started always runs its login and its first folder (IMAP) or
+  message (Gmail) with no stop armed, so it always acts and always sends
+  `email_changed`; a stop waits at most for that, and a stop between folders
+  leaves the rest where they were.
 
 ## Confirming a send or a trash
 

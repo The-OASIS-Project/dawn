@@ -31,6 +31,7 @@
 
 #include "core/curl_buffer.h"
 #include "tools/email_mime.h"
+#include "tools/email_undo.h" /* EMAIL_UNDO_LABELS_MAX: the labels an undo keeps */
 
 #define GMAIL_API_BASE "https://gmail.googleapis.com/gmail/v1/users/me"
 
@@ -50,6 +51,15 @@ int gmail_api_get_ex(CURL *curl,
                      long *http_code_out,
                      CURLcode *res_out);
 
+/** gmail_api_get_ex with a reply cap of @p max_bytes instead of the default 4 MB. */
+int gmail_api_get_capped(CURL *curl,
+                         const char *token,
+                         const char *url,
+                         size_t max_bytes,
+                         curl_buffer_t *resp,
+                         long *http_code_out,
+                         CURLcode *res_out);
+
 /** gmail_api_get_ex without the transfer result. */
 int gmail_api_get(CURL *curl,
                   const char *token,
@@ -57,8 +67,36 @@ int gmail_api_get(CURL *curl,
                   curl_buffer_t *resp,
                   long *http_code_out);
 
+/**
+ * @brief POST @p body to a Gmail API URL, reply into @p resp (freed on failure)
+ * @param http_code_out As for gmail_api_get_ex (a 403 rate limit reads as 429)
+ * @return 0 on a 2xx, 1 otherwise
+ */
+int gmail_api_post_ex(CURL *curl,
+                      const char *token,
+                      const char *url,
+                      const char *content_type,
+                      const char *body,
+                      curl_buffer_t *resp,
+                      long *http_code_out,
+                      CURLcode *res_out);
+
+/** Remove UNREAD from one message on @p curl's connection (gmail_flags.c). */
+int gmail_mark_read(CURL *curl, const char *token, const char *message_id, email_err_t *err);
+
+/** The email_err_t a failed Gmail call stands for (gmail_client.c). */
+email_err_t gmail_http_err(CURLcode res, long http_code);
+
+/** gmail_inbox_unread on the caller's handle (no new connection) (gmail_flags.c). */
+int gmail_inbox_unread_on(CURL *curl, const char *token, int *unread, email_err_t *err);
+
 /* The most of one text part read from a message's tree. */
 #define GMAIL_TEXT_PART_MAX (4 * 1024 * 1024)
+
+/* The reply cap for one part fetched by its attachmentId: the part's base64
+ * (4/3 of GMAIL_TEXT_PART_MAX) plus the JSON around it.  A part that fits is
+ * read whole; a bigger one reads as cut. */
+#define GMAIL_PART_RESPONSE_MAX (GMAIL_TEXT_PART_MAX / 3 * 4 + 64 * 1024)
 
 /** Whether @p c is a base64url character.  gmail_parts.c, as below. */
 bool gmail_b64url_char(unsigned char c);
@@ -114,5 +152,122 @@ typedef struct {
 int gmail_parts_from_payload(struct json_object *payload, gmail_parts_t *out);
 
 void gmail_parts_free(gmail_parts_t *p);
+
+/** A message's row (sender, subject, date, labels as flags) from its metadata
+ *  or list JSON (gmail_batch.c).  @return 0, or 1 */
+int gmail_summary_from_json(struct json_object *root, email_summary_t *out);
+
+/* The batch metadata fetch (gmail_batch.c, run by gmail_client.c). */
+#define GMAIL_BATCH_BOUNDARY "dawn_gmail_batch"
+/* Messages per batch request: Google advises at most 50, and larger batches
+ * draw "too many concurrent requests" refusals for some of their messages. */
+#define GMAIL_BATCH_SIZE 20
+/* Rounds after the first that ask again for the refused messages, waiting
+ * 1 s then 2 s first (Google: back off at least one second). */
+#define GMAIL_BATCH_RETRIES 2
+
+typedef struct {
+   char id[64];
+} gmail_msg_id_t;
+
+/* A listed message's fetch. */
+enum {
+   GMAIL_BATCH_PENDING = 0, /* not read yet: asked for (again) */
+   GMAIL_BATCH_DONE,        /* read */
+   GMAIL_BATCH_GONE,        /* deleted since the listing: left out */
+   GMAIL_BATCH_FAILED,      /* refused for good (401, a 403 not for rate): counted missing */
+};
+
+/** The batch request body asking for the rows of ids[which[0..n-1]] (each
+ *  part's Content-ID is its index in @p ids).  @return heap string, or NULL */
+char *gmail_batch_body(const gmail_msg_id_t *ids, const int *which, int n);
+
+/**
+ * @brief Read a batch reply into rows[i] for each part answering index i
+ *
+ * A row read sets state[i] DONE; a refusal that asks us to slow down (429, a
+ * 403 naming a rate limit) or a server error leaves it PENDING, to ask again;
+ * a lapsed token (401) or another 403 sets FAILED (not asked again, counted
+ * missing); any other answer (a message deleted since the listing) sets GONE.
+ * Parts for an index out of range or not PENDING are ignored.
+ *
+ * @return rows read
+ */
+int gmail_batch_parse(const char *resp,
+                      const char *boundary,
+                      int n_ids,
+                      email_summary_t *rows,
+                      unsigned char *state);
+
+/** @p src as a term inside a quoted Gmail query: no quotes, and no currency
+ *  signs ($ € £ ¥), with which Gmail matches nothing. */
+void gmail_query_term(const char *src, char *dst, size_t dst_len);
+
+/**
+ * @brief Whether a trashed message's label may be added back by an undo
+ *        (gmail_parts.c): INBOX, UNREAD, STARRED, IMPORTANT, CATEGORY_* and user
+ *        labels (Label_*), never TRASH, SPAM, SENT, DRAFT or CHAT, and only
+ *        names of [A-Za-z0-9_] (they go into a JSON body as they are)
+ */
+bool gmail_label_addable(const char *label);
+
+/**
+ * @brief Pack the addable ones of @p labels into @p out as "A,B,C"
+ *        (gmail_parts.c); whatever doesn't fit is left out
+ * @return how many addable labels didn't fit
+ */
+int gmail_labels_pack(const char *const *labels, int n, char *out, size_t out_size);
+
+/**
+ * @brief The body adding @p packed's labels back: {"addLabelIds":["A","B"]}
+ *        (gmail_parts.c)
+ * @param system_only Only the system ones (no Label_*): the retry when a user
+ *                    label was deleted in between
+ * @return false when there's nothing to add or it doesn't fit
+ */
+bool gmail_labels_add_body(const char *packed, bool system_only, char *out, size_t out_size);
+
+/** What a Gmail message is, read before moving it (gmail_move.c). */
+typedef struct {
+   bool in_inbox;
+   bool in_trash;
+   bool in_spam;
+   char keep[EMAIL_UNDO_LABELS_MAX]; /* the labels an undo adds back */
+   int dropped;                      /* addable labels that didn't fit in keep */
+} gmail_move_meta_t;
+
+/**
+ * @brief Read @p id's labels (format=minimal) on @p curl
+ * @return 0, or 1 with @p err set (EMAIL_ERR_NOT_FOUND for a 404)
+ */
+int gmail_move_meta(CURL *curl,
+                    const char *token,
+                    const char *id,
+                    gmail_move_meta_t *meta,
+                    email_err_t *err);
+
+/**
+ * @brief POST /messages/{id}/{action} with @p body on @p curl (gmail_move.c)
+ * @param action "trash", "untrash" or "modify"
+ * @return 0, or 1 with @p err set (NOT_FOUND for a 404, RATE_LIMITED for a 429);
+ *         @p http_code (may be NULL) the status, so a 400 can be told apart
+ */
+int gmail_message_post(CURL *curl,
+                       const char *token,
+                       const char *id,
+                       const char *action,
+                       const char *body,
+                       long *http_code,
+                       email_err_t *err);
+
+/**
+ * @brief @p id's row from a metadata get on @p curl (gmail_move.c)
+ * @return 0, or 1 with @p err set
+ */
+int gmail_message_row(CURL *curl,
+                      const char *token,
+                      const char *id,
+                      email_summary_t *row,
+                      email_err_t *err);
 
 #endif /* GMAIL_CLIENT_INTERNAL_H */

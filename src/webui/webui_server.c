@@ -1473,7 +1473,7 @@ static void *webui_thread_func(void *arg) {
 
             for (int j = 0; j < ao_count; j++) {
                ws_connection_t *c = ao_conn[j];
-               if (always_on_check_timeouts(c->always_on, c)) {
+               if (always_on_check_timeouts(c->always_on, c, ao_session[j])) {
                   /* Auto-disabled — clean up (lws thread; single-threaded field). */
                   send_always_on_state(c->wsi, "disabled");
                   always_on_destroy(c->always_on);
@@ -3005,20 +3005,29 @@ void webui_fanout_job_stream_response(ws_response_t *resp) {
    free_response(resp); /* fan-out owns the original; free its heap exactly once */
 }
 
-void webui_send_session_json(session_t *session, const char *json_str) {
+void webui_send_session_json_take(session_t *session, char *json_str) {
    if (!session || session->type != SESSION_TYPE_WEBUI || !json_str) {
+      free(json_str);
       return;
    }
 
    ws_response_t resp = { 0 };
    resp.session = session;
    resp.type = WS_RESP_JSON;
-   resp.generic_json.json = strdup(json_str);
-   if (!resp.generic_json.json) {
+   resp.generic_json.json = json_str; /* the send queue frees it */
+   queue_response(&resp);
+}
+
+void webui_send_session_json(session_t *session, const char *json_str) {
+   if (!session || session->type != SESSION_TYPE_WEBUI || !json_str) {
+      return;
+   }
+   char *copy = strdup(json_str);
+   if (!copy) {
       OLOG_ERROR("WebUI: Failed to allocate JSON response string");
       return;
    }
-   queue_response(&resp);
+   webui_send_session_json_take(session, copy);
 }
 
 void webui_send_conversation_reset(session_t *session) {

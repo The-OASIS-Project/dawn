@@ -102,7 +102,7 @@ static void test_account_get(void) {
 static void test_account_get_not_found(void) {
    email_account_t out;
    memset(&out, 0, sizeof(out));
-   TEST_ASSERT_EQUAL_INT(1, email_db_account_get(99999, &out));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, email_db_account_get(99999, &out));
 }
 
 static void test_account_preserves_encrypted_password(void) {
@@ -233,7 +233,7 @@ static void test_account_delete(void) {
    TEST_ASSERT_EQUAL_INT(0, email_db_account_delete(id));
 
    email_account_t out;
-   TEST_ASSERT_EQUAL_INT(1, email_db_account_get(id, &out));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, email_db_account_get(id, &out));
 }
 
 /* ── Account Flags ───────────────────────────────────────────────────────── */

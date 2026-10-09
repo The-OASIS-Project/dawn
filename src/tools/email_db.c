@@ -197,10 +197,13 @@ int email_db_account_get(int64_t id, email_account_t *out) {
    sqlite3_reset(st);
    sqlite3_bind_int64(st, 1, id);
 
-   int result = 1;
-   if (sqlite3_step(st) == SQLITE_ROW) {
+   const int step = sqlite3_step(st);
+   int result = AUTH_DB_FAILURE;
+   if (step == SQLITE_ROW) {
       row_to_account(st, out);
-      result = 0;
+      result = AUTH_DB_SUCCESS;
+   } else if (step == SQLITE_DONE) {
+      result = AUTH_DB_NOT_FOUND;
    }
    sqlite3_reset(st);
 

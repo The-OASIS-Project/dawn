@@ -53,6 +53,8 @@ typedef struct {
    char trash[EMAIL_IMAP_ROLE_FOLDER_MAX];
    /** The folder archive moves to ("" = none). */
    char archive[EMAIL_IMAP_ROLE_FOLDER_MAX];
+   /** The folder marked \All, all of the user's mail ("" = none marked). */
+   char all[EMAIL_IMAP_ROLE_FOLDER_MAX];
 } email_imap_roles_t;
 
 /** The user's own namespace and the ones that aren't theirs (RFC 2342). */

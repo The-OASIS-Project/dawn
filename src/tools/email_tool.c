@@ -44,6 +44,7 @@
 #include "tools/email_display.h"
 #include "tools/email_parse.h"
 #include "tools/email_service.h"
+#include "tools/email_transfer.h"
 #include "tools/oauth_client.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -233,6 +234,20 @@ static int append_page_token(char *buf, int pos, const char *token) {
    return append_bounded(buf, pos, line);
 }
 
+/* After a listing Gmail cut short: it kept refusing some matching messages as
+ * too many requests, so the list (or "none") isn't the whole answer. */
+static int append_missing_note(char *buf, int pos, int missing) {
+   if (missing <= 0)
+      return pos;
+   char line[256];
+   snprintf(line, sizeof(line),
+            "\n\nNote: %d more matching message(s) couldn't be fetched from Gmail (most often "
+            "it asking us to slow down), so this list is incomplete. Tell the user, and try "
+            "again in a moment.",
+            missing);
+   return append_bounded(buf, pos, line);
+}
+
 static char *email_rc_to_error(int rc, const char *op, const char *account, const char *folder) {
    char *msg = malloc(384);
    if (!msg)
@@ -355,6 +370,12 @@ static void sort_summaries_by_date(email_summary_t *arr, int n, const char *sort
    qsort(arr, (size_t)n, sizeof(*arr), oldest ? cmp_summary_date_asc : cmp_summary_date_desc);
 }
 
+static char *err_error(int rc,
+                       email_err_t err,
+                       const char *op,
+                       const char *account,
+                       const char *folder);
+
 static char *handle_recent(struct json_object *details, int user_id) {
    /* 0 = not given: the service layer substitutes the account's max_recent. */
    int count = json_get_int(details, "count", 0);
@@ -367,12 +388,14 @@ static char *handle_recent(struct json_object *details, int user_id) {
    email_summary_t emails[MAX_EMAIL_RESULTS];
    int out_count = 0;
    char next_page_token[256] = { 0 };
+   email_err_t err = EMAIL_ERR_NONE;
+   email_page_ext_t ext = { 0 };
    int rc = email_service_recent(user_id, account, folder, count, unread_only, page_token, emails,
                                  MAX_EMAIL_RESULTS, &out_count, next_page_token,
-                                 sizeof(next_page_token));
+                                 sizeof(next_page_token), &ext, NULL, &err);
 
    if (rc != EMAIL_RC_OK)
-      return email_rc_to_error(rc, "recent", account, folder);
+      return err_error(rc, err, "recent", account, folder);
 
    sort_summaries_by_date(emails, out_count, sort);
 
@@ -382,7 +405,9 @@ static char *handle_recent(struct json_object *details, int user_id) {
 
    int pos = 0;
    bool cut = false;
-   if (out_count == 0 && next_page_token[0]) {
+   if (out_count == 0 && ext.rows_missing > 0) {
+      pos += snprintf(buf, RESULT_BUF_SIZE, "No emails could be fetched.");
+   } else if (out_count == 0 && next_page_token[0]) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
    } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No recent emails found.");
@@ -393,14 +418,29 @@ static char *handle_recent(struct json_object *details, int user_id) {
 
    if (next_page_token[0] && !cut)
       pos = append_page_token(buf, pos, next_page_token);
+   pos = append_missing_note(buf, pos, ext.rows_missing);
 
    return buf;
 }
 
-/* Why a read failed, when the cause is known; otherwise the generic text for rc. */
-static char *read_error(int rc, email_err_t err, const char *account) {
+/* Why an operation failed, when the cause is known; otherwise the generic text for rc. */
+static char *err_error(int rc,
+                       email_err_t err,
+                       const char *op,
+                       const char *account,
+                       const char *folder) {
    if (rc == EMAIL_RC_FAILURE) {
       switch (err) {
+         case EMAIL_ERR_BUSY:
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: this mailbox is busy with another request (one connection per "
+                          "account at a time). Retry in a moment.");
+         case EMAIL_ERR_UNSUPPORTED_QUERY:
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: this account's mail server can only search ASCII text. "
+                          "Search with ASCII words (drop accented or non-Latin characters).");
+         case EMAIL_ERR_CANCELLED:
+            return strdup(TOOL_RESULT_ERROR_MARK "Error: the request was stopped.");
          case EMAIL_ERR_AUTH_FAILED:
             return strdup(TOOL_RESULT_ERROR_MARK
                           "Error: the mail server refused the login. The account's password or "
@@ -425,7 +465,7 @@ static char *read_error(int rc, email_err_t err, const char *account) {
             break;
       }
    }
-   return email_rc_to_error(rc, "read", account, NULL);
+   return email_rc_to_error(rc, op, account, folder);
 }
 
 /* @p bytes as "512 B", "12 KB", "3.4 MB". */
@@ -475,12 +515,14 @@ static char *handle_read(struct json_object *details, int user_id) {
    const char *account = json_get_str(details, "account");
 
    /* The account's own body cap; never HTML (the model reads text). */
-   const email_read_opts_t opts = { .fetch_bytes = EMAIL_READ_FETCH_TOOL };
+   /* The text a person reading the message sees: its HTML form when it has
+    * one, so a plain alternative can't tell the model something else. */
+   const email_read_opts_t opts = { .fetch_bytes = EMAIL_READ_FETCH_TOOL, .text_as_shown = true };
    email_message_t msg = { 0 };
    email_err_t err = EMAIL_ERR_NONE;
-   int rc = email_service_read(user_id, account, message_id, &opts, &msg, &err);
+   int rc = email_service_read(user_id, account, message_id, &opts, &msg, NULL, &err);
    if (rc != EMAIL_RC_OK)
-      return read_error(rc, err, account);
+      return err_error(rc, err, "read", account, NULL);
 
    /* Every field here is the sender's text, already made safe to show. */
    /* Headers, 32+32 addresses and 16 attachment lines fit well within 64 KB. */
@@ -561,10 +603,14 @@ static char *handle_search(struct json_object *details, int user_id) {
    int out_count = 0;
    char next_page_token[256] = { 0 };
    char warn[256] = { 0 }; /* accounts that couldn't be searched (multi-account merge) */
+   email_search_report_t report;
    int rc = email_service_search(user_id, account, &params, emails, MAX_EMAIL_RESULTS, &out_count,
-                                 next_page_token, sizeof(next_page_token), warn, sizeof(warn));
+                                 next_page_token, sizeof(next_page_token), warn, sizeof(warn), NULL,
+                                 &report);
 
    if (rc != EMAIL_RC_OK) {
+      if (report.err == EMAIL_ERR_CANCELLED)
+         return err_error(rc, report.err, "search", account, params.folder);
       /* Every enabled account failed.  Name them (with 'login failed' where known)
        * instead of the generic backend-error message, so the user gets an
        * actionable report rather than a silent/opaque failure. */
@@ -580,6 +626,8 @@ static char *handle_search(struct json_object *details, int user_id) {
                   warn);
          return msg;
       }
+      if (rc == EMAIL_RC_FAILURE && report.err != EMAIL_ERR_FAILED)
+         return err_error(rc, report.err, "search", account, params.folder);
       if (rc == EMAIL_RC_TIMEOUT) {
          /* Date-aware hint: if the search was already date-bounded, telling the
           * LLM to "add a since date" is wrong — the range is just still too big,
@@ -622,7 +670,9 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    int pos = 0;
    bool cut = false;
-   if (out_count == 0 && next_page_token[0]) {
+   if (out_count == 0 && report.rows_missing > 0) {
+      pos += snprintf(buf, RESULT_BUF_SIZE, "No emails could be fetched.");
+   } else if (out_count == 0 && next_page_token[0]) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
    } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No emails matching your search criteria.");
@@ -633,6 +683,7 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    if (next_page_token[0] && !cut)
       pos = append_page_token(buf, pos, next_page_token);
+   pos = append_missing_note(buf, pos, report.rows_missing);
 
    /* Partial result: some accounts succeeded, others couldn't be reached.  Surface
     * it so the LLM tells the user rather than silently presenting incomplete results
@@ -782,6 +833,11 @@ static char *handle_confirm_send(struct json_object *details,
                        "Error: not confirmed. A confirm counts only in the user's reply right "
                        "after the read-back; the conversation has moved on since. Prepare it "
                        "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_FROM_VISUAL:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. This turn came from a rendered visual, not the "
+                       "user, and a visual can't approve anything. Prepare it again, read it "
+                       "back, and confirm only when the user replies themselves.");
       case EMAIL_CONFIRM_RC_OTHER_SESSION:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: not confirmed. This was prepared in another session (another "
@@ -811,9 +867,10 @@ static char *handle_folders(struct json_object *details, int user_id) {
    const char *account = json_get_str(details, "account");
 
    char buf[4096];
-   int rc = email_service_list_folders(user_id, account, buf, sizeof(buf));
+   email_err_t err = EMAIL_ERR_NONE;
+   int rc = email_service_list_folders(user_id, account, buf, sizeof(buf), NULL, &err);
    if (rc != EMAIL_RC_OK)
-      return email_rc_to_error(rc, "folder list", account, NULL);
+      return err_error(rc, err, "folder list", account, NULL);
 
    if (!buf[0])
       return strdup("No folders found.");
@@ -881,7 +938,8 @@ static char *handle_confirm_trash(struct json_object *details,
    if (!pending_id || !pending_id[0])
       return strdup("Error: 'pending_id' is required");
 
-   int rc = email_service_confirm_trash(user_id, pending_id, origin);
+   email_err_t err = EMAIL_ERR_NONE;
+   int rc = email_service_confirm_trash(user_id, pending_id, origin, &err);
    switch (rc) {
       case EMAIL_RC_OK:
          return strdup("Email moved to Trash.");
@@ -895,6 +953,11 @@ static char *handle_confirm_trash(struct json_object *details,
                        "Error: not confirmed. A confirm counts only in the user's reply right "
                        "after the read-back; the conversation has moved on since. Prepare it "
                        "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_FROM_VISUAL:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: not confirmed. This turn came from a rendered visual, not the "
+                       "user, and a visual can't approve anything. Prepare it again, read it "
+                       "back, and confirm only when the user replies themselves.");
       case EMAIL_CONFIRM_RC_OTHER_SESSION:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: not confirmed. This was prepared in another session (another "
@@ -935,6 +998,24 @@ static char *handle_confirm_trash(struct json_object *details,
                        "it is (DAWN never deletes mail permanently). Tell the user; they can "
                        "create a Trash folder in their mail app.");
       default:
+         /* A busy or stopped confirm happens before anything is consumed: the
+          * trash is still staged under the same id. */
+         if (err == EMAIL_ERR_BUSY)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: this mailbox is busy with another request (one connection per "
+                          "account at a time). Nothing was trashed and the trash is still staged. "
+                          "Tell the user; if they say yes again, confirm with the same pending "
+                          "id.");
+         if (err == EMAIL_ERR_CANCELLED)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the request was stopped before anything was trashed; the trash "
+                          "is still staged. If the user says yes again, confirm with the same "
+                          "pending id.");
+         if (err == EMAIL_ERR_OUTCOME_UNKNOWN)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the mail server didn't confirm the trash, so the message may "
+                          "or may not have been moved. Don't retry; tell the user to check the "
+                          "folder.");
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to trash email (network or upstream error). Retry "
                        "once; if persistent, the email backend may be unreachable.");
@@ -948,7 +1029,8 @@ static char *handle_archive(struct json_object *details, int user_id) {
 
    const char *account = json_get_str(details, "account");
 
-   int rc = email_service_archive(user_id, account, mid);
+   email_err_t err = EMAIL_ERR_NONE;
+   int rc = email_service_archive(user_id, account, mid, NULL, &err);
    switch (rc) {
       case EMAIL_RC_OK:
          return strdup("Email archived (moved out of its folder to the account's archive).");
@@ -978,6 +1060,17 @@ static char *handle_archive(struct json_object *details, int user_id) {
                        "where it is. Tell the user; they can create an Archive folder in their "
                        "mail app.");
       default:
+         if (err == EMAIL_ERR_BUSY)
+            return err_error(EMAIL_RC_FAILURE, err, "archive", account, NULL);
+         if (err == EMAIL_ERR_IN_TRASH)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: that message is in Trash or Spam, so it wasn't archived. Tell "
+                          "the user; it has to be restored to the inbox first.");
+         if (err == EMAIL_ERR_OUTCOME_UNKNOWN)
+            return strdup(TOOL_RESULT_ERROR_MARK
+                          "Error: the mail server didn't confirm the archive, so the message may "
+                          "or may not have been moved. Don't retry; tell the user to check the "
+                          "folder.");
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to archive email (network or upstream error). The "
                        "message_id may be invalid (get fresh IDs from 'recent') or the "
@@ -1188,6 +1281,14 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
                     "turn. Tell the user what you would do, and let them ask for it.");
    }
 
+   /* The user's Stop ends a read's transfers and lease waits.  Not one that
+    * acts: a send or move cut short may have happened anyway, unreported. */
+   session_t *session = session_get_command_context();
+   const bool stoppable = session && !email_action_acts(action);
+   const atomic_bool *prev_cancel = NULL;
+   if (stoppable)
+      prev_cancel = email_transfer_scope_cancel(&session->cancel_requested);
+
    char *result = NULL;
 
    if (strcmp(action, "accounts") == 0) {
@@ -1222,6 +1323,8 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
       result = strdup(buf);
    }
 
+   if (stoppable)
+      email_transfer_scope_cancel(prev_cancel);
    json_object_put(details);
    return result;
 }
@@ -1301,9 +1404,12 @@ static const treg_param_t email_params[] = {
            "send {account, to, subject, body} (account: REQUIRED — the configured "
            "account to send FROM; to: email or contact name), "
            "confirm_send {draft_id}, "
-           "trash {message_id, account?} (creates pending — ask user to confirm), "
+           "trash {message_id, account?}, "
            "confirm_trash {pending_id}, "
            "archive {message_id, account?} (removes from inbox, no confirmation needed).\n"
+           "  send and trash only stage the action and return a preview: once the user has "
+           "asked for it, call them directly, don't ask first. The user's yes to the preview "
+           "is the confirmation; then call confirm_send / confirm_trash.\n"
            "  account?: the CONFIGURED account name OR username/email from the 'accounts' "
            "action — must already exist. Do NOT invent an email address; if uncertain, "
            "call action='accounts' first to enumerate. 'send' REQUIRES account (the sender — "

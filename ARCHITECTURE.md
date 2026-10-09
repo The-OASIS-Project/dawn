@@ -137,7 +137,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 | **Notes / Reference Text** | First-class **notes** document kind (`DOC_KIND_NOTES`) on the same `document_db`/`embedding_engine` foundation: user- or LLM-authored reference text with hybrid lexical (BM25/FTS5 + Porter2 stemming, `libstemmer`) plus semantic search, surgical edit/append, version history with one-step undo (`document_versions`), and a notes↔memory bridge so fuzzy recall resolves to the right note. Filed note bodies are kept **out** of semantic memory by default (`note_extraction_guard`) so the canonical text lives only in the note store. | shares [rag.md](docs/arch/subsystems/rag.md) + [vision-documents.md](docs/arch/subsystems/vision-documents.md) |
 | **Deep Research** (`src/tools/research_*`, `src/core/research_worker.c`) | **P0 shipped 2026-08-13; P1 (controller-driven convergence) shipped 2026-08-14, live-validated.** Confirmation-gated `deep_research` tool spawns a detached **`research_worker`** (a background-job sibling — reuses `job_manager_*`, its own spawn path, NOT `job_worker.c`) that runs an **IterResearch** loop on a **bare, memory-free** session: each round resets history to a bounded digest + top open questions, plans sub-questions, does web `search`/`url_fetch` under a **read-only tool allowlist** (enforced at advertise AND execute), and records injection-gated evidence **claims** to a SQLite ledger (`research_runs/questions/claims/report_revisions`, schema v75; v76 adds `resolution_reason`). A **deterministic C stop-controller** ends it — natural-end reasons first (`concluded` via the agent's `research_conclude` signal → distinct-source `coverage`, with `research_mark_unanswerable` + **P1 stale-question auto-retirement** clearing dead questions → `saturation` after N dry rounds) then the **input-token budget as a high runaway backstop** (a per-round overshoot guard keeps it honest) — so a run stops on why it's actually done, not on spend. P1 adds **plan-freeze** (no new top-level questions after round K) and a **fresh-context completeness critic** (§6 item 4) that may re-arm a stop-eligible run at an untried angle up to `critic_max_rearm` times (each re-arm resets the saturation streak so a multi-round gap gets a fresh window). A final **no-tools synthesis turn** writes the answer (exec summary + direct answer/recommendation + honest gaps) over the **claims evidence** (a view over `research_claims` — the ledger retains every recorded claim, so synthesis works from evidence rather than a lossy running summary; the render is bounded by a generous per-report claim cap with an explicit truncation marker beyond it), so every terminal path yields a real answer; it's filed to notes and persisted to the job conversation (never re-entering a tool session or `reinvoke_parent` — the untrusted-content boundary, §11). A voice/WebUI run posts a JARVIS-style **completion take** back into the originating conversation (`completion_commentary`). Off by default (`[research] enabled`). P2–P4 (parallel fan-out, attach/replay specialization, TUI) remain design-only. | [DEEP_RESEARCH_DESIGN.md](docs/DEEP_RESEARCH_DESIGN.md) |
 | **CalDAV Calendar** | Multi-account RFC 4791 client with offline-first SQLite cache, pre-expanded RRULE occurrences, and background sync. Tested with Google, iCloud, Nextcloud, Radicale. | [calendar.md](docs/arch/subsystems/calendar.md) |
-| **Email** | Dual backend — IMAP/SMTP for anything, Gmail REST API for OAuth accounts — read through one MIME reader (`email_mime.c`, GMime): bounded fetches, a pre-scan against parser bombs, charsets to UTF-8, attachments listed, sender text sanitized. Trash/archive move exactly one message to the server-marked folder, never a bare EXPUNGE. Two-step confirmation on send and trash. Recipients resolved against the contacts system. | [email.md](docs/arch/subsystems/email.md) |
+| **Email** | Dual backend — IMAP/SMTP for anything, Gmail REST API for OAuth accounts — read through one MIME reader (`email_mime.c`, GMime): bounded fetches, a pre-scan against parser bombs, charsets to UTF-8, attachments listed, sender text sanitized. Trash/archive move batches (one IMAP login, Gmail per message and paced) to the server-marked folder, never a bare EXPUNGE, with a 60 s undo; IMAP ids are pinned to their mailbox's UIDVALIDITY. Two-step confirmation on send and trash. Recipients resolved against the contacts system. | [email.md](docs/arch/subsystems/email.md) |
 | **Messaging Channels** (`src/messaging/`) | Bidirectional text chat over Telegram, Discord, Slack, and SMS. Each provider is a `messaging_driver_t` with its own background listener thread; a channel answers only the person who linked it (the provider's sender id; several DAWN users can each link one group chat, each with their own session), an SMS link completes with a code texted to the number, and inbound messages bind to a per-channel "forever conversation" (`SESSION_TYPE_MESSAGING`, exempt from idle cleanup) with per-conversation LLM settings, and scheduler briefings can deliver to a channel via `deliver_to`. Discord additionally supports read-only channel read/summarize (`list_readable_channels`/`read_history`, `messaging_engine_read.c`). Engine split into core + `_session`/`_channels`/`_link`/`_inbound`/`_codes`/`_read` behind `messaging_engine_internal.h`. WebUI channel-management panel + `dawn-admin messaging` CLI. | [MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
 | **Phone & SMS** (`src/tools/phone_*.c`) | Cellular calls and SMS via the external **ECHO** modem daemon (SIM7600G-H) over MQTT. `phone_tool.c` is the LLM interface; `phone_service.c` runs the call state machine (RINGING/ANSWERING/ACTIVE, atomic first-wins answer claim) + TTS announcements + HUD/WebUI banner; `phone_db.c` logs calls/SMS. Incoming-call context is posted to every interactive session via `session_broadcast_notice()` (rendered into each turn's volatile prompt block for 10 minutes, never written into a conversation history); a WebUI incoming-call banner + persistent in-call panel let any surface answer/reject/hang up. Two-way call **audio** bridge (Phase 5) is not yet shipped. | [PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **OAuth 2.0 & Crypto** | Shared OAuth client with PKCE S256 and `crypto_store.c` (libsodium `crypto_secretbox`) for encrypted token and password storage. Used by email and calendar. | [oauth-crypto.md](docs/arch/subsystems/oauth-crypto.md) |
@@ -197,6 +197,14 @@ Layer 4 (Application) — deps: everything below
 │                               no-ops, and the WebUI-only pieces are left out (messaging channels, the job and
 │                               deep_research tools, the OAuth and code-project handlers, Home Assistant's
 │                               realtime connection)
+│   ├── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
+│   │                           taken by ticket so no worker waits on an account, replies by session id; a
+│   │                           session's moves queue in order on its MOVE slot, never replaced
+│   └── webui_email_panel*.c    The mail panel's verbs (email_list/_search/_read/_set_flags/_unread_counts;
+│                               _archive/_trash/_undo in webui_email_panel_move.c), with the pure
+│                               email_cursor.c (paging across accounts) and email_wire.c (rows, read frames
+│                               within their size budget); webui_email_changed.c pushes email_changed to
+│                               every tab of the user after a move or undo
 └── src/core/{job_worker,research_worker}.c   Detached background-job sequencers*
 ```
 
@@ -214,6 +222,8 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
 | `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
+| `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
+| `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -330,6 +340,14 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │
+│  Email exec      — 4 workers, started on the first     │
+│                    WebUI email request and kept until  │
+│                    shutdown: the panel's email work,   │
+│                    off the lws thread                  │
+│  Email fan-out   — transient, one per enabled account  │
+│                    (≤16) for an all-accounts email     │
+│                    search from the tool, joined before │
+│                    the search returns                  │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -468,6 +486,33 @@ Per-module locks (scoped to a single subsystem):
   document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (LEAF: never held across a database call; a rebuild reads pages outside it, then installs; scoring holds only this)
   memory_embeddings_entity::s_ent.mutex (src/memory/memory_embeddings_entity.c) — per-user entity-embedding copies (LEAF: held only to look up, score and install; a copy is read from the DB and name-stemmed with no cache lock held; invalidation is lock-free atomics, safe under the auth_db lock)
   memory_extraction::s_extraction_mutex + s_extraction_cond (src/memory/memory_extraction.c) — per-user extraction slots (leaf); the cond var lets a forget wait out a user's in-flight extraction (memory_extraction_hold_user)
+  email_account_lease::s_mutex (src/tools/email_account_lease.c) — the per-account IMAP lease table (held only to queue, hand over or
+                                                                     drop a waiter, never across I/O).  The LEASE itself is the outermost
+                                                                     email lock: its holder may take the OAuth per-account mutex and then the
+                                                                     auth_db lock; nothing takes it while holding those, the draft/trash
+                                                                     mutexes or s_conn_registry_mutex; the release hook runs with no lease mutex held.
+                                                                     A thread re-taking its own lease is caught; a ticket holder has no thread,
+                                                                     so code running under a ticket's lease asserts email_lease_is_held
+                                                                     (that the account's lease is held by someone, not that it is this
+                                                                     ticket's: a debug check, not a guard)
+  webui_email_exec::s_mutex (src/webui/webui_email_exec.c) — the WebUI email executor's run queue, sessions' slots and which
+                                                                     user each worker serves.  Taken BEFORE the lease mutex (a worker asks for a
+                                                                     lease, a cancel withdraws a ticket) and before a join's deliver_mutex; never
+                                                                     held while releasing a lease or setting the lease hook (either may call the
+                                                                     hook, which takes it) or while running account work.  A request's free_ctx takes no locks (it may
+                                                                     run under s_mutex)
+  webui_email_exec join->deliver_mutex (src/webui/webui_email_exec.c) — one per request: its cancel and its result's send are
+                                                                     ordered by it (a cancelled request's result is never sent).  Order: s_mutex →
+                                                                     deliver_mutex → the send queue's lock.  The reply's session is looked up (session
+                                                                     registry, then its metrics_mutex for the owner check) BEFORE the deliver_mutex is
+                                                                     taken.  A deliberate module-before-session exception to rule 1: the send only
+                                                                     queues, so nothing waits on a session while it's held
+  email_undo::s_mutex (src/tools/email_undo.c) — the trash/archive undo tokens (LEAF: held only to add, claim, finish or release
+                                                                     a token; never across a call into anything else)
+  email_service_move::s_pace_mutex (src/tools/email_service_move.c) — Gmail's per-account call pacing, shared by the tool and
+                                                                     the panel (LEAF: held only to reserve a slot; the wait sleeps with it released)
+  email_service_move::s_caps_mutex (src/tools/email_service_move.c) — which accounts can trash and archive, as last learned (LEAF:
+                                                                     held only to find, note or read a slot; never across I/O or another lock)
   ...and similar per-tool mutexes in src/tools/*.c
 ```
 

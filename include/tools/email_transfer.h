@@ -43,6 +43,31 @@ email_err_t email_err_from_curl(CURLcode res);
  */
 void email_transfer_set_cancel(CURL *curl, const atomic_bool *cancel);
 
+/** Undo email_transfer_set_cancel on @p curl: its next transfers can't be stopped. */
+void email_transfer_clear_cancel(CURL *curl);
+
+/**
+ * @brief Set this thread's transfer cancel flag; every IMAP, SMTP or Gmail handle
+ *        the thread creates from now on ends early once it is set
+ *
+ * For work run on someone else's behalf (a WebUI request on a worker thread): set
+ * it when the work starts and restore the previous one when it ends.
+ *
+ * @return The previous flag (may be NULL)
+ */
+const atomic_bool *email_transfer_scope_cancel(const atomic_bool *cancel);
+
+/** This thread's transfer cancel flag (NULL when none is set). */
+const atomic_bool *email_transfer_thread_cancel(void);
+
+/** Why a transfer failed when the backend says only "failed": EMAIL_ERR_CANCELLED
+ *  when this thread's cancel flag is set (a stopped transfer fails the same
+ *  way), else EMAIL_ERR_FAILED. */
+email_err_t email_transfer_failure(void);
+
+/** Whether this thread's transfers have been stopped. */
+bool email_transfer_stopped(void);
+
 #ifdef __cplusplus
 }
 #endif

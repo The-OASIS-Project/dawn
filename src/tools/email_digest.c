@@ -44,6 +44,7 @@
 #include "tools/email_digest_internal.h"
 #include "tools/email_parse.h"
 #include "tools/email_service.h"
+#include "tools/email_transfer.h"
 #include "tools/email_types.h"
 #include "tools/tool_registry.h"
 
@@ -194,6 +195,7 @@ static bool digest_fetch_account(int user_id,
    st.depth = acct->digest_depth; /* clamped to [1, EMAIL_DIGEST_DEPTH_MAX] on DB load */
    email_digest_step_t step = EMAIL_DIGEST_MORE;
    int kept = 0;
+   int missing = 0; /* listed, but Gmail kept refusing them */
    bool fetch_error = false;
    bool oom = false;
 
@@ -202,6 +204,7 @@ static bool digest_fetch_account(int user_id,
       if (want > EMAIL_MAX_FETCH_RESULTS)
          want = EMAIL_MAX_FETCH_RESULTS;
       int out_count = 0;
+      email_page_ext_t ext = { 0 };
       /* Resolve by username (the account's login/address), not the display name:
        * find_account matches name OR username first-wins, and display names are
        * not unique (two accounts may both be "Gmail").  Selecting by name would
@@ -212,7 +215,7 @@ static bool digest_fetch_account(int user_id,
        * service layer normalizes per backend. */
       int rc = email_service_recent(user_id, acct->username, "inbox", want, unread_only,
                                     tok_in[0] ? tok_in : NULL, batch, EMAIL_MAX_FETCH_RESULTS,
-                                    &out_count, tok_out, sizeof(tok_out));
+                                    &out_count, tok_out, sizeof(tok_out), &ext, NULL, NULL);
       if (rc != EMAIL_RC_OK) {
          if (st.pages == 0) {
             strbuf_appendf(status, "  %s <%s>: unavailable (fetch error — check account/OAuth)\n",
@@ -220,6 +223,11 @@ static bool digest_fetch_account(int user_id,
             return false;
          }
          fetch_error = true; /* keep what earlier pages found */
+         break;
+      }
+      missing += ext.rows_missing;
+      if (out_count == 0 && ext.rows_missing > 0) {
+         fetch_error = true; /* a page of refusals isn't the mailbox running out */
          break;
       }
 
@@ -252,6 +260,9 @@ static bool digest_fetch_account(int user_id,
    }
 
    strbuf_appendf(status, "  %s <%s>: %d in window", acct->name, acct->username, kept);
+   if (missing > 0)
+      strbuf_appendf(status, " (%d more couldn't be fetched: Gmail asked us to slow down)",
+                     missing);
    if (oom)
       strbuf_appendf(status, " (out of memory; older in-window mail omitted)");
    else if (fetch_error)
@@ -319,9 +330,13 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    int ok_accounts = 0;
    int total_unread = 0;
 
+   bool stopped = false;
    for (int a = 0; a < n_acct; a++) {
       if (!accounts[a].enabled)
          continue;
+      /* Stopped: what's left would only fail and read as broken accounts. */
+      if ((stopped = email_transfer_stopped()))
+         break;
       enabled_accounts++;
       if (digest_fetch_account(user_id, &accounts[a], opts->unread_only, cutoff, batch, &rows,
                                &status, &total_unread))
@@ -330,6 +345,12 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
 
    email_summary_t *merged = rows.v;
    int merged_n = rows.n;
+   if (stopped || email_transfer_stopped()) {
+      strbuf_free(&status);
+      free(batch);
+      free(merged);
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: the request was stopped.");
+   }
 
    if (merged_n > 1)
       qsort(merged, merged_n, sizeof(email_summary_t), cmp_summary_date_desc);

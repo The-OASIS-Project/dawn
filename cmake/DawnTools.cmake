@@ -340,20 +340,32 @@ if(DAWN_ENABLE_EMAIL_TOOL)
         src/tools/email_tool.c
         src/tools/email_service.c
         src/tools/email_service_read.c
+        src/tools/email_fanout.c
+        src/tools/email_service_fetch.c
+        src/tools/email_service_flags.c
+        src/tools/email_service_move.c
+        src/tools/email_undo.c
+        src/tools/email_account_lease.c
         src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c
+        src/tools/email_imap_read.c
         src/tools/email_imap_move.c
+        src/tools/email_imap_batch.c
         src/tools/email_imap_roles.c
+        src/tools/email_imap_flags.c
+        src/tools/email_imap_state.c
         src/tools/email_instrument.c
         src/tools/email_mime.c
         src/tools/email_display.c
         src/tools/email_transfer.c
         src/tools/email_parse.c
+        src/tools/gmail_batch.c
         src/tools/gmail_client.c
         src/tools/gmail_read.c
-        src/tools/gmail_parts.c
-        src/webui/webui_email.c)
+        src/tools/gmail_flags.c
+        src/tools/gmail_move.c
+        src/tools/gmail_parts.c)
     # oauth_client.c may already be included by calendar tool
     if(NOT DAWN_ENABLE_CALENDAR_TOOL)
         list(APPEND TOOL_SOURCES src/tools/oauth_client.c)
@@ -390,6 +402,20 @@ endif()
 # it when WebUI is on — otherwise the local / ci presets fail to link.
 if((DAWN_ENABLE_CALENDAR_TOOL OR DAWN_ENABLE_EMAIL_TOOL) AND ENABLE_WEBUI)
     list(APPEND TOOL_SOURCES src/webui/webui_oauth.c)
+endif()
+
+# The email account panel, the mail panel and their executor are WebUI surfaces too.
+if(DAWN_ENABLE_EMAIL_TOOL AND ENABLE_WEBUI)
+    list(APPEND TOOL_SOURCES
+        src/webui/email_cursor.c
+        src/webui/email_wire.c
+        src/webui/webui_email.c
+        src/webui/webui_email_changed.c
+        src/webui/webui_email_exec.c
+        src/webui/webui_email_exec_policy.c
+        src/webui/webui_email_exec_send.c
+        src/webui/webui_email_panel.c
+        src/webui/webui_email_panel_move.c)
 endif()
 
 # SFX Tool (sound effect playback)

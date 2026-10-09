@@ -259,3 +259,92 @@ void gmail_parts_free(gmail_parts_t *p) {
    free(p->parts);
    memset(p, 0, sizeof(*p));
 }
+
+/* Labels an undo never adds back: they'd put the message somewhere it wasn't
+ * moved from (or can't be added by the API at all). */
+static const char *const LABELS_NEVER[] = { "TRASH", "SPAM", "SENT", "DRAFT", "CHAT" };
+static const char *const LABELS_SYSTEM_OK[] = { "INBOX", "UNREAD", "STARRED", "IMPORTANT" };
+
+static bool label_chars_ok(const char *label) {
+   if (!label || !label[0])
+      return false;
+   for (const char *p = label; *p; p++) {
+      if (!isalnum((unsigned char)*p) && *p != '_')
+         return false;
+   }
+   return true;
+}
+
+bool gmail_label_addable(const char *label) {
+   if (!label_chars_ok(label))
+      return false;
+   for (size_t i = 0; i < sizeof(LABELS_NEVER) / sizeof(LABELS_NEVER[0]); i++) {
+      if (strcmp(label, LABELS_NEVER[i]) == 0)
+         return false;
+   }
+   for (size_t i = 0; i < sizeof(LABELS_SYSTEM_OK) / sizeof(LABELS_SYSTEM_OK[0]); i++) {
+      if (strcmp(label, LABELS_SYSTEM_OK[i]) == 0)
+         return true;
+   }
+   return strncmp(label, "CATEGORY_", 9) == 0 || strncmp(label, "Label_", 6) == 0;
+}
+
+int gmail_labels_pack(const char *const *labels, int n, char *out, size_t out_size) {
+   int dropped = 0;
+   size_t pos = 0;
+   if (out_size)
+      out[0] = '\0';
+   for (int i = 0; i < n; i++) {
+      if (!gmail_label_addable(labels[i]))
+         continue;
+      const size_t len = strlen(labels[i]);
+      const size_t need = len + (pos ? 1 : 0);
+      if (out_size == 0 || pos + need >= out_size) {
+         dropped++;
+         continue;
+      }
+      if (pos)
+         out[pos++] = ',';
+      memcpy(out + pos, labels[i], len);
+      pos += len;
+      out[pos] = '\0';
+   }
+   return dropped;
+}
+
+bool gmail_labels_add_body(const char *packed, bool system_only, char *out, size_t out_size) {
+   static const char head[] = "{\"addLabelIds\":[";
+   if (!packed || out_size < sizeof(head) + 3)
+      return false;
+   size_t pos = sizeof(head) - 1;
+   memcpy(out, head, pos);
+   int added = 0;
+   for (const char *p = packed; *p;) {
+      const char *end = strchr(p, ',');
+      const size_t len = end ? (size_t)(end - p) : strlen(p);
+      char label[EMAIL_UNDO_LABELS_MAX];
+      if (len > 0 && len < sizeof(label)) {
+         memcpy(label, p, len);
+         label[len] = '\0';
+         if (gmail_label_addable(label) && !(system_only && strncmp(label, "Label_", 6) == 0)) {
+            /* ,"label" plus the closing ]} and NUL */
+            if (pos + len + 4 + 3 > out_size)
+               return false;
+            if (added)
+               out[pos++] = ',';
+            out[pos++] = '"';
+            memcpy(out + pos, label, len);
+            pos += len;
+            out[pos++] = '"';
+            added++;
+         }
+      }
+      if (!end)
+         break;
+      p = end + 1;
+   }
+   if (added == 0)
+      return false;
+   memcpy(out + pos, "]}", 3);
+   return true;
+}

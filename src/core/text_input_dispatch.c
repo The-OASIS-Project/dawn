@@ -84,6 +84,9 @@ char *core_text_input_dispatch(session_t *session,
    if (opts && opts->is_background_turn) {
       session_turn_mark_background(session);
    }
+   if (opts && opts->from_visual) {
+      session_turn_mark_from_visual(session);
+   }
    if (opts && opts->conversation_id > 0) {
       session_turn_set_conversation(session, opts->conversation_id, true);
    }

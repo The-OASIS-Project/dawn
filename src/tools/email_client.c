@@ -45,6 +45,7 @@
 #include "logging.h"
 #include "tools/email_client_internal.h"
 #include "tools/email_display.h"
+#include "tools/email_imap_state.h"
 #include "tools/email_instrument.h"
 #include "tools/email_mime.h"
 #include "tools/email_parse.h"
@@ -144,6 +145,7 @@ CURL *email_imap_handle_create(const email_conn_t *conn) {
    if (strstr(conn->imap_url, "imap://") != NULL) {
       curl_easy_setopt(curl, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);
    }
+   email_transfer_set_cancel(curl, email_transfer_thread_cancel());
 
    return curl;
 }
@@ -170,6 +172,7 @@ static CURL *create_smtp_handle(const email_conn_t *conn) {
    if (strstr(conn->smtp_url, "smtp://") != NULL) {
       curl_easy_setopt(curl, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);
    }
+   email_transfer_set_cancel(curl, email_transfer_thread_cancel());
 
    return curl;
 }
@@ -287,16 +290,22 @@ static bool page_mark_stale(email_imap_page_t *page,
 /* Mailbox URL; a continuation page pins the UIDVALIDITY epoch its cursor came
  * from, so libcurl fails the SELECT (CURLE_REMOTE_FILE_NOT_FOUND) instead of
  * paging a rebuilt mailbox with stale UIDs. */
-static void build_mailbox_url(const email_conn_t *conn,
+/* @return false when it doesn't fit @p url_len: a cut URL could address
+ * another mailbox, so it is never used. */
+static bool build_mailbox_url(const email_conn_t *conn,
                               const char *encoded_folder,
                               const email_imap_page_t *page,
                               char *url,
                               size_t url_len) {
-   if (page && page->before_uid > 1 && page->uidvalidity > 0)
-      snprintf(url, url_len, "%s/%s;UIDVALIDITY=%u", conn->imap_url, encoded_folder,
-               page->uidvalidity);
-   else
-      snprintf(url, url_len, "%s/%s", conn->imap_url, encoded_folder);
+   const int w = (page && page->before_uid > 1 && page->uidvalidity > 0)
+                     ? snprintf(url, url_len, "%s/%s;UIDVALIDITY=%u", conn->imap_url,
+                                encoded_folder, page->uidvalidity)
+                     : snprintf(url, url_len, "%s/%s", conn->imap_url, encoded_folder);
+   if (w < 0 || (size_t)w >= url_len) {
+      url[0] = '\0';
+      return false;
+   }
+   return true;
 }
 
 /* =============================================================================
@@ -401,8 +410,10 @@ static int batch_fetch_headers(CURL *curl,
       BUF_PRINTF(uid_list, upos, urem, "%u", uids[i]);
    }
 
-   char url[1024];
-   snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
+   char url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   const int ulen = snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
+   if (ulen < 0 || (size_t)ulen >= sizeof(url))
+      return 1; /* never a cut URL: it would name another mailbox */
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    char fetch_cmd[1200];
@@ -487,24 +498,41 @@ static int batch_fetch_headers(CURL *curl,
    return 0;
 }
 
-/* =============================================================================
- * URL-encode IMAP Folder Name
- *
- * Percent-encode folder name for use in IMAP curl URLs.
- * curl handles mUTF-7 decoding internally for IMAP URLs.
- * ============================================================================= */
+int email_imap_fetch_summaries(CURL *curl,
+                               const email_conn_t *conn,
+                               const char *folder,
+                               const uint32_t *uids,
+                               int n,
+                               email_summary_t *out,
+                               int max_out,
+                               int *out_count) {
+   *out_count = 0;
+   char encoded[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded, sizeof(encoded)))
+      return 1;
+   return batch_fetch_headers(curl, conn, encoded, uids, n, out, max_out, out_count);
+}
 
-static void url_encode_folder(const char *folder, char *out, size_t out_len) {
-   size_t j = 0;
-   for (size_t i = 0; folder[i] && j < out_len - 4; i++) {
-      unsigned char c = (unsigned char)folder[i];
-      if (isalnum(c) || c == '/' || c == '.' || c == '_' || c == '-') {
-         out[j++] = c;
-      } else {
-         j += snprintf(out + j, out_len - j, "%%%02X", c);
-      }
+bool email_imap_mailbox_url(const email_conn_t *conn,
+                            const char *folder,
+                            uint32_t uidvalidity,
+                            char *out,
+                            size_t out_size) {
+   if (!conn || !folder || !folder[0] || !out || out_size == 0)
+      return false;
+   char encoded[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded, sizeof(encoded))) {
+      out[0] = '\0';
+      return false; /* never a cut name, which could address another folder */
    }
-   out[j] = '\0';
+   const int w = uidvalidity ? snprintf(out, out_size, "%s/%s;UIDVALIDITY=%u", conn->imap_url,
+                                        encoded, uidvalidity)
+                             : snprintf(out, out_size, "%s/%s", conn->imap_url, encoded);
+   if (w < 0 || (size_t)w >= out_size) {
+      out[0] = '\0';
+      return false;
+   }
+   return true;
 }
 
 /* =============================================================================
@@ -832,8 +860,16 @@ int email_fetch_recent(const email_conn_t *conn,
                        email_imap_page_t *page,
                        email_summary_t *out,
                        int max_out,
-                       int *out_count) {
+                       int *out_count,
+                       int *inbox_unseen,
+                       email_err_t *err) {
+   email_err_t err_local;
+   if (!err)
+      err = &err_local;
+   *err = EMAIL_ERR_FAILED;
    *out_count = 0;
+   if (inbox_unseen)
+      *inbox_unseen = -1;
    page_reset_outputs(page);
 
    if (count > max_out)
@@ -846,8 +882,12 @@ int email_fetch_recent(const email_conn_t *conn,
    if (!folder || !folder[0])
       folder = "INBOX";
 
-   char encoded_folder[256];
-   url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   char encoded_folder[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      return 1;
+   }
 
    CURL *curl = email_imap_handle_create(conn);
    if (!curl)
@@ -856,8 +896,29 @@ int email_fetch_recent(const email_conn_t *conn,
    email_instrument_ctx_t dctx;
    email_instrument_attach(curl, &dctx);
 
-   char url[1024];
-   build_mailbox_url(conn, encoded_folder, page, url, sizeof(url));
+   /* The INBOX's unread count rides the same login, asked before any mailbox
+    * is selected on this connection.  A server that doesn't answer it leaves
+    * -1; only a transfer failure ends the listing. */
+   if (inbox_unseen && !email_instrument_status_refused(conn->imap_url, conn->username)) {
+      const CURLcode sres = email_imap_status_inbox_unseen(curl, &dctx, conn, true, inbox_unseen);
+      if (sres == CURLE_QUOTE_ERROR)
+         email_instrument_note_status_refused(conn->imap_url, conn->username);
+      if (sres != CURLE_OK && sres != CURLE_QUOTE_ERROR) {
+         *err = email_err_from_curl(sres);
+         email_instrument_op_done(conn->username, "recent", curl, &dctx);
+         curl_easy_cleanup(curl);
+         return 1;
+      }
+   }
+
+   char url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   if (!build_mailbox_url(conn, encoded_folder, page, url, sizeof(url))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      email_instrument_op_done(conn->username, "recent", curl, &dctx);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    /* Step 1: the newest `count` matching UIDs, via windowed UID SEARCH.  UID
@@ -869,6 +930,8 @@ int email_fetch_recent(const email_conn_t *conn,
    CURLcode res = CURLE_OK;
    if (imap_windowed_search(curl, &dctx, conn, "recent", unread_only ? " UNSEEN" : "", page, count,
                             EMAIL_IMAP_TIMEOUT_SEC, rev_uids, &rev_count, &res) != 0) {
+      if (res != CURLE_OK)
+         *err = email_err_from_curl(res);
       email_instrument_op_done(conn->username, "recent", curl, &dctx);
       curl_easy_cleanup(curl);
       return 1;
@@ -883,179 +946,9 @@ int email_fetch_recent(const email_conn_t *conn,
    /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
     * an error, not a successful-looking empty mailbox (the digest would then
     * treat a broken account as healthy). */
+   if (fetch_rc == 0)
+      *err = EMAIL_ERR_NONE;
    return fetch_rc;
-}
-
-/* =============================================================================
- * Public API: Read Message
- * ============================================================================= */
-
-/* A read's sink: keeps at most `cap` bytes, then stops the transfer (a short
- * write makes curl end it with CURLE_WRITE_ERROR), so a message larger than
- * the read wants is never downloaded whole. */
-typedef struct {
-   curl_buffer_t buf;
-   size_t cap;
-   bool hit_cap;
-} read_sink_t;
-
-static size_t read_sink_write(void *data, size_t size, size_t nmemb, void *userp) {
-   read_sink_t *s = userp;
-   const size_t n = size * nmemb;
-   const size_t room = s->cap > s->buf.size ? s->cap - s->buf.size : 0;
-   if (n > room) {
-      if (room > 0)
-         curl_buffer_write_callback(data, 1, room, &s->buf);
-      s->hit_cap = true;
-      return 0;
-   }
-   return curl_buffer_write_callback(data, size, nmemb, &s->buf);
-}
-
-/* Subject and From without reading the body: FETCH (ENVELOPE) answers inline
- * (no literal for libcurl to drop) and, unlike a body fetch, leaves the
- * message unread. */
-static int read_headers_only(CURL *curl,
-                             email_instrument_ctx_t *dctx,
-                             const email_conn_t *conn,
-                             const char *folder_url,
-                             uint32_t uid,
-                             email_message_t *out,
-                             email_err_t *err) {
-   curl_easy_setopt(curl, CURLOPT_URL, folder_url);
-   char cmd[64];
-   snprintf(cmd, sizeof(cmd), "UID FETCH %u (ENVELOPE)", uid);
-   curl_buffer_t buf;
-   const CURLcode res = email_imap_run_command(curl, dctx, conn, "read", cmd, true, &buf);
-   if (res != CURLE_OK || !buf.data) {
-      *err = res == CURLE_OK ? EMAIL_ERR_NOT_FOUND : email_err_from_curl(res);
-      curl_buffer_free(&buf);
-      return 1;
-   }
-   char subject[512] = "";
-   char from_name[256] = "";
-   char from_addr[256] = "";
-   const bool ok = email_parse_envelope(buf.data, subject, sizeof(subject), from_name,
-                                        sizeof(from_name), from_addr, sizeof(from_addr));
-   curl_buffer_free(&buf);
-   if (!ok) {
-      *err = EMAIL_ERR_NOT_FOUND;
-      return 1;
-   }
-   email_mime_header_text(subject, out->subject, sizeof(out->subject));
-   email_mime_header_text(from_name, out->from_name, sizeof(out->from_name));
-   email_display_sanitize(from_addr, strlen(from_addr), out->from_addr, sizeof(out->from_addr), 0);
-   return 0;
-}
-
-int email_read_message(const email_conn_t *conn,
-                       const char *folder,
-                       uint32_t uid,
-                       const email_read_opts_t *opts,
-                       email_message_t *out,
-                       email_err_t *err) {
-   email_err_t err_local;
-   if (!err)
-      err = &err_local;
-   *err = EMAIL_ERR_NONE;
-   memset(out, 0, sizeof(*out));
-   if (!conn || !opts || uid == 0) {
-      *err = EMAIL_ERR_FAILED;
-      return 1;
-   }
-   if (!folder || !folder[0])
-      folder = "INBOX";
-
-   char encoded_folder[256];
-   url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
-   CURL *curl = email_imap_handle_create(conn);
-   if (!curl) {
-      *err = EMAIL_ERR_FAILED;
-      return 1;
-   }
-   email_instrument_ctx_t dctx;
-   email_instrument_attach(curl, &dctx);
-   email_transfer_set_cancel(curl, opts->cancel);
-   char url[1024];
-   int rc = 1;
-
-   if (opts->headers_only) {
-      snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
-      rc = read_headers_only(curl, &dctx, conn, url, uid, out, err);
-      email_instrument_op_done(conn->username, "read", curl, &dctx);
-      curl_easy_cleanup(curl);
-      if (rc == 0)
-         out->uid = uid;
-      return rc;
-   }
-
-   /* A bounded fetch (IMAP BODY[]<0.N>, curl ";PARTIAL="): a message bigger than
-    * the read wants comes back cut, and is read as truncated.  PARTIAL is core
-    * RFC 3501; a server that rejects it gets one plain fetch, whose sink stops
-    * the transfer at the same size. */
-   const size_t cap = opts->fetch_bytes > 0 ? opts->fetch_bytes : EMAIL_READ_FETCH_TOOL;
-   read_sink_t sink;
-   bool raw_cut = false;
-   bool got = false;
-   for (int attempt = 0; attempt < 2 && !got; attempt++) {
-      const bool partial = attempt == 0;
-      if (partial)
-         snprintf(url, sizeof(url), "%s/%s/;UID=%u;PARTIAL=0.%zu", conn->imap_url, encoded_folder,
-                  uid, cap);
-      else
-         snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
-      curl_easy_setopt(curl, CURLOPT_URL, url);
-      memset(&sink, 0, sizeof(sink));
-      dctx.last_reject[0] = '\0'; /* a refused command shows up here */
-      curl_buffer_init_with_max(&sink.buf, cap + 1);
-      sink.cap = cap;
-      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, read_sink_write);
-      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
-
-      const CURLcode res = email_instrument_perform(curl, &dctx, conn->username, "read");
-      if (res == CURLE_OK && sink.buf.size > 0) {
-         raw_cut = partial && sink.buf.size >= cap;
-         got = true;
-      } else if (res == CURLE_WRITE_ERROR && sink.hit_cap && sink.buf.size > 0) {
-         raw_cut = true;
-         got = true;
-      } else if (res == CURLE_OK) {
-         /* The server answered and had no such message. */
-         *err = EMAIL_ERR_NOT_FOUND;
-         curl_buffer_free(&sink.buf);
-         break;
-      } else {
-         curl_buffer_free(&sink.buf);
-         *err = email_err_from_curl(res);
-         /* A server that refused PARTIAL gets the plain fetch.  libcurl reports
-          * that refusal as it reports a missing message (no FETCH answer); the
-          * server's tagged NO/BAD tells them apart, so a missing message costs
-          * one command.  Not a login denial (a second fetch would log in again,
-          * the burst the instrumented perform guards against), not a cancel. */
-         const bool refused = dctx.last_reject[0] != '\0';
-         if (*err == EMAIL_ERR_AUTH_FAILED || *err == EMAIL_ERR_CANCELLED || !partial ||
-             (*err == EMAIL_ERR_NOT_FOUND && !refused)) {
-            OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s", uid, curl_easy_strerror(res));
-            break;
-         }
-         OLOG_WARNING("email: IMAP partial fetch uid=%u failed (%s); retrying full fetch", uid,
-                      curl_easy_strerror(res));
-      }
-   }
-   email_instrument_op_done(conn->username, "read", curl, &dctx);
-   curl_easy_cleanup(curl);
-   if (!got)
-      return 1;
-
-   rc = email_mime_parse_raw(sink.buf.data, sink.buf.size, raw_cut, opts, out);
-   curl_buffer_free(&sink.buf);
-   if (rc != 0) {
-      *err = EMAIL_ERR_FAILED;
-      return 1;
-   }
-   *err = EMAIL_ERR_NONE;
-   out->uid = uid;
-   return 0;
 }
 
 /* =============================================================================
@@ -1069,13 +962,12 @@ int email_search(const email_conn_t *conn,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
-                 bool *auth_denied,
-                 bool *timed_out) {
+                 email_err_t *err) {
+   email_err_t err_local;
+   if (!err)
+      err = &err_local;
+   *err = EMAIL_ERR_FAILED;
    *out_count = 0;
-   if (auth_denied)
-      *auth_denied = false;
-   if (timed_out)
-      *timed_out = false;
    page_reset_outputs(page);
 
    if (max_out > EMAIL_MAX_FETCH_RESULTS)
@@ -1084,8 +976,12 @@ int email_search(const email_conn_t *conn,
    if (!folder || !folder[0])
       folder = "INBOX";
 
-   char encoded_folder[256];
-   url_encode_folder(folder, encoded_folder, sizeof(encoded_folder));
+   char encoded_folder[EMAIL_IMAP_FOLDER_URL_MAX];
+   if (!email_imap_url_encode_folder(folder, encoded_folder, sizeof(encoded_folder))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      return 1;
+   }
 
    CURL *curl = email_imap_handle_create(conn);
    if (!curl)
@@ -1128,8 +1024,14 @@ int email_search(const email_conn_t *conn,
       }
    }
 
-   char url[1024];
-   build_mailbox_url(conn, encoded_folder, page, url, sizeof(url));
+   char url[EMAIL_IMAP_MAILBOX_URL_MAX];
+   if (!build_mailbox_url(conn, encoded_folder, page, url, sizeof(url))) {
+      if (err)
+         *err = EMAIL_ERR_FAILED;
+      email_instrument_op_done(conn->username, "search", curl, &dctx);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    /* The newest max_out matches, newest first, plus the cursor */
@@ -1144,10 +1046,8 @@ int email_search(const email_conn_t *conn,
    }
    if (imap_windowed_search(curl, &dctx, conn, "search", search_cmd, page, max_out,
                             EMAIL_IMAP_SEARCH_TIMEOUT_SEC, rev_uids, &rev_count, &res) != 0) {
-      if (auth_denied && res == CURLE_LOGIN_DENIED)
-         *auth_denied = true;
-      if (timed_out && res == CURLE_OPERATION_TIMEDOUT)
-         *timed_out = true;
+      if (res != CURLE_OK)
+         *err = email_err_from_curl(res);
       email_instrument_op_done(conn->username, "search", curl, &dctx);
       curl_easy_cleanup(curl);
       return 1;
@@ -1161,6 +1061,8 @@ int email_search(const email_conn_t *conn,
    /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
     * an error, not a successful-looking empty mailbox (the digest would then
     * treat a broken account as healthy). */
+   if (fetch_rc == 0)
+      *err = EMAIL_ERR_NONE;
    return fetch_rc;
 }
 
@@ -1253,11 +1155,9 @@ int email_send(const email_conn_t *conn,
  * Public API: Test Connection
  * ============================================================================= */
 
-int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok) {
-   *imap_ok = false;
-   *smtp_ok = false;
-
-   /* Test IMAP: connect to INBOX */
+bool email_test_imap(const email_conn_t *conn) {
+   bool ok = false;
+   /* Connect to INBOX */
    CURL *curl = email_imap_handle_create(conn);
    if (curl) {
       /* Instrument for the same on-wire-login count + rejection capture as the
@@ -1278,8 +1178,8 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
       CURLcode res = curl_easy_perform(curl);
-      *imap_ok = (res == CURLE_OK);
-      if (!*imap_ok) {
+      ok = (res == CURLE_OK);
+      if (!ok) {
          if (res == CURLE_LOGIN_DENIED)
             email_instrument_note_denied(conn->username, &dctx, "test-connection");
          else
@@ -1289,22 +1189,25 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
    }
+   return ok;
+}
 
-   /* Test SMTP: EHLO only (CURLOPT_CONNECT_ONLY) */
-   curl = create_smtp_handle(conn);
+bool email_test_smtp(const email_conn_t *conn) {
+   bool ok = false;
+   /* EHLO only (CURLOPT_CONNECT_ONLY) */
+   CURL *curl = create_smtp_handle(conn);
    if (curl) {
       curl_easy_setopt(curl, CURLOPT_URL, conn->smtp_url);
       curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1L);
 
       CURLcode res = curl_easy_perform(curl);
-      *smtp_ok = (res == CURLE_OK);
-      if (!*smtp_ok) {
+      ok = (res == CURLE_OK);
+      if (!ok) {
          OLOG_WARNING("email: SMTP test failed: %s", curl_easy_strerror(res));
       }
       curl_easy_cleanup(curl);
    }
-
-   return (*imap_ok && *smtp_ok) ? 0 : 1;
+   return ok;
 }
 
 /* =============================================================================

@@ -24,6 +24,8 @@
 #include "webui/webui_email.h"
 
 #include <json-c/json.h>
+#include <sodium.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "config/dawn_config.h"
@@ -31,6 +33,8 @@
 #include "tools/email_db.h"
 #include "tools/email_service.h"
 #include "tools/oauth_client.h"
+#include "utils/string_utils.h"
+#include "webui/webui_email_exec.h"
 #include "webui/webui_internal.h"
 
 /* =============================================================================
@@ -38,16 +42,33 @@
  * ============================================================================= */
 
 static bool verify_account_owner(ws_connection_t *conn, int64_t account_id, email_account_t *out) {
-   if (email_db_account_get(account_id, out) != 0)
-      return false;
-   return out->user_id == conn->auth_user_id;
+   /* Disabled accounts too: these are the account's own settings. */
+   return email_service_find_account_by_id(conn->auth_user_id, account_id, false, out) ==
+          EMAIL_RC_OK;
+}
+
+/* Echo the request's req (when it's a plain one) in @p resp_payload. */
+static void echo_req(json_object *payload, json_object *resp_payload) {
+   char req[EMAIL_EXEC_REQ_MAX + 1];
+   if (resp_payload && email_exec_payload_req(payload, req, sizeof(req)))
+      json_object_object_add(resp_payload, "req", json_object_new_string(req));
 }
 
 /* =============================================================================
  * List Accounts
  * ============================================================================= */
 
-void handle_email_list_accounts(ws_connection_t *conn) {
+/* Account fields are typed by the user; a bad byte would close the socket on
+ * the whole frame, so they go out well-formed. */
+static void add_text(json_object *o, const char *key, const char *val) {
+   char *fixed = NULL;
+   if (!val || utf8_repair_dup(val, strlen(val), &fixed, NULL) != 0)
+      val = "";
+   json_object_object_add(o, key, json_object_new_string(fixed ? fixed : val));
+   free(fixed);
+}
+
+void handle_email_list_accounts(ws_connection_t *conn, json_object *payload) {
    if (!conn_require_auth(conn))
       return;
 
@@ -70,18 +91,15 @@ void handle_email_list_accounts(ws_connection_t *conn) {
       for (int i = 0; i < count; i++) {
          json_object *obj = json_object_new_object();
          json_object_object_add(obj, "id", json_object_new_int64(accounts[i].id));
-         json_object_object_add(obj, "name", json_object_new_string(accounts[i].name));
-         json_object_object_add(obj, "imap_server",
-                                json_object_new_string(accounts[i].imap_server));
+         add_text(obj, "name", accounts[i].name);
+         add_text(obj, "imap_server", accounts[i].imap_server);
          json_object_object_add(obj, "imap_port", json_object_new_int(accounts[i].imap_port));
          json_object_object_add(obj, "imap_ssl", json_object_new_boolean(accounts[i].imap_ssl));
-         json_object_object_add(obj, "smtp_server",
-                                json_object_new_string(accounts[i].smtp_server));
+         add_text(obj, "smtp_server", accounts[i].smtp_server);
          json_object_object_add(obj, "smtp_port", json_object_new_int(accounts[i].smtp_port));
          json_object_object_add(obj, "smtp_ssl", json_object_new_boolean(accounts[i].smtp_ssl));
-         json_object_object_add(obj, "username", json_object_new_string(accounts[i].username));
-         json_object_object_add(obj, "display_name",
-                                json_object_new_string(accounts[i].display_name));
+         add_text(obj, "username", accounts[i].username);
+         add_text(obj, "display_name", accounts[i].display_name);
          json_object_object_add(obj, "has_password",
                                 json_object_new_boolean(accounts[i].encrypted_password_len > 0));
          json_object_object_add(obj, "auth_type", json_object_new_string(accounts[i].auth_type));
@@ -93,6 +111,13 @@ void handle_email_list_accounts(ws_connection_t *conn) {
          json_object_object_add(obj, "max_body_chars",
                                 json_object_new_int(accounts[i].max_body_chars));
          json_object_object_add(obj, "digest_depth", json_object_new_int(accounts[i].digest_depth));
+         bool can_trash, can_archive;
+         if (email_service_account_caps(accounts[i].id,
+                                        email_service_is_gmail_account(&accounts[i]), &can_trash,
+                                        &can_archive)) {
+            json_object_object_add(obj, "can_trash", json_object_new_boolean(can_trash));
+            json_object_object_add(obj, "can_archive", json_object_new_boolean(can_archive));
+         }
          json_object_array_add(arr, obj);
       }
       json_object_object_add(resp_payload, "accounts", arr);
@@ -115,6 +140,7 @@ void handle_email_list_accounts(ws_connection_t *conn) {
       json_object_object_add(resp_payload, "limits", limits);
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -218,6 +244,7 @@ void handle_email_add_account(ws_connection_t *conn, json_object *payload) {
    }
 
 done:
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -342,10 +369,13 @@ void handle_email_update_account(ws_connection_t *conn, json_object *payload) {
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to update account"));
    } else {
+      /* Another server or login may have other folders: learn them again. */
+      email_service_account_caps_forget(account_id);
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    }
 
 done:
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -389,6 +419,7 @@ void handle_email_remove_account(ws_connection_t *conn, json_object *payload) {
       }
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -398,54 +429,122 @@ void handle_email_remove_account(ws_connection_t *conn, json_object *payload) {
  * Test Connection
  * ============================================================================= */
 
+/* A test talks to the servers, so it runs on the email executor, off the lws
+ * thread; an IMAP test waits its turn for the account's lease. */
+typedef struct {
+   bool imap_ok;
+   bool smtp_ok;
+   email_err_t err;
+} test_ctx_t;
+
+static void test_op(const email_exec_task_ctx_t *task) {
+   test_ctx_t *t = (test_ctx_t *)task->ctx;
+   /* Without the lease (its table is full), the IMAP half reports busy and the
+    * SMTP half is still tested. */
+   email_service_test_connection(task->user_id, task->account_id, task->target, &t->imap_ok,
+                                 &t->smtp_ok, &t->err);
+}
+
+static json_object *test_finish(void *ctx, const int64_t *account_ids, int n) {
+   (void)account_ids;
+   (void)n;
+   const test_ctx_t *t = (const test_ctx_t *)ctx;
+   json_object *payload = json_object_new_object();
+   if (!payload)
+      return NULL;
+   const bool imap_busy = t->err == EMAIL_ERR_BUSY;
+   json_object_object_add(payload, "imap_ok", json_object_new_boolean(t->imap_ok));
+   json_object_object_add(payload, "smtp_ok", json_object_new_boolean(t->smtp_ok));
+   if (imap_busy) /* not tested, not failed */
+      json_object_object_add(payload, "imap_busy", json_object_new_boolean(1));
+   if (t->imap_ok && t->smtp_ok) {
+      json_object_object_add(payload, "success", json_object_new_boolean(1));
+      return payload;
+   }
+   json_object_object_add(payload, "success", json_object_new_boolean(0));
+   char err[256];
+   if (imap_busy)
+      snprintf(err, sizeof(err),
+               "IMAP not tested: the account is busy, try again in a moment "
+               "(SMTP %s)",
+               t->smtp_ok ? "OK" : "failed");
+   else if (!t->imap_ok && !t->smtp_ok)
+      snprintf(err, sizeof(err), "Both IMAP and SMTP connection failed");
+   else if (!t->imap_ok)
+      snprintf(err, sizeof(err), "IMAP connection failed (SMTP OK)");
+   else
+      snprintf(err, sizeof(err), "SMTP connection failed (IMAP OK)");
+   json_object_object_add(payload, "error", json_object_new_string(err));
+   if (t->err != EMAIL_ERR_NONE)
+      json_object_object_add(payload, "error_code",
+                             json_object_new_string(email_error_name(t->err)));
+   return payload;
+}
+
+static void test_free(void *ctx) {
+   free(ctx);
+}
+
+static void send_test_error(ws_connection_t *conn, const char *error, const char *req) {
+   json_object *response = json_object_new_object();
+   json_object *payload = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("email_test_connection_response"));
+   json_object_object_add(payload, "success", json_object_new_boolean(0));
+   json_object_object_add(payload, "error", json_object_new_string(error));
+   if (req)
+      json_object_object_add(payload, "req", json_object_new_string(req));
+   json_object_object_add(response, "payload", payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
 void handle_email_test_connection(ws_connection_t *conn, json_object *payload) {
    if (!conn_require_auth(conn))
       return;
 
-   json_object *response = json_object_new_object();
-   json_object_object_add(response, "type",
-                          json_object_new_string("email_test_connection_response"));
-
-   json_object *resp_payload = json_object_new_object();
+   char req[EMAIL_EXEC_REQ_MAX + 1];
+   const bool has_req = email_exec_payload_req(payload, req, sizeof(req));
 
    json_object *id_obj;
-   if (!json_object_object_get_ex(payload, "id", &id_obj)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error", json_object_new_string("Missing account id"));
-   } else {
-      int64_t account_id = json_object_get_int64(id_obj);
+   if (!payload || !json_object_object_get_ex(payload, "id", &id_obj)) {
+      send_test_error(conn, "Missing account id", has_req ? req : NULL);
+      return;
+   }
+   const int64_t account_id = json_object_get_int64(id_obj);
 
-      email_account_t acct;
-      if (!verify_account_owner(conn, account_id, &acct)) {
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string("Account not found or access denied"));
-      } else {
-         bool imap_ok = false, smtp_ok = false;
-         email_service_test_connection(account_id, &imap_ok, &smtp_ok);
+   email_account_t acct;
+   if (!verify_account_owner(conn, account_id, &acct)) {
+      send_test_error(conn, "Account not found or access denied", has_req ? req : NULL);
+      return;
+   }
+   const bool is_imap = email_service_account_uses_lease(&acct);
+   sodium_memzero(&acct, sizeof(acct));
 
-         json_object_object_add(resp_payload, "imap_ok", json_object_new_boolean(imap_ok));
-         json_object_object_add(resp_payload, "smtp_ok", json_object_new_boolean(smtp_ok));
-
-         if (imap_ok && smtp_ok) {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-         } else {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-            char err[256];
-            if (!imap_ok && !smtp_ok)
-               snprintf(err, sizeof(err), "Both IMAP and SMTP connection failed");
-            else if (!imap_ok)
-               snprintf(err, sizeof(err), "IMAP connection failed (SMTP OK)");
-            else
-               snprintf(err, sizeof(err), "SMTP connection failed (IMAP OK)");
-            json_object_object_add(resp_payload, "error", json_object_new_string(err));
-         }
-      }
+   session_t *session = conn_get_session(conn);
+   test_ctx_t *ctx = calloc(1, sizeof(*ctx));
+   if (!session || !ctx) {
+      free(ctx);
+      send_test_error(conn, "Couldn't start the test", has_req ? req : NULL);
+      return;
    }
 
-   json_object_object_add(response, "payload", resp_payload);
-   send_json_response(conn, response);
-   json_object_put(response);
+   const email_exec_request_t r = {
+      .session_id = session->session_id,
+      .user_id = conn->auth_user_id,
+      .slot = EMAIL_EXEC_SLOT_ADMIN,
+      .verb = "email_test_connection",
+      .req = has_req ? req : NULL,
+      .task_count = 1,
+      .account_ids = &account_id,
+      .is_imap = &is_imap,
+      .op = test_op,
+      .finish = test_finish,
+      .free_ctx = test_free,
+      .ctx = ctx,
+   };
+   if (webui_email_exec_submit(&r) == EMAIL_EXEC_FAILURE)
+      send_test_error(conn, "Couldn't start the test", has_req ? req : NULL);
 }
 
 /* =============================================================================
@@ -488,6 +587,7 @@ void handle_email_set_read_only(ws_connection_t *conn, json_object *payload) {
       }
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -533,6 +633,7 @@ void handle_email_set_enabled(ws_connection_t *conn, json_object *payload) {
       }
    }
 
+   echo_req(payload, resp_payload);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);

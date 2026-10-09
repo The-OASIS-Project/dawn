@@ -41,6 +41,7 @@
 #ifndef HTML_PARSER_H
 #define HTML_PARSER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -99,7 +100,19 @@ int html_extract_text_with_base(const char *html,
  * @param out_text Receives allocated plain text (caller frees)
  * @return HTML_PARSE_SUCCESS or error code
  */
+/* Every html_extract_* reads @p html_len bytes of @p html, which must also be
+ * NUL-terminated at html_len (some searches run to the NUL). */
 int html_extract_text_plain(const char *html, size_t html_len, char **out_text);
+
+/**
+ * @brief html_extract_text_plain, saying whether text a reader never sees
+ *        (hidden by the email's styles) was left out.
+ * @param hidden_dropped Set true when hidden text was left out (may be NULL)
+ */
+int html_extract_text_plain_ex(const char *html,
+                               size_t html_len,
+                               char **out_text,
+                               bool *hidden_dropped);
 
 #ifdef __cplusplus
 }

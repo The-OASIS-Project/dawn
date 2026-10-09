@@ -39,6 +39,7 @@
 #include "conversation_manager.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "git_sha.h"
 #include "input_queue.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -292,7 +293,7 @@ static void format_number(uint64_t num, char *buf, size_t buf_size) {
 static void draw_status_panel(int y, int x, int width, dawn_metrics_t *metrics) {
    /* Build title with version info */
    char title[64];
-   snprintf(title, sizeof(title), "DAWN v%s (%s)", VERSION_NUMBER, GIT_SHA);
+   snprintf(title, sizeof(title), "DAWN v%s (%s)", VERSION_NUMBER, dawn_git_sha);
    draw_box(y, x, 5, width, title);
 
    char uptime_str[16];

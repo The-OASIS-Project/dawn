@@ -501,6 +501,48 @@ dawn_add_unit_test(test_briefing_prompt
    LIBS    dawn_common unity
    LABEL   ci)
 
+# One IMAP connection per account: the lease's FIFO handover, cancel, timeout
+# and release hook.  NDEBUG so a re-take by the holder returns instead of asserting.
+dawn_add_unit_test(test_email_account_lease
+   SOURCES test_email_account_lease.c
+           ${SRC_ROOT}/src/tools/email_account_lease.c
+   LIBS    dawn_common unity pthread
+   DEFINES NDEBUG
+   LABEL   ci)
+
+# The WebUI email executor: admission per slot, and the executor under load
+# with the real lease (stub account work and sender).
+dawn_add_unit_test(test_webui_email_exec_policy
+   SOURCES test_webui_email_exec_policy.c
+           ${SRC_ROOT}/src/webui/webui_email_exec_policy.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_webui_email_exec
+   SOURCES test_webui_email_exec.c
+           ${SRC_ROOT}/src/webui/webui_email_exec.c
+           ${SRC_ROOT}/src/webui/webui_protocol.c
+           ${SRC_ROOT}/src/webui/webui_email_exec_policy.c
+           ${SRC_ROOT}/src/tools/email_account_lease.c
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${CURL_LIBRARIES}
+   LABEL   ci)
+
+# Email failure codes on the wire, curl results as codes, the per-thread cancel.
+dawn_add_unit_test(test_email_transfer
+   SOURCES test_email_transfer.c
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    unity pthread ${CURL_LIBRARIES}
+   LABEL   ci)
+
+# Searching every account at once: same results as one at a time, overlapping.
+dawn_add_unit_test(test_email_fanout
+   SOURCES test_email_fanout.c
+           ${SRC_ROOT}/src/tools/email_fanout.c
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    unity pthread ${CURL_LIBRARIES}
+   LABEL   ci)
+
 # An IMAP account's capabilities and Trash/Archive folders, from its replies.
 dawn_add_unit_test(test_email_imap_roles
    SOURCES test_email_imap_roles.c
@@ -517,7 +559,26 @@ if(DAWN_ENABLE_EMAIL_TOOL)
                ${SRC_ROOT}/src/tools/email_display.c
                ${SRC_ROOT}/src/tools/gmail_parts.c
                ${SRC_ROOT}/src/tools/html_parser.c
+               ${SRC_ROOT}/src/tools/html_hidden.c
+               ${SRC_ROOT}/src/tools/html_hidden_css.c
       LIBS     dawn_common unity ${GMIME_LINK_LIBRARIES} ${JSONC_LIBRARIES}
+      INCLUDES ${GMIME_INCLUDE_DIRS}
+      LABEL    ci)
+endif()
+
+# The Gmail batch metadata fetch without the network: parts matched back by
+# Content-ID (a rate-limited part asked for again), search terms cleaned.
+if(DAWN_ENABLE_EMAIL_TOOL)
+   dawn_add_unit_test(test_gmail_batch
+      SOURCES  test_gmail_batch.c
+               ${SRC_ROOT}/src/tools/gmail_batch.c
+               ${SRC_ROOT}/src/tools/email_mime.c
+               ${SRC_ROOT}/src/tools/email_display.c
+               ${SRC_ROOT}/src/tools/gmail_parts.c
+               ${SRC_ROOT}/src/tools/html_parser.c
+               ${SRC_ROOT}/src/tools/html_hidden.c
+               ${SRC_ROOT}/src/tools/html_hidden_css.c
+      LIBS     dawn_common unity ${GMIME_LINK_LIBRARIES} ${JSONC_LIBRARIES} ${CURL_LIBRARIES}
       INCLUDES ${GMIME_INCLUDE_DIRS}
       LABEL    ci)
 endif()
@@ -569,6 +630,35 @@ dawn_add_unit_test(test_pending_slots
 dawn_add_unit_test(test_email_parse
    SOURCES test_email_parse.c
            ${SRC_ROOT}/src/tools/email_parse.c
+   LIBS    unity
+   LABEL   ci)
+
+# Undo tokens for trash and archive: single use, expiry, per-user and global caps.
+dawn_add_unit_test(test_email_undo
+   SOURCES test_email_undo.c
+           ${SRC_ROOT}/src/tools/email_undo.c
+   LIBS    dawn_common unity pthread ${SODIUM_LIBRARIES}
+   LABEL   ci)
+
+# The mail panel's cursor and page merge across accounts.
+dawn_add_unit_test(test_email_cursor
+   SOURCES test_email_cursor.c
+           ${SRC_ROOT}/src/webui/email_cursor.c
+   LIBS    unity sodium ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# The mail panel's wire shapes and the read frame budget.
+dawn_add_unit_test(test_email_wire
+   SOURCES test_email_wire.c
+           ${SRC_ROOT}/src/webui/email_wire.c
+           ${SRC_ROOT}/src/tools/email_parse.c
+           ${SRC_ROOT}/src/tools/email_transfer.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES} ${CURL_LIBRARIES}
+   LABEL   ci)
+
+dawn_add_unit_test(test_email_imap_state
+   SOURCES test_email_imap_state.c
+           ${SRC_ROOT}/src/tools/email_imap_state.c
    LIBS    unity
    LABEL   ci)
 
@@ -844,6 +934,8 @@ dawn_add_unit_test(test_document_extract
    SOURCES test_document_extract.c
            ${SRC_ROOT}/src/tools/document_extract.c
            ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
    LIBS    dawn_common unity
    INCLUDES ${SRC_ROOT}/include
    LABEL   ci)
@@ -1474,6 +1566,8 @@ dawn_add_unit_test(test_url_whitelist
            ${SRC_ROOT}/src/tools/url_fetcher_detect.c
            ${SRC_ROOT}/src/tools/url_fetcher_fallback.c
            ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
            ${SRC_ROOT}/src/config/config_defaults.c
    LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} m
    LABEL   ci)
@@ -1844,6 +1938,12 @@ dawn_add_unit_test(test_llm_tool_views
    LIBS    unity m
    LABEL   ci)
 
+# When always-on stops waiting for a turn's answer.
+dawn_add_unit_test(test_always_on_watchdog
+   SOURCES test_always_on_watchdog.c
+   LIBS    unity
+   LABEL   ci)
+
 # The WebUI protocol's version and feature flags.
 dawn_add_unit_test(test_webui_protocol
    SOURCES test_webui_protocol.c
@@ -2032,6 +2132,8 @@ dawn_add_unit_test(test_device_types
 dawn_add_unit_test(test_html_parser
    SOURCES test_html_parser.c
            ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
    LIBS    dawn_common unity
    LABEL   ci)
 
@@ -2099,6 +2201,8 @@ dawn_add_unit_test(test_summarizer_quality
            ${SRC_ROOT}/src/tools/tfidf_summarizer.c
            ${SRC_ROOT}/src/tools/url_fetcher.c
            ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_defaults.c
            ${SRC_ROOT}/src/config/config_env.c

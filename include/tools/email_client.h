@@ -27,6 +27,7 @@
 #ifndef EMAIL_CLIENT_H
 #define EMAIL_CLIENT_H
 
+#include "tools/email_parse.h" /* EMAIL_IMAP_FOLDER_URL_MAX */
 #include "tools/email_types.h"
 
 typedef struct {
@@ -38,6 +39,11 @@ typedef struct {
    char display_name[64];
    int max_body_chars;
 } email_conn_t;
+
+/* Room for a mailbox URL: the server URL, '/', the longest encoded folder
+ * (EMAIL_IMAP_FOLDER_URL_MAX) and ;UIDVALIDITY=<v>. */
+#define EMAIL_IMAP_MAILBOX_URL_MAX \
+   (EMAIL_IMAP_FOLDER_URL_MAX + sizeof(((email_conn_t *)0)->imap_url) + 32)
 
 /**
  * IMAP paging cursor.  UIDs only grow within one UIDVALIDITY epoch, so "the next
@@ -57,6 +63,10 @@ typedef struct {
  * @param folder       IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
  * @param unread_only  If true, only fetch unread (UNSEEN) emails
  * @param page         Optional paging cursor (NULL = first page, no cursor out)
+ * @param inbox_unseen Optional: the INBOX's unread count, asked on the same
+ *                     connection before the folder is selected (-1 when the
+ *                     server didn't say); NULL to skip it
+ * @param err          Why it failed (may be NULL)
  * @return 0 on success, 1 on failure (page->stale set when the cursor's epoch changed)
  */
 int email_fetch_recent(const email_conn_t *conn,
@@ -66,7 +76,9 @@ int email_fetch_recent(const email_conn_t *conn,
                        email_imap_page_t *page,
                        email_summary_t *out,
                        int max_out,
-                       int *out_count);
+                       int *out_count,
+                       int *inbox_unseen,
+                       email_err_t *err);
 
 /**
  * @brief Read a message by UID from an IMAP folder (email_mime.h does the reading)
@@ -76,13 +88,17 @@ int email_fetch_recent(const email_conn_t *conn,
  * (FETCH ENVELOPE, which leaves the message unread).  A full read marks the
  * message read on the server.
  *
- * @param folder IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
- * @param err    Why it failed (may be NULL); EMAIL_ERR_NOT_FOUND for no such UID
- * @return 0, or 1 with no heap left in @p out; free a success with email_message_free()
+ * @param folder      IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
+ * @param uidvalidity The mailbox epoch the id was issued under (0 = don't pin):
+ *                    a mailbox rebuilt since then is NOT_FOUND, never another message
+ * @param err         Why it failed (may be NULL); EMAIL_ERR_NOT_FOUND for no such UID
+ * @return 0 (@p out->uidvalidity the epoch seen), or 1 with no heap left in @p out;
+ *         free a success with email_message_free()
  */
 int email_read_message(const email_conn_t *conn,
                        const char *folder,
                        uint32_t uid,
+                       uint32_t uidvalidity,
                        const email_read_opts_t *opts,
                        email_message_t *out,
                        email_err_t *err);
@@ -90,13 +106,10 @@ int email_read_message(const email_conn_t *conn,
 /**
  * @brief Search emails by criteria in an IMAP folder.
  * @param folder  IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
- * @param auth_denied  Optional out (may be NULL): set true when the failure was
- *                     an IMAP login/credential rejection (CURLE_LOGIN_DENIED),
- *                     so the caller can surface an actionable "login failed".
- * @param timed_out    Optional out (may be NULL): set true when the failure was
- *                     a transfer timeout (CURLE_OPERATION_TIMEDOUT) — typically a
- *                     large mailbox with no server-side full-text index, so the
- *                     caller can hint the LLM to bound the search with a date.
+ * @param err     Why it failed (may be NULL): EMAIL_ERR_AUTH_FAILED for a refused
+ *                login, EMAIL_ERR_TIMEOUT for a search that ran out of time
+ *                (typically a large mailbox with no server-side full-text index,
+ *                so the caller can suggest bounding it with a date), ...
  * @return 0 on success, 1 on failure
  */
 int email_search(const email_conn_t *conn,
@@ -106,8 +119,7 @@ int email_search(const email_conn_t *conn,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
-                 bool *auth_denied,
-                 bool *timed_out);
+                 email_err_t *err);
 
 /**
  * @brief Does @p iso parse as a valid IMAP search date (YYYY-MM-DD)?
@@ -137,51 +149,129 @@ int email_send(const email_conn_t *conn,
                const char *body);
 
 /**
- * @brief Test IMAP and SMTP connectivity.
- * @param imap_ok  Output: true if IMAP connected successfully
- * @param smtp_ok  Output: true if SMTP connected successfully
- * @return 0 if both succeeded, 1 if either failed
+ * @brief The INBOX's unread count: STATUS INBOX (UNSEEN), one login
+ *        (email_imap_flags.c)
+ * @return 0 with @p unseen set, or 1 (@p err says why)
  */
-int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok);
+int email_imap_inbox_unseen(const email_conn_t *conn, int *unseen, email_err_t *err);
 
-/* Trash / archive results (0 = done).  The values match the service's
- * EMAIL_RC_* codes of the same names so they pass through. */
-#define EMAIL_CLIENT_RC_FAILURE 1         /* network, server, or bad input */
-#define EMAIL_CLIENT_RC_NOT_FOUND 13      /* no message with that UID in the folder */
-#define EMAIL_CLIENT_RC_NO_TRASH 16       /* the account has no Trash folder */
-#define EMAIL_CLIENT_RC_FOLDER_MISSING 17 /* the account has no Archive folder */
-#define EMAIL_CLIENT_RC_ALREADY_THERE 18  /* the message is already in that folder */
-#define EMAIL_CLIENT_RC_LEFT_FLAGGED 19   /* copied + \Deleted; no MOVE or UIDPLUS to remove it */
-#define EMAIL_CLIENT_RC_NOT_REMOVED 20    /* copied; removing the original failed */
-
-/**
- * @brief Move a message to the account's Trash folder (email_imap_move.c)
- *
- * The Trash is the user's own folder the server marks \Trash, else one with
- * a known name at the top of their folders; with none the message stays
- * where it is (EMAIL_CLIENT_RC_NO_TRASH), never deleted.  Only this message
- * is touched: UID MOVE, or UID COPY + UID STORE \Deleted + UID EXPUNGE of its
- * UID; never a bare EXPUNGE.  A server with neither MOVE nor UIDPLUS gets the
- * copy and the \Deleted flag only (EMAIL_CLIENT_RC_LEFT_FLAGGED); a copy whose
- * original couldn't then be removed is EMAIL_CLIENT_RC_NOT_REMOVED.
- *
- * @param folder Source folder (e.g. "INBOX")
- * @param uid    Message UID
- * @return 0, EMAIL_CLIENT_RC_NOT_FOUND, _NO_TRASH, _ALREADY_THERE,
- *         _LEFT_FLAGGED, _NOT_REMOVED, or _FAILURE
- */
-int email_trash_message(const email_conn_t *conn, const char *folder, uint32_t uid);
+/** One folder's share of an email_imap_set_seen call. */
+typedef struct {
+   const char *folder;
+   uint32_t uidvalidity; /* the epoch the ids were issued under (0 = don't pin) */
+   const uint32_t *uids; /* parsed UIDs, never text from a client */
+   int n;
+   bool *updated;   /* per UID: true when the message is there in the asked state */
+   email_err_t err; /* EMAIL_ERR_NONE, or why this folder's change failed */
+} email_imap_seen_batch_t;
 
 /**
- * @brief Move a message to the account's Archive folder (email_imap_move.c)
+ * @brief Mark messages read or unread (\Seen only, nothing else), folder by
+ *        folder, on one connection: one login for the whole call
  *
- * The Archive is the user's own folder the server marks \Archive, else on
- * Gmail \All (All Mail), else one with a known name.  Moves as
- * email_trash_message does.
+ * Per folder: UID STORE, then a UID FETCH (FLAGS) of the same set to see which
+ * messages exist and now have the state asked for (a STORE of a UID that
+ * doesn't exist is OK on the wire).  If the STORE went through but that check
+ * failed, the folder's messages count as updated.  A folder the server won't
+ * SELECT (deleted or renamed) is NOT_FOUND and the rest go on.  A cancel, a
+ * lost connection or a refused login ends the call: the folders not reached
+ * get the same error.
+ * email_imap_flags.c
  *
- * @return 0, EMAIL_CLIENT_RC_NOT_FOUND, _FOLDER_MISSING, _ALREADY_THERE,
- *         _LEFT_FLAGGED, _NOT_REMOVED, or _FAILURE
+ * @return 0 when every folder's commands went through (see each @p updated), or 1
  */
-int email_archive_message(const email_conn_t *conn, const char *folder, uint32_t uid);
+int email_imap_set_seen(const email_conn_t *conn,
+                        email_imap_seen_batch_t *batches,
+                        int nbatches,
+                        bool seen);
+
+/** Test IMAP connectivity (log in and look at INBOX); true if it worked. */
+bool email_test_imap(const email_conn_t *conn);
+
+/** Test SMTP connectivity (connect only); true if it worked. */
+bool email_test_smtp(const email_conn_t *conn);
+
+/** Most messages one folder's move carries. */
+#define EMAIL_IMAP_MOVE_MAX 50
+
+/** One folder's share of an email_imap_move_batch call. */
+typedef struct {
+   const char *folder;
+   uint32_t uidvalidity;          /* in: the epoch the ids were issued under (0 = don't
+                                   * pin); out: the epoch the server showed */
+   const uint32_t *uids;          /* parsed UIDs, never text from a client */
+   int n;                         /* at most EMAIL_IMAP_MOVE_MAX */
+   email_move_outcome_t *outcome; /* per UID */
+   email_err_t *errs;             /* per UID: why it wasn't moved (EMAIL_ERR_NONE when it was) */
+   uint32_t *dest_uid;            /* per UID: where it landed (0 = unknown: no undo) */
+   uint32_t dest_uidvalidity;     /* out: the destination's epoch (0 = unknown) */
+} email_imap_move_group_t;
+
+/**
+ * @brief Move messages to the account's Trash or Archive, folder by folder,
+ *        on one login (email_imap_batch.c)
+ *
+ * The Trash is the user's own folder the server marks \Trash, else one with a
+ * known name at the top of their folders; the Archive likewise (\Archive, else
+ * on Gmail \All).  With none, nothing moves (EMAIL_ERR_NO_TRASH /
+ * EMAIL_ERR_FOLDER_MISSING), nothing is deleted.  Per folder: a UID FETCH of the
+ * set (a missing message is NOT_FOUND; a mailbox rebuilt since the ids were
+ * issued, or gone, makes all of its ids NOT_FOUND), then UID MOVE, or UID COPY +
+ * UID STORE \Deleted + UID EXPUNGE of the copied UIDs; never a bare EXPUNGE.  A
+ * server with neither MOVE nor UIDPLUS gets the copy and the flag only
+ * (EMAIL_MOVE_LEFT_FLAGGED); a copy whose original couldn't be removed is
+ * EMAIL_ERR_NOT_REMOVED.  The thread's cancel (email_transfer.h) is honoured
+ * between folders only; the folders not reached are EMAIL_ERR_CANCELLED.
+ *
+ * @param dest_folder Out: the folder they went to ("" when none)
+ * @param err         Out: an error that ended the whole call (refused login, no
+ *                    such folder, lost connection), else EMAIL_ERR_NONE
+ * @return 0 when the call ran (see each group's results), or 1
+ */
+int email_imap_move_batch(const email_conn_t *conn,
+                          email_move_kind_t kind,
+                          email_imap_move_group_t *groups,
+                          int ngroups,
+                          char *dest_folder,
+                          size_t dest_size,
+                          email_err_t *err);
+
+/** One folder's share of an email_imap_move_back call. */
+typedef struct {
+   const char *dest_folder;   /* where the messages were moved to */
+   uint32_t dest_uidvalidity; /* its epoch then (0 = don't pin) */
+   const char *src_folder;    /* where they go back to */
+   const uint32_t *uids;      /* their UIDs in dest_folder */
+   int n;                     /* at most EMAIL_IMAP_MOVE_MAX */
+   email_move_outcome_t *outcome;
+   email_err_t *errs;
+   uint32_t *new_uid;        /* per UID: its UID back in src_folder (0 = unknown) */
+   uint32_t src_uidvalidity; /* out: src_folder's epoch, from COPYUID */
+   email_summary_t *rows;    /* per UID: the restored message's row */
+   bool *row_ok;             /* per UID: rows[i] was read */
+} email_imap_undo_group_t;
+
+/**
+ * @brief Move messages back where they came from (undo), on one login
+ *        (email_imap_batch.c)
+ *
+ * As email_imap_move_batch, towards each group's src_folder: a message no
+ * longer in dest_folder (or a dest_folder rebuilt since) is NOT_FOUND; a
+ * src_folder that is gone is EMAIL_ERR_FOLDER_MISSING.  Each restored message's
+ * row is read back from src_folder.
+ * @return 0 when the call ran (see each group's results), or 1 (@p err says why)
+ */
+int email_imap_move_back(const email_conn_t *conn,
+                         email_imap_undo_group_t *groups,
+                         int ngroups,
+                         email_err_t *err);
+
+/**
+ * @brief The folder the server marks \All (all of the user's mail), from the
+ *        cached folder roles (probed on a login of its own when not cached;
+ *        a failed probe isn't retried for 5 minutes)
+ * @return false when none is marked (or it couldn't be learned): @p out is ""
+ */
+bool email_imap_all_mail_folder(const email_conn_t *conn, char *out, size_t size);
 
 #endif /* EMAIL_CLIENT_H */

@@ -28,7 +28,7 @@
  * - Header injection prevention via email_sanitize_header_value() on all user fields
  * - Base64url decode: text/plain capped at max_body_chars, text/html capped at 2 MB
  * - Gmail search params quoted to prevent query injection
- * - Batch API used for metadata fetches (2 HTTP calls instead of N+1)
+ * - Batch API used for metadata fetches (a list, then batches of rows, refused rows retried)
  */
 
 #define _GNU_SOURCE /* strcasestr */
@@ -50,6 +50,7 @@
 #include "logging.h"
 #include "tools/email_mime.h"
 #include "tools/email_parse.h"
+#include "tools/email_transfer.h"
 #include "tools/gmail_client_internal.h"
 #include "tools/html_parser.h"
 
@@ -58,7 +59,6 @@
  * ============================================================================= */
 
 #define GMAIL_BATCH_URL "https://gmail.googleapis.com/batch/gmail/v1"
-#define GMAIL_BATCH_BOUNDARY "dawn_gmail_batch"
 #define GMAIL_MAX_RESPONSE_SIZE (4 * 1024 * 1024) /* 4 MB */
 #define GMAIL_CURL_TIMEOUT 30
 #define GMAIL_MIME_MAX_DEPTH 10
@@ -72,23 +72,6 @@
  * mid-transfer — gmail_api_get/post check `resp->truncated` after
  * curl_easy_perform and reject the response.
  * ============================================================================= */
-
-/* =============================================================================
- * Message ID Validation
- *
- * Gmail message IDs are hex strings (e.g., "18e4a2b3c4d5e6f7").
- * Reject anything with non-hex chars to prevent path traversal.
- * ============================================================================= */
-
-bool gmail_message_id_valid(const char *id) {
-   if (!id || !id[0])
-      return false;
-   for (const char *p = id; *p; p++) {
-      if (!isxdigit((unsigned char)*p))
-         return false;
-   }
-   return true;
-}
 
 /* =============================================================================
  * HTTP Helpers
@@ -107,6 +90,7 @@ CURL *gmail_create_curl(void) {
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+   email_transfer_set_cancel(curl, email_transfer_thread_cancel());
 
    return curl;
 }
@@ -120,11 +104,22 @@ int gmail_api_get_ex(CURL *curl,
                      curl_buffer_t *resp,
                      long *http_code_out,
                      CURLcode *res_out) {
+   return gmail_api_get_capped(curl, token, url, GMAIL_MAX_RESPONSE_SIZE, resp, http_code_out,
+                               res_out);
+}
+
+int gmail_api_get_capped(CURL *curl,
+                         const char *token,
+                         const char *url,
+                         size_t max_bytes,
+                         curl_buffer_t *resp,
+                         long *http_code_out,
+                         CURLcode *res_out) {
    if (http_code_out)
       *http_code_out = 0;
    if (res_out)
       *res_out = CURLE_OK;
-   curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
+   curl_buffer_init_with_max(resp, max_bytes);
 
    char auth_header[2112];
    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", token);
@@ -151,7 +146,7 @@ int gmail_api_get_ex(CURL *curl,
    }
 
    if (resp->truncated) {
-      OLOG_ERROR("gmail: API response exceeded %d byte cap; rejecting", GMAIL_MAX_RESPONSE_SIZE);
+      OLOG_ERROR("gmail: API response exceeded %zu byte cap; rejecting", max_bytes);
       curl_buffer_free(resp);
       return 1;
    }
@@ -188,12 +183,18 @@ int gmail_api_get(CURL *curl,
    return gmail_api_get_ex(curl, token, url, resp, http_code_out, NULL);
 }
 
-static int gmail_api_post(CURL *curl,
-                          const char *token,
-                          const char *url,
-                          const char *content_type,
-                          const char *body,
-                          curl_buffer_t *resp) {
+int gmail_api_post_ex(CURL *curl,
+                      const char *token,
+                      const char *url,
+                      const char *content_type,
+                      const char *body,
+                      curl_buffer_t *resp,
+                      long *http_code_out,
+                      CURLcode *res_out) {
+   if (http_code_out)
+      *http_code_out = 0;
+   if (res_out)
+      *res_out = CURLE_OK;
    curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
 
    char auth_header[2112];
@@ -215,6 +216,8 @@ static int gmail_api_post(CURL *curl,
 
    sodium_memzero(auth_header, sizeof(auth_header));
    curl_slist_free_all(headers);
+   if (res_out)
+      *res_out = res;
 
    if (res != CURLE_OK) {
       OLOG_ERROR("gmail: API POST failed: %s", curl_easy_strerror(res));
@@ -231,6 +234,10 @@ static int gmail_api_post(CURL *curl,
 
    long http_code = 0;
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+   if (http_code == 403 && resp->data && strstr(resp->data, "ateLimitExceeded"))
+      http_code = 429;
+   if (http_code_out)
+      *http_code_out = http_code;
    if (http_code < 200 || http_code >= 300) {
       OLOG_ERROR("gmail: API POST returned HTTP %ld", http_code);
       curl_buffer_free(resp);
@@ -238,6 +245,27 @@ static int gmail_api_post(CURL *curl,
    }
 
    return 0;
+}
+
+email_err_t gmail_http_err(CURLcode res, long http_code) {
+   if (res != CURLE_OK)
+      return email_err_from_curl(res);
+   if (http_code == 401)
+      return EMAIL_ERR_AUTH_FAILED;
+   if (http_code == 404)
+      return EMAIL_ERR_NOT_FOUND;
+   if (http_code == 429)
+      return EMAIL_ERR_RATE_LIMITED;
+   return EMAIL_ERR_FAILED;
+}
+
+static int gmail_api_post(CURL *curl,
+                          const char *token,
+                          const char *url,
+                          const char *content_type,
+                          const char *body,
+                          curl_buffer_t *resp) {
+   return gmail_api_post_ex(curl, token, url, content_type, body, resp, NULL, NULL);
 }
 
 /* =============================================================================
@@ -316,14 +344,16 @@ static size_t url_encode(const char *str, char *out, size_t out_len) {
  * Values are quoted to prevent Gmail query injection.
  * ============================================================================= */
 
-/** Strip double quotes from a string to prevent Gmail query injection */
-static void strip_quotes(const char *src, char *dst, size_t dst_len) {
-   size_t j = 0;
-   for (size_t i = 0; src[i] && j < dst_len - 1; i++) {
-      if (src[i] != '"')
-         dst[j++] = src[i];
-   }
-   dst[j] = '\0';
+/* Append " before:<t+1>" to @p query: Gmail's before:/after: take a Unix time in
+ * seconds as well as a date, and before: is exclusive, so this keeps the rows
+ * dated at or before @p at_or_before.  Unchanged if it wouldn't fit. */
+static void gmail_append_before(char *query, size_t size, time_t at_or_before) {
+   const size_t len = strlen(query);
+   char add[32];
+   const int n = snprintf(add, sizeof(add), "%sbefore:%lld", len ? " " : "",
+                          (long long)at_or_before + 1);
+   if (n > 0 && len + (size_t)n < size)
+      memcpy(query + len, add, (size_t)n + 1);
 }
 
 static void build_search_query(const email_search_params_t *params,
@@ -337,7 +367,7 @@ static void build_search_query(const email_search_params_t *params,
 
    if (params->from[0]) {
       char safe[128];
-      strip_quotes(params->from, safe, sizeof(safe));
+      gmail_query_term(params->from, safe, sizeof(safe));
       if (pos > 0)
          query[pos++] = ' ';
       pos += snprintf(query + pos, query_len - pos, "from:\"%s\"", safe);
@@ -345,15 +375,15 @@ static void build_search_query(const email_search_params_t *params,
 
    if (params->subject[0]) {
       char safe[128];
-      strip_quotes(params->subject, safe, sizeof(safe));
+      gmail_query_term(params->subject, safe, sizeof(safe));
       if (pos > 0)
          query[pos++] = ' ';
       pos += snprintf(query + pos, query_len - pos, "subject:\"%s\"", safe);
    }
 
    if (params->text[0]) {
-      char safe[128];
-      strip_quotes(params->text, safe, sizeof(safe));
+      char safe[sizeof(params->text)];
+      gmail_query_term(params->text, safe, sizeof(safe));
       if (pos > 0)
          query[pos++] = ' ';
       pos += snprintf(query + pos, query_len - pos, "\"%s\"", safe);
@@ -394,94 +424,8 @@ static void build_search_query(const email_search_params_t *params,
 
    if (pos < (int)query_len)
       query[pos] = '\0';
-}
-
-/* =============================================================================
- * Message JSON Parser
- *
- * Parse a Gmail message JSON object into email_summary_t.
- * Shared by both batch and single-message fetch paths.
- * ============================================================================= */
-
-static int parse_message_json(struct json_object *root, email_summary_t *out) {
-   memset(out, 0, sizeof(*out));
-
-   /* Extract message ID */
-   struct json_object *id_obj = NULL;
-   if (json_object_object_get_ex(root, "id", &id_obj)) {
-      const char *id_str = json_object_get_string(id_obj);
-      if (id_str)
-         snprintf(out->message_id, sizeof(out->message_id), "%s", id_str);
-   }
-
-   /* Extract headers */
-   struct json_object *payload = NULL;
-   struct json_object *headers = NULL;
-   if (json_object_object_get_ex(root, "payload", &payload))
-      json_object_object_get_ex(payload, "headers", &headers);
-
-   /* Gmail's API does NOT MIME-decode header values (only the snippet).  The
-    * same decoding and display rules as reading a message: the sender's words
-    * decoded, invisible and direction-changing characters dropped. */
-   gmail_header_fields(headers, out->from_name, sizeof(out->from_name), out->from_addr,
-                       sizeof(out->from_addr), out->subject, sizeof(out->subject), out->date_str,
-                       sizeof(out->date_str));
-
-   /* Parse snippet as preview */
-   struct json_object *snippet_obj = NULL;
-   if (json_object_object_get_ex(root, "snippet", &snippet_obj)) {
-      const char *snippet = json_object_get_string(snippet_obj);
-      if (snippet)
-         snprintf(out->preview, sizeof(out->preview), "%s", snippet);
-   }
-
-   /* Parse internalDate for sorting (epoch milliseconds) */
-   struct json_object *internal_date_obj = NULL;
-   if (json_object_object_get_ex(root, "internalDate", &internal_date_obj)) {
-      const char *ms_str = json_object_get_string(internal_date_obj);
-      if (ms_str)
-         out->date = (time_t)(strtoll(ms_str, NULL, 10) / 1000);
-   }
-
-   /* Thread id — used by the digest for reply detection + dedup grouping. */
-   struct json_object *thread_obj = NULL;
-   if (json_object_object_get_ex(root, "threadId", &thread_obj)) {
-      const char *tid = json_object_get_string(thread_obj);
-      if (tid)
-         snprintf(out->thread_id, sizeof(out->thread_id), "%s", tid);
-   }
-
-   /* labelIds → read/importance/category flags.  Present in format=metadata and
-    * format=minimal responses; absent when a caller uses format=full without
-    * asking for labels, in which case the flags stay at their zero defaults. */
-   struct json_object *labels = NULL;
-   if (json_object_object_get_ex(root, "labelIds", &labels) &&
-       json_object_is_type(labels, json_type_array)) {
-      size_t n = json_object_array_length(labels);
-      for (size_t i = 0; i < n; i++) {
-         const char *lbl = json_object_get_string(json_object_array_get_idx(labels, i));
-         if (!lbl)
-            continue;
-         if (strcmp(lbl, "UNREAD") == 0)
-            out->unread = true;
-         else if (strcmp(lbl, "IMPORTANT") == 0)
-            out->important = true;
-         else if (strcmp(lbl, "STARRED") == 0)
-            out->starred = true;
-         else if (strcmp(lbl, "SENT") == 0)
-            out->from_me = true;
-         else if (strcmp(lbl, "CATEGORY_SOCIAL") == 0)
-            out->category = EMAIL_CAT_SOCIAL;
-         else if (strcmp(lbl, "CATEGORY_PROMOTIONS") == 0)
-            out->category = EMAIL_CAT_PROMOTIONS;
-         else if (strcmp(lbl, "CATEGORY_UPDATES") == 0)
-            out->category = EMAIL_CAT_UPDATES;
-         else if (strcmp(lbl, "CATEGORY_FORUMS") == 0)
-            out->category = EMAIL_CAT_FORUMS;
-      }
-   }
-
-   return 0;
+   if (params->gmail_at_or_before > 0)
+      gmail_append_before(query, query_len, (time_t)params->gmail_at_or_before);
 }
 
 /* =============================================================================
@@ -489,10 +433,6 @@ static int parse_message_json(struct json_object *root, email_summary_t *out) {
  *
  * Fetch message IDs from Gmail list/search endpoint.
  * ============================================================================= */
-
-typedef struct {
-   char id[64];
-} gmail_msg_id_t;
 
 static int fetch_message_ids(CURL *curl,
                              const char *token,
@@ -575,43 +515,8 @@ static int fetch_message_ids(CURL *curl,
  * Batch Metadata Fetcher
  *
  * Fetch metadata for multiple messages in a single HTTP request using the
- * Gmail batch API. Reduces N+1 round-trips to 2 (1 list + 1 batch).
+ * Gmail batch API: a listing's rows in a few requests, not one per message.
  * ============================================================================= */
-
-/**
- * Build a multipart/mixed batch request body for metadata fetches.
- * Each part requests format=metadata with From/Subject/Date headers.
- * @return Heap-allocated batch body string, or NULL on failure
- */
-static char *build_batch_request(const gmail_msg_id_t *ids, int count) {
-   /* Estimate: ~256 bytes per message part + boundary overhead */
-   size_t alloc_size = (size_t)count * 300 + 128;
-   char *body = malloc(alloc_size);
-   if (!body)
-      return NULL;
-
-   int pos = 0;
-   for (int i = 0; i < count; i++) {
-      if (!gmail_message_id_valid(ids[i].id))
-         continue;
-
-      pos += snprintf(body + pos, alloc_size - pos,
-                      "--%s\r\n"
-                      "Content-Type: application/http\r\n"
-                      "Content-ID: <%d>\r\n"
-                      "\r\n"
-                      "GET /gmail/v1/users/me/messages/%s"
-                      "?format=metadata"
-                      "&metadataHeaders=From"
-                      "&metadataHeaders=Subject"
-                      "&metadataHeaders=Date HTTP/1.1\r\n"
-                      "\r\n",
-                      GMAIL_BATCH_BOUNDARY, i, ids[i].id);
-   }
-   pos += snprintf(body + pos, alloc_size - pos, "--%s--\r\n", GMAIL_BATCH_BOUNDARY);
-
-   return body;
-}
 
 /**
  * Extract the boundary string from a Content-Type header.
@@ -655,104 +560,61 @@ static int extract_boundary(const char *content_type, char *boundary, size_t bou
    return 0;
 }
 
-/**
- * Parse batch response and populate email summaries.
- * @param resp_data     Raw batch response body (multipart/mixed)
- * @param boundary      Response boundary string (from Content-Type)
- * @param out           Output array
- * @param max_out       Size of output array
- * @param out_count     Output: number of results
- * @return 0 on success
- */
-static int parse_batch_response(const char *resp_data,
-                                const char *boundary,
-                                email_summary_t *out,
-                                int max_out,
-                                int *out_count) {
-   *out_count = 0;
-
-   /* Build delimiter: "--boundary" (sized for "--" + longest boundary + NUL). */
-   char delim[512];
-   snprintf(delim, sizeof(delim), "--%s", boundary);
-   size_t delim_len = strlen(delim);
-
-   const char *pos = resp_data;
-   int fetched = 0;
-
-   while (fetched < max_out) {
-      /* Find next boundary */
-      pos = strstr(pos, delim);
-      if (!pos)
-         break;
-      pos += delim_len;
-
-      /* Check for closing boundary (--boundary--) */
-      if (pos[0] == '-' && pos[1] == '-')
-         break;
-
-      /* Skip outer headers: find \r\n\r\n */
-      const char *outer_end = strstr(pos, "\r\n\r\n");
-      if (!outer_end)
-         break;
-      pos = outer_end + 4;
-
-      /* Now at inner HTTP response: "HTTP/1.1 200 OK\r\n..." */
-      /* Check for 200 status */
-      if (strncmp(pos, "HTTP/1.1 200", 12) != 0) {
-         /* Non-200 part — skip this message */
-         continue;
-      }
-
-      /* Find inner headers end: \r\n\r\n */
-      const char *inner_end = strstr(pos, "\r\n\r\n");
-      if (!inner_end)
-         break;
-      const char *json_start = inner_end + 4;
-
-      /* Parse JSON body (find end by looking for next boundary or end of data) */
-      const char *json_end = strstr(json_start, delim);
-      if (!json_end)
-         json_end = json_start + strlen(json_start);
-
-      /* Trim trailing whitespace */
-      while (json_end > json_start && (json_end[-1] == '\r' || json_end[-1] == '\n'))
-         json_end--;
-
-      size_t json_len = json_end - json_start;
-      if (json_len == 0)
-         continue;
-
-      /* Parse the JSON fragment */
-      struct json_tokener *tok = json_tokener_new();
-      struct json_object *msg_json = tok ? json_tokener_parse_ex(tok, json_start, json_len) : NULL;
-      json_tokener_free(tok);
-      if (!msg_json) {
-         /* Try with a null-terminated copy */
-         char *json_copy = malloc(json_len + 1);
-         if (json_copy) {
-            memcpy(json_copy, json_start, json_len);
-            json_copy[json_len] = '\0';
-            msg_json = json_tokener_parse(json_copy);
-            free(json_copy);
-         }
-      }
-
-      if (msg_json) {
-         if (parse_message_json(msg_json, &out[fetched]) == 0)
-            fetched++;
-         json_object_put(msg_json);
-      }
+/* Sleep @p ms, waking early when this thread's transfers are stopped.
+ * @return false when stopped */
+static bool batch_backoff(int ms) {
+   const atomic_bool *cancel = email_transfer_thread_cancel();
+   for (int waited = 0; waited < ms; waited += 100) {
+      if (cancel && atomic_load(cancel))
+         return false;
+      struct timespec ts = { 0, 100 * 1000 * 1000 };
+      nanosleep(&ts, NULL);
    }
+   return !(cancel && atomic_load(cancel));
+}
 
-   *out_count = fetched;
+/* One batch request for ids[which[0..n-1]], read into rows/state.
+ * @return 0, or 1 when the request itself failed */
+static int batch_round(CURL *curl,
+                       const char *token,
+                       const gmail_msg_id_t *ids,
+                       int id_count,
+                       const int *which,
+                       int n,
+                       email_summary_t *rows,
+                       unsigned char *state) {
+   char *body = gmail_batch_body(ids, which, n);
+   if (!body)
+      return 1;
+   char content_type[128];
+   snprintf(content_type, sizeof(content_type), "multipart/mixed; boundary=%s",
+            GMAIL_BATCH_BOUNDARY);
+   curl_buffer_t resp;
+   int rc = gmail_api_post(curl, token, GMAIL_BATCH_URL, content_type, body, &resp);
+   free(body);
+   if (rc != 0)
+      return 1;
+   char *resp_ct = NULL;
+   curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &resp_ct);
+   char boundary[256];
+   if (extract_boundary(resp_ct, boundary, sizeof(boundary)) != 0) {
+      OLOG_ERROR("gmail: batch response missing boundary");
+      curl_buffer_free(&resp);
+      return 1;
+   }
+   gmail_batch_parse(resp.data, boundary, id_count, rows, state);
+   curl_buffer_free(&resp);
    return 0;
 }
 
 /**
- * Fetch metadata for multiple messages using Gmail batch API (one POST).
- * A failed batch fails the whole call; there is no per-message fallback.
+ * Fetch the rows of a listing's messages, GMAIL_BATCH_SIZE per batch request,
+ * in the listing's order.  Gmail refuses some messages of a batch when the
+ * user's requests come too fast; those are asked for again, after 1 s and
+ * then 2 s.  A message deleted since the listing is left out.
  *
- * Stack budget: ~1.6KB for ids array + curl locals. Called from Jetson daemon only.
+ * @param missing_out Messages still refused after the retries (may be NULL)
+ * @return 0, or 1 when no row could be fetched and a request failed
  */
 static int gmail_batch_fetch_metadata(CURL *curl,
                                       const char *token,
@@ -760,43 +622,67 @@ static int gmail_batch_fetch_metadata(CURL *curl,
                                       int id_count,
                                       email_summary_t *out,
                                       int max_out,
-                                      int *out_count) {
+                                      int *out_count,
+                                      int *missing_out) {
    *out_count = 0;
+   if (missing_out)
+      *missing_out = 0;
    if (id_count <= 0)
       return 0;
 
-   /* Build batch request body */
-   char *batch_body = build_batch_request(ids, id_count);
-   if (!batch_body)
-      return 1;
-
-   /* POST to batch endpoint */
-   char content_type[128];
-   snprintf(content_type, sizeof(content_type), "multipart/mixed; boundary=%s",
-            GMAIL_BATCH_BOUNDARY);
-
-   curl_buffer_t resp;
-   int rc = gmail_api_post(curl, token, GMAIL_BATCH_URL, content_type, batch_body, &resp);
-   free(batch_body);
-
-   if (rc != 0)
-      return 1;
-
-   /* Get response Content-Type to extract boundary */
-   char *resp_ct = NULL;
-   curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &resp_ct);
-
-   char resp_boundary[256];
-   if (extract_boundary(resp_ct, resp_boundary, sizeof(resp_boundary)) != 0) {
-      OLOG_ERROR("gmail: batch response missing boundary");
-      curl_buffer_free(&resp);
+   email_summary_t *rows = calloc((size_t)id_count, sizeof(*rows));
+   unsigned char *state = calloc((size_t)id_count, 1);
+   int *which = calloc((size_t)id_count, sizeof(*which));
+   if (!rows || !state || !which) {
+      free(rows);
+      free(state);
+      free(which);
       return 1;
    }
+   for (int i = 0; i < id_count; i++) {
+      if (!gmail_message_id_valid(ids[i].id))
+         state[i] = GMAIL_BATCH_GONE;
+   }
 
-   /* Parse batch response */
-   rc = parse_batch_response(resp.data, resp_boundary, out, max_out, out_count);
-   curl_buffer_free(&resp);
-   return rc;
+   bool request_failed = false;
+   bool stopped = false;
+   for (int round = 0; round <= GMAIL_BATCH_RETRIES; round++) {
+      int pending = 0;
+      for (int i = 0; i < id_count; i++) {
+         if (state[i] == GMAIL_BATCH_PENDING)
+            which[pending++] = i;
+      }
+      if (pending == 0)
+         break;
+      if (round > 0 && !batch_backoff(1000 << (round - 1))) {
+         stopped = true;
+         break;
+      }
+      for (int k = 0; k < pending; k += GMAIL_BATCH_SIZE) {
+         const int n = pending - k < GMAIL_BATCH_SIZE ? pending - k : GMAIL_BATCH_SIZE;
+         if (batch_round(curl, token, ids, id_count, which + k, n, rows, state) != 0)
+            request_failed = true;
+      }
+   }
+
+   int missing = 0;
+   for (int i = 0; i < id_count; i++) {
+      if (state[i] == GMAIL_BATCH_DONE && *out_count < max_out)
+         out[(*out_count)++] = rows[i];
+      else if (state[i] == GMAIL_BATCH_PENDING || state[i] == GMAIL_BATCH_FAILED)
+         missing++;
+   }
+   if (missing > 0 && !stopped)
+      OLOG_WARNING("gmail: %d of %d listed messages not fetched (refused after retries)", missing,
+                   id_count);
+   if (missing_out)
+      *missing_out = missing;
+   free(rows);
+   free(state);
+   free(which);
+   if (stopped || email_transfer_stopped())
+      return 1; /* the caller reads a stopped transfer as cancelled */
+   return *out_count == 0 && request_failed ? 1 : 0;
 }
 
 /* =============================================================================
@@ -807,15 +693,20 @@ int gmail_fetch_recent(const char *token,
                        const char *label_query,
                        int count,
                        bool unread_only,
+                       time_t at_or_before,
                        const char *page_token,
                        email_summary_t *out,
                        int max_out,
                        int *out_count,
                        char *next_page_token,
-                       size_t npt_len) {
+                       size_t npt_len,
+                       int *inbox_unread,
+                       int *missing_out) {
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
+   if (inbox_unread)
+      *inbox_unread = -1;
 
    if (!token || !token[0])
       return 1;
@@ -835,11 +726,10 @@ int gmail_fetch_recent(const char *token,
 
    /* Build query */
    const char *lq = (label_query && label_query[0]) ? label_query : "in:inbox";
-   char query[256];
-   if (unread_only)
-      snprintf(query, sizeof(query), "%s is:unread", lq);
-   else
-      snprintf(query, sizeof(query), "%s", lq);
+   char query[320];
+   int qlen = snprintf(query, sizeof(query), "%s%s", lq, unread_only ? " is:unread" : "");
+   if (at_or_before > 0 && qlen > 0 && (size_t)qlen < sizeof(query))
+      gmail_append_before(query, sizeof(query), at_or_before);
 
    /* Fetch message IDs */
    /* Zeroed: a list entry without an "id" leaves its slot untouched, and
@@ -853,8 +743,13 @@ int gmail_fetch_recent(const char *token,
       return 1;
    }
 
-   /* Batch fetch metadata (2 HTTP calls total instead of N+1) */
-   rc = gmail_batch_fetch_metadata(curl, token, ids, id_count, out, max_out, out_count);
+   /* Batch fetch metadata */
+   rc = gmail_batch_fetch_metadata(curl, token, ids, id_count, out, max_out, out_count,
+                                   missing_out);
+
+   /* The INBOX's unread count on the same connection; -1 when it can't be had. */
+   if (rc == 0 && inbox_unread)
+      gmail_inbox_unread_on(curl, token, inbox_unread, NULL);
 
    curl_easy_cleanup(curl);
    return rc;
@@ -871,7 +766,8 @@ int gmail_search(const char *token,
                  int max_out,
                  int *out_count,
                  char *next_page_token,
-                 size_t npt_len) {
+                 size_t npt_len,
+                 int *missing_out) {
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
@@ -917,7 +813,8 @@ int gmail_search(const char *token,
    }
 
    /* Batch fetch metadata */
-   rc = gmail_batch_fetch_metadata(curl, token, ids, id_count, out, max_out, out_count);
+   rc = gmail_batch_fetch_metadata(curl, token, ids, id_count, out, max_out, out_count,
+                                   missing_out);
 
    curl_easy_cleanup(curl);
    return rc;
@@ -1166,61 +1063,4 @@ int gmail_list_labels(const char *token, char *out, size_t out_len) {
 
    json_object_put(root);
    return 0;
-}
-
-/* =============================================================================
- * Trash / Archive
- * ============================================================================= */
-
-int gmail_trash_message(const char *token, const char *message_id) {
-   if (!token || !token[0] || !gmail_message_id_valid(message_id)) {
-      OLOG_ERROR("gmail_trash: invalid token or message_id");
-      return 1;
-   }
-
-   char url[256];
-   snprintf(url, sizeof(url), GMAIL_API_BASE "/messages/%s/trash", message_id);
-
-   CURL *curl = gmail_create_curl();
-   if (!curl)
-      return 1;
-
-   curl_buffer_t resp;
-   int rc = gmail_api_post(curl, token, url, "application/json", "{}", &resp);
-   curl_buffer_free(&resp);
-   curl_easy_cleanup(curl);
-
-   if (rc == 0)
-      OLOG_INFO("gmail: trashed message %s", message_id);
-   else
-      OLOG_ERROR("gmail: failed to trash message %s", message_id);
-
-   return rc;
-}
-
-int gmail_archive_message(const char *token, const char *message_id) {
-   if (!token || !token[0] || !gmail_message_id_valid(message_id)) {
-      OLOG_ERROR("gmail_archive: invalid token or message_id");
-      return 1;
-   }
-
-   char url[256];
-   snprintf(url, sizeof(url), GMAIL_API_BASE "/messages/%s/modify", message_id);
-
-   CURL *curl = gmail_create_curl();
-   if (!curl)
-      return 1;
-
-   curl_buffer_t resp;
-   int rc = gmail_api_post(curl, token, url, "application/json",
-                           "{\"removeLabelIds\": [\"INBOX\"]}", &resp);
-   curl_buffer_free(&resp);
-   curl_easy_cleanup(curl);
-
-   if (rc == 0)
-      OLOG_INFO("gmail: archived message %s", message_id);
-   else
-      OLOG_ERROR("gmail: failed to archive message %s", message_id);
-
-   return rc;
 }

@@ -30,6 +30,7 @@
 #include "core/turn_origin.h"
 #include "tools/email_client.h"
 #include "tools/email_db.h"
+#include "tools/email_undo.h"
 
 /* Draft / pending action limits */
 #define EMAIL_MAX_DRAFTS 16
@@ -43,6 +44,51 @@
 #define EMAIL_CONFIRM_LOCKOUT_SEC 60
 #define EMAIL_MAX_PENDING_TRASH 16
 #define EMAIL_PENDING_TRASH_EXPIRY_SEC 300
+/* Longest wait for an IMAP account's lease (the longest operation another
+ * caller may hold it for: a search's connect plus its budget, with margin). */
+#define EMAIL_LEASE_WAIT_SEC 90
+
+/* How long a multi-account search or read waits for each IMAP account's lease
+ * before reporting that account busy and moving on. */
+#define EMAIL_LEASE_FANOUT_WAIT_SEC 10
+
+/**
+ * The account an operation runs on, chosen by id (checked against the user; it
+ * must be enabled).  NULL instead means the operation resolves the account by
+ * name.  The operation takes the account's IMAP lease itself unless
+ * @c lease_held says the caller already holds it; a Gmail account needs none.
+ */
+typedef struct {
+   int64_t account_id;
+   bool lease_held; /* the caller holds this IMAP account's lease */
+} email_target_t;
+
+/* An account that failed in a multi-account search, and why. */
+typedef struct {
+   int64_t account_id;
+   email_err_t err;
+} email_acct_failure_t;
+
+/* What went wrong in a search (email_service_search). */
+typedef struct {
+   email_err_t err;                                 /* why it failed; NONE on success */
+   email_acct_failure_t failed[EMAIL_MAX_ACCOUNTS]; /* accounts a fan-out couldn't search */
+   int failed_count;
+   uint32_t uidvalidity;  /* one IMAP account: the mailbox epoch seen (0 = not seen) */
+   char imap_folder[128]; /* one IMAP account: the folder searched ("" = not reached) */
+   int rows_missing;      /* Gmail: matching rows left out (Gmail kept refusing them) */
+} email_search_report_t;
+
+/* What a paging caller (the mail panel) wants with a page of email_service_recent
+ * beyond the rows; pass NULL for none. */
+typedef struct {
+   bool want_inbox_unread; /* in: the INBOX's unread count (inbox, first page only) */
+   time_t at_or_before;    /* in, Gmail: only rows dated at or before this (0 = no bound) */
+   int inbox_unread;       /* out: -1 when unknown or not asked */
+   uint32_t uidvalidity;   /* out, IMAP: the mailbox epoch seen (0 = not seen) */
+   char imap_folder[128];  /* out, IMAP: the folder listed ("" = not reached) */
+   int rows_missing;       /* out, Gmail: listed rows left out (Gmail kept refusing them) */
+} email_page_ext_t;
 
 
 typedef struct {
@@ -113,6 +159,7 @@ typedef struct {
 #define EMAIL_CONFIRM_RC_OTHER_SESSION 8 /* confirmed from another session than the draft's */
 #define EMAIL_CONFIRM_RC_SAME_TURN 9     /* confirmed in the turn that prepared it */
 #define EMAIL_CONFIRM_RC_NOT_NEXT 21     /* confirmed later than the turn right after it */
+#define EMAIL_CONFIRM_RC_FROM_VISUAL 23  /* confirmed in a turn a rendered visual started */
 
 /** A refused turn_origin_check as this module's confirm code. */
 static inline int email_confirm_rc(turn_origin_rc_t rc) {
@@ -123,6 +170,8 @@ static inline int email_confirm_rc(turn_origin_rc_t rc) {
          return EMAIL_CONFIRM_RC_SAME_TURN;
       case TURN_ORIGIN_NOT_NEXT:
          return EMAIL_CONFIRM_RC_NOT_NEXT;
+      case TURN_ORIGIN_FROM_VISUAL:
+         return EMAIL_CONFIRM_RC_FROM_VISUAL;
       default:
          return EMAIL_CONFIRM_RC_OTHER_SESSION;
    }
@@ -182,8 +231,40 @@ int email_service_add_account(int user_id,
                               const char *oauth_account_key);
 
 int email_service_remove_account(int64_t account_id);
-int email_service_test_connection(int64_t account_id, bool *imap_ok, bool *smtp_ok);
+
+/**
+ * @brief Test @p account_id's IMAP and SMTP (one API call for Gmail)
+ *
+ * Doesn't wait for an IMAP account in use by another caller: the IMAP half
+ * reports EMAIL_ERR_BUSY instead (the SMTP half is still tested).  Works on a
+ * disabled account (account settings do).
+ *
+ * @param user_id The account's owner (checked)
+ * @param target  The same account (see email_target_t), or NULL
+ * @param err     Why it failed (may be NULL)
+ * @return EMAIL_RC_OK if both halves worked, EMAIL_RC_UNKNOWN_ACCOUNT, or EMAIL_RC_FAILURE
+ */
+int email_service_test_connection(int user_id,
+                                  int64_t account_id,
+                                  const email_target_t *target,
+                                  bool *imap_ok,
+                                  bool *smtp_ok,
+                                  email_err_t *err);
 int email_service_list_accounts(int user_id, email_account_t *out, int max);
+
+/** Whether @p acct's operations take its lease (IMAP: one connection per account). */
+bool email_service_account_uses_lease(const email_account_t *acct);
+
+/**
+ * @brief The user's account @p account_id
+ * @param enabled_only Refuse a disabled account (operations do; account settings don't)
+ * @return EMAIL_RC_OK, EMAIL_RC_UNKNOWN_ACCOUNT when it isn't the user's (or is disabled),
+ *         or EMAIL_RC_FAILURE when the database couldn't answer (try again)
+ */
+int email_service_find_account_by_id(int user_id,
+                                     int64_t account_id,
+                                     bool enabled_only,
+                                     email_account_t *out);
 
 /* Best-effort fill of each row's `replied` tri-state (email_summary_t.replied):
  * for each Gmail account represented in @p rows, one `in:sent` search — bounded
@@ -224,6 +305,9 @@ bool email_service_is_gmail_account(const email_account_t *acct);
  *                         token on an IMAP account (or a stale IMAP cursor) returns
  *                         EMAIL_RC_INVALID_PAGE_TOKEN.
  * @param next_page_token  Filled when more (older) messages remain; empty otherwise.
+ * @param ext              Optional paging extras (email_page_ext_t), or NULL
+ * @param target             The account by id, or NULL to resolve by name (see email_target_t)
+ * @param err              Why it failed (may be NULL)
  * @note @p page_token and @p next_page_token may be the same buffer (the input is
  *       copied before the output is cleared).
  */
@@ -237,7 +321,10 @@ int email_service_recent(int user_id,
                          int max,
                          int *out_count,
                          char *next_page_token,
-                         size_t npt_len);
+                         size_t npt_len,
+                         email_page_ext_t *ext,
+                         const email_target_t *target,
+                         email_err_t *err);
 
 /**
  * @brief Read a message (email_service_read.c)
@@ -245,7 +332,8 @@ int email_service_recent(int user_id,
  * With no account named, each enabled account is tried until one has it.
  * opts->max_text_chars <= 0 takes the account's own body cap.
  *
- * @param err Why it failed (may be NULL)
+ * @param target The account by id, or NULL to resolve by name (see email_target_t)
+ * @param err  Why it failed (may be NULL)
  * @return EMAIL_RC_OK, EMAIL_RC_NOT_FOUND, EMAIL_RC_NO_ACCOUNTS, an account-lookup
  *         code, or EMAIL_RC_FAILURE; free a success with email_message_free()
  */
@@ -254,7 +342,51 @@ int email_service_read(int user_id,
                        const char *message_id,
                        const email_read_opts_t *opts,
                        email_message_t *out,
+                       const email_target_t *target,
                        email_err_t *err);
+
+/* Most messages one email_service_set_flags call changes, and the most folders
+ * they may span (an IMAP login each). */
+#define EMAIL_FLAGS_MAX_IDS 50
+#define EMAIL_FLAGS_MAX_FOLDERS 8
+
+/* One message's outcome in email_service_set_flags. */
+typedef struct {
+   bool updated;    /* the message is there in the state asked for */
+   email_err_t err; /* why not: NOT_FOUND (no such message), FAILED (past the folder cap), ... */
+} email_flag_result_t;
+
+/**
+ * @brief Mark messages read or unread (email_service_flags.c)
+ *
+ * Only the read state is ever changed (\Seen, Gmail's UNREAD), so a read-only
+ * account allows it, as reading a message would.  IMAP ids are parsed into
+ * folder and UID before anything is sent, one login per folder.
+ *
+ * @param target  The account by id (required)
+ * @param n       At most EMAIL_FLAGS_MAX_IDS
+ * @param results Per id, in order
+ * @return EMAIL_RC_OK (see @p results), an account-lookup code, or
+ *         EMAIL_RC_FAILURE with @p err set (nothing could be asked)
+ */
+int email_service_set_flags(int user_id,
+                            const email_target_t *target,
+                            const char *const *message_ids,
+                            int n,
+                            bool unread,
+                            email_flag_result_t *results,
+                            email_err_t *err);
+
+/**
+ * @brief The INBOX's unread count (email_service_flags.c)
+ * @param target The account by id (required)
+ * @return EMAIL_RC_OK with @p inbox_unread set, an account-lookup code, or
+ *         EMAIL_RC_FAILURE with @p err set
+ */
+int email_service_unread_count(int user_id,
+                               const email_target_t *target,
+                               int *inbox_unread,
+                               email_err_t *err);
 
 /**
  * @brief Search email across one or (when account_name is NULL) all enabled accounts.
@@ -264,8 +396,17 @@ int email_service_read(int user_id,
  *                  flagged distinctly) so the caller can tell the user results are
  *                  partial instead of the failure being silent. Empty when all
  *                  searched accounts were reached.
+ * @param target   One account by id (a paged single-account search), or NULL
+ *                 (see email_target_t)
+ * @param report   Optional out (may be NULL): why it failed, and which accounts a
+ *                 multi-account search couldn't reach
  * @note Paging (params->page_token / next_page_token) applies to a single-account
- *       search only; a multi-account search always returns the first page.
+ *       search only; a multi-account search searches every account at once,
+ *       returns the newest @p max rows across them (each account's newest), and
+ *       reports an account in use elsewhere for EMAIL_LEASE_FANOUT_WAIT_SEC as
+ *       EMAIL_ERR_BUSY in @p report rather than waiting it out.  On an
+ *       IMAP account a query with non-ASCII text fails as EMAIL_ERR_UNSUPPORTED_QUERY
+ *       (the server's quoted strings are ASCII).
  */
 int email_service_search(int user_id,
                          const char *account_name,
@@ -276,7 +417,9 @@ int email_service_search(int user_id,
                          char *next_page_token,
                          size_t npt_len,
                          char *warn_out,
-                         size_t warn_len);
+                         size_t warn_len,
+                         const email_target_t *target,
+                         email_search_report_t *report);
 
 /**
  * @brief Create a draft email for two-step send.
@@ -367,9 +510,16 @@ int email_service_get_access_summary(int user_id,
  * @param account_name  Account name, or NULL for first enabled
  * @param out           Output buffer for formatted folder list
  * @param out_len       Size of output buffer
+ * @param target        The account by id, or NULL to resolve by name (see email_target_t)
+ * @param err           Why it failed (may be NULL)
  * @return 0 on success, 1 on failure
  */
-int email_service_list_folders(int user_id, const char *account_name, char *out, size_t out_len);
+int email_service_list_folders(int user_id,
+                               const char *account_name,
+                               char *out,
+                               size_t out_len,
+                               const email_target_t *target,
+                               email_err_t *err);
 
 /**
  * @brief Create a pending trash action for two-step delete.
@@ -394,14 +544,18 @@ int email_service_create_pending_trash(int user_id,
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
  *         EMAIL_RC_NOT_FOUND (the message is gone), EMAIL_RC_NO_TRASH,
  *         EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED, EMAIL_RC_NOT_REMOVED
- *         (IMAP; see email_trash_message),
+ *         (IMAP; see email_imap_move_batch),
  *         EMAIL_CONFIRM_RC_NOT_FOUND if not found/expired,
  *         EMAIL_CONFIRM_RC_THROTTLED if throttled,
  *         EMAIL_CONFIRM_RC_ACCOUNT_GONE if the account is no longer available or
  *         writable since the pending action was prepared, EMAIL_CONFIRM_RC_OTHER_SESSION
  *         / _SAME_TURN / _NOT_NEXT as for email_service_confirm_send
+ * @param err Why the move failed (may be NULL)
  */
-int email_service_confirm_trash(int user_id, const char *pending_id, const turn_origin_t *origin);
+int email_service_confirm_trash(int user_id,
+                                const char *pending_id,
+                                const turn_origin_t *origin,
+                                email_err_t *err);
 
 /**
  * @brief Archive a message: move it to the account's archive folder (Gmail
@@ -409,8 +563,139 @@ int email_service_confirm_trash(int user_id, const char *pending_id, const turn_
  * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
  *         EMAIL_ACCT_RC_READONLY if the account is read-only, EMAIL_RC_NOT_FOUND,
  *         EMAIL_RC_FOLDER_MISSING, EMAIL_RC_ALREADY_THERE, EMAIL_RC_LEFT_FLAGGED,
- *         EMAIL_RC_NOT_REMOVED (IMAP; see email_archive_message)
+ *         EMAIL_RC_NOT_REMOVED (IMAP; see email_imap_move_batch)
+ * @param target The account by id, or NULL to resolve by name (see email_target_t)
+ * @param err  Why it failed (may be NULL)
  */
-int email_service_archive(int user_id, const char *account_name, const char *message_id);
+int email_service_archive(int user_id,
+                          const char *account_name,
+                          const char *message_id,
+                          const email_target_t *target,
+                          email_err_t *err);
+
+/* =============================================================================
+ * Trash, archive and undo, several messages at a time (email_service_move.c)
+ * ============================================================================= */
+
+/** Most messages one move or undo takes. */
+#define EMAIL_MOVE_MAX_IDS 50
+
+/** One message's share of email_service_move. */
+typedef struct {
+   email_move_outcome_t outcome;
+   email_err_t err;                     /* EMAIL_ERR_NONE unless outcome is EMAIL_MOVE_FAILED */
+   char message_id[192];                /* the id as the server knows it now (IMAP: pinned) */
+   char undo[EMAIL_UNDO_TOKEN_LEN + 1]; /* "" = can't be undone */
+} email_move_result_t;
+
+/**
+ * @brief Move messages of one account to its Trash or Archive
+ *
+ * IMAP: one lease and one login; per (folder, epoch) group a check that the
+ * messages exist, then the move (email_imap_move_batch).  Gmail: per message, its
+ * labels read first (already in Trash, or not in the inbox for an archive, is
+ * EMAIL_MOVE_ALREADY_THERE; an archive of a message in Trash or Spam is
+ * EMAIL_ERR_IN_TRASH), then the move, paced per account; an archive without
+ * @p want_undo skips the read.  With
+ * @p want_undo a moved message gets an undo token (none when the server can't
+ * say where it went, or the token store is full).  Tells the WebUI what left its
+ * folder (email_changed_notify), whatever else happened.
+ *
+ * @param target The account (see email_target_t); its lease is taken unless held
+ * @param ids    At most EMAIL_MOVE_MAX_IDS
+ * @param results One per id, in order.  Callers heap-allocate a full batch
+ *                (EMAIL_MOVE_MAX_IDS results are ~12 KB)
+ * @param err    Out: what ended the whole call, EMAIL_ERR_NONE when it ran
+ * @return EMAIL_RC_OK (see @p results), EMAIL_ACCT_RC_READONLY, an account-lookup
+ *         code, or EMAIL_RC_FAILURE (@p err says why; @p results carry it too)
+ */
+int email_service_move(int user_id,
+                       const email_target_t *target,
+                       const char *const *ids,
+                       int n,
+                       email_move_kind_t kind,
+                       bool want_undo,
+                       email_move_result_t *results,
+                       email_err_t *err);
+
+/**
+ * @brief Whether the account has a Trash and an Archive to move to, once known
+ *        (learned on a worker: a move, the panel's first inbox page).  A Gmail
+ *        API account (@p gmail_api) has both.  Reads no credentials and does no
+ *        I/O: safe on any thread.
+ * @return false when not yet known (both outs false)
+ */
+bool email_service_account_caps(int64_t account_id,
+                                bool gmail_api,
+                                bool *can_trash,
+                                bool *can_archive);
+
+/** Forget what email_service_account_caps knows of an account (its server or
+ *  login changed, or it's gone). */
+void email_service_account_caps_forget(int64_t account_id);
+
+/** One undo record's result in email_service_undo. */
+typedef struct {
+   email_err_t err;     /* EMAIL_ERR_NONE when it's back */
+   bool retry;          /* it couldn't run this time: release its token, don't finish it */
+   bool row_ok;         /* row holds the message as it is back */
+   email_summary_t row; /* its id pinned to where it is now */
+} email_undo_result_t;
+
+/**
+ * @brief Move messages back where a move took them (records claimed with
+ *        email_undo_claim)
+ *
+ * Under the account's lease the account is resolved again: one no longer the
+ * user's, enabled, writable, or with another server or login is
+ * EMAIL_ERR_UNDO_EXPIRED.  A message no longer where the move put it (Trash
+ * emptied, moved on) is EMAIL_ERR_NOT_FOUND; a folder it came from that is gone,
+ * EMAIL_ERR_FOLDER_MISSING.  Tells the WebUI the restored rows and the ids that
+ * left Trash or Archive (email_changed_notify).
+ *
+ * @param n       At most EMAIL_MOVE_MAX_IDS
+ * @param results results[i] is recs[i]'s: finish its token (email_undo_finish)
+ *                unless retry is set, then release it (email_undo_release).  On
+ *                an early EMAIL_RC_FAILURE with every result's retry set (a
+ *                transient lookup, the lease busy) release them all.  Callers
+ *                heap-allocate a full batch (EMAIL_MOVE_MAX_IDS results are
+ *                ~95 KB, as many records ~55 KB): too big for a tool thread's stack
+ * @return EMAIL_RC_OK (see @p results), or EMAIL_RC_FAILURE (@p err says why;
+ *         EMAIL_ERR_UNDO_EXPIRED when the account changed under every record)
+ */
+int email_service_undo(int user_id,
+                       const email_target_t *target,
+                       const email_undo_rec_t *recs,
+                       int n,
+                       email_undo_result_t *results,
+                       email_err_t *err);
+
+/**
+ * @brief What a move or undo changed on @p account_id, for the user's open mail
+ *        panels: rows that appeared, ids that left their folder, and whether
+ *        the panel should reload (a row couldn't be read, or a message's move
+ *        may have happened without its answer)
+ *
+ * @p gmail_api says which backend the ids are from (a Gmail row carries flags).
+ * @p kind and @p undo say what moved, because a Gmail id is the same in every
+ * view.  A move's @p destroyed ids left INBOX (archive) or everything but
+ * Trash (trash); an IMAP id names its folder, so it left just that one.  An
+ * undo's @p created rows come back (a Gmail row replaces the one with its id,
+ * which leaves the Trash view for a trash undo); its @p destroyed ids are the
+ * IMAP copies that left Trash or Archive.
+ *
+ * Called with no mutex held (the account's lease may be).  A no-op unless the
+ * WebUI overrides it; the override only queues.
+ */
+void email_changed_notify(int user_id,
+                          int64_t account_id,
+                          bool gmail_api,
+                          email_move_kind_t kind,
+                          bool undo,
+                          const email_summary_t *created,
+                          int nc,
+                          const char *const *destroyed,
+                          int nd,
+                          bool refresh);
 
 #endif /* EMAIL_SERVICE_H */

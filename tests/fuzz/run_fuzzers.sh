@@ -16,10 +16,11 @@ OUT="${OUT:-${TMPDIR:-/tmp}/dawn_fuzz}"
 COMMON="common/src/utils/string_utils.c common/src/logging.c"
 declare -A SOURCES LIBS LINK CFLAGS_EXTRA MAXLEN
 SOURCES[email_mime]="src/tools/email_mime.c src/tools/email_display.c src/tools/gmail_parts.c
-                     src/tools/html_parser.c $COMMON"
+                     src/tools/html_parser.c src/tools/html_hidden.c src/tools/html_hidden_css.c
+                     $COMMON"
 LIBS[email_mime]="gmime-3.0 json-c"
 MAXLEN[email_mime]=262144
-SOURCES[html]="src/tools/html_parser.c $COMMON"
+SOURCES[html]="src/tools/html_parser.c src/tools/html_hidden.c src/tools/html_hidden_css.c $COMMON"
 MAXLEN[html]=262144
 SOURCES[neutralize]="src/llm/llm_context_text.c"
 MAXLEN[neutralize]=65536

@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* The feature flags, one line in docs/WEBSOCKET_PROTOCOL.md each.  Names are
  * stable snake_case; a flag is never removed while the protocol version
@@ -54,7 +55,35 @@ static const char *const s_features[] = {
     * each body and builds the inlined form itself, so a document can't end its
     * own span. */
    "document_attachments",
+   /* A text frame may carry from_visual: true for a prompt sent by a rendered
+    * visual; no confirm counts in that turn.  A client sends a visual's prompt
+    * only to a daemon advertising this, never as an ordinary turn. */
+   "visual_prompt_guard",
 };
+
+/* The email panel's check (webui_email_panel.c); a build without the panel has
+ * none, and the flag isn't advertised.  Must match its declaration in
+ * webui/webui_email_panel.h (not included here: that header pulls in the WebUI). */
+bool webui_email_client_enabled(void) __attribute__((weak));
+
+/* Flags that depend on how the daemon runs, each with its check.  Same rules
+ * as s_features. */
+static const struct {
+   const char *name;
+   bool (*on)(void);
+} s_runtime_features[] = {
+   /* The mail panel's verbs answer: email_list, email_search, email_read,
+    * email_set_flags, email_unread_counts (docs/WEBSOCKET_PROTOCOL.md, Email). */
+   { "email_client", webui_email_client_enabled },
+};
+
+static bool append_feature(char *out, size_t size, size_t *len, bool first, const char *name) {
+   const int n = snprintf(out + *len, size - *len, "%s\"%s\"", first ? "" : ",", name);
+   if (n < 0 || (size_t)n >= size - *len)
+      return false;
+   *len += (size_t)n;
+   return true;
+}
 
 size_t webui_protocol_json_members(char *out, size_t size) {
    if (!out || size == 0) {
@@ -67,13 +96,22 @@ size_t webui_protocol_json_members(char *out, size_t size) {
       return 0;
    }
    len = (size_t)n;
+   bool first = true;
    for (size_t i = 0; i < sizeof(s_features) / sizeof(s_features[0]); i++) {
-      n = snprintf(out + len, size - len, "%s\"%s\"", i ? "," : "", s_features[i]);
-      if (n < 0 || (size_t)n >= size - len) {
+      if (!append_feature(out, size, &len, first, s_features[i])) {
          out[0] = '\0';
          return 0;
       }
-      len += (size_t)n;
+      first = false;
+   }
+   for (size_t i = 0; i < sizeof(s_runtime_features) / sizeof(s_runtime_features[0]); i++) {
+      if (!s_runtime_features[i].on || !s_runtime_features[i].on())
+         continue;
+      if (!append_feature(out, size, &len, first, s_runtime_features[i].name)) {
+         out[0] = '\0';
+         return 0;
+      }
+      first = false;
    }
    if (len + 2 > size) {
       out[0] = '\0';
@@ -124,4 +162,63 @@ void webui_protocol_note_client(struct json_object *payload, bool *noted) {
    } else {
       OLOG_INFO("WebUI: client %s %s (protocol %d)", name, version, protocol);
    }
+}
+
+/* A client string safe to echo back: at most max bytes, no control characters,
+ * valid UTF-8 (one bad byte closes the client's socket). */
+static bool echo_ok(const char *s, size_t len, size_t max) {
+   if (!s || len > max)
+      return false;
+   for (size_t i = 0; i < len; i++) {
+      const unsigned char c = (unsigned char)s[i];
+      if (c < 0x20 || c == 0x7f)
+         return false;
+   }
+   return utf8_is_valid(s, len);
+}
+
+bool webui_protocol_echo_ok(const char *s) {
+   return s && echo_ok(s, strlen(s), WEBUI_REQ_MAX);
+}
+
+bool webui_protocol_payload_req(struct json_object *payload,
+                                size_t max,
+                                char *out,
+                                size_t out_size) {
+   struct json_object *req_obj;
+   if (!payload || !out || out_size == 0 || !json_object_object_get_ex(payload, "req", &req_obj) ||
+       !json_object_is_type(req_obj, json_type_string))
+      return false;
+   const char *req = json_object_get_string(req_obj);
+   const size_t len = (size_t)json_object_get_string_len(req_obj);
+   /* strlen too: an embedded NUL would cut the echo short of what was checked */
+   if (!req || strlen(req) != len || len >= out_size || !echo_ok(req, len, max))
+      return false;
+   memcpy(out, req, len + 1);
+   return true;
+}
+
+char *webui_protocol_unknown_type_json(const char *type, const char *req) {
+   struct json_object *obj = json_object_new_object();
+   struct json_object *payload = json_object_new_object();
+   if (!obj || !payload) {
+      json_object_put(obj);
+      json_object_put(payload);
+      return NULL;
+   }
+   json_object_object_add(payload, "code", json_object_new_string("UNKNOWN_TYPE"));
+   json_object_object_add(payload, "message",
+                          json_object_new_string("This server doesn't handle that message type"));
+   json_object_object_add(payload, "severity", json_object_new_string("error"));
+   json_object_object_add(payload, "recoverable", json_object_new_boolean(1));
+   if (webui_protocol_echo_ok(type))
+      json_object_object_add(payload, "request_type", json_object_new_string(type));
+   if (webui_protocol_echo_ok(req))
+      json_object_object_add(payload, "req", json_object_new_string(req));
+   json_object_object_add(obj, "type", json_object_new_string("error"));
+   json_object_object_add(obj, "payload", payload);
+   const char *json = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
+   char *out = json ? strdup(json) : NULL;
+   json_object_put(obj);
+   return out;
 }

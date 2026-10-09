@@ -26,6 +26,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "core/session_manager.h"
 #include "webui/webui_server.h"
@@ -71,6 +72,11 @@ void webui_send_state_with_detail(struct session *session, const char *state, co
 void webui_send_session_json(struct session *session, const char *json_str) {
    (void)session;
    (void)json_str;
+}
+
+void webui_send_session_json_take(struct session *session, char *json_str) {
+   (void)session;
+   free(json_str);
 }
 
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id) {

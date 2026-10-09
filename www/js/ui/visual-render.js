@@ -11,6 +11,8 @@
 
    /* Track known visual iframe contentWindows for postMessage source validation */
    var knownVisualWindows = new WeakSet();
+   /* A visual's prompt is a short question, never a document. */
+   var VISUAL_PROMPT_MAX = 2000;
 
    /* Map from iframe contentWindow to iframe element for delegated resize handling.
     * Single global listener dispatches by source — no per-iframe listeners needed. */
@@ -575,17 +577,16 @@
             typeof event.data.text === 'string' &&
             knownVisualWindows.has(event.source)
          ) {
-            if (DawnElements.textInput) {
-               DawnElements.textInput.value = event.data.text;
-               DawnElements.textInput.dispatchEvent(new Event('input'));
-               var enterEvent = new KeyboardEvent('keydown', {
-                  key: 'Enter',
-                  code: 'Enter',
-                  keyCode: 13,
-                  which: 13,
-                  bubbles: true,
-               });
-               DawnElements.textInput.dispatchEvent(enterEvent);
+            /* A visual is model-written: its prompt goes as its own turn, marked
+             * from_visual so the daemon lets no confirm count in it, and never
+             * through the user's draft.  Only after a recent click (a script
+             * running on load sends nothing); that is a first filter only, since
+             * a click anywhere on the page counts. */
+            /* No activation API (older browsers): treat it as no click. */
+            var active = !!(navigator.userActivation && navigator.userActivation.isActive);
+            var text = event.data.text.trim();
+            if (active && text && window.DAWN && window.DAWN.sendVisualPrompt) {
+               window.DAWN.sendVisualPrompt(text.slice(0, VISUAL_PROMPT_MAX));
             }
          } else if (event.data.type === 'dawn_visual_resize') {
             var entry = iframeResizeMap.get(event.source);

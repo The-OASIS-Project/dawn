@@ -82,6 +82,7 @@ typedef struct {
                            * for an image turn; NULL persists plain text. Owned/freed here. */
    char client_ref[WEBUI_CLIENT_REF_MAX + 1]; /* the frame's client_ref ("" = none): the
                                                * worker's turn ref while the turn runs */
+   bool from_visual; /* the text came from a rendered visual's prompt, not the person */
 } text_work_t;
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
@@ -467,6 +468,13 @@ static void *text_worker_thread(void *arg) {
     * out from under us while it generates (a disconnected client no longer
     * aborts the turn — background-jobs Phase 1).  Cleared by text_worker_end()
     * at every subsequent exit. */
+   /* Stamp this turn's input modality (voice vs typed) onto the session on
+    * THIS worker thread, before the turn counts as in flight (always-on's
+    * watchdog reads it with turn_in_flight).  Setting it at the entry point
+    * (LWS/always-on thread) instead left a window where a concurrent always-on
+    * voice turn could clobber a typed turn's reset.  The prompt builder reads
+    * session->input_was_voice to gate the ASR hint. */
+   session->input_was_voice = work->input_was_voice;
    atomic_fetch_add(&session->turn_in_flight, 1);
 
    OLOG_INFO("WebUI: Processing text input for session %u: %zu bytes (%d image(s))",
@@ -502,13 +510,6 @@ static void *text_worker_thread(void *arg) {
    bool use_opus = conn && conn->use_opus;
    int turn_user_id = conn ? conn->auth_user_id : (int)session->metrics.user_id;
 
-   /* Stamp this turn's input modality (voice vs typed) onto the session right
-    * before dispatch, on THIS worker thread — same pattern as tts_enabled above.
-    * Setting it at the entry point (LWS/always-on thread) instead left a window
-    * where a concurrent always-on voice turn could clobber a typed turn's reset;
-    * stamping it here, adjacent to the synchronous build, closes that window. The
-    * prompt builder reads session->input_was_voice to gate the ASR hint. */
-   session->input_was_voice = work->input_was_voice;
 
    /* An image question goes into the history exactly as a reload rebuilds it,
     * from the stored files its ids name, or not at all: an id that names no
@@ -561,6 +562,7 @@ static void *text_worker_thread(void *arg) {
       .sentence_userdata = fanout_tts ? session : NULL,
       .on_user_msg_added = webui_text_dispatch_on_user_msg,
       .user_msg_added_ctx = session,
+      .from_visual = work->from_visual,
    };
 
    /* Clear the per-turn error flag before the call; the provider layer sets it via
@@ -867,6 +869,7 @@ int webui_process_text_input_with_images(session_t *session,
    if (webui_turn_ref_get()) {
       snprintf(work->client_ref, sizeof(work->client_ref), "%s", webui_turn_ref_get());
    }
+   work->from_visual = webui_turn_from_visual_get();
 
    /* Retain the session for the queued turn (released by the worker when it runs,
     * or by webui_text_turn_free on purge/reject). */

@@ -317,6 +317,10 @@ void session_turn_await_conversation(session_t *session);
 /** Mark the running turn as background (a reinvoke, not the user's own). */
 void session_turn_mark_background(session_t *session);
 
+/** Mark the running turn as started by a rendered visual's prompt: it can't
+ *  confirm anything (turn_origin_check). */
+void session_turn_mark_from_visual(session_t *session);
+
 /**
  * @brief Whether the caller is the session's running turn
  *

@@ -145,11 +145,44 @@ typedef enum {
    EMAIL_ERR_NO_TRASH,          /* no Trash folder */
    EMAIL_ERR_NO_ACCOUNT,        /* the user has no enabled email account */
    EMAIL_ERR_ACCOUNT_NOT_FOUND, /* no enabled account by that name */
-   EMAIL_ERR_CANCELLED,         /* stopped by the caller (email_read_opts_t.cancel) */
+   EMAIL_ERR_CANCELLED,         /* stopped by the caller (a cancel flag) */
+   EMAIL_ERR_CURSOR_STALE,      /* a paging cursor no longer applies: start over */
+   EMAIL_ERR_SUPERSEDED,        /* replaced by a newer request before it ran */
+   EMAIL_ERR_UNSUPPORTED_QUERY, /* the account can't run this query (IMAP: non-ASCII) */
+   EMAIL_ERR_BUSY,              /* the account or the server's email workers are busy */
+   EMAIL_ERR_SHUTTING_DOWN,     /* the daemon is stopping */
+   EMAIL_ERR_CANNOT_CALCULATE,  /* the changes since a state can't be worked out */
+   EMAIL_ERR_INVALID_REQUEST,   /* the request itself is malformed or past a limit */
+   EMAIL_ERR_UNAVAILABLE,       /* email is turned off */
+   EMAIL_ERR_NOT_REMOVED,       /* copied to the destination; the original couldn't be removed */
+   EMAIL_ERR_UNDO_EXPIRED,      /* the undo token is unknown, used or past its time */
+   EMAIL_ERR_IN_TRASH,          /* archive of a message in Trash or Spam: restore it first */
+   EMAIL_ERR_OUTCOME_UNKNOWN,   /* the command went out but its answer didn't arrive */
 } email_err_t;
 
 /** The wire name of @p err ("AUTH_FAILED", ...; "" for NONE).  email_transfer.c */
 const char *email_error_name(email_err_t err);
+
+/* Where a move sends a message. */
+typedef enum {
+   EMAIL_MOVE_TRASH = 0,
+   EMAIL_MOVE_ARCHIVE,
+} email_move_kind_t;
+
+/* What became of one message in a move. */
+typedef enum {
+   EMAIL_MOVE_FAILED = 0,    /* not moved: see the err beside it */
+   EMAIL_MOVE_DONE,          /* moved */
+   EMAIL_MOVE_ALREADY_THERE, /* already in the destination; nothing done */
+   EMAIL_MOVE_LEFT_FLAGGED,  /* copied and marked \Deleted, left in its folder (no UIDPLUS) */
+} email_move_outcome_t;
+
+/* What a read does to the message's read state. */
+typedef enum {
+   EMAIL_MARK_AS_BACKEND = 0, /* as the backend's read does: IMAP marks it read, Gmail doesn't */
+   EMAIL_MARK_READ,           /* leave it read */
+   EMAIL_MARK_KEEP,           /* leave it as it was (IMAP: mark it unread again right after) */
+} email_mark_t;
 
 /* How a message is read: how much to fetch and what to produce. */
 typedef struct {
@@ -157,9 +190,12 @@ typedef struct {
    int max_text_chars;        /* body_text cap, in bytes */
    size_t max_html_bytes;     /* body_html cap (only with want_html) */
    bool want_html;            /* produce body_html (never for the LLM) */
+   bool text_as_shown;        /* body_text from the HTML form when there is one (what a
+                               * reader saw; its hidden text dropped), else text/plain */
    bool headers_only;         /* no body is fetched: From and Subject are filled (Date on
                                * Gmail); nothing else is promised */
    const atomic_bool *cancel; /* set it to stop the read's transfers (may be NULL) */
+   email_mark_t mark;         /* the read state to leave it in (not with headers_only) */
 } email_read_opts_t;
 
 typedef struct {
@@ -188,6 +224,9 @@ typedef struct {
    char date_str[32];     /* the Date header as sent */
    time_t internal_date;  /* server receive time (Gmail internalDate); 0 when unknown */
    bool unread_before;    /* unread when it was read (Gmail); false when unknown */
+   bool unread_known;     /* unread_after holds the state the read left (with a mark) */
+   bool unread_after;     /* unread once the read is done */
+   uint32_t uidvalidity;  /* IMAP: the mailbox epoch the read saw (0 = not seen) */
    email_addr_t *to_list; /* heap; to_count kept of to_total */
    int to_count;
    int to_total;
@@ -200,21 +239,26 @@ typedef struct {
    char *body_html;       /* heap, valid UTF-8 but NOT HTML-sanitized; only with want_html */
    size_t body_html_len;
    bool text_truncated; /* body is not the whole text (cap, cut fetch or limits) */
+   bool hidden_text;    /* the HTML had text its reader never sees, left out of body */
    bool html_truncated;
    email_attachment_t *attachments; /* heap */
    int attachment_count;
    bool attachments_truncated; /* more attachments than listed (cap, cut fetch, limits) */
 } email_message_t;
 
+/* The longest free-text search query, in bytes. */
+#define EMAIL_SEARCH_TEXT_MAX 256
+
 typedef struct {
    char from[128];
    char subject[128];
-   char text[128];
-   char since[16]; /* YYYY-MM-DD, validated via strptime/strftime */
+   char text[EMAIL_SEARCH_TEXT_MAX + 1]; /* the free-text query (the panel's search box) */
+   char since[16];                       /* YYYY-MM-DD, validated via strptime/strftime */
    char before[16];
    bool unread_only;                      /* Only match UNSEEN messages */
    char folder[256];                      /* Folder/label or normalized Gmail query fragment */
    char page_token[EMAIL_PAGE_TOKEN_LEN]; /* Paging cursor, Gmail or IMAP (empty = first page) */
+   int64_t gmail_at_or_before; /* Gmail: only rows dated at or before this (epoch s; 0 = none) */
 } email_search_params_t;
 
 /**

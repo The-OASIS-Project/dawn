@@ -49,6 +49,30 @@ const char *email_error_name(email_err_t err) {
          return "ACCOUNT_NOT_FOUND";
       case EMAIL_ERR_CANCELLED:
          return "CANCELLED";
+      case EMAIL_ERR_CURSOR_STALE:
+         return "CURSOR_STALE";
+      case EMAIL_ERR_SUPERSEDED:
+         return "SUPERSEDED";
+      case EMAIL_ERR_UNSUPPORTED_QUERY:
+         return "UNSUPPORTED_QUERY";
+      case EMAIL_ERR_BUSY:
+         return "BUSY";
+      case EMAIL_ERR_SHUTTING_DOWN:
+         return "SHUTTING_DOWN";
+      case EMAIL_ERR_CANNOT_CALCULATE:
+         return "CANNOT_CALCULATE";
+      case EMAIL_ERR_INVALID_REQUEST:
+         return "INVALID_REQUEST";
+      case EMAIL_ERR_UNAVAILABLE:
+         return "UNAVAILABLE";
+      case EMAIL_ERR_NOT_REMOVED:
+         return "NOT_REMOVED";
+      case EMAIL_ERR_UNDO_EXPIRED:
+         return "UNDO_EXPIRED";
+      case EMAIL_ERR_IN_TRASH:
+         return "IN_TRASH";
+      case EMAIL_ERR_OUTCOME_UNKNOWN:
+         return "OUTCOME_UNKNOWN";
       case EMAIL_ERR_FAILED:
          break;
    }
@@ -97,4 +121,33 @@ void email_transfer_set_cancel(CURL *curl, const atomic_bool *cancel) {
    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, cancel_progress);
    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, (void *)cancel);
    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+}
+
+void email_transfer_clear_cancel(CURL *curl) {
+   if (!curl)
+      return;
+   curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, NULL);
+   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
+}
+
+/* Thread-local, so a worker serving one request can't stop another's transfers. */
+static __thread const atomic_bool *s_thread_cancel;
+
+const atomic_bool *email_transfer_scope_cancel(const atomic_bool *cancel) {
+   const atomic_bool *prev = s_thread_cancel;
+   s_thread_cancel = cancel;
+   return prev;
+}
+
+const atomic_bool *email_transfer_thread_cancel(void) {
+   return s_thread_cancel;
+}
+
+bool email_transfer_stopped(void) {
+   return s_thread_cancel && atomic_load(s_thread_cancel);
+}
+
+email_err_t email_transfer_failure(void) {
+   return email_transfer_stopped() ? EMAIL_ERR_CANCELLED : EMAIL_ERR_FAILED;
 }

@@ -1210,6 +1210,7 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
    session->turn_history_conv = conv_id > 0 ? conv_id : 0;
    session->turn_awaits_conversation = false;
    session->turn_background = false;
+   session->turn_from_visual = false;
    session->turn_context_reset = false;
    free(session->turn_pending_user);
    session->turn_pending_user = NULL;
@@ -1447,6 +1448,17 @@ void session_turn_await_conversation(session_t *session) {
    pthread_mutex_unlock(&session->history_mutex);
 }
 
+void session_turn_mark_from_visual(session_t *session) {
+   if (!session) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   if (session->turn_active) {
+      session->turn_from_visual = true;
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
 void session_turn_mark_background(session_t *session) {
    if (!session) {
       return;
@@ -1540,6 +1552,7 @@ bool turn_origin_capture(turn_origin_t *out) {
    pthread_mutex_lock(&ctx->history_mutex);
    const bool user = turn_user_originated_locked(ctx);
    const uint32_t number = ctx->turn_number;
+   const bool from_visual = ctx->turn_from_visual;
    pthread_mutex_unlock(&ctx->history_mutex);
    if (!user) {
       return false;
@@ -1548,6 +1561,7 @@ bool turn_origin_capture(turn_origin_t *out) {
    out->turn_token = token;
    out->turn_number = number;
    out->code_redeemed = s_call_code_redeemed;
+   out->from_visual = from_visual;
    return true;
 }
 

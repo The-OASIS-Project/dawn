@@ -152,9 +152,12 @@ static void test_free_pages_are_drained(void) {
 }
 
 /* Other callers get the mutex between vacuum chunks (a pass must not lock
- * them out for its whole budget). */
+ * them out for its whole budget).  Shown by what happens during the pass,
+ * not by a fixed wait: a loaded machine (a sanitizer build, parallel jobs)
+ * stretches every wait, but the pass with it. */
 static _Atomic int s_probing;
 static _Atomic int64_t s_worst_wait_ms;
+static _Atomic int s_probes;
 
 static int64_t mono_ms(void) {
    struct timespec ts;
@@ -169,6 +172,7 @@ static void *prober(void *arg) {
       auth_user_t u;
       (void)auth_db_get_user("nobody", &u);
       const int64_t waited = mono_ms() - t0;
+      atomic_fetch_add(&s_probes, 1);
       if (waited > atomic_load(&s_worst_wait_ms)) {
          atomic_store(&s_worst_wait_ms, waited);
       }
@@ -187,13 +191,21 @@ static void test_a_vacuum_pass_shares_the_mutex(void) {
    pthread_t t;
    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, prober, NULL));
    int freed = 0;
+   const int probes_before = atomic_load(&s_probes);
+   const int64_t start = mono_ms();
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_storage_vacuum_pass(1500, &freed));
+   const int64_t pass_ms = mono_ms() - start;
+   const int probes = atomic_load(&s_probes) - probes_before;
    atomic_store(&s_probing, 0);
    pthread_join(t, NULL);
    TEST_ASSERT_TRUE(freed > 1000);
-   char msg[64];
-   snprintf(msg, sizeof(msg), "a caller waited %lld ms", (long long)atomic_load(&s_worst_wait_ms));
-   TEST_ASSERT_TRUE_MESSAGE(atomic_load(&s_worst_wait_ms) < 150, msg);
+   /* Held for the whole pass, a caller would get in about never, and its
+    * wait would be the pass itself. */
+   char msg[96];
+   snprintf(msg, sizeof(msg), "pass %lld ms: %d callers got in, the longest waited %lld ms",
+            (long long)pass_ms, probes, (long long)atomic_load(&s_worst_wait_ms));
+   TEST_ASSERT_TRUE_MESSAGE(probes >= 10, msg);
+   TEST_ASSERT_TRUE_MESSAGE(atomic_load(&s_worst_wait_ms) * 2 < pass_ms, msg);
 }
 
 int main(void) {

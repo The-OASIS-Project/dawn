@@ -26,6 +26,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -194,6 +195,91 @@ size_t utf8_valid_seq_len(const char *str) {
          return 0;
    }
    return n;
+}
+
+/* Length of the well-formed sequence at s with avail bytes left, or 0. */
+static size_t utf8_seq_len_bounded(const unsigned char *s, size_t avail) {
+   const unsigned char c = s[0];
+   if (c < 0x80)
+      return 1;
+   size_t n;
+   unsigned char lo = 0x80, hi = 0xBF;
+   if (c >= 0xC2 && c <= 0xDF) {
+      n = 2;
+   } else if (c >= 0xE0 && c <= 0xEF) {
+      n = 3;
+      if (c == 0xE0)
+         lo = 0xA0;
+      else if (c == 0xED)
+         hi = 0x9F;
+   } else if (c >= 0xF0 && c <= 0xF4) {
+      n = 4;
+      if (c == 0xF0)
+         lo = 0x90;
+      else if (c == 0xF4)
+         hi = 0x8F;
+   } else {
+      return 0;
+   }
+   if (n > avail || s[1] < lo || s[1] > hi)
+      return 0;
+   for (size_t i = 2; i < n; i++) {
+      if ((s[i] & 0xC0) != 0x80)
+         return 0;
+   }
+   return n;
+}
+
+bool utf8_is_valid(const char *s, size_t len) {
+   const unsigned char *u = (const unsigned char *)s;
+   for (size_t i = 0; i < len;) {
+      const size_t n = utf8_seq_len_bounded(u + i, len - i);
+      if (!n)
+         return false;
+      i += n;
+   }
+   return true;
+}
+
+int utf8_repair_dup(const char *s, size_t len, char **out, size_t *out_len) {
+   if (out)
+      *out = NULL;
+   if (out_len)
+      *out_len = 0;
+   if (!s || !out || utf8_is_valid(s, len))
+      return 0;
+   const unsigned char *u = (const unsigned char *)s;
+   size_t bad = 0;
+   for (size_t i = 0; i < len;) {
+      const size_t n = utf8_seq_len_bounded(u + i, len - i);
+      if (n) {
+         i += n;
+      } else {
+         bad++;
+         i++;
+      }
+   }
+   char *copy = malloc(len + bad * 2 + 1); /* each bad byte becomes 3 */
+   if (!copy)
+      return 1;
+   size_t o = 0;
+   for (size_t i = 0; i < len;) {
+      const size_t n = utf8_seq_len_bounded(u + i, len - i);
+      if (n) {
+         memcpy(copy + o, s + i, n);
+         o += n;
+         i += n;
+      } else {
+         memcpy(copy + o, "\xEF\xBF\xBD", 3);
+         o += 3;
+         i++;
+      }
+   }
+   copy[o] = '\0';
+   *out = copy;
+   if (out_len)
+      *out_len = o;
+   return 0;
 }
 
 void sanitize_utf8_for_json(char *str) {

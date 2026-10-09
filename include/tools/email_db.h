@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "auth/auth_db.h"      /* AUTH_DB_SUCCESS / _NOT_FOUND / _FAILURE */
 #include "tools/email_types.h" /* EMAIL_MAX_READ_BODY_LEN */
 
 #define EMAIL_MAX_ACCOUNTS 16
@@ -77,7 +78,8 @@ int email_db_account_create(const email_account_t *acct, int64_t *id_out);
 
 /**
  * @brief Get account by ID.
- * @return 0 on success, 1 on failure/not found
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no such account), or AUTH_DB_FAILURE
+ *         (the database couldn't answer: try again later)
  */
 int email_db_account_get(int64_t id, email_account_t *out);
 
