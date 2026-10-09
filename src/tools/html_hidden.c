@@ -1148,13 +1148,13 @@ bool html_vis_open(html_vis_t *vis,
    f.kind = (unsigned char)kind;
    f.special = in_sorted(tag_name, k_special, sizeof(k_special) / sizeof(k_special[0]));
    f.hard = parent->hard || hv_decl_hard(&d) || hidden_by_default(tag_name);
-   const int v = d.f[HV_VISIBILITY];
+   const int v = (int)d.f[HV_VISIBILITY];
    f.vis = v == HV_SHOWN ? true : (v == HV_HIDDEN ? false : parent->vis);
-   const int fs = d.f[HV_FONT_SIZE];
+   const int fs = (int)d.f[HV_FONT_SIZE];
    f.tiny = fs == HV_HIDDEN ? true : (fs == HV_SHOWN ? false : parent->tiny);
-   const int col = d.f[HV_COLOR];
+   const int col = (int)d.f[HV_COLOR];
    f.clear = col == HV_HIDDEN ? true : (col == HV_SHOWN ? false : parent->clear);
-   const int fill = d.f[HV_TEXT_FILL];
+   const int fill = (int)d.f[HV_TEXT_FILL];
    f.fill = fill == HV_OWN_COLOR
                 ? f.clear
                 : (fill == HV_HIDDEN ? true : (fill == HV_SHOWN ? false : parent->fill));

@@ -73,7 +73,7 @@ uint64_t email_cursor_filter_hash(const char *verb,
       return fnv_str(h, "*", false);
    }
    /* The set, not the order it was asked in. */
-   int64_t sorted[EMAIL_CURSOR_ACCOUNTS];
+   int64_t sorted[EMAIL_CURSOR_ACCOUNTS] = { 0 };
    int n = n_ids < EMAIL_CURSOR_ACCOUNTS ? n_ids : EMAIL_CURSOR_ACCOUNTS;
    for (int i = 0; i < n; i++) {
       int64_t v = ids[i];
