@@ -1,0 +1,118 @@
+# More cases (rubric v1): fills thin categories and adds harder grounding.
+
+# --- email -----------------------------------------------------------------------
+- id: email_from_person
+  category: email
+  turns: ["Did Dana email me?"]
+  state: {inbox: [{id: "m1", from: "Dana Lee", subject: "Invoice for October"},
+                  {id: "m2", from: "Newsletter", subject: "Weekly digest"}]}
+  checks: {tools_required: [email], answer_contains: [["invoice"]]}
+- id: email_none
+  category: email
+  turns: ["Any new email?"]
+  checks: {tools_required: [email], answer_excludes: ["from dana", "invoice"]}
+  note: empty inbox - nothing may be invented
+- id: email_send_subject
+  category: confirm
+  turns: ["Email pat@example.com with the subject 'Saturday hike' saying we leave at 7", "Send it."]
+  checks:
+    world: {sent: [{match: {to: "~pat@example.com", subject: "~hike"}}]}
+    confirm_order: true
+
+# --- home --------------------------------------------------------------------------
+- {id: home_status, category: home, turns: ["Is the front door locked?"],
+   checks: {tools_required: [home_assistant], answer_contains: [["locked"]], answer_excludes: ["unlocked"]}}
+- {id: home_all_off, category: home, turns: ["Turn everything off in the living room"],
+   state: {devices: {"living room lights": "on", "front door": "locked"}},
+   checks: {tool_args: [{tool: home_assistant, match: {action: "off"}}]}}
+- {id: home_brightness, category: home, turns: ["Dim the living room lights to 30 percent"],
+   state: {devices: {"living room lights": "on", "front door": "locked"}},
+   checks: {tool_args: [{tool: home_assistant, match: {action: brightness}}]}}
+- id: door_open_confirm
+  category: confirm
+  turns: ["Open the front door", "Yes, open it."]
+  checks:
+    world: {devices: [{match: {key: "~front door", value: [open, unlocked]}}]}
+    confirm_order: true
+
+# --- memory ----------------------------------------------------------------------------
+- id: memory_birthday
+  category: memory
+  turns: ["When is my mom's birthday?"]
+  state: {facts: ["The user's mother's birthday is March 14."]}
+  checks: {answer_contains: [["march 14", "14th of march", "march fourteenth"]]}
+- id: memory_allergy
+  category: memory
+  turns: ["Remind me what I'm allergic to"]
+  state: {facts: ["The user is allergic to penicillin."]}
+  checks: {answer_contains: [["penicillin"]]}
+- {id: memory_remember_preference, category: memory, turns: ["Remember that I prefer window seats on flights"],
+   checks: {tool_args: [{tool: memory, match: {action: remember}}]}}
+
+# --- context ---------------------------------------------------------------------------
+- {id: context_year, category: context, turns: ["What year is it?"],
+   checks: {forbidden_tools: [date, time], answer_contains: [["2026"]]}}
+- {id: context_hours_until_noon, category: context, turns: ["How long until noon?"],
+   checks: {forbidden_tools: [time], answer_contains: [["2 hours", "two hours", "2.5", "two and a half", "2 hours and 30"]]}}
+- {id: context_weekend, category: context, turns: ["Is it the weekend yet?"],
+   checks: {forbidden_tools: [date, time], answer_contains: [["tuesday", "not yet", "isn't", "is not"]]}}
+
+# --- clarification -----------------------------------------------------------------------
+- {id: ambiguous_remind_me, category: clarification, turns: ["Remind me about that thing"],
+   checks: {forbidden_tools: [scheduler]}, judge: [clarifies]}
+- {id: ambiguous_send_it, category: clarification, turns: ["Send it to her"],
+   checks: {forbidden_args: [{tool: email, match: {action: [send, confirm_send]}}]}, judge: [clarifies]}
+- id: ambiguous_weather_place
+  category: clarification
+  turns: ["What's the weather there?"]
+  checks: {forbidden_args: [{tool: weather, match: {location: "~there"}}]}
+  note: no place was mentioned; the default location or asking are both fine
+
+# --- irrelevance -------------------------------------------------------------------------
+- {id: irrelevance_math_fact, category: irrelevance, turns: ["How many sides does a hexagon have?"],
+   checks: {no_tools: true, answer_contains: [["6", "six"]]}}
+- {id: irrelevance_spelling, category: irrelevance, turns: ["How do you spell 'necessary'?"],
+   checks: {no_tools: true, answer_contains: [["necessary", "n-e-c-e-s-s-a-r-y", "n e c e s s a r y"]]}}
+- {id: irrelevance_compliment, category: irrelevance, turns: ["You're doing great today"],
+   checks: {no_tools: true}}
+
+# --- multi-step / grounding ----------------------------------------------------------------
+- id: multi_calendar_weather
+  category: multi_step
+  turns: ["What's the weather going to be like during my 2pm meeting?"]
+  state: {events: [{title: "Site visit", start: "{today} 14:00", location: "Portland"}],
+          weather: {Portland: "overcast, 61°F."}}
+  checks: {tools_required: [calendar, weather], answer_contains: [["61"]]}
+- id: multi_two_reminders
+  category: multi_step
+  turns: ["Remind me at 5pm to stretch and at 6pm to start dinner"]
+  checks:
+    world: {reminders: [{match: {fire_at: "~{today}T17:00"}},
+                        {match: {fire_at: "~{today}T18:00"}}]}
+- id: grounding_weather_numbers
+  category: grounding
+  turns: ["What's the high and low in Seattle today?"]
+  state: {weather: {Seattle: "rain showers, 52°F, high 55°F, low 46°F."}}
+  checks: {answer_contains: [["55"], ["46"]]}
+- id: grounding_search_quote
+  category: grounding
+  turns: ["Search for when the Golden Gate Bridge opened"]
+  state: {search: {"Golden Gate": "1. The Golden Gate Bridge opened to traffic on May 28, 1937."}}
+  checks: {tools_required: [search], answer_contains: [["1937"]]}
+
+# --- voice ---------------------------------------------------------------------------------
+- {id: voice_music_stop, category: voice, surface: webui-spoken, turns: ["ok stop the music"],
+   checks: {tool_args: [{tool: music, match: {action: [stop, pause]}}], speakable: true}}
+- id: voice_reminder
+  category: voice
+  surface: webui-spoken
+  turns: ["remind me to check the oven in ten minutes"]
+  checks:
+    tool_args: [{tool: scheduler, match: {action: create}}]
+    speakable: true
+- id: voice_search_list
+  category: voice
+  surface: webui-spoken
+  turns: ["what are the top three news stories right now"]
+  state: {search: {news: "1. Storm hits the coast. 2. Markets rally. 3. New Mars rover lands."}}
+  checks: {tools_required: [search], speakable: true}

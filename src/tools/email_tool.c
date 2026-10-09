@@ -38,6 +38,7 @@
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "toml.h"
 #include "tools/contact_resolve.h"
 #include "tools/email_digest.h"
 #include "tools/email_display.h"
@@ -45,7 +46,6 @@
 #include "tools/email_service.h"
 #include "tools/email_transfer.h"
 #include "tools/oauth_client.h"
-#include "tools/toml.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 

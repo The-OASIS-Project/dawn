@@ -107,9 +107,17 @@ static bool is_duplicate_in_claude_history(struct json_object *history,
                                            const char *tool_name,
                                            const char *tool_args,
                                            int min_idx) {
+   /* Claude stores the input as an object, and json-c prints it in its own spacing, so
+    * compare parsed JSON: no args is an empty object; args that aren't JSON match nothing */
+   json_object *want = (tool_args && tool_args[0] != '\0') ? json_tokener_parse(tool_args)
+                                                           : json_object_new_object();
+   if (!want)
+      return false;
+
+   bool found = false;
    int len = json_object_array_length(history);
 
-   for (int i = len - 1; i >= min_idx; i--) {
+   for (int i = len - 1; i >= min_idx && !found; i--) {
       json_object *msg = json_object_array_get_idx(history, i);
       if (!msg)
          continue;
@@ -150,24 +158,16 @@ static bool is_duplicate_in_claude_history(struct json_object *history,
          if (!prev_name || strcmp(prev_name, tool_name) != 0)
             continue;
 
-         /* Claude stores input as object, compare JSON string representation */
          json_object *input_obj;
-         if (json_object_object_get_ex(block, "input", &input_obj)) {
-            const char *prev_args = json_object_to_json_string(input_obj);
-            bool args_match = false;
-            if ((!prev_args || prev_args[0] == '\0') && (!tool_args || tool_args[0] == '\0')) {
-               args_match = true;
-            } else if (prev_args && tool_args && strcmp(prev_args, tool_args) == 0) {
-               args_match = true;
-            }
-
-            if (args_match) {
-               return true;
-            }
+         if (json_object_object_get_ex(block, "input", &input_obj) &&
+             json_object_equal(input_obj, want)) {
+            found = true;
+            break;
          }
       }
    }
-   return false;
+   json_object_put(want);
+   return found;
 }
 
 /* Index of the last real user message — the start of the current turn.  A repeat

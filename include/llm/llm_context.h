@@ -102,17 +102,6 @@ void llm_context_cleanup(void);
 int llm_context_get_size(llm_type_t type, cloud_provider_t provider, const char *model);
 
 /**
- * @brief Query local LLM server for context size
- *
- * Makes HTTP request to /props endpoint and extracts n_ctx.
- * Result is cached for subsequent calls.
- *
- * @param endpoint Local LLM endpoint URL (e.g., "http://127.0.0.1:8080")
- * @return Context size, or LLM_CONTEXT_DEFAULT_LOCAL on failure
- */
-int llm_context_query_local(const char *endpoint);
-
-/**
  * @brief Refresh cached local context size
  *
  * Forces re-query of /props endpoint. Use after server restart

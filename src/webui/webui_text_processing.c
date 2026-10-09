@@ -424,6 +424,8 @@ static void text_worker_persist_final(session_t *session,
 
 static void *text_worker_thread(void *arg) {
    text_work_t *work = (text_work_t *)arg;
+   /* work is never NULL: turn_queue_enqueue refuses NULL work */
+   // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
    session_t *session = work->session;
    char *text = work->text;
    unsigned int expected_gen = work->request_gen;

@@ -2059,6 +2059,30 @@ admin_resp_code_t admin_client_ota_push_all(int fd,
    return recv_text_response(fd, response, resp_len);
 }
 
+admin_resp_code_t admin_client_llm_capture(int fd,
+                                           const char *admin_user,
+                                           const char *admin_password,
+                                           const char *username,
+                                           const char *dir,
+                                           int count,
+                                           char *response,
+                                           size_t resp_len) {
+   if (!admin_user || !admin_password || !username || !dir || count < 0) {
+      return ADMIN_RESP_FAILURE;
+   }
+   char payload[ADMIN_MSG_MAX_PAYLOAD];
+   const size_t auth_len = build_auth_prefix(payload, admin_user, admin_password);
+   const int n = snprintf(payload + auth_len, sizeof(payload) - auth_len, "%s%c%s%c%d", username,
+                          '\0', dir, '\0', count);
+   if (n < 0 || (size_t)n >= sizeof(payload) - auth_len) {
+      return ADMIN_RESP_FAILURE;
+   }
+   if (send_message(fd, ADMIN_MSG_LLM_CAPTURE, payload, (uint16_t)(auth_len + (size_t)n)) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_mcp_grant(int fd,
                                          const char *username,
                                          const char *alias,

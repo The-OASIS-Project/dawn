@@ -219,6 +219,7 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
    if (text[strspn(text, " \t\r\n")] == '\0') {
       if (image_id_count == 0) {
          send_error_impl(conn->wsi, "EMPTY_MESSAGE", "A message needs text or at least one image");
+         free(built);
          return;
       }
       text = "";
@@ -265,6 +266,8 @@ static void dispatch_text_frame(ws_connection_t *conn, struct json_object *paylo
       const bool is_string = json_object_is_type(ref_obj, json_type_string);
       const char *ref = is_string ? json_object_get_string(ref_obj) : NULL;
       if (!webui_client_ref_valid(ref) ||
+          /* webui_client_ref_valid(NULL) is false, so strlen never sees NULL */
+          // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
           (size_t)json_object_get_string_len(ref_obj) != strlen(ref)) {
          send_error_impl(conn->wsi, "INVALID_CLIENT_REF",
                          "client_ref must be 1 to 64 printable ASCII characters");

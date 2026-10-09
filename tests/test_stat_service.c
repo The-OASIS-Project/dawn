@@ -29,15 +29,18 @@
 #include "core/stat_db.h"
 #include "core/stat_net_interpret.h"
 #include "core/stat_service.h"
+#include "test_tmp.h"
 #include "tools/stat_render.h"
 #include "unity.h"
 
-#define TEST_DB "/tmp/dawn_stat_test.db"
+static char TEST_DB[TEST_TMP_PATH_MAX];
+static char TEST_DB_WAL[TEST_TMP_PATH_MAX + 4];
+static char TEST_DB_SHM[TEST_TMP_PATH_MAX + 4];
 
 static void unlink_db(void) {
    unlink(TEST_DB);
-   unlink(TEST_DB "-wal");
-   unlink(TEST_DB "-shm");
+   unlink(TEST_DB_WAL);
+   unlink(TEST_DB_SHM);
 }
 
 void setUp(void) {
@@ -769,6 +772,9 @@ void test_interpret_since_update_dwell(void) {
 }
 
 int main(void) {
+   test_tmp_path(TEST_DB, sizeof(TEST_DB), "dawn_stat_test.db");
+   snprintf(TEST_DB_WAL, sizeof(TEST_DB_WAL), "%s-wal", TEST_DB);
+   snprintf(TEST_DB_SHM, sizeof(TEST_DB_SHM), "%s-shm", TEST_DB);
    UNITY_BEGIN();
    RUN_TEST(test_topic_gating);
    RUN_TEST(test_render_primary_min_metric);

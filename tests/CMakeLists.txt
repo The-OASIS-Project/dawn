@@ -13,19 +13,22 @@
 
 set(CMAKE_C_STANDARD 11)
 
+# Source root directory (parent of tests/)
+set(SRC_ROOT ${CMAKE_SOURCE_DIR})
+
 # Unity test framework (vendored, matches STAT/ECHO repos)
 # NOTE: DAWN uses EXCLUDE_FROM_ALL for tests because the Jetson target has
 # limited resources. This means ctest is a test-runner only — `make tests-ci`
 # must be run first to build the binaries.
-add_library(unity STATIC unity/unity.c)
-target_include_directories(unity PUBLIC unity)
+add_library(unity STATIC ${SRC_ROOT}/third_party/unity/unity.c)
+target_include_directories(unity PUBLIC ${SRC_ROOT}/third_party/unity)
 target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE)
-
-# Source root directory (parent of tests/)
-set(SRC_ROOT ${CMAKE_SOURCE_DIR})
 
 # Include directories (inherited from parent, but be explicit for clarity)
 include_directories(${SRC_ROOT}/include)
+include_directories(${SRC_ROOT}/third_party/nlohmann ${SRC_ROOT}/third_party/tomlc99
+                    ${SRC_ROOT}/third_party/tinyexpr ${SRC_ROOT}/third_party/utfcpp
+                    ${SRC_ROOT}/third_party/piper ${SRC_ROOT}/third_party/vosk)
 
 # Aggregate targets — populated by dawn_add_unit_test() below.
 add_custom_target(tests-ci  COMMENT "Building CI-safe unit tests")
@@ -469,7 +472,7 @@ if(EXISTS ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c)
               ${SRC_ROOT}/dawn_satellite/src/ota_launch_core.c
               ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
       INCLUDES ${SRC_ROOT}/dawn_satellite/include
-      DEFINES OTA_DATA_DIR="/tmp/dawn_test_ota_launch"
+      DEFINES OTA_DATA_DIR="${CMAKE_CURRENT_BINARY_DIR}/dawn_test_ota_launch"
       LIBS    unity
       LABEL   ci)
 
@@ -478,7 +481,7 @@ if(EXISTS ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c)
               ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c
               ${SRC_ROOT}/src/core/ota_manifest.c
       INCLUDES ${SRC_ROOT}/dawn_satellite/include
-      DEFINES OTA_KEYRING_PATH="/tmp/dawn_test_ota_keyring"
+      DEFINES OTA_KEYRING_PATH="${CMAKE_CURRENT_BINARY_DIR}/dawn_test_ota_keyring"
       LIBS    unity ${SODIUM_LIBRARIES} ${JSONC_LIBRARIES}
       LABEL   ci)
 else()
@@ -1081,7 +1084,7 @@ dawn_add_unit_test(test_claude_format
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/core/hash_util.c
@@ -1105,7 +1108,7 @@ dawn_add_unit_test(test_prompt_cache_layout
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/core/hash_util.c
@@ -1402,7 +1405,7 @@ dawn_add_unit_test(test_llm_capabilities
    SOURCES test_llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
@@ -1411,7 +1414,7 @@ dawn_add_unit_test(test_llm_capabilities
 dawn_add_unit_test(test_llm_models_toml
    SOURCES test_llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_models_toml.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity
    LABEL   ci)
 
@@ -1471,7 +1474,7 @@ dawn_add_unit_test(test_llm_pricing
    SOURCES test_llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity m
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
@@ -1545,6 +1548,30 @@ dawn_add_unit_test(test_iso8601
    LIBS    unity
    LABEL   ci)
 
+# Reading CalDAV responses (multistatus XML, iCalendar via libical), no server.
+if(LIBXML2_FOUND AND LIBICAL_FOUND)
+   dawn_add_unit_test(test_caldav_parse
+      SOURCES test_caldav_parse.c
+              ${SRC_ROOT}/src/tools/caldav_client.c
+      LIBS    dawn_common unity ${LIBXML2_LIBRARIES} ${LIBICAL_LIBRARIES} ${CURL_LIBRARIES}
+      LABEL   ci)
+   target_include_directories(test_caldav_parse PRIVATE ${LIBXML2_INCLUDE_DIRS})
+   target_compile_definitions(test_caldav_parse PRIVATE DAWN_ENABLE_CALENDAR_TOOL)
+endif()
+
+# The URL fetcher's private-address block (IP literals only, no network).
+dawn_add_unit_test(test_url_whitelist
+   SOURCES test_url_whitelist.c
+           ${SRC_ROOT}/src/tools/url_fetcher.c
+           ${SRC_ROOT}/src/tools/url_fetcher_detect.c
+           ${SRC_ROOT}/src/tools/url_fetcher_fallback.c
+           ${SRC_ROOT}/src/tools/html_parser.c
+           ${SRC_ROOT}/src/tools/html_hidden.c
+           ${SRC_ROOT}/src/tools/html_hidden_css.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} m
+   LABEL   ci)
+
 # sanitize_utf8_for_json — the guard that keeps invalid UTF-8 out of WebSocket
 # text frames (string_utils.c lives in dawn_common).
 dawn_add_unit_test(test_string_utils
@@ -1585,6 +1612,12 @@ dawn_add_unit_test(test_admin_cache_stats
    SOURCES test_admin_cache_stats.c
            ${SRC_ROOT}/src/auth/admin_socket_cache.c
    LIBS    dawn_common unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_llm_request_capture
+   SOURCES test_llm_request_capture.c
+           ${SRC_ROOT}/src/llm/llm_request_capture.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} ${CURL_LIBRARIES} pthread
    LABEL   ci)
 
 dawn_add_unit_test(test_scheduled_context
@@ -1737,7 +1770,7 @@ dawn_add_unit_test(test_embed_tokenizer
 dawn_add_unit_test(test_rate_limiter
    SOURCES test_rate_limiter.c
            ${SRC_ROOT}/src/core/rate_limiter.c
-   LIBS    unity pthread
+   LIBS    unity pthread ${SODIUM_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_llm_interrupt_ctx
@@ -1803,6 +1836,13 @@ dawn_add_unit_test(test_auth_db_migrations_v75
 
 dawn_add_unit_test(test_conv_db_events
    SOURCES test_conv_db_events.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# The auth database's cached statements: each prepared once, finalize leaves none.
+dawn_add_unit_test(test_auth_db_statements
+   SOURCES test_auth_db_statements.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -2017,7 +2057,7 @@ dawn_add_unit_test(test_config_roundtrip
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/config/config_defaults.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    unity json-c m pthread
    LABEL   ci)
 
@@ -2025,8 +2065,8 @@ dawn_add_unit_test(test_calculator
    SOURCES test_calculator.c
            ${SRC_ROOT}/src/tools/calculator.c
            ${SRC_ROOT}/src/tools/calculator_bignum.c
-           ${SRC_ROOT}/src/tools/tinyexpr.c
-   LIBS    dawn_common unity m pthread
+           ${SRC_ROOT}/third_party/tinyexpr/tinyexpr.c
+   LIBS    dawn_common unity m pthread ${SODIUM_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_event_payload
@@ -2077,7 +2117,7 @@ dawn_add_unit_test(test_tool_registry
 dawn_add_unit_test(test_phone_audio_config
    SOURCES test_phone_audio_config.c
            ${SRC_ROOT}/src/tools/phone_audio_config.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
            ${SRC_ROOT}/src/audio/phone_apm.cpp
            ${SRC_ROOT}/common/src/logging.c
    LIBS    unity
@@ -2166,7 +2206,7 @@ dawn_add_unit_test(test_summarizer_quality
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_defaults.c
            ${SRC_ROOT}/src/config/config_env.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common ${CURL_LIBRARIES} ${JSONC_LIBRARIES} m
    LABEL   hardware)
 
@@ -2220,6 +2260,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_request_capture.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
@@ -2282,7 +2323,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/config/config_defaults.c
            ${SRC_ROOT}/src/config/config_validate.c
            ${SRC_ROOT}/src/config/config_env.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    INCLUDES /usr/local/include/onnxruntime
    LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
@@ -2332,6 +2373,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_request_capture.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
@@ -2394,7 +2436,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/config/config_defaults.c
            ${SRC_ROOT}/src/config/config_validate.c
            ${SRC_ROOT}/src/config/config_env.c
-           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)

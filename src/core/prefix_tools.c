@@ -509,6 +509,8 @@ void prefix_tools_apply(struct json_object *hist,
    if (!frozen) {
       bind_first(hist, prefix, catalog, session_id, out);
    } else if (has_names(frozen)) {
+      /* has_names() is pure, so cp is non-NULL on this path */
+      // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
       convert_once(hist, prefix, rec, frozen, catalog, cp->tool_schemas, session_id, out);
    }
    if (out->bind) {

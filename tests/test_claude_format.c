@@ -44,7 +44,7 @@
 #include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "unity.h"
 
 /* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
@@ -76,6 +76,10 @@ bool llm_tools_enabled(const llm_resolved_config_t *c) {
 }
 bool llm_tools_suppressed(void) {
    return s_suppressed;
+}
+static const char *s_utility_effort = "";
+const char *llm_get_current_utility_effort(void) {
+   return s_utility_effort;
 }
 int llm_budget_tokens_for_effort(const char *effort) {
    return (effort && strcmp(effort, "low") == 0) ? 1024 : 8192;
@@ -148,6 +152,7 @@ void setUp(void) {
    g_config.llm.max_tokens = 4096;
    s_mode = "disabled";
    s_effort = "medium";
+   s_utility_effort = "";
    s_suppressed = false;
 }
 void tearDown(void) {
@@ -350,6 +355,35 @@ static void test_utility_call_gets_the_cheapest_legal_setting(void) {
    json_object_put(req);
    req = request_for("claude-sonnet-5");
    TEST_ASSERT_EQUAL_STRING("disabled", thinking_type(req));
+   json_object_put(req);
+}
+
+/* Haiku 5.5 takes no budget mode: a budget pick goes out as adaptive, and a
+ * utility call (extraction, compaction) turns thinking off rather than
+ * running at the model's default effort.  No sampling parameters: 400 there. */
+static void test_haiku_5_5_never_gets_a_budget(void) {
+   s_mode = "enabled";
+   s_effort = "low";
+   json_object *req = request_for("claude-haiku-5-5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("low", effort_of(req));
+   json_object *t = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "thinking", &t));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(t, "budget_tokens", NULL));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(req, "temperature", NULL));
+   json_object_put(req);
+
+   s_suppressed = true;
+   req = request_for("claude-haiku-5-5");
+   TEST_ASSERT_EQUAL_STRING("disabled", thinking_type(req));
+   TEST_ASSERT_NULL(effort_of(req));
+   json_object_put(req);
+
+   /* Extraction with [memory] extraction_effort: adaptive at that effort. */
+   s_utility_effort = "medium";
+   req = request_for("claude-haiku-5-5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("medium", effort_of(req));
    json_object_put(req);
 }
 
@@ -567,6 +601,7 @@ int main(void) {
    RUN_TEST(test_openrouter_slug_gets_its_models_rules);
    RUN_TEST(test_budget_model_gets_enabled_with_budget);
    RUN_TEST(test_utility_call_gets_the_cheapest_legal_setting);
+   RUN_TEST(test_haiku_5_5_never_gets_a_budget);
    RUN_TEST(test_tool_use_without_thinking_keeps_reasoning);
    RUN_TEST(test_final_answer_replays_its_blocks);
    RUN_TEST(test_results_without_their_call_become_notes);

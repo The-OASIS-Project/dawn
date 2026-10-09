@@ -1460,6 +1460,8 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    if (!resolved || !session_config) {
       return 1;
    }
+   /* Callers pass uninitialized stack structs: every field starts empty. */
+   memset(resolved, 0, sizeof(*resolved));
 
    // Use session config directly (sessions own their config)
    resolved->type = session_config->type;

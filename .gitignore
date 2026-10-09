@@ -66,3 +66,11 @@ docs/DONE.md
 # pre-push.hook if present and executable.  For per-developer policies that
 # shouldn't live in the public repo.
 *.local.hook
+
+# LLM quality suite: local captures, results, labels, logs and personas
+llm_testing/quality/.judge_cache.json
+llm_testing/quality/captures*/
+llm_testing/quality/personas/
+llm_testing/quality/*.json
+llm_testing/quality/*.log
+quality_[0-9]*.json

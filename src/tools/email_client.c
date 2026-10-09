@@ -1267,8 +1267,9 @@ static bool parse_list_folder_name(const char *line, char *fname, size_t fname_l
    /* Skip delimiter token (e.g. "/" or ".") — may be quoted */
    if (*p == '"') {
       p = strchr(p + 1, '"');
-      if (p)
-         p++;
+      if (!p)
+         return false; /* unterminated quote: a malformed (or hostile) LIST line */
+      p++;
    } else {
       while (*p && *p != ' ')
          p++;

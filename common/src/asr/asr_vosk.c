@@ -31,8 +31,8 @@
 #include <string.h>
 #include <sys/time.h>
 
-#include "asr/vosk_api.h"
 #include "logging_common.h"
+#include "vosk_api.h"
 
 /**
  * @brief Vosk ASR context structure

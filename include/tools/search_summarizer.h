@@ -118,13 +118,6 @@ int search_summarizer_process(const char *search_results,
 const summarizer_config_t *search_summarizer_get_config(void);
 
 /**
- * @brief Check if summarizer is initialized
- *
- * @return 1 if initialized, 0 otherwise
- */
-int search_summarizer_is_initialized(void);
-
-/**
  * @brief Get human-readable backend name
  *
  * @param backend Backend type

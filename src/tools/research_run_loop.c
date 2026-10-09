@@ -570,7 +570,7 @@ static char *research_extract_summary(const char *prose) {
     * this lead becomes a chat message body emitted into a JSON WS frame, so a partial
     * UTF-8 sequence would break the frame. Sanitize before appending the ASCII "…". */
    sanitize_utf8_for_json(out);
-   strcat(out, "…");
+   memcpy(out + strlen(out), "…", sizeof("…"));
    return out;
 }
 

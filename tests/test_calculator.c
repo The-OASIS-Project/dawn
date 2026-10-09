@@ -21,6 +21,7 @@
  * Unit tests for calculator tool (evaluate, convert, base_convert, random).
  */
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -361,6 +362,30 @@ static void test_random_single(void) {
    free(s);
 }
 
+/* A range past 2^31 is drawn from in full, not cut to RAND_MAX */
+static void test_random_large_range(void) {
+   bool above = false;
+   for (int i = 0; i < 64 && !above; i++) {
+      char *s = calculator_random("1 to 10000000000");
+      TEST_ASSERT_NOT_NULL(s);
+      long long val = strtoll(s, NULL, 10);
+      TEST_ASSERT_TRUE(val >= 1 && val <= 10000000000LL);
+      above = val > 2147483647LL;
+      free(s);
+   }
+   TEST_ASSERT_TRUE(above);
+}
+
+static void test_random_full_and_single_value(void) {
+   char *s = calculator_random("-9223372036854775808 to 9223372036854775807");
+   TEST_ASSERT_NOT_NULL(s);
+   free(s);
+   s = calculator_random("7 to 7");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("7", s);
+   free(s);
+}
+
 /* ── Main ───────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -422,6 +447,8 @@ int main(void) {
    /* random */
    RUN_TEST(test_random_range);
    RUN_TEST(test_random_single);
+   RUN_TEST(test_random_large_range);
+   RUN_TEST(test_random_full_and_single_value);
 
    return UNITY_END();
 }

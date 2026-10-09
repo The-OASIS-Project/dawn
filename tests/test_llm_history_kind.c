@@ -277,6 +277,87 @@ static void test_fold_keeps_an_envelopes_context_apart(void) {
    json_object_put(h);
 }
 
+/* A turn's notes move into its question, after its context and before the
+ * user's words; a tool change stays where it is, and the history itself is
+ * untouched. */
+static void test_notes_go_before_the_words(void) {
+   const char *in = "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"CTX\","
+                    "\"_kind\":\"turn_context\"},{\"type\":\"text\",\"text\":\"Hi\"}],\"id\":1},"
+                    "{\"role\":\"system\",\"content\":\"I\",\"_kind\":\"instruction\"},"
+                    "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"},"
+                    "{\"role\":\"system\",\"content\":\"T\",\"_kind\":\"tool_change\"},"
+                    "{\"role\":\"assistant\",\"content\":\"Hello\"}]";
+   struct json_object *h = parse(in);
+   struct json_object *out = llm_history_notes_before_words(h);
+   TEST_ASSERT_NOT_NULL(out);
+   assert_json("[{\"role\":\"user\",\"id\":1,\"content\":["
+               "{\"type\":\"text\",\"text\":\"CTX\",\"_kind\":\"turn_context\"},"
+               "{\"type\":\"text\",\"text\":\"[Operator note] I\",\"_kind\":\"instruction\"},"
+               "{\"type\":\"text\",\"text\":\"[Operator note] D\",\"_kind\":\"directive\"},"
+               "{\"type\":\"text\",\"text\":\"Hi\"}]},"
+               "{\"role\":\"system\",\"content\":\"T\",\"_kind\":\"tool_change\"},"
+               "{\"role\":\"assistant\",\"content\":\"Hello\"}]",
+               out);
+   struct json_object *same = parse(in);
+   assert_json(json_object_to_json_string_ext(same, FLAGS), h);
+   json_object_put(same);
+   json_object_put(out);
+   json_object_put(h);
+}
+
+/* A question that is plain text becomes parts: the note, then the words. */
+static void test_notes_before_a_plain_question(void) {
+   struct json_object *h = parse(
+       "[{\"role\":\"user\",\"content\":\"Turn it up\"},"
+       "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"}]");
+   struct json_object *out = llm_history_notes_before_words(h);
+   assert_json("[{\"role\":\"user\",\"content\":["
+               "{\"type\":\"text\",\"text\":\"[Operator note] D\",\"_kind\":\"directive\"},"
+               "{\"type\":\"text\",\"text\":\"Turn it up\"}]}]",
+               out);
+   json_object_put(out);
+   json_object_put(h);
+}
+
+/* An envelope's notes join the context message in front of it, never the
+ * envelope; a note after a reply (no question before it) stays put. */
+static void test_notes_of_an_envelope_and_after_a_reply(void) {
+   struct json_object *h = parse(
+       "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"CTX\","
+       "\"_kind\":\"turn_context\"}]},"
+       "{\"role\":\"user\",\"content\":\"SMS TEXT\",\"_kind\":\"envelope\"},"
+       "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"},"
+       "{\"role\":\"assistant\",\"content\":\"A\"},"
+       "{\"role\":\"system\",\"content\":\"D2\",\"_kind\":\"directive\"}]");
+   struct json_object *out = llm_history_notes_before_words(h);
+   assert_json("[{\"role\":\"user\",\"content\":["
+               "{\"type\":\"text\",\"text\":\"CTX\",\"_kind\":\"turn_context\"},"
+               "{\"type\":\"text\",\"text\":\"[Operator note] D\",\"_kind\":\"directive\"}]},"
+               "{\"role\":\"user\",\"content\":\"SMS TEXT\",\"_kind\":\"envelope\"},"
+               "{\"role\":\"assistant\",\"content\":\"A\"},"
+               "{\"role\":\"system\",\"content\":\"D2\",\"_kind\":\"directive\"}]",
+               out);
+   json_object_put(out);
+   json_object_put(h);
+}
+
+/* An envelope with no context message in front gets one for its notes; an
+ * earlier envelope there is never taken for one. */
+static void test_envelope_notes_never_join_an_envelope(void) {
+   struct json_object *h = parse(
+       "[{\"role\":\"user\",\"content\":\"FIRST SMS\",\"_kind\":\"envelope\"},"
+       "{\"role\":\"user\",\"content\":\"SECOND SMS\",\"_kind\":\"envelope\"},"
+       "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"}]");
+   struct json_object *out = llm_history_notes_before_words(h);
+   assert_json("[{\"role\":\"user\",\"content\":\"FIRST SMS\",\"_kind\":\"envelope\"},"
+               "{\"role\":\"user\",\"content\":["
+               "{\"type\":\"text\",\"text\":\"[Operator note] D\",\"_kind\":\"directive\"}]},"
+               "{\"role\":\"user\",\"content\":\"SECOND SMS\",\"_kind\":\"envelope\"}]",
+               out);
+   json_object_put(out);
+   json_object_put(h);
+}
+
 /* The frozen prefix is the first message only when it is marked as one; its
  * in-force record is read without being made unless the caller asks. */
 static void test_prefix_and_its_in_force_record(void) {
@@ -316,5 +397,9 @@ int main(void) {
    RUN_TEST(test_rows_carry_a_message_kind_and_skip_the_prefix);
    RUN_TEST(test_strip_internal_drops_context);
    RUN_TEST(test_wire_copy_strips_part_keys);
+   RUN_TEST(test_notes_go_before_the_words);
+   RUN_TEST(test_notes_before_a_plain_question);
+   RUN_TEST(test_notes_of_an_envelope_and_after_a_reply);
+   RUN_TEST(test_envelope_notes_never_join_an_envelope);
    return UNITY_END();
 }

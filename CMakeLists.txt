@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.10)
 
 project(dawn LANGUAGES C CXX)
 
+# compile_commands.json in the build directory, for clang-tidy and editors (clangd).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -97,6 +100,9 @@ configure_file(${CMAKE_SOURCE_DIR}/cmake/git_sha.c.in ${CMAKE_BINARY_DIR}/genera
 # Include directories for new source layout
 include_directories(include)
 include_directories(common/include)
+# Vendored third-party code (third_party/README.md), included by bare file name.
+include_directories(third_party/nlohmann third_party/tomlc99 third_party/tinyexpr
+                    third_party/utfcpp third_party/piper third_party/vosk)
 
 # models.toml, compiled in: the registry loader falls back to it for any table
 # the models.toml on disk lacks, so an older copy (a service install keeps its
@@ -350,7 +356,7 @@ endif()
 
 # Text to Speech - check if target already exists (may be created by common/)
 if(NOT TARGET piper)
-    add_library(piper STATIC src/tts/piper.cpp)
+    add_library(piper STATIC third_party/piper/piper.cpp)
     target_link_libraries(piper onnxruntime)
 endif()
 
@@ -549,7 +555,7 @@ add_compile_options(-Wall -Werror)
 # pointer arithmetic trips -Warray-bounds under -O2 (4 warnings, all known-benign
 # upstream).  Suppress the class for that one file rather than patching vendored code
 # or disabling -Warray-bounds globally.
-set_source_files_properties(src/tools/tinyexpr.c PROPERTIES COMPILE_OPTIONS "-Wno-array-bounds")
+set_source_files_properties(third_party/tinyexpr/tinyexpr.c PROPERTIES COMPILE_OPTIONS "-Wno-array-bounds")
 
 # Common library added here (after whisper.cpp) so dawn_common_asr can link whisper
 add_subdirectory(common)
@@ -600,6 +606,7 @@ set(DAWN_SOURCES
     src/llm/llm_openai_history.c
     src/llm/llm_openai_responses.c
     src/llm/llm_openai_responses_input.c
+    src/llm/llm_request_capture.c
     src/llm/llm_claude.c
     src/llm/llm_claude_format.c
     src/llm/llm_claude_tools.c
@@ -688,7 +695,7 @@ set(DAWN_SOURCES
     src/tools/weather_service.c
     src/tools/calculator.c
     src/tools/calculator_bignum.c
-    src/tools/tinyexpr.c
+    third_party/tinyexpr/tinyexpr.c
     src/tools/search_summarizer.c
     src/tools/tfidf_summarizer.c
     src/tools/url_fetcher.c
@@ -704,7 +711,7 @@ set(DAWN_SOURCES
     src/core/iso8601.c
     src/core/str_fuzzy.c
     src/core/scheduled_context.c
-    src/tools/toml.c
+    third_party/tomlc99/toml.c
 
     # Config subsystem
     src/config/config_defaults.c
@@ -1053,6 +1060,7 @@ if(ENABLE_AUTH)
         src/auth/admin_socket_research.c
         src/auth/admin_socket_schwab.c
         src/auth/admin_socket_cache.c
+        src/auth/admin_socket_llm.c
         src/auth/auth_db_session.c
         src/auth/auth_db_rate_limit.c
         src/auth/auth_db_audit.c
@@ -1391,6 +1399,7 @@ add_subdirectory(tests EXCLUDE_FROM_ALL)
 if(ENABLE_AUTH)
     add_executable(dawn-admin
         dawn-admin/main.c
+        dawn-admin/cmd_llm.c
         dawn-admin/socket_client.c
         dawn-admin/password_prompt.c)
     target_include_directories(dawn-admin PRIVATE ${CMAKE_SOURCE_DIR}/include)

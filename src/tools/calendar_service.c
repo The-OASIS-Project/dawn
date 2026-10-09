@@ -549,7 +549,7 @@ static void expand_rrule(int64_t event_id,
    }
 
    /* Build start time for iterator */
-   struct icaltimetype dtstart;
+   struct icaltimetype dtstart = icaltime_null_time();
    if (ce->all_day) {
       dtstart = icaltime_from_string(ce->dtstart_date[0] ? ce->dtstart_date : "19700101");
       dtstart.is_date = 1;

@@ -159,12 +159,6 @@ void weather_free_response(weather_response_t *response);
 void weather_service_cleanup(void);
 
 /**
- * Check if weather service is initialized (thread-safe)
- * @return 1 if initialized, 0 otherwise
- */
-int weather_service_is_initialized(void);
-
-/**
  * Convert WMO weather code to human-readable string
  * @param code WMO weather code
  * @return Human-readable condition string (static, do not free)

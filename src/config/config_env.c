@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,41 +69,65 @@
          char *end_;                                                                          \
          errno = 0;                                                                           \
          long v_ = strtol(val, &end_, 10);                                                    \
-         if (*end_ != '\0' || errno != 0 || v_ < INT_MIN || v_ > INT_MAX) {                   \
+         if (end_ == val || *end_ != '\0' || errno != 0 || v_ < INT_MIN || v_ > INT_MAX) {    \
             OLOG_WARNING("Config override: %s=%s (invalid integer, ignored)", env_name, val); \
          } else {                                                                             \
-            dest = (int)v_;                                                                   \
-            OLOG_INFO("Config override: %s=%d", env_name, dest);                              \
+            (dest) = (int)v_;                                                                 \
+            OLOG_INFO("Config override: %s=%d", env_name, (dest));                            \
          }                                                                                    \
       }                                                                                       \
    } while (0)
 
-#define ENV_FLOAT(env_name, dest)                               \
-   do {                                                         \
-      const char *val = getenv(env_name);                       \
-      if (val) {                                                \
-         dest = (float)atof(val);                               \
-         OLOG_INFO("Config override: %s=%.2f", env_name, dest); \
-      }                                                         \
+#define ENV_FLOAT(env_name, dest)                                                            \
+   do {                                                                                      \
+      const char *val = getenv(env_name);                                                    \
+      if (val) {                                                                             \
+         char *end_;                                                                         \
+         errno = 0;                                                                          \
+         float v_ = strtof(val, &end_);                                                      \
+         if (end_ == val || *end_ != '\0' || errno != 0 || !isfinite(v_)) {                  \
+            OLOG_WARNING("Config override: %s=%s (invalid number, ignored)", env_name, val); \
+         } else {                                                                            \
+            (dest) = v_;                                                                     \
+            OLOG_INFO("Config override: %s=%.2f", env_name, (dest));                         \
+         }                                                                                   \
+      }                                                                                      \
    } while (0)
 
-#define ENV_BOOL(env_name, dest)                                                 \
-   do {                                                                          \
-      const char *val = getenv(env_name);                                        \
-      if (val) {                                                                 \
-         dest = (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 ||        \
-                 strcasecmp(val, "yes") == 0);                                   \
-         OLOG_INFO("Config override: %s=%s", env_name, dest ? "true" : "false"); \
-      }                                                                          \
+#define ENV_BOOL(env_name, dest)                                                                \
+   do {                                                                                         \
+      const char *val = getenv(env_name);                                                       \
+      if (val) {                                                                                \
+         int b_ = -1;                                                                           \
+         if (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 ||                           \
+             strcasecmp(val, "yes") == 0 || strcasecmp(val, "on") == 0)                         \
+            b_ = 1;                                                                             \
+         else if (strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0 ||                     \
+                  strcasecmp(val, "no") == 0 || strcasecmp(val, "off") == 0)                    \
+            b_ = 0;                                                                             \
+         if (b_ < 0) {                                                                          \
+            OLOG_WARNING("Config override: %s=%s (not true or false, ignored)", env_name, val); \
+         } else {                                                                               \
+            (dest) = (b_ == 1);                                                                 \
+            OLOG_INFO("Config override: %s=%s", env_name, (dest) ? "true" : "false");           \
+         }                                                                                      \
+      }                                                                                         \
    } while (0)
 
-#define ENV_SIZE_T(env_name, dest)                             \
-   do {                                                        \
-      const char *val = getenv(env_name);                      \
-      if (val) {                                               \
-         dest = (size_t)atol(val);                             \
-         OLOG_INFO("Config override: %s=%zu", env_name, dest); \
-      }                                                        \
+#define ENV_SIZE_T(env_name, dest)                                                              \
+   do {                                                                                         \
+      const char *val = getenv(env_name);                                                       \
+      if (val) {                                                                                \
+         char *end_;                                                                            \
+         errno = 0;                                                                             \
+         unsigned long long v_ = strtoull(val, &end_, 10);                                      \
+         if (strchr(val, '-') || end_ == val || *end_ != '\0' || errno != 0 || v_ > SIZE_MAX) { \
+            OLOG_WARNING("Config override: %s=%s (invalid size, ignored)", env_name, val);      \
+         } else {                                                                               \
+            (dest) = (size_t)v_;                                                                \
+            OLOG_INFO("Config override: %s=%zu", env_name, (dest));                             \
+         }                                                                                      \
+      }                                                                                         \
    } while (0)
 
 /* =============================================================================
@@ -1495,6 +1520,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->memory.extraction_model));
    json_object_object_add(memory, "extraction_timeout_ms",
                           json_object_new_int(config->memory.extraction_timeout_ms));
+   json_object_object_add(memory, "extraction_effort",
+                          json_object_new_string(config->memory.extraction_effort));
    json_object_object_add(memory, "paraphrase_dedup_enabled",
                           json_object_new_boolean(config->memory.paraphrase_dedup_enabled));
    json_object_object_add(memory, "paraphrase_dedup_threshold",
@@ -2465,6 +2492,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    write_toml_string(fp, "extraction_provider", config->memory.extraction_provider);
    write_toml_string(fp, "extraction_model", config->memory.extraction_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);
+   write_toml_string(fp, "extraction_effort", config->memory.extraction_effort);
    fprintf(fp, "paraphrase_dedup_enabled = %s\n",
            config->memory.paraphrase_dedup_enabled ? "true" : "false");
    fprintf(fp, "paraphrase_dedup_threshold = %.2f\n", config->memory.paraphrase_dedup_threshold);

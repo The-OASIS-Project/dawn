@@ -1,3 +1,9 @@
+/*
+ * Adapted from rhasspy/piper (src/cpp/piper.hpp), MIT License,
+ * Copyright (c) 2022 Michael Hansen. See LICENSE in this directory.
+ * Changed for DAWN: textToAudio() takes a tts_stop_processing flag.
+ */
+
 #ifndef PIPER_H_
 #define PIPER_H_
 

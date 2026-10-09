@@ -52,6 +52,7 @@
 #include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
+#include "llm/llm_request_capture.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
@@ -188,7 +189,8 @@ static struct json_object *flatten_tools_for_responses(struct json_object *cc_to
 /* The request's reasoning effort: the session's mode and effort resolved
  * against the model (models.toml [thinking.openai]).  "disabled" is effort
  * "none"; a model that can't turn reasoning off, or a utility call, gets its
- * lowest level.  Always explicit: an omitted effort runs OpenAI's default. */
+ * lowest level (a utility call with its own utility_effort gets that).  Always explicit: an omitted
+ * effort runs OpenAI's default. */
 static const char *select_reasoning_effort(const char *model_name,
                                            llm_thinking_resolved_t *resolved) {
    llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name, resolved);
@@ -999,6 +1001,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_RESPONSES_ENDPOINT);
       curl_easy_setopt(curl, CURLOPT_URL, full_url);
       curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload);
+      llm_request_capture("openai-responses", full_url, headers, payload);
       curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, responses_write_callback);
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &rctx);

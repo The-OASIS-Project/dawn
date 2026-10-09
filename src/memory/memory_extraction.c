@@ -516,13 +516,15 @@ static void extraction_slot_release_locked(int user_id) {
  * Helper: Build existing profile string
  * ============================================================================= */
 
+#define EXISTING_PROFILE_BUF 4096
+
 static char *build_existing_profile(int user_id) {
-   char *profile = malloc(4096);
+   char *profile = malloc(EXISTING_PROFILE_BUF);
    if (!profile)
       return strdup("(none)");
 
    size_t off = 0;
-   size_t rem = 4096;
+   size_t rem = EXISTING_PROFILE_BUF;
 
    /* Load existing preferences */
    memory_preference_t prefs[10];
@@ -590,7 +592,7 @@ static char *build_existing_profile(int user_id) {
    }
 
    if (off == 0) {
-      strcpy(profile, "(none)");
+      snprintf(profile, EXISTING_PROFILE_BUF, "(none)");
    }
 
    return profile;
@@ -1613,6 +1615,11 @@ static void *extraction_thread(void *arg) {
                                         endpoint_buf, sizeof(endpoint_buf),
                                         "memory_extraction") != SUCCESS) {
       goto cleanup;
+   }
+   /* Reasoning for this call ([memory] extraction_effort).  The session-model
+    * fallback below and the other memory-model calls keep the cheapest setting. */
+   if (strcmp(g_config.memory.extraction_effort, "off") != 0) {
+      safe_strscpy(extraction_config.utility_effort, g_config.memory.extraction_effort);
    }
 
    /* Log the RESOLVED provider/model (post-gateway), not the raw config — under the

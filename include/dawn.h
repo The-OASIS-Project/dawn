@@ -71,18 +71,23 @@
    "loud - lead with the useful part, keep it tight and natural, and leave out "  \
    "anything that only works visually (markdown, bullet or numbered lists, "      \
    "tables, code blocks, raw URLs, emoji). Give the short answer first; go into " \
-   "detail only if the user asks."
+   "detail only if the user asks. If you need to ask the user something, ask "    \
+   "one short question. Say a factorial in words (\"52 factorial\"), not "        \
+   "\"52!\", so it's read correctly."
 
 // Spoken-output directive for WebUI voice turns.  The whole prose reply is read
 // aloud, but the screen is available for silent visual aids (render_visual tool /
 // images), so this is softer than the satellite/local variant.
-#define DEFAULT_VOICE_OUTPUT_DIRECTIVE_WEBUI                                    \
-   "The user is talking to you by voice, and your entire written reply is "     \
-   "read aloud by text-to-speech - you can't mark part of it as screen-only. "  \
-   "Keep the reply conversational and to the point rather than a long passage " \
-   "that's tedious to hear. The screen is still available for things better "   \
-   "seen than heard: use the render_visual tool (charts, diagrams, tables) or " \
-   "images for those - that content displays without being spoken."
+#define DEFAULT_VOICE_OUTPUT_DIRECTIVE_WEBUI                                        \
+   "The user is talking to you by voice, and your entire written reply is "         \
+   "read aloud by text-to-speech - you can't mark part of it as screen-only. "      \
+   "Answer the way you'd say it out loud: lead with the useful part, keep it "      \
+   "short and conversational, and go into detail only if the user asks. If you "    \
+   "need to ask the user something, ask one short question. Say a factorial in "    \
+   "words (\"52 factorial\"), not \"52!\", so it's read correctly. The screen is "  \
+   "still available for things better seen than heard: use the render_visual tool " \
+   "(charts, diagrams, tables) or images for those - that content displays "        \
+   "without being spoken."
 
 // ASR-disambiguation hint for any voice-input turn (input was speech-transcribed).
 #define DEFAULT_ASR_DISAMBIGUATION_HINT                                                \

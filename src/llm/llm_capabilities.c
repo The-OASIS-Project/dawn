@@ -33,7 +33,7 @@
 #include "llm/llm_model_family.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "utils/string_utils.h"
 
 /* A models.toml row: "prefix" = { modes = [...], efforts = [...] }. */
@@ -340,6 +340,8 @@ static void add_mode(llm_thinking_caps_t *out,
       return;
    }
    for (int i = 0; efforts && i < effort_count && i < LLM_EFFORTS_MAX; i++) {
+      /* safe_strscpy evaluates dst once; its other uses are inside sizeof/typeof */
+      // NOLINTNEXTLINE(bugprone-macro-repeated-side-effects)
       safe_strscpy(m->efforts[m->effort_count++], efforts[i]);
    }
 }
@@ -537,8 +539,17 @@ void llm_thinking_resolve_current(llm_type_t type,
    }
    llm_thinking_caps_t caps;
    llm_thinking_caps(type, provider, model, &caps);
+   /* A tools-off call gets the model's cheapest setting, unless it asked for
+    * reasoning (memory extraction's [memory] extraction_effort): then the
+    * model's first reasoning mode at that effort. */
+   const bool utility = llm_tools_suppressed();
+   const char *utility_effort = utility ? llm_get_current_utility_effort() : "";
+   if (utility_effort[0]) {
+      llm_thinking_resolve(&caps, "auto", utility_effort, false, out);
+      return;
+   }
    llm_thinking_resolve(&caps, llm_get_current_thinking_mode(), llm_get_current_reasoning_effort(),
-                        llm_tools_suppressed(), out);
+                        utility, out);
 }
 
 int llm_thinking_budget_size(const char *level) {

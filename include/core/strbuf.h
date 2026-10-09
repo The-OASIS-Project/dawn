@@ -140,11 +140,6 @@ bool strbuf_oom(const strbuf_t *sb);
 size_t strbuf_len(const strbuf_t *sb);
 
 /**
- * @brief Current capacity (allocation size).
- */
-size_t strbuf_cap(const strbuf_t *sb);
-
-/**
  * @brief Current pointer to NUL-terminated buffer contents (read-only view).
  *
  * Returns "" (a static empty string) if the buffer has never been written to.

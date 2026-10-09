@@ -1324,8 +1324,12 @@ static int pack_param(const tool_metadata_t *meta,
       return FAILURE;
    }
    char *at = value_buf + cur_len;
+   /* tool_value_escape writes the terminating NUL after the delimiters */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(at, "::", 2);
    memcpy(at + 2, param->field_name, name_len);
+   /* tool_value_escape writes the terminating NUL after the delimiters */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(at + 2 + name_len, "::", 2);
    tool_value_escape(val_str, strlen(val_str), at + 4 + name_len, remaining - 4 - name_len);
    return SUCCESS;
@@ -1965,6 +1969,8 @@ static void prepend_header(tool_result_t *result, const char *header) {
                "[Tool result shortened: the rest was left out.]");
       return;
    }
+   /* the next memcpy copies blen + 1 bytes, NUL included */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(framed, header, hlen);
    memcpy(framed + hlen, body, blen + 1);
    llm_tools_result_set_content(result, framed);
@@ -2251,6 +2257,10 @@ const char *llm_get_current_reasoning_effort(void) {
       return g_config.llm.thinking.reasoning_effort;
    }
    return LLM_REASONING_EFFORT_DEFAULT;
+}
+
+const char *llm_get_current_utility_effort(void) {
+   return tl_current_config ? tl_current_config->utility_effort : "";
 }
 
 int llm_budget_tokens_for_effort(const char *effort) {

@@ -33,6 +33,8 @@ import re
 import sys
 from pathlib import Path
 
+from anthropic_request import anthropic_body, text_of
+
 
 # Aggregate verdict: PASS iff at least this many providers pass each component.
 # With 3 providers, a 2-of-3 quorum tolerates one model-specific quirk while
@@ -74,13 +76,8 @@ PROVIDER_DEFAULTS = {
 def _anthropic_call(model, system, user_prompt, api_key, endpoint,
                     temperature=0.0, max_tokens=1024, timeout=60.0):
     import urllib.request
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "system": system,
-        "messages": [{"role": "user", "content": user_prompt}],
-    }).encode("utf-8")
+    payload = json.dumps(anthropic_body(model, system, user_prompt, temperature,
+                                        max_tokens)).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
         data=payload,
@@ -92,11 +89,7 @@ def _anthropic_call(model, system, user_prompt, api_key, endpoint,
         method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
-    data = json.loads(body)
-    for b in data.get("content", []):
-        if b.get("type") == "text":
-            return b.get("text", "")
-    return ""
+    return text_of(json.loads(body))
 
 
 def _openai_call(model, system, user_prompt, api_key, endpoint,

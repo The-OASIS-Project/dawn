@@ -50,6 +50,9 @@
 #include "webui/webui_server.h"
 #endif
 
+/* The answer's share of max_tokens beside a thinking budget. */
+#define CLAUDE_ANSWER_TOKENS_MIN 4096
+
 /**
  * @brief Check if current session is remote (WebSocket or DAP)
  */
@@ -391,10 +394,11 @@ static json_object *content_blocks(json_object *msg) {
 /**
  * A directive or an instruction change, where it sits: after the turn's user
  * message.  On a model that takes one it is a `role: "system"` message (a run
- * of them is one message: each must be followed by an assistant turn); on any
- * other it is a note at the end of that user message.  With no user message
- * before it (a question that was never saved) the note opens a user message
- * of its own, which the next user message joins.
+ * of them is one message: each must be followed by an assistant turn).  On any
+ * other a turn's notes are already in its question (llm_history_notes_before_words);
+ * one still here has no question before it (it follows a reply or tool
+ * results) and is a note at the end of the user message before it, or, with
+ * none, opens a user message of its own, which the next user message joins.
  */
 static void add_operator_message(json_object *messages,
                                  const char *label,
@@ -729,12 +733,13 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                    ? llm_budget_tokens_for_effort(thinking.effort)
                                    : 0;
 
-   /* max_tokens must exceed a thinking budget: leave room for the answer. */
+   /* max_tokens covers a thinking budget and the answer: leave the answer at
+    * least CLAUDE_ANSWER_TOKENS_MIN (a memory extraction's JSON runs ~2K). */
    int max_tokens = g_config.llm.max_tokens;
-   if (thinking_budget > 0 && max_tokens <= thinking_budget) {
-      max_tokens = thinking_budget + 4096;
-      OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + 4096 response buffer)", max_tokens,
-                thinking_budget);
+   if (thinking_budget > 0 && max_tokens < thinking_budget + CLAUDE_ANSWER_TOKENS_MIN) {
+      max_tokens = thinking_budget + CLAUDE_ANSWER_TOKENS_MIN;
+      OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + %d for the answer)", max_tokens,
+                thinking_budget, CLAUDE_ANSWER_TOKENS_MIN);
    }
    json_object_object_add(claude_request, "max_tokens", json_object_new_int(max_tokens));
 
@@ -771,12 +776,26 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    json_object *system_array = json_object_new_array();
    json_object *messages_array = json_object_new_array();
 
-   int conv_len = json_object_array_length(openai_conversation);
-   const char *last_role = NULL;
-   json_object *last_message = NULL;
    char note_label[LLM_CONTEXT_TAG_MAX + 24];
    llm_operator_note_label(llm_history_tag(openai_conversation), note_label, sizeof(note_label));
    const bool mid_system = llm_model_mid_system(model_id);
+   /* A model that takes no system message here reads a turn's notes in its
+    * question, ahead of the user's words, so the words are what it reads last. */
+   json_object *noted_history = NULL;
+   if (!mid_system) {
+      noted_history = llm_history_notes_before_words(openai_conversation);
+      if (!noted_history) {
+         json_object_put(system_array);
+         json_object_put(messages_array);
+         json_object_put(claude_request);
+         json_object_put(shown_history);
+         return NULL;
+      }
+      openai_conversation = noted_history;
+   }
+   int conv_len = json_object_array_length(openai_conversation);
+   const char *last_role = NULL;
+   json_object *last_message = NULL;
 
    /* Tool calls and results are paired once, after every message is built
     * (repair_tool_pairs), not filtered here message by message. */
@@ -1210,6 +1229,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       mark_conversation_breakpoint(messages_array);
    }
    json_object_object_add(claude_request, "messages", messages_array);
+   json_object_put(noted_history);
    json_object_put(shown_history);
 
    return claude_request;

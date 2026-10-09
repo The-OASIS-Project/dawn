@@ -87,6 +87,7 @@ typedef struct {
 
 static const cost_entry_t COST_TABLE[] = {
    /* Anthropic — March 2026 published rates */
+   { "claude", "claude-haiku-5-5", 0.10, 0.50 }, /* prompts up to 100K tokens (5x above) */
    { "claude", "claude-haiku-4-5", 1.00, 5.00 },
    { "claude", "claude-3-5-haiku", 0.80, 4.00 },
    { "claude", "claude-sonnet", 3.00, 15.00 },

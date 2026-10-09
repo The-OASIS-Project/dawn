@@ -371,6 +371,8 @@ void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn) {
     * connection's close handler must still see a non-NULL session to release its
     * per-connection ref (the ownership guard there leaves the session intact since
     * client_data will already point at new_conn). */
+   /* An application close code (4000-4999), which lws passes through */
+   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
    lws_close_reason(old->wsi, (enum lws_close_status)WEBUI_CLOSE_SUPERSEDED,
                     (unsigned char *)"superseded", 10);
    lws_set_timeout(old->wsi, PENDING_TIMEOUT_CLOSE_SEND, 3);
@@ -1544,6 +1546,8 @@ static void webui_send_llm_state_update(session_t *session) {
                           .transcript = { .role = strdup("__llm_state__"),
                                           .text = strdup(json_object_to_json_string(response)) } };
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    json_object_put(response);
 
    if (resp.transcript.role && resp.transcript.text) {
@@ -1632,7 +1636,8 @@ static bool session_remove_active_tool(session_t *session, const char *tool_name
       if (strcmp(session->active_tools[i], tool_name) == 0) {
          /* Shift remaining tools down */
          for (int j = i; j < session->active_tool_count - 1; j++) {
-            strcpy(session->active_tools[j], session->active_tools[j + 1]);
+            memcpy(session->active_tools[j], session->active_tools[j + 1],
+                   sizeof(session->active_tools[j]));
          }
          session->active_tool_count--;
          pthread_mutex_unlock(&session->tools_mutex);
@@ -1669,6 +1674,8 @@ static void send_state_with_tools(session_t *session, const char *state) {
       return;
    }
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    queue_response(&resp);
 }
 
@@ -2210,6 +2217,8 @@ void webui_send_transcript_ex(session_t *session,
                               .message_id = message_id,
                           } };
    /* The user's own echo names the turn it echoes (its client_ref). */
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    if (role && strcmp(role, "user") == 0 && webui_turn_ref_get()) {
       snprintf(resp.transcript.client_ref, sizeof(resp.transcript.client_ref), "%s",
                webui_turn_ref_get());
@@ -2255,9 +2264,12 @@ void webui_send_state_for_conversation(session_t *session,
 
    if (!resp.state.state) {
       OLOG_ERROR("WebUI: Failed to allocate state response");
+      free(resp.state.detail);
       return;
    }
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    queue_response(&resp);
 }
 
@@ -2338,6 +2350,8 @@ void webui_send_error_ex(session_t *session,
                               .severity = severity,
                           } };
    /* An error raised while a text turn is handled belongs to it. */
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    if (webui_turn_ref_get()) {
       snprintf(resp.error.client_ref, sizeof(resp.error.client_ref), "%s", webui_turn_ref_get());
    }
@@ -2375,6 +2389,8 @@ void webui_send_compaction_complete(session_t *session,
                           } };
 
    queue_response(&resp);
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
 }
 
 /**
@@ -2424,6 +2440,8 @@ void webui_send_audio(session_t *session, const uint8_t *data, size_t len) {
                              } };
 
       queue_response(&resp);
+      /* queue_response() takes ownership of the response strings (freed by free_response) */
+      // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
       offset += chunk_len;
       chunk_num++;
    }
@@ -3129,6 +3147,8 @@ void webui_broadcast_plan_progress(session_t *session, const char *json_str) {
    if (!resp.generic_json.json)
       return;
 
+   /* queue_response() takes ownership of the response strings (freed by free_response) */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    queue_response(&resp);
 }
 

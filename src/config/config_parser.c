@@ -34,7 +34,7 @@
 
 #include "dawn_error.h"
 #include "logging.h"
-#include "tools/toml.h"
+#include "toml.h"
 #include "utils/string_utils.h"
 
 /* =============================================================================
@@ -59,7 +59,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                         \
       toml_datum_t d = toml_int_in(table, key); \
       if (d.ok) {                               \
-         dest = (int)d.u.i;                     \
+         (dest) = (int)d.u.i;                   \
       }                                         \
    } while (0)
 
@@ -67,7 +67,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                            \
       toml_datum_t d = toml_double_in(table, key); \
       if (d.ok) {                                  \
-         dest = (float)d.u.d;                      \
+         (dest) = (float)d.u.d;                    \
       }                                            \
    } while (0)
 
@@ -75,7 +75,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                          \
       toml_datum_t d = toml_bool_in(table, key); \
       if (d.ok) {                                \
-         dest = d.u.b ? true : false;            \
+         (dest) = d.u.b ? true : false;          \
       }                                          \
    } while (0)
 
@@ -83,7 +83,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                         \
       toml_datum_t d = toml_int_in(table, key); \
       if (d.ok && d.u.i >= 0) {                 \
-         dest = (size_t)d.u.i;                  \
+         (dest) = (size_t)d.u.i;                \
       }                                         \
    } while (0)
 
@@ -1209,6 +1209,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "extraction_provider",
                                              "extraction_model",
                                              "extraction_timeout_ms",
+                                             "extraction_effort",
                                              "paraphrase_dedup_enabled",
                                              "paraphrase_dedup_threshold",
                                              "note_extraction_guard",
@@ -1238,6 +1239,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    PARSE_STRING(table, "extraction_provider", config->extraction_provider);
    PARSE_STRING(table, "extraction_model", config->extraction_model);
    PARSE_INT(table, "extraction_timeout_ms", config->extraction_timeout_ms);
+   PARSE_STRING(table, "extraction_effort", config->extraction_effort);
    PARSE_BOOL(table, "paraphrase_dedup_enabled", config->paraphrase_dedup_enabled);
    PARSE_DOUBLE(table, "paraphrase_dedup_threshold", config->paraphrase_dedup_threshold);
    CONFIG_CLAMP(config->paraphrase_dedup_threshold, 0.5f, 1.0f);
@@ -1751,6 +1753,16 @@ void config_clamp_memory(memory_config_t *config) {
       return;
    }
    CONFIG_CLAMP(config->fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN, MEMORY_FACT_CACHE_MB_MAX);
+
+   /* extraction_effort: "off" or an effort level; anything else is "off". */
+   if (strcmp(config->extraction_effort, "off") != 0 &&
+       strcmp(config->extraction_effort, "low") != 0 &&
+       strcmp(config->extraction_effort, "medium") != 0 &&
+       strcmp(config->extraction_effort, "high") != 0) {
+      OLOG_WARNING("Invalid [memory] extraction_effort '%s'; using 'off'",
+                   config->extraction_effort);
+      safe_strscpy(config->extraction_effort, "off");
+   }
 
    /* Clamp context_budget_tokens to valid range */
    if (config->context_budget_tokens < 100) {
@@ -2546,6 +2558,8 @@ int config_backup_file(const char *path) {
    /* Copy contents */
    char buffer[4096];
    size_t bytes;
+   /* a short read ends the copy loop; the position is not used */
+   // NOLINTNEXTLINE(clang-analyzer-unix.Stream)
    while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0) {
       if (fwrite(buffer, 1, bytes, dst) != bytes) {
          OLOG_ERROR("Failed to write backup file: %s", backup_path);

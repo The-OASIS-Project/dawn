@@ -40,6 +40,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_key_tag.h"
 #include "llm/llm_openai.h"
+#include "llm/llm_request_capture.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -176,6 +177,7 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
 
    curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
+   llm_request_capture("claude", full_url, headers, payload);
    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
@@ -491,7 +493,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
                                    int iteration,
                                    llm_tool_response_t *result) {
    CURL *curl_handle = NULL;
-   CURLcode res = -1;
+   CURLcode res = CURLE_FAILED_INIT;
    struct curl_slist *headers = NULL;
    char full_url[2048 + 20] = "";
    const char *payload = NULL;
@@ -580,6 +582,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
 
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
       curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
+      llm_request_capture("claude", full_url, headers, payload);
       curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, claude_streaming_write_callback);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&streaming_ctx);

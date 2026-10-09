@@ -39,7 +39,7 @@
  * Configuration
  * ============================================================================= */
 
-#include "tools/toml.h"
+#include "toml.h"
 
 typedef struct {
    int timeout_seconds;

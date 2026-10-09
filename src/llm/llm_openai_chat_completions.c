@@ -43,6 +43,7 @@
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_cache.h"
 #include "llm/llm_openai_internal.h"
+#include "llm/llm_request_capture.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -168,7 +169,7 @@ static json_object *local_template_kwargs(bool thinking) {
 static void add_local_thinking_params(json_object *root) {
    /* The session's mode and effort, resolved for the local provider in use
     * (llama.cpp: off or a fixed budget; Ollama: think on or off).  A utility
-    * call resolves to off. */
+    * call resolves to off, or to its own utility_effort when it set one. */
    llm_thinking_resolved_t thinking;
    llm_thinking_resolve_current(LLM_LOCAL, CLOUD_PROVIDER_NONE, NULL, &thinking);
    const bool on = thinking.controllable && thinking.mode != LLM_THINK_DISABLED;
@@ -254,7 +255,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                                     const char *api_key,
                                     const char *model) {
    CURL *curl_handle = NULL;
-   CURLcode res = -1;
+   CURLcode res = CURLE_FAILED_INIT;
    struct curl_slist *headers = NULL;
    char full_url[2048 + 20] = "";
 
@@ -293,6 +294,14 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
 
    if (model_name && model_name[0] != '\0') {
       json_object_object_add(root, "model", json_object_new_string(model_name));
+   }
+
+   /* Reasoning as the streaming request sends it: a tools-off call (memory
+    * extraction, compaction) gets its own setting, not the server's default. */
+   if (api_key == NULL) {
+      add_local_thinking_params(root);
+   } else {
+      add_cloud_reasoning_effort(root, model_name, base_url);
    }
 
    json_object_object_add(root, "messages", converted_history);
@@ -346,6 +355,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
       curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
+      llm_request_capture("openai-chat", full_url, headers, payload);
       curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
@@ -557,7 +567,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
                                         int iteration,
                                         llm_tool_response_t *result) {
    CURL *curl_handle = NULL;
-   CURLcode res = -1;
+   CURLcode res = CURLE_FAILED_INIT;
    struct curl_slist *headers = NULL;
    char full_url[2048 + 20] = "";
    const char *payload = NULL;
@@ -684,6 +694,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
       curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
+      llm_request_capture("openai-chat", full_url, headers, payload);
       curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, streaming_write_callback);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&streaming_ctx);

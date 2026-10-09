@@ -1019,4 +1019,18 @@ admin_resp_code_t admin_client_code_proj_link(int fd,
                                               char *response,
                                               size_t resp_len);
 
+/**
+ * @brief Arm (count > 0) or stop (count 0) LLM request capture for a user
+ *
+ * Requires admin credentials.  @p response receives the daemon's message.
+ */
+admin_resp_code_t admin_client_llm_capture(int fd,
+                                           const char *admin_user,
+                                           const char *admin_password,
+                                           const char *username,
+                                           const char *dir,
+                                           int count,
+                                           char *response,
+                                           size_t resp_len);
+
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

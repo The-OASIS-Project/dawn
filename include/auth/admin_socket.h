@@ -281,7 +281,10 @@ typedef enum {
    ADMIN_MSG_SCHWAB_STATUS = 0xE5,        /**< linked-account status + refresh-expiry countdown */
    /* Prompt-cache stats: [hours i32][provider bytes, optional] → a text table. */
    ADMIN_MSG_CACHE_STATS = 0xE6,
-   /* Next free operator opcode: 0xE7.  (Range ends 0xEF.) */
+   /** Arm or stop LLM request capture; admin_auth_prefix + "<username>\0<dir>\0<count>"
+    *  (count "0" stops).  Admin auth required: captures hold a user's prompts. */
+   ADMIN_MSG_LLM_CAPTURE = 0xE7,
+   /* Next free operator opcode: 0xE8.  (Range ends 0xEF.) */
 } admin_msg_type_t;
 
 /**

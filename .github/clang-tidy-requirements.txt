@@ -1,0 +1,5 @@
+# clang-tidy for CI and local runs, pinned by version and hash (the same
+# binary everywhere): pip install --require-hashes -r .github/clang-tidy-requirements.txt
+clang-tidy==20.1.0 \
+    --hash=sha256:e205541e350044ffe0b0d1fcaf62b9953890f8ecba31458bbcdcfe73040e58b6 \
+    --hash=sha256:14125fd35b2d324da33c884ab8b5a1d9d70a5a2e76f071ca14783d325a992917

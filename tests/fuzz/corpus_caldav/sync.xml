@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+<d:response><d:href>/dav/calendars/user/home/a1.ics</d:href><d:propstat><d:prop><d:getetag>"2"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+<d:response><d:href>/dav/calendars/user/home/gone.ics</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>
+<d:sync-token>http://example.com/ns/sync/1234</d:sync-token>
+</d:multistatus>

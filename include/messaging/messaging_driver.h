@@ -37,6 +37,11 @@
 extern "C" {
 #endif
 
+/** The longest one driver send may take (seconds): the HTTP timeout of a
+ *  Telegram, Discord or Slack message.  Shutdown waits past it for sends in
+ *  flight (MESSAGING_ASYNC_SEND_DRAIN_MS). */
+#define MESSAGING_SEND_TIMEOUT_SEC 30L
+
 /** Whether a chat holds one person (with the bot) or several. */
 typedef enum {
    MESSAGING_CHAT_ONE_TO_ONE = 0,

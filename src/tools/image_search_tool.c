@@ -221,7 +221,7 @@ static char *image_search_callback(const char *action, char *value, int *should_
    }
 
    /* Query SearXNG for image results */
-   struct json_object *root = web_search_query_images_raw(query, count * 2);
+   struct json_object *root = web_search_query_images_raw(query);
    if (!root) {
       return strdup(TOOL_RESULT_ERROR_MARK "Image search request failed.");
    }
