@@ -185,6 +185,39 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(w._local_time("08:00"), "2026-10-14T08:00:00")
 
 
+class DeadlineTests(unittest.TestCase):
+    """A stream that trickles past its deadline ends; retries stop at the budget."""
+
+    def test_trickling_stream_hits_deadline(self):
+        from . import providers
+
+        class Resp:
+            def iter_lines(self, decode_unicode=True):
+                while True:  # a keep-alive line forever: never a read timeout
+                    yield ": ping"
+
+        with self.assertRaises(providers.StreamDeadline):
+            for _ in providers._sse(Resp(), deadline=0.0):
+                pass
+
+    def test_retries_stop_at_budget(self):
+        from unittest import mock
+        from . import providers
+        calls = []
+
+        def failing(cap, body, keys):
+            calls.append(1)
+            return providers.Reply(error="HTTP 529: overloaded")
+
+        clock = iter(range(0, 10_000, 200))  # each look at the clock is 200s later
+        with mock.patch.object(providers, "_send_once", failing), \
+                mock.patch.object(providers.time, "time", lambda: next(clock)), \
+                mock.patch.object(providers.time, "sleep", lambda s: None):
+            reply = providers.send(_capture(), {}, {})
+        self.assertLess(len(calls), providers.RETRY_ATTEMPTS)
+        self.assertIn("gave up after", reply.error)
+
+
 class InstructionTests(unittest.TestCase):
     def _cap(self, system):
         return capture.Capture("x", "claude", "u", [], {"system": system, "messages": []},
