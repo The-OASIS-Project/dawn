@@ -338,6 +338,7 @@ if(DAWN_ENABLE_EMAIL_TOOL)
     add_definitions(-DDAWN_ENABLE_EMAIL_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/email_tool.c
+        src/tools/email_render.c
         src/tools/email_service.c
         src/tools/email_service_read.c
         src/tools/email_fanout.c

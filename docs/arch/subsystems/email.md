@@ -145,6 +145,10 @@ sees the message's structure. It does the rest:
 Part ids are IMAP section numbers ("2", "2.1") on both backends, so a later
 per-part fetch can use them directly.
 
+The email tool's read, recent, search and digest results reach the model framed as `EMAIL CONTENT`
+(third-party text, after the neutralizer; see [llm.md](llm.md), Tool results), from the shared
+formatter `email_render.c` for a read, and memory extraction never learns from them.
+
 Everything taken from a message is the sender's text. Subjects, names, addresses
 and filenames go through `email_display_sanitize`: well-formed UTF-8 only, with
 controls, bidi overrides and isolates, and zero-width characters removed.

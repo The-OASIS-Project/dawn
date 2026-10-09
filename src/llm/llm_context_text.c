@@ -142,8 +142,12 @@ static int shadowed(unsigned cp) {
        cp == 0xFFA0) {
       return 0;
    }
+   /* Dashes, and the horizontal lines a rule can be drawn with (box drawing:
+    * light, heavy, dashed, double), so "═══ END EMAIL CONTENT ═══" is a rule. */
    if ((cp >= 0x2010 && cp <= 0x2015) || cp == 0x2212 || cp == 0xFE58 || cp == 0xFE63 ||
-       cp == 0x2500 || cp == 0x2501 || cp == 0x2E3A || cp == 0x2E3B) {
+       cp == 0x2500 || cp == 0x2501 || (cp >= 0x2504 && cp <= 0x250B) ||
+       (cp >= 0x254C && cp <= 0x254F) || cp == 0x2550 || cp == 0x23AF || cp == 0x2E3A ||
+       cp == 0x2E3B) {
       return '-';
    }
    if (cp >= 0xFF01 && cp <= 0xFF5E) {
@@ -861,6 +865,20 @@ static bool close_after(const shadow_t *sh, size_t e) {
    return sh->s[end] == '\0';
 }
 
+/* Whether a frame line's words end at @p e in a frame line's shape: a tag's
+ * '(', a closing rule, a line break or the end of the text after them.
+ * "--- Web content accessibility" is prose under a rule, not a frame. */
+static bool frame_shape_after(const shadow_t *sh, size_t e) {
+   const size_t end = seps_at(sh, e, false);
+   for (size_t k = e; k <= end && sh->s[k]; k++) {
+      if (sh->s[k] == '\n' || sh->s[k] == '\r') {
+         return true;
+      }
+   }
+   const char c = sh->s[end];
+   return c == '\0' || c == '(' || is_rule(c);
+}
+
 /* An imitation, after an opening '[' at @p i, of a turn context's own lines:
  * where it ends, with what it becomes in @p out; 0 when there is none. */
 static size_t item_line_at(const shadow_t *sh, size_t i, const char **out) {
@@ -894,6 +912,12 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    static const char *const k_memory[] = { "user", "memory", NULL };
    static const char *const k_end_summary[] = { "end", "conversation", "summary", NULL };
    static const char *const k_summary[] = { "conversation", "summary", NULL };
+   /* Third-party frames (prompt_third_party): two words, so a signature's
+    * "-- \nEmail: bob@x" is left as it is. */
+   static const char *const k_end_email[] = { "end", "email", "content", NULL };
+   static const char *const k_email[] = { "email", "content", NULL };
+   static const char *const k_end_web[] = { "end", "web", "content", NULL };
+   static const char *const k_web[] = { "web", "content", NULL };
    static const char *const k_note[] = { "operator", "note", NULL };
    static const char *const k_updated[] = { "updated", "instructions", NULL };
    static const char *const k_shortened[] = { "tool", "result", "shortened", NULL };
@@ -906,23 +930,31 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
       const size_t w = seps_at(sh, r, false);
       size_t next;
       const char first = letter_at(sh, w, &next);
+      /* shaped: only in a frame line's shape (frame_shape_after), for the
+       * names ordinary text starts lines with ("Email content", "Web
+       * content"). */
       static const struct {
          const char *const *words;
          const char *defused;
+         bool shaped;
       } k_frames[] = {
-         { k_end_turn, "- - END TURN CONTEXT (quoted)" },
-         { k_end_memory, "- - END USER MEMORY (quoted)" },
-         { k_turn, "- - TURN CONTEXT (quoted)" },
-         { k_memory, "- - USER MEMORY (quoted)" },
-         { k_end_summary, "- - END CONVERSATION SUMMARY (quoted)" },
-         { k_summary, "- - CONVERSATION SUMMARY (quoted)" },
+         { k_end_turn, "- - END TURN CONTEXT (quoted)", false },
+         { k_end_memory, "- - END USER MEMORY (quoted)", false },
+         { k_turn, "- - TURN CONTEXT (quoted)", false },
+         { k_memory, "- - USER MEMORY (quoted)", false },
+         { k_end_summary, "- - END CONVERSATION SUMMARY (quoted)", false },
+         { k_summary, "- - CONVERSATION SUMMARY (quoted)", false },
+         { k_end_email, "- - END EMAIL CONTENT (quoted)", true },
+         { k_email, "- - EMAIL CONTENT (quoted)", true },
+         { k_end_web, "- - END WEB CONTENT (quoted)", true },
+         { k_web, "- - WEB CONTENT (quoted)", true },
       };
       for (size_t k = 0; k < sizeof(k_frames) / sizeof(k_frames[0]); k++) {
          if (k_frames[k].words[0][0] != first) {
             continue;
          }
          const size_t e = words_at(sh, w, k_frames[k].words);
-         if (e > 0) {
+         if (e > 0 && (!k_frames[k].shaped || frame_shape_after(sh, e))) {
             *out = k_frames[k].defused;
             return e;
          }

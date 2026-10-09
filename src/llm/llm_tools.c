@@ -44,6 +44,7 @@
 #include "core/component_status.h"
 #include "core/hash_util.h"
 #include "core/ocp_helpers.h"
+#include "core/prompt_parts.h"
 #include "core/research_allowlist.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
@@ -279,6 +280,17 @@ static bool get_tool_parallel_safe(const char *tool_name) {
  * and its workers): a plan's steps run inside, so they carry it only when the
  * model started the plan (llm_tools_executing()). */
 static __thread bool tl_executing;
+
+/* The frame the running callback asked for (llm_tools_result_third_party). */
+static __thread const char *tl_third_party;
+/* Tool callbacks running on this thread: a call made inside one (a plan's
+ * step) is framed by the outer call, not on its own, so its text reaches the
+ * outer one without frame lines (and without the conversation's tag). */
+static __thread int tl_tool_depth;
+
+void llm_tools_result_third_party(const char *frame) {
+   tl_third_party = frame;
+}
 
 bool llm_tools_executing(void) {
    return tl_executing;
@@ -1713,8 +1725,14 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
     * code gives way (its item may be the one being prepared again). */
    const bool text_prepare = verdict.caller == TOOL_CALLER_UNVERIFIED && kind == TOOL_KIND_PREPARE;
    const bool dropped = text_prepare && llm_tools_drop_earlier_code();
+   tl_third_party = NULL;
+   tl_tool_depth++;
    const int rc = run_resolved_call(call, meta, effective_device, action, value_buf, result);
+   tl_tool_depth--;
    tool_call_policy_leave(outer);
+   result->third_party_forced = tl_third_party != NULL;
+   result->third_party = tl_third_party ? tl_third_party : tool_third_party_frame(meta, action);
+   tl_third_party = NULL;
    if (text_prepare) {
       llm_tools_note_text_preview(meta, action, dropped, result);
    }
@@ -1796,6 +1814,35 @@ static void neutralize_result(const char *tool, tool_result_t *result) {
       result->success = false;
       OLOG_ERROR("Tool '%s': out of memory neutralizing its result", tool);
    }
+}
+
+/* A successful result that is someone else's text, in its frame (the
+ * conversation's tag on it when there is one).  After neutralize_result: the
+ * frame is DAWN's, so only an imitation of it in the text is defused.  An
+ * error is the tool's own text and stays as it is.  Without the memory for
+ * the frame the result is withheld rather than passed on unframed. */
+static void frame_third_party(const char *tool, tool_result_t *result) {
+   if (!result->third_party || !result->success ||
+       (result->is_error && !result->third_party_forced)) {
+      return;
+   }
+   session_t *ctx = session_get_command_context();
+   char tag[LLM_CONTEXT_TAG_MAX];
+   const bool tagged = ctx && session_prefix_tag(ctx, tag, sizeof(tag));
+   char *framed = prompt_third_party(result->third_party, tagged ? tag : NULL,
+                                     tool_result_content(result));
+   if (!framed) {
+      /* prompt_third_party knows every TOOL_FRAME_* (test_llm_tools_finish), so
+       * NULL here is memory. */
+      free(result->result_extended);
+      result->result_extended = NULL;
+      snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error: out of memory reading the result");
+      result->success = false;
+      result->is_error = true;
+      OLOG_ERROR("Tool '%s': out of memory framing its result", tool);
+      return;
+   }
+   llm_tools_result_set_content(result, framed);
 }
 
 static int execute_one(const tool_call_t *call,
@@ -1914,6 +1961,9 @@ static int execute_and_finish(const tool_call_t *call,
     * result as it came; what the model sees is neutralized last). */
    if (result && call && !tl_defer_current) {
       neutralize_result(call->name, result);
+      if (tl_tool_depth == 0) {
+         frame_third_party(call->name, result);
+      }
       result->finished = true;
    }
    tl_defer_current = outer;
@@ -1981,12 +2031,14 @@ void llm_tools_finish_result(const tool_call_t *call, tool_result_t *result, con
       return;
    }
    neutralize_result(call->name, result);
-   /* DAWN's own frame goes on after the result is neutralized (the
-    * neutralizer defuses an imitation of it in the result). */
+   /* DAWN's own frames go on after the result is neutralized (the
+    * neutralizer defuses an imitation of them in the result): the
+    * third-party frame around the text, the view's header ahead of it. */
+   result->is_error = result->is_error || !result->success;
+   frame_third_party(call->name, result);
    if (header && header[0]) {
       prepend_header(result, header);
    }
-   result->is_error = result->is_error || !result->success;
    result->finished = true;
    /* A call to no tool was never announced, so it isn't completed either. */
    if (!tool_registry_find(call->name)) {

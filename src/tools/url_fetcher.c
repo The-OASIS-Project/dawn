@@ -997,13 +997,11 @@ int flaresolverr_fallback_fetch(const char *url,
    }
 
    /* Prompt-injection defense for FlareSolverr-fetched markdown happens
-    * one layer up in url_tool.c, which wraps every url_fetch tool result in
-    * `[BEGIN UNTRUSTED WEB CONTENT]` / `[END UNTRUSTED WEB CONTENT]` markers
-    * regardless of provider. The memory_filter blocklist is intentionally
-    * NOT used on web content — it's authored for short factual text destined
-    * for persistent memory storage and false-positives heavily on
-    * article-length natural language. The filter still gates memory
-    * ingestion at its storage sites (memory_db_fact_insert etc.). */
+    * in the tool loop, which frames every url_fetch result as web content
+    * (TOOL_FRAME_WEB, after neutralizing it) regardless of provider. The memory_filter blocklist is
+    * intentionally NOT used on web content — it's authored for short factual text destined for
+    * persistent memory storage and false-positives heavily on article-length natural language. The
+    * filter still gates memory ingestion at its storage sites (memory_db_fact_insert etc.). */
 
    OLOG_INFO("url_fetcher: FlareSolverr fallback extracted %zu bytes of markdown", extracted_len);
    OLOG_INFO("url_fetcher: Content preview:\n%.2000s%s", extracted,

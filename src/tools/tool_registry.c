@@ -1303,6 +1303,31 @@ static const tool_action_kind_entry_t *find_action_kind(const tool_metadata_t *m
    return NULL;
 }
 
+const char *tool_third_party_frame(const tool_metadata_t *meta, const char *action) {
+   if (!meta) {
+      return NULL;
+   }
+   /* An entry with no frame of its own keeps the tool's: listing an action
+    * (for its kind) never drops the frame its text goes in. */
+   const tool_action_kind_entry_t *e = action && action[0] ? find_action_kind(meta, action) : NULL;
+   return e && e->third_party ? e->third_party : meta->third_party;
+}
+
+const char *tool_third_party_frame_any(const tool_metadata_t *meta) {
+   if (!meta) {
+      return NULL;
+   }
+   if (meta->third_party) {
+      return meta->third_party;
+   }
+   for (int i = 0; i < meta->action_kind_count; i++) {
+      if (meta->action_kinds[i].third_party) {
+         return meta->action_kinds[i].third_party;
+      }
+   }
+   return NULL;
+}
+
 const char *tool_default_action(const tool_metadata_t *meta) {
    if (!meta) {
       return "get";

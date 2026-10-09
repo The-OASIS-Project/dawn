@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "logging.h"
+#include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
 #ifdef ENABLE_WEBUI
@@ -1017,6 +1018,11 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
    tool_result_t result = { 0 };
    llm_tools_execute(&call, &result);
    ctx->total_tool_calls++;
+   /* An email or a page a step read is in what the plan returns (an email
+    * names the frame when there's both). */
+   if (result.success && !result.is_error && result.third_party &&
+       (!ctx->third_party || strcmp(result.third_party, TOOL_FRAME_EMAIL) == 0))
+      ctx->third_party = result.third_party;
 
    /* Calculate step duration */
    struct timespec step_end;

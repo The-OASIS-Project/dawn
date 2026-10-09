@@ -193,6 +193,12 @@ typedef struct {
                                                   *   "" when kept in memory only */
    int vision_image_owner;                       /**< Its owner, when stored */
    bool finished; /**< Neutralized and announced (llm_tools_finish_result) */
+   /** The frame a successful result goes in (tool_third_party_frame): someone
+    *  else's text, framed as such once neutralized.  NULL for the tool's own. */
+   const char *third_party;
+   /** Set by the callback (llm_tools_result_third_party): framed even when
+    *  marked an error, since its text may hold what it ran (a plan's steps). */
+   bool third_party_forced;
 } tool_result_t;
 
 /**
@@ -495,6 +501,15 @@ const char *llm_tools_current_raw_args(void);
  *        (result_read) refuses other callers, such as MQTT.
  */
 bool llm_tools_executing(void);
+
+/**
+ * @brief For a tool whose text is someone else's only on some calls (result_read
+ *        returning part of a stored email or page, a plan that read one): the
+ *        frame this call's result goes in, in place of the action's own
+ *        (tool_third_party_frame), error or not.  Only from inside the tool's
+ *        callback, after its last nested call; NULL changes nothing.
+ */
+void llm_tools_result_third_party(const char *frame);
 
 /**
  * @brief Execute a single tool call

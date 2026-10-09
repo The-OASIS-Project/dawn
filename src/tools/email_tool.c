@@ -43,6 +43,7 @@
 #include "tools/email_digest.h"
 #include "tools/email_display.h"
 #include "tools/email_parse.h"
+#include "tools/email_render.h"
 #include "tools/email_service.h"
 #include "tools/email_transfer.h"
 #include "tools/oauth_client.h"
@@ -468,36 +469,6 @@ static char *err_error(int rc,
    return email_rc_to_error(rc, op, account, folder);
 }
 
-/* @p bytes as "512 B", "12 KB", "3.4 MB". */
-static void format_size(size_t bytes, char *out, size_t size) {
-   if (bytes < 1024)
-      snprintf(out, size, "%zu B", bytes);
-   else if (bytes < 1024 * 1024)
-      snprintf(out, size, "%zu KB", (bytes + 512) / 1024);
-   else
-      snprintf(out, size, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
-}
-
-static void append_addrs(strbuf_t *sb,
-                         const char *label,
-                         const email_addr_t *list,
-                         int count,
-                         int total) {
-   if (count <= 0)
-      return;
-   strbuf_appendf(sb, "%s: ", label);
-   for (int i = 0; i < count; i++) {
-      /* A name that is just the address again isn't shown twice. */
-      if (list[i].name[0] && strcasecmp(list[i].name, list[i].addr) != 0)
-         strbuf_appendf(sb, "%s%s <%s>", i ? ", " : "", list[i].name, list[i].addr);
-      else
-         strbuf_appendf(sb, "%s%s", i ? ", " : "", list[i].addr);
-   }
-   if (total > count)
-      strbuf_appendf(sb, " (and %d more)", total - count);
-   strbuf_append(sb, "\n");
-}
-
 static char *handle_read(struct json_object *details, int user_id) {
    /* Accept message_id (string) or fall back to uid (int) for backward compat */
    const char *mid = json_get_str(details, "message_id");
@@ -524,42 +495,9 @@ static char *handle_read(struct json_object *details, int user_id) {
    if (rc != EMAIL_RC_OK)
       return err_error(rc, err, "read", account, NULL);
 
-   /* Every field here is the sender's text, already made safe to show. */
-   /* Headers, 32+32 addresses and 16 attachment lines fit well within 64 KB. */
-   strbuf_t sb;
-   const size_t body = msg.body_len > 0 ? (size_t)msg.body_len : 0;
-   strbuf_init_with_max(&sb, body + 2048, body + 65536);
-   char from[2 * sizeof(msg.from_name) + sizeof(msg.from_addr) + 8];
-   email_display_mailbox(msg.from_name, msg.from_addr, from, sizeof(from));
-   strbuf_appendf(&sb, "From: %s\n", from);
-   append_addrs(&sb, "To", msg.to_list, msg.to_count, msg.to_total);
-   append_addrs(&sb, "Cc", msg.cc_list, msg.cc_count, msg.cc_total);
-   if (msg.reply_to.addr[0] && strcasecmp(msg.reply_to.addr, msg.from_addr) != 0)
-      strbuf_appendf(&sb, "Reply-To: %s\n", msg.reply_to.addr);
-   strbuf_appendf(&sb, "Subject: %s\nDate: %s\n", msg.subject, msg.date_str);
-   if (msg.attachment_count > 0) {
-      strbuf_append(&sb, "Attachments:\n");
-      for (int i = 0; i < msg.attachment_count; i++) {
-         const email_attachment_t *a = &msg.attachments[i];
-         char size[32];
-         format_size(a->size, size, sizeof(size));
-         strbuf_appendf(&sb, "  %d. %s (%s, %s%s)\n", i + 1,
-                        a->filename[0] ? a->filename : "(unnamed)", a->mime, size,
-                        a->is_inline ? ", inline" : "");
-      }
-      if (msg.attachments_truncated)
-         strbuf_append(&sb, "  (more attachments not listed)\n");
-   }
-   strbuf_appendf(&sb, "\n%s", msg.body && msg.body[0] ? msg.body : "(No body)");
-   if (msg.text_truncated)
-      strbuf_append(&sb, "\n[Message truncated]");
+   char *out = email_render_message(&msg);
    email_message_free(&msg);
-
-   if (strbuf_oom(&sb)) {
-      strbuf_free(&sb);
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
-   }
-   return strbuf_steal(&sb);
+   return out ? out : strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 }
 
 static char *handle_search(struct json_object *details, int user_id) {
@@ -1168,11 +1106,12 @@ static int email_validate_schedulable_action(const char *action,
 }
 
 static const tool_action_kind_entry_t s_email_action_kinds[] = {
-   { "recent", TOOL_KIND_READ, NULL },
-   { "read", TOOL_KIND_READ, NULL },
-   { "search", TOOL_KIND_READ, NULL },
+   /* What senders wrote comes back framed as theirs (TOOL_FRAME_EMAIL). */
+   { "recent", TOOL_KIND_READ, NULL, TOOL_FRAME_EMAIL },
+   { "read", TOOL_KIND_READ, NULL, TOOL_FRAME_EMAIL },
+   { "search", TOOL_KIND_READ, NULL, TOOL_FRAME_EMAIL },
    { "folders", TOOL_KIND_READ, NULL },
-   { "digest", TOOL_KIND_READ, NULL },
+   { "digest", TOOL_KIND_READ, NULL, TOOL_FRAME_EMAIL },
    { "accounts", TOOL_KIND_READ, NULL },
    { "send", TOOL_KIND_PREPARE, "confirm_send" },
    { "trash", TOOL_KIND_PREPARE, "confirm_trash" },

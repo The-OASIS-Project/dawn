@@ -194,7 +194,14 @@ typedef struct {
    const char *action;
    tool_action_kind_t kind;
    const char *confirm; /**< TOOL_KIND_PREPARE only: the action that confirms it (listed ACT) */
+   /** The frame its successful result goes in when it is someone else's text
+    *  (TOOL_FRAME_EMAIL, TOOL_FRAME_WEB), or NULL */
+   const char *third_party;
 } tool_action_kind_entry_t;
+
+/* Frames for third-party text in a tool's result (prompt_third_party). */
+#define TOOL_FRAME_EMAIL "EMAIL CONTENT"
+#define TOOL_FRAME_WEB "WEB CONTENT"
 
 /** Entries in an action_kinds table: .action_kind_count = TOOL_KIND_COUNT(t) */
 #define TOOL_KIND_COUNT(table) ((int)(sizeof(table) / sizeof((table)[0])))
@@ -477,6 +484,9 @@ typedef struct {
    const tool_action_kind_entry_t *action_kinds;
    int action_kind_count;
    tool_action_kind_t default_kind;
+   /* The frame an action not in action_kinds puts its successful result in
+    * (tool_action_kind_entry_t.third_party), or NULL. */
+   const char *third_party;
    /** A call of this tool can't be approved by reply code (a plan: its
     *  steps would each need their own): a call that would need one is refused. */
    bool no_reply_code;
@@ -778,6 +788,20 @@ tool_action_kind_t tool_action_kind(const tool_metadata_t *meta,
                                     const char *device,
                                     const char *action,
                                     const char *value);
+
+/**
+ * @brief The frame a successful result of @p action goes in: its entry's
+ *        third_party, else the tool's (an entry can add a frame, never drop
+ *        the tool's); NULL when its text is the tool's own
+ */
+const char *tool_third_party_frame(const tool_metadata_t *meta, const char *action);
+
+/**
+ * @brief A frame any action of the tool uses (its default, else the first
+ *        entry's), for text the tool returned when the action isn't known
+ *        (a stored result); NULL when none does
+ */
+const char *tool_third_party_frame_any(const tool_metadata_t *meta);
 
 /**
  * @brief The tool's own spelling of @p action: the value of its ENUM action

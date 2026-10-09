@@ -611,6 +611,19 @@ int tool_result_store_put(struct session *session,
    }
    return TOOL_RESULT_STORE_NO_USER;
 }
+int tool_result_store_put_framed(struct session *session,
+                                 const char *tool_name,
+                                 const char *tool_call_id,
+                                 const char *text,
+                                 size_t len,
+                                 bool is_json,
+                                 const char *frame,
+                                 char id_out[TOOL_RESULTS_ID_LEN],
+                                 bool *cut_out) {
+   (void)frame;
+   return tool_result_store_put(session, tool_name, tool_call_id, text, len, is_json, id_out,
+                                cut_out);
+}
 
 void tool_result_store_tree_seed(struct session *session,
                                  const char *id,

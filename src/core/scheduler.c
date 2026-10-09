@@ -42,6 +42,7 @@
 #include "core/briefing_prompt.h"
 #include "core/memory_filter.h"
 #include "core/missed_notifications_db.h"
+#include "core/prompt_parts.h"
 #include "core/scheduled_context.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
@@ -741,6 +742,20 @@ static void briefing_persist_tool_steps(int64_t conv_id,
    }
 }
 
+/* A step's (neutralized) result in the frame its action's text goes in
+ * (tool_third_party_frame), as the tool loop frames it: an email or a page in
+ * a briefing is someone else's text too.  Takes @p text; returns it as is when
+ * the action has no frame, NULL on allocation failure (freed). */
+static char *briefing_frame_step(const tool_metadata_t *meta, const char *action, char *text) {
+   const char *frame = tool_third_party_frame(meta, action);
+   if (!frame || !text) {
+      return text;
+   }
+   char *framed = prompt_third_party(frame, NULL, text);
+   free(text);
+   return framed;
+}
+
 static void *briefing_thread_func(void *arg) {
    briefing_context_t *ctx = (briefing_context_t *)arg;
    sched_event_t *event = &ctx->event;
@@ -836,6 +851,14 @@ static void *briefing_thread_func(void *arg) {
             free(step_result);
             continue;
          }
+         step_result = briefing_frame_step(step_meta, steps[i].tool_action, step_result);
+         if (!step_result) {
+            OLOG_ERROR("scheduler: briefing %lld step %d (%s): out of memory framing its result",
+                       (long long)event->id, i + 1, steps[i].tool_name);
+            strbuf_appendf(&combined, "## Step %d (%s): [tool returned no result]\n\n", i + 1,
+                           steps[i].tool_name);
+            continue;
+         }
          strbuf_appendf(&combined, "## Step %d (%s):\n%s\n\n", i + 1, steps[i].tool_name,
                         step_result);
          /* Capture persist-eligible results for tool-use persistence.  Gate on
@@ -916,6 +939,14 @@ static void *briefing_thread_func(void *arg) {
        * the multi-step path, which only persists non-error results). */
       bool legacy_was_error = tool_result_is_error(tool_result);
       tool_result_strip_error_mark(tool_result);
+      if (!legacy_was_error) {
+         tool_result = briefing_frame_step(meta, event->tool_action, tool_result);
+         if (!tool_result) {
+            OLOG_ERROR("scheduler: briefing %lld: out of memory framing its result",
+                       (long long)event->id);
+            goto fail;
+         }
+      }
 
       if (meta->persist_scheduled_output && !legacy_was_error &&
           !memory_filter_check_injection_commands(tool_result)) {
