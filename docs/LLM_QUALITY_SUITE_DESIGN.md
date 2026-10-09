@@ -328,3 +328,19 @@ effort medium (`quality_capture_all.sh` with `claude:claude-haiku-5-5@medium`):
 No significant quality difference on either surface, so time to first token and cost decide: reasoning
 stays off for chat. Reasoning helps where nobody waits for it, memory extraction (`[memory]
 extraction_effort = "medium"`).
+
+### A local model (2026-10-09)
+
+Qwen 3.6 35B-A3B (Q4_K_M) on the llama.cpp server, thinking off (the config), the replace-mode persona,
+3 runs with `--workers 1`, against Haiku 5.5 from the same day's captures:
+
+| | Score text / spoken | TTFT p50 / p90 (text) | $/turn |
+|---|---|---|---|
+| Haiku 5.5 | 0.985 / 0.984 | 0.69 s / 1.74 s | 0.00096 |
+| Qwen 3.6 (local) | 0.958 / 0.992 | 3.79 s / 5.64 s | no API cost |
+
+No significant quality difference (text −0.027, CI [−0.059, +0.002]; worse on 11 cases, better on 3; spoken
+ties); time favors Haiku 5.5 and cost the local model. Qwen's characteristic misses: answering from its own
+knowledge without searching (it named the wrong Super Bowl winner from memory) and acting on an ambiguous
+request instead of asking. Concise (validated) 0.64 against 0.67; 27% of its text replies end with a
+question (Haiku 5.5 19%).

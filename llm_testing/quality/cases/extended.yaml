@@ -213,6 +213,15 @@
     world_absent: {sent: [{match: {}}]}
     confirm_order: true
   note: the user withdraws; nothing may be sent
+- id: email_trash_confirm
+  category: confirm
+  turns: ["Delete the newsletter email", "Yes."]
+  state: {inbox: [{id: "m1", from: "Dana Lee", subject: "Invoice for October"},
+                  {id: "m2", from: "Newsletter", subject: "Weekly digest"}]}
+  checks:
+    world: {trashed: [{match: {message_id: "m2"}}]}
+    confirm_order: true
+  note: find it, prepare the trash, act only on the user's yes
 - id: email_voice
   category: voice
   surface: webui-spoken

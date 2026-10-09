@@ -180,6 +180,9 @@ From the first comparison on real captures (Luna, Haiku 4.5, Haiku 5.5).
 | The judge graded against standards the prompt never stated: rubric v1's κ was 0.12–0.40, always harsher than the human | Rubric v2 quotes the instruction each request gave; a run with no instruction on a criterion isn't graded on it |
 | An SSL disconnect from the API scored as a model failure | Dropped connections are retried and, if they persist, counted as run errors |
 | A follow-up capture shared by two templates was patched twice | Each capture is patched once |
+| `search_fact` asked about "last year" while its mocked result named a game the frozen clock had moved past, and gave half credit to an answer invented without searching that happened to name a team in the check | Asks about a named game; searching is required |
+| `url_fetch`, email `read` and email `trash` were unmocked, so a model that used them got "unavailable" | Mocked (`url_fetch` says when a page's text isn't in the test, rather than inventing one); `email_trash_confirm` case |
+| A missing API key made every judge call (or run request) fail with 401, and the run still finished | `run` and `judge` stop before calling when the key they need isn't in the secrets file |
 
 Rubric v2's first validation (35 labels): concise met the threshold (κ 0.83);
 clarifies (κ −0.13) and persona (κ 0.08) did not. On clarifies the judge

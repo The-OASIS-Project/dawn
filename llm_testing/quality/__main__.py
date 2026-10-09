@@ -56,6 +56,11 @@ def cmd_run(args):
         capture.patch_system(tpl, patch, patched)
     want = set(args.model or [])
     keys = providers.load_keys(args.secrets)
+    missing = sorted({providers.key_name(t) for t in templates
+                      if providers.key_name(t) and not keys.get(providers.key_name(t))})
+    if missing:  # every request would fail with 401 and be scored as the model's fault
+        raise SystemExit(f"{args.secrets}: no {', '.join(missing)}; pass --secrets with the "
+                         f"daemon's secrets.toml")
     case_list = cases_mod.load_cases(now, only=args.only)
     from .report import _slug, prices
     results = {"version": RESULTS_VERSION, "rubric_version": RUBRIC_VERSION,
