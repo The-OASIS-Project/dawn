@@ -78,17 +78,22 @@ int gmail_move_meta(CURL *curl,
    if (json_object_object_get_ex(root, "labelIds", &arr) &&
        json_object_is_type(arr, json_type_array)) {
       const size_t len = json_object_array_length(arr);
-      for (size_t i = 0; i < len && n < GMAIL_MOVE_LABELS_MAX; i++) {
+      /* Every label is checked for where the message is (Gmail doesn't list
+       * the system ones first); only the ones kept for undo are bounded. */
+      for (size_t i = 0; i < len; i++) {
          const char *l = json_object_get_string(json_object_array_get_idx(arr, i));
          if (!l)
             continue;
          meta->in_inbox |= strcmp(l, "INBOX") == 0;
          meta->in_trash |= strcmp(l, "TRASH") == 0;
          meta->in_spam |= strcmp(l, "SPAM") == 0;
-         labels[n++] = l;
+         if (n < GMAIL_MOVE_LABELS_MAX)
+            labels[n++] = l;
+         else
+            meta->dropped++;
       }
    }
-   meta->dropped = gmail_labels_pack(labels, n, meta->keep, sizeof(meta->keep));
+   meta->dropped += gmail_labels_pack(labels, n, meta->keep, sizeof(meta->keep));
    json_object_put(root);
    *err = EMAIL_ERR_NONE;
    return 0;

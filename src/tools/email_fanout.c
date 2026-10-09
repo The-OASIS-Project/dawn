@@ -107,21 +107,14 @@ int email_fanout_run(int n, int max, email_fanout_fn fn, void *ctx, email_fanout
    return 0;
 }
 
-/* One row of one account, for the merge's sort. */
-typedef struct {
-   time_t date;
-   int slot;
-   int row;
-} merge_key_t;
-
-/* Newest first; a tie keeps account, then row, order (qsort isn't stable). */
-static int cmp_merge_key(const void *a, const void *b) {
-   const merge_key_t *x = a, *y = b;
-   if (x->date != y->date)
-      return x->date < y->date ? 1 : -1;
-   if (x->slot != y->slot)
-      return x->slot < y->slot ? -1 : 1;
-   return x->row < y->row ? -1 : (x->row > y->row);
+/* Whether row (sa, ra) comes before row (sb, rb) in the merge: newer first;
+ * a tie keeps account, then row, order.  A total order, so the merge can take
+ * rows one at a time without sorting or allocating. */
+static bool merge_before(const email_fanout_slot_t *slots, int sa, int ra, int sb, int rb) {
+   const time_t da = slots[sa].rows[ra].date, db = slots[sb].rows[rb].date;
+   if (da != db)
+      return da > db;
+   return sa != sb ? sa < sb : ra < rb;
 }
 
 bool email_fanout_merge(const email_fanout_slot_t *slots,
@@ -132,41 +125,41 @@ bool email_fanout_merge(const email_fanout_slot_t *slots,
                         email_fanout_fail_fn on_fail,
                         void *ctx) {
    bool whole = true;
-   size_t rows = 0;
    for (int i = 0; i < n; i++) {
       const email_fanout_slot_t *s = &slots[i];
-      if (s->rc == 0) {
-         rows += (size_t)s->count;
-      } else if (s->err == EMAIL_ERR_CANCELLED) {
+      if (s->rc == 0)
+         continue;
+      if (s->err == EMAIL_ERR_CANCELLED)
          whole = false;
-      } else if (on_fail) {
+      else if (on_fail)
          on_fail(ctx, i, s);
-      }
    }
 
-   /* Sorted by date alone, not by each account's own order: an old message
-    * re-filed into a folder (a new UID, its old date) mustn't hold back that
-    * account's newer mail. */
+   /* By date alone, not by each account's own order: an old message re-filed
+    * into a folder (a new UID, its old date) mustn't hold back that account's
+    * newer mail.  Each pass takes the first row after the last one taken
+    * (at most max passes over at most 16 x max rows). */
    int total = 0;
-   merge_key_t *keys = rows ? malloc(rows * sizeof(*keys)) : NULL;
-   if (keys) {
-      size_t k = 0;
+   int last_s = -1, last_r = -1;
+   while (total < max) {
+      int bs = -1, br = -1;
       for (int i = 0; i < n; i++) {
          if (slots[i].rc != 0)
             continue;
-         for (int r = 0; r < slots[i].count; r++)
-            keys[k++] = (merge_key_t){ .date = slots[i].rows[r].date, .slot = i, .row = r };
+         for (int r = 0; r < slots[i].count; r++) {
+            if (last_s >= 0 && !merge_before(slots, last_s, last_r, i, r))
+               continue; /* already taken */
+            if (bs < 0 || merge_before(slots, i, r, bs, br)) {
+               bs = i;
+               br = r;
+            }
+         }
       }
-      qsort(keys, rows, sizeof(*keys), cmp_merge_key);
-      for (size_t k2 = 0; k2 < rows && total < max; k2++)
-         out[total++] = slots[keys[k2].slot].rows[keys[k2].row];
-      free(keys);
-   } else {
-      /* Out of memory: each account's rows in turn, still within max. */
-      for (int i = 0; i < n && total < max; i++) {
-         for (int r = 0; slots[i].rc == 0 && r < slots[i].count && total < max; r++)
-            out[total++] = slots[i].rows[r];
-      }
+      if (bs < 0)
+         break;
+      out[total++] = slots[bs].rows[br];
+      last_s = bs;
+      last_r = br;
    }
    *total_out = total;
    return whole;

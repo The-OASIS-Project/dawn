@@ -545,6 +545,24 @@ static void test_empty_html_returns_empty_error(void) {
 /* Hostile pages: an unclosed skip tag or noise class, or an unclosed comment,
  * repeated.  Each used to rescan the rest of the page per occurrence
  * (quadratic: 500 KB took a minute and more); now each search runs once. */
+/* Sanitizers slow the parser by a constant factor (ThreadSanitizer about 10x
+ * on these inputs); the limits below are for a plain build and only catch
+ * work that grows out of bounds, so they scale with it. */
+#if defined(__SANITIZE_THREAD__)
+#define SLOW 4
+#elif defined(__SANITIZE_ADDRESS__)
+#define SLOW 2
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define SLOW 4
+#elif __has_feature(address_sanitizer)
+#define SLOW 2
+#endif
+#endif
+#ifndef SLOW
+#define SLOW 1
+#endif
+
 static long elapsed_ms(const struct timespec *a) {
    struct timespec b;
    clock_gettime(CLOCK_MONOTONIC, &b);
@@ -563,8 +581,8 @@ static void check_linear(const char *unit) {
    clock_gettime(CLOCK_MONOTONIC, &t);
    char *out = NULL;
    html_extract_text_plain(html, reps * n, &out);
-   /* Linear is tens of ms (more under a sanitizer); quadratic was minutes. */
-   TEST_ASSERT_LESS_THAN_INT(3000, elapsed_ms(&t));
+   /* Linear is tens of ms; quadratic was minutes. */
+   TEST_ASSERT_LESS_THAN_INT(3000 * SLOW, elapsed_ms(&t));
    free(out);
    free(html);
 }
@@ -591,7 +609,7 @@ static void test_hostile_visibility_is_bounded(void) {
    clock_gettime(CLOCK_MONOTONIC, &t);
    char *out = NULL;
    html_extract_text_plain(html, n, &out);
-   TEST_ASSERT_LESS_THAN_INT(3000, elapsed_ms(&t));
+   TEST_ASSERT_LESS_THAN_INT(3000 * SLOW, elapsed_ms(&t));
    free(out);
    free(html);
 }
@@ -610,7 +628,7 @@ static void test_hostile_exponents_are_bounded(void) {
    clock_gettime(CLOCK_MONOTONIC, &t);
    char *out = NULL;
    html_extract_text_plain(html, n, &out);
-   TEST_ASSERT_LESS_THAN_INT(1000, elapsed_ms(&t)); /* 2.5 s before the cap */
+   TEST_ASSERT_LESS_THAN_INT(1000 * SLOW, elapsed_ms(&t)); /* 2.5 s before the cap */
    free(out);
    free(html);
 }

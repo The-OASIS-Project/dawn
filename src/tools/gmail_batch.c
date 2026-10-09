@@ -65,10 +65,19 @@ char *gmail_batch_body(const gmail_msg_id_t *ids, const int *which, int n) {
       const int i = which[k];
       if (!gmail_message_id_valid(ids[i].id))
          continue;
-      pos += (size_t)snprintf(body + pos, size - pos, BATCH_PART_FMT, GMAIL_BATCH_BOUNDARY, i,
-                              ids[i].id);
+      const int w = snprintf(body + pos, size - pos, BATCH_PART_FMT, GMAIL_BATCH_BOUNDARY, i,
+                             ids[i].id);
+      if (w < 0 || (size_t)w >= size - pos) {
+         free(body);
+         return NULL;
+      }
+      pos += (size_t)w;
    }
-   snprintf(body + pos, size - pos, "--%s--\r\n", GMAIL_BATCH_BOUNDARY);
+   const int w = snprintf(body + pos, size - pos, "--%s--\r\n", GMAIL_BATCH_BOUNDARY);
+   if (w < 0 || (size_t)w >= size - pos) {
+      free(body);
+      return NULL;
+   }
    return body;
 }
 

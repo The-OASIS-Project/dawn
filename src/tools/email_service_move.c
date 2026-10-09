@@ -752,12 +752,20 @@ static void undo_gmail(const email_account_t *acct,
             long code = 0;
             email_err_t lerr;
             gmail_pace(acct->id);
-            if (gmail_message_post(curl, token, rec->message_id, "modify", body, &code, &lerr) !=
-                    0 &&
-                code == 400 && gmail_labels_add_body(rec->labels, true, body, sizeof(body))) {
+            int lrc = gmail_message_post(curl, token, rec->message_id, "modify", body, &code,
+                                         &lerr);
+            if (lrc != 0 && code == 400 &&
+                gmail_labels_add_body(rec->labels, true, body, sizeof(body))) {
                /* A user label deleted since: the system ones still go back. */
                gmail_pace(acct->id);
-               gmail_message_post(curl, token, rec->message_id, "modify", body, NULL, &lerr);
+               lrc = gmail_message_post(curl, token, rec->message_id, "modify", body, NULL, &lerr);
+            }
+            if (lrc != 0) {
+               /* Out of Trash, but its labels (the Inbox among them) may not
+                * be back: the client reloads to see where it is, and the
+                * undo can be asked again (untrash does nothing twice). */
+               r->err = EMAIL_ERR_OUTCOME_UNKNOWN;
+               continue;
             }
          }
       } else {
