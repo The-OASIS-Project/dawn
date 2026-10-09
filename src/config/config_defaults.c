@@ -133,8 +133,8 @@ void config_set_defaults(dawn_config_t *config) {
    /* Default Claude model list (first entry is default) */
    config->llm.cloud.claude_models_count = 4;
    safe_strscpy(config->llm.cloud.claude_models[0],
-                LLM_DEFAULT_CLAUDE_MODEL); /* claude-haiku-4-5 */
-   safe_strscpy(config->llm.cloud.claude_models[1], "claude-haiku-5-5");
+                LLM_DEFAULT_CLAUDE_MODEL); /* claude-haiku-5-5 */
+   safe_strscpy(config->llm.cloud.claude_models[1], "claude-haiku-4-5");
    safe_strscpy(config->llm.cloud.claude_models[2], "claude-sonnet-5-5");
    safe_strscpy(config->llm.cloud.claude_models[3], "claude-opus-5-5");
    config->llm.cloud.claude_default_model_idx = 0;
@@ -149,21 +149,23 @@ void config_set_defaults(dawn_config_t *config) {
    /* Default OpenRouter model list (curated favorites shown in the header switcher;
     * full live catalog browsing is Phase 2).  IDs are OpenRouter "vendor/model" slugs —
     * verify against https://openrouter.ai/models as the catalog shifts.  Mirrors the
-    * per-provider lists above (default gpt-5.6-luna to match the OpenAI default). */
+    * per-provider lists above; first entry is the default, the same model as the Claude
+    * default. */
    config->llm.cloud.openrouter_models_count = 12;
-   safe_strscpy(config->llm.cloud.openrouter_models[0], "openai/gpt-5.6-luna");
-   safe_strscpy(config->llm.cloud.openrouter_models[1], "openai/gpt-5.6-terra");
-   safe_strscpy(config->llm.cloud.openrouter_models[2], "openai/gpt-5.6-sol");
-   safe_strscpy(config->llm.cloud.openrouter_models[3], "openai/gpt-5.5");
-   safe_strscpy(config->llm.cloud.openrouter_models[4], "openai/gpt-5.4-mini");
-   safe_strscpy(config->llm.cloud.openrouter_models[5], "openai/gpt-5.4-nano");
-   safe_strscpy(config->llm.cloud.openrouter_models[6], "anthropic/claude-haiku-4.5");
-   safe_strscpy(config->llm.cloud.openrouter_models[7], "anthropic/claude-haiku-5.5");
-   safe_strscpy(config->llm.cloud.openrouter_models[8], "anthropic/claude-sonnet-5.5");
-   safe_strscpy(config->llm.cloud.openrouter_models[9], "anthropic/claude-opus-5.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[0],
+                LLM_DEFAULT_OPENROUTER_MODEL); /* anthropic/claude-haiku-5.5 */
+   safe_strscpy(config->llm.cloud.openrouter_models[1], "anthropic/claude-haiku-4.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[2], "anthropic/claude-sonnet-5.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[3], "anthropic/claude-opus-5.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[4], "openai/gpt-5.6-luna");
+   safe_strscpy(config->llm.cloud.openrouter_models[5], "openai/gpt-5.6-terra");
+   safe_strscpy(config->llm.cloud.openrouter_models[6], "openai/gpt-5.6-sol");
+   safe_strscpy(config->llm.cloud.openrouter_models[7], "openai/gpt-5.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[8], "openai/gpt-5.4-mini");
+   safe_strscpy(config->llm.cloud.openrouter_models[9], "openai/gpt-5.4-nano");
    safe_strscpy(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
    safe_strscpy(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
-   config->llm.cloud.openrouter_default_model_idx = 0; /* openai/gpt-5.6-luna */
+   config->llm.cloud.openrouter_default_model_idx = 0;
 
    /* LLM Local */
    safe_strscpy(config->llm.local.endpoint, "http://127.0.0.1:8080");

@@ -12,6 +12,22 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-09 — Claude Haiku 5.5 is the default Claude and OpenRouter model
+
+**What changed.** When you use Claude without naming a model, DAWN now picks Claude Haiku 5.5
+(`claude-haiku-5-5`) instead of Haiku 4.5. In DAWN's chat quality tests it was more accurate than Haiku
+4.5 on text replies at about an eighth of the cost, and as accurate as OpenAI's `gpt-5.6-luna` while
+starting to answer about 3 seconds sooner. OpenRouter's default model is now Haiku 5.5 too
+(`anthropic/claude-haiku-5.5`, first in its built-in list, ahead of the OpenAI and Gemini models). The
+default provider is unchanged (OpenAI, `gpt-5.6-luna`).
+
+**What you need to do.** Nothing. If you saved your own Claude or OpenRouter model list (Settings →
+Language Model, or `claude_models` / `openrouter_models` in `dawn.toml`), DAWN keeps it and its
+default; to use Haiku 5.5 there, pick it in the model switcher or put it first. Conversations that
+already have a model keep it.
+
+---
+
 ## 2026-10-08 — Replies sized to the question; text messages kept short
 
 **What changed.**
