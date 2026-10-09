@@ -41,15 +41,8 @@
  * SYSTEM_PROMPT_NATIVE_TOOLS_RULES follow them when tools are enabled.  See
  * get_system_instructions() for the branching logic. */
 
-// Static buffer for the command prompt - make it static, make it large
-#define PROMPT_BUFFER_SIZE 65536
-static char command_prompt[PROMPT_BUFFER_SIZE];
-static int prompt_initialized = 0;
-
 // Static buffer for localization context
 #define LOCALIZATION_BUFFER_SIZE 512
-static char localization_context[LOCALIZATION_BUFFER_SIZE];
-static int localization_initialized = 0;
 
 // Static buffer for dynamic system instructions.
 #define SYSTEM_INSTRUCTIONS_BUFFER_SIZE 8192
@@ -57,11 +50,10 @@ static char system_instructions_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
 static int system_instructions_initialized = 0;
 
 /*
- * Serializes all access to the cached system_instructions state above, plus
- * the derived command_prompt buffer and its _initialized flag. Before this existed, invalidation
- * was called only at well-defined init boundaries and the buffers were treated as build-once; now
- * invalidation fires from MQTT callback threads (HUD status / discovery) while LLM worker threads
- * may be mid-read, so the previous lock-free pattern no longer holds.
+ * Serializes all access to the cached system_instructions state above. Before this existed,
+ * invalidation was called only at well-defined init boundaries and the buffers were treated as
+ * build-once; now invalidation fires from MQTT callback threads (HUD status / discovery) while LLM
+ * worker threads may be mid-read, so the previous lock-free pattern no longer holds.
  */
 static pthread_mutex_t system_instructions_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -109,7 +101,6 @@ int is_vision_enabled_for_current_llm(void) {
 void invalidate_system_instructions(void) {
    pthread_mutex_lock(&system_instructions_mutex);
    system_instructions_initialized = 0;
-   prompt_initialized = 0;
    pthread_mutex_unlock(&system_instructions_mutex);
    OLOG_INFO("System instructions cache invalidated - will rebuild on next LLM call");
 }
@@ -198,15 +189,13 @@ const char *get_system_instructions(void) {
  * @brief Builds the localization context string from config
  *
  * Creates a context string like:
- * "USER CONTEXT: Location: Atlanta, Georgia. Units: imperial. Timezone: America/New_York."
+ * "TOOL DEFAULTS (...): Location=Atlanta, Georgia. Units=imperial. TZ=America/New_York."
  *
- * Only includes fields that are configured (non-empty).
+ * Only includes fields that are configured (non-empty).  Writes into
+ * @p localization_context, LOCALIZATION_BUFFER_SIZE bytes (the longest line,
+ * every field full, is about 310).
  */
-static const char *get_localization_context(void) {
-   if (localization_initialized) {
-      return localization_context;
-   }
-
+static void localization_text(char *localization_context) {
    localization_context[0] = '\0';
    int offset = 0;
    int has_context = 0;
@@ -243,16 +232,13 @@ static const char *get_localization_context(void) {
    if (has_context) {
       snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset, "\n\n");
    }
-
-   localization_initialized = 1;
-   return localization_context;
 }
 
 void llm_persona_default(char *out, size_t size) {
    const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name : AI_NAME;
 
    /* Capitalized: it's a name. */
-   char name[64];
+   char name[CONFIG_NAME_MAX];
    snprintf(name, sizeof(name), "%s", ai_name);
    if (name[0] >= 'a' && name[0] <= 'z') {
       name[0] -= 32;
@@ -260,46 +246,12 @@ void llm_persona_default(char *out, size_t size) {
    snprintf(out, size, AI_PERSONA_TEMPLATE, name);
 }
 
-/* The persona the prompt opens with: the configured [persona] description,
- * else the default.  Built on each call, never cached, so a rename or a new
- * description reaches the next prompt built. */
-static void persona_effective(char *out, size_t size) {
+void llm_persona_effective(char *out, size_t size) {
    if (g_config.persona.description[0] != '\0') {
       snprintf(out, size, "%s", g_config.persona.description);
    } else {
       llm_persona_default(out, size);
    }
-}
-
-/**
- * @brief Builds the command prompt every surface starts from
- *
- * Persona, system instructions and localization.  Nothing about the surface a
- * turn arrives on (a local mic's voice and room, a satellite's room, a
- * channel): those are standing directions (dawn_build_prompt), so a
- * conversation that moves between surfaces keeps one system prompt.
- */
-static void initialize_command_prompt(void) {
-   /* Gather inputs without holding the mutex — these call helpers that each
-    * take the mutex briefly (get_system_instructions) or none at all. */
-   char persona[CONFIG_DESCRIPTION_MAX];
-   persona_effective(persona, sizeof(persona));
-   const char *sys_instr = get_system_instructions();
-   const char *loc_ctx = get_localization_context();
-
-   pthread_mutex_lock(&system_instructions_mutex);
-   if (prompt_initialized) {
-      pthread_mutex_unlock(&system_instructions_mutex);
-      return;
-   }
-
-   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s", persona,
-                             sys_instr, loc_ctx);
-   prompt_initialized = 1;
-   pthread_mutex_unlock(&system_instructions_mutex);
-
-   OLOG_INFO("AI prompt initialized (tools %s). Length: %d",
-             g_config.llm.tools.enabled ? "on" : "off", prompt_len);
 }
 
 int get_command_prompt_parts(command_prompt_parts_t *out) {
@@ -308,14 +260,15 @@ int get_command_prompt_parts(command_prompt_parts_t *out) {
    }
    memset(out, 0, sizeof(*out));
    char persona[CONFIG_DESCRIPTION_MAX];
-   persona_effective(persona, sizeof(persona));
+   llm_persona_effective(persona, sizeof(persona));
    (void)get_system_instructions();
-   (void)get_localization_context();
+   char localization[LOCALIZATION_BUFFER_SIZE];
+   localization_text(localization); /* built per call, like the persona: never older than config */
    /* Copied under the mutex a rebuild writes the buffers under. */
    pthread_mutex_lock(&system_instructions_mutex);
    out->persona = strdup(persona);
    out->rules = strdup(system_instructions_buffer);
-   out->tool_defaults = strdup(localization_context);
+   out->tool_defaults = strdup(localization);
    pthread_mutex_unlock(&system_instructions_mutex);
    if (!out->persona || !out->rules || !out->tool_defaults) {
       command_prompt_parts_free(out);
@@ -334,21 +287,30 @@ void command_prompt_parts_free(command_prompt_parts_t *parts) {
    memset(parts, 0, sizeof(*parts));
 }
 
+/* Persona, rules and localization joined, built from the parts on each call so
+ * the persona is never older than the config (only the rules and localization
+ * are cached).  Nothing about the surface a turn arrives on: those are standing
+ * directions (dawn_build_prompt), so a conversation that moves between
+ * surfaces keeps one system prompt. */
 char *get_command_prompt_dup(void) {
-   initialize_command_prompt();
-   /* Copied under the mutex a rebuild writes the buffer under, so a config edit
-    * mid-copy can't hand the caller half of each. */
-   pthread_mutex_lock(&system_instructions_mutex);
-   char *copy = strdup(command_prompt);
-   pthread_mutex_unlock(&system_instructions_mutex);
-   return copy;
+   command_prompt_parts_t parts;
+   if (get_command_prompt_parts(&parts) != 0) {
+      return NULL;
+   }
+   size_t size = strlen(parts.persona) + strlen(parts.rules) + strlen(parts.tool_defaults) + 5;
+   char *joined = malloc(size);
+   if (joined) {
+      snprintf(joined, size, "%s\n\n%s\n\n%s", parts.persona, parts.rules, parts.tool_defaults);
+   }
+   command_prompt_parts_free(&parts);
+   return joined;
 }
 
 /* =============================================================================
  * Voice-session prompt directives — effective-value accessors
  *
  * Config field set → use it; empty → fall back to the compile-time default.
- * See the header contract and dawn.h for the built-in text.
+ * See the header contract and prompts.h for the built-in text.
  *
  * Concurrency note: these return a pointer directly into g_config and are read
  * unlocked on the prompt-build path — consistent with every other g_config read

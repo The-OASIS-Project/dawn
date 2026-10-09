@@ -49,6 +49,7 @@
 
 /* Speech to Text */
 #include "asr/asr_interface.h"
+#include "prompts.h"
 #include "utils/asr_transcript.h"
 #include "utils/string_utils.h"
 
@@ -416,9 +417,6 @@ static bool s_command_unattended = false;
  * question is kept in the history with a stopped note, rather than rolled back
  * as for an interrupt that brings a new request. */
 static bool s_reply_stopped_by_user = false;
-
-/* Recorded in place of the reply a cancel phrase stopped. */
-#define STOPPED_REPLY_NOTE "(Stopped at the user's request before finishing.)"
 
 
 /* A cancel phrase: stop the reply (its speech, and its generation if still

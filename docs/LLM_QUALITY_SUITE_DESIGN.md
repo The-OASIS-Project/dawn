@@ -274,7 +274,7 @@ Each phase is a piece of the final design.
 
 **Remaining**
 1. **Clarifies and persona to κ ≥ 0.6.** Clarifies disagreed on acting where the player or calendar answers
-   the question (rule 2 says check first) and on one question with two parts; tighten the rubric there, then
+   the question (the rules say check first) and on one question with two parts; tighten the rubric there, then
    fresh labels. Persona needs more labels. Until then neither decides anything.
 2. **Local and OpenRouter capture.** Capture the chat-completions carrier (OpenRouter, llama.cpp/Ollama) and run
    it once end to end; DAWN is used with local models, and the suite can't evaluate them yet.

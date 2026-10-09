@@ -46,6 +46,7 @@
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "llm/llm_cache_monitor.h"
+#include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "prompts.h"
@@ -509,18 +510,21 @@ static char *research_commentary_context(const research_run_t *run0) {
  * conversation so the take ties back to what the user was doing.  Returns the take
  * (caller frees) or NULL on failure — caller falls back to the mechanical excerpt. */
 static char *research_commentary(struct session *s, const research_run_t *run0, const char *prose) {
-   const char *ai_name = g_config.general.ai_name[0] ? g_config.general.ai_name : "the assistant";
-   const char *persona = g_config.persona.description; /* may be "" */
+   char persona[CONFIG_DESCRIPTION_MAX];
+   llm_persona_effective(persona, sizeof(persona));
+   size_t plen = strlen(persona);
+   while (plen > 0 && (persona[plen - 1] == '\n' || persona[plen - 1] == ' ')) {
+      persona[--plen] = '\0'; /* the template supplies the blank line after it */
+   }
    char *convo = research_commentary_context(run0);
 
-   size_t sys_need = strlen(ai_name) + strlen(persona) + 900;
+   size_t sys_need = strlen(persona) + sizeof(RESEARCH_COMMENTARY_PROMPT_TEMPLATE);
    char *sysprompt = malloc(sys_need);
    if (!sysprompt) {
       free(convo);
       return NULL;
    }
-   snprintf(sysprompt, sys_need, RESEARCH_COMMENTARY_PROMPT_TEMPLATE, ai_name,
-            persona[0] ? " " : "", persona);
+   snprintf(sysprompt, sys_need, RESEARCH_COMMENTARY_PROMPT_TEMPLATE, persona);
 
    size_t dir_need = (convo ? strlen(convo) : 0) + strlen(run0->brief) + strlen(prose) + 512;
    char *directive = malloc(dir_need);

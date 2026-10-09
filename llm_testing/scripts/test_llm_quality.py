@@ -26,7 +26,7 @@ SERVER = "http://127.0.0.1:8080"
 # System Prompt — matches DAWN's actual prompt generation
 # =============================================================================
 
-# AI_PERSONA (from dawn.h) with default AI_NAME="Friday"
+# The default persona (AI_PERSONA_TEMPLATE, include/prompts.h) with AI_NAME="Friday"
 PERSONA = """Your name is Friday. Iron-Man-style AI assistant. Female voice; witty, playful, and kind. Address the user as "sir" or "boss". Light banter welcome. You're not 'just an AI'—own your identity with confidence.
 
 You assist the OASIS Project (Open Armor Systems Integrated Suite):

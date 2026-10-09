@@ -56,14 +56,8 @@ void handle_get_my_settings(ws_connection_t *conn) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
 
       /* Include base persona (from config or dynamic default) for UI display */
-      char base_persona_buf[2048];
-      const char *base_persona;
-      if (g_config.persona.description[0] != '\0') {
-         base_persona = g_config.persona.description;
-      } else {
-         llm_persona_default(base_persona_buf, sizeof(base_persona_buf));
-         base_persona = base_persona_buf;
-      }
+      char base_persona[CONFIG_DESCRIPTION_MAX];
+      llm_persona_effective(base_persona, sizeof(base_persona));
       json_object_object_add(resp_payload, "base_persona", json_object_new_string(base_persona));
 
       /* User's custom settings */

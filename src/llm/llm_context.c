@@ -53,6 +53,7 @@
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "prompts.h"
 #include "toml.h"
 #include "utils/string_utils.h"
 
@@ -63,7 +64,6 @@
 
 extern dawn_config_t g_config;
 
-#include "prompts.h"
 #include "tools/time_utils.h"
 
 /* =============================================================================

@@ -173,6 +173,8 @@ Layer 1 (Core infrastructure) — deps: Layer 0
                                 compaction worker, waits for its last reference, then frees it
 
 Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
+├── include/prompts.h           Every model-facing prompt, as string literals; quotes llm/ and core/ tokens, so
+│                               include it from Layer 2 up
 ├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views
 ├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
 │                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images

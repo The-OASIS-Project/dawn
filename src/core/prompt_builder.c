@@ -281,10 +281,7 @@ static char *append_messaging_context(char *base, session_t *dispatch) {
     * (b) the channel name usable as deliver_to, and (c) the rule inline, and
     * for SMS how a reply should read.  Stable across a session's turns, so it
     * caches cleanly. */
-   static const char sms_format[] =
-       " This is a text message: reply in short plain text, a few sentences at most, with no "
-       "markdown, lists or links unless the user asks.";
-   const char *format = strcmp(provider, "sms") == 0 ? sms_format : "";
+   const char *format = strcmp(provider, "sms") == 0 ? MESSAGING_SMS_FORMAT_DIRECTION : "";
    char ctx[768];
    ctx[0] = '\0';
    int len;

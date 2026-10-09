@@ -25,7 +25,7 @@
 #ifndef LLM_COMMAND_PARSER_H
 #define LLM_COMMAND_PARSER_H
 
-/* Header text for the TOOL DEFAULTS line emitted by get_localization_context():
+/* Header text for the TOOL DEFAULTS line (llm_command_parser.c):
  * the configured location / units / timezone, for a caller with no user
  * settings of its own. */
 #define TOOL_DEFAULTS_HEADER_TEXT \
@@ -55,8 +55,9 @@ void command_prompt_parts_free(command_prompt_parts_t *parts);
  *
  * Surface-neutral: what differs by surface (voice output, ASR hints, a room,
  * a channel) reaches the model as standing directions, so a conversation
- * keeps one system prompt wherever it continues.  A copy, since the shared
- * buffer is rewritten on a rebuild (invalidate_system_instructions()).
+ * keeps one system prompt wherever it continues.  The persona and
+ * localization are built on each call from the config; the rules are cached
+ * until invalidate_system_instructions().
  */
 char *get_command_prompt_dup(void);
 
@@ -105,6 +106,17 @@ void invalidate_system_instructions(void);
  * @param size Size of @p out
  */
 void llm_persona_default(char *out, size_t size);
+
+/**
+ * @brief Write the persona every prompt opens with into @p out
+ *
+ * The [persona] description when set, else llm_persona_default().  Built on
+ * each call, never cached, so a new description reaches the next prompt.
+ *
+ * @param out  Buffer to write into, CONFIG_DESCRIPTION_MAX for no truncation
+ * @param size Size of @p out
+ */
+void llm_persona_effective(char *out, size_t size);
 
 /* =============================================================================
  * Voice-session prompt directives (effective-value accessors)
