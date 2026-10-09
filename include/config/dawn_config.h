@@ -215,7 +215,7 @@ typedef struct {
    /* Prompt hint injected on voice-input surfaces warning the LLM that its
     * input was speech-transcribed and may contain homophone/mis-recognition
     * errors to interpret from context.  Empty = built-in default
-    * (DEFAULT_ASR_DISAMBIGUATION_HINT in dawn.h). */
+    * (DEFAULT_ASR_DISAMBIGUATION_HINT in prompts.h). */
    char disambiguation_hint[CONFIG_DESCRIPTION_MAX];
 } asr_config_t;
 
@@ -228,7 +228,7 @@ typedef struct {
    float length_scale;                /* Speaking rate: <1.0 = faster, >1.0 = slower */
    /* Spoken-output shaping directives injected on voice surfaces (reply is
     * read aloud by TTS, not shown on a screen).  Empty = built-in default
-    * (DEFAULT_VOICE_OUTPUT_DIRECTIVE / _WEBUI in dawn.h). */
+    * (DEFAULT_VOICE_OUTPUT_DIRECTIVE / _WEBUI in prompts.h). */
    char voice_directive[CONFIG_DESCRIPTION_MAX];       /* Satellites + local mic (firm) */
    char voice_directive_webui[CONFIG_DESCRIPTION_MAX]; /* WebUI voice turns (screen leeway) */
 } tts_config_t;

@@ -81,6 +81,7 @@
 #include "memory/memory_fact_search.h"
 #include "memory/memory_graph_retrieval.h"
 #include "memory/memory_types.h"
+#include "prompts.h"
 
 #ifdef DAWN_DAEMON_BUILD
 #error "bench_memory_pipeline.c is a benchmark harness — do NOT link into the dawn daemon. \

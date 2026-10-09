@@ -36,6 +36,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "prompts.h"
 #include "tools/tfidf_summarizer.h"
 #include "tts/text_to_speech.h"
 #include "ui/metrics.h"
@@ -139,19 +140,6 @@ static char *truncate_with_notice(const char *text, size_t max_len, size_t origi
 
    return result;
 }
-
-// Summarization prompt template
-static const char *SUMMARIZER_PROMPT_TEMPLATE =
-    "You are a search result summarizer. Given raw search results for the query \"%s\", "
-    "write a concise prose summary of the key information found.\n\n"
-    "Rules:\n"
-    "- Synthesize information across all sources\n"
-    "- Focus on facts directly relevant to the query\n"
-    "- Note conflicting information if present\n"
-    "- Do not include URLs\n"
-    "- Keep under %zu words\n\n"
-    "Search Results:\n%s\n\n"
-    "Summary:";
 
 // =============================================================================
 // Lifecycle
@@ -507,7 +495,7 @@ int search_summarizer_process(const char *search_results,
       }
    } else {
       // Build the summarization prompt for LLM backends
-      size_t prompt_size = strlen(SUMMARIZER_PROMPT_TEMPLATE) + strlen(original_query) +
+      size_t prompt_size = strlen(SEARCH_SUMMARIZER_PROMPT_TEMPLATE) + strlen(original_query) +
                            input_size + 32; /* Extra for word count */
       char *prompt = malloc(prompt_size);
       if (!prompt) {
@@ -525,7 +513,7 @@ int search_summarizer_process(const char *search_results,
          return SUMMARIZER_ERROR_ALLOC;
       }
 
-      snprintf(prompt, prompt_size, SUMMARIZER_PROMPT_TEMPLATE, original_query,
+      snprintf(prompt, prompt_size, SEARCH_SUMMARIZER_PROMPT_TEMPLATE, original_query,
                s_summarizer_config.target_summary_words, search_results);
 
       // Call appropriate LLM backend

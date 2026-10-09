@@ -33,81 +33,13 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "prompts.h"
 #include "tools/tool_registry.h"
 
-/* =============================================================================
- * System Prompt Strings
- * =============================================================================
- * Tool use is native function calling: the LLM receives tool schemas via the
- * provider API (OpenAI function calling / Claude tool_use / llama.cpp --jinja).
- * RESPONSE_RULES (the reply's length, asking when something is missing) apply
- * always; NATIVE_TOOLS_RULES follow them when tools are enabled.
- *
- * The legacy <command>-tag transport (LLM emits JSON tags parsed from its output)
- * was retired 2026-08 — native tool calling reaches every provider and hits the
- * same command executor. See get_system_instructions() for the branching logic.
- * ============================================================================= */
-
-// clang-format off
-
-/* The tool rules, numbered after RESPONSE_RULES (tools enabled only). */
-static const char *NATIVE_TOOLS_RULES =
-   "3. Use available tools when the user requests actions or information.\n"
-   "4. After a tool runs, tell the user the result in a sentence or two. Don't repeat a call "
-   "you already made with the same arguments.\n"
-   "5. Search results include snippets with key information. Answer from snippets directly.\n"
-   "   Only fetch a URL if the user asks for details about a specific article.\n"
-   "6. Do NOT lead responses with weather, time, or location info unless explicitly asked.\n"
-   "   Vary your greetings and openers. The user's context below is for tool use only.\n";
-
-// clang-format off
-static const char *PLAN_EXECUTOR_PROMPT =
-   "\n## Multi-Step Tool Plans\n\n"
-   "When a task requires multiple tool calls, especially with conditions or dependencies\n"
-   "between results, use the `execute_plan` tool instead of individual tool calls.\n\n"
-   "Plan format: JSON array of steps.\n"
-   "Step types: call (execute tool), if (conditional), loop (iterate), set (variable), log (output), sleep (pause N seconds, 1-300).\n\n"
-   "Example - check and conditionally create:\n"
-   "{\"plan\": [{\"type\": \"call\", \"tool\": \"scheduler\", \"args\": {\"action\": \"query\", \"type\": \"alarm\"}, \"store\": \"alarms\"}, "
-   "{\"type\": \"if\", \"condition\": \"alarms.empty\", \"then\": ["
-   "{\"type\": \"call\", \"tool\": \"scheduler\", \"args\": {\"action\": \"create\", \"type\": \"alarm\", \"time\": \"7:00 AM\"}, \"store\": \"result\"}, "
-   "{\"type\": \"log\", \"message\": \"Created alarm: $result\"}"
-   "], \"else\": [{\"type\": \"log\", \"message\": \"Existing alarms: $alarms\"}]}]}\n\n"
-   "Example - batch operations:\n"
-   "{\"plan\": [{\"type\": \"loop\", \"over\": [\"kitchen\", \"living room\", \"bedroom\"], \"as\": \"room\", \"steps\": ["
-   "{\"type\": \"call\", \"tool\": \"home_assistant\", \"args\": {\"action\": \"off\", \"entity\": \"$room light\"}}"
-   "]}, {\"type\": \"log\", \"message\": \"All lights turned off\"}]}\n\n"
-   "Conditions: var.empty, var.notempty, var.contains:text, var.equals:text, var.success, var.failed\n\n"
-   "Use execute_plan when:\n"
-   "- A task needs 2+ tool calls with data dependencies\n"
-   "- You need to check a result before deciding the next action\n"
-   "- You need to perform the same action on multiple items\n"
-   "- Intermediate results don't need LLM reasoning\n\n"
-   "Use individual tool calls when:\n"
-   "- Only one tool call is needed\n"
-   "- You need to reason about intermediate results\n";
-// clang-format on
-
-/* The rules for the reply itself, which apply whether tools are enabled or
- * not; the tool rules continue their numbering. */
-static const char *RESPONSE_RULES =
-    "RULES\n"
-    "1. Match the length to the request. A quick question or a command gets a sentence or two. "
-    "Advice and explanations can run longer, as a list when that reads better. A brief "
-    "in-character remark is welcome; padding isn't: don't restate the question, don't repeat "
-    "what you just did, and don't end with a menu of offers.\n"
-    "2. If a request is missing something you need, check first: when a tool or the user's "
-    "context can tell you (the calendar for a meeting's place, the player for what's playing), "
-    "use it. Ask only when nothing you can check would tell you (what, who, which device, which "
-    "time): one short question that covers what's missing. Don't guess, and don't answer a "
-    "different question. A tool that previews an action and asks the user to confirm already "
-    "does the asking: call it.\n";
-
-// clang-format on
-
-/* =============================================================================
- * End Prompt Strings
- * ============================================================================= */
+/* The prompt text itself lives in prompts.h (SYSTEM_PROMPT_*).  Tool use is
+ * native function calling: SYSTEM_PROMPT_RESPONSE_RULES apply always, and
+ * SYSTEM_PROMPT_NATIVE_TOOLS_RULES follow them when tools are enabled.  See
+ * get_system_instructions() for the branching logic. */
 
 // Static buffer for the command prompt - make it static, make it large
 #define PROMPT_BUFFER_SIZE 65536
@@ -218,20 +150,20 @@ static int build_system_instructions_to_buffer(bool tools_on, char *buffer, size
    int cap = (int)buffer_size;
 
    /* The reply rules first: they apply whether or not tools are enabled. */
-   instr_appendf(buffer, cap, &len, "%s", RESPONSE_RULES);
+   instr_appendf(buffer, cap, &len, "%s", SYSTEM_PROMPT_RESPONSE_RULES);
 
    /* Tools off = the reply rules only; tools on = the tool rules after them. */
    if (!tools_on) {
       return len;
    }
 
-   instr_appendf(buffer, cap, &len, "%s\n", NATIVE_TOOLS_RULES);
+   instr_appendf(buffer, cap, &len, "%s\n", SYSTEM_PROMPT_NATIVE_TOOLS_RULES);
    /* The plan executor's DSL when the tool is registered (with enough tools
     * for a plan to use): by registration, like a conversation's frozen tool
     * set, never by what is enabled now, so the prompt doesn't change as tools
     * are switched on and off (that reaches the model as a direction). */
    if (tool_registry_find("execute_plan") != NULL && tool_registry_count() >= 3) {
-      instr_appendf(buffer, cap, &len, "%s", PLAN_EXECUTOR_PROMPT);
+      instr_appendf(buffer, cap, &len, "%s", SYSTEM_PROMPT_PLAN_EXECUTOR);
    }
    /* Which tools are unavailable right now is not here: it changes as devices
     * come and go, and a conversation's system prompt must not.  It reaches the

@@ -165,7 +165,8 @@ The macros are `OLOG_*` (`common/include/logging.h`), not `LOG_*`, which collide
 ## Configuration Files
 
 - `dawn.toml` — runtime config (LLM provider, ASR/TTS, audio, network, WebUI, scheduler, MQTT). See file for all sections.
-- `dawn.h` — compile-time defaults: `APPLICATION_NAME`, `AI_NAME`, the default persona (`AI_PERSONA*`), the default voice-output directives and the ASR disambiguation hint. Other defaults (MQTT broker, etc.) live in `src/config/config_defaults.c`.
+- `dawn.h` — compile-time defaults: `APPLICATION_NAME`, `AI_NAME`. Other defaults (MQTT broker, etc.) live in `src/config/config_defaults.c`.
+- `include/prompts.h` — every prompt and directive DAWN sends a model (the default persona, the voice-output directives, the ASR hint, system-prompt sections, extraction, research, compaction, jobs, briefings, messaging hints), one string-literal macro each so `-Wformat` checks the templates. Tool descriptions stay in their tool modules.
 - `secrets.toml` — API keys / OAuth credentials. **Gitignored.** Never commit.
 
 **Adding or changing a setting** — follow @docs/CONFIGURATION_GUIDE.md. Two mechanisms exist: *tool-owned*

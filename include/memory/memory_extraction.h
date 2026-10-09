@@ -187,18 +187,6 @@ struct json_object *memory_extraction_parse_json(const char *response);
  */
 #define MEMORY_EXTRACTION_ENDPOINT_BUF_MIN 128
 
-/**
- * @brief Master extraction prompt template.
- *
- * Single source of truth used by both the live extraction worker and the
- * summarize-missing backfill helper.  Defined in memory_extraction.c.
- * Format args (in order): anchor_line, conversation_json, existing_profile.
- *
- * Exposed (not file-static) so backfill tooling can share the prompt without
- * silently drifting; do NOT duplicate this string elsewhere.
- */
-extern const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE;
-
 int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
                                      char *model_buf,
                                      size_t model_buf_sz,

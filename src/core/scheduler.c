@@ -50,6 +50,7 @@
 #include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
+#include "prompts.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 #include "webui/webui_server.h" /* satellite_send_response; the user's sessions */
@@ -483,8 +484,8 @@ static int scheduler_execute_task(sched_event_t *event) {
  * ============================================================================= */
 
 /* The briefing summarization prompt macros (BRIEFING_SYSTEM_PROMPT_PREFIX /
- * _SECURITY) and its assembly (build_briefing_system_message /
- * neutralize_briefing_fences) live in core/briefing_prompt.{c,h} so the
+ * _SECURITY) are in prompts.h; their assembly (build_briefing_system_message /
+ * neutralize_briefing_fences) lives in core/briefing_prompt.{c,h} so the
  * prompt-injection defenses are independently unit-testable. */
 
 #define BRIEFING_TTS_FALLBACK_MAX 500 /* Max chars for fallback-notice TTS */

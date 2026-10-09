@@ -54,6 +54,7 @@
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_types.h"
+#include "prompts.h"
 
 /* Pacing between conversations.  Each LLM call already takes seconds; this
  * just keeps us off the rate-limit ceiling during long backfills and gives

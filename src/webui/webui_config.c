@@ -55,6 +55,7 @@
 #include "llm/llm_rate_limit.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
+#include "prompts.h"
 #include "tools/messaging_tool.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"

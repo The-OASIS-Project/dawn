@@ -33,6 +33,7 @@
 #include "dawn.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
+#include "prompts.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
