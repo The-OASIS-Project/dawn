@@ -50,6 +50,15 @@ char *core_text_input_dispatch(session_t *session,
    if (!session || !text || (text[0] == '\0' && !(opts && opts->question_message))) {
       return NULL;
    }
+   /* What the user attached goes with the turn, or the turn doesn't run:
+    * refused before its question is added or saved. */
+   if (opts && (opts->email_account || opts->email_message_id) &&
+       session_turn_attach_email(session, opts->email_account, opts->email_message_id) != SUCCESS) {
+      OLOG_WARNING("text_input_dispatch: session %u: attached email refused (no running turn of "
+                   "this caller, a bad name, or out of memory)",
+                   session->session_id);
+      return NULL;
+   }
 
    /* Observe-side `status` (background-jobs Phase 2, §6.2).  Three terms, because
     * none alone covers the set: the session type catches a job worker, the

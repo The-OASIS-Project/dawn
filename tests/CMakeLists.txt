@@ -137,6 +137,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v99.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v100.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v101.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v102.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c

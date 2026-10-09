@@ -164,7 +164,8 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 ├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
 │                               dedup, reply codes, text-input dispatch, prompt sections, input queue
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
-│                               session, on the next turn
+│                               session, on the next turn, and never in a turn carrying an email the user
+│                               attached
 ├── src/core/pending_slots.c    What a tool staged for the user's confirm: one item per session and kind, each
 │                               with a new id its confirm must name; never evicts another session's item
 ├── src/core/tool_call_challenge.c  An action asked for by text, waiting for its reply code: one per channel,
@@ -177,7 +178,8 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
 │                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
-│                               background job, unattended) against the action's kind; decided once per call
+│                               background job, unattended, a user turn carrying an attached email) against the
+│                               action's kind; decided once per call
 ├── src/memory/                 Persistent memory, contacts, extraction, forgetting
 ├── src/auth/                   Users, settings, conversations and messages; auth_db_messages.c is the one
 │                               message insert (and the LLM replay read)

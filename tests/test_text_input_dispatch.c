@@ -163,6 +163,15 @@ void session_turn_mark_from_visual(session_t *session) {
    (void)session;
    s_from_visual_marks++;
 }
+static int s_attach_rc;
+static int s_attaches;
+int session_turn_attach_email(session_t *session, const char *account, const char *message_id) {
+   (void)session;
+   (void)account;
+   (void)message_id;
+   s_attaches++;
+   return s_attach_rc;
+}
 
 void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may_load) {
    (void)session;
@@ -244,6 +253,25 @@ static void test_from_visual_marks_the_turn(void) {
    TEST_ASSERT_EQUAL_INT(1, s_from_visual_marks);
 }
 
+/* An attached email goes with the turn, or the turn doesn't run: nothing
+ * added, saved or sent when the attach fails. */
+static void test_a_failed_attach_refuses_the_turn(void) {
+   s_attaches = 0;
+   s_attach_rc = 1; /* FAILURE */
+   const text_input_dispatch_opts_t opts = { .conversation_id = 3,
+                                             .auth_user_id = 1,
+                                             .email_account = "work",
+                                             .email_message_id = "u42.7" };
+   TEST_ASSERT_NULL(core_text_input_dispatch(s_session, "what is this?", &opts));
+   TEST_ASSERT_EQUAL_INT(1, s_attaches);
+   TEST_ASSERT_EQUAL_INT(0, s_added_objects + s_added_text + s_llm_calls);
+   TEST_ASSERT_EQUAL_STRING("", s_persisted);
+   s_attach_rc = 0;
+   free(core_text_input_dispatch(s_session, "what is this?", &opts));
+   TEST_ASSERT_EQUAL_INT(2, s_attaches);
+   TEST_ASSERT_EQUAL_INT(1, s_llm_calls);
+}
+
 /* A NULL text is never a turn, question or not. */
 static void test_null_text_is_refused(void) {
    struct json_object *question = image_only_question();
@@ -259,5 +287,6 @@ int main(void) {
    RUN_TEST(test_image_only_turn_runs);
    RUN_TEST(test_null_text_is_refused);
    RUN_TEST(test_from_visual_marks_the_turn);
+   RUN_TEST(test_a_failed_attach_refuses_the_turn);
    return UNITY_END();
 }

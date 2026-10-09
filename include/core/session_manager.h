@@ -571,6 +571,8 @@ typedef struct session {
    bool turn_awaits_conversation;  // typed first message; conversation created after
    bool turn_background;           // a reinvoke / background turn, not the user's
    bool turn_from_visual;          // started by a rendered visual's prompt, not the person
+   char *turn_attached;            // the note naming an email the user attached to this
+                                   // turn (session_turn_attach_email); NULL = none
    uint32_t turn_number;           // turns begun on this session (the running one's number)
    bool turn_context_reset;        // the live history it wrote was reset under it (a clear)
    char *turn_pending_user;        // persisted form of a user message not yet written
@@ -1712,11 +1714,35 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text);
  * @brief session_dispatch_user_turn() with a note for this turn only
  *
  * @p turn_note (a channel's constraint this turn, NULL for none) goes in the
- * turn's context, in front of its question.
+ * turn's context, in front of its question, with the note naming an email
+ * the running turn has attached (session_turn_attach_email).
  */
 int session_dispatch_user_turn_ex(session_t *session,
                                   const char *user_turn_text,
                                   const char *turn_note);
+
+/** Longest account and message id session_turn_attach_email() takes. */
+#define SESSION_ATTACH_ACCOUNT_MAX 128
+#define SESSION_ATTACH_MESSAGE_ID_MAX 191
+
+/**
+ * @brief Attach an email to the running turn (replacing any): the turn's
+ *        context names it, and the model reads it with the email tool
+ *
+ * Only its name goes with the turn, never its text: the text reaches the
+ * model as a tool result, where it is treated as someone else's.  Kept until
+ * the turn ends or the next begins.  While it is, a confirm in the turn is
+ * refused (turn_origin: the email could say "yes"), and so are device changes
+ * and other actions (TOOL_CALLER_THIRD_PARTY).
+ *
+ * @param account    The account's name as the email tool takes it
+ * @param message_id The message's id as the email tool takes it
+ * @return SUCCESS; FAILURE (nothing attached) when the caller isn't the running
+ *         turn's own code, either name is empty, too long or holds a character
+ *         outside printable ASCII (or a quote or backslash), or on allocation
+ *         failure
+ */
+int session_turn_attach_email(session_t *session, const char *account, const char *message_id);
 
 
 // =============================================================================

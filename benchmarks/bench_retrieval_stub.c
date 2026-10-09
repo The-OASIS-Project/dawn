@@ -104,6 +104,10 @@ bool session_turn_is_background(session_t *session) {
    (void)session;
    return false;
 }
+bool session_turn_carries_third_party(session_t *session) {
+   (void)session;
+   return false;
+}
 static __thread bool s_stub_code_redeemed;
 bool session_call_code_redeemed(void) {
    return s_stub_code_redeemed;

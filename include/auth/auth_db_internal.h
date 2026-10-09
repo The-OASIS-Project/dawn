@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 101
+#define AUTH_DB_SCHEMA_VERSION 102
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -153,8 +153,17 @@
  * the stored text.  Column order matters to the reads: a turn's stored blocks
  * are the largest value a row holds and spill to overflow pages, so they come
  * last, after every column a filter or index reads (kind, context_of,
- * images); llm_blocks_len sits just before them, so a size or presence check
- * never reads the blob's overflow pages either. */
+ * images, email_ref); llm_blocks_len sits just before them, so a size or
+ * presence check never reads the blob's overflow pages either.  (v102 added
+ * email_ref to existing databases with ALTER, after the blocks; it is read
+ * only on user rows, which never hold blocks.  So a migrated table's column
+ * order differs from a new one's: a later rebuild names its columns, never
+ * SELECT *.)
+ *
+ * email_ref: on a user question, the email the user attached to it, as the
+ * panel names it (a JSON object), so a reload shows what was attached.  The
+ * email's text is never stored with the question: the model reads it with the
+ * email tool, as a tool result. */
 #define CONV_MESSAGES_TABLE_SQL                                                      \
    "CREATE TABLE IF NOT EXISTS messages ("                                           \
    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
@@ -169,6 +178,7 @@
    "   kind TEXT DEFAULT NULL,"                                                      \
    "   context_of INTEGER DEFAULT NULL,"                                             \
    "   images TEXT DEFAULT NULL " CONV_MESSAGE_IMAGES_CHECK_SQL ","                  \
+   "   email_ref TEXT DEFAULT NULL,"                                                 \
    "   llm_blocks_len INTEGER,"                                                      \
    "   llm_blocks TEXT " CONV_LLM_BLOCKS_CHECK_SQL ","                               \
    "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE" \
@@ -1062,6 +1072,13 @@ int auth_db_migrations_v100(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (rolled back).
  */
 int auth_db_migrations_v101(sqlite3 *db);
+
+/**
+ * @brief Schema v102: messages.email_ref (the email a question was asked
+ *        about).  Idempotent.
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (rolled back; retried next start).
+ */
+int auth_db_migrations_v102(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the
