@@ -63,7 +63,11 @@ You need a daemon built from this branch, and an admin login.
 # spoken, per model.  With a persona file the fixture uses it in replace mode.
 scripts/quality_capture_all.sh llm_testing/quality/captures
 scripts/quality_capture_all.sh llm_testing/quality/captures my-persona.txt
-#   QUALITY_MODELS="openai:gpt-5.6-luna claude:claude-haiku-5-5" to choose models
+#   QUALITY_MODELS="openai:gpt-5.6-luna claude:claude-haiku-5-5" to choose models:
+#   provider:model for claude, openai, gemini or openrouter (vendor/model);
+#   local:<model> for the local llama.cpp/Ollama server; add @effort (e.g.
+#   claude:claude-haiku-5-5@medium) to capture that model with reasoning on.
+#   Models with and without @effort go in separate runs.
 ```
 
 Run the capture as the daemon's own user, because the daemon writes only into a
@@ -82,6 +86,9 @@ python3 -m llm_testing.quality run --captures llm_testing/quality/captures/captu
     --runs 3 --out results.json
 python3 -m llm_testing.quality run ... --model claude-haiku-5-5 --only confirm,multi_step
 ```
+
+Run a local model with `--workers 1`: parallel requests on one llama.cpp slot evict each
+other's cached prompt, and time to first token would measure that instead of the model.
 
 Rate limits, overloads and dropped connections are retried with backoff and are
 never scored as failures. A run that still fails shows in the `err` column.
