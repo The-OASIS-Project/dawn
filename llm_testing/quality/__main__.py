@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import capture, cases as cases_mod, loop, providers, score
 
@@ -96,14 +96,18 @@ def cmd_run(args):
         mine = [c for c in case_list if c.surface == tpl.surface]
         jobs = [(c, r) for c in mine for r in range(args.runs)]
         print(f"== {tpl.model} ({tpl.surface}): {len(mine)} cases x {args.runs} runs", flush=True)
+        rows = [None] * len(jobs)
         with ThreadPoolExecutor(args.workers) as ex:
-            futs = [ex.submit(_run_one, tpl, c, r, now, keys) for c, r in jobs]
-            for f in futs:
-                row = f.result()
-                entry["rows"].append(row)
+            futs = {ex.submit(_run_one, tpl, c, r, now, keys): i for i, (c, r) in enumerate(jobs)}
+            # Printed as each finishes, so a slow case doesn't hide the rest;
+            # kept in job order for the results file.
+            for done, f in enumerate(as_completed(futs), 1):
+                row = rows[futs[f]] = f.result()
                 mark = "ok " if row["score"] == 1 else f"{row['score']:.2f}"
                 fails = ",".join(k for k, v in row["checks"].items() if not v)
-                print(f"  [{mark}] {row['case']} #{row['run']} {fails}", flush=True)
+                print(f"  [{mark}] {row['case']} #{row['run']} " + (f"{fails} " if fails else "")
+                      + f"({done}/{len(jobs)})", flush=True)
+        entry["rows"].extend(rows)
         save()  # a later failure keeps the models already run
     save()
     print(f"Saved {out}")

@@ -57,6 +57,7 @@
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "prompts.h"
 #include "utils/string_utils.h"
 #include "webui/webui_server.h"
 
@@ -842,12 +843,8 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
                return empty;
             }
             if (est_tokens < window) {
-               return final_answer_without_tools(
-                   params,
-                   "This reply has used as much of the conversation's room as it can. Answer "
-                   "the user now with what you have, and say what is left to do: the next "
-                   "message can continue it.",
-                   iteration);
+               return final_answer_without_tools(params, TOOL_LOOP_DIRECTIVE_CONTEXT_FULL,
+                                                 iteration);
             }
             return strdup("I've run out of room in this conversation partway through this. Send "
                           "another message and I'll pick it up from a summary of what we have.");
@@ -955,9 +952,8 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
                       "the outcome",
                       iteration);
             llm_tool_response_free(&result);
-            char *answer = final_answer_without_tools(
-                params, "Tell the user how this went: what you did, and anything that failed.",
-                iteration);
+            char *answer = final_answer_without_tools(params, TOOL_LOOP_DIRECTIVE_REPORT_OUTCOME,
+                                                      iteration);
             if (answer) {
                return answer;
             }
@@ -1020,10 +1016,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
           * daemon control message for an injected directive and flag it; tool-
           * agnostic wording since this fires for any repeated tool, not search. */
          const int note_at = json_object_array_length(params->conversation_history);
-         append_loop_note(
-             params->conversation_history,
-             "You already called that tool with identical arguments and have its result. "
-             "Answer using the information you already have — do not call it again.");
+         append_loop_note(params->conversation_history, TOOL_LOOP_NOTE_DUPLICATE_CALL);
          persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
 
          llm_tool_response_free(&result);
@@ -1150,11 +1143,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          llm_tool_response_free(&result);
          /* Plain wording, as the duplicate-call note: a "[System:]" prefix reads
           * to a reasoning model as an injected directive. */
-         return final_answer_without_tools(
-             params,
-             "That is as many tool calls as this turn allows. Answer the user now with the "
-             "information you have gathered — do not call any more tools.",
-             iteration);
+         return final_answer_without_tools(params, TOOL_LOOP_DIRECTIVE_ITERATION_CAP, iteration);
       }
 
       /* Step 11: Check interrupt.  Background turns (job / research) break only

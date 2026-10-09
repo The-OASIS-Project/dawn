@@ -50,7 +50,7 @@ void config_set_defaults(dawn_config_t *config) {
    safe_strscpy(config->general.ai_name, "friday");
    config->general.log_file[0] = '\0'; /* Empty = stdout */
 
-   /* Persona - empty means use compile-time default from dawn.h */
+   /* Persona - empty means use compile-time default from prompts.h */
    config->persona.description[0] = '\0';
 
    /* Localization */
@@ -94,7 +94,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->asr.dedup_window_sec = ASR_DEDUP_WINDOW_SEC_DEFAULT;
    config->asr.audio_ctx_floor = ASR_AUDIO_CTX_FLOOR_DEFAULT;
    /* disambiguation_hint left empty by the memset above → built-in default
-    * (DEFAULT_ASR_DISAMBIGUATION_HINT) is used at prompt-build time. */
+    * (DEFAULT_ASR_DISAMBIGUATION_HINT, prompts.h) is used at prompt-build time. */
 
    /* TTS */
    safe_strscpy(config->tts.models_path, "models");

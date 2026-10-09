@@ -56,6 +56,7 @@
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
 #include "messaging/messaging_split.h"
+#include "prompts.h"
 
 /* =============================================================================
  * Module-local constants
@@ -303,15 +304,6 @@ static int enqueue_inbound(const char *provider,
  * documented provider ceilings, leaving 20-char headroom for the "(NN/NN) "
  * split prefix.  `channel_hint` is appended to the per-turn system prompt so
  * the LLM shapes its response to the channel. */
-/* Light formatting nudge for chat channels that DO render markdown (Discord /
- * Telegram / Slack).  The formatter handles correctness deterministically;
- * this just steers the LLM away from wide tables (which flatten to fenced
- * monospace on every chat surface) at the source.  SMS keeps its own stricter
- * plain-text hint instead — appending this would contradict it. */
-#define MESSAGING_CHAT_FORMAT_NUDGE                                                                \
-   "[Formatting for chat delivery: prefer concise prose and short '- ' bullet lists over wide "    \
-   "markdown tables — tables render poorly on chat channels.  Keep code in fenced blocks.  The " \
-   "full richly-formatted version is always available in the WebUI.]"
 
 provider_outbound_t provider_outbound_for(const char *provider) {
    if (provider && strcmp(provider, "sms") == 0) {
@@ -335,19 +327,7 @@ provider_outbound_t provider_outbound_for(const char *provider) {
          .max_outbound_chars = 670,
          .split_oversize = true,
          .max_parts = 3,
-         .channel_hint =
-             "[Delivery channel: SMS.  Your reply is being sent as a text message, NOT to a "
-             "voice or web client.  HARD CONSTRAINTS for this reply, regardless of what the "
-             "user asked for: "
-             "(1) under 400 characters total — count them; "
-             "(2) plain text only — NO markdown bold/italic, NO headers, NO bullet lists, NO "
-             "emoji; "
-             "(3) if the user asks for 'everything', 'all', a deep explanation, a list of "
-             "items, or anything that naturally wants a long answer, give a 1-2 sentence "
-             "summary and offer the WebUI for the full version (e.g. \"Quick version: X.  Want "
-             "the full breakdown?  I can pull it up in the WebUI.\"). "
-             "Anything you write that doesn't fit in 3 SMS messages will be dropped entirely "
-             "— the user gets a short 'open the WebUI' note instead.  Keep replies short.]",
+         .channel_hint = MESSAGING_SMS_CHANNEL_HINT,
       };
    }
    if (provider && strcmp(provider, "discord") == 0) {

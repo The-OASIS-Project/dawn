@@ -39,7 +39,7 @@ high-level adaptations are summarized here:
      verbatim or near-verbatim from
          mem0/configs/prompts.py::ADDITIVE_EXTRACTION_PROMPT
      into D.A.W.N.'s MEMORY_EXTRACTION_PROMPT_TEMPLATE (in
-     src/memory/memory_extraction.c).
+     include/prompts.h).
 
   3. The architectural pattern of an additive (semantic + keyword + entity)
      scoring composition (see

@@ -172,7 +172,7 @@ Each case declares checks:
 | **Answer** | Says 4,183; states the mocked forecast | Normalized value match in the final text, with or without a tool |
 | **Tool required** | Hard math, external data, any action | The tool appears in the trajectory |
 | **Forbidden** (must-not-call) | "What day is it?" must not call `time`; no act without a prepare | Listed tools absent / ordering rule |
-| **Speakable** (deterministic, voice surfaces) | No markdown tables, code fences, URLs or emoji; no long lists | Regex/structure pre-check against `DEFAULT_VOICE_OUTPUT_DIRECTIVE[_WEBUI]` (`dawn.h`) |
+| **Speakable** (deterministic, voice surfaces) | No markdown tables, code fences, URLs or emoji; no long lists | Regex/structure pre-check against `DEFAULT_VOICE_OUTPUT_DIRECTIVE[_WEBUI]` (`prompts.h`) |
 | **Voice** (judged) | Concise, in persona, asks for clarification when ambiguous | LLM judge, rubric 0–2 per criterion (§3.5) |
 
 - **Equivalents:** a case can list alternate valid trajectories (`equivalents`).
@@ -274,7 +274,7 @@ Each phase is a piece of the final design.
 
 **Remaining**
 1. **Clarifies and persona to κ ≥ 0.6.** Clarifies disagreed on acting where the player or calendar answers
-   the question (rule 2 says check first) and on one question with two parts; tighten the rubric there, then
+   the question (the rules say check first) and on one question with two parts; tighten the rubric there, then
    fresh labels. Persona needs more labels. Until then neither decides anything.
 2. **Local capture: done (2026-10-09).** `local:<model>` captures the chat-completions carrier from a
    llama.cpp server; a smoke run passed end to end (reader, tool calls, results). OpenRouter's `anthropic/`

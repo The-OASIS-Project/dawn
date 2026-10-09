@@ -22,7 +22,13 @@ import requests
 
 from .capture import Capture, messages_key
 
-REQUEST_TIMEOUT_S = 180
+# A stream is bounded three ways: no bytes for READ_TIMEOUT_S, longer than
+# ATTEMPT_DEADLINE_S in all (a stream that trickles never trips the first), and
+# a request's attempts together past REQUEST_BUDGET_S (it is then a run error).
+CONNECT_TIMEOUT_S = 10
+READ_TIMEOUT_S = 60
+ATTEMPT_DEADLINE_S = 180
+REQUEST_BUDGET_S = 420
 RETRY_ATTEMPTS = 6
 TRUNCATED = "stream ended early"
 # Errors that say nothing about the model.  Not "server_error": OpenAI also
@@ -34,6 +40,10 @@ _TRANSIENT = ("rate_limit", "overloaded", "api_error", TRUNCATED, "HTTP 408", "H
 # Connection failures, matched only as the exception that ended the request (the
 # start of the error), never inside a response body that quotes them.
 _TRANSIENT_EXCEPTIONS = ("ConnectionError:", "SSLError:", "ChunkedEncodingError:")
+
+
+class StreamDeadline(requests.exceptions.Timeout):
+    """A stream still running at its attempt's deadline (transient: "timed out")."""
 
 
 @dataclass
@@ -91,10 +101,13 @@ def _headers(cap: Capture, keys: Dict[str, str]) -> Dict[str, str]:
     return out
 
 
-def _sse(resp):
-    """(event, data) pairs from a server-sent-events response; "[DONE]" as ("done", {})."""
+def _sse(resp, deadline: Optional[float] = None):
+    """(event, data) pairs from a server-sent-events response; "[DONE]" as ("done", {}).
+    Raises StreamDeadline once @p deadline (a time.time()) has passed."""
     event = None
     for raw in resp.iter_lines(decode_unicode=True):
+        if deadline is not None and time.time() > deadline:
+            raise StreamDeadline(f"stream timed out after {ATTEMPT_DEADLINE_S}s")
         if raw is None:
             continue
         if raw.startswith("event:"):
@@ -121,10 +134,10 @@ def _parse_args(text: str):
     return (args, False) if isinstance(args, dict) else ({}, True)
 
 
-def _read_claude(resp, reply: Reply, text_seen):
+def _read_claude(resp, reply: Reply, text_seen, deadline=None):
     blocks: Dict[int, dict] = {}
     finished = False
-    for _ev, d in _sse(resp):
+    for _ev, d in _sse(resp, deadline):
         t = d.get("type")
         if t == "message_start":
             u = d["message"].get("usage", {})
@@ -172,10 +185,10 @@ def _read_claude(resp, reply: Reply, text_seen):
     reply.assistant_items = [{"role": "assistant", "content": content}]
 
 
-def _read_responses(resp, reply: Reply, text_seen):
+def _read_responses(resp, reply: Reply, text_seen, deadline=None):
     items: List[dict] = []
     finished = False
-    for _ev, d in _sse(resp):
+    for _ev, d in _sse(resp, deadline):
         t = d.get("type", "")
         if t == "response.output_text.delta":
             if d.get("delta", "").strip():
@@ -232,11 +245,11 @@ def merge_reasoning_details(pieces: List[dict]) -> List[dict]:
     return out
 
 
-def _read_chat(resp, reply: Reply, text_seen):
+def _read_chat(resp, reply: Reply, text_seen, deadline=None):
     calls: Dict[int, dict] = {}
     reasoning, details = "", []
     finished = False
-    for ev, d in _sse(resp):
+    for ev, d in _sse(resp, deadline):
         if ev == "done":
             finished = True
             break
@@ -303,11 +316,16 @@ def send(cap: Capture, body: dict, keys: Dict[str, str]) -> Reply:
     """POST @p body and read the streamed reply, retrying transient failures
     with backoff.  Nothing has run yet when a request is retried, so the
     mocked world is untouched."""
+    budget_end = time.time() + REQUEST_BUDGET_S
     for attempt in range(RETRY_ATTEMPTS):
         reply = _send_once(cap, body, keys)
         if not reply.error or not is_transient(reply.error):
             return reply
-        time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+        wait = min(30.0, 2.0 * (2 ** attempt))
+        if time.time() + wait >= budget_end:
+            reply.error += f" (gave up after {REQUEST_BUDGET_S}s of retries)"
+            return reply
+        time.sleep(wait)
     return reply
 
 
@@ -321,12 +339,12 @@ def _send_once(cap: Capture, body: dict, keys: Dict[str, str]) -> Reply:
 
     try:
         with requests.post(cap.url, headers=_headers(cap, keys), json=body, stream=True,
-                           timeout=REQUEST_TIMEOUT_S) as resp:
+                           timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S)) as resp:
             resp.encoding = "utf-8"  # an event stream without a charset is not Latin-1
             if resp.status_code != 200:
                 reply.error = f"HTTP {resp.status_code}: {resp.text[:300]}"
             else:
-                _READERS[cap.provider](resp, reply, text_seen)
+                _READERS[cap.provider](resp, reply, text_seen, start + ATTEMPT_DEADLINE_S)
     except requests.RequestException as e:
         reply.error = f"{type(e).__name__}: {e}"
     reply.total_s = time.time() - start

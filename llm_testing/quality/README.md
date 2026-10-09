@@ -91,7 +91,10 @@ Run a local model with `--workers 1`: parallel requests on one llama.cpp slot ev
 other's cached prompt, and time to first token would measure that instead of the model.
 
 Rate limits, overloads and dropped connections are retried with backoff and are
-never scored as failures. A run that still fails shows in the `err` column.
+never scored as failures. A run that still fails shows in the `err` column. A
+stream that sends nothing for 60 s, or runs past 180 s, is retried too, and a
+request gives up after 7 minutes of attempts, so one stuck call can't stall the
+run. Results print as each case finishes.
 
 To compare prompt wording without a new capture, `--system-patch FILE` replaces
 text in every captured system prompt: a JSON list of `[old, new]` pairs, each

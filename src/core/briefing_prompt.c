@@ -26,6 +26,7 @@
 
 #include "core/scheduler_db.h" /* SCHED_INSTRUCTIONS_MAX */
 #include "core/strbuf.h"
+#include "prompts.h"
 
 void neutralize_briefing_fences(char *s) {
    if (!s)
