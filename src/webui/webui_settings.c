@@ -31,9 +31,9 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
-#include "prompts.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
@@ -61,19 +61,7 @@ void handle_get_my_settings(ws_connection_t *conn) {
       if (g_config.persona.description[0] != '\0') {
          base_persona = g_config.persona.description;
       } else {
-         /* Build dynamic persona with configured AI name */
-         const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name
-                                                                   : AI_NAME;
-
-         /* Capitalize first letter for proper noun */
-         char capitalized_name[64];
-         snprintf(capitalized_name, sizeof(capitalized_name), "%s", ai_name);
-         if (capitalized_name[0] >= 'a' && capitalized_name[0] <= 'z') {
-            capitalized_name[0] -= 32;
-         }
-
-         snprintf(base_persona_buf, sizeof(base_persona_buf),
-                  AI_PERSONA_NAME_TEMPLATE " " AI_PERSONA_TRAITS, capitalized_name);
+         llm_persona_default(base_persona_buf, sizeof(base_persona_buf));
          base_persona = base_persona_buf;
       }
       json_object_object_add(resp_payload, "base_persona", json_object_new_string(base_persona));

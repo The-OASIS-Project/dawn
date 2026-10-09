@@ -20,6 +20,7 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifndef LLM_COMMAND_PARSER_H
 #define LLM_COMMAND_PARSER_H
@@ -93,11 +94,23 @@ int is_vision_enabled_for_current_llm(void);
  */
 void invalidate_system_instructions(void);
 
+/**
+ * @brief Write the default persona (AI_PERSONA_TEMPLATE, prompts.h) into @p out
+ *
+ * Uses general.ai_name (AI_NAME when unset), first letter capitalized.  Not the
+ * effective persona: a [persona] description, when set, replaces this.  Shown by
+ * the settings panels; the prompt build uses the same text.
+ *
+ * @param out  Buffer to write into (always NUL-terminated)
+ * @param size Size of @p out
+ */
+void llm_persona_default(char *out, size_t size);
+
 /* =============================================================================
  * Voice-session prompt directives (effective-value accessors)
  *
  * Each returns the configured directive text ([tts]/[asr] in dawn.toml) when
- * set, else the compile-time built-in default (dawn.h).  The prompt-build path
+ * set, else the compile-time built-in default (prompts.h).  The prompt-build path
  * injects these only on the relevant voice surfaces:
  *   - voice_directive:            satellites (DAP2/DAP) + local mic (spoken out)
  *   - voice_directive_webui:      WebUI voice turns (softer; screen leeway)

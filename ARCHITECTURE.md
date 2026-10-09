@@ -775,7 +775,7 @@ gemini_api_key = "..."
 
 **`dawn.h`** — compile-time fallbacks: `APPLICATION_NAME`, `AI_NAME`. Audio devices and MQTT broker defaults live in `src/config/config_defaults.c`.
 
-**`include/prompts.h`** — every prompt and directive sent to a model, including the defaults `dawn.toml` can replace: the persona (`AI_PERSONA`, `AI_PERSONA_TRAITS`), the voice-output directives (`DEFAULT_VOICE_OUTPUT_DIRECTIVE`, `_WEBUI`) and the ASR disambiguation hint.
+**`include/prompts.h`** — every prompt and directive sent to a model, including the defaults `dawn.toml` can replace: the persona (`AI_PERSONA_TEMPLATE`), the voice-output directives (`DEFAULT_VOICE_OUTPUT_DIRECTIVE`, `_WEBUI`) and the ASR disambiguation hint.
 
 **`models.toml`** — model context-window registry (per-model-prefix → max input tokens for OpenAI/Anthropic/Gemini). Read-only reference data loaded once by `llm_context.c` at startup; **exempt from the `dawn.toml` settings round-trip** (never rewritten). Edit + restart to update; no rebuild. OpenRouter/local windows are fetched live and not listed. See [MODELS_TOML_DESIGN.md](docs/MODELS_TOML_DESIGN.md).
 

@@ -55,7 +55,6 @@
 #include "llm/llm_rate_limit.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
-#include "prompts.h"
 #include "tools/messaging_tool.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -181,16 +180,8 @@ void handle_get_config(ws_connection_t *conn) {
 
    /* Add effective default persona (built-in fallback when config field is empty) */
    {
-      const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name
-                                                                : AI_NAME;
-      char capitalized_name[64];
-      snprintf(capitalized_name, sizeof(capitalized_name), "%s", ai_name);
-      if (capitalized_name[0] >= 'a' && capitalized_name[0] <= 'z') {
-         capitalized_name[0] -= 32;
-      }
       char default_persona[2048];
-      snprintf(default_persona, sizeof(default_persona),
-               AI_PERSONA_NAME_TEMPLATE " " AI_PERSONA_TRAITS, capitalized_name);
+      llm_persona_default(default_persona, sizeof(default_persona));
       json_object_object_add(payload, "default_persona", json_object_new_string(default_persona));
    }
 
@@ -1336,6 +1327,12 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    /* Track tools enable/disable changes for prompt rebuild */
    bool old_tools_enabled = g_config.llm.tools.enabled;
 
+   /* Track what the persona is built from, for the same rebuild */
+   char old_ai_name[sizeof(g_config.general.ai_name)];
+   safe_strscpy(old_ai_name, g_config.general.ai_name);
+   char old_persona[sizeof(g_config.persona.description)];
+   safe_strscpy(old_persona, g_config.persona.description);
+
    /* Track local endpoint changes for provider cache invalidation */
    char old_local_endpoint[128];
    safe_strscpy(old_local_endpoint, g_config.llm.local.endpoint);
@@ -1348,6 +1345,8 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    dawn_config_t *mutable_config = (dawn_config_t *)config_get();
    apply_config_from_json(mutable_config, payload);
    bool tools_mode_changed = (old_tools_enabled != g_config.llm.tools.enabled);
+   bool persona_changed = strcmp(old_ai_name, g_config.general.ai_name) != 0 ||
+                          strcmp(old_persona, g_config.persona.description) != 0;
    int result = config_write_toml(mutable_config, config_path);
    pthread_rwlock_unlock(&s_config_rwlock);
 
@@ -1474,6 +1473,11 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
          invalidate_system_instructions();
          OLOG_INFO("Tool calling %s, rebuilding prompt",
                    g_config.llm.tools.enabled ? "enabled" : "disabled");
+      }
+      /* A rename or a new persona description: the next prompt built carries it. */
+      if (persona_changed) {
+         invalidate_system_instructions();
+         OLOG_INFO("Persona changed, rebuilding prompt");
       }
 
       /* Nudge other admin browsers (a second tab, Aurora) to re-pull config so

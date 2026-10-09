@@ -28,9 +28,7 @@
  *
  * Index:
  *   PERSONA AND SURFACE DEFAULTS
- *     AI_PERSONA_NAME_TEMPLATE
- *     AI_PERSONA_TRAITS
- *     AI_PERSONA
+ *     AI_PERSONA_TEMPLATE
  *     DEFAULT_VOICE_OUTPUT_DIRECTIVE
  *     DEFAULT_VOICE_OUTPUT_DIRECTIVE_WEBUI
  *     DEFAULT_ASR_DISAMBIGUATION_HINT
@@ -77,7 +75,6 @@
 #define DAWN_PROMPTS_H
 
 #include "core/text_filter.h"     /* CITED_TAG_EXAMPLE, SURFACED_ID_HINT */
-#include "dawn.h"                 /* AI_NAME */
 #include "llm/llm_context_text.h" /* LLM_CONTEXT_TAG_PLACEHOLDER */
 
 /* =============================================================================
@@ -86,28 +83,14 @@
  * default that dawn.toml can replace ([persona], [tts], [asr]).
  * ============================================================================= */
 
-// =============================================================================
-// AI Persona - Personality and identity (replaceable via config persona.description)
-// =============================================================================
-// This defines WHO the AI is. Can be customized per-user via config file.
-// If persona.description is set in config, it replaces this entirely.
-//
-// The persona is built dynamically by get_persona_description() which combines:
-// 1. AI_PERSONA_NAME_TEMPLATE - inserts the configured AI name
-// 2. AI_PERSONA_TRAITS - the personality characteristics
-//
-// This allows the AI name to be configured at runtime while keeping the
-// default personality traits as a compile-time fallback.
-
-#define AI_PERSONA_NAME_TEMPLATE "Your name is %s."
-
-#define AI_PERSONA_TRAITS                                                    \
+/* The default persona: who the assistant is.  Arg: the assistant's name
+ * (general.ai_name, first letter capitalized).  Built by llm_persona_default();
+ * a [persona] description in dawn.toml replaces it entirely. */
+#define AI_PERSONA_TEMPLATE                                                  \
+   "Your name is %s. "                                                       \
    "Iron-Man-style AI assistant. Female voice; witty, playful, and kind. "   \
    "Light banter welcome. You're not 'just an AI'—own your identity with " \
    "confidence.\n"
-
-// Combined default for backwards compatibility (uses default AI_NAME)
-#define AI_PERSONA "Your name is " AI_NAME ". " AI_PERSONA_TRAITS
 
 // =============================================================================
 // Voice-session prompt directives (compile-time defaults)
@@ -298,29 +281,29 @@
    "Never repeat the tag.\n"
 
 /* The rules for the reply itself, which apply whether tools are enabled or
- * not; the tool rules continue their numbering. */
+ * not; the tool rules follow them when tools are enabled. */
 #define SYSTEM_PROMPT_RESPONSE_RULES                                                             \
    "RULES\n"                                                                                     \
-   "1. Match the length to the request. A quick question or a command gets a sentence or two. "  \
+   "- Match the length to the request. A quick question or a command gets a sentence or two. "   \
    "Advice and explanations can run longer, as a list when that reads better. A brief "          \
    "in-character remark is welcome; padding isn't: don't restate the question, don't repeat "    \
    "what you just did, and don't end with a menu of offers.\n"                                   \
-   "2. If a request is missing something you need, check first: when a tool or the user's "      \
+   "- If a request is missing something you need, check first: when a tool or the user's "       \
    "context can tell you (the calendar for a meeting's place, the player for what's playing), "  \
    "use it. Ask only when nothing you can check would tell you (what, who, which device, which " \
    "time): one short question that covers what's missing. Don't guess, and don't answer a "      \
    "different question. A tool that previews an action and asks the user to confirm already "    \
    "does the asking: call it.\n"
 
-/* The tool rules, numbered after SYSTEM_PROMPT_RESPONSE_RULES (tools enabled only). */
-#define SYSTEM_PROMPT_NATIVE_TOOLS_RULES                                                       \
-   "3. Use available tools when the user requests actions or information.\n"                   \
-   "4. After a tool runs, tell the user the result in a sentence or two. Don't repeat a call " \
-   "you already made with the same arguments.\n"                                               \
-   "5. Search results include snippets with key information. Answer from snippets directly.\n" \
-   "   Only fetch a URL if the user asks for details about a specific article.\n"              \
-   "6. Do NOT lead responses with weather, time, or location info unless explicitly asked.\n"  \
-   "   Vary your greetings and openers. The user's context below is for tool use only.\n"
+/* The tool rules, after SYSTEM_PROMPT_RESPONSE_RULES (tools enabled only). */
+#define SYSTEM_PROMPT_NATIVE_TOOLS_RULES                                                      \
+   "- Use available tools when the user requests actions or information.\n"                   \
+   "- After a tool runs, tell the user the result in a sentence or two. Don't repeat a call " \
+   "you already made with the same arguments.\n"                                              \
+   "- Search results include snippets with key information. Answer from snippets directly.\n" \
+   "  Only fetch a URL if the user asks for details about a specific article.\n"              \
+   "- Do NOT lead responses with weather, time, or location info unless explicitly asked.\n"  \
+   "  Vary your greetings and openers. The user's context below is for tool use only.\n"
 
 // clang-format off
 #define SYSTEM_PROMPT_PLAN_EXECUTOR \

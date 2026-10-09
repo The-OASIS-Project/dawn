@@ -248,45 +248,27 @@ static const char *get_localization_context(void) {
    return localization_context;
 }
 
-/**
- * @brief Gets the persona description from config or builds default with dynamic AI name
- *
- * Returns g_config.persona.description if set, otherwise builds the default persona
- * using AI_PERSONA_NAME_TEMPLATE + AI_PERSONA_TRAITS with the configured AI name
- * from g_config.general.ai_name (or falling back to AI_NAME compile-time default).
- *
- * This allows runtime customization of the AI personality via config file while
- * keeping the system instructions (AI_SYSTEM_INSTRUCTIONS) always active.
- */
-static const char *get_persona_description(void) {
-   static char dynamic_persona[1024]; /* Template ~30 + traits ~500 = ~550 max */
-   static int persona_built = 0;
+void llm_persona_default(char *out, size_t size) {
+   const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name : AI_NAME;
 
-   // If global config has a custom persona, use it directly
+   /* Capitalized: it's a name. */
+   char name[64];
+   snprintf(name, sizeof(name), "%s", ai_name);
+   if (name[0] >= 'a' && name[0] <= 'z') {
+      name[0] -= 32;
+   }
+   snprintf(out, size, AI_PERSONA_TEMPLATE, name);
+}
+
+/* The persona the prompt opens with: the configured [persona] description,
+ * else the default.  Built on each call, never cached, so a rename or a new
+ * description reaches the next prompt built. */
+static void persona_effective(char *out, size_t size) {
    if (g_config.persona.description[0] != '\0') {
-      return g_config.persona.description;
+      snprintf(out, size, "%s", g_config.persona.description);
+   } else {
+      llm_persona_default(out, size);
    }
-
-   // Build dynamic persona with configured AI name (only once)
-   if (!persona_built) {
-      const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name
-                                                                : AI_NAME;
-
-      // Capitalize first letter for proper noun (more respectful!)
-      char capitalized_name[64];
-      snprintf(capitalized_name, sizeof(capitalized_name), "%s", ai_name);
-      if (capitalized_name[0] >= 'a' && capitalized_name[0] <= 'z') {
-         capitalized_name[0] -= 32;
-      }
-
-      // Build the persona: "Your name is <Name>. <traits>"
-      snprintf(dynamic_persona, sizeof(dynamic_persona),
-               AI_PERSONA_NAME_TEMPLATE " " AI_PERSONA_TRAITS, capitalized_name);
-      persona_built = 1;
-      OLOG_INFO("Built dynamic persona with AI name: %s", capitalized_name);
-   }
-
-   return dynamic_persona;
 }
 
 /**
@@ -300,7 +282,8 @@ static const char *get_persona_description(void) {
 static void initialize_command_prompt(void) {
    /* Gather inputs without holding the mutex — these call helpers that each
     * take the mutex briefly (get_system_instructions) or none at all. */
-   const char *persona = get_persona_description();
+   char persona[CONFIG_DESCRIPTION_MAX];
+   persona_effective(persona, sizeof(persona));
    const char *sys_instr = get_system_instructions();
    const char *loc_ctx = get_localization_context();
 
@@ -324,7 +307,8 @@ int get_command_prompt_parts(command_prompt_parts_t *out) {
       return 1;
    }
    memset(out, 0, sizeof(*out));
-   const char *persona = get_persona_description();
+   char persona[CONFIG_DESCRIPTION_MAX];
+   persona_effective(persona, sizeof(persona));
    (void)get_system_instructions();
    (void)get_localization_context();
    /* Copied under the mutex a rebuild writes the buffers under. */

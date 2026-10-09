@@ -203,6 +203,15 @@ class InstructionTests(unittest.TestCase):
         i = capture.instructions(new)
         self.assertTrue(i["length"].startswith("Match the length"))
         self.assertIn("missing something you need", i["ask"])
+        bullets = self._cap("P\nRULES\n- Match the length to the request. A quick one.\n"
+                            "- If a request is missing something you need, ask.\n"
+                            "- Search results include snippets.\n"
+                            "  Only fetch a URL if asked.\n")
+        i = capture.instructions(bullets)
+        self.assertTrue(i["length"].startswith("Match the length"))
+        self.assertIn("missing something you need", i["ask"])
+        self.assertEqual(capture._rules(bullets.body["system"])[-1],
+                         "Search results include snippets. Only fetch a URL if asked.")
 
     def test_replace_persona_and_unstated_criterion(self):
         from .judge import definition
