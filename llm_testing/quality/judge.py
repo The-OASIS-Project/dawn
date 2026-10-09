@@ -174,6 +174,9 @@ def judge_results(path: str, judge_model: str, keys: Dict[str, str], out: Option
                 if definition(row, c) is not None:  # not told anything on it: not graded
                     todo.append((row, c, _key(row, c, judge_model)))
     missing = {k: (row, c) for row, c, k in todo if k not in cache}
+    key = "gemini_api_key" if judge_model.startswith("gemini") else "openrouter_api_key"
+    if missing and not keys.get(key):
+        raise SystemExit(f"no {key} for the judge; pass --secrets with the daemon's secrets.toml")
 
     failures = []
 

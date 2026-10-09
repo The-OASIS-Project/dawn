@@ -63,7 +63,11 @@ You need a daemon built from this branch, and an admin login.
 # spoken, per model.  With a persona file the fixture uses it in replace mode.
 scripts/quality_capture_all.sh llm_testing/quality/captures
 scripts/quality_capture_all.sh llm_testing/quality/captures my-persona.txt
-#   QUALITY_MODELS="openai:gpt-5.6-luna claude:claude-haiku-5-5" to choose models
+#   QUALITY_MODELS="openai:gpt-5.6-luna claude:claude-haiku-5-5" to choose models:
+#   provider:model for claude, openai, gemini or openrouter (vendor/model);
+#   local:<model> for the local llama.cpp/Ollama server; add @effort (e.g.
+#   claude:claude-haiku-5-5@medium) to capture that model with reasoning on.
+#   Models with and without @effort go in separate runs.
 ```
 
 Run the capture as the daemon's own user, because the daemon writes only into a
@@ -82,6 +86,9 @@ python3 -m llm_testing.quality run --captures llm_testing/quality/captures/captu
     --runs 3 --out results.json
 python3 -m llm_testing.quality run ... --model claude-haiku-5-5 --only confirm,multi_step
 ```
+
+Run a local model with `--workers 1`: parallel requests on one llama.cpp slot evict each
+other's cached prompt, and time to first token would measure that instead of the model.
 
 Rate limits, overloads and dropped connections are retried with backoff and are
 never scored as failures. A run that still fails shows in the `err` column.
@@ -173,6 +180,9 @@ From the first comparison on real captures (Luna, Haiku 4.5, Haiku 5.5).
 | The judge graded against standards the prompt never stated: rubric v1's κ was 0.12–0.40, always harsher than the human | Rubric v2 quotes the instruction each request gave; a run with no instruction on a criterion isn't graded on it |
 | An SSL disconnect from the API scored as a model failure | Dropped connections are retried and, if they persist, counted as run errors |
 | A follow-up capture shared by two templates was patched twice | Each capture is patched once |
+| `search_fact` asked about "last year" while its mocked result named a game the frozen clock had moved past, and gave half credit to an answer invented without searching that happened to name a team in the check | Asks about a named game; searching is required |
+| `url_fetch`, email `read` and email `trash` were unmocked, so a model that used them got "unavailable" | Mocked (`url_fetch` says when a page's text isn't in the test, rather than inventing one); `email_trash_confirm` case |
+| A missing API key made every judge call (or run request) fail with 401, and the run still finished | `run` and `judge` stop before calling when the key they need isn't in the secrets file |
 
 Rubric v2's first validation (35 labels): concise met the threshold (κ 0.83);
 clarifies (κ −0.13) and persona (κ 0.08) did not. On clarifies the judge

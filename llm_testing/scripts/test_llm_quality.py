@@ -3,6 +3,11 @@
 DAWN LLM Quality & Instruction-Following Test
 Tests how well each model follows DAWN's command format and maintains FRIDAY persona.
 
+Superseded for quality: it scores the <command>{JSON}</command> text format DAWN
+retired in 2026-08, so its scores don't apply to current DAWN. To choose a chat
+model, use the LLM quality suite (llm_testing/quality/README.md). The llama-server
+speed scripts still run this as a fixed ~1,145-token prompt for timing.
+
 The system prompt mirrors what DAWN actually generates for command_tags mode
 with default_remote=true tools. Updated April 2025 to match the live tool registry.
 """

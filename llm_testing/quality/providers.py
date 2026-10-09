@@ -68,14 +68,19 @@ def load_keys(secrets_path: str) -> Dict[str, str]:
     return keys
 
 
+def key_name(cap: Capture) -> Optional[str]:
+    """The secrets.toml key @p cap's request needs, or None (a local server's
+    request carries no credential)."""
+    if not any(h.partition(":")[2].strip() == "[REDACTED]" for h in cap.headers):
+        return None
+    if "openrouter.ai" in cap.url:
+        return "openrouter_api_key"
+    return "claude_api_key" if cap.provider == "claude" else "openai_api_key"
+
+
 def _headers(cap: Capture, keys: Dict[str, str]) -> Dict[str, str]:
     """The captured headers with the redacted credential filled back in."""
-    if "openrouter.ai" in cap.url:
-        key = keys.get("openrouter_api_key", "")
-    elif cap.provider == "claude":
-        key = keys.get("claude_api_key", "")
-    else:
-        key = keys.get("openai_api_key", "")
+    key = keys.get(key_name(cap) or "", "")
     out = {}
     for h in cap.headers:
         name, _, value = h.partition(":")

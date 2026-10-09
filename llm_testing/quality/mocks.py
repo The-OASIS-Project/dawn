@@ -100,7 +100,9 @@ class World:
                                                            "front door": "locked"})
         self.weather: Dict[str, str] = st.get("weather", {})
         self.search: Dict[str, str] = st.get("search", {})
+        self.pages: Dict[str, str] = st.get("pages", {})  # url substring -> page text
         self.reminders: List[dict] = []
+        self.trashed: List[dict] = []
         self.drafts: List[dict] = []
         self.sent: List[dict] = []
         self.playing_log: List[dict] = []
@@ -349,7 +351,35 @@ class World:
                 return "No such draft."
             self.sent.append(p)
             return f"Email sent to {p['to']}."
+        if action in ("read", "trash"):
+            mid = str(a.get("message_id") or "")
+            m = next((m for m in self.inbox if str(m.get("id")) == mid), None)
+            if not m:
+                return "Error: no message with that message_id (get IDs from recent or search)."
+            if action == "read":
+                return (f"From {m['from']}\nSubject: {m['subject']}\n\n"
+                        f"{m.get('body') or '(no text)'}")
+            pid = self._mint("email_trash", {"message_id": mid})
+            return (f"Ready to move '{m['subject']}' from {m['from']} to trash (pending_id {pid}). "
+                    f"Confirm with the user before proceeding, and call confirm_trash with "
+                    f"pending_id.")
+        if action == "confirm_trash":
+            p = self._take(a.get("pending_id") or a.get("id"), "email_trash")
+            if not p:
+                return "No such pending action."
+            self.inbox = [m for m in self.inbox if str(m.get("id")) != p["message_id"]]
+            self.trashed.append(p)
+            return "Moved to trash."
         return self._gap(self._tool, action)
+
+    def t_url_fetch(self, _action, a):
+        url = str(a.get("url") or "")
+        key = next((k for k in self.pages if k.lower() in url.lower()), None)
+        if key:
+            return f"Content of {url}:\n\n{self.pages[key]}"
+        # Honest about being a test: a made-up page would invite made-up answers.
+        return (f"Fetched {url}, but its text isn't available in this test. Answer from the "
+                f"search results you have, or say you couldn't read the page.")
 
     def t_home_assistant(self, action, a):
         dev = str(a.get("device", "")).lower()
