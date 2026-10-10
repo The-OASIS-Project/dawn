@@ -2496,9 +2496,6 @@ void webui_send_stream_start(session_t *session) {
    session->cmd_tag_filter.nesting_depth = 0;
    session->cmd_tag_filter.len = 0;
 
-   /* Reset sentence spacing tracker */
-   session->stream_last_char = '\0';
-
    /* Cache whether to bypass filtering (native tools enabled) */
    session->cmd_tag_filter_bypass = llm_tools_enabled(NULL);
 
@@ -2531,66 +2528,6 @@ void webui_send_stream_start(session_t *session) {
 }
 
 /* Command tag filter uses shared constants from core/text_filter.h */
-
-/**
- * @brief Check if character is a sentence terminator
- */
-static inline bool is_sentence_terminator(char c) {
-   return c == '.' || c == '!' || c == '?' || c == ':';
-}
-
-/**
- * @brief Check and fix sentence spacing for streaming text
- *
- * LLM streaming sometimes omits spaces after sentence terminators.
- * This function detects when the previous chunk ended with a terminator
- * and the new chunk starts with a letter, prepending a space if needed.
- *
- * @param session Session with stream_last_char tracking
- * @param text Input text
- * @param out_buf Output buffer (can overlap with text if no space needed)
- * @param out_size Size of output buffer
- * @return Pointer to text to send (either out_buf with space, or original text)
- */
-static const char *fix_sentence_spacing(session_t *session,
-                                        const char *text,
-                                        char *out_buf,
-                                        size_t out_size) {
-   if (!session || !text || !text[0] || !out_buf || out_size < 2) {
-      return text;
-   }
-
-   /* Check if we need to add a space:
-    * - Previous chunk ended with sentence terminator
-    * - This chunk starts with a letter */
-   char first = text[0];
-   bool needs_space = is_sentence_terminator(session->stream_last_char) &&
-                      ((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z'));
-
-   if (needs_space) {
-      /* Prepend space to the text */
-      size_t text_len = strlen(text);
-      if (text_len + 2 <= out_size) {
-         out_buf[0] = ' ';
-         memcpy(out_buf + 1, text, text_len + 1); /* Include null terminator */
-         return out_buf;
-      }
-   }
-
-   return text;
-}
-
-/**
- * @brief Update the last character tracker after sending text
- */
-static inline void update_stream_last_char(session_t *session, const char *text) {
-   if (session && text) {
-      size_t len = strlen(text);
-      if (len > 0) {
-         session->stream_last_char = text[len - 1];
-      }
-   }
-}
 
 /**
  * @brief Output callback for WebUI streaming (adapter for text_filter API)
@@ -2632,10 +2569,6 @@ static void webui_filter_output(const char *text, size_t len, void *ctx) {
    memcpy(temp_buf, text, safe_len);
    temp_buf[safe_len] = '\0';
 
-   /* Fix sentence spacing (LLM sometimes omits space after period) */
-   char spaced_buf[4098]; /* Extra room for prepended space */
-   const char *fixed_text = fix_sentence_spacing(session, temp_buf, spaced_buf, sizeof(spaced_buf));
-
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_DELTA,
                           .stream = {
@@ -2643,10 +2576,11 @@ static void webui_filter_output(const char *text, size_t len, void *ctx) {
                               .conversation_id = session->stream_conversation_id,
                           } };
 
-   snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
+   /* A frame carries at most its text field; a longer chunk is cut there. */
+   snprintf(resp.stream.text, sizeof(resp.stream.text), "%.*s", (int)sizeof(resp.stream.text) - 1,
+            temp_buf);
 
    session->stream_had_content = true;
-   update_stream_last_char(session, resp.stream.text);
    conv_stream_append(session->stream_conversation_id, session->current_stream_id,
                       resp.stream.text);
    queue_response(&resp);
@@ -2686,17 +2620,15 @@ int webui_filter_command_tags(session_t *session,
 }
 
 /* Per-delta stream working-buffer size.  The frame field `ws_response_t.stream.text`
- * is 1024 bytes and snprintf-truncates there, so the intermediate strip/spacing
- * buffers never need to exceed it (the +64 margin covers a sentence-spacing
- * prepended space and keeps a round number).  Replaces an inconsistent 4096/4098
- * magic pair that was 4× the transmittable ceiling. */
+ * is 1024 bytes and snprintf-truncates there, so the intermediate strip buffer
+ * never needs to exceed it (with a margin, a round number). */
 #define WEBUI_STREAM_DELTA_BUF 1088
 
 /**
  * @brief Emit one already-tag-stripped delta chunk to the stream.
  *
  * Shared tail of the native-tools stream path: opens the bubble on first real
- * content, fixes sentence spacing, appends to the replay ring, and queues the
+ * content, appends to the replay ring, and queues the
  * frame.  Callers must pass text that has already passed through any tag filter
  * (it is NOT re-filtered here) — used by both the live delta path and the
  * stream-end <cited> flush.
@@ -2713,19 +2645,14 @@ static void webui_emit_clean_delta(session_t *session, const char *text) {
       webui_send_stream_start(session);
    }
 
-   /* Fix sentence spacing (LLM sometimes omits space after period) */
-   char spaced_buf[WEBUI_STREAM_DELTA_BUF];
-   const char *fixed_text = fix_sentence_spacing(session, text, spaced_buf, sizeof(spaced_buf));
-
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_DELTA,
                           .stream = {
                               .stream_id = session->current_stream_id,
                               .conversation_id = session->stream_conversation_id,
                           } };
-   snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
+   snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", text);
    session->stream_had_content = true;
-   update_stream_last_char(session, resp.stream.text);
    /* Accumulate into the replay ring so a client attaching mid-turn (or the
     * one that switched away) can replay the partial. */
    conv_stream_append(session->stream_conversation_id, session->current_stream_id,

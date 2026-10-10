@@ -740,7 +740,6 @@ typedef struct session {
    uint64_t first_token_ms;      // Timestamp of first token (0 if none yet)
    uint64_t last_token_ms;       // Timestamp of most recent token
    uint32_t stream_token_count;  // Token count for current stream
-   char stream_last_char;        // Last character sent (for sentence spacing fix)
 
    // Per-session metrics (saved to database after each query)
    session_metrics_tracker_t metrics;
