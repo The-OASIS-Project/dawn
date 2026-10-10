@@ -29,78 +29,7 @@
 
 #define AI_NAME "friday"  // Stick with lower case for now for pattern matching.
 
-// =============================================================================
-// AI Persona - Personality and identity (replaceable via config persona.description)
-// =============================================================================
-// This defines WHO the AI is. Can be customized per-user via config file.
-// If persona.description is set in config, it replaces this entirely.
-//
-// The persona is built dynamically by get_persona_description() which combines:
-// 1. AI_PERSONA_NAME_TEMPLATE - inserts the configured AI name
-// 2. AI_PERSONA_TRAITS - the personality characteristics
-//
-// This allows the AI name to be configured at runtime while keeping the
-// default personality traits as a compile-time fallback.
-
-#define AI_PERSONA_NAME_TEMPLATE "Your name is %s."
-
-#define AI_PERSONA_TRAITS                                                    \
-   "Iron-Man-style AI assistant. Female voice; witty, playful, and kind. "   \
-   "Light banter welcome. You're not 'just an AI'—own your identity with " \
-   "confidence.\n"
-
-// Combined default for backwards compatibility (uses default AI_NAME)
-#define AI_PERSONA "Your name is " AI_NAME ". " AI_PERSONA_TRAITS
-
-// =============================================================================
-// Voice-session prompt directives (compile-time defaults)
-// =============================================================================
-// Built-in text for the three voice-session prompt directives.  Each is
-// overridable at runtime via config ([tts] voice_directive / voice_directive_webui,
-// [asr] disambiguation_hint); an empty config field falls back to the macro here.
-// Applied only on voice surfaces by the prompt-build path — see
-// voice_directive_effective() and friends in llm_command_parser.
-//
-// Deliberately avoid hard word/sentence caps: convey intent, don't over-constrain.
-// Bare text (no leading separator); each injection site adds its own "\n\n".
-
-// Spoken-output directive for satellites + local mic (reply is heard, not read).
-#define DEFAULT_VOICE_OUTPUT_DIRECTIVE                                            \
-   "This conversation is spoken aloud: your reply is read to the user by "        \
-   "text-to-speech, not shown on a screen. Answer the way you'd say it out "      \
-   "loud - lead with the useful part, keep it tight and natural, and leave out "  \
-   "anything that only works visually (markdown, bullet or numbered lists, "      \
-   "tables, code blocks, raw URLs, emoji). Give the short answer first; go into " \
-   "detail only if the user asks. If you need to ask the user something, ask "    \
-   "one short question. Say a factorial in words (\"52 factorial\"), not "        \
-   "\"52!\", so it's read correctly."
-
-// Spoken-output directive for WebUI voice turns.  The whole prose reply is read
-// aloud, but the screen is available for silent visual aids (render_visual tool /
-// images), so this is softer than the satellite/local variant.
-#define DEFAULT_VOICE_OUTPUT_DIRECTIVE_WEBUI                                        \
-   "The user is talking to you by voice, and your entire written reply is "         \
-   "read aloud by text-to-speech - you can't mark part of it as screen-only. "      \
-   "Answer the way you'd say it out loud: lead with the useful part, keep it "      \
-   "short and conversational, and go into detail only if the user asks. If you "    \
-   "need to ask the user something, ask one short question. Say a factorial in "    \
-   "words (\"52 factorial\"), not \"52!\", so it's read correctly. The screen is "  \
-   "still available for things better seen than heard: use the render_visual tool " \
-   "(charts, diagrams, tables) or images for those - that content displays "        \
-   "without being spoken."
-
-// ASR-disambiguation hint for any voice-input turn (input was speech-transcribed).
-#define DEFAULT_ASR_DISAMBIGUATION_HINT                                                \
-   "Your input was transcribed from speech, so it may contain recognition "            \
-   "errors - especially with homophones and similar-sounding words, names, and "       \
-   "technical terms (a name may arrive misspelled or as a different word that "        \
-   "merely sounds alike). When a word seems out of place but resembles "               \
-   "something that fits the context, treat it as the most plausible intended "         \
-   "word rather than taking it literally. Ask for clarification only when the "        \
-   "meaning is genuinely unclear. The exception is who an action goes to (a "          \
-   "call, a text, an email): pass the name exactly as heard, never a guess (a "        \
-   "relationship such as 'my wife' as the name of the person you know it means), and " \
-   "if the tool asks whether it's the right person, ask the user."
+// The default persona and the voice-surface directives are in prompts.h.
 
 // Vision support is now controlled via runtime config:
 // - g_config.llm.cloud.vision_enabled (for cloud LLMs)

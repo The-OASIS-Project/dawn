@@ -505,7 +505,7 @@ cudaMalloc failed: out of memory
 - **Fix:** DAWN has a built-in rate limiter (`rate_limit_rpm`, default 40). Lower the value if still hitting limits, or check if multiple DAWN instances share the same API key.
 
 **Problem:** Unknown cloud provider error
-- **Fix:** `provider` must be `"openai"`, `"claude"`, or `"gemini"` (case-sensitive)
+- **Fix:** `provider` must be `"openai"`, `"claude"`, `"gemini"` or `"openrouter"` (case-sensitive)
 
 ---
 
@@ -513,10 +513,24 @@ cudaMalloc failed: out of memory
 
 ### Quality Test
 
+To choose a chat model (cloud or local) or compare prompt wording, use the LLM quality suite: it replays
+DAWN's own captured requests against each model, checks what the model did and said, and reports
+quality, time to first token and cost under a decision rule fixed in advance. See
+`llm_testing/quality/README.md`. A local model is captured as `local:<model>`, for example:
+
 ```bash
-cd llm_testing/scripts
-python3 test_llm_quality.py
+QUALITY_MODELS="local:/var/lib/llama-cpp/models/<model>.gguf" \
+  scripts/quality_capture_all.sh llm_testing/quality/captures
+python3 -m llm_testing.quality run --captures llm_testing/quality/captures/capture-XXXX \
+  --runs 3 --workers 1 --out local.json
 ```
+
+Run a local model with `--workers 1`: requests in parallel on one llama.cpp slot evict each other's
+cached prompt, so time to first token would measure that, not the model.
+
+`llm_testing/scripts/test_llm_quality.py` scores the `<command>` text format DAWN no longer uses, so
+its scores don't apply to current DAWN. The llama-server speed scripts still run it as a fixed
+prompt for timing.
 
 ### Speed Test
 

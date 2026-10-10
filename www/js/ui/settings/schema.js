@@ -57,6 +57,7 @@
             ai_name: {
                type: 'text',
                label: 'AI Name / Wake Word',
+               restart: true,
                hint: 'Wake word to activate voice input',
             },
             log_file: {

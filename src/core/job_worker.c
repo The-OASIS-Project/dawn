@@ -47,6 +47,7 @@
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
+#include "prompts.h"
 #include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (jobs run only in WebUI builds) */
 
 /* Work item handed to the detached worker thread. */
@@ -56,42 +57,6 @@ typedef struct {
    char *goal;  /* owned; freed by the worker */
    bool resume; /* re-dispatch of an interrupted/failed job (history hydrated) */
 } job_work_t;
-
-/* What a resumed job is told.  A fresh job is dispatched with the user's goal on
- * an empty session; a resume runs on the SAME conversation with its prior
- * messages hydrated, so re-sending the original goal would read as a duplicate
- * request and invite the model to start over.  This says what happened and what
- * to do about it, and leaves the work already in the transcript to speak for
- * itself. */
-#define JOB_RESUME_DIRECTIVE                                                            \
-   "Your previous attempt at this task did not finish — it was interrupted by a "     \
-   "daemon restart or ended in an error before producing a final answer. The messages " \
-   "above are your own work so far. Review them, continue from where you left off "     \
-   "without repeating work that is already complete, and produce the final answer."
-
-/* Deliverable contract prepended to a job's goal on its first run.  A background
- * job hands exactly ONE thing back to the conversation that started it: the text
- * of its final message (reinjected, head-capped ~12 KB — JOB_REINVOKE_RESULT_CAP).
- * Without this framing the model improvises — most damagingly by saving its whole
- * report into a document and "handing off" a pointer the conversation never
- * receives, which also blows the output-token cap mid-tool-argument and truncates
- * to nothing (observed live, conv 1060).  Same shape as a Claude Code subagent:
- * the final message IS the return value. */
-#define JOB_DELIVERABLE_DIRECTIVE                                                     \
-   "You are running as a background job. Your FINAL message is the entire result "    \
-   "handed back to the conversation that started you — put your complete answer "   \
-   "there, as a concise, self-contained synthesis (aim for under ~1500 words). Do "   \
-   "NOT save your answer into a document or note and hand back a pointer to it: the " \
-   "conversation receives only your final message, never a file you create. If you "  \
-   "genuinely need to store a large reference artifact, write it in chunks with an "  \
-   "append action rather than one large create. Here is your task:\n\n"
-
-/* What a job is told when its context filled mid-task: its turn closed, and the
- * one that goes on runs on a compacted history (the work so far summarized). */
-#define JOB_CONTINUE_DIRECTIVE                                                       \
-   "Your context filled up partway through this task, so the earlier part of it is " \
-   "now summarized above. Continue from where you left off, without repeating work " \
-   "that is already complete, and produce the final answer."
 
 /* Continuation turns a job may take after its context fills (each compacts the
  * history first); its runtime reap bounds it too. */

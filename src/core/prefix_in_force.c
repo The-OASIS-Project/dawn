@@ -44,9 +44,8 @@
 #include "core/strbuf.h"
 #include "llm/llm_history_kind.h"
 #include "logging.h"
+#include "prompts.h"
 
-/* The standing directions when a surface has none (after one that had some). */
-#define DIRECTIVES_NONE "No standing directions apply to this surface now."
 
 static void hash_text(const char *text, char out[DAWN_SHA256_HEX_LEN]) {
    dawn_sha256_hex(text ? text : "", text ? strlen(text) : 0, out);
@@ -289,7 +288,7 @@ char *prefix_in_force_instructions(struct json_object *hist, const composed_prom
 }
 
 const char *prefix_in_force_directives_text(const char *directives) {
-   return (directives && directives[0]) ? directives : DIRECTIVES_NONE;
+   return (directives && directives[0]) ? directives : STANDING_DIRECTIONS_NONE;
 }
 
 /* The directions in force for a history with no record of them: the newest
@@ -300,7 +299,7 @@ static void legacy_directives_hash(struct json_object *hist, char out[DAWN_SHA25
       struct json_object *msg = json_object_array_get_idx(hist, i);
       if (llm_history_kind_of(msg) == MESSAGE_KIND_DIRECTIVE) {
          const char *c = str_of(msg, "content");
-         text = (c && strcmp(c, DIRECTIVES_NONE) != 0) ? c : "";
+         text = (c && strcmp(c, STANDING_DIRECTIONS_NONE) != 0) ? c : "";
          break;
       }
    }

@@ -77,11 +77,6 @@ struct json_object *memory_extraction_parse_json(const char *response) {
    abort();
 }
 
-/* MEMORY_EXTRACTION_PROMPT_TEMPLATE definition (the test_extraction binary
- * provides its own; here we just need a definition so summarize_missing.c
- * links).  Empty string is enough — the worker never runs in this test. */
-const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE = "";
-
 /* History loader — no-op stubs (worker is not under test). */
 struct json_object *memory_history_load_from_db(int64_t conv_id,
                                                 int user_id,

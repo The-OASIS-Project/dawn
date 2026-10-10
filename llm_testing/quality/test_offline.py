@@ -88,6 +88,22 @@ class MockTests(unittest.TestCase):
         self.assertEqual(w.sent[0]["to"], "b@x.com")
         self.assertEqual(w.same_turn_acts, [])
 
+    def test_email_read_and_trash_need_a_yes(self):
+        w = World(NOW, {"inbox": [{"id": "m2", "from": "Newsletter", "subject": "Digest",
+                                   "body": "This week..."}]})
+        self.assertIn("This week", w.call("email", {"action": "read", "message_id": "m2"}))
+        self.assertIn("pending_id p1", w.call("email", {"action": "trash", "message_id": "m2"}))
+        w.turn = 1
+        self.assertEqual(w.call("email", {"action": "confirm_trash", "pending_id": "p1"}),
+                         "Moved to trash.")
+        self.assertEqual((w.inbox, w.trashed[0]["message_id"], w.same_turn_acts), ([], "m2", []))
+
+    def test_url_fetch_without_a_page_says_so(self):
+        w = World(NOW, {"pages": {"example.org": "Page text."}})
+        self.assertIn("Page text.", w.call("url_fetch", {"url": "https://example.org/a"}))
+        self.assertIn("isn't available", w.call("url_fetch", {"url": "https://other.net"}))
+        self.assertEqual(w.unmocked, [])
+
     def test_unmocked_tool_is_recorded_not_failed(self):
         w = World(NOW)
         self.assertIn("isn't available", w.call("stocks", {"action": "quote"}))
@@ -160,6 +176,15 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(len(marked), 1)
         self.assertEqual(marked[0]["type"], "tool_result")
 
+    def test_key_name_follows_the_carrier(self):
+        from .providers import key_name
+        local = capture.Capture("x", "openai-chat", "http://10.0.0.2:8080/v1/chat/completions",
+                                ["Content-Type: application/json"], {}, "webui-text", "m", "q")
+        self.assertIsNone(key_name(local))
+        claude = capture.Capture("x", "claude", "https://api.anthropic.com/v1/messages",
+                                 ["x-api-key: [REDACTED]"], {}, "webui-text", "m", "q")
+        self.assertEqual(key_name(claude), "claude_api_key")
+
     def test_reasoning_details_merge_like_dawn(self):
         from .providers import merge_reasoning_details
         merged = merge_reasoning_details([{"type": "r", "index": 0, "text": "a"},
@@ -185,6 +210,39 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(w._local_time("08:00"), "2026-10-14T08:00:00")
 
 
+class DeadlineTests(unittest.TestCase):
+    """A stream that trickles past its deadline ends; retries stop at the budget."""
+
+    def test_trickling_stream_hits_deadline(self):
+        from . import providers
+
+        class Resp:
+            def iter_lines(self, decode_unicode=True):
+                while True:  # a keep-alive line forever: never a read timeout
+                    yield ": ping"
+
+        with self.assertRaises(providers.StreamDeadline):
+            for _ in providers._sse(Resp(), deadline=0.0):
+                pass
+
+    def test_retries_stop_at_budget(self):
+        from unittest import mock
+        from . import providers
+        calls = []
+
+        def failing(cap, body, keys):
+            calls.append(1)
+            return providers.Reply(error="HTTP 529: overloaded")
+
+        clock = iter(range(0, 10_000, 200))  # each look at the clock is 200s later
+        with mock.patch.object(providers, "_send_once", failing), \
+                mock.patch.object(providers.time, "time", lambda: next(clock)), \
+                mock.patch.object(providers.time, "sleep", lambda s: None):
+            reply = providers.send(_capture(), {}, {})
+        self.assertLess(len(calls), providers.RETRY_ATTEMPTS)
+        self.assertIn("gave up after", reply.error)
+
+
 class InstructionTests(unittest.TestCase):
     def _cap(self, system):
         return capture.Capture("x", "claude", "u", [], {"system": system, "messages": []},
@@ -203,6 +261,15 @@ class InstructionTests(unittest.TestCase):
         i = capture.instructions(new)
         self.assertTrue(i["length"].startswith("Match the length"))
         self.assertIn("missing something you need", i["ask"])
+        bullets = self._cap("P\nRULES\n- Match the length to the request. A quick one.\n"
+                            "- If a request is missing something you need, ask.\n"
+                            "- Search results include snippets.\n"
+                            "  Only fetch a URL if asked.\n")
+        i = capture.instructions(bullets)
+        self.assertTrue(i["length"].startswith("Match the length"))
+        self.assertIn("missing something you need", i["ask"])
+        self.assertEqual(capture._rules(bullets.body["system"])[-1],
+                         "Search results include snippets. Only fetch a URL if asked.")
 
     def test_replace_persona_and_unstated_criterion(self):
         from .judge import definition

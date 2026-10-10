@@ -225,14 +225,14 @@
 # First model in list is used when switching to that provider (up to 32 models per provider)
 # openai_models = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"]
 # openai_default_model_idx = 0
-# claude_models = ["claude-haiku-4-5", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]
+# claude_models = ["claude-haiku-5-5", "claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"]
 # claude_default_model_idx = 0
 # gemini_models = ["gemini-3.7-flash", "gemini-3.1-pro-preview"]
 # gemini_default_model_idx = 0
 # OpenRouter favorites (used when provider = "openrouter"). IDs are "vendor/model".
 # These are the curated shortlist shown in the header model switcher.
-# openrouter_models = ["openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "anthropic/claude-haiku-4.5", "anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5", "google/gemini-3.7-flash", "google/gemini-3.1-pro-preview"]
-# openrouter_default_model_idx = 0   # openai/gpt-5.6-luna
+# openrouter_models = ["anthropic/claude-haiku-5.5", "anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5", "openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "google/gemini-3.7-flash", "google/gemini-3.1-pro-preview"]
+# openrouter_default_model_idx = 0   # anthropic/claude-haiku-5.5
                                   # Verify slugs against https://openrouter.ai/models
 
 [llm.local]

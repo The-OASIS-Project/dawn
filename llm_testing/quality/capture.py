@@ -185,14 +185,15 @@ def system_text(body: dict, provider: str) -> str:
 
 
 def _rules(sys_text: str) -> List[str]:
-    """The RULES block's rules, each as one line of text without its number."""
+    """The RULES block's rules, each as one line of text without its bullet or
+    number (older prompts numbered them)."""
     parts = RULES_RE.split(sys_text, 1)
     rules: List[str] = []
     for line in (parts[1] if len(parts) > 1 else "").split("\n"):
-        m = re.match(r"^\d+\. (.*)", line)
+        m = re.match(r"^(?:\d+\.|-) (.*)", line)
         if m:
             rules.append(m.group(1))
-        elif line.startswith("   ") and rules:
+        elif line.startswith("  ") and rules:
             rules[-1] += " " + line.strip()
         else:
             break  # the block ends at its first line that isn't a rule

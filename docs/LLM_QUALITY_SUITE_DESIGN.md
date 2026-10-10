@@ -1,9 +1,9 @@
 # LLM Quality Suite v2: Design
 
-**Status:** rev 4 (2026-10-08). Built and used for its first decision: capture (P0, WebUI surfaces with the
-Claude and OpenAI Responses carriers), the runner and checks (P1), 125 audited cases (P2), the judge with
+**Status:** rev 5 (2026-10-09). Built and used for its first decisions: capture (P0, WebUI surfaces with the
+Claude, OpenAI Responses and chat-completions carriers), the runner and checks (P1), 125 audited cases (P2), the judge with
 rubric v2 and labeling (P3, concise validated, clarifies and persona not yet), statistics (P4) and the usage
-README (P5, in part). The remaining work is in §4. Usage: `llm_testing/quality/README.md`.
+README (P5, in part), and per-capture reasoning (`@effort`). The remaining work is in §4. Usage: `llm_testing/quality/README.md`.
 **Replaces:** `llm_testing/scripts/test_llm_quality_native.py` as the basis for choosing a chat model. The old
 suite stays as a quick smoke test.
 **Why now:** choosing a chat default between OpenAI `gpt-5.6-luna`, Claude Haiku 4.5 and Haiku 5.5 showed that
@@ -172,7 +172,7 @@ Each case declares checks:
 | **Answer** | Says 4,183; states the mocked forecast | Normalized value match in the final text, with or without a tool |
 | **Tool required** | Hard math, external data, any action | The tool appears in the trajectory |
 | **Forbidden** (must-not-call) | "What day is it?" must not call `time`; no act without a prepare | Listed tools absent / ordering rule |
-| **Speakable** (deterministic, voice surfaces) | No markdown tables, code fences, URLs or emoji; no long lists | Regex/structure pre-check against `DEFAULT_VOICE_OUTPUT_DIRECTIVE[_WEBUI]` (`dawn.h`) |
+| **Speakable** (deterministic, voice surfaces) | No markdown tables, code fences, URLs or emoji; no long lists | Regex/structure pre-check against `DEFAULT_VOICE_OUTPUT_DIRECTIVE[_WEBUI]` (`prompts.h`) |
 | **Voice** (judged) | Concise, in persona, asks for clarification when ambiguous | LLM judge, rubric 0–2 per criterion (§3.5) |
 
 - **Equivalents:** a case can list alternate valid trajectories (`equivalents`).
@@ -274,15 +274,20 @@ Each phase is a piece of the final design.
 
 **Remaining**
 1. **Clarifies and persona to κ ≥ 0.6.** Clarifies disagreed on acting where the player or calendar answers
-   the question (rule 2 says check first) and on one question with two parts; tighten the rubric there, then
+   the question (the rules say check first) and on one question with two parts; tighten the rubric there, then
    fresh labels. Persona needs more labels. Until then neither decides anything.
-2. **Local and OpenRouter capture.** Capture the chat-completions carrier (OpenRouter, llama.cpp/Ollama) and run
-   it once end to end; DAWN is used with local models, and the suite can't evaluate them yet.
+2. **Local capture: done (2026-10-09).** `local:<model>` captures the chat-completions carrier from a
+   llama.cpp server; a smoke run passed end to end (reader, tool calls, results). OpenRouter's `anthropic/`
+   models use the Claude Messages path, already covered. Run local models with `--workers 1` (one
+   llama.cpp slot; parallel requests evict each other's cached prompt).
 3. **local-mic capture**, for the local surface's own directions.
 4. **The prefix-hash cross-check** (§3.1).
 5. **Trailing offers.** Haiku 5.5 ends ~19% of text replies with a question (Luna ~2%); a clause in the length
    rule didn't change it. A dedicated, more prominent rule, A/B'd the same way, is the next attempt.
-6. **P5 rest:** the LLM_INTEGRATION_GUIDE refresh, and retiring `llm_testing/scripts/test_llm_quality.py`.
+6. **P5 rest:** the LLM_INTEGRATION_GUIDE points to the suite (done). Retiring
+   `llm_testing/scripts/test_llm_quality.py` waits on moving the llama-server speed scripts
+   (`benchmark_all_models.sh`, `test_single_model.sh`) and the latency figures they produced
+   (`ARCHITECTURE.md`, `services/llama-server/README.md`) to the suite on a local capture.
 
 ## 5. Decisions
 - **Capture file location:** an admin-named path, opened `O_EXCL|0600` (as `db backup`), rather than a fixed
@@ -309,3 +314,33 @@ first token and cost decide for it. The judge's validated concise score: Luna 1.
 The suite also changed DAWN's prompts: new length and asking rules, measured not to cost tool use or answers on
 any of the three models, and a fix for notes that came after the user's words on models without
 mid-conversation system messages.
+
+### Chat reasoning (2026-10-09)
+
+Haiku 5.5, the replace-mode persona, today's main, 3 runs; reasoning off (the config) against adaptive at
+effort medium (`quality_capture_all.sh` with `claude:claude-haiku-5-5@medium`):
+
+| | Score text / spoken | TTFT p50 / p90 (text) | $/turn (text) |
+|---|---|---|---|
+| Off | 0.985 / 0.984 | 0.69 s / 1.74 s | 0.00096 |
+| Medium | 0.989 / 1.000 | 2.38 s / 4.38 s | 0.00100 |
+
+No significant quality difference on either surface, so time to first token and cost decide: reasoning
+stays off for chat. Reasoning helps where nobody waits for it, memory extraction (`[memory]
+extraction_effort = "medium"`).
+
+### A local model (2026-10-09)
+
+Qwen 3.6 35B-A3B (Q4_K_M) on the llama.cpp server, thinking off (the config), the replace-mode persona,
+3 runs with `--workers 1`, against Haiku 5.5 from the same day's captures:
+
+| | Score text / spoken | TTFT p50 / p90 (text) | $/turn |
+|---|---|---|---|
+| Haiku 5.5 | 0.985 / 0.984 | 0.69 s / 1.74 s | 0.00096 |
+| Qwen 3.6 (local) | 0.958 / 0.992 | 3.79 s / 5.64 s | no API cost |
+
+No significant quality difference (text −0.027, CI [−0.059, +0.002]; worse on 11 cases, better on 3; spoken
+ties); time favors Haiku 5.5 and cost the local model. Qwen's characteristic misses: answering from its own
+knowledge without searching (it named the wrong Super Bowl winner from memory) and acting on an ambiguous
+request instead of asking. Concise (validated) 0.64 against 0.67; 27% of its text replies end with a
+question (Haiku 5.5 19%).

@@ -33,91 +33,16 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "prompts.h"
 #include "tools/tool_registry.h"
 
-/* =============================================================================
- * System Prompt Strings
- * =============================================================================
- * Tool use is native function calling: the LLM receives tool schemas via the
- * provider API (OpenAI function calling / Claude tool_use / llama.cpp --jinja).
- * RESPONSE_RULES (the reply's length, asking when something is missing) apply
- * always; NATIVE_TOOLS_RULES follow them when tools are enabled.
- *
- * The legacy <command>-tag transport (LLM emits JSON tags parsed from its output)
- * was retired 2026-08 — native tool calling reaches every provider and hits the
- * same command executor. See get_system_instructions() for the branching logic.
- * ============================================================================= */
-
-// clang-format off
-
-/* The tool rules, numbered after RESPONSE_RULES (tools enabled only). */
-static const char *NATIVE_TOOLS_RULES =
-   "3. Use available tools when the user requests actions or information.\n"
-   "4. After a tool runs, tell the user the result in a sentence or two. Don't repeat a call "
-   "you already made with the same arguments.\n"
-   "5. Search results include snippets with key information. Answer from snippets directly.\n"
-   "   Only fetch a URL if the user asks for details about a specific article.\n"
-   "6. Do NOT lead responses with weather, time, or location info unless explicitly asked.\n"
-   "   Vary your greetings and openers. The user's context below is for tool use only.\n";
-
-// clang-format off
-static const char *PLAN_EXECUTOR_PROMPT =
-   "\n## Multi-Step Tool Plans\n\n"
-   "When a task requires multiple tool calls, especially with conditions or dependencies\n"
-   "between results, use the `execute_plan` tool instead of individual tool calls.\n\n"
-   "Plan format: JSON array of steps.\n"
-   "Step types: call (execute tool), if (conditional), loop (iterate), set (variable), log (output), sleep (pause N seconds, 1-300).\n\n"
-   "Example - check and conditionally create:\n"
-   "{\"plan\": [{\"type\": \"call\", \"tool\": \"scheduler\", \"args\": {\"action\": \"query\", \"type\": \"alarm\"}, \"store\": \"alarms\"}, "
-   "{\"type\": \"if\", \"condition\": \"alarms.empty\", \"then\": ["
-   "{\"type\": \"call\", \"tool\": \"scheduler\", \"args\": {\"action\": \"create\", \"type\": \"alarm\", \"time\": \"7:00 AM\"}, \"store\": \"result\"}, "
-   "{\"type\": \"log\", \"message\": \"Created alarm: $result\"}"
-   "], \"else\": [{\"type\": \"log\", \"message\": \"Existing alarms: $alarms\"}]}]}\n\n"
-   "Example - batch operations:\n"
-   "{\"plan\": [{\"type\": \"loop\", \"over\": [\"kitchen\", \"living room\", \"bedroom\"], \"as\": \"room\", \"steps\": ["
-   "{\"type\": \"call\", \"tool\": \"home_assistant\", \"args\": {\"action\": \"off\", \"entity\": \"$room light\"}}"
-   "]}, {\"type\": \"log\", \"message\": \"All lights turned off\"}]}\n\n"
-   "Conditions: var.empty, var.notempty, var.contains:text, var.equals:text, var.success, var.failed\n\n"
-   "Use execute_plan when:\n"
-   "- A task needs 2+ tool calls with data dependencies\n"
-   "- You need to check a result before deciding the next action\n"
-   "- You need to perform the same action on multiple items\n"
-   "- Intermediate results don't need LLM reasoning\n\n"
-   "Use individual tool calls when:\n"
-   "- Only one tool call is needed\n"
-   "- You need to reason about intermediate results\n";
-// clang-format on
-
-/* The rules for the reply itself, which apply whether tools are enabled or
- * not; the tool rules continue their numbering. */
-static const char *RESPONSE_RULES =
-    "RULES\n"
-    "1. Match the length to the request. A quick question or a command gets a sentence or two. "
-    "Advice and explanations can run longer, as a list when that reads better. A brief "
-    "in-character remark is welcome; padding isn't: don't restate the question, don't repeat "
-    "what you just did, and don't end with a menu of offers.\n"
-    "2. If a request is missing something you need, check first: when a tool or the user's "
-    "context can tell you (the calendar for a meeting's place, the player for what's playing), "
-    "use it. Ask only when nothing you can check would tell you (what, who, which device, which "
-    "time): one short question that covers what's missing. Don't guess, and don't answer a "
-    "different question. A tool that previews an action and asks the user to confirm already "
-    "does the asking: call it.\n";
-
-// clang-format on
-
-/* =============================================================================
- * End Prompt Strings
- * ============================================================================= */
-
-// Static buffer for the command prompt - make it static, make it large
-#define PROMPT_BUFFER_SIZE 65536
-static char command_prompt[PROMPT_BUFFER_SIZE];
-static int prompt_initialized = 0;
+/* The prompt text itself lives in prompts.h (SYSTEM_PROMPT_*).  Tool use is
+ * native function calling: SYSTEM_PROMPT_RESPONSE_RULES apply always, and
+ * SYSTEM_PROMPT_NATIVE_TOOLS_RULES follow them when tools are enabled.  See
+ * get_system_instructions() for the branching logic. */
 
 // Static buffer for localization context
 #define LOCALIZATION_BUFFER_SIZE 512
-static char localization_context[LOCALIZATION_BUFFER_SIZE];
-static int localization_initialized = 0;
 
 // Static buffer for dynamic system instructions.
 #define SYSTEM_INSTRUCTIONS_BUFFER_SIZE 8192
@@ -125,11 +50,10 @@ static char system_instructions_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
 static int system_instructions_initialized = 0;
 
 /*
- * Serializes all access to the cached system_instructions state above, plus
- * the derived command_prompt buffer and its _initialized flag. Before this existed, invalidation
- * was called only at well-defined init boundaries and the buffers were treated as build-once; now
- * invalidation fires from MQTT callback threads (HUD status / discovery) while LLM worker threads
- * may be mid-read, so the previous lock-free pattern no longer holds.
+ * Serializes all access to the cached system_instructions state above. Before this existed,
+ * invalidation was called only at well-defined init boundaries and the buffers were treated as
+ * build-once; now invalidation fires from MQTT callback threads (HUD status / discovery) while LLM
+ * worker threads may be mid-read, so the previous lock-free pattern no longer holds.
  */
 static pthread_mutex_t system_instructions_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -177,7 +101,6 @@ int is_vision_enabled_for_current_llm(void) {
 void invalidate_system_instructions(void) {
    pthread_mutex_lock(&system_instructions_mutex);
    system_instructions_initialized = 0;
-   prompt_initialized = 0;
    pthread_mutex_unlock(&system_instructions_mutex);
    OLOG_INFO("System instructions cache invalidated - will rebuild on next LLM call");
 }
@@ -218,20 +141,20 @@ static int build_system_instructions_to_buffer(bool tools_on, char *buffer, size
    int cap = (int)buffer_size;
 
    /* The reply rules first: they apply whether or not tools are enabled. */
-   instr_appendf(buffer, cap, &len, "%s", RESPONSE_RULES);
+   instr_appendf(buffer, cap, &len, "%s", SYSTEM_PROMPT_RESPONSE_RULES);
 
    /* Tools off = the reply rules only; tools on = the tool rules after them. */
    if (!tools_on) {
       return len;
    }
 
-   instr_appendf(buffer, cap, &len, "%s\n", NATIVE_TOOLS_RULES);
+   instr_appendf(buffer, cap, &len, "%s\n", SYSTEM_PROMPT_NATIVE_TOOLS_RULES);
    /* The plan executor's DSL when the tool is registered (with enough tools
     * for a plan to use): by registration, like a conversation's frozen tool
     * set, never by what is enabled now, so the prompt doesn't change as tools
     * are switched on and off (that reaches the model as a direction). */
    if (tool_registry_find("execute_plan") != NULL && tool_registry_count() >= 3) {
-      instr_appendf(buffer, cap, &len, "%s", PLAN_EXECUTOR_PROMPT);
+      instr_appendf(buffer, cap, &len, "%s", SYSTEM_PROMPT_PLAN_EXECUTOR);
    }
    /* Which tools are unavailable right now is not here: it changes as devices
     * come and go, and a conversation's system prompt must not.  It reaches the
@@ -266,15 +189,13 @@ const char *get_system_instructions(void) {
  * @brief Builds the localization context string from config
  *
  * Creates a context string like:
- * "USER CONTEXT: Location: Atlanta, Georgia. Units: imperial. Timezone: America/New_York."
+ * "TOOL DEFAULTS (...): Location=Atlanta, Georgia. Units=imperial. TZ=America/New_York."
  *
- * Only includes fields that are configured (non-empty).
+ * Only includes fields that are configured (non-empty).  Writes into
+ * @p localization_context, LOCALIZATION_BUFFER_SIZE bytes (the longest line,
+ * every field full, is about 310).
  */
-static const char *get_localization_context(void) {
-   if (localization_initialized) {
-      return localization_context;
-   }
-
+static void localization_text(char *localization_context) {
    localization_context[0] = '\0';
    int offset = 0;
    int has_context = 0;
@@ -311,80 +232,26 @@ static const char *get_localization_context(void) {
    if (has_context) {
       snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset, "\n\n");
    }
-
-   localization_initialized = 1;
-   return localization_context;
 }
 
-/**
- * @brief Gets the persona description from config or builds default with dynamic AI name
- *
- * Returns g_config.persona.description if set, otherwise builds the default persona
- * using AI_PERSONA_NAME_TEMPLATE + AI_PERSONA_TRAITS with the configured AI name
- * from g_config.general.ai_name (or falling back to AI_NAME compile-time default).
- *
- * This allows runtime customization of the AI personality via config file while
- * keeping the system instructions (AI_SYSTEM_INSTRUCTIONS) always active.
- */
-static const char *get_persona_description(void) {
-   static char dynamic_persona[1024]; /* Template ~30 + traits ~500 = ~550 max */
-   static int persona_built = 0;
+void llm_persona_default(char *out, size_t size) {
+   const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name : AI_NAME;
 
-   // If global config has a custom persona, use it directly
+   /* Capitalized: it's a name. */
+   char name[CONFIG_NAME_MAX];
+   snprintf(name, sizeof(name), "%s", ai_name);
+   if (name[0] >= 'a' && name[0] <= 'z') {
+      name[0] -= 32;
+   }
+   snprintf(out, size, AI_PERSONA_TEMPLATE, name);
+}
+
+void llm_persona_effective(char *out, size_t size) {
    if (g_config.persona.description[0] != '\0') {
-      return g_config.persona.description;
+      snprintf(out, size, "%s", g_config.persona.description);
+   } else {
+      llm_persona_default(out, size);
    }
-
-   // Build dynamic persona with configured AI name (only once)
-   if (!persona_built) {
-      const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name
-                                                                : AI_NAME;
-
-      // Capitalize first letter for proper noun (more respectful!)
-      char capitalized_name[64];
-      snprintf(capitalized_name, sizeof(capitalized_name), "%s", ai_name);
-      if (capitalized_name[0] >= 'a' && capitalized_name[0] <= 'z') {
-         capitalized_name[0] -= 32;
-      }
-
-      // Build the persona: "Your name is <Name>. <traits>"
-      snprintf(dynamic_persona, sizeof(dynamic_persona),
-               AI_PERSONA_NAME_TEMPLATE " " AI_PERSONA_TRAITS, capitalized_name);
-      persona_built = 1;
-      OLOG_INFO("Built dynamic persona with AI name: %s", capitalized_name);
-   }
-
-   return dynamic_persona;
-}
-
-/**
- * @brief Builds the command prompt every surface starts from
- *
- * Persona, system instructions and localization.  Nothing about the surface a
- * turn arrives on (a local mic's voice and room, a satellite's room, a
- * channel): those are standing directions (dawn_build_prompt), so a
- * conversation that moves between surfaces keeps one system prompt.
- */
-static void initialize_command_prompt(void) {
-   /* Gather inputs without holding the mutex — these call helpers that each
-    * take the mutex briefly (get_system_instructions) or none at all. */
-   const char *persona = get_persona_description();
-   const char *sys_instr = get_system_instructions();
-   const char *loc_ctx = get_localization_context();
-
-   pthread_mutex_lock(&system_instructions_mutex);
-   if (prompt_initialized) {
-      pthread_mutex_unlock(&system_instructions_mutex);
-      return;
-   }
-
-   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s", persona,
-                             sys_instr, loc_ctx);
-   prompt_initialized = 1;
-   pthread_mutex_unlock(&system_instructions_mutex);
-
-   OLOG_INFO("AI prompt initialized (tools %s). Length: %d",
-             g_config.llm.tools.enabled ? "on" : "off", prompt_len);
 }
 
 int get_command_prompt_parts(command_prompt_parts_t *out) {
@@ -392,14 +259,16 @@ int get_command_prompt_parts(command_prompt_parts_t *out) {
       return 1;
    }
    memset(out, 0, sizeof(*out));
-   const char *persona = get_persona_description();
+   char persona[CONFIG_DESCRIPTION_MAX];
+   llm_persona_effective(persona, sizeof(persona));
    (void)get_system_instructions();
-   (void)get_localization_context();
+   char localization[LOCALIZATION_BUFFER_SIZE];
+   localization_text(localization); /* built per call, like the persona: never older than config */
    /* Copied under the mutex a rebuild writes the buffers under. */
    pthread_mutex_lock(&system_instructions_mutex);
    out->persona = strdup(persona);
    out->rules = strdup(system_instructions_buffer);
-   out->tool_defaults = strdup(localization_context);
+   out->tool_defaults = strdup(localization);
    pthread_mutex_unlock(&system_instructions_mutex);
    if (!out->persona || !out->rules || !out->tool_defaults) {
       command_prompt_parts_free(out);
@@ -418,21 +287,30 @@ void command_prompt_parts_free(command_prompt_parts_t *parts) {
    memset(parts, 0, sizeof(*parts));
 }
 
+/* Persona, rules and localization joined, built from the parts on each call so
+ * the persona is never older than the config (only the rules and localization
+ * are cached).  Nothing about the surface a turn arrives on: those are standing
+ * directions (dawn_build_prompt), so a conversation that moves between
+ * surfaces keeps one system prompt. */
 char *get_command_prompt_dup(void) {
-   initialize_command_prompt();
-   /* Copied under the mutex a rebuild writes the buffer under, so a config edit
-    * mid-copy can't hand the caller half of each. */
-   pthread_mutex_lock(&system_instructions_mutex);
-   char *copy = strdup(command_prompt);
-   pthread_mutex_unlock(&system_instructions_mutex);
-   return copy;
+   command_prompt_parts_t parts;
+   if (get_command_prompt_parts(&parts) != 0) {
+      return NULL;
+   }
+   size_t size = strlen(parts.persona) + strlen(parts.rules) + strlen(parts.tool_defaults) + 5;
+   char *joined = malloc(size);
+   if (joined) {
+      snprintf(joined, size, "%s\n\n%s\n\n%s", parts.persona, parts.rules, parts.tool_defaults);
+   }
+   command_prompt_parts_free(&parts);
+   return joined;
 }
 
 /* =============================================================================
  * Voice-session prompt directives — effective-value accessors
  *
  * Config field set → use it; empty → fall back to the compile-time default.
- * See the header contract and dawn.h for the built-in text.
+ * See the header contract and prompts.h for the built-in text.
  *
  * Concurrency note: these return a pointer directly into g_config and are read
  * unlocked on the prompt-build path — consistent with every other g_config read

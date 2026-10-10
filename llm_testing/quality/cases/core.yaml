@@ -83,11 +83,13 @@
 
 - id: search_fact
   category: search
-  turns: ["Look up who won the Super Bowl last year"]
+  turns: ["Look up who won Super Bowl LIX"]
   state: {search: {"Super Bowl": "1. The Philadelphia Eagles won Super Bowl LIX on February 9, 2025."}}
   checks:
+    tools_required: [search]
     tool_args: [{tool: search, match: {query: "~super bowl"}}]
     answer_contains: [["eagles"]]
+  note: a named game, not "last year", so the answer doesn't depend on the frozen clock; a reply from memory without searching fails
 
 # --- calculator ---------------------------------------------------------------
 - id: calc_easy

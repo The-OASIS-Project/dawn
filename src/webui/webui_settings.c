@@ -31,6 +31,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
 #include "utils/string_utils.h"
@@ -55,26 +56,8 @@ void handle_get_my_settings(ws_connection_t *conn) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
 
       /* Include base persona (from config or dynamic default) for UI display */
-      char base_persona_buf[2048];
-      const char *base_persona;
-      if (g_config.persona.description[0] != '\0') {
-         base_persona = g_config.persona.description;
-      } else {
-         /* Build dynamic persona with configured AI name */
-         const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name
-                                                                   : AI_NAME;
-
-         /* Capitalize first letter for proper noun */
-         char capitalized_name[64];
-         snprintf(capitalized_name, sizeof(capitalized_name), "%s", ai_name);
-         if (capitalized_name[0] >= 'a' && capitalized_name[0] <= 'z') {
-            capitalized_name[0] -= 32;
-         }
-
-         snprintf(base_persona_buf, sizeof(base_persona_buf),
-                  AI_PERSONA_NAME_TEMPLATE " " AI_PERSONA_TRAITS, capitalized_name);
-         base_persona = base_persona_buf;
-      }
+      char base_persona[CONFIG_DESCRIPTION_MAX];
+      llm_persona_effective(base_persona, sizeof(base_persona));
       json_object_object_add(resp_payload, "base_persona", json_object_new_string(base_persona));
 
       /* User's custom settings */

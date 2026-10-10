@@ -42,6 +42,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_types.h"
+#include "prompts.h"
 
 #define RECAT_BATCH_SIZE 25
 #define RECAT_MAX_LOOPS 500
@@ -50,23 +51,6 @@
 static atomic_bool s_recat_running = false;
 static atomic_bool s_recat_shutdown = false;
 static pthread_t s_recat_thread;
-
-static const char *RECAT_PROMPT_TEMPLATE =
-    "Classify each fact into exactly ONE category. Respond ONLY with a JSON array.\n\n"
-    "Categories:\n"
-    "- personal: biographical (name, age, birthplace, hometown, background)\n"
-    "- professional: job, employer, education, skills, career\n"
-    "- relationships: family, friends, contacts, pets (connections to people/animals)\n"
-    "- health: medical conditions, fitness, dietary, allergies, medications\n"
-    "- interests: hobbies, media tastes, travel, sports, learning\n"
-    "- practical: home, vehicles, schedules, routines, addresses, accounts, devices\n"
-    "- preferences: communication style, UI tastes, formats, likes/dislikes\n"
-    "- general: ONLY if the fact truly fits no other category\n\n"
-    "Strongly prefer a specific category over \"general\".\n"
-    "Return only ids from the input.\n\n"
-    "Facts:\n%s\n\n"
-    "Respond with ONLY a JSON array:\n"
-    "[{\"id\": 42, \"category\": \"relationships\"}, ...]\n";
 
 static bool validate_category(const char *cat) {
    if (!cat || !*cat)
@@ -106,13 +90,13 @@ static int process_batch(int user_id,
 
    const char *facts_json = json_object_to_json_string_ext(facts_arr, JSON_C_TO_STRING_PLAIN);
 
-   size_t prompt_sz = strlen(RECAT_PROMPT_TEMPLATE) + strlen(facts_json) + 64;
+   size_t prompt_sz = strlen(MEMORY_RECATEGORIZE_PROMPT_TEMPLATE) + strlen(facts_json) + 64;
    char *prompt = malloc(prompt_sz);
    if (!prompt) {
       json_object_put(facts_arr);
       return FAILURE;
    }
-   snprintf(prompt, prompt_sz, RECAT_PROMPT_TEMPLATE, facts_json);
+   snprintf(prompt, prompt_sz, MEMORY_RECATEGORIZE_PROMPT_TEMPLATE, facts_json);
    json_object_put(facts_arr);
 
    struct json_object *history = json_object_new_array();

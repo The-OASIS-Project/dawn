@@ -141,9 +141,16 @@ def run_turn(ws, text):
 
 def capture_conversation(ws, surface, model, turns, manifest):
     """One new private conversation on @p model and @p surface, its turns sent."""
+    model, _, effort = (model or "").partition("@")
     if model:
         provider, _, name = model.partition(":")
-        send(ws, "set_session_llm", {"type": "cloud", "provider": provider, "model": name})
+        # "local:<model>" is the local server (llama.cpp/Ollama); any other
+        # provider (openai, claude, gemini, openrouter) is a cloud one.
+        llm = ({"type": "local", "model": name} if provider == "local"
+               else {"type": "cloud", "provider": provider, "model": name})
+        if effort:  # this session's own reasoning, instead of the config's
+            llm.update(thinking_mode="adaptive", reasoning_effort=effort)
+        send(ws, "set_session_llm", llm)
         resp = wait_for(ws, "set_session_llm_response", time.time() + 30)
         if not resp.get("success"):
             raise RuntimeError(f"could not switch to {model}: {resp.get('error', resp)}")
@@ -159,8 +166,8 @@ def capture_conversation(ws, surface, model, turns, manifest):
         provider, _, name = (model or ":").partition(":")
         with open(manifest, "a") as f:
             f.write(json.dumps({"surface": surface, "provider": provider or None,
-                                "model": name or None, "turns": turns,
-                                "finished_at": int(time.time())}) + "\n")
+                                "model": name or None, "reasoning": effort or None,
+                                "turns": turns, "finished_at": int(time.time())}) + "\n")
 
 
 def main():
@@ -179,7 +186,10 @@ def main():
     p.add_argument("--surface", choices=SURFACES, default="webui-text")
     p.add_argument("--turn", action="append", default=[], help="A user turn (repeatable).")
     p.add_argument("--model", action="append", default=[],
-                   help="provider:model for the session (repeatable with --standard).")
+                   help="provider:model[@effort] for the session (repeatable with --standard): "
+                        "claude:, openai:, gemini:, openrouter:<vendor/model>, or local:<model> "
+                        "for the local server; @effort runs it with reasoning at that effort "
+                        "instead of the config's.")
     p.add_argument("--standard", action="store_true",
                    help="Capture the standard set for every --model and both surfaces.")
     p.add_argument("--manifest", help="Append each conversation's surface, model and turns.")
@@ -190,6 +200,10 @@ def main():
         p.error("nothing to do: pass --setup, --turn or --standard")
     if args.standard and not args.model:
         p.error("--standard needs at least one --model")
+    # A session keeps the reasoning it was last given, so a model without
+    # @effort after one with it would run with the earlier model's setting.
+    if len({"@" in m for m in args.model}) > 1:
+        p.error("capture models with @effort and without it in separate runs")
 
     ws = open_socket(args)
     try:

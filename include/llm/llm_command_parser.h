@@ -20,11 +20,12 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifndef LLM_COMMAND_PARSER_H
 #define LLM_COMMAND_PARSER_H
 
-/* Header text for the TOOL DEFAULTS line emitted by get_localization_context():
+/* Header text for the TOOL DEFAULTS line (llm_command_parser.c):
  * the configured location / units / timezone, for a caller with no user
  * settings of its own. */
 #define TOOL_DEFAULTS_HEADER_TEXT \
@@ -54,8 +55,9 @@ void command_prompt_parts_free(command_prompt_parts_t *parts);
  *
  * Surface-neutral: what differs by surface (voice output, ASR hints, a room,
  * a channel) reaches the model as standing directions, so a conversation
- * keeps one system prompt wherever it continues.  A copy, since the shared
- * buffer is rewritten on a rebuild (invalidate_system_instructions()).
+ * keeps one system prompt wherever it continues.  The persona and
+ * localization are built on each call from the config; the rules are cached
+ * until invalidate_system_instructions().
  */
 char *get_command_prompt_dup(void);
 
@@ -93,11 +95,34 @@ int is_vision_enabled_for_current_llm(void);
  */
 void invalidate_system_instructions(void);
 
+/**
+ * @brief Write the default persona (AI_PERSONA_TEMPLATE, prompts.h) into @p out
+ *
+ * Uses general.ai_name (AI_NAME when unset), first letter capitalized.  Not the
+ * effective persona: a [persona] description, when set, replaces this.  Shown by
+ * the settings panels; the prompt build uses the same text.
+ *
+ * @param out  Buffer to write into (always NUL-terminated)
+ * @param size Size of @p out
+ */
+void llm_persona_default(char *out, size_t size);
+
+/**
+ * @brief Write the persona every prompt opens with into @p out
+ *
+ * The [persona] description when set, else llm_persona_default().  Built on
+ * each call, never cached, so a new description reaches the next prompt.
+ *
+ * @param out  Buffer to write into, CONFIG_DESCRIPTION_MAX for no truncation
+ * @param size Size of @p out
+ */
+void llm_persona_effective(char *out, size_t size);
+
 /* =============================================================================
  * Voice-session prompt directives (effective-value accessors)
  *
  * Each returns the configured directive text ([tts]/[asr] in dawn.toml) when
- * set, else the compile-time built-in default (dawn.h).  The prompt-build path
+ * set, else the compile-time built-in default (prompts.h).  The prompt-build path
  * injects these only on the relevant voice surfaces:
  *   - voice_directive:            satellites (DAP2/DAP) + local mic (spoken out)
  *   - voice_directive_webui:      WebUI voice turns (softer; screen leeway)
