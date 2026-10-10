@@ -648,6 +648,13 @@
                   <button id="memory-import" class="btn-link" title="Import memories">
                      Import
                   </button>
+                  <button
+                     id="memory-merged"
+                     class="btn-link"
+                     title="Memories merged into another or replaced by a newer one"
+                  >
+                     Merged
+                  </button>
                   <button id="memory-forget-all" class="btn-danger-small">Forget Everything</button>
                </div>
             </div>
@@ -1030,6 +1037,34 @@
                   <button id="memory-source-close" class="modal-close-btn">&times;</button>
                </div>
                <div id="memory-source-body" class="memory-source-body"></div>
+            </div>
+         </div>
+
+         <!-- Merged and replaced memories (memory_merged.js) -->
+         <div
+            id="memory-merged-modal"
+            class="modal-overlay hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="memory-merged-title"
+         >
+            <div class="modal-content memory-source-modal memory-merged-modal">
+               <div class="modal-header">
+                  <h3 id="memory-merged-title">Merged &amp; replaced memories</h3>
+                  <button id="memory-merged-close" class="modal-close-btn" aria-label="Close">
+                     &times;
+                  </button>
+               </div>
+               <div class="memory-merged-controls">
+                  <input
+                     type="search"
+                     id="memory-merged-search"
+                     placeholder="Search merged memories..."
+                     aria-label="Search merged memories"
+                     autocomplete="off"
+                  />
+               </div>
+               <div id="memory-merged-body" class="memory-merged-body" aria-live="polite"></div>
             </div>
          </div>
 
@@ -3733,6 +3768,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/memory_aliases.js"></script>
       <script defer src="/js/ui/memory_import.js"></script>
       <script defer src="/js/ui/memory_source.js"></script>
+      <script defer src="/js/ui/memory_merged.js"></script>
       <script defer src="/js/ui/memory.js"></script>
       <script defer src="/js/ui/silent-observe.js"></script>
       <script defer src="/js/ui/context-injection.js"></script>

@@ -53,6 +53,9 @@ static const treg_param_t memory_params[] = {
            "first to find the IDs), 'recent' (list recent memories), "
            "'find_duplicates' (list clusters of near-identical facts with their IDs so you "
            "can forget the redundant ones), "
+           "'list_merged' (memories merged into another or replaced by a newer one, which "
+           "recall no longer shows), 'restore' (bring one of those back by ID, when the user "
+           "says a merge or replacement was wrong), "
            "'save_contact' (store email/phone for a person), "
            "'find_contact' (look up contact info), "
            "'list_contacts' (list all contacts), "
@@ -63,9 +66,9 @@ static const treg_param_t memory_params[] = {
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
        .enum_values = { "remember", "search", "get", "forget", "recent", "find_duplicates",
-                        "save_contact", "find_contact", "list_contacts", "delete_contact",
-                        "merge_entities" },
-       .enum_count = 11,
+                        "list_merged", "restore", "save_contact", "find_contact", "list_contacts",
+                        "delete_contact", "merge_entities" },
+       .enum_count = 13,
    },
    {
        .name = "query",
@@ -93,6 +96,10 @@ static const treg_param_t memory_params[] = {
            "(default 0.85). Omit to use the default; raise it for stricter (more-identical) "
            "matches. To clean up, pass the redundant IDs to 'forget' (max 50 per call — "
            "split larger sets across calls).\n"
+           "  list_merged:     OPTIONAL — a number alone is a fact ID and lists what was "
+           "merged into that fact; words list merged or replaced memories containing them; "
+           "omit for the newest.\n"
+           "  restore:         NUMERIC ID — one merged or replaced memory from list_merged.\n"
            "  recent:          TIME WINDOW — how far back to look. Suffix-encoded: "
            "'24h', '7d', '2w', '90d', '1y', '10y' (default '7d', upper bound '10y'). "
            "Returns entries within [now − query, now]. Use 'sort' and 'before' params for "
@@ -301,9 +308,15 @@ static const treg_param_t memory_params[] = {
 /* ========== Tool Metadata ========== */
 
 static const tool_action_kind_entry_t s_memory_action_kinds[] = {
-   { "search", TOOL_KIND_READ, NULL },       { "get", TOOL_KIND_READ, NULL },
-   { "recent", TOOL_KIND_READ, NULL },       { "find_duplicates", TOOL_KIND_READ, NULL },
-   { "find_contact", TOOL_KIND_READ, NULL }, { "list_contacts", TOOL_KIND_READ, NULL },
+   { "search", TOOL_KIND_READ, NULL },
+   { "get", TOOL_KIND_READ, NULL },
+   { "recent", TOOL_KIND_READ, NULL },
+   { "find_duplicates", TOOL_KIND_READ, NULL },
+   { "find_contact", TOOL_KIND_READ, NULL },
+   { "list_contacts", TOOL_KIND_READ, NULL },
+   { "list_merged", TOOL_KIND_READ, NULL },
+   /* Changes what recall returns: refused where an outsider's text could ask. */
+   { "restore", TOOL_KIND_ACT, NULL },
 };
 
 /* What a call waiting for the user's reply code does: 'remember' by the fact

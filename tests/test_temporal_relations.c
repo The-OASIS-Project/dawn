@@ -98,6 +98,7 @@ static const char *DDL =
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  valid_from INTEGER DEFAULT NULL,"
    "  valid_to INTEGER DEFAULT NULL,"
+   "  closed_by_fact_id INTEGER DEFAULT NULL,"
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"

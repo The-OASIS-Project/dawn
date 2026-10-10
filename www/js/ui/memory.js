@@ -1623,6 +1623,17 @@
          });
       }
 
+      /* Merged and replaced facts (memory_merged.js): a restore brings one
+       * back into the Facts list. */
+      if (window.DawnMemoryMerged) {
+         DawnMemoryMerged.init({
+            onMemoriesChanged: () => {
+               requestStats();
+               switchTab(memoryState.activeTab);
+            },
+         });
+      }
+
       // Set up event delegation for delete buttons (single listener)
       setupDeleteDelegation();
 

@@ -80,6 +80,7 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
                          "  valid_from INTEGER DEFAULT NULL,"
                          "  valid_to INTEGER DEFAULT NULL,"
+                         "  closed_by_fact_id INTEGER DEFAULT NULL,"
                          /* v40 + v49 columns — mirror production so the upsert
                           * prepared statement's 12 bind slots all have targets
                           * and the partial UNIQUE index has rows to constrain. */

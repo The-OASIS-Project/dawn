@@ -1294,7 +1294,7 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
       bool removed = false;
       if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS &&
           (merge ? memory_db_fact_merge(ids[i], replaced_by, user_id)
-                 : memory_db_fact_delete(ids[i], user_id)) == MEMORY_DB_SUCCESS) {
+                 : memory_db_fact_forget(ids[i], user_id, NULL)) == MEMORY_DB_SUCCESS) {
          removed = true;
          if (forgotten == 0) {
             snprintf(first_text, sizeof(first_text), "%.200s", fact.fact_text);
@@ -2239,6 +2239,14 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
             replaced_by = 0;
       }
       return memory_action_forget(user_id, forget_ids, replaced_by);
+   } else if (strcmp(actionName, "list_merged") == 0) {
+      char q[MEMORY_FACT_TEXT_MAX] = "";
+      tool_param_extract_base(value, q, sizeof(q));
+      return memory_action_list_merged(user_id, q);
+   } else if (strcmp(actionName, "restore") == 0) {
+      char id[32] = "";
+      tool_param_extract_base(value, id, sizeof(id));
+      return memory_action_restore(user_id, id);
    } else if (strcmp(actionName, "get") == 0) {
       /* Deterministic exact-fetch by numeric ID(s); base-extract so the parser
        * ignores any encoded suffix. */

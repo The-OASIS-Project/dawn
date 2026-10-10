@@ -469,6 +469,59 @@ int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id);
 int memory_db_fact_delete(int64_t fact_id, int user_id);
 
 /**
+ * @brief Forget a fact: delete it and every fact merged into it, at any depth
+ *        (memory_db_fact_merge and relation supersedes point a fact's
+ *        superseded_by at the one kept; deleting the keeper alone would bring
+ *        them back as current).  Deepest first, the fact last: a failure leaves
+ *        the fact, and nothing pointing at a deleted one.
+ *
+ * @param merged_out Merged facts deleted with it (may be NULL)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE (also
+ *         when more than a few hundred facts were merged into it: nothing deleted)
+ */
+int memory_db_fact_forget(int64_t fact_id, int user_id, int *merged_out);
+
+/** A superseded fact and the fact it was merged into (memory_db_fact_list_superseded). */
+typedef struct {
+   int64_t id;
+   int64_t keeper_id;
+   time_t superseded_at; /* 0 when unknown (superseded before v95) */
+   char text[MEMORY_FACT_TEXT_MAX];
+   char keeper_text[MEMORY_FACT_TEXT_MAX];
+} memory_superseded_fact_t;
+
+/**
+ * @brief The user's superseded facts, newest first
+ *
+ * @param keeper_id   Only those merged into this fact (0: all)
+ * @param text_filter Only facts whose text contains it, case aside (NULL: all)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_list_superseded(int user_id,
+                                   int64_t keeper_id,
+                                   const char *text_filter,
+                                   memory_superseded_fact_t *out,
+                                   int max,
+                                   int *count_out);
+
+/**
+ * @brief Restore a superseded fact: current again, and the relations its
+ *        replacement closed (memory_relations.closed_by_fact_id) reopened,
+ *        unless that value, or for a one-at-a-time relation any value, is open
+ *
+ * Sources a merge copied onto the kept fact stay with it.  A relation closed
+ * before closed_by_fact_id existed (schema v103) stays closed, and so does one
+ * whose value is open again (or any value of a one-at-a-time relation, or its
+ * contradiction on the same object): counted in @p kept_closed_out.
+ *
+ * @param reopened_out    Relations reopened (may be NULL)
+ * @param kept_closed_out Relations it closed that stay closed (may be NULL)
+ * @return MEMORY_DB_SUCCESS; MEMORY_DB_NOT_FOUND (not the user's, or not
+ *         superseded); or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_restore(int user_id, int64_t fact_id, int *reopened_out, int *kept_closed_out);
+
+/**
  * @brief Find similar facts (for duplicate detection)
  *
  * Uses LIKE pattern matching on fact text.

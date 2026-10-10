@@ -1648,6 +1648,25 @@ admin_resp_code_t admin_client_memory_entity_history(int fd,
                            response, resp_len);
 }
 
+admin_resp_code_t admin_client_memory_fact_superseded(int fd,
+                                                      const char *username,
+                                                      const char *filter,
+                                                      int limit,
+                                                      char *response,
+                                                      size_t resp_len) {
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_FACT_SUPERSEDED, 0, limit, 0, username, filter,
+                           response, resp_len);
+}
+
+admin_resp_code_t admin_client_memory_fact_restore(int fd,
+                                                   const char *username,
+                                                   int64_t fact_id,
+                                                   char *response,
+                                                   size_t resp_len) {
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_FACT_RESTORE, 0, fact_id, 0, username, NULL,
+                           response, resp_len);
+}
+
 admin_resp_code_t admin_client_memory_entity_list(int fd,
                                                   const char *username,
                                                   bool include_aliases,

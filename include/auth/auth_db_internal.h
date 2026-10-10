@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 102
+#define AUTH_DB_SCHEMA_VERSION 103
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -928,10 +928,11 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
  * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
  * ?5/?6 the new object (entity id / literal: the same object is never closed, so
  * a re-mention is idempotent), ?7 the one replaced value to close (a literal or an
- * entity's name, case aside), or NULL for every other open value.  Shared with
- * the tests that prepare it themselves. */
+ * entity's name, case aside), or NULL for every other open value, ?8 the new
+ * value's fact (closed_by_fact_id: what a restore of the old fact reopens; NULL
+ * with none).  Shared with the tests that prepare it themselves. */
 #define MEMORY_RELATION_CLOSE_OPEN_SQL                                             \
-   "UPDATE memory_relations SET valid_to = ?1 "                                    \
+   "UPDATE memory_relations SET valid_to = ?1, closed_by_fact_id = ?8 "            \
    "WHERE user_id = ?2 AND subject_entity_id = ?3 AND relation = ?4 "              \
    "  AND valid_to IS NULL "                                                       \
    "  AND (COALESCE(object_entity_id, 0) != COALESCE(?5, 0) "                      \
@@ -1103,6 +1104,13 @@ int auth_db_migrations_v101(sqlite3 *db);
  * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (rolled back; retried next start).
  */
 int auth_db_migrations_v102(sqlite3 *db);
+
+/**
+ * @brief Schema v103: memory_relations.closed_by_fact_id (the fact whose new
+ *        value closed the relation; what a restore reopens).  Idempotent.
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (retried next start).
+ */
+int auth_db_migrations_v103(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

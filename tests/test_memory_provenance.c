@@ -220,10 +220,12 @@ static const char *DDL =
    "  relation TEXT NOT NULL,"
    "  object_entity_id INTEGER DEFAULT 0,"
    "  object_name TEXT,"
+   "  object_value TEXT DEFAULT NULL,"
    "  confidence REAL DEFAULT 1.0,"
    "  fact_id INTEGER DEFAULT NULL,"
    "  valid_from INTEGER DEFAULT NULL,"
    "  valid_to INTEGER DEFAULT NULL,"
+   "  closed_by_fact_id INTEGER DEFAULT NULL,"
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
@@ -1440,6 +1442,129 @@ void test_merge_with_a_deleted_source_conversation(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_merge(old, 424242, 1));
 }
 
+/* Forgetting a fact takes what was merged into it: left alone they would point
+ * at nothing and come back as current. */
+void test_forget_takes_what_was_merged_into_it(void) {
+   int64_t keep = 0, dup1 = 0, dup2 = 0, other = 0;
+   memory_db_fact_create(1, "User drinks oat milk", 0.9f, "explicit", "health", NULL, &keep);
+   memory_db_fact_create(1, "User likes oat milk", 0.9f, "explicit", "health", NULL, &dup1);
+   memory_db_fact_create(1, "User prefers oat milk", 0.9f, "explicit", "health", NULL, &dup2);
+   memory_db_fact_create(1, "User lives near a park", 0.9f, "explicit", "personal", NULL, &other);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup1, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup2, keep, 1));
+   int merged = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(keep, 1, &merged));
+   TEST_ASSERT_EQUAL_INT(2, merged);
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_facts"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_forget(424242, 1, NULL));
+}
+
+/* A merge chain (A into B, B into K) goes with K, at any depth. */
+void test_forget_takes_a_merge_chain(void) {
+   int64_t k = 0, b = 0, a = 0;
+   memory_db_fact_create(1, "User runs on Sundays", 0.9f, "explicit", "health", NULL, &k);
+   memory_db_fact_create(1, "User jogs on Sundays", 0.9f, "explicit", "health", NULL, &b);
+   memory_db_fact_create(1, "User goes running Sundays", 0.9f, "explicit", "health", NULL, &a);
+   char sql[200];
+   snprintf(sql, sizeof(sql),
+            "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;"
+            "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;",
+            (long long)k, (long long)b, (long long)b, (long long)a);
+   q_exec(sql);
+   int merged = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(k, 1, &merged));
+   TEST_ASSERT_EQUAL_INT(2, merged);
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_facts"));
+}
+
+/* Restore doesn't reopen "likes X" while the "dislikes X" that closed it is open. */
+void test_restore_keeps_a_contradiction_closed(void) {
+   int64_t liked = 0, disliked = 0;
+   memory_db_fact_create(1, "User likes cilantro", 0.9f, "explicit", "preferences", NULL, &liked);
+   memory_db_fact_create(1, "User dislikes cilantro", 0.9f, "explicit", "preferences", NULL,
+                         &disliked);
+   char sql[600];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id, valid_to, closed_by_fact_id) VALUES "
+            "(960, 1, 601, 'likes', 'cilantro', %lld, 100, %lld), "
+            "(961, 1, 601, 'dislikes', 'cilantro', %lld, NULL, NULL);"
+            "UPDATE memory_facts SET superseded_by = %lld, superseded_at = 100 WHERE id = %lld;",
+            (long long)liked, (long long)disliked, (long long)disliked, (long long)disliked,
+            (long long)liked);
+   q_exec(sql);
+   int reopened = -1, kept_closed = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_restore(1, liked, &reopened, &kept_closed));
+   TEST_ASSERT_EQUAL_INT(0, reopened);
+   TEST_ASSERT_EQUAL_INT(1, kept_closed);
+   TEST_ASSERT_EQUAL_INT64(100, q_int("SELECT valid_to FROM memory_relations WHERE id = 960"));
+}
+
+/* A merged fact is listed with the one kept, and comes back on restore; not
+ * another user's, and not twice. */
+void test_restore_brings_a_merged_fact_back(void) {
+   int64_t keep = 0, dup = 0;
+   memory_db_fact_create(1, "User's cat is named Miso", 0.9f, "explicit", "personal", NULL, &keep);
+   memory_db_fact_create(1, "User has a cat called Miso", 0.9f, "explicit", "personal", NULL, &dup);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+
+   memory_superseded_fact_t rows[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, keep, NULL, rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(dup, rows[0].id);
+   TEST_ASSERT_EQUAL_STRING("User's cat is named Miso", rows[0].keeper_text);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, 0, "CALLED miso", rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, 0, "parrot", rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_restore(2, dup, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_restore(1, dup, NULL, NULL));
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM memory_facts WHERE id = %lld AND superseded_by IS NULL AND "
+            "superseded_at IS NULL",
+            (long long)dup);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_restore(1, dup, NULL, NULL));
+}
+
+/* Restore reopens only what the replacement closed: not a relation stated as
+ * ended, and not a one-at-a-time value while another is open. */
+void test_restore_reopens_what_its_replacement_closed(void) {
+   int64_t old = 0, fresh = 0;
+   memory_db_fact_create(1, "User's email is old@example.com", 0.9f, "explicit", "personal", NULL,
+                         &old);
+   memory_db_fact_create(1, "User's email is new@example.com", 0.9f, "explicit", "personal", NULL,
+                         &fresh);
+   char sql[1024];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_entity_id, object_value, fact_id, valid_to, closed_by_fact_id) VALUES "
+            "(950, 1, 600, 'email_is', NULL, 'old@example.com', %lld, 100, %lld), "
+            "(951, 1, 600, 'works_at', NULL, 'Acme', %lld, 100, NULL), "
+            "(952, 1, 600, 'married_to', NULL, 'Pat', %lld, 100, %lld), "
+            "(953, 1, 600, 'married_to', NULL, 'Sam', %lld, NULL, NULL);"
+            "UPDATE memory_facts SET superseded_by = %lld, superseded_at = 100 WHERE id = %lld;",
+            (long long)old, (long long)fresh, (long long)old, (long long)old, (long long)fresh,
+            (long long)fresh, (long long)fresh, (long long)old);
+   q_exec(sql);
+   int reopened = -1;
+   int kept_closed = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_restore(1, old, &reopened, &kept_closed));
+   TEST_ASSERT_EQUAL_INT(1, reopened);
+   TEST_ASSERT_EQUAL_INT(1, kept_closed); /* married_to: Sam is open */
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT valid_to FROM memory_relations WHERE id = 950"));
+   TEST_ASSERT_EQUAL_INT64(100, q_int("SELECT valid_to FROM memory_relations WHERE id = 951"));
+   TEST_ASSERT_EQUAL_INT64(100, q_int("SELECT valid_to FROM memory_relations WHERE id = 952"));
+}
+
 /* An entity an alias still targets is kept (its target column can't be nulled),
  * and doesn't fail the forget. */
 void test_forget_keeps_alias_target_entity(void) {
@@ -1707,6 +1832,11 @@ int main(void) {
    RUN_TEST(test_forget_keeps_what_a_merge_brought);
    RUN_TEST(test_merge_carries_unsourced_origin);
    RUN_TEST(test_merge_with_a_deleted_source_conversation);
+   RUN_TEST(test_forget_takes_what_was_merged_into_it);
+   RUN_TEST(test_forget_takes_a_merge_chain);
+   RUN_TEST(test_restore_keeps_a_contradiction_closed);
+   RUN_TEST(test_restore_brings_a_merged_fact_back);
+   RUN_TEST(test_restore_reopens_what_its_replacement_closed);
    RUN_TEST(test_forget_keeps_alias_target_entity);
    RUN_TEST(test_conversation_delete_drops_sources);
    RUN_TEST(test_forget_queries_use_their_indexes);

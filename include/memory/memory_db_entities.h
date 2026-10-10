@@ -183,6 +183,12 @@ bool memory_db_relation_is_one_at_a_time(const char *relation);
 bool memory_db_relation_is_merge_evidence(const char *relation);
 
 /**
+ * @brief The relation that contradicts @p relation on the same object (likes and
+ *        dislikes, enjoys and hates, can and cannot, is and is_not), or NULL.
+ */
+const char *memory_db_relation_contradictory_opposite(const char *relation);
+
+/**
  * @brief memory_db_relation_supersede_ex() with no replaced value (the path for
  * a relation nobody said replaces anything).
  *

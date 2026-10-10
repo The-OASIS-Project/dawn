@@ -338,7 +338,7 @@ void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payloa
 
    int64_t fact_id = json_object_get_int64(id_obj);
    conv_db_withdraw_intent_begin(conn->auth_user_id); /* the user removing it */
-   int result = memory_db_fact_delete(fact_id, conn->auth_user_id);
+   int result = memory_db_fact_forget(fact_id, conn->auth_user_id, NULL);
    conv_db_withdraw_intent_end();
 
    if (result == MEMORY_DB_SUCCESS) {

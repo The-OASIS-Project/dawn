@@ -98,7 +98,7 @@ static const struct {
 static const int CONTRADICTORY_PAIRS_COUNT = (int)(sizeof(CONTRADICTORY_PAIRS) /
                                                    sizeof(CONTRADICTORY_PAIRS[0]));
 
-static const char *contradictory_opposite(const char *relation) {
+const char *memory_db_relation_contradictory_opposite(const char *relation) {
    if (!relation)
       return NULL;
    for (int i = 0; i < CONTRADICTORY_PAIRS_COUNT; i++) {
@@ -431,6 +431,11 @@ int memory_db_relation_supersede_ex(int user_id,
       } else {
          sqlite3_bind_null(close_stmt, 7);
       }
+      if (fact_id > 0) {
+         sqlite3_bind_int64(close_stmt, 8, fact_id);
+      } else {
+         sqlite3_bind_null(close_stmt, 8);
+      }
       rc = collect_closed_facts(close_stmt, closed_facts, &n_closed_facts);
       sqlite3_reset(close_stmt);
       if (rc != SQLITE_DONE) {
@@ -452,17 +457,19 @@ int memory_db_relation_supersede_ex(int user_id,
 
    /* Close contradictory relation (e.g., likes↔dislikes) on the same
     * (subject, object) pair.  Only applies to currently-true new relations. */
-   const char *opposite = contradictory_opposite(relation);
+   const char *opposite = memory_db_relation_contradictory_opposite(relation);
    if (opposite && new_is_current) {
       sqlite3_stmt *cstmt = NULL;
-      int rc2 = sqlite3_prepare_v2(s_db.db,
-                                   "UPDATE memory_relations SET valid_to = ? "
-                                   "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
-                                   "  AND valid_to IS NULL "
-                                   "  AND COALESCE(object_entity_id, 0) = COALESCE(?, 0) "
-                                   "  AND COALESCE(object_value, '') = COALESCE(?, '') "
-                                   "RETURNING fact_id",
-                                   -1, &cstmt, NULL);
+      int rc2 = sqlite3_prepare_v2(
+          s_db.db,
+          "UPDATE memory_relations SET valid_to = ?1, "
+          "closed_by_fact_id = ?7 "
+          "WHERE user_id = ?2 AND subject_entity_id = ?3 AND relation = ?4 "
+          "  AND valid_to IS NULL "
+          "  AND COALESCE(object_entity_id, 0) = COALESCE(?5, 0) "
+          "  AND COALESCE(object_value, '') = COALESCE(?6, '') "
+          "RETURNING fact_id",
+          -1, &cstmt, NULL);
       if (rc2 != SQLITE_OK) {
          OLOG_ERROR("memory_db: prepare contradictory close failed: %s", sqlite3_errmsg(s_db.db));
          sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
@@ -471,6 +478,11 @@ int memory_db_relation_supersede_ex(int user_id,
       }
       bind_close_locked(cstmt, close_time, user_id, subject_entity_id, opposite, object_entity_id,
                         object_value);
+      if (fact_id > 0) {
+         sqlite3_bind_int64(cstmt, 7, fact_id);
+      } else {
+         sqlite3_bind_null(cstmt, 7);
+      }
       const int before = n_closed_facts;
       rc2 = collect_closed_facts(cstmt, closed_facts, &n_closed_facts);
       sqlite3_finalize(cstmt);

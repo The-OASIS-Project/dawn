@@ -743,6 +743,21 @@ admin_resp_code_t admin_client_memory_entity_aliases(int fd,
                                                      char *response,
                                                      size_t resp_len);
 
+/** memory superseded: the user's merged or replaced facts (filter: text, max 32 chars). */
+admin_resp_code_t admin_client_memory_fact_superseded(int fd,
+                                                      const char *username,
+                                                      const char *filter,
+                                                      int limit,
+                                                      char *response,
+                                                      size_t resp_len);
+
+/** memory restore: bring a superseded fact back. */
+admin_resp_code_t admin_client_memory_fact_restore(int fd,
+                                                   const char *username,
+                                                   int64_t fact_id,
+                                                   char *response,
+                                                   size_t resp_len);
+
 admin_resp_code_t admin_client_memory_entity_history(int fd,
                                                      const char *username,
                                                      int64_t entity_id,

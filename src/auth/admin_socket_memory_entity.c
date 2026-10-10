@@ -590,3 +590,106 @@ int handle_memory_entity_link_user_self(int client_fd, const char *payload, uint
    free(result);
    return sret;
 }
+
+/* Facts one 'memory superseded' lists, at most. */
+#define ADMIN_SUPERSEDED_MAX 50
+#define ADMIN_SUPERSEDED_DEFAULT 20
+
+int handle_memory_fact_superseded(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t limit = 0, unused = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   char filter[ADMIN_MEM_ENTITY_REASON_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &limit, &unused, username,
+                             sizeof(username), filter, sizeof(filter)) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed payload");
+   }
+   if (limit <= 0) {
+      limit = ADMIN_SUPERSEDED_DEFAULT;
+   } else if (limit > ADMIN_SUPERSEDED_MAX) {
+      limit = ADMIN_SUPERSEDED_MAX;
+   }
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+
+   memory_superseded_fact_t *rows = calloc((size_t)limit, sizeof(*rows));
+   if (!rows) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Out of memory");
+   }
+   int count = 0;
+   if (memory_db_fact_list_superseded(user.id, 0, filter[0] ? filter : NULL, rows, (int)limit,
+                                      &count) != MEMORY_DB_SUCCESS) {
+      free(rows);
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Query failed");
+   }
+   char report[ADMIN_MSG_CONTENT_MAX + 1];
+   int off = 0;
+   report_off_advance(&off,
+                      snprintf(report, sizeof(report),
+                               "Superseded facts for user '%s' (newest first; restore with "
+                               "'memory restore --user %s --fact-id <id>'):\n",
+                               username, username),
+                      (int)sizeof(report));
+   int shown = 0;
+   for (int i = 0; i < count; i++) {
+      /* Room for this row and the "more" line, or stop and say so. */
+      const size_t text_len = strlen(rows[i].text);
+      const size_t keeper_len = strlen(rows[i].keeper_text);
+      const int need = (int)(text_len < 160 ? text_len : 160) +
+                       (int)(keeper_len < 120 ? keeper_len : 120) + 96; /* the row's %.Ns */
+      if (off + need > (int)sizeof(report) - 64) {
+         break;
+      }
+      shown++;
+      report_off_advance(&off,
+                         snprintf(report + off, sizeof(report) - (size_t)off,
+                                  "  [%lld] %.160s\n      → [%lld] %.120s\n", (long long)rows[i].id,
+                                  rows[i].text, (long long)rows[i].keeper_id,
+                                  rows[i].keeper_text[0] ? rows[i].keeper_text : "(gone)"),
+                         (int)sizeof(report));
+   }
+   free(rows);
+   if (shown < count) {
+      report_off_advance(&off,
+                         snprintf(report + off, sizeof(report) - (size_t)off,
+                                  "  ... %d more not shown: narrow with --grep\n", count - shown),
+                         (int)sizeof(report));
+   }
+   if (count == 0) {
+      snprintf(report, sizeof(report), "No superseded facts for user '%s'%s.", username,
+               filter[0] ? " matching that text" : "");
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+int handle_memory_fact_restore(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t fact_id = 0, unused = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &fact_id, &unused, username,
+                             sizeof(username), NULL, 0) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed payload");
+   }
+   if (fact_id <= 0) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid fact id");
+   }
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+   int reopened = 0;
+   int kept_closed = 0;
+   const int rc = memory_db_fact_restore(user.id, fact_id, &reopened, &kept_closed);
+   if (rc == MEMORY_DB_NOT_FOUND) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND,
+                                "No superseded fact with that id for this user");
+   }
+   if (rc != MEMORY_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Restore failed");
+   }
+   char report[256];
+   snprintf(report, sizeof(report), "Restored fact %lld for user '%s' (%d relation(s) reopened%s).",
+            (long long)fact_id, username, reopened,
+            kept_closed > 0 ? "; the value that replaced it is still current too" : "");
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}

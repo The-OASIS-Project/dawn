@@ -30,6 +30,13 @@
 #include <stdint.h>
 #include <time.h>
 
+/* 'list_merged': the facts merged into (or replaced by) a fact, by its ID, or
+ * those whose text contains @p query, or the newest (memory_callback_restore.c). */
+char *memory_action_list_merged(int user_id, const char *query);
+
+/* 'restore': bring a merged or replaced fact back by ID (memory_db_fact_restore). */
+char *memory_action_restore(int user_id, const char *query);
+
 /**
  * @brief Search memory facts/preferences/summaries/relations.
  *

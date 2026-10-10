@@ -138,6 +138,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v100.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v101.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v102.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v103.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -1701,6 +1702,7 @@ dawn_add_unit_test(test_memory_provenance
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
@@ -2305,6 +2307,8 @@ dawn_add_unit_test(bench_retrieval
            # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/memory/memory_callback.c
+           ${SRC_ROOT}/src/memory/memory_callback_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
@@ -2424,6 +2428,8 @@ dawn_add_unit_test(test_memory_remember
            # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/memory/memory_callback.c
+           ${SRC_ROOT}/src/memory/memory_callback_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c

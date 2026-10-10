@@ -978,7 +978,47 @@ Delete a specific memory fact.
    }
 }
 ```
-Response: `delete_memory_fact_response`
+Response: `delete_memory_fact_response`. The facts merged into it are deleted with it.
+
+#### `list_memory_superseded`
+The caller's merged or replaced facts (recall no longer shows them), newest first, at most 50.
+`query` (optional) keeps those whose text contains it.
+```json
+{
+   "type": "list_memory_superseded",
+   "payload": { "query": "email" }
+}
+```
+Response: `list_memory_superseded_response`
+```json
+{
+   "type": "list_memory_superseded_response",
+   "payload": {
+      "success": true,
+      "facts": [
+         {
+            "id": 42,
+            "text": "...",
+            "keeper_id": 17,
+            "keeper_text": "...",
+            "superseded_at": 1791648000
+         }
+      ]
+   }
+}
+```
+`superseded_at` is 0 when unknown.
+
+#### `restore_memory_fact`
+Bring a merged or replaced fact back, with the relations its replacement closed.
+```json
+{
+   "type": "restore_memory_fact",
+   "payload": { "fact_id": 42 }
+}
+```
+Response: `restore_memory_fact_response` with `success`, `fact_id`, and `error` on failure
+(the fact isn't the caller's, or isn't merged any more).
 
 #### `delete_memory_preference`
 Delete a specific user preference.

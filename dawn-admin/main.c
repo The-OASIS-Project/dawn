@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "cmd_llm.h"
+#include "cmd_memory.h"
 #include "password_prompt.h"
 #include "socket_client.h"
 #include "utils/string_utils.h"
@@ -112,6 +113,10 @@ static void print_usage(const char *prog) {
    fprintf(stderr,
            "  memory reextract-status --user <user>\n"
            "                                       Report progress of last reextract run\n");
+   fprintf(stderr, "  memory superseded --user <u> [--grep <text>] [--limit N]\n"
+                   "                                       List merged or replaced facts\n"
+                   "  memory restore --user <u> --fact-id <id>\n"
+                   "                                       Bring a merged or replaced fact back\n");
    fprintf(stderr, "\nEntity Merge (v43):\n");
    fprintf(stderr,
            "  memory entity list [--user <u>] [--show-aliases]\n"
@@ -1854,6 +1859,9 @@ int main(int argc, char *argv[]) {
       }
       const char *subcmd = argv[2];
 
+      if (strcmp(subcmd, "superseded") == 0 || strcmp(subcmd, "restore") == 0) {
+         return cmd_memory_facts(argc, argv); /* cmd_memory.c */
+      }
       if (strcmp(subcmd, "recategorize-all") == 0) {
          if (argc < 4) {
             fprintf(stderr, "Error: Missing username\n");

@@ -298,7 +298,8 @@
    color: var(--text-primary);
 }
 
-#memory-search-input {
+#memory-search-input,
+.memory-merged-controls input {
    width: 100%;
    padding: 0.5rem 0.75rem;
    background: rgba(0, 0, 0, 0.3);
@@ -310,12 +311,14 @@
    transition: all var(--transition-fast);
 }
 
-#memory-search-input:focus {
+#memory-search-input:focus,
+.memory-merged-controls input:focus {
    border-color: var(--accent);
    box-shadow: 0 0 0 2px var(--accent-border);
 }
 
-#memory-search-input::placeholder {
+#memory-search-input::placeholder,
+.memory-merged-controls input::placeholder {
    color: var(--text-secondary);
 }
 
@@ -1744,4 +1747,30 @@
    font-style: italic;
    text-align: center;
    padding: 1.5rem 0;
+}
+
+/* Merged and replaced memories (memory_merged.js): the source modal's frame,
+ * a search row, and the panel's own fact rows with a Restore link. */
+.modal-content.memory-merged-modal {
+   max-width: 640px;
+}
+
+.memory-merged-controls {
+   padding: 0.75rem 1rem 0;
+}
+
+.memory-merged-body {
+   padding: 0.75rem 1rem 1rem;
+   max-height: 60vh;
+   overflow-y: auto;
+}
+
+.memory-merged-status {
+   margin: 0.5rem 0;
+   color: var(--text-secondary);
+   font-size: 0.875rem;
+}
+
+.memory-merged-keeper {
+   overflow-wrap: anywhere;
 }

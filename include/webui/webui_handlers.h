@@ -311,6 +311,18 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
 void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief List the user's merged or replaced memory facts, newest first
+ *        (webui_memory_merged.c; payload: optional "query" text filter)
+ */
+void handle_list_memory_superseded(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Restore a merged or replaced memory fact ("fact_id")
+ *        (webui_memory_merged.c)
+ */
+void handle_restore_memory_fact(ws_connection_t *conn, struct json_object *payload);
+
+/**
  * @brief List memory preferences for the current user (paginated)
  */
 void handle_list_memory_preferences(ws_connection_t *conn, struct json_object *payload);

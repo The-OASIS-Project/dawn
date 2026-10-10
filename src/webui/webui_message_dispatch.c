@@ -1250,6 +1250,12 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (payload) {
          handle_delete_memory_fact(conn, payload);
       }
+   } else if (strcmp(type, "list_memory_superseded") == 0) {
+      handle_list_memory_superseded(conn, payload);
+   } else if (strcmp(type, "restore_memory_fact") == 0) {
+      if (payload) {
+         handle_restore_memory_fact(conn, payload);
+      }
    } else if (strcmp(type, "delete_memory_preference") == 0) {
       if (payload) {
          handle_delete_memory_preference(conn, payload);

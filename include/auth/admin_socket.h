@@ -200,7 +200,13 @@ typedef enum {
     * partial migration backfill or FTS orphans).  Global, no payload. */
    ADMIN_MSG_MEMORY_REBUILD_DOCUMENT_FTS = 0x92,
 
-   /* Next free memory opcode: 0x93. */
+   /* Superseded facts (memory_db_fact_list_superseded / _restore): list a user's
+    * merged or replaced facts, and restore one.  Entity payload shape:
+    * SUPERSEDED arg1 = limit, reason = text filter; RESTORE arg1 = fact id. */
+   ADMIN_MSG_MEMORY_FACT_SUPERSEDED = 0x93,
+   ADMIN_MSG_MEMORY_FACT_RESTORE = 0x94,
+
+   /* Next free memory opcode: 0x95. */
 
    /* Phase 7: Messaging channels (Phase 4 + Phase 6 operator commands).
     * Opcode range 0xA0..0xAF is reserved for messaging — Phase 6 will
