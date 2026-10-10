@@ -35,6 +35,7 @@
 #include "llm/llm_history_kind.h"
 #include "logging.h"
 #include "memory/memory_note_guard.h"
+#include "prompts.h"
 #include "utils/string_utils.h"
 
 /* Return a message for the extraction transcript with inline base64 image data
@@ -108,8 +109,6 @@ static struct json_object *extraction_message_strip_images(struct json_object *m
  * extraction is safe. */
 #define MEMORY_EXTRACTION_MAX_MSG_BYTES 16384
 
-/* What a framed tool result becomes in the extraction input. */
-#define THIRD_PARTY_STUB "[Email or web content: not used for memory.]"
 
 /* Whether a tool result's content (a string, or text parts) was framed as
  * someone else's (prompt_third_party). */
@@ -163,7 +162,7 @@ static struct json_object *extraction_message_stub_third_party(struct json_objec
       if (!content_is_third_party(content)) {
          return json_object_get(msg);
       }
-      return with_content(msg, json_object_new_string(THIRD_PARTY_STUB));
+      return with_content(msg, json_object_new_string(MEMORY_EXTRACTION_THIRD_PARTY_STUB));
    }
    /* Claude: tool_result parts in a user message. */
    if (!json_object_is_type(content, json_type_array)) {
@@ -188,7 +187,7 @@ static struct json_object *extraction_message_stub_third_party(struct json_objec
           strcmp(json_object_get_string(type), "tool_result") == 0 &&
           json_object_object_get_ex(part, "content", &inner) && content_is_third_party(inner)) {
          json_object_put(keep);
-         keep = with_content(part, json_object_new_string(THIRD_PARTY_STUB));
+         keep = with_content(part, json_object_new_string(MEMORY_EXTRACTION_THIRD_PARTY_STUB));
       }
       if (!keep || json_object_array_add(parts, keep) != 0) {
          json_object_put(keep);
