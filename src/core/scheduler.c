@@ -42,7 +42,6 @@
 #include "core/briefing_prompt.h"
 #include "core/memory_filter.h"
 #include "core/missed_notifications_db.h"
-#include "core/prompt_parts.h"
 #include "core/scheduled_context.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
@@ -50,6 +49,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_third_party.h"
 #include "logging.h"
 #include "prompts.h"
 #include "tools/tool_registry.h"
@@ -752,7 +752,7 @@ static char *briefing_frame_step(const tool_metadata_t *meta, const char *action
    if (!frame || !text) {
       return text;
    }
-   char *framed = prompt_third_party(frame, NULL, text);
+   char *framed = llm_third_party_frame(frame, NULL, text);
    free(text);
    return framed;
 }

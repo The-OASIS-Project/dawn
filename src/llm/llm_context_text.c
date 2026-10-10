@@ -912,7 +912,7 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    static const char *const k_memory[] = { "user", "memory", NULL };
    static const char *const k_end_summary[] = { "end", "conversation", "summary", NULL };
    static const char *const k_summary[] = { "conversation", "summary", NULL };
-   /* Third-party frames (prompt_third_party): two words, so a signature's
+   /* Third-party frames (llm_third_party_frame): two words, so a signature's
     * "-- \nEmail: bob@x" is left as it is. */
    static const char *const k_end_email[] = { "end", "email", "content", NULL };
    static const char *const k_email[] = { "email", "content", NULL };
@@ -932,7 +932,9 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
       const char first = letter_at(sh, w, &next);
       /* shaped: only in a frame line's shape (frame_shape_after), for the
        * names ordinary text starts lines with ("Email content", "Web
-       * content"). */
+       * content").  A close's three words aren't prose, so they are defused
+       * in any shape: a tagless frame (a briefing's) can't be ended by
+       * "--- END EMAIL CONTENT." either. */
       static const struct {
          const char *const *words;
          const char *defused;
@@ -944,9 +946,9 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
          { k_memory, "- - USER MEMORY (quoted)", false },
          { k_end_summary, "- - END CONVERSATION SUMMARY (quoted)", false },
          { k_summary, "- - CONVERSATION SUMMARY (quoted)", false },
-         { k_end_email, "- - END EMAIL CONTENT (quoted)", true },
+         { k_end_email, "- - END EMAIL CONTENT (quoted)", false },
          { k_email, "- - EMAIL CONTENT (quoted)", true },
-         { k_end_web, "- - END WEB CONTENT (quoted)", true },
+         { k_end_web, "- - END WEB CONTENT (quoted)", false },
          { k_web, "- - WEB CONTENT (quoted)", true },
       };
       for (size_t k = 0; k < sizeof(k_frames) / sizeof(k_frames[0]); k++) {

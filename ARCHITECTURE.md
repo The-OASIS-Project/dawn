@@ -160,7 +160,8 @@ Layer 0 (Foundation) — no DAWN dependencies
 
 Layer 1 (Core infrastructure) — deps: Layer 0
 ├── src/tools/tool_registry.c   Tool registration and lookup, and each action's kind (read, fetch, state,
-│                               device, prepare, act), checked at registration and at build time
+│                               device, prepare, act) and the frame its result goes in when it is someone
+│                               else's text, checked at registration and at build time
 ├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
 │                               dedup, reply codes, text-input dispatch, prompt sections, input queue
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
@@ -176,7 +177,8 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── include/prompts.h           Every model-facing prompt, as string literals; quotes llm/ and core/ tokens, so
 │                               include it from Layer 2 up
-├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views
+├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views;
+│                               llm_third_party.c frames an email's or a page's text as someone else's
 ├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
 │                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,

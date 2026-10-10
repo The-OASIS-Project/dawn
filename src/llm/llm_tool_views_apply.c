@@ -155,8 +155,7 @@ static void view_one(const stage_t *st,
    if (st->session && st->offers_read && !is_read) {
       /* An email's or a page's text keeps its frame: a read of it is framed
        * as the view is (a plan's output included). */
-      const char *frame = r->success && (!r->is_error || r->third_party_forced) ? r->third_party
-                                                                                : NULL;
+      const char *frame = tool_result_frame(r);
       const int rc = tool_result_store_put_framed(st->session, call->name, call->id, masked, len,
                                                   info.mode == LLM_TOOL_VIEW_JSON, frame, handle,
                                                   &head_tail_only);

@@ -149,7 +149,7 @@ static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
  *
  * code_redeemed is copied from session_call_code_redeemed(); from_visual and
  * third_party from the running turn (session_turn_mark_from_visual,
- * session_turn_attach).
+ * session_turn_attach_email).
  *
  * @param out Receives the origin (zeroed on false)
  * @return false with no command context, in a job's session, on a background

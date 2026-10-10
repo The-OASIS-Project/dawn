@@ -634,6 +634,7 @@ set(DAWN_SOURCES
     src/llm/llm_turn_blocks.c
     src/llm/llm_history_kind.c
     src/llm/llm_context_text.c
+    src/llm/llm_third_party.c
     src/llm/llm_turn_blocks_stored.c
     src/llm/llm_key_tag.c
     src/llm/llm_history_rows.c

@@ -35,8 +35,9 @@
  * follow-up, in whatever session it runs) and a call with no running turn (an MQTT message naming a
  * session) can't reach out either.  A turn carrying an email the user
  * attached is the user's, but the email's text could be steering it: it may
- * read, look up, remember and prepare, and a device change or an action waits
- * for the user to ask in a message of their own.
+ * read, look up, check state and prepare (a draft waits for the user's own
+ * confirm); a device change or an action (a memory saved included) waits for
+ * the user to ask in a message of their own.
  *
  * Decided once per call, at the one place every model tool call runs
  * (llm_tools_execute_from_treg; plan steps come back through it), and at the

@@ -236,15 +236,21 @@ static char *result_read_callback(const char *action, char *value, int *should_r
    }
    const size_t budget = tool_result_store_read_budget(session);
    char *out = answer(session, action, value, &doc, budget);
+   /* An error keeps its mark (the sanitizer drops control bytes, the mark
+    * among them): it is DAWN's own guidance, reported as an error and left
+    * unframed. */
+   const bool err = out && tool_result_is_error(out);
    if (out) {
-      sanitize_utf8_for_json(out); /* a stored result's bytes are anyone's */
+      sanitize_utf8_for_json(err ? out + 1 : out); /* a stored result's bytes are anyone's */
    }
    /* Part of an email or a page is framed as theirs, as the whole was: the
     * frame stored with it, else (a row stored before frames) any frame the
     * storing tool uses (its own text loses nothing by it). */
-   const char *frame = tool_result_store_frame(&doc);
-   llm_tools_result_third_party(
-       frame ? frame : tool_third_party_frame_any(tool_registry_find(doc.meta.tool_name)));
+   if (out && !err) {
+      const char *frame = tool_result_store_frame(&doc);
+      llm_tools_result_third_party(
+          frame ? frame : tool_third_party_frame_any(tool_registry_find(doc.meta.tool_name)));
+   }
    OLOG_INFO("result_read: %s %s (%s, %lld bytes) -> %zu bytes", action, id, doc.meta.tool_name,
              (long long)doc.meta.bytes, out ? strlen(out) : 0);
    tool_result_store_close(&doc);

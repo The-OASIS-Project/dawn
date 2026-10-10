@@ -201,6 +201,12 @@ typedef struct {
    bool third_party_forced;
 } tool_result_t;
 
+/** The frame @p r goes in (tool_result_t.third_party), or NULL: a successful
+ *  result that is someone else's text; an error only when forced. */
+static inline const char *tool_result_frame(const tool_result_t *r) {
+   return r && r->success && (!r->is_error || r->third_party_forced) ? r->third_party : NULL;
+}
+
 /**
  * @brief Get the effective result content from a tool result
  *

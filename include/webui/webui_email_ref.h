@@ -40,6 +40,10 @@ extern "C" {
  *  longest id, still fit CONV_EMAIL_REF_MAX. */
 #define WEBUI_EMAIL_REF_TEXT_MAX 160
 
+/** The record's own bytes around its values: keys, quotes, braces, commas and
+ *  the account id's digits. */
+#define WEBUI_EMAIL_REF_JSON_OVERHEAD 96
+
 /** Refusal codes (an error frame; the turn doesn't run, nothing is saved). */
 #define WEBUI_ERR_EMAIL_REF_LIMIT "EMAIL_REF_LIMIT"
 #define WEBUI_ERR_EMAIL_UNAVAILABLE "EMAIL_UNAVAILABLE"
@@ -85,7 +89,8 @@ void webui_turn_email_set(const webui_email_ref_t *ref);
 const webui_email_ref_t *webui_turn_email_get(void);
 
 #ifndef __cplusplus
-_Static_assert(4 * WEBUI_EMAIL_REF_TEXT_MAX + SESSION_ATTACH_MESSAGE_ID_MAX + 96 <=
+_Static_assert(4 * WEBUI_EMAIL_REF_TEXT_MAX + SESSION_ATTACH_MESSAGE_ID_MAX +
+                       WEBUI_EMAIL_REF_JSON_OVERHEAD <=
                    CONV_EMAIL_REF_MAX,
                "an email_ref record must always fit its column");
 #endif

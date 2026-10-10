@@ -199,9 +199,13 @@ typedef struct {
    const char *third_party;
 } tool_action_kind_entry_t;
 
-/* Frames for third-party text in a tool's result (prompt_third_party). */
+/* Frames for third-party text in a tool's result (llm/llm_third_party.h).
+ * A new frame goes in TOOL_FRAMES_ALL too: test_llm_tools_finish checks each
+ * one is written, found again, defused by the neutralizer and stored. */
 #define TOOL_FRAME_EMAIL "EMAIL CONTENT"
 #define TOOL_FRAME_WEB "WEB CONTENT"
+#define TOOL_FRAMES_ALL \
+   { TOOL_FRAME_EMAIL, TOOL_FRAME_WEB }
 
 /** Entries in an action_kinds table: .action_kind_count = TOOL_KIND_COUNT(t) */
 #define TOOL_KIND_COUNT(table) ((int)(sizeof(table) / sizeof((table)[0])))

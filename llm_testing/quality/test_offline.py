@@ -136,8 +136,35 @@ def _prompts_h_string(name):
     return "".join(lits).encode().decode("unicode_escape")
 
 
+def _c_framed_actions():
+    """{(tool, action or "*"): frame} as the tools declare them in src/tools: a
+    tool-wide .third_party, or an action-kinds entry's frame."""
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    with open(os.path.join(root, "include", "tools", "tool_registry.h"), encoding="utf-8") as f:
+        names = dict(re.findall(r'#define (TOOL_FRAME_\w+) "([^"]+)"', f.read()))
+    out = {}
+    tools_dir = os.path.join(root, "src", "tools")
+    for fn in sorted(os.listdir(tools_dir)):
+        if not fn.endswith(".c"):
+            continue
+        with open(os.path.join(tools_dir, fn), encoding="utf-8") as f:
+            src = f.read()
+        tool = re.search(r'tool_metadata_t \w+ = \{\s*\.name = "([^"]+)",', src)
+        if not tool:
+            continue
+        for frame in re.findall(r"^\s*\.third_party = (TOOL_FRAME_\w+)", src, re.M):
+            out[(tool.group(1), "*")] = names[frame]
+        for action, frame in re.findall(
+                r'^\s*\{ "(\w+)", TOOL_KIND_\w+, [^,]+, (TOOL_FRAME_\w+) \}', src, re.M):
+            out[(tool.group(1), action)] = names[frame]
+    return out
+
+
 class ThirdPartyFrameTests(unittest.TestCase):
     TAG = "dawn-ctx-0123abcd"
+
+    def test_framed_actions_match_the_tools(self):
+        self.assertEqual(_c_framed_actions(), mocks._THIRD_PARTY_ACTIONS)
 
     def test_text_matches_prompts_h(self):
         lead = _prompts_h_string("THIRD_PARTY_FRAME_LEAD_TEMPLATE").replace("%s", "{what}")

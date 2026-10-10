@@ -201,11 +201,13 @@ A/B that measured it, is in ATLAS (`dawn/archive/TOOL_RESULT_VIEWS_DESIGN.md`).
 - **Third-party frames.** An action whose result is someone else's text names its frame in the tool's
   action-kinds table (`tool_action_kind_entry_t.third_party`, or the tool's `third_party` default):
   `EMAIL CONTENT` for the email tool's read, recent, search and digest; `WEB CONTENT` for `url_fetch`
-  and `search`. A successful result goes in that frame after the neutralizer (`prompt_third_party`:
+  and `search`. A successful result goes in that frame after the neutralizer (`llm_third_party_frame`:
   the conversation's tag on its lines, a first line saying the text is data), with a view's header
   ahead of it. The neutralizer defuses imitations of both frames, so a page or an email can't end its
   own. `result_read` frames a slice of a stored result the same way when the tool that stored it
-  returns third-party text. Memory extraction reads a framed result as a stub, so an email or a page
+  returns third-party text, and `context_expand` frames its result when a stored row it brings back
+  was framed. A new frame is listed in `TOOL_FRAMES_ALL` (`tool_registry.h`), which a test walks.
+  Memory extraction reads a framed result as a stub, so an email or a page
   can't plant a "fact". An email a user attaches to a question arrives this way too: the model
   reads it with the tool (see the turn's context above).
 - **Compaction** keeps each handle in the summary with a phrase on what it held, so a summarized

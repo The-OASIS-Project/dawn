@@ -1296,7 +1296,7 @@ const char *tool_action_kind_name(tool_action_kind_t kind) {
 static const tool_action_kind_entry_t *find_action_kind(const tool_metadata_t *meta,
                                                         const char *action) {
    for (int i = 0; i < meta->action_kind_count; i++) {
-      if (strcmp(meta->action_kinds[i].action, action) == 0) {
+      if (strcasecmp(meta->action_kinds[i].action, action) == 0) {
          return &meta->action_kinds[i];
       }
    }
@@ -1370,7 +1370,7 @@ const char *tool_effective_action(const tool_metadata_t *meta, const char *actio
 static bool is_a_confirm(const tool_metadata_t *meta, const char *action) {
    for (int i = 0; i < meta->action_kind_count; i++) {
       const char *c = meta->action_kinds[i].confirm;
-      if (c && strcmp(c, action) == 0) {
+      if (c && strcasecmp(c, action) == 0) {
          return true;
       }
    }
@@ -1505,7 +1505,7 @@ int tool_action_kinds_validate(const tool_metadata_t *meta, char *why, size_t wh
          return FAILURE;
       }
       for (int j = 0; j < i; j++) {
-         if (strcmp(meta->action_kinds[j].action, e->action) == 0) {
+         if (strcasecmp(meta->action_kinds[j].action, e->action) == 0) {
             snprintf(why, why_len, "'%s' is listed twice", e->action);
             return FAILURE;
          }

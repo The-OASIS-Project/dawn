@@ -1020,9 +1020,9 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
    ctx->total_tool_calls++;
    /* An email or a page a step read is in what the plan returns (an email
     * names the frame when there's both). */
-   if (result.success && !result.is_error && result.third_party &&
-       (!ctx->third_party || strcmp(result.third_party, TOOL_FRAME_EMAIL) == 0))
-      ctx->third_party = result.third_party;
+   const char *frame = tool_result_frame(&result);
+   if (frame && (!ctx->third_party || strcmp(frame, TOOL_FRAME_EMAIL) == 0))
+      ctx->third_party = frame;
 
    /* Calculate step duration */
    struct timespec step_end;

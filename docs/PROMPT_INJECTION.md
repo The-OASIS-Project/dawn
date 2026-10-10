@@ -68,17 +68,22 @@ From most to least load-bearing:
 1. **Who may make a tool call** (`src/core/tool_call_policy.c`): every action has a kind (read,
    fetch, state, device, prepare, act; `tool_registry`), and the caller's kind of turn decides which
    kinds run. Background jobs and unattended turns can't act; an unverified chat sender's actions wait
-   for the user's reply code.
+   for the user's reply code. A turn carrying an email the user attached may read, fetch, check state
+   and prepare; a device change or an action (a memory saved included) waits for a message of the
+   user's own.
 2. **Confirms** (`include/core/turn_origin.h`): an action that was prepared runs only on the user's
-   next turn in the same session, never in a turn a rendered visual started.
-3. **Outside text in tool results, framed** (`prompt_third_party`): an email or web page goes in its
-   frame (`EMAIL CONTENT`, `WEB CONTENT`) with the conversation's secret tag and a line saying it is
-   data. Memory extraction reads a framed result as a stub, so outside text can't plant a fact.
+   next turn in the same session, never in a turn a rendered visual started or one carrying an
+   attached email.
+3. **Outside text in tool results, framed** (`src/llm/llm_third_party.c`): an email or web page goes
+   in its frame (`EMAIL CONTENT`, `WEB CONTENT`) with the conversation's secret tag and a line saying
+   it is data; a stored one read again (`result_read`, `context_expand`) is framed again. An attached
+   email reaches the model only this way: the turn names it and the model reads it with the tool.
+   Memory extraction reads a framed result as a stub, so outside text can't plant a fact through it.
 4. **The neutralizer** (`llm_context_neutralize`): defuses imitations of DAWN's own framing, tags and
    item lines in any text DAWN didn't write; the conversation's secret is masked wherever outside text
    could echo it.
-5. **The system prompt** (`prompt_builder.c` context rules): only tagged framing and system messages
-   are DAWN's; anything imitating them is data.
+5. **The system prompt** (`SYSTEM_PROMPT_CONTEXT_RULES` in `include/prompts.h`): only tagged framing
+   and system messages are DAWN's; anything imitating them is data.
 
 Layers 1 and 2 hold whatever the model does. Layers 3 to 5 lower the odds that it is steered.
 
@@ -92,6 +97,16 @@ Layers 1 and 2 hold whatever the model does. Layers 3 to 5 lower the odds that i
   prepared; steered text can shape both the item and its description. The fix is a preview DAWN
   renders from the staged item (recipient, subject, body) for anything prepared in a turn that read
   outside text.
+- **Outside text the user asked for.** The attached-email limits (layer 1) key on the attachment.
+  When the user asks "read my latest email", the email's text is in the turn too, framed, but the
+  turn stays an ordinary one: an action in a later step of it (a memory saved, a device changed)
+  isn't limited. Limiting it by kind alone would refuse "read Bob's email and add the meeting to my
+  calendar"; by the decision rule below the line is silent or irreversible effects, which is the
+  capability mask's job.
+- **Outside text not framed yet.** Messaging channel reads (`read_history`), SMS bodies, calendar
+  invite text, MCP results and the MQTT device-data relay are neutralized but not framed.
+- **Attached documents.** An uploaded document's text goes into the user's message
+  (`[ATTACHED DOCUMENT: ...]`, neutralized), not a tool result, and the turn is an ordinary one.
 
 ## The decision rule
 

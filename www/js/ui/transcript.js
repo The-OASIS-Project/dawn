@@ -313,6 +313,14 @@
       '<polyline points="10 9 9 9 8 9"/>' +
       '</svg>';
 
+   /** SVG envelope icon, for the email a question was asked about */
+   const EMAIL_ICON_SVG =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<rect x="3" y="5" width="18" height="14" rx="2"/>' +
+      '<path d="m3 7 9 6 9-6"/>' +
+      '</svg>';
+
    /** Small download-arrow glyph shown on chips backed by a stored original. */
    const DOWNLOAD_ICON_SVG =
       '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
@@ -381,18 +389,25 @@
          'Asked about an email' + (from ? ' from ' + from : '') + (subject ? ': ' + subject : '')
       );
       chip.title = (subject || '(no subject)') + (from ? ' \u2014 ' + from : '');
+      const icon = document.createElement('span');
+      icon.className = 'transcript-doc-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = EMAIL_ICON_SVG;
       const type = document.createElement('span');
       type.className = 'transcript-doc-type';
-      type.dataset.category = 'text';
+      type.dataset.category = 'email';
       type.textContent = 'EMAIL';
       const name = document.createElement('span');
       name.className = 'transcript-doc-name';
+      name.dir = 'auto';
       name.textContent = subject || '(no subject)';
+      chip.appendChild(icon);
       chip.appendChild(type);
       chip.appendChild(name);
       if (from) {
          const who = document.createElement('span');
          who.className = 'transcript-doc-size';
+         who.dir = 'auto';
          who.textContent = from;
          chip.appendChild(who);
       }
@@ -825,8 +840,8 @@
       } else if (isOnlyDebugContent(text)) {
          // Pure debug message (only commands/tool results) - debug only
          // Still render document chips if present
-         if (extractedDocs.length > 0) {
-            await addNormalEntry(role, '', extractedDocs, messageId);
+         if (extractedDocs.length > 0 || emailRef) {
+            await addNormalEntry(role, '', extractedDocs, messageId, emailRef);
          } else {
             addDebugEntry(`debug (${role})`, text);
          }
@@ -846,7 +861,7 @@
          });
 
          // Add user-facing text if any (or if documents are attached)
-         if (userText.length > 0 || extractedDocs.length > 0) {
+         if (userText.length > 0 || extractedDocs.length > 0 || emailRef) {
             await addNormalEntry(role, userText, extractedDocs, messageId, emailRef);
          }
       }

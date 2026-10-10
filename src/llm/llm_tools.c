@@ -44,7 +44,6 @@
 #include "core/component_status.h"
 #include "core/hash_util.h"
 #include "core/ocp_helpers.h"
-#include "core/prompt_parts.h"
 #include "core/research_allowlist.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
@@ -60,6 +59,7 @@
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_third_party.h"
 #include "llm/llm_tool_images.h"
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools_internal.h"
@@ -1822,17 +1822,16 @@ static void neutralize_result(const char *tool, tool_result_t *result) {
  * error is the tool's own text and stays as it is.  Without the memory for
  * the frame the result is withheld rather than passed on unframed. */
 static void frame_third_party(const char *tool, tool_result_t *result) {
-   if (!result->third_party || !result->success ||
-       (result->is_error && !result->third_party_forced)) {
+   const char *frame = tool_result_frame(result);
+   if (!frame) {
       return;
    }
    session_t *ctx = session_get_command_context();
    char tag[LLM_CONTEXT_TAG_MAX];
    const bool tagged = ctx && session_prefix_tag(ctx, tag, sizeof(tag));
-   char *framed = prompt_third_party(result->third_party, tagged ? tag : NULL,
-                                     tool_result_content(result));
+   char *framed = llm_third_party_frame(frame, tagged ? tag : NULL, tool_result_content(result));
    if (!framed) {
-      /* prompt_third_party knows every TOOL_FRAME_* (test_llm_tools_finish), so
+      /* llm_third_party_frame knows every TOOL_FRAME_* (test_llm_tools_finish), so
        * NULL here is memory. */
       free(result->result_extended);
       result->result_extended = NULL;

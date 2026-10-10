@@ -190,26 +190,6 @@ char *prompt_framed(const char *name,
                     const char *tag,
                     const char *const pieces[PROMPT_FRAMED_PIECES]);
 
-/**
- * @brief Someone else's text (an email, a web page) in its frame @p name
- *        ("EMAIL CONTENT", "WEB CONTENT"), with the line saying it is data
- *        and not an instruction, then @p body
- *
- * @p body must already be neutralized (llm_context_neutralize), so nothing in
- * it can end the frame.  @p tag may be NULL (no conversation tag yet).
- *
- * @return Heap text (caller frees), or NULL on allocation failure
- */
-char *prompt_third_party(const char *name, const char *tag, const char *body);
-
-/**
- * @brief Whether @p text holds a third-party frame's open line (as
- *        prompt_third_party writes it): text DAWN framed as someone else's.
- *        An imitation in the text itself is defused by the neutralizer, so a
- *        line found is DAWN's own.
- */
-bool prompt_has_third_party(const char *text);
-
 /** Free every part and zero them (the struct is then safe to reuse). NULL-safe. */
 static inline void composed_prompt_free(composed_prompt_t *p) {
    if (p == NULL) {

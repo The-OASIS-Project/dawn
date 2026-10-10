@@ -27,7 +27,6 @@
 
 #include "core/prompt_parts.h"
 #include "dawn_error.h"
-#include "prompts.h"
 
 static bool is_blank(char c) {
    return c == '\n' || c == '\r' || c == ' ' || c == '\t';
@@ -132,51 +131,6 @@ static size_t frame_line(char *out,
    const int n = tag ? snprintf(out, size, "--- %s%s (%s) ---\n", end, name, tag)
                      : snprintf(out, size, "--- %s%s ---\n", end, name);
    return n > 0 ? (size_t)n : 0;
-}
-
-/* Each third-party frame and what it holds, for its first line. */
-static const struct {
-   const char *name;
-   const char *what;
-} k_third_party[] = {
-   { "EMAIL CONTENT", THIRD_PARTY_WHAT_EMAIL },
-   { "WEB CONTENT", THIRD_PARTY_WHAT_WEB },
-};
-
-char *prompt_third_party(const char *name, const char *tag, const char *body) {
-   const char *what = NULL;
-   for (size_t i = 0; i < sizeof(k_third_party) / sizeof(k_third_party[0]); i++) {
-      if (name && strcmp(name, k_third_party[i].name) == 0) {
-         what = k_third_party[i].what;
-      }
-   }
-   if (!what || !body) {
-      return NULL;
-   }
-   char lead[160];
-   snprintf(lead, sizeof(lead), THIRD_PARTY_FRAME_LEAD_TEMPLATE, what);
-   const char *pieces[PROMPT_FRAMED_PIECES] = { lead, body, NULL, NULL, NULL };
-   return prompt_framed(name, tag, pieces);
-}
-
-bool prompt_has_third_party(const char *text) {
-   if (!text) {
-      return false;
-   }
-   for (size_t i = 0; i < sizeof(k_third_party) / sizeof(k_third_party[0]); i++) {
-      char open[48];
-      const int n = snprintf(open, sizeof(open), "--- %s ", k_third_party[i].name);
-      if (n <= 0 || (size_t)n >= sizeof(open)) {
-         continue;
-      }
-      for (const char *p = strstr(text, open); p; p = strstr(p + 1, open)) {
-         /* At a line's start: "--- EMAIL CONTENT (tag) ---" or "... ---". */
-         if (p == text || p[-1] == '\n') {
-            return true;
-         }
-      }
-   }
-   return false;
 }
 
 char *prompt_framed(const char *name,

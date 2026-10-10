@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * An email as the model reads it: its headers, attachments and body as text.
- * Shared by the email tool's read and an email attached to a chat turn.
+ * The email tool's read (an email attached to a chat turn is read through it).
  */
 
 #ifndef EMAIL_RENDER_H

@@ -153,22 +153,28 @@ static int open_as(session_t *s, int u, int64_t conv, const char *id) {
    return rc;
 }
 
-/* A result stored as someone else's text keeps its frame (and its kind); one
- * stored without reads as none. */
+/* A result stored as someone else's text keeps its frame, whichever it is
+ * (and its kind); one stored without reads as none. */
 static void test_a_stored_frame_comes_back(void) {
    session_t *s = new_session(1);
    const int64_t conv = conversation(alice);
    char id[TOOL_RESULTS_ID_LEN];
    const char *json = "{\"results\":[1,2,3]}";
-   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK,
-                         tool_result_store_put_framed(as_user(at(s, conv), alice), "execute_plan",
-                                                      "call_1", json, strlen(json), true,
-                                                      TOOL_FRAME_EMAIL, id, NULL));
+   static const char *const frames[] = TOOL_FRAMES_ALL;
    tool_result_doc_t doc;
-   TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_open(at(s, conv), alice, id, &doc));
-   TEST_ASSERT_EQUAL_STRING(TOOL_FRAME_EMAIL, tool_result_store_frame(&doc));
-   TEST_ASSERT_EQUAL_INT(TOOL_RESULTS_JSON, doc.meta.kind);
-   tool_result_store_close(&doc);
+   for (size_t i = 0; i < sizeof(frames) / sizeof(frames[0]); i++) {
+      char call_id[16];
+      snprintf(call_id, sizeof(call_id), "call_%zu", i + 1);
+      TEST_ASSERT_EQUAL_INT(TOOL_RESULT_STORE_OK,
+                            tool_result_store_put_framed(as_user(at(s, conv), alice),
+                                                         "execute_plan", call_id, json,
+                                                         strlen(json), true, frames[i], id, NULL));
+      TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK,
+                            tool_result_store_open(at(s, conv), alice, id, &doc));
+      TEST_ASSERT_EQUAL_STRING(frames[i], tool_result_store_frame(&doc));
+      TEST_ASSERT_EQUAL_INT(TOOL_RESULTS_JSON, doc.meta.kind);
+      tool_result_store_close(&doc);
+   }
    put(s, alice, conv, id);
    TEST_ASSERT_EQUAL_INT(TOOL_RESULT_OPEN_OK, tool_result_store_open(at(s, conv), alice, id, &doc));
    TEST_ASSERT_NULL(tool_result_store_frame(&doc));

@@ -31,8 +31,8 @@
 
 #include "auth/auth_db.h"
 #include "core/automated_event.h"
-#include "core/prompt_parts.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_third_party.h"
 #include "logging.h"
 #include "memory/memory_note_guard.h"
 #include "prompts.h"
@@ -111,10 +111,10 @@ static struct json_object *extraction_message_strip_images(struct json_object *m
 
 
 /* Whether a tool result's content (a string, or text parts) was framed as
- * someone else's (prompt_third_party). */
+ * someone else's (llm_third_party_frame). */
 static bool content_is_third_party(struct json_object *content) {
    if (json_object_is_type(content, json_type_string)) {
-      return prompt_has_third_party(json_object_get_string(content));
+      return llm_third_party_present(json_object_get_string(content)) != NULL;
    }
    if (!json_object_is_type(content, json_type_array)) {
       return false;
@@ -122,7 +122,7 @@ static bool content_is_third_party(struct json_object *content) {
    for (size_t i = 0; i < json_object_array_length(content); i++) {
       struct json_object *text = NULL;
       if (json_object_object_get_ex(json_object_array_get_idx(content, i), "text", &text) &&
-          prompt_has_third_party(json_object_get_string(text))) {
+          llm_third_party_present(json_object_get_string(text))) {
          return true;
       }
    }

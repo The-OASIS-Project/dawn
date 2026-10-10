@@ -28,14 +28,24 @@
 #include "core/strbuf.h"
 #include "tools/email_parse.h"
 
+#define KIB ((size_t)1024)
+#define MIB (KIB * KIB)
+
+/* What the headers and attachment lines take beyond the body, to start with
+ * and at most: headers, 32+32 addresses and 16 attachment lines fit well
+ * within the most. */
+#define RENDER_HEADROOM_START (2 * KIB)
+#define RENDER_HEADROOM_MAX (64 * KIB)
+
 /* @p bytes as "512 B", "12 KB", "3.4 MB". */
 static void format_size(size_t bytes, char *out, size_t size) {
-   if (bytes < 1024)
+   if (bytes < KIB) {
       snprintf(out, size, "%zu B", bytes);
-   else if (bytes < 1024 * 1024)
-      snprintf(out, size, "%zu KB", (bytes + 512) / 1024);
-   else
-      snprintf(out, size, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+   } else if (bytes < MIB) {
+      snprintf(out, size, "%zu KB", (bytes + KIB / 2) / KIB);
+   } else {
+      snprintf(out, size, "%.1f MB", (double)bytes / (double)MIB);
+   }
 }
 
 static void append_addrs(strbuf_t *sb,
@@ -43,35 +53,39 @@ static void append_addrs(strbuf_t *sb,
                          const email_addr_t *list,
                          int count,
                          int total) {
-   if (count <= 0)
+   if (count <= 0) {
       return;
+   }
    strbuf_appendf(sb, "%s: ", label);
    for (int i = 0; i < count; i++) {
       /* A name that is just the address again isn't shown twice. */
-      if (list[i].name[0] && strcasecmp(list[i].name, list[i].addr) != 0)
+      if (list[i].name[0] && strcasecmp(list[i].name, list[i].addr) != 0) {
          strbuf_appendf(sb, "%s%s <%s>", i ? ", " : "", list[i].name, list[i].addr);
-      else
+      } else {
          strbuf_appendf(sb, "%s%s", i ? ", " : "", list[i].addr);
+      }
    }
-   if (total > count)
+   if (total > count) {
       strbuf_appendf(sb, " (and %d more)", total - count);
+   }
    strbuf_append(sb, "\n");
 }
 
 char *email_render_message(const email_message_t *msg) {
-   if (!msg)
+   if (!msg) {
       return NULL;
-   /* Headers, 32+32 addresses and 16 attachment lines fit well within 64 KB. */
+   }
    strbuf_t sb;
    const size_t body = msg->body_len > 0 ? (size_t)msg->body_len : 0;
-   strbuf_init_with_max(&sb, body + 2048, body + 65536);
+   strbuf_init_with_max(&sb, body + RENDER_HEADROOM_START, body + RENDER_HEADROOM_MAX);
    char from[2 * sizeof(msg->from_name) + sizeof(msg->from_addr) + 8];
    email_display_mailbox(msg->from_name, msg->from_addr, from, sizeof(from));
    strbuf_appendf(&sb, "From: %s\n", from);
    append_addrs(&sb, "To", msg->to_list, msg->to_count, msg->to_total);
    append_addrs(&sb, "Cc", msg->cc_list, msg->cc_count, msg->cc_total);
-   if (msg->reply_to.addr[0] && strcasecmp(msg->reply_to.addr, msg->from_addr) != 0)
+   if (msg->reply_to.addr[0] && strcasecmp(msg->reply_to.addr, msg->from_addr) != 0) {
       strbuf_appendf(&sb, "Reply-To: %s\n", msg->reply_to.addr);
+   }
    strbuf_appendf(&sb, "Subject: %s\nDate: %s\n", msg->subject, msg->date_str);
    if (msg->attachment_count > 0) {
       strbuf_append(&sb, "Attachments:\n");
@@ -83,12 +97,14 @@ char *email_render_message(const email_message_t *msg) {
                         a->filename[0] ? a->filename : "(unnamed)", a->mime, size,
                         a->is_inline ? ", inline" : "");
       }
-      if (msg->attachments_truncated)
+      if (msg->attachments_truncated) {
          strbuf_append(&sb, "  (more attachments not listed)\n");
+      }
    }
    strbuf_appendf(&sb, "\n%s", msg->body && msg->body[0] ? msg->body : "(No body)");
-   if (msg->text_truncated)
+   if (msg->text_truncated) {
       strbuf_append(&sb, "\n[Message truncated]");
+   }
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
       return NULL;
