@@ -27,6 +27,7 @@
 
 #include <stdbool.h>
 
+#include "webui/webui_email_client.h"
 #include "webui/webui_internal.h"
 
 #ifdef __cplusplus
@@ -41,9 +42,6 @@ void handle_email_unread_counts(ws_connection_t *conn, json_object *payload);
 void handle_email_archive(ws_connection_t *conn, json_object *payload);
 void handle_email_trash(ws_connection_t *conn, json_object *payload);
 void handle_email_undo(ws_connection_t *conn, json_object *payload);
-
-/** The panel's verbs answer (the email tool is on and its service up): the email_client flag. */
-bool webui_email_client_enabled(void);
 
 #ifdef __cplusplus
 }

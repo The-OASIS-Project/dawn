@@ -479,6 +479,7 @@ static char *handle_read(struct json_object *details, int user_id) {
       int uid_val = json_get_int(details, "uid", 0);
       if (uid_val <= 0)
          return strdup(
+             TOOL_RESULT_ERROR_MARK
              "Error: 'message_id' is required (get IDs from 'recent' or 'search' results)");
       snprintf(message_id, sizeof(message_id), "%u", (uint32_t)uid_val);
    }
@@ -654,21 +655,23 @@ static char *handle_send(struct json_object *details, int user_id, const turn_or
                     "FROM (the sender). Call action='accounts' to list them, and never invent "
                     "one. When replying, use the account the original message arrived on.");
    if (!to || !to[0])
-      return strdup("Error: 'to' is required (email address or contact name)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'to' is required (email address or contact name)");
    if (!subject || !subject[0])
-      return strdup("Error: 'subject' is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'subject' is required");
    if (!body || !body[0])
-      return strdup("Error: 'body' is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'body' is required");
 
    /* Validate field lengths */
    if (strlen(body) > EMAIL_MAX_SEND_BODY_LEN) {
       char err[128];
-      snprintf(err, sizeof(err), "Error: email body too long (%zu chars, max %d)", strlen(body),
-               EMAIL_MAX_SEND_BODY_LEN);
+      snprintf(err, sizeof(err),
+               TOOL_RESULT_ERROR_MARK "Error: email body too long (%zu chars, max %d)",
+               strlen(body), EMAIL_MAX_SEND_BODY_LEN);
       return strdup(err);
    }
    if (strlen(subject) > EMAIL_MAX_SUBJECT_LEN) {
-      return strdup("Error: subject too long (max 250 characters)");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: subject too long (max 250 characters)");
    }
 
    /* Who it goes to, without guessing (contact_resolve.h): one address, or a
@@ -755,7 +758,7 @@ static char *handle_confirm_send(struct json_object *details,
                                  const turn_origin_t *origin) {
    const char *draft_id = json_get_str(details, "draft_id");
    if (!draft_id || !draft_id[0])
-      return strdup("Error: 'draft_id' is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'draft_id' is required");
 
    int rc = email_service_confirm_send(user_id, draft_id, origin);
    switch (rc) {
@@ -836,7 +839,8 @@ static char *handle_folders(struct json_object *details, int user_id) {
 static char *handle_trash(struct json_object *details, int user_id, const turn_origin_t *origin) {
    const char *mid = json_get_str(details, "message_id");
    if (!mid || !mid[0])
-      return strdup("Error: 'message_id' is required (get IDs from 'recent' or 'search' results)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'message_id' is required (get IDs from 'recent' or 'search' results)");
 
    const char *account = json_get_str(details, "account");
 
@@ -879,7 +883,7 @@ static char *handle_confirm_trash(struct json_object *details,
                                   const turn_origin_t *origin) {
    const char *pending_id = json_get_str(details, "pending_id");
    if (!pending_id || !pending_id[0])
-      return strdup("Error: 'pending_id' is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'pending_id' is required");
 
    email_err_t err = EMAIL_ERR_NONE;
    int rc = email_service_confirm_trash(user_id, pending_id, origin, &err);
@@ -973,7 +977,8 @@ static char *handle_confirm_trash(struct json_object *details,
 static char *handle_archive(struct json_object *details, int user_id) {
    const char *mid = json_get_str(details, "message_id");
    if (!mid || !mid[0])
-      return strdup("Error: 'message_id' is required (get IDs from 'recent' or 'search' results)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'message_id' is required (get IDs from 'recent' or 'search' results)");
 
    const char *account = json_get_str(details, "account");
 
@@ -1192,7 +1197,7 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
    *should_respond = 1;
 
    if (!action || !action[0])
-      return strdup("Error: action is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: action is required");
 
    /* Fire-time schedulability gate.  Keyed on the scheduled-origin context, NOT
     * "no session" — the identity fallback in tool_get_current_user_id resolves a

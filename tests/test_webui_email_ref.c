@@ -90,7 +90,7 @@ bool email_service_account_uses_lease(const email_account_t *acct) {
    (void)acct;
    return true;
 }
-bool email_panel_msg_id_ok(const char *id, bool is_imap) {
+bool email_service_message_id_ok(const char *id, bool is_imap) {
    const char *colon = is_imap ? strrchr(id, ':') : NULL;
    return colon && colon[1] >= '0' && colon[1] <= '9';
 }

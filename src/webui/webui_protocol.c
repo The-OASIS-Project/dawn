@@ -28,6 +28,7 @@
 
 #include "logging.h"
 #include "utils/string_utils.h"
+#include "webui/webui_email_client.h"
 
 /* The feature flags, one line in docs/WEBSOCKET_PROTOCOL.md each.  Names are
  * stable snake_case; a flag is never removed while the protocol version
@@ -62,9 +63,8 @@ static const char *const s_features[] = {
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has
- * none, and the flag isn't advertised.  Must match its declaration in
- * webui/webui_email_panel.h (not included here: that header pulls in the WebUI). */
-bool webui_email_client_enabled(void) __attribute__((weak));
+ * none, and the flag isn't advertised. */
+#pragma weak webui_email_client_enabled
 
 /* Flags that depend on how the daemon runs, each with its check.  Same rules
  * as s_features. */

@@ -30,8 +30,7 @@
 #include <sodium.h>
 
 #include "tools/email_service.h"
-#include "webui/webui_email_panel.h"
-#include "webui/webui_email_panel_internal.h"
+#include "webui/webui_email_client.h"
 #endif
 
 static __thread const webui_email_ref_t *t_turn_email;
@@ -91,7 +90,7 @@ static int64_t account_id_of(struct json_object *obj) {
  * gives them (its own check): a Gmail id, or an IMAP "folder:uid.uidvalidity". */
 static bool message_id_ok(const email_account_t *acct, const char *id) {
    return session_attach_name_ok(id, SESSION_ATTACH_MESSAGE_ID_MAX) &&
-          email_panel_msg_id_ok(id, email_service_account_uses_lease(acct));
+          email_service_message_id_ok(id, email_service_account_uses_lease(acct));
 }
 
 /* A name for account @p acct the email tool resolves back to it (its `account`

@@ -114,7 +114,7 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
 
    if (value == NULL || strlen(value) == 0) {
       OLOG_WARNING("url_tool: No URL provided");
-      return strdup("Please provide a URL to fetch.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Please provide a URL to fetch.");
    }
 
    /* Support both "get" action and NULL/empty action (for direct calls) */

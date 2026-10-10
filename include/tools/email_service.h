@@ -209,6 +209,16 @@ bool email_service_available(void);
  */
 bool email_service_validate_folder_name(const char *folder);
 
+/** The longest folder name email_service_validate_folder_name accepts, in bytes. */
+#define EMAIL_FOLDER_NAME_MAX 127
+
+/**
+ * @brief Whether @p id is a message id of the account's kind, as the mail
+ *        panel and the email tool give them: IMAP "folder:uid[.uidvalidity]"
+ *        with a valid folder (@p is_imap), else a Gmail hex id
+ */
+bool email_service_message_id_ok(const char *id, bool is_imap);
+
 /* =============================================================================
  * Account Management (WebUI)
  * ============================================================================= */
