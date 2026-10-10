@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "auth/auth_db.h"
@@ -52,6 +53,7 @@
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_embeddings_internal.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_extraction_queue.h"
 #include "memory/memory_history_loader.h"
@@ -1079,21 +1081,31 @@ static void process_extraction_response(int user_id,
                   rel_fact_id = 0;
                }
 
-               int64_t old_fact_id = 0;
-               int rel_rc = memory_db_relation_supersede(user_id, r_subj_id, canon_pred, r_obj_id,
-                                                         (r_obj_id == 0) ? r_obj : NULL,
-                                                         rel_fact_id, 0.8f, valid_from, valid_to,
-                                                         prov, &old_fact_id);
-               if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
-                  if (memory_db_fact_supersede(old_fact_id, rel_fact_id, user_id) ==
-                      MEMORY_DB_SUCCESS) {
-                     OLOG_INFO("memory_extraction: contradiction — fact %ld superseded by %ld "
-                               "(relation: %s)",
-                               (long)old_fact_id, (long)rel_fact_id, canon_pred);
-                  } else {
-                     OLOG_WARNING("memory_extraction: fact supersede failed for %ld -> %ld",
-                                  (long)old_fact_id, (long)rel_fact_id);
+               /* "replaces": the user said this value replaced an old one (a new
+                * number, a move, a job change): the old value it names, or true
+                * when it can't say which. */
+               struct json_object *repl_obj = NULL;
+               const char *replaces = NULL;
+               if (json_object_object_get_ex(rel, "replaces", &repl_obj)) {
+                  const char *v = json_object_is_type(repl_obj, json_type_string)
+                                      ? json_object_get_string(repl_obj)
+                                      : NULL;
+                  if (v && strcasecmp(v, "true") != 0 && strcasecmp(v, "false") != 0) {
+                     replaces = v[0] ? v : NULL;
+                  } else if (v ? strcasecmp(v, "true") == 0 : json_object_get_boolean(repl_obj)) {
+                     replaces = MEMORY_RELATION_REPLACES_UNKNOWN;
                   }
+               }
+               int64_t old_fact_id = 0;
+               int rel_rc = memory_db_relation_supersede_ex(
+                   user_id, r_subj_id, canon_pred, r_obj_id, (r_obj_id == 0) ? r_obj : NULL,
+                   rel_fact_id, 0.8f, valid_from, valid_to, replaces, prov, &old_fact_id);
+               if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
+                  /* Superseded in the same transaction; the cache keeps current facts. */
+                  memory_embeddings_invalidate_cache_for_user(user_id);
+                  OLOG_INFO("memory_extraction: contradiction — fact %ld superseded by %ld "
+                            "(relation: %s)",
+                            (long)old_fact_id, (long)rel_fact_id, canon_pred);
                }
                if (valid_from || valid_to) {
                   OLOG_INFO("memory_extraction: relation: (%s, %s, %s) valid [%ld..%ld]", r_subj,

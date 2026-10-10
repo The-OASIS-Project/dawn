@@ -163,32 +163,34 @@ int memory_db_relation_create(int user_id,
                               int64_t valid_to,
                               const memory_provenance_t *prov);
 
-/**
- * @brief Returns true if the given relation type is in the EXCLUSIVE_RELATIONS
- * list (works_at, lives_in, married_to, ...).  Exposed so the entity-merge
- * alias surface (memory_db_alias.c) can compute exclusive_relation_overlap
- * without re-listing the source-of-truth array.  Single source of truth lives
- * in memory_db.c.
- *
- * @param relation Relation type string (e.g. "works_at"); may be NULL.
- * @return true if exclusive, false otherwise (NULL → false).
- */
-bool memory_db_relation_is_exclusive(const char *relation);
+/** memory_db_relation_supersede_ex(): the user said the new value replaces an
+ *  old one, but not which. */
+#define MEMORY_RELATION_REPLACES_UNKNOWN ""
 
 /**
- * @brief Transactional close-and-create: auto-closes any existing open exclusive
- * relation with a different object before inserting the new row.  All work happens
- * under a single BEGIN IMMEDIATE so other workers cannot observe an inconsistent
- * state.  Non-exclusive relations skip the close branch (multiple open rows valid).
- *
- * See EXCLUSIVE_RELATIONS[] and CONTRADICTORY_PAIRS[] in memory_db.c for the
- * full compile-time lists of auto-close relation types.
+ * @brief Whether a person has one value of @p relation at a time (married_to,
+ *        born_in, born_on, favorite_color, favorite_food, primary_language): a
+ *        new value closes the open one.  NULL → false.
+ */
+bool memory_db_relation_is_one_at_a_time(const char *relation);
+
+/**
+ * @brief Whether entity merging counts a value of @p relation two entities
+ *        share as strong evidence they are one (the one-at-a-time relations
+ *        plus works_at, lives_in, attends_school, owns_vehicle, email_is,
+ *        phone_number_is; memory_db_alias.c).  NULL → false.
+ */
+bool memory_db_relation_is_merge_evidence(const char *relation);
+
+/**
+ * @brief memory_db_relation_supersede_ex() with no replaced value (the path for
+ * a relation nobody said replaces anything).
  *
  * Use this from extraction instead of memory_db_relation_create directly.
  *
  * @param user_id User ID
  * @param subject_entity_id Subject entity ID
- * @param relation Relation type (auto-close enabled if exclusive)
+ * @param relation Relation type
  * @param object_entity_id Object entity ID (0 for literal)
  * @param object_value Literal value if no object entity
  * @param fact_id Associated fact ID (0 for none)
@@ -197,8 +199,8 @@ bool memory_db_relation_is_exclusive(const char *relation);
  * @param valid_to End of validity period (0 = open-ended/NULL = currently true)
  * @param prov Provenance; NULL or conv_id==0 = no provenance
  * @param out_old_fact_id If non-NULL and an existing open relation was closed
- *        (exclusive supersede or contradictory-pair close), receives that old
- *        relation's fact_id (0 if none was linked)
+ *        (one-at-a-time supersede or contradictory-pair close), receives that
+ *        old relation's fact_id when it backs no open relation (0 otherwise)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_relation_supersede(int user_id,
@@ -212,6 +214,40 @@ int memory_db_relation_supersede(int user_id,
                                  int64_t valid_to,
                                  const memory_provenance_t *prov,
                                  int64_t *out_old_fact_id);
+
+/**
+ * @brief Transactional close-and-create.  Open rows of the same (subject,
+ * relation) with a different object are closed before the new row is
+ * inserted: every one for a one-at-a-time relation; for one a person has
+ * several of, only when @p replaces says the user called the new value a
+ * replacement: the open row whose object is that value (a literal or an
+ * entity's name, case aside), or with MEMORY_RELATION_REPLACES_UNKNOWN the one
+ * other open value when there is exactly one.  NULL: nothing is closed.  A
+ * contradictory relation (likes/dislikes) on the same object is closed too.
+ * The fact of each closed row that no open relation rests on any more, and
+ * that isn't already superseded, is superseded by @p fact_id (when > 0), in
+ * the same transaction; the caller drops the user's fact-embedding cache when
+ * @p out_old_fact_id is set.
+ *
+ * See SPECIAL_RELATIONS[] and CONTRADICTORY_PAIRS[] in memory_db_relations.c.
+ * Use this from extraction instead of memory_db_relation_create directly.
+ *
+ * @param out_old_fact_id If non-NULL, receives the first fact superseded (0 if none)
+ *        Other parameters as memory_db_relation_supersede().
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_supersede_ex(int user_id,
+                                    int64_t subject_entity_id,
+                                    const char *relation,
+                                    int64_t object_entity_id,
+                                    const char *object_value,
+                                    int64_t fact_id,
+                                    float confidence,
+                                    int64_t valid_from,
+                                    int64_t valid_to,
+                                    const char *replaces,
+                                    const memory_provenance_t *prov,
+                                    int64_t *out_old_fact_id);
 
 /**
  * @brief List relations where entity is subject (outgoing).  Returns ALL

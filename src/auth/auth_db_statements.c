@@ -1005,17 +1005,8 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "RETURNING id, mention_count",
      &s_db.stmt_memory_relation_create },
 
-   /* Auto-close superseded exclusive relations (v33).  Used inside
-    * memory_db_relation_supersede() before the new INSERT.  The (object_entity_id != ?
-    * OR object_value != ?) clause skips when the user re-mentions the same target —
-    * idempotency check.  COALESCE guards against NULL comparisons. */
-   { "memory_relation_close_open",
-     "UPDATE memory_relations SET valid_to = ? "
-     "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
-     "  AND valid_to IS NULL "
-     "  AND (COALESCE(object_entity_id, 0) != COALESCE(?, 0) "
-     "    OR COALESCE(object_value, '') != COALESCE(?, '')) "
-     "RETURNING fact_id",
+   /* Close the relations a new value supersedes (MEMORY_RELATION_CLOSE_OPEN_SQL). */
+   { "memory_relation_close_open", MEMORY_RELATION_CLOSE_OPEN_SQL,
      &s_db.stmt_memory_relation_close_open },
    { "memory_relation_list_by_subject",
      "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "

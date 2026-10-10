@@ -169,9 +169,9 @@ static bool entity_type_prefers_longer_canonical(const char *entity_type) {
 }
 
 /* Returns true if the entity has any aliases pointing at it OR any open
- * exclusive relations as subject.  Used to gate the longer-canonical swap:
+ * identifying relations as subject.  Used to gate the longer-canonical swap:
  * we only redirect the alias-link when the existing canonical is a "leaf"
- * (no equivalence-class subtree, no exclusive subject-side state that would
+ * (no equivalence-class subtree, no identifying subject-side state that would
  * be surprising to orphan-by-soft-merge).  Fail-safe: returns true on lock
  * acquisition failure or any SQL error — the caller will skip the swap. */
 static bool entity_has_canonical_dependents(int user_id, int64_t entity_id) {
@@ -211,7 +211,7 @@ static bool entity_has_canonical_dependents(int user_id, int64_t entity_id) {
    bool has_excl_open = false;
    while (sqlite3_step(q_rel) == SQLITE_ROW) {
       const char *rel = (const char *)sqlite3_column_text(q_rel, 0);
-      if (rel && memory_db_relation_is_exclusive(rel)) {
+      if (rel && memory_db_relation_is_merge_evidence(rel)) {
          has_excl_open = true;
          break;
       }
@@ -231,7 +231,7 @@ static bool entity_has_canonical_dependents(int user_id, int64_t entity_id) {
  * canonical name for person/pet/place" for rationale.
  *
  * Guard against orphaning a subtree: only swap when the target has no
- * aliases pointing at it AND no open exclusive relations as subject.  Hard-
+ * aliases pointing at it AND no open identifying relations as subject.  Hard-
  * merge / Phase 3 consolidate is the right tool when the target is the head
  * of an equivalence class.
  *
@@ -354,7 +354,7 @@ int memory_db_entity_consider_auto_merge(int user_id,
     *
     * Direction swap: for person/pet/place where the inbound is the fuller
     * form and the existing canonical is a "leaf" (no aliases, no open
-    * exclusive relations as subject), flip the alias-link so the long form
+    * identifying relations as subject), flip the alias-link so the long form
     * stays canonical.  Updates out_eval->source/target to reflect the
     * actual link direction taken — caller can detect a swap by comparing
     * out_eval->target_entity_id against the entity_id passed in. */
@@ -409,7 +409,7 @@ int memory_db_entity_consider_auto_merge(int user_id,
 
       /* Direction preference mirrors the AUTO branch — if the inbound is
        * the fuller person/pet/place form and the candidate is a leaf
-       * (no aliases pointing at it, no open exclusive relations as
+       * (no aliases pointing at it, no open identifying relations as
        * subject), store the proposal pre-swapped so the operator sees
        * the right direction in the Suggested-Merges UI.  Without this
        * the operator would have to mentally invert "merge Jonathan

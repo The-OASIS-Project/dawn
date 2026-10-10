@@ -924,6 +924,23 @@ int auth_db_txn_end_locked(int result, const char *tag);
  */
 int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
 
+/* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),
+ * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
+ * ?5/?6 the new object (entity id / literal: the same object is never closed, so
+ * a re-mention is idempotent), ?7 the one replaced value to close (a literal or an
+ * entity's name, case aside), or NULL for every other open value.  Shared with
+ * the tests that prepare it themselves. */
+#define MEMORY_RELATION_CLOSE_OPEN_SQL                                             \
+   "UPDATE memory_relations SET valid_to = ?1 "                                    \
+   "WHERE user_id = ?2 AND subject_entity_id = ?3 AND relation = ?4 "              \
+   "  AND valid_to IS NULL "                                                       \
+   "  AND (COALESCE(object_entity_id, 0) != COALESCE(?5, 0) "                      \
+   "    OR COALESCE(object_value, '') != COALESCE(?6, '')) "                       \
+   "  AND (?7 IS NULL OR object_value = ?7 COLLATE NOCASE OR object_entity_id IN " \
+   "    (SELECT id FROM memory_entities WHERE user_id = ?2 AND "                   \
+   "     (name = ?7 COLLATE NOCASE OR canonical_name = ?7 COLLATE NOCASE))) "      \
+   "RETURNING fact_id"
+
 /* =============================================================================
  * Schema + Statement Lifecycle (defined in sibling modules)
  *

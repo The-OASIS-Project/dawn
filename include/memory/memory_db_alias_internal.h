@@ -94,9 +94,9 @@ int memory_alias_internal_load_entity_full(int user_id,
 int memory_alias_internal_find_user_self_id(int user_id, int64_t *out_id);
 
 /* Compute exclusive_relation_overlap signal between two entities.
- *   1.0 if any open exclusive relation shares object_entity_id (or
- *       canonical-equal object_value)
- *   0.5 if any non-exclusive relation shares object
+ *   1.0 if any open merge-evidence relation (memory_db_relation_is_merge_evidence)
+ *       shares object_entity_id (or canonical-equal object_value)
+ *   0.5 if any other relation shares object
  *   0   otherwise */
 float memory_alias_internal_compute_exclusive_relation_overlap(int user_id,
                                                                int64_t a_id,

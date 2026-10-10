@@ -19,12 +19,12 @@
  * Memory Database — Relation CRUD operations + contradiction handling.
  *
  * Phase 6 split from memory_db.c — relation create / list / supersede,
- * plus the EXCLUSIVE_RELATIONS / CONTRADICTORY_PAIRS tables and the
+ * plus the SPECIAL_RELATIONS / CONTRADICTORY_PAIRS tables and the
  * memory_db_relation_supersede atomic close-and-create transaction.
  *
  * Contradiction handling — lives in three coordinated locations:
  *
- *   (1) HERE: EXCLUSIVE_RELATIONS[] + CONTRADICTORY_PAIRS[] tables
+ *   (1) HERE: SPECIAL_RELATIONS[] + CONTRADICTORY_PAIRS[] tables
  *       (compile-time data) and memory_db_relation_supersede() (atomic
  *       close + create transaction; out_old_fact_id surfaces the linked
  *       fact for the caller to propagate).
@@ -36,17 +36,18 @@
  *       the structured-relation supersede also retires the natural-
  *       language fact rendered from it.
  *
- * Adding a new exclusive relation or contradictory pair is a (1)-only edit.
+ * Adding a one-at-a-time relation or contradictory pair is a (1)-only edit.
  * Changing the supersede-propagation mechanism is a (1)+(2) edit; if a
  * fourth piece lands (e.g. inline LLM-based contradiction judgment for
  * subtle quantity / negation cases — see dawn/docs/TODO.md "LLM-based
  * contradiction judgment"), this whole cluster should move into a
  * dedicated memory_contradiction.{c,h} module.
  *
- * Exclusive relations have at-most-one open instance per (subject, relation).
- * When extraction stores a new such relation with a different object,
- * memory_db_relation_supersede() auto-closes the prior open row.
- * Non-exclusive relations (likes, knows, has_pet) skip the close branch.
+ * One-at-a-time relations have at-most-one open instance per (subject,
+ * relation).  When extraction stores a new such relation with a different
+ * object, or any relation it marks as replacing the old value ("my new number
+ * is ..."), memory_db_relation_supersede_ex() auto-closes the prior open row.
+ * Others (likes, knows, has_pet, email_is) skip the close branch.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -63,13 +64,27 @@
 /* `const char *const` (not just `const char *`) so the pointer array itself
  * lands in .rodata.  Without the inner const, only the C-strings are
  * read-only — the pointer table is in .data and process-image-writable. */
-static const char *const EXCLUSIVE_RELATIONS[] = {
-   "works_at",      "lives_in",         "married_to", "attends_school",
-   "owns_vehicle",  "born_in",          "born_on",    "favorite_color",
-   "favorite_food", "primary_language", "email_is",   "phone_number_is",
+/* The standard relations with special handling.  one_at_a_time: a person has
+ * one value at a time, so a new value closes the open one.  merge_evidence:
+ * entity merging scores a value two entities share as strong evidence they
+ * are one (memory_db_alias.c; the list it has always used, not all of it
+ * identifying).  A person can have several emails, phones, vehicles, jobs,
+ * schools and homes, so those don't close each other unless the new one is
+ * said to replace an old one (memory_db_relation_supersede_ex's replaces). */
+static const struct {
+   const char *name;
+   bool one_at_a_time;
+   bool merge_evidence;
+} SPECIAL_RELATIONS[] = {
+   { "married_to", true, true },      { "born_in", true, true },
+   { "born_on", true, true },         { "favorite_color", true, true },
+   { "favorite_food", true, true },   { "primary_language", true, true },
+   { "works_at", false, true },       { "lives_in", false, true },
+   { "attends_school", false, true }, { "owns_vehicle", false, true },
+   { "email_is", false, true },       { "phone_number_is", false, true },
 };
-static const int EXCLUSIVE_RELATIONS_COUNT = (int)(sizeof(EXCLUSIVE_RELATIONS) /
-                                                   sizeof(EXCLUSIVE_RELATIONS[0]));
+static const int SPECIAL_RELATIONS_COUNT = (int)(sizeof(SPECIAL_RELATIONS) /
+                                                 sizeof(SPECIAL_RELATIONS[0]));
 
 static const struct {
    const char *const a;
@@ -95,23 +110,24 @@ static const char *contradictory_opposite(const char *relation) {
    return NULL;
 }
 
-/* Public-named helper: alias surface (memory_db_alias.c, v43) consults this to
- * identify open exclusive relations during Stage 5 of the resolver cascade.
- * EXCLUSIVE_RELATIONS[] stays static here as the source-of-truth list. */
-bool memory_db_relation_is_exclusive(const char *relation) {
-   if (!relation)
-      return false;
-   for (int i = 0; i < EXCLUSIVE_RELATIONS_COUNT; i++) {
-      if (strcmp(relation, EXCLUSIVE_RELATIONS[i]) == 0)
-         return true;
+/* The relation's SPECIAL_RELATIONS entry, or -1. */
+static int special_relation_index(const char *relation) {
+   for (int i = 0; relation && i < SPECIAL_RELATIONS_COUNT; i++) {
+      if (strcmp(relation, SPECIAL_RELATIONS[i].name) == 0) {
+         return i;
+      }
    }
-   return false;
+   return -1;
 }
 
-/* Internal-name shim — keeps the existing call sites in this file unchanged
- * while the public name becomes the canonical entry point. */
-static inline bool relation_is_exclusive(const char *relation) {
-   return memory_db_relation_is_exclusive(relation);
+bool memory_db_relation_is_one_at_a_time(const char *relation) {
+   const int i = special_relation_index(relation);
+   return i >= 0 && SPECIAL_RELATIONS[i].one_at_a_time;
+}
+
+bool memory_db_relation_is_merge_evidence(const char *relation) {
+   const int i = special_relation_index(relation);
+   return i >= 0 && SPECIAL_RELATIONS[i].merge_evidence;
 }
 
 int memory_db_relation_create(int user_id,
@@ -198,13 +214,14 @@ int memory_db_relation_create(int user_id,
    return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
-/* Transactional close-and-create.  For exclusive relations (works_at, lives_in, ...)
- * any existing open row with a different object is closed (valid_to = now()) before
+/* Transactional close-and-create.  For one-at-a-time relations (married_to,
+ * born_in, ...), or a new value said to replace the old, any existing open row
+ * with a different object is closed (valid_to = now()) before
  * the new row is inserted.  Both writes happen under one BEGIN IMMEDIATE so other
  * workers can never observe a state with zero open rows for the same (subject, relation).
  *
- * Non-exclusive relations skip the close branch — multiple open rows are valid
- * (a user can like many things, know many people). */
+ * Other relations skip the close branch — multiple open rows are valid
+ * (a user can like many things, know many people, have several emails). */
 int memory_db_relation_supersede(int user_id,
                                  int64_t subject_entity_id,
                                  const char *relation,
@@ -216,6 +233,133 @@ int memory_db_relation_supersede(int user_id,
                                  int64_t valid_to,
                                  const memory_provenance_t *prov,
                                  int64_t *out_old_fact_id) {
+   return memory_db_relation_supersede_ex(user_id, subject_entity_id, relation, object_entity_id,
+                                          object_value, fact_id, confidence, valid_from, valid_to,
+                                          NULL, prov, out_old_fact_id);
+}
+
+/* Whether @p fact_id still backs an open relation (caller holds the lock). */
+static bool fact_has_open_relation_locked(int user_id, int64_t fact_id) {
+   sqlite3_stmt *st = NULL;
+   bool open = true; /* on error, keep the fact (never hide one by mistake) */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT EXISTS (SELECT 1 FROM memory_relations WHERE user_id = ? AND "
+                          "fact_id = ? AND valid_to IS NULL)",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, fact_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         open = sqlite3_column_int(st, 0) != 0;
+      }
+   }
+   sqlite3_finalize(st);
+   return open;
+}
+
+/* Facts one supersede can close relations of; past it, the rest stay as they are. */
+#define SUPERSEDE_FACTS_MAX 32
+
+/* Bind a close statement's ?1-?6 (MEMORY_RELATION_CLOSE_OPEN_SQL's order; the
+ * contradictory close binds the same six). */
+static void bind_close_locked(sqlite3_stmt *st,
+                              int64_t close_time,
+                              int user_id,
+                              int64_t subject_entity_id,
+                              const char *relation,
+                              int64_t object_entity_id,
+                              const char *object_value) {
+   sqlite3_bind_int64(st, 1, close_time);
+   sqlite3_bind_int(st, 2, user_id);
+   sqlite3_bind_int64(st, 3, subject_entity_id);
+   sqlite3_bind_text(st, 4, relation, -1, SQLITE_TRANSIENT);
+   if (object_entity_id > 0) {
+      sqlite3_bind_int64(st, 5, object_entity_id);
+   } else {
+      sqlite3_bind_null(st, 5);
+   }
+   if (object_value) {
+      sqlite3_bind_text(st, 6, object_value, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(st, 6);
+   }
+}
+
+/* Step a close statement to the end, adding each returned fact_id (once) to
+ * @p facts.  The step's final code (SQLITE_DONE when it ran). */
+static int collect_closed_facts(sqlite3_stmt *st, int64_t *facts, int *n) {
+   int rc;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+      const int64_t id = sqlite3_column_int64(st, 0);
+      bool seen = id <= 0;
+      for (int i = 0; i < *n && !seen; i++) {
+         seen = facts[i] == id;
+      }
+      if (!seen && *n < SUPERSEDE_FACTS_MAX) {
+         facts[(*n)++] = id;
+      }
+   }
+   return rc;
+}
+
+/* Open values of (subject, relation) other than the new one, or -1 on error. */
+static int other_open_count_locked(int user_id,
+                                   int64_t subject_entity_id,
+                                   const char *relation,
+                                   int64_t object_entity_id,
+                                   const char *object_value) {
+   sqlite3_stmt *st = NULL;
+   int count = -1;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT COUNT(*) FROM memory_relations WHERE user_id = ?2 AND "
+                          "subject_entity_id = ?3 AND relation = ?4 AND valid_to IS NULL AND "
+                          "(COALESCE(object_entity_id, 0) != COALESCE(?5, 0) OR "
+                          "COALESCE(object_value, '') != COALESCE(?6, '')) AND ?1 IS NOT NULL",
+                          -1, &st, NULL) == SQLITE_OK) {
+      bind_close_locked(st, 0, user_id, subject_entity_id, relation, object_entity_id,
+                        object_value);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         count = sqlite3_column_int(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   return count;
+}
+
+/* Supersede @p old_id by @p new_id inside the caller's transaction, when it is
+ * current (a fact already merged into another keeps its keeper and merge time).
+ * Both facts the user's.  The rows changed (0 or 1), or -1 on error. */
+static int fact_supersede_in_tx_locked(int user_id, int64_t old_id, int64_t new_id) {
+   sqlite3_stmt *st = NULL;
+   int changed = -1;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE memory_facts SET superseded_by = ?1, "
+                          "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                          "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL "
+                          "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?1 AND user_id = ?3)",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, new_id);
+      sqlite3_bind_int64(st, 2, old_id);
+      sqlite3_bind_int(st, 3, user_id);
+      if (sqlite3_step(st) == SQLITE_DONE) {
+         changed = sqlite3_changes(s_db.db);
+      }
+   }
+   sqlite3_finalize(st);
+   return changed;
+}
+
+int memory_db_relation_supersede_ex(int user_id,
+                                    int64_t subject_entity_id,
+                                    const char *relation,
+                                    int64_t object_entity_id,
+                                    const char *object_value,
+                                    int64_t fact_id,
+                                    float confidence,
+                                    int64_t valid_from,
+                                    int64_t valid_to,
+                                    const char *replaces,
+                                    const memory_provenance_t *prov,
+                                    int64_t *out_old_fact_id) {
    if (out_old_fact_id)
       *out_old_fact_id = 0;
    if (!relation)
@@ -233,8 +377,8 @@ int memory_db_relation_supersede(int user_id,
       return MEMORY_DB_FAILURE;
    }
 
-   /* Auto-close prior open exclusive relation, if any.  Idempotency check (object
-    * mismatch) lives in the prepared statement's WHERE clause.
+   /* Auto-close prior open relation (one-at-a-time, or replaced), if any.  Idempotency check
+    * (object mismatch) lives in MEMORY_RELATION_CLOSE_OPEN_SQL's WHERE clause.
     *
     * Two orthogonal questions govern whether we close and, if so, at what time:
     *
@@ -251,33 +395,43 @@ int memory_db_relation_supersede(int user_id,
     */
    int64_t now_ts = (int64_t)time(NULL);
    bool new_is_current = (valid_to <= 0) || (valid_to > now_ts);
-   if (relation_is_exclusive(relation) && new_is_current) {
-      int64_t close_time = (valid_from > 0) ? valid_from : now_ts;
+   const int64_t close_time = (valid_from > 0) ? valid_from : now_ts;
+   /* The facts of the rows closed here: each is superseded by the new fact
+    * once the new row is in, when nothing open rests on it any more. */
+   int64_t closed_facts[SUPERSEDE_FACTS_MAX];
+   int n_closed_facts = 0;
+
+   const bool one = memory_db_relation_is_one_at_a_time(relation);
+   const bool named = !one && replaces && replaces[0];
+   bool do_close = new_is_current && (one || replaces);
+   if (do_close && !one && !named) {
+      /* "Replaces", but not which: only when there is exactly one other value
+       * to replace (with a work number and a cell, guessing would lose one). */
+      const int others = other_open_count_locked(user_id, subject_entity_id, relation,
+                                                 object_entity_id, object_value);
+      if (others < 0) {
+         OLOG_ERROR("memory_db: relation_supersede count failed: %s", sqlite3_errmsg(s_db.db));
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         AUTH_DB_UNLOCK();
+         return MEMORY_DB_FAILURE;
+      }
+      if (others != 1) {
+         OLOG_INFO("memory_db: '%s' replaces one of %d values for subject %ld; none closed",
+                   relation, others, (long)subject_entity_id);
+         do_close = false;
+      }
+   }
+   if (do_close) {
       sqlite3_stmt *close_stmt = s_db.stmt_memory_relation_close_open;
       sqlite3_reset(close_stmt);
-      sqlite3_bind_int64(close_stmt, 1, close_time);
-      sqlite3_bind_int(close_stmt, 2, user_id);
-      sqlite3_bind_int64(close_stmt, 3, subject_entity_id);
-      sqlite3_bind_text(close_stmt, 4, relation, -1, SQLITE_TRANSIENT);
-      if (object_entity_id > 0) {
-         sqlite3_bind_int64(close_stmt, 5, object_entity_id);
+      bind_close_locked(close_stmt, close_time, user_id, subject_entity_id, relation,
+                        object_entity_id, object_value);
+      if (named) {
+         sqlite3_bind_text(close_stmt, 7, replaces, -1, SQLITE_TRANSIENT);
       } else {
-         sqlite3_bind_null(close_stmt, 5);
+         sqlite3_bind_null(close_stmt, 7);
       }
-      if (object_value) {
-         sqlite3_bind_text(close_stmt, 6, object_value, -1, SQLITE_TRANSIENT);
-      } else {
-         sqlite3_bind_null(close_stmt, 6);
-      }
-      /* RETURNING fact_id yields SQLITE_ROW for each closed row */
-      int64_t old_fact_id_local = 0;
-      rc = sqlite3_step(close_stmt);
-      if (rc == SQLITE_ROW) {
-         old_fact_id_local = sqlite3_column_int64(close_stmt, 0);
-         while (sqlite3_step(close_stmt) == SQLITE_ROW) {
-         }
-         rc = SQLITE_DONE;
-      }
+      rc = collect_closed_facts(close_stmt, closed_facts, &n_closed_facts);
       sqlite3_reset(close_stmt);
       if (rc != SQLITE_DONE) {
          OLOG_ERROR("memory_db: relation_supersede close failed: %s", sqlite3_errmsg(s_db.db));
@@ -285,12 +439,14 @@ int memory_db_relation_supersede(int user_id,
          AUTH_DB_UNLOCK();
          return MEMORY_DB_FAILURE;
       }
-      int closed = sqlite3_changes(s_db.db);
+      const int closed = sqlite3_changes(s_db.db);
       if (closed > 0) {
          OLOG_INFO("memory_db: closed %d superseded '%s' relation(s) for subject %ld", closed,
                    relation, (long)subject_entity_id);
-         if (out_old_fact_id && old_fact_id_local > 0)
-            *out_old_fact_id = old_fact_id_local;
+      } else if (named) {
+         OLOG_INFO("memory_db: '%s' replaces a value matching no other open one for subject "
+                   "%ld; none closed",
+                   relation, (long)subject_entity_id);
       }
    }
 
@@ -312,48 +468,22 @@ int memory_db_relation_supersede(int user_id,
          sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
          AUTH_DB_UNLOCK();
          return MEMORY_DB_FAILURE;
-      } else {
-         int64_t close_time = (valid_from > 0) ? valid_from : now_ts;
-         sqlite3_bind_int64(cstmt, 1, close_time);
-         sqlite3_bind_int(cstmt, 2, user_id);
-         sqlite3_bind_int64(cstmt, 3, subject_entity_id);
-         sqlite3_bind_text(cstmt, 4, opposite, -1, SQLITE_TRANSIENT);
-         if (object_entity_id > 0)
-            sqlite3_bind_int64(cstmt, 5, object_entity_id);
-         else
-            sqlite3_bind_null(cstmt, 5);
-         if (object_value)
-            sqlite3_bind_text(cstmt, 6, object_value, -1, SQLITE_TRANSIENT);
-         else
-            sqlite3_bind_null(cstmt, 6);
-
-         rc2 = sqlite3_step(cstmt);
-         if (rc2 == SQLITE_ROW) {
-            int64_t contra_fact_id = sqlite3_column_int64(cstmt, 0);
-            do {
-               rc2 = sqlite3_step(cstmt);
-            } while (rc2 == SQLITE_ROW);
-            if (rc2 != SQLITE_DONE) {
-               OLOG_ERROR("memory_db: contradictory close step failed: %s",
-                          sqlite3_errmsg(s_db.db));
-               sqlite3_finalize(cstmt);
-               sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-               AUTH_DB_UNLOCK();
-               return MEMORY_DB_FAILURE;
-            }
-            if (out_old_fact_id && *out_old_fact_id == 0 && contra_fact_id > 0)
-               *out_old_fact_id = contra_fact_id;
-            OLOG_INFO("memory_db: closed contradictory '%s' (opposite of '%s') "
-                      "for subject %ld",
-                      opposite, relation, (long)subject_entity_id);
-         } else if (rc2 != SQLITE_DONE) {
-            OLOG_ERROR("memory_db: contradictory close step failed: %s", sqlite3_errmsg(s_db.db));
-            sqlite3_finalize(cstmt);
-            sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-            AUTH_DB_UNLOCK();
-            return MEMORY_DB_FAILURE;
-         }
-         sqlite3_finalize(cstmt);
+      }
+      bind_close_locked(cstmt, close_time, user_id, subject_entity_id, opposite, object_entity_id,
+                        object_value);
+      const int before = n_closed_facts;
+      rc2 = collect_closed_facts(cstmt, closed_facts, &n_closed_facts);
+      sqlite3_finalize(cstmt);
+      if (rc2 != SQLITE_DONE) {
+         OLOG_ERROR("memory_db: contradictory close step failed: %s", sqlite3_errmsg(s_db.db));
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         AUTH_DB_UNLOCK();
+         return MEMORY_DB_FAILURE;
+      }
+      if (n_closed_facts > before || sqlite3_changes(s_db.db) > 0) {
+         OLOG_INFO("memory_db: closed contradictory '%s' (opposite of '%s') "
+                   "for subject %ld",
+                   opposite, relation, (long)subject_entity_id);
       }
    }
 
@@ -454,6 +584,30 @@ int memory_db_relation_supersede(int user_id,
       sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
+   }
+
+   /* A closed row's fact goes only when nothing it says is still open (a fact
+    * listing two numbers stays when one of them changes), never the new fact
+    * itself, and only with a new fact to point at. */
+   for (int i = 0; i < n_closed_facts; i++) {
+      const int64_t old_id = closed_facts[i];
+      if (old_id == fact_id || fact_has_open_relation_locked(user_id, old_id)) {
+         continue;
+      }
+      if (fact_id <= 0) {
+         continue; /* nothing to point it at */
+      }
+      const int changed = fact_supersede_in_tx_locked(user_id, old_id, fact_id);
+      if (changed < 0) {
+         OLOG_ERROR("memory_db: relation_supersede fact %lld failed: %s", (long long)old_id,
+                    sqlite3_errmsg(s_db.db));
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         AUTH_DB_UNLOCK();
+         return MEMORY_DB_FAILURE;
+      }
+      if (changed > 0 && out_old_fact_id && *out_old_fact_id == 0) {
+         *out_old_fact_id = old_id;
+      }
    }
 
    rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg);

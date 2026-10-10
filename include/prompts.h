@@ -467,7 +467,9 @@
    "          \"predicate\": \"standard or custom relation type, snake_case\",\n"                \
    "          \"object\": \"entity name or literal value\",\n"                                   \
    "          \"valid_from\": \"YYYY-MM-DD or YYYY (optional)\",\n"                              \
-   "          \"valid_to\":   \"YYYY-MM-DD or YYYY (optional)\"\n"                               \
+   "          \"valid_to\":   \"YYYY-MM-DD or YYYY (optional)\",\n"                              \
+   "          \"replaces\": \"the old value this one replaced (optional: only when the "         \
+   "user says so)\"\n"                                                                           \
    "        }\n"                                                                                 \
    "      ]\n"                                                                                   \
    "    }\n"                                                                                     \
@@ -603,9 +605,14 @@
    "child_of, sibling_of, friend_of, has_pet, owns_vehicle, member_of, "                         \
    "primary_language, email_is, phone_number_is, nationality, likes, dislikes, "                 \
    "enjoys, hates, can, cannot, is_a, is, favorite_color, favorite_food\n"                       \
-   "  These have special semantics in the memory system (some are exclusive — only "           \
-   "one valid at a time — and trigger automatic supersede on conflict).  Use them "            \
-   "when the fact fits one of these categories.\n"                                               \
+   "  These have special semantics in the memory system (married_to, born_in, born_on, "         \
+   "favorite_color, favorite_food and primary_language hold one value at a time, so a new "      \
+   "value replaces the old).  Use them when the fact fits one of these categories.\n"            \
+   "  A person can have several emails, phone numbers, vehicles, jobs, schools and homes: "      \
+   "a new one is added beside the others.  When the user says a new value REPLACES an old "      \
+   "one (\"my new number is\", \"I moved to\", \"I left Acme for\", \"I sold the Civic\"), set " \
+   "\"replaces\" on that relation to the old value (from the profile or the conversation), "     \
+   "or true when it isn't known, so the old value is closed and the others stay.\n"              \
    "- CUSTOM TYPES (use when no standard fits):\n"                                               \
    "    Invent a short, lowercase snake_case predicate.  Examples that come up "                 \
    "naturally: attended, plays_for, gave_talk_at, organized, competed_in, created, "             \

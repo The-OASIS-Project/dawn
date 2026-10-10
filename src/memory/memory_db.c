@@ -25,7 +25,7 @@
  *   memory_db_summaries.c   (12 summary functions incl. semantic search)
  *   memory_db_prefs.c       (5 preference functions)
  *   memory_db_entities.c    (11 entity functions + memory_make_canonical_name)
- *   memory_db_relations.c   (9 relation functions + EXCLUSIVE_RELATIONS /
+ *   memory_db_relations.c   (9 relation functions + SPECIAL_RELATIONS /
  *                            CONTRADICTORY_PAIRS / memory_db_relation_supersede)
  *   memory_db_alias.c       (Phase 1/2 equivalence-class resolver cascade)
  *   memory_db_provenance.c  (Phase B provenance reads)
