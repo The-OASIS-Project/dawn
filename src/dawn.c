@@ -1146,11 +1146,13 @@ int publish_ai_state(dawn_state_t newState) {
    json_object_object_add(json, "timestamp", json_object_new_int64(ocp_get_timestamp_ms()));
 
    const char *json_str = json_object_to_json_string(json);
-   rc = mosquitto_publish(mosq, NULL, "hud", strlen(json_str), json_str, 0, false);
+   /* The state changes whether or not the broker hears about it: with MQTT off
+    * there's no broker, and one that dropped refuses every publish until it's
+    * back.  Recording it here also keeps a failure to one log line per change. */
+   rc = mosq ? mosquitto_publish(mosq, NULL, "hud", strlen(json_str), json_str, 0, false)
+             : MOSQ_ERR_SUCCESS;
    if (rc != MOSQ_ERR_SUCCESS) {
       OLOG_ERROR("Error publishing: %s\n", mosquitto_strerror(rc));
-      json_object_put(json);
-      return 1;
    }
 
    json_object_put(json);
@@ -1158,9 +1160,9 @@ int publish_ai_state(dawn_state_t newState) {
    // Update metrics with state transition
    metrics_update_state(newState);
 
-   currentState = newState;  // Update the state after successful publish
+   currentState = newState;
 
-   return 0;
+   return rc == MOSQ_ERR_SUCCESS ? 0 : 1;
 }
 
 /**

@@ -369,9 +369,9 @@ int config_validate(const dawn_config_t *config,
    }
 
    /* ===== URL Fetcher Fallback Engine (enum) =====
-    * "flaresolverr" (default) | "tavily" | "none". Cross-field rule:
-    * fallback = "flaresolverr" but flaresolverr.enabled = false → hard error
-    * (the fallback would silently never fire). Missing API key with
+    * "flaresolverr" (default) | "tavily" | "none".  "flaresolverr" with
+    * [url_fetcher.flaresolverr] off is the shipped default: no fallback until
+    * FlareSolverr is turned on, so it isn't an error.  Missing API key with
     * fallback = "tavily" is NOT a hard error — runtime cascades to
     * FlareSolverr / fails gracefully and surfaces a request-time warning. */
    if (config->url_fetcher.fallback[0] != '\0') {
@@ -379,10 +379,6 @@ int config_validate(const dawn_config_t *config,
       if (!string_in_list(config->url_fetcher.fallback, valid_fallbacks, 3)) {
          ADD_ERROR("url_fetcher.fallback", "must be 'flaresolverr', 'tavily', or 'none' (got '%s')",
                    config->url_fetcher.fallback);
-      } else if (strcmp(config->url_fetcher.fallback, "flaresolverr") == 0 &&
-                 !config->url_fetcher.flaresolverr.enabled) {
-         ADD_ERROR("url_fetcher.fallback",
-                   "set to 'flaresolverr' but [url_fetcher.flaresolverr] enabled = false");
       }
 
       /* Tavily fetch tunables (only validated when selected) */

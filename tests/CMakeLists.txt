@@ -2080,6 +2080,7 @@ dawn_add_unit_test(test_conv_stream
 dawn_add_unit_test(test_config_validate
    SOURCES test_config_validate.c
            ${SRC_ROOT}/src/config/config_validate.c
+           ${SRC_ROOT}/src/config/config_defaults.c
    LIBS    unity
    LABEL   ci)
 

@@ -461,7 +461,8 @@ else()
             "ENABLE_AEC=ON but webrtc-audio-processing is not built — building WITHOUT "
             "echo cancellation and the phone-call APM.\n"
             "To enable: git submodule update --init --recursive && "
-            "cd webrtc-audio-processing && meson setup build && ninja -C build")
+            "cd webrtc-audio-processing && (meson setup build --default-library=static --wipe "
+            "|| meson setup build --default-library=static) && ninja -C build")
         set(AEC_ENABLED FALSE)
     else()
         set(AEC_ENABLED TRUE)
