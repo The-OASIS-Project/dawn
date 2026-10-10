@@ -22,6 +22,7 @@
  */
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "config/config_validate.h"
@@ -130,6 +131,17 @@ void tearDown(void) {
 
 static void test_valid_config_no_errors(void) {
    int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* What a dawn.toml that leaves a setting out gets.  An error here stops the
+ * daemon from starting with the shipped dawn.toml.example. */
+static void test_shipped_defaults_no_errors(void) {
+   static dawn_config_t defaults;
+   config_set_defaults(&defaults);
+   int n = config_validate(&defaults, NULL, s_errors, MAX_ERRORS);
+   for (int i = 0; i < n; i++)
+      printf("default fails validation: [%s] %s\n", s_errors[i].field, s_errors[i].message);
    TEST_ASSERT_EQUAL_INT(0, n);
 }
 
@@ -349,6 +361,7 @@ int main(void) {
    UNITY_BEGIN();
 
    RUN_TEST(test_valid_config_no_errors);
+   RUN_TEST(test_shipped_defaults_no_errors);
 
    RUN_TEST(test_vad_speech_threshold_out_of_range);
    RUN_TEST(test_tts_length_scale_out_of_range);
