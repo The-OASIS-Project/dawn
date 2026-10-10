@@ -145,6 +145,20 @@ struct json_object *memory_history_load_for_llm(int64_t conv_id, int user_id, si
  */
 char *memory_history_strip_image_markers(const char *src);
 
+/**
+ * @brief An assistant reply without the visuals the WebUI saved after it.
+ *
+ * A turn's visuals are saved appended to its reply ("\n" and each
+ * `<dawn-visual ...>...</dawn-visual>` block) so they render again on reload;
+ * they are display, and the model never wrote them.  Only the trailing run of
+ * whole blocks goes (a mention in the text stays); a reply that was nothing
+ * but visuals becomes HISTORY_VISUAL_ONLY_REPLY.
+ *
+ * @return A new heap string, or NULL when there was nothing to strip (or on
+ *         allocation failure, logged): use @p content as it is
+ */
+char *memory_history_strip_visuals(const char *content);
+
 #ifdef __cplusplus
 }
 #endif
