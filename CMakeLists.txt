@@ -740,6 +740,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
         src/webui/webui_turn_ref.c
+        src/webui/webui_email_ref.c
         src/webui/webui_attachments.c
         src/webui/webui_http.c
         src/webui/webui_admin.c

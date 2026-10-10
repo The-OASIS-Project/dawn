@@ -194,6 +194,30 @@
    outline-offset: 2px;
 }
 
+/* The email a question was asked about: a reference, not a control, so it
+ * reads as passive (no fill, dashed outline) beside the clickable document chips. */
+.transcript-doc-chip.email-ref-chip {
+   cursor: default;
+   max-width: min(360px, 100%);
+   min-width: 0;
+   background: transparent;
+   border-style: dashed;
+   padding: 0.375rem 0.625rem;
+   transition: none;
+}
+
+.transcript-doc-chip.email-ref-chip:hover {
+   border-color: var(--border-color);
+}
+
+.email-ref-chip .transcript-doc-size {
+   flex: 0 1 auto;
+   max-width: 45%;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+
 .transcript-doc-icon {
    display: inline-flex;
    flex-shrink: 0;

@@ -227,9 +227,10 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_event_append },
    { "msg_get",
      "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-     "m.reasoning, m.created_at, m.is_error FROM messages m "
-     "INNER JOIN conversations c ON m.conversation_id = c.id "
-     "WHERE m.conversation_id = ? AND c.user_id = ? AND m.kind IS NULL ORDER BY m.id ASC",
+     "m.reasoning, m.created_at, m.is_error, " CONV_MSG_EMAIL_REF_COL(
+         m) " FROM messages m "
+            "INNER JOIN conversations c ON m.conversation_id = c.id "
+            "WHERE m.conversation_id = ? AND c.user_id = ? AND m.kind IS NULL ORDER BY m.id ASC",
      &s_db.stmt_msg_get },
 
    /* v67: same as stmt_msg_get but bounded to id > ? — the compaction-watermark
@@ -237,18 +238,20 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * reasoning rehydration works identically to the unbounded load. */
    { "msg_get_after",
      "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-     "m.reasoning, m.created_at, m.is_error FROM messages m "
-     "INNER JOIN conversations c ON m.conversation_id = c.id "
-     "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? AND m.kind IS NULL "
-     "ORDER BY m.id ASC",
+     "m.reasoning, m.created_at, m.is_error, " CONV_MSG_EMAIL_REF_COL(
+         m) " FROM messages m "
+            "INNER JOIN conversations c ON m.conversation_id = c.id "
+            "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? AND m.kind IS NULL "
+            "ORDER BY m.id ASC",
      &s_db.stmt_msg_get_after },
 
    /* Admin-only: get messages without user ownership check */
    { "msg_get_admin",
      "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, "
      "reasoning, created_at, "
-     "is_error FROM messages WHERE conversation_id = ? AND kind IS NULL "
-     "ORDER BY id ASC",
+     "is_error, " CONV_MSG_EMAIL_REF_COL(messages) " FROM messages WHERE conversation_id = ? "
+                                                   "AND kind IS NULL "
+                                                   "ORDER BY id ASC",
      &s_db.stmt_msg_get_admin },
    { "conv_update_meta",
      "UPDATE conversations SET updated_at = ?, message_count = message_count + 1 WHERE id = ?",

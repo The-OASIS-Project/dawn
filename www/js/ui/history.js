@@ -907,7 +907,13 @@
                   continue;
                }
 
-               await DawnTranscript.addEntry(msg.role, msg.content, msg.reasoning);
+               await DawnTranscript.addEntry(
+                  msg.role,
+                  msg.content,
+                  msg.reasoning,
+                  undefined,
+                  msg.email_ref
+               );
                tagEntries(entryStart, msg.created_at, msg.id);
             }
 

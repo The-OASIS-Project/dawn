@@ -202,6 +202,9 @@ Layer 4 (Application) — deps: everything below
 │   ├── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
 │   │                           taken by ticket so no worker waits on an account, replies by session id; a
 │   │                           session's moves queue in order on its MOVE slot, never replaced
+│   ├── webui_email_ref.c       A text turn's attached email (email_refs): its account checked in the database
+│   │                           at receipt, carried with the turn (the model reads the email with the tool),
+│   │                           saved as messages.email_ref and sent back on every frame delivering the row
 │   └── webui_email_panel*.c    The mail panel's verbs (email_list/_search/_read/_set_flags/_unread_counts;
 │                               _archive/_trash/_undo in webui_email_panel_move.c), with the pure
 │                               email_cursor.c (paging across accounts) and email_wire.c (rows, read frames

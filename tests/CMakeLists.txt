@@ -390,6 +390,15 @@ dawn_add_unit_test(test_webui_turn_ref
    LIBS    unity pthread
    LABEL   ci)
 
+# A text frame's email_refs: refusals, the question row's record, the row field.
+if(DAWN_ENABLE_EMAIL_TOOL)
+dawn_add_unit_test(test_webui_email_ref
+   SOURCES test_webui_email_ref.c
+           ${SRC_ROOT}/src/webui/webui_email_ref.c
+   LIBS    dawn_common unity sodium ${JSONC_LIBRARIES}
+   LABEL   ci)
+endif()
+
 # Document-original store + blob engine dedup/orphan/caps + v68 stmt_blob_*.
 dawn_add_unit_test(test_document_original_store
    SOURCES test_document_original_store.c

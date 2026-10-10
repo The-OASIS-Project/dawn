@@ -187,6 +187,21 @@ static void test_display_reads_skip_kind_rows(void) {
    TEST_ASSERT_EQUAL_INT64(last_visible, max_id);
 }
 
+/* The rows a display read returns that carry an email_ref, and the last one. */
+typedef struct {
+   int with_ref;
+   char ref[128];
+} refs_seen_t;
+
+static int collect_refs(const conversation_message_t *msg, void *ctx) {
+   refs_seen_t *out = ctx;
+   if (msg->email_ref) {
+      out->with_ref++;
+      snprintf(out->ref, sizeof(out->ref), "%s", msg->email_ref);
+   }
+   return 0;
+}
+
 /* A question names the email the user attached (email_ref, a JSON object);
  * on any other row, or not an object, it is dropped and the row still saves. */
 static void test_email_ref_only_on_a_question(void) {
@@ -219,6 +234,26 @@ static void test_email_ref_only_on_a_question(void) {
             (long long)conv);
    TEST_ASSERT_EQUAL_INT64(q, raw_int(db, sql)); /* the question's only */
    sqlite3_close(db);
+
+   /* Every display read the frames use returns it, on the question only. */
+   refs_seen_t seen = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages(conv, alice_id, collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   TEST_ASSERT_EQUAL_STRING(ref, seen.ref);
+   seen = (refs_seen_t){ 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_after(conv, alice_id, 0, collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   seen = (refs_seen_t){ 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_messages_admin(conv, collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   seen = (refs_seen_t){ 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_by_range(conv, alice_id, q, q + 10, 0, true,
+                                                       collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   TEST_ASSERT_EQUAL_STRING(ref, seen.ref);
 }
 
 static void test_replay_read_returns_kind_rows_in_order(void) {

@@ -1738,11 +1738,15 @@ int session_dispatch_user_turn_ex(session_t *session,
  * @param account    The account's name as the email tool takes it
  * @param message_id The message's id as the email tool takes it
  * @return SUCCESS; FAILURE (nothing attached) when the caller isn't the running
- *         turn's own code, either name is empty, too long or holds a character
- *         outside printable ASCII (or a quote or backslash), or on allocation
- *         failure
+ *         turn's own code, either name fails session_attach_name_ok, or on
+ *         allocation failure
  */
 int session_turn_attach_email(session_t *session, const char *account, const char *message_id);
+
+/** Whether @p name can name an attached email (session_turn_attach_email): 1 to
+ *  @p max bytes of valid UTF-8 with no control character (so it stays on its
+ *  line; the note JSON-quotes it, so a quote or backslash can't end it). */
+bool session_attach_name_ok(const char *name, size_t max);
 
 
 // =============================================================================

@@ -269,6 +269,14 @@ int email_service_find_account_by_id(int user_id,
                                      bool enabled_only,
                                      email_account_t *out);
 
+/**
+ * @brief The account the email tool's `account` argument @p name means: the
+ *        first enabled account of the user whose name or username matches,
+ *        ignoring case (NULL or "": the first enabled one)
+ * @return EMAIL_RC_OK, EMAIL_RC_UNKNOWN_ACCOUNT or EMAIL_RC_NO_ACCOUNTS
+ */
+int email_service_find_account_by_name(int user_id, const char *name, email_account_t *out);
+
 /* Best-effort fill of each row's `replied` tri-state (email_summary_t.replied):
  * for each Gmail account represented in @p rows, one `in:sent` search — bounded
  * to the oldest enrichable row's date for that account (a reply is always later

@@ -48,6 +48,7 @@
 #include "memory/memory_extraction.h"
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
 #include "version.h"
+#include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_reasoning.h"
 #include "webui/webui_server.h" /* For WEBUI_MAX_THUMBNAIL_BASE64 */
@@ -615,10 +616,9 @@ int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *titl
    }
 
    int64_t conv_id = 0;
-   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Voice conversation (auto)",
-                                   &conv_id);
+   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Conversation (auto)", &conv_id);
    if (rc != AUTH_DB_SUCCESS || conv_id <= 0) {
-      OLOG_WARNING("WebUI: voice-turn conversation auto-create failed (rc=%d)", rc);
+      OLOG_WARNING("WebUI: conversation auto-create for a turn failed (rc=%d)", rc);
       return 0;
    }
 
@@ -826,6 +826,7 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
          json_object_object_add(msg_obj, "reasoning", r);
       }
    }
+   webui_row_add_email_ref(msg_obj, msg->role, msg->email_ref);
 
    json_object_array_add(msg_array, msg_obj);
    return 0;
@@ -1934,6 +1935,7 @@ static int export_msg_callback(const conversation_message_t *msg, void *context)
    char ts[32];
    time_to_iso8601(msg->created_at, ts, sizeof(ts));
    json_object_object_add(msg_obj, "timestamp", json_object_new_string(ts));
+   webui_row_add_email_ref(msg_obj, msg->role, msg->email_ref);
 
    json_object_array_add(msg_array, msg_obj);
    return 0;

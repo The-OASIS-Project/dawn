@@ -75,6 +75,10 @@ static const struct {
    /* The mail panel's verbs answer: email_list, email_search, email_read,
     * email_set_flags, email_unread_counts (docs/WEBSOCKET_PROTOCOL.md, Email). */
    { "email_client", webui_email_client_enabled },
+   /* A text turn may carry email_refs (one email the user attached, by account
+    * and message id); the model reads it with the email tool, and the question
+    * row comes back with email_ref (docs/WEBSOCKET_PROTOCOL.md, Email). */
+   { "email_refs", webui_email_client_enabled },
 };
 
 static bool append_feature(char *out, size_t size, size_t *len, bool first, const char *name) {

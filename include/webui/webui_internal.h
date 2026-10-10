@@ -948,6 +948,7 @@ void send_error_impl_ex(struct lws *wsi,
  * @param origin     The session whose turn wrote it (its connection gets
  *                   payload.client_ref); NULL: every connection gets the same
  * @param client_ref That turn's client_ref; NULL or "" sends none
+ * @param email_ref  A user row's email_ref (messages.email_ref), or NULL
  * Otherwise as webui_broadcast_message_appended (conv_event.h).
  */
 void webui_broadcast_message_appended_origin(int user_id,
@@ -958,7 +959,8 @@ void webui_broadcast_message_appended_origin(int user_id,
                                              const char *reasoning,
                                              unsigned stream_id,
                                              const session_t *origin,
-                                             const char *client_ref);
+                                             const char *client_ref,
+                                             const char *email_ref);
 
 /**
  * @brief Send an error frame naming the text turn it refuses.

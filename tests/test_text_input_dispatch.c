@@ -42,6 +42,7 @@ static int s_added_objects;
 static int s_added_text;
 static int s_llm_calls;
 static char s_persisted[256];
+static char s_persisted_ref[256];
 
 /* ---- stubs ------------------------------------------------------------- */
 
@@ -63,9 +64,15 @@ int conv_db_add_message_ex(int64_t conv_id,
 int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row, int64_t *id_out) {
    (void)conv_id;
    (void)user_id;
-   (void)row;
+   /* An ordinary question is the turn's saved row; a kinded one isn't counted. */
+   const bool question = row && !row->kind;
+   if (question) {
+      snprintf(s_persisted, sizeof(s_persisted), "%s", row->content ? row->content : "");
+      snprintf(s_persisted_ref, sizeof(s_persisted_ref), "%s",
+               row->email_ref ? row->email_ref : "");
+   }
    if (id_out) {
-      *id_out = 0;
+      *id_out = question ? 7 : 0;
    }
    return AUTH_DB_SUCCESS;
 }
@@ -194,6 +201,7 @@ void setUp(void) {
    s_added_text = 0;
    s_llm_calls = 0;
    s_persisted[0] = '\0';
+   s_persisted_ref[0] = '\0';
    s_session = calloc(1, sizeof(*s_session));
    TEST_ASSERT_NOT_NULL(s_session);
 }
@@ -267,9 +275,13 @@ static void test_a_failed_attach_refuses_the_turn(void) {
    TEST_ASSERT_EQUAL_INT(0, s_added_objects + s_added_text + s_llm_calls);
    TEST_ASSERT_EQUAL_STRING("", s_persisted);
    s_attach_rc = 0;
-   free(core_text_input_dispatch(s_session, "what is this?", &opts));
+   text_input_dispatch_opts_t saved = opts;
+   saved.email_ref = "{\"account_id\":3}";
+   free(core_text_input_dispatch(s_session, "what is this?", &saved));
    TEST_ASSERT_EQUAL_INT(2, s_attaches);
    TEST_ASSERT_EQUAL_INT(1, s_llm_calls);
+   TEST_ASSERT_EQUAL_STRING("what is this?", s_persisted); /* the question, with its ref */
+   TEST_ASSERT_EQUAL_STRING("{\"account_id\":3}", s_persisted_ref);
 }
 
 /* A NULL text is never a turn, question or not. */

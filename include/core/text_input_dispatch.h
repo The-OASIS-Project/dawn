@@ -134,6 +134,9 @@ typedef struct {
     * turn doesn't run (NULL, nothing added or saved). */
    const char *email_account;
    const char *email_message_id;
+   /* What the question row records about that email (messages.email_ref, a
+    * JSON object); saved with the question.  NULL = none. */
+   const char *email_ref;
 
    /* Observe-side `status` events (background-jobs Phase 2).  Emitted at turn
     * start/end so a jobs panel or TUI reads one durable signal instead of

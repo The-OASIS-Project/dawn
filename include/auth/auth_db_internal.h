@@ -164,6 +164,10 @@
  * panel names it (a JSON object), so a reload shows what was attached.  The
  * email's text is never stored with the question: the model reads it with the
  * email tool, as a tool result. */
+/* A display read's email_ref column: a user row's only, so the read never
+ * reaches the blocks after it on a migrated table (user rows hold none). */
+#define CONV_MSG_EMAIL_REF_COL(t) "CASE WHEN " #t ".role = 'user' THEN " #t ".email_ref END"
+
 #define CONV_MESSAGES_TABLE_SQL                                                      \
    "CREATE TABLE IF NOT EXISTS messages ("                                           \
    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \

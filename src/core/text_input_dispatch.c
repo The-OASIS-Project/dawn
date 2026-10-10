@@ -156,8 +156,11 @@ char *core_text_input_dispatch(session_t *session,
    } else if (opts && opts->conversation_id > 0 && question_kind == MESSAGE_KIND_NONE) {
       const char *persist_text = opts->persist_content_override ? opts->persist_content_override
                                                                 : text;
-      if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", persist_text,
-                                 &user_msg_id) == AUTH_DB_SUCCESS) {
+      const conv_message_row_t row = { .role = "user",
+                                       .content = persist_text,
+                                       .email_ref = opts->email_ref };
+      if (conv_db_add_row(opts->conversation_id, opts->auth_user_id, &row, &user_msg_id) ==
+          AUTH_DB_SUCCESS) {
          session_stamp_last_message_id(session, "user", user_msg_id);
          session_prefix_question_saved(session, opts->conversation_id, opts->auth_user_id,
                                        user_msg_id);

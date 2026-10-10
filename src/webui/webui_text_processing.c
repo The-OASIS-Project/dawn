@@ -54,6 +54,7 @@
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
+#include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
 
@@ -82,7 +83,8 @@ typedef struct {
                            * for an image turn; NULL persists plain text. Owned/freed here. */
    char client_ref[WEBUI_CLIENT_REF_MAX + 1]; /* the frame's client_ref ("" = none): the
                                                * worker's turn ref while the turn runs */
-   bool from_visual; /* the text came from a rendered visual's prompt, not the person */
+   bool from_visual;        /* the text came from a rendered visual's prompt, not the person */
+   webui_email_ref_t email; /* an email the user attached (email.present), checked */
 } text_work_t;
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
@@ -291,11 +293,19 @@ void webui_turn_persist_disarm(session_t *session, webui_turn_persist_scope_t *s
  * focus injection and the LLM call.  Preserves the WebUI's "transcript
  * echoes immediately after the user types" UX while keeping the
  * add/persist/focus/LLM sequence inside the Layer 2 helper. */
+/* The user-msg hook's context: the turn's session and what its question row
+ * records about an attached email (NULL = none). */
+typedef struct {
+   session_t *session;
+   const char *email_ref;
+} user_msg_ctx_t;
+
 static void webui_text_dispatch_on_user_msg(void *ctx,
                                             const char *text,
                                             const char *persist_text,
                                             int64_t message_id) {
-   session_t *session = (session_t *)ctx;
+   const user_msg_ctx_t *uctx = (const user_msg_ctx_t *)ctx;
+   session_t *session = uctx ? uctx->session : NULL;
    if (!session || !text) {
       return;
    }
@@ -319,7 +329,8 @@ static void webui_text_dispatch_on_user_msg(void *ctx,
       if (conn && conn->auth_user_id > 0 && conv_id > 0 && body[0]) {
          /* The sender's copy names its turn too, in case its echo was dropped. */
          webui_broadcast_message_appended_origin(conn->auth_user_id, conv_id, message_id, "user",
-                                                 body, NULL, 0, session, webui_turn_ref_get());
+                                                 body, NULL, 0, session, webui_turn_ref_get(),
+                                                 uctx->email_ref);
       }
    }
 }
@@ -552,6 +563,8 @@ static void *text_worker_thread(void *arg) {
     * fanout callback synthesizes once and fans to every speaker viewer (the origin included). */
    bool fanout_tts = tts_enabled ||
                      webui_audio_has_other_speaker(turn_user_id, turn_conv, session->session_id);
+   user_msg_ctx_t user_msg_ctx = { .session = session,
+                                   .email_ref = work->email.present ? work->email.stored : NULL };
    text_input_dispatch_opts_t dispatch_opts = {
       .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
@@ -561,8 +574,11 @@ static void *text_worker_thread(void *arg) {
       .sentence_cb = fanout_tts ? webui_sentence_audio_fanout_callback : NULL,
       .sentence_userdata = fanout_tts ? session : NULL,
       .on_user_msg_added = webui_text_dispatch_on_user_msg,
-      .user_msg_added_ctx = session,
+      .user_msg_added_ctx = &user_msg_ctx,
       .from_visual = work->from_visual,
+      .email_account = work->email.present ? work->email.account : NULL,
+      .email_message_id = work->email.present ? work->email.message_id : NULL,
+      .email_ref = work->email.present ? work->email.stored : NULL,
    };
 
    /* Clear the per-turn error flag before the call; the provider layer sets it via
@@ -827,6 +843,21 @@ int webui_process_text_input_with_images(session_t *session,
       }
    }
 
+   /* A turn with an attached email is saved with it on its question row, so
+    * its conversation exists before it runs (created now when none is open,
+    * as for a voice turn). */
+   const webui_email_ref_t *email = webui_turn_email_get();
+   if (email && email->present) {
+      ws_connection_t *econn = (ws_connection_t *)session->client_data;
+      if (!econn || (econn->active_conversation_id <= 0 &&
+                     webui_ensure_active_conversation(econn, text) <= 0)) {
+         webui_send_error(session, WEBUI_ERR_EMAIL_UNAVAILABLE,
+                          "A conversation for the attached email couldn't be started (the "
+                          "conversation limit may be reached). Open a conversation and try again.");
+         return WEBUI_TEXT_INPUT_REPORTED;
+      }
+   }
+
    /* Conversation this turn was sent for — captured NOW (the viewed conversation)
     * and applied to session->stream_conversation_id at dequeue. */
    int64_t turn_conv_id = webui_get_active_conversation_id(session);
@@ -870,6 +901,9 @@ int webui_process_text_input_with_images(session_t *session,
       snprintf(work->client_ref, sizeof(work->client_ref), "%s", webui_turn_ref_get());
    }
    work->from_visual = webui_turn_from_visual_get();
+   if (email && email->present) {
+      work->email = *email;
+   }
 
    /* Retain the session for the queued turn (released by the worker when it runs,
     * or by webui_text_turn_free on purge/reject). */
