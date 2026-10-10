@@ -31,6 +31,7 @@
 static session_t *s_ctx;
 static bool s_user_turn;
 static bool s_background_turn;
+static bool s_third_party_turn;
 static bool s_code_redeemed;
 
 session_t *session_get_command_context(void) {
@@ -43,6 +44,10 @@ bool session_turn_user_originated(session_t *session) {
 
 bool session_turn_is_background(session_t *session) {
    return session == s_ctx && s_background_turn;
+}
+
+bool session_turn_carries_third_party(session_t *session) {
+   return session == s_ctx && s_third_party_turn;
 }
 
 static uint64_t s_turn_token = 7;
@@ -66,6 +71,7 @@ void setUp(void) {
    s_ctx = &s_session;
    s_user_turn = true;
    s_background_turn = false;
+   s_third_party_turn = false;
    s_code_redeemed = false;
    s_turn_token = 7;
 }
@@ -81,6 +87,13 @@ static void test_callers(void) {
    TEST_ASSERT_EQUAL_INT(TOOL_CALLER_USER, tool_call_policy_caller());
    s_session.messaging_identity.sender_unverified = true;
    TEST_ASSERT_EQUAL_INT(TOOL_CALLER_UNVERIFIED, tool_call_policy_caller());
+   s_session.messaging_identity.sender_unverified = false;
+
+   /* The user's turn carrying an email they attached. */
+   s_third_party_turn = true;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALLER_THIRD_PARTY, tool_call_policy_caller());
+   s_third_party_turn = false;
+   s_session.messaging_identity.sender_unverified = true;
 
    /* A background turn on that channel is unattended, not the sender. */
    s_background_turn = true;
@@ -110,6 +123,7 @@ static void test_allows(void) {
       { TOOL_CALLER_UNVERIFIED, true, false, true, false, true, false }, /* the rest wait */
       { TOOL_CALLER_JOB, true, true, true, false, false, false },
       { TOOL_CALLER_UNATTENDED, true, false, true, false, false, false },
+      { TOOL_CALLER_THIRD_PARTY, true, true, true, false, true, false },
    };
    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
       const tool_caller_t c = rows[i].caller;

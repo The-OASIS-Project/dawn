@@ -187,6 +187,75 @@ static void test_display_reads_skip_kind_rows(void) {
    TEST_ASSERT_EQUAL_INT64(last_visible, max_id);
 }
 
+/* The rows a display read returns that carry an email_ref, and the last one. */
+typedef struct {
+   int with_ref;
+   char ref[128];
+} refs_seen_t;
+
+static int collect_refs(const conversation_message_t *msg, void *ctx) {
+   refs_seen_t *out = ctx;
+   if (msg->email_ref) {
+      out->with_ref++;
+      snprintf(out->ref, sizeof(out->ref), "%s", msg->email_ref);
+   }
+   return 0;
+}
+
+/* A question names the email the user attached (email_ref, a JSON object);
+ * on any other row, or not an object, it is dropped and the row still saves. */
+static void test_email_ref_only_on_a_question(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const char *ref = "{\"account_id\":3,\"message_id\":\"u42.7\"}";
+   int64_t q = 0;
+   const conv_message_row_t question = { .role = "user",
+                                         .content = "Summarize it",
+                                         .email_ref = ref };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &question, &q));
+   const conv_message_row_t reply = { .role = "assistant", .content = "Done.", .email_ref = ref };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &reply, NULL));
+   const conv_message_row_t ctx = { .role = "user",
+                                    .content = "--- TURN CONTEXT (t) ---\n",
+                                    .kind = "turn_context",
+                                    .context_of = q,
+                                    .email_ref = ref };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &ctx, NULL));
+   const conv_message_row_t bad = { .role = "user", .content = "Again?", .email_ref = "[1" };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &bad, NULL));
+
+   sqlite3 *db = raw_open(TEST_DB);
+   char sql[160];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM messages WHERE conversation_id = %lld",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(4, raw_int(db, sql)); /* every row saved */
+   snprintf(sql, sizeof(sql),
+            "SELECT id FROM messages WHERE email_ref IS NOT NULL AND conversation_id = %lld",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(q, raw_int(db, sql)); /* the question's only */
+   sqlite3_close(db);
+
+   /* Every display read the frames use returns it, on the question only. */
+   refs_seen_t seen = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages(conv, alice_id, collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   TEST_ASSERT_EQUAL_STRING(ref, seen.ref);
+   seen = (refs_seen_t){ 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_after(conv, alice_id, 0, collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   seen = (refs_seen_t){ 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_messages_admin(conv, collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   seen = (refs_seen_t){ 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_by_range(conv, alice_id, q, q + 10, 0, true,
+                                                       collect_refs, &seen));
+   TEST_ASSERT_EQUAL_INT(1, seen.with_ref);
+   TEST_ASSERT_EQUAL_STRING(ref, seen.ref);
+}
+
 static void test_replay_read_returns_kind_rows_in_order(void) {
    int64_t first = 0, last_visible = 0, last = 0;
    const int64_t conv = conv_with_kind_rows(&first, &last_visible, &last);
@@ -1098,6 +1167,31 @@ static void test_v98_moves_the_blocks_last(void) {
    sqlite3_close(db);
 }
 
+/* v102 on a v101 database: email_ref is added, a re-run changes nothing,
+ * and a later rerun of v98 (the ladder retried) keeps the column and its
+ * values, since the table is already v98's. */
+static void test_v102_adds_email_ref(void) {
+   sqlite3 *db = v97_fixture();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v98(db, OLD_DB));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, "ALTER TABLE messages DROP COLUMN email_ref",
+                                                 NULL, NULL, NULL));
+   TEST_ASSERT_FALSE(auth_db_column_exists(db, "messages", "email_ref"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v102(db));
+   TEST_ASSERT_TRUE(auth_db_column_exists(db, "messages", "email_ref"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v102(db)); /* idempotent */
+
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db,
+                                                 "UPDATE messages SET email_ref = '{}' WHERE "
+                                                 "kind IS NULL AND role = 'user'",
+                                                 NULL, NULL, NULL));
+   const int64_t refs = raw_int(db, "SELECT COUNT(*) FROM messages WHERE email_ref IS NOT NULL");
+   TEST_ASSERT_TRUE(refs > 0);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v98(db, OLD_DB));
+   TEST_ASSERT_EQUAL_INT64(
+       refs, raw_int(db, "SELECT COUNT(*) FROM messages WHERE email_ref IS NOT NULL"));
+   sqlite3_close(db);
+}
+
 /* The images the stored rows name are recorded as a new row's are: an
  * ordinary question's uploads, a tool row's captures, the conversation
  * owner's only; never a reply's marker, a kinded row's, or another user's
@@ -1429,6 +1523,7 @@ int main(void) {
    test_tmp_path(OLD_DB, sizeof(OLD_DB), "dawn_test_kind_prefix_v93.db");
    UNITY_BEGIN();
    RUN_TEST(test_display_reads_skip_kind_rows);
+   RUN_TEST(test_email_ref_only_on_a_question);
    RUN_TEST(test_replay_read_returns_kind_rows_in_order);
    RUN_TEST(test_kind_rows_do_not_count_as_messages);
    RUN_TEST(test_kind_must_match_role);
@@ -1451,6 +1546,7 @@ int main(void) {
    RUN_TEST(test_v96_leaves_compacted_reasoning_behind);
    RUN_TEST(test_v98_rebuilds_messages_keeping_rows_ids_and_sequence);
    RUN_TEST(test_v98_moves_the_blocks_last);
+   RUN_TEST(test_v102_adds_email_ref);
    RUN_TEST(test_v98_records_the_images_rows_name);
    RUN_TEST(test_v98_room_check);
    RUN_TEST(test_kind_triggers_are_refreshed);

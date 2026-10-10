@@ -122,6 +122,17 @@
       if (docs.length > 0 && window.DawnTranscript && DawnTranscript.createDocumentChips) {
          anchor.appendChild(DawnTranscript.createDocumentChips(docs));
       }
+      // The email a question was asked about (its email_ref).
+      if (
+         role === 'user' &&
+         m &&
+         m.email_ref &&
+         window.DawnTranscript &&
+         DawnTranscript.createEmailChip
+      ) {
+         const chip = DawnTranscript.createEmailChip(m.email_ref);
+         if (chip) anchor.appendChild(chip);
+      }
 
       // Visual placeholders.
       for (const v of visuals) {

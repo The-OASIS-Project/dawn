@@ -41,6 +41,7 @@
 #include "memory/memory_import.h"
 #include "memory/memory_similarity.h"
 #include "utils/string_utils.h"
+#include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
 
 /* Default pagination limits */
@@ -218,6 +219,7 @@ static int source_msg_to_json(const conversation_message_t *msg, void *ctx) {
    json_object_object_add(obj, "role", json_object_new_string(msg->role));
    json_object_object_add(obj, "content", json_object_new_string(msg->content));
    json_object_object_add(obj, "created_at", json_object_new_int64((int64_t)msg->created_at));
+   webui_row_add_email_ref(obj, msg->role, msg->email_ref);
    json_object_array_add(arr, obj);
    return 0;
 }

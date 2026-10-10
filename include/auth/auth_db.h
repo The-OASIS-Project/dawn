@@ -1166,6 +1166,8 @@ typedef struct {
                             Delivered to the browser only — never read into the LLM context. */
    time_t created_at;
    int is_error; /**< role='tool' rows: 1 = confirmed failure (reds the pill on reload); else 0 */
+   char *email_ref; /**< user rows: the email the question was asked about (a JSON object), else
+                         NULL (borrowed) */
 } conversation_message_t;
 
 /**

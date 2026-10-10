@@ -446,6 +446,9 @@ static char *plan_executor_callback(const char *action, char *value, int *should
       plan_notify_progress(notify);
    }
 
+   /* The plan's output carries what its steps read: framed as theirs. */
+   llm_tools_result_third_party(ctx.third_party);
+
    /* Cleanup */
    plan_context_cleanup(&ctx);
    json_object_put(plan);

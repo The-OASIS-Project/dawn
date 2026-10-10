@@ -128,6 +128,16 @@ typedef struct {
     * to session_dispatch_user_turn rebuilds the prompt from scratch. */
    const char *channel_hint;
 
+   /* An email the user attached to this turn, as the email tool names it
+    * (account, message id); NULL = none.  Attached to the running turn
+    * (session_turn_attach_email) before anything else: when that fails the
+    * turn doesn't run (NULL, nothing added or saved). */
+   const char *email_account;
+   const char *email_message_id;
+   /* What the question row records about that email (messages.email_ref, a
+    * JSON object); saved with the question.  NULL = none. */
+   const char *email_ref;
+
    /* Observe-side `status` events (background-jobs Phase 2).  Emitted at turn
     * start/end so a jobs panel or TUI reads one durable signal instead of
     * inferring liveness from delta timing.

@@ -175,7 +175,7 @@ static void handle_move(ws_connection_t *conn, json_object *payload, email_move_
       return;
    }
    for (int i = 0; i < c->n; i++) {
-      if (!email_panel_msg_id_ok(c->ids[i], a->is_imap)) {
+      if (!email_service_message_id_ok(c->ids[i], a->is_imap)) {
          free(c);
          email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
          return;

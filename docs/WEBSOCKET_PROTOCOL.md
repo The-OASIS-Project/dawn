@@ -83,6 +83,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `email_refs` | 2026-10-09 | A `text` frame may carry `email_refs`: one email the user attached, by account and message id. The model reads it with the email tool, and the question row comes back with `email_ref` on every frame that delivers it (see Email, Email in chat). Advertised with `email_client`. Without it, send no `email_refs` (an older daemon ignores them, and the model never sees the email). |
 | `email_client` | 2026-10-07 | The mail panel's verbs answer: `email_list`, `email_search`, `email_read`, `email_set_flags`, `email_unread_counts`, `email_archive`, `email_trash`, `email_undo`, and the server pushes `email_changed` (see Email). Advertised only while email is turned on (`[email] enabled`) and its service is up; a build without the WebUI or the email tool never advertises it. |
 | `document_attachments` | 2026-10-02 | A `text` frame may carry its documents as `attachments` (`[{filename, size, content, blob_id?}]`): the daemon defuses each body and filename and builds the `[ATTACHED DOCUMENT: …]…[END DOCUMENT]` text itself, so a document can't end its own span. Without it, inline the documents into `text` as before. Every daemon with it also has `turn_refs`. |
 | `turn_refs` | 2026-10-02 | A `text` frame may carry `client_ref`: the turn's own user `transcript` echo and every `error` raised for that turn (refused at receipt, refused or failed when it runs) carry it back unchanged, so a client knows which of its turns an error belongs to. Without it, refusals name no turn. |
@@ -128,10 +129,14 @@ Send a text message to the AI, with the images attached to it by id.
       "image_ids": ["img_a1b2c3d4e5f6"],
       "client_ref": "17",
       "attachments": [{"filename": "report.pdf", "size": 52113,
-                       "content": "<extracted text>", "blob_id": "blb_a1b2c3d4e5f6"}]
+                       "content": "<extracted text>", "blob_id": "blb_a1b2c3d4e5f6"}],
+      "email_refs": [{"account_id": 3, "message_id": "u4182.1700000000",
+                      "from": "Bob <bob@example.com>", "subject": "Lunch Friday?"}]
    }
 }
 ```
+- `email_refs` — optional (flag `email_refs`); the email the user attached to this turn, at most
+  one (see Email, Email in chat).
 - `attachments` — optional (flag `document_attachments`); the documents the turn attaches,
   from the `POST /api/documents` upload: `filename` (1–255 bytes, no line break), `size` (the
   original file's bytes, a non-negative integer), `content` (the extracted text), and
@@ -189,8 +194,9 @@ Send a text message to the AI, with the images attached to it by id.
   the images it attached. Other
   viewers and a reload get the images from the saved row.
 - A refused turn gets exactly one `error` frame: `TURN_QUEUE_FULL` when too many messages are
-  already queued for the session, `EMPTY_MESSAGE`, `ATTACHMENT_INVALID`, an `IMAGE_*` code, or
-  `PROCESSING_ERROR` for anything else.
+  already queued for the session, `EMPTY_MESSAGE`, `ATTACHMENT_INVALID`, an `IMAGE_*` code,
+  `EMAIL_REF_LIMIT` / `EMAIL_UNAVAILABLE` (see Email, Email in chat), or `PROCESSING_ERROR` for
+  anything else.
 - Requires authentication
 
 #### `cancel`
@@ -654,6 +660,10 @@ Load a saved conversation into the current session.
 ```
 Response: `load_conversation_response`
 
+A user row that asked about an attached email carries `email_ref` (an object:
+`account_id`, `message_id`, `from`, `subject`; see Email, Email in chat). Rows without one
+have no such field.
+
 #### `set_active_conversation`
 Re-anchor the connection's active conversation **without** replaying history — a
 lightweight alternative to `load_conversation` for the reconnect case, where the
@@ -950,8 +960,9 @@ messages (system/tool messages are omitted):
    }
 }
 ```
-An empty `messages` array with `success: true` means the range held no
-user/assistant messages (only system/tool). On failure, `success` is `false`
+A user message that asked about an attached email carries `email_ref`, as in
+`load_conversation_response`. An empty `messages` array with `success: true` means the range
+held no user/assistant messages (only system/tool). On failure, `success` is `false`
 and `reason` is one of: `not_available` (no provenance recorded, fact not
 found, source conversation deleted, or private), `forbidden` (the source
 conversation is not owned by the caller), `invalid_range` (the stored
@@ -1464,6 +1475,39 @@ Every enabled account's inbox unread count, with the same `status` values as the
 `accounts`. For refreshing: the first page of `email_list` for the inbox already carries
 them.
 
+##### Email in chat (`email_refs`)
+
+A `text` frame may name one email the user attached (flag `email_refs`):
+
+```json
+"email_refs": [{"account_id": 3, "message_id": "u4182.1700000000",
+                "from": "Bob <bob@example.com>", "subject": "Lunch Friday?"}]
+```
+
+- `account_id` — the user's own enabled account (an id from `email_list` rows); `message_id`
+  — the message's id exactly as `email_list`/`email_read` give it (a Gmail id, or an IMAP
+  `folder:uid.uidvalidity`; at most 191 bytes, no control characters). `from` and `subject` — optional, what the chip shows; stored for
+  display only (cut to 160 bytes, control characters as spaces) and never sent to the model.
+- The words are still required: a frame with `email_refs` and no text gets `EMPTY_MESSAGE`.
+- More than one ref: `EMAIL_REF_LIMIT`. Anything else wrong (not a list of objects, a bad id,
+  an account that isn't the user's or is disabled, two accounts the model couldn't tell apart
+  by name, email off, or no conversation could be created for the turn): `EMAIL_UNAVAILABLE`.
+  Either way one `error` frame (with `client_ref`), the turn doesn't run and no message is
+  saved. (A conversation created for the turn, below, stays even if the turn is then refused
+  for a full queue, `TURN_QUEUE_FULL`.)
+  The account is checked in DAWN's database; nothing is fetched before the turn runs.
+- The model reads the email itself with the email tool, so its text reaches the model as a
+  tool result framed as someone else's (never as the user's words), and is kept with the
+  conversation like any tool result. If the message is gone, the model says so.
+- In that turn no confirm counts (an email the user attached could say "yes"), and the model
+  can't make device changes or take other actions; it can read, look things up and prepare
+  (a draft, say), and the user's next message confirms as usual.
+- A turn with an email always has a conversation: when none is open, the daemon creates one
+  first and sends `new_conversation_response`, as for a voice turn.
+- The question row stores `email_ref` (`account_id`, `message_id`, `from`, `subject`) and
+  sends it on `load_conversation_response` rows, `message_appended` and
+  `get_memory_fact_source_response` messages, and in exports.
+
 ### DAP2 Satellite Messages
 
 These messages are only accepted from satellite connections (identified by
@@ -1640,6 +1684,8 @@ A user message sent from the WebUI is fanned out the same way (`"role": "user"`,
 text) to every browser of its user. The copy sent to the connection that sent it also carries
 `client_ref` when the `text` frame had one (flag `turn_refs`), so that connection can match it
 to its turn even if its `transcript` echo was dropped. Other connections' copies don't carry it.
+A user message that asked about an attached email carries `email_ref` in every copy, the
+sender's included (its `transcript` echo doesn't: the sender shows the chip it attached).
 
 ### Background-Job List Frames (Phase 2)
 

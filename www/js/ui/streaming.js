@@ -552,7 +552,8 @@
          payload.role || 'assistant',
          payload.text || '',
          reasoningObj,
-         msgId
+         msgId,
+         payload.email_ref
       );
    }
 

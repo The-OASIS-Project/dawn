@@ -357,6 +357,12 @@ uint32_t session_turn_number(session_t *session);
 bool session_turn_is_background(session_t *session);
 
 /**
+ * @brief Whether the caller is the session's running turn and that turn
+ *        carries someone else's text the user attached (session_turn_attach_email)
+ */
+bool session_turn_carries_third_party(session_t *session);
+
+/**
  * @brief Mark the calling thread's tool call as approved by the user's reply
  *        code (true), or clear it (false)
  *

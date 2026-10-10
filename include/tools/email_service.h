@@ -160,6 +160,7 @@ typedef struct {
 #define EMAIL_CONFIRM_RC_SAME_TURN 9     /* confirmed in the turn that prepared it */
 #define EMAIL_CONFIRM_RC_NOT_NEXT 21     /* confirmed later than the turn right after it */
 #define EMAIL_CONFIRM_RC_FROM_VISUAL 23  /* confirmed in a turn a rendered visual started */
+#define EMAIL_CONFIRM_RC_THIRD_PARTY 24  /* confirmed in a turn carrying an attached email */
 
 /** A refused turn_origin_check as this module's confirm code. */
 static inline int email_confirm_rc(turn_origin_rc_t rc) {
@@ -172,6 +173,8 @@ static inline int email_confirm_rc(turn_origin_rc_t rc) {
          return EMAIL_CONFIRM_RC_NOT_NEXT;
       case TURN_ORIGIN_FROM_VISUAL:
          return EMAIL_CONFIRM_RC_FROM_VISUAL;
+      case TURN_ORIGIN_THIRD_PARTY:
+         return EMAIL_CONFIRM_RC_THIRD_PARTY;
       default:
          return EMAIL_CONFIRM_RC_OTHER_SESSION;
    }
@@ -205,6 +208,16 @@ bool email_service_available(void);
  * @return true if folder is valid, false otherwise.
  */
 bool email_service_validate_folder_name(const char *folder);
+
+/** The longest folder name email_service_validate_folder_name accepts, in bytes. */
+#define EMAIL_FOLDER_NAME_MAX 127
+
+/**
+ * @brief Whether @p id is a message id of the account's kind, as the mail
+ *        panel and the email tool give them: IMAP "folder:uid[.uidvalidity]"
+ *        with a valid folder (@p is_imap), else a Gmail hex id
+ */
+bool email_service_message_id_ok(const char *id, bool is_imap);
 
 /* =============================================================================
  * Account Management (WebUI)
@@ -265,6 +278,14 @@ int email_service_find_account_by_id(int user_id,
                                      int64_t account_id,
                                      bool enabled_only,
                                      email_account_t *out);
+
+/**
+ * @brief The account the email tool's `account` argument @p name means: the
+ *        first enabled account of the user whose name or username matches,
+ *        ignoring case (NULL or "": the first enabled one)
+ * @return EMAIL_RC_OK, EMAIL_RC_UNKNOWN_ACCOUNT or EMAIL_RC_NO_ACCOUNTS
+ */
+int email_service_find_account_by_name(int user_id, const char *name, email_account_t *out);
 
 /* Best-effort fill of each row's `replied` tri-state (email_summary_t.replied):
  * for each Gmail account represented in @p rows, one `in:sent` search — bounded

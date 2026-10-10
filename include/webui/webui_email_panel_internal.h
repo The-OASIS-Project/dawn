@@ -69,9 +69,6 @@ bool email_panel_text_ok(json_object *v, size_t max);
 /** The user's enabled accounts into @p out (EMAIL_MAX_ACCOUNTS); returns the count. */
 int email_panel_load_accounts(int user_id, panel_acct_t *out);
 
-/** A message id of the account's kind: IMAP "folder:uid" with a valid folder, or a Gmail hex id. */
-bool email_panel_msg_id_ok(const char *id, bool is_imap);
-
 /** The account_id member: the user's enabled account, else NULL (@p valid: the member was well
  * formed). */
 const panel_acct_t *email_panel_get_account(json_object *payload,

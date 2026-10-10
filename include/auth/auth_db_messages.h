@@ -80,7 +80,14 @@ typedef struct {
                                   (at most CONV_MESSAGE_IMAGES_MAX); NULL = none */
    bool images_bind_later;   /**< leave those images unbound: the caller binds them
                                   with conv_db_bind_images() as its last step */
+   const char *email_ref;    /**< ordinary user row: the email attached to the question,
+                                  as the panel names it (a JSON object, at most
+                                  CONV_EMAIL_REF_MAX bytes; anything else is dropped);
+                                  NULL = none */
 } conv_message_row_t;
+
+/** Longest email_ref a question row holds. */
+#define CONV_EMAIL_REF_MAX 1024
 
 /** Most image ids one row names (a tool result's images). */
 #define CONV_MESSAGE_IMAGES_MAX 64

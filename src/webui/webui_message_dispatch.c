@@ -73,6 +73,7 @@
 #endif
 #include "webui/webui_email.h"
 #include "webui/webui_email_panel.h"
+#include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
 #include "webui/webui_ota.h"
@@ -203,6 +204,24 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
       return;
    }
 
+   /* An attached email: checked now (its account, in the database), carried
+    * with the turn; the model reads it with the email tool. */
+   webui_email_ref_t email;
+   const char *email_code = NULL;
+   const char *email_message = NULL;
+   if (!webui_email_ref_from_payload(conn->auth_user_id, conn->auth_user_id > 0 ? payload : NULL,
+                                     &email, &email_code, &email_message)) {
+      send_error_impl(conn->wsi, email_code, email_message);
+      return;
+   }
+
+   /* An attached email needs the user's own words (the question the model is
+    * asked), not just a document: checked before documents join the text. */
+   if (email.present && text[strspn(text, " \t\r\n")] == '\0') {
+      send_error_impl(conn->wsi, "EMPTY_MESSAGE", "Say what you want to know about the email");
+      return;
+   }
+
    /* Attached documents sent as their own field are framed into the text
     * here (their bodies are defused when the turn runs). */
    char *built = NULL;
@@ -244,8 +263,10 @@ static void text_turn_from_payload(ws_connection_t *conn, struct json_object *pa
       }
    }
 
+   webui_turn_email_set(email.present ? &email : NULL);
    handle_text_message(conn, text, strlen(text), (const char(*)[IMAGE_ID_LEN])image_ids,
                        image_id_count, persist_content);
+   webui_turn_email_set(NULL);
    free(persist_content);
    free(built);
 }

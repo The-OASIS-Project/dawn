@@ -104,6 +104,7 @@ typedef struct {
    char error[256];          /* last error message */
    struct timespec start_time;
    int timeout_s;
+   const char *third_party; /* a step's frame (tool_result_t.third_party): its text is the plan's */
 } plan_context_t;
 
 /* =============================================================================

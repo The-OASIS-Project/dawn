@@ -123,6 +123,25 @@ static void test_email_codes(void) {
    TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_OTHER_SESSION,
                          email_confirm_rc(TURN_ORIGIN_OTHER_SESSION));
    TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_FROM_VISUAL, email_confirm_rc(TURN_ORIGIN_FROM_VISUAL));
+   TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_THIRD_PARTY, email_confirm_rc(TURN_ORIGIN_THIRD_PARTY));
+}
+
+/* A turn carrying an attached email confirms nothing (the email could say
+ * yes); staging in one is fine, and the user's own next reply confirms. */
+static void test_third_party_refused(void) {
+   const turn_origin_t made = { .session_id = 7, .turn_token = 100, .turn_number = 4 };
+   turn_origin_t reply = { .session_id = 7, .turn_token = 160, .turn_number = 5 };
+   reply.third_party = true;
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_THIRD_PARTY, turn_origin_check(&made, &reply));
+   reply.code_redeemed = true;
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_THIRD_PARTY, turn_origin_check(&made, &reply));
+   turn_origin_t staged = made;
+   staged.third_party = true;
+   const turn_origin_t stored = turn_origin_stored(&staged);
+   TEST_ASSERT_FALSE(stored.third_party);
+   const turn_origin_t user = { .session_id = 7, .turn_token = 160, .turn_number = 5 };
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OK, turn_origin_check(&stored, &user));
+   TEST_ASSERT_NOT_NULL(strstr(turn_origin_retry_hint(TURN_ORIGIN_THIRD_PARTY), "email"));
 }
 
 int main(void) {
@@ -134,6 +153,7 @@ int main(void) {
    RUN_TEST(test_no_turn_refused);
    RUN_TEST(test_code_redeemed);
    RUN_TEST(test_from_visual_refused);
+   RUN_TEST(test_third_party_refused);
    RUN_TEST(test_email_codes);
    return UNITY_END();
 }

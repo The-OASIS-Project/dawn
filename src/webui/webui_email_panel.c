@@ -47,7 +47,7 @@
 
 #define PANEL_LIMIT_DEFAULT 25
 #define PANEL_LIMIT_MAX EMAIL_MAX_FETCH_RESULTS
-#define PANEL_FOLDER_MAX 127
+#define PANEL_FOLDER_MAX EMAIL_FOLDER_NAME_MAX
 
 _Static_assert(EMAIL_CURSOR_ACCOUNTS >= EMAIL_MAX_ACCOUNTS, "a cursor holds every account");
 _Static_assert(EMAIL_EXEC_MAX_TASKS >= EMAIL_MAX_ACCOUNTS, "a request may span every account");
@@ -182,17 +182,6 @@ int email_panel_load_accounts(int user_id, panel_acct_t *out) {
    }
    sodium_memzero(accounts, sizeof(accounts));
    return count;
-}
-
-/* A message id of the account's kind, checked before it goes any further:
- * IMAP "folder:uid" with a valid folder, or a Gmail hex id. */
-bool email_panel_msg_id_ok(const char *id, bool is_imap) {
-   if (!is_imap)
-      return gmail_message_id_valid(id);
-   char folder[PANEL_FOLDER_MAX + 1];
-   uint32_t uid = 0;
-   return email_imap_id_parse(id, folder, sizeof(folder), &uid, NULL) &&
-          email_service_validate_folder_name(folder);
 }
 
 static const panel_acct_t *find_acct(const panel_acct_t *accts, int n, int64_t id) {
@@ -817,7 +806,7 @@ void handle_email_read(ws_connection_t *conn, json_object *payload) {
                               req);
       return;
    }
-   if (!email_panel_msg_id_ok(c->message_id, a->is_imap)) {
+   if (!email_service_message_id_ok(c->message_id, a->is_imap)) {
       free(c);
       email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
       return;
@@ -953,7 +942,7 @@ void handle_email_set_flags(ws_connection_t *conn, json_object *payload) {
       return;
    }
    for (int i = 0; i < c->n; i++) {
-      if (!email_panel_msg_id_ok(c->ids[i], a->is_imap)) {
+      if (!email_service_message_id_ok(c->ids[i], a->is_imap)) {
          free(c);
          email_panel_reply_error(conn, verb, EMAIL_ERR_INVALID_REQUEST, req);
          return;

@@ -74,6 +74,8 @@
    --doc-category-code-fg: var(--bg-primary);
    --doc-category-text-bg: var(--bg-tertiary);
    --doc-category-text-fg: var(--text-primary);
+   --doc-category-email-bg: var(--bg-primary);
+   --doc-category-email-fg: var(--text-primary);
 
    /* Layout */
    --border-radius: 8px;

@@ -292,6 +292,10 @@ int email_service_find_account_by_id(int user_id,
    return EMAIL_RC_OK;
 }
 
+int email_service_find_account_by_name(int user_id, const char *name, email_account_t *out) {
+   return email_svc_find_account(user_id, name, out);
+}
+
 int email_svc_resolve(int user_id,
                       const char *account_name,
                       const email_target_t *target,
@@ -362,7 +366,7 @@ bool email_service_is_gmail_account(const email_account_t *acct) {
 bool email_service_validate_folder_name(const char *folder) {
    if (!folder || !folder[0])
       return true; /* Empty = default inbox, valid */
-   if (strlen(folder) > 127)
+   if (strlen(folder) > EMAIL_FOLDER_NAME_MAX)
       return false;
    if (strstr(folder, ".."))
       return false; /* Path traversal */
@@ -374,6 +378,16 @@ bool email_service_validate_folder_name(const char *folder) {
       return false;
    }
    return true;
+}
+
+bool email_service_message_id_ok(const char *id, bool is_imap) {
+   if (!is_imap) {
+      return gmail_message_id_valid(id);
+   }
+   char folder[EMAIL_FOLDER_NAME_MAX + 1];
+   uint32_t uid = 0;
+   return email_imap_id_parse(id, folder, sizeof(folder), &uid, NULL) &&
+          email_service_validate_folder_name(folder);
 }
 
 int email_svc_gmail_token(const email_account_t *acct, char *token, size_t len, bool *revoked) {

@@ -160,11 +160,13 @@ Layer 0 (Foundation) — no DAWN dependencies
 
 Layer 1 (Core infrastructure) — deps: Layer 0
 ├── src/tools/tool_registry.c   Tool registration and lookup, and each action's kind (read, fetch, state,
-│                               device, prepare, act), checked at registration and at build time
+│                               device, prepare, act) and the frame its result goes in when it is someone
+│                               else's text, checked at registration and at build time
 ├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
 │                               dedup, reply codes, text-input dispatch, prompt sections, input queue
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
-│                               session, on the next turn
+│                               session, on the next turn, and never in a turn carrying an email the user
+│                               attached
 ├── src/core/pending_slots.c    What a tool staged for the user's confirm: one item per session and kind, each
 │                               with a new id its confirm must name; never evicts another session's item
 ├── src/core/tool_call_challenge.c  An action asked for by text, waiting for its reply code: one per channel,
@@ -175,11 +177,13 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── include/prompts.h           Every model-facing prompt, as string literals; quotes llm/ and core/ tokens, so
 │                               include it from Layer 2 up
-├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views
+├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views;
+│                               llm_third_party.c frames an email's or a page's text as someone else's
 ├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
 │                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
-│                               background job, unattended) against the action's kind; decided once per call
+│                               background job, unattended, a user turn carrying an attached email) against the
+│                               action's kind; decided once per call
 ├── src/memory/                 Persistent memory, contacts, extraction, forgetting
 ├── src/auth/                   Users, settings, conversations and messages; auth_db_messages.c is the one
 │                               message insert (and the LLM replay read)
@@ -202,6 +206,9 @@ Layer 4 (Application) — deps: everything below
 │   ├── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
 │   │                           taken by ticket so no worker waits on an account, replies by session id; a
 │   │                           session's moves queue in order on its MOVE slot, never replaced
+│   ├── webui_email_ref.c       A text turn's attached email (email_refs): its account checked in the database
+│   │                           at receipt, carried with the turn (the model reads the email with the tool),
+│   │                           saved as messages.email_ref and sent back on every frame delivering the row
 │   └── webui_email_panel*.c    The mail panel's verbs (email_list/_search/_read/_set_flags/_unread_counts;
 │                               _archive/_trash/_undo in webui_email_panel_move.c), with the pure
 │                               email_cursor.c (paging across accounts) and email_wire.c (rows, read frames

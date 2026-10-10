@@ -67,6 +67,7 @@
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
+#include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
@@ -749,7 +750,7 @@ void webui_broadcast_message_appended(int user_id,
                                       const char *reasoning,
                                       unsigned stream_id) {
    webui_broadcast_message_appended_origin(user_id, conv_id, msg_id, role, text, reasoning,
-                                           stream_id, NULL, NULL);
+                                           stream_id, NULL, NULL, NULL);
 }
 
 void webui_broadcast_message_appended_origin(int user_id,
@@ -760,7 +761,8 @@ void webui_broadcast_message_appended_origin(int user_id,
                                              const char *reasoning,
                                              unsigned stream_id,
                                              const session_t *origin,
-                                             const char *client_ref) {
+                                             const char *client_ref,
+                                             const char *email_ref) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
       return;
    }
@@ -785,6 +787,7 @@ void webui_broadcast_message_appended_origin(int user_id,
       json_object_object_add(p, "reasoning", json_object_new_string(reasoning));
    }
    json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
+   webui_row_add_email_ref(p, role, email_ref);
    json_object_object_add(root, "payload", p);
 
    /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame

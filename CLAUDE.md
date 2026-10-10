@@ -53,6 +53,22 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
 - **Design doc commit policy**: commit design docs only when they describe shipped or in-flight code (implementation matches the doc substantially). Docs for planned-but-unstarted work and working/scratch docs stay untracked — the developer uses them as a local unimplemented-work reminder. When unsure, ask.
 - **User-facing upgrade notes → `UPGRADING.md`.** When a change affects someone *upgrading* an existing install — a changed default, a schema/data migration needing a manual step, a user-visible behavior change, or a new opt-in — add a dated entry at the **top** of `UPGRADING.md` (newest-first), in plain language: what changed and what (if anything) the user must do. Add an entry **only when there is real upgrade impact**; drop-in changes need none. This IS a tracked, committed doc (unlike TODO.md/DONE.md), and it's user-facing — write for a human running the update, not for a developer reading the diff.
 
+## Untrusted content (prompt injection)
+
+Prompt injection is not solvable inside the model: no frame, filter or prompt holds against a
+determined attacker (adaptive attacks beat >90% of published defenses), and small local models
+follow injected text far more readily. Safety comes from what a steered turn can reach.
+
+- **Check vendor guidance first** (Anthropic, OpenAI, Qwen) before designing anything that puts
+  outside text in front of a model.
+- **Outside text goes in tool results only**, never the system prompt or the user's message
+  (Anthropic: Claude is trained to distrust instructions there). Label its source; frame and
+  neutralize it.
+- **Gate in code, not prompts:** hard-block only where outside text in the turn meets an effect
+  that is silent or irreversible and no human sees a DAWN-rendered summary first. Elsewhere prefer
+  visible + undoable over refusal.
+- Details, sources and the decision rule: `docs/PROMPT_INJECTION.md`.
+
 ## Build & Test
 
 ```bash

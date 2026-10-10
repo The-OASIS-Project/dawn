@@ -32,6 +32,8 @@
 
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "llm/llm_third_party.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #ifdef ENABLE_WEBUI
@@ -176,6 +178,7 @@ typedef struct {
    int offset;
    int capacity;
    int count;
+   const char *frame; /* a frame one of the rows was in (an email's first) */
 } expand_ctx_t;
 
 static int expand_message_cb(const conversation_message_t *msg, void *ctx) {
@@ -193,6 +196,12 @@ static int expand_message_cb(const conversation_message_t *msg, void *ctx) {
    }
    ec->offset += written;
    ec->count++;
+   /* A stored email or page: its frame lines are defused when this result is
+    * neutralized, so the whole result goes in its frame instead. */
+   const char *frame = llm_third_party_present(msg->content);
+   if (frame && (!ec->frame || strcmp(frame, TOOL_FRAME_EMAIL) == 0)) {
+      ec->frame = frame;
+   }
    return 0;
 }
 
@@ -413,6 +422,9 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    }
 
    OLOG_INFO("context_expand: returned %d messages (%d bytes)", ec.count, ec.offset);
+   if (ec.frame) {
+      llm_tools_result_third_party(ec.frame);
+   }
 
    return ec.buf;
 }

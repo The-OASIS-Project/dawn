@@ -36,6 +36,7 @@
 #include "core/session_prefix.h"
 #include "llm/llm_tool_view.h"
 #include "logging.h"
+#include "tools/tool_registry.h" /* TOOL_FRAME_* */
 
 /* ---------------------------------------------------------------------------
  * The minted set: the unbound results the session's turns stored, each with
@@ -517,6 +518,33 @@ static bool caller_context_locked(const session_t *session, uint64_t *token, int
    return true;
 }
 
+/* The stored number of a frame name, and back. */
+static const struct {
+   int id;
+   const char *name;
+} k_frames[] = {
+   { TOOL_RESULTS_FRAME_EMAIL, TOOL_FRAME_EMAIL },
+   { TOOL_RESULTS_FRAME_WEB, TOOL_FRAME_WEB },
+};
+
+static int frame_id(const char *name) {
+   for (size_t i = 0; name && i < sizeof(k_frames) / sizeof(k_frames[0]); i++) {
+      if (strcmp(name, k_frames[i].name) == 0) {
+         return k_frames[i].id;
+      }
+   }
+   return TOOL_RESULTS_FRAME_NONE;
+}
+
+const char *tool_result_store_frame(const tool_result_doc_t *doc) {
+   for (size_t i = 0; doc && i < sizeof(k_frames) / sizeof(k_frames[0]); i++) {
+      if (doc->meta.frame == k_frames[i].id) {
+         return k_frames[i].name;
+      }
+   }
+   return NULL;
+}
+
 int tool_result_store_put(session_t *session,
                           const char *tool_name,
                           const char *tool_call_id,
@@ -525,6 +553,19 @@ int tool_result_store_put(session_t *session,
                           bool is_json,
                           char id_out[TOOL_RESULTS_ID_LEN],
                           bool *cut_out) {
+   return tool_result_store_put_framed(session, tool_name, tool_call_id, text, len, is_json, NULL,
+                                       id_out, cut_out);
+}
+
+int tool_result_store_put_framed(session_t *session,
+                                 const char *tool_name,
+                                 const char *tool_call_id,
+                                 const char *text,
+                                 size_t len,
+                                 bool is_json,
+                                 const char *frame,
+                                 char id_out[TOOL_RESULTS_ID_LEN],
+                                 bool *cut_out) {
    if (cut_out) {
       *cut_out = false;
    }
@@ -571,6 +612,7 @@ int tool_result_store_put(session_t *session,
       .tool_name = tool_name,
       .tool_call_id = tool_call_id,
       .kind = is_json && !too_big ? TOOL_RESULTS_JSON : TOOL_RESULTS_TEXT,
+      .frame = frame_id(frame),
       .chars = utf8_chars(body, bytes),
       .body = body,
       .bytes = bytes,

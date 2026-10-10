@@ -213,7 +213,9 @@ int auth_db_migrations_v98(sqlite3 *db, const char *db_path) {
     * (IF NOT EXISTS) and triggers (made again), and the images its rows name
     * recorded (a table made by an earlier v98 that didn't record them). */
    const bool has_images = auth_db_column_exists(db, "messages", "images");
-   if (has_images && blocks_last(db)) {
+   /* email_ref after the blocks: v102 added it to this table, so it is
+    * already the v98 one (a rebuild would drop the column). */
+   if (has_images && (blocks_last(db) || auth_db_column_exists(db, "messages", "email_ref"))) {
       if (exec_logged(db, CONV_MESSAGES_OBJECTS_SQL, "messages indexes and triggers") !=
               AUTH_DB_SUCCESS ||
           exec_logged(db, "BEGIN IMMEDIATE", "BEGIN") != AUTH_DB_SUCCESS) {

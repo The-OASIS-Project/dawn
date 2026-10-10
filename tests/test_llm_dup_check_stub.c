@@ -182,3 +182,10 @@ int llm_thinking_budget_size(const char *level) {
    (void)level;
    return 8192;
 }
+
+/* No tool in these tests returns someone else's text. */
+const char *tool_third_party_frame(const void *meta, const char *action) {
+   (void)meta;
+   (void)action;
+   return NULL;
+}
