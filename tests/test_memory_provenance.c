@@ -1183,6 +1183,44 @@ static void q_exec(const char *sql) {
                                  err ? err : sql);
 }
 
+/* Forgetting is of what was learned so far: the forgotten conversation, or
+ * every conversation of the user after "delete all", counts as extracted, so
+ * memory recovery doesn't learn it again.  Another user's stays as it was. */
+void test_forget_marks_conversations_extracted(void) {
+   q_exec("UPDATE conversations SET message_count = 0, last_extracted_msg_count = 0, "
+          "last_extracted_msg_id = 0, extraction_attempts = 1;"
+          "INSERT INTO conversations (id, user_id, is_private, message_count) "
+          "VALUES (40, 2, 0, 2);"
+          "INSERT INTO messages (id, conversation_id, role, content) VALUES "
+          "(7001, 25, 'user', 'a'), (7002, 25, 'assistant', 'b'), (7003, 30, 'user', 'c'), "
+          "(7004, 40, 'user', 'd');"
+          "UPDATE conversations SET message_count = 2 WHERE id = 25;"
+          "UPDATE conversations SET message_count = 1 WHERE id = 30;");
+
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT64(7002, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                       "WHERE id = 25"));
+   TEST_ASSERT_EQUAL_INT64(2, q_int("SELECT last_extracted_msg_count FROM conversations "
+                                    "WHERE id = 25"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT extraction_attempts FROM conversations WHERE id = 25"));
+   /* Not the one forgotten. */
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                    "WHERE id = 30"));
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_delete_user_memories(1));
+   TEST_ASSERT_EQUAL_INT64(7003, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                       "WHERE id = 30"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT last_extracted_msg_count FROM conversations "
+                                    "WHERE id = 30"));
+   TEST_ASSERT_EQUAL_INT64(q_int("SELECT MAX(id) FROM messages WHERE conversation_id = 10"),
+                           q_int("SELECT last_extracted_msg_id FROM conversations WHERE id = 10"));
+   /* Another user's conversation is left alone. */
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                    "WHERE id = 40"));
+}
+
 /* Forgetting conversation 25 removes what only it taught, keeps (and re-points)
  * what another conversation also taught, and cleans up orphaned entities. */
 void test_forget_keeps_facts_taught_elsewhere(void) {
@@ -1657,6 +1695,7 @@ int main(void) {
    RUN_TEST(test_fact_list_sort_orders);
    RUN_TEST(test_prune_expired_removes_past_only);
    RUN_TEST(test_forget_keeps_facts_taught_elsewhere);
+   RUN_TEST(test_forget_marks_conversations_extracted);
    RUN_TEST(test_forget_is_user_scoped);
    RUN_TEST(test_preference_sources_follow_the_value);
    RUN_TEST(test_forget_keeps_relation_taught_elsewhere);

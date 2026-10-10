@@ -83,6 +83,8 @@ int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned
                    user_id, (long long)conv_id);
       return MEMORY_FORGET_BUSY;
    }
+   /* A queued extraction of these would learn them again once the hold lets go. */
+   memory_extraction_unqueue_conversations(user_id, ids, n);
    int rc = memory_db_conversations_forget(user_id, ids, n, &d);
    memory_extraction_release_user(user_id);
    if (rc != MEMORY_DB_SUCCESS) {
@@ -97,4 +99,15 @@ int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned
       *deleted_out = d;
    }
    return SUCCESS;
+}
+
+int memory_forget_all(int user_id) {
+   if (!memory_extraction_hold_user(user_id, MEMORY_FORGET_WAIT_SEC)) {
+      OLOG_WARNING("memory_forget: user %d: extraction still running; not deleting yet", user_id);
+      return MEMORY_FORGET_BUSY;
+   }
+   memory_extraction_unqueue_user(user_id);
+   const int rc = memory_db_delete_user_memories(user_id);
+   memory_extraction_release_user(user_id);
+   return rc == MEMORY_DB_SUCCESS ? SUCCESS : FAILURE;
 }

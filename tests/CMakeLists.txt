@@ -1725,6 +1725,7 @@ dawn_add_unit_test(test_memory_db_admin
            # memory_db.c linked so memory_db_undo_extraction_attempt is
            # exercised directly (transient-failure rollback path).
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_stem.c
    LIBS    dawn_common unity sqlite3 pthread m stemmer
@@ -1811,6 +1812,12 @@ dawn_add_unit_test(test_memory_similarity
    SOURCES test_memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
    LIBS    unity m
+   LABEL   ci)
+
+dawn_add_unit_test(test_memory_extraction_queue
+   SOURCES test_memory_extraction_queue.c
+           ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+   LIBS    unity
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_extraction
@@ -2316,6 +2323,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
@@ -2434,6 +2442,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c

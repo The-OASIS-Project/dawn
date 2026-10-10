@@ -29,6 +29,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,8 @@
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction_input.h"
+#include "memory/memory_extraction_queue.h"
+#include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
 #include "memory/memory_predicate_dedup.h"
 #include "memory/memory_types.h"
@@ -89,8 +92,13 @@ static struct {
    int count;                          /* Current number of running extractions */
    /* Users held by memory_extraction_hold_user (no LLM call; 0 = empty). */
    int held_user_ids[MEMORY_EXTRACTION_MAX_HOLDS];
+   /* Users a hold is waiting for, one entry per waiting call: a queued
+    * extraction for them waits until the hold has had its turn. */
+   int hold_waiter_ids[MEMORY_EXTRACTION_MAX_HOLDS];
 } s_extraction_state;
 static pthread_mutex_t s_extraction_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* Set at shutdown: nothing more is queued or started from the queue. */
+static atomic_bool s_queue_stopped;
 /* Signalled whenever a slot is released (see memory_extraction_hold_user).  Uses
  * CLOCK_MONOTONIC so a wall-clock change can't stretch or cut a timed wait. */
 static pthread_cond_t s_extraction_cond;
@@ -197,6 +205,33 @@ static void extraction_slot_release_locked(int user_id) {
          return;
       }
    }
+}
+
+/* Helper: a hold is waiting for the user (must hold mutex) */
+static bool hold_waiting_locked(int user_id) {
+   for (int i = 0; i < MEMORY_EXTRACTION_MAX_HOLDS; i++) {
+      if (s_extraction_state.hold_waiter_ids[i] == user_id) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* Whether a queued extraction for the user can start now, claiming its slot
+ * when it can (extraction_queue_take; must hold mutex). */
+static bool queue_entry_ready_locked(int user_id, void *ctx) {
+   (void)ctx;
+   return !hold_waiting_locked(user_id) && extraction_slot_acquire_locked(user_id);
+}
+
+static void queue_dispatch(void);
+
+/* Release the user's slot, then start what the queue holds that can now run. */
+static void extraction_slot_release(int user_id) {
+   pthread_mutex_lock(&s_extraction_mutex);
+   extraction_slot_release_locked(user_id);
+   pthread_mutex_unlock(&s_extraction_mutex);
+   queue_dispatch();
 }
 
 /* =============================================================================
@@ -1568,9 +1603,7 @@ cleanup:
    int saved_user_id = ctx->user_id;
    free(ctx);
 
-   pthread_mutex_lock(&s_extraction_mutex);
-   extraction_slot_release_locked(saved_user_id);
-   pthread_mutex_unlock(&s_extraction_mutex);
+   extraction_slot_release(saved_user_id);
 
    OLOG_INFO("memory_extraction: completed for user %d", saved_user_id);
    return NULL;
@@ -1581,19 +1614,31 @@ cleanup:
  * ============================================================================= */
 
 
-int memory_trigger_extraction(int user_id,
+/* A request refused before it started: with @p have_slot (a queued run's slot,
+ * claimed when it was taken) the slot goes back. */
+static int trigger_skip(int user_id, bool have_slot, int rc) {
+   if (have_slot) {
+      extraction_slot_release(user_id);
+   }
+   return rc;
+}
+
+/* memory_trigger_extraction(), or a queued run (@p have_slot: its slot is
+ * already claimed, and every return lets it go or hands it to the thread). */
+static int trigger_extraction(int user_id,
                               int64_t conversation_id,
                               const char *session_id_str,
                               struct json_object *conversation_history,
                               int message_count,
                               int duration_seconds,
-                              const memory_extraction_fallback_t *fallback) {
+                              const memory_extraction_fallback_t *fallback,
+                              bool have_slot) {
    if (user_id <= 0 || !conversation_history) {
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
 
    if (!g_config.memory.enabled) {
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
 
 #ifdef ENABLE_AUTH
@@ -1609,7 +1654,7 @@ int memory_trigger_extraction(int user_id,
          OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
                    (long long)conversation_id,
                    priv_rc == AUTH_DB_SUCCESS ? "private" : "unreadable");
-         return 0;
+         return trigger_skip(user_id, have_slot, 0);
       }
       /* A background job's transcript is research the model did, not what the
        * user said; memory comes from the parent conversation it reports into. */
@@ -1619,7 +1664,7 @@ int memory_trigger_extraction(int user_id,
          OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
                    (long long)conversation_id,
                    job_rc == AUTH_DB_SUCCESS ? "a background job" : "unreadable (job check)");
-         return 0;
+         return trigger_skip(user_id, have_slot, 0);
       }
    }
 #endif
@@ -1634,7 +1679,7 @@ int memory_trigger_extraction(int user_id,
          memory_db_set_last_extracted(conversation_id, message_count,
                                       0); /* 0 = leave msg_id cursor unchanged */
       }
-      return 0;
+      return trigger_skip(user_id, have_slot, 0);
    }
 
    /* ID-based incremental extraction cursor.
@@ -1652,36 +1697,61 @@ int memory_trigger_extraction(int user_id,
       if (max_msg_id > 0 && max_msg_id <= last_msg_id) {
          OLOG_INFO("memory_extraction: skipping — no new messages (max_id=%lld, last=%lld)",
                    (long long)max_msg_id, (long long)last_msg_id);
-         return 0;
+         return trigger_skip(user_id, have_slot, 0);
       }
    }
 
    int new_messages = message_count - last_extracted;
 
-   /* Check concurrency limits and acquire extraction slot */
-   pthread_mutex_lock(&s_extraction_mutex);
-   if (!extraction_slot_acquire_locked(user_id)) {
-      /* Either user already has extraction in progress, or we've hit max concurrent */
-      bool user_active = extraction_is_active_locked(user_id);
-      int max_concurrent = get_max_concurrent_extractions();
-      pthread_mutex_unlock(&s_extraction_mutex);
+   /* Check concurrency limits and acquire extraction slot.  Refused (the
+    * user's extraction is running or held, or every slot is busy): a
+    * conversation waits in the queue for the next release; recovery's own
+    * requests retry on its pass instead. */
+   if (!have_slot) {
+      pthread_mutex_lock(&s_extraction_mutex);
+      /* A forget waiting for the user goes first: this waits behind it. */
+      if (hold_waiting_locked(user_id) || !extraction_slot_acquire_locked(user_id)) {
+         const bool user_active = extraction_is_active_locked(user_id) ||
+                                  hold_waiting_locked(user_id);
+         const int running = s_extraction_state.count;
+         const int max_concurrent = get_max_concurrent_extractions();
+         const bool recovery = session_id_str && strncmp(session_id_str, "recovery_", 9) == 0;
+         bool queued = false;
+         if (conversation_id > 0 && !recovery && !atomic_load(&s_queue_stopped)) {
+            extraction_queue_entry_t e = { .user_id = user_id,
+                                           .conversation_id = conversation_id,
+                                           .has_fallback = fallback != NULL };
+            if (session_id_str) {
+               safe_strscpy(e.session_id, session_id_str);
+            }
+            if (fallback) {
+               e.fallback = *fallback;
+            }
+            queued = extraction_queue_push(&e);
+         }
+         pthread_mutex_unlock(&s_extraction_mutex);
 
-      if (user_active) {
-         OLOG_INFO("memory_extraction: already in progress for user %d", user_id);
-      } else {
-         OLOG_INFO("memory_extraction: at capacity (%d/%d), skipping user %d",
-                   s_extraction_state.count, max_concurrent, user_id);
+         if (user_active) {
+            OLOG_INFO("memory_extraction: already in progress for user %d%s", user_id,
+                      queued ? "; conversation queued" : "");
+         } else {
+            OLOG_INFO("memory_extraction: at capacity (%d/%d) for user %d%s", running,
+                      max_concurrent, user_id, queued ? "; conversation queued" : "");
+         }
+         if (!queued && conversation_id > 0 && !recovery) {
+            OLOG_WARNING("memory_extraction: queue full; conversation %lld waits for memory "
+                         "recovery",
+                         (long long)conversation_id);
+         }
+         return MEMORY_EXTRACTION_BUSY;
       }
-      return 0;
+      pthread_mutex_unlock(&s_extraction_mutex);
    }
-   pthread_mutex_unlock(&s_extraction_mutex);
 
    /* Prepare context */
    extraction_context_t *ctx = calloc(1, sizeof(extraction_context_t));
    if (!ctx) {
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
 
@@ -1707,9 +1777,7 @@ int memory_trigger_extraction(int user_id,
                                                                 conversation_history, last_msg_id);
    if (!filtered) {
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 0;
    }
 
@@ -1719,9 +1787,7 @@ int memory_trigger_extraction(int user_id,
    json_object_put(filtered);
    if (!safe) {
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
    ctx->conversation_json = strdup(json_object_to_json_string_ext(safe, JSON_C_TO_STRING_PLAIN));
@@ -1729,9 +1795,7 @@ int memory_trigger_extraction(int user_id,
 
    if (!ctx->conversation_json) {
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
 
@@ -1751,14 +1815,111 @@ int memory_trigger_extraction(int user_id,
       OLOG_ERROR("memory_extraction: failed to create thread: %d", rc);
       free(ctx->conversation_json);
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
 
    OLOG_INFO("memory_extraction: triggered for user %d", user_id);
    return 0;
+}
+
+int memory_trigger_extraction(int user_id,
+                              int64_t conversation_id,
+                              const char *session_id_str,
+                              struct json_object *conversation_history,
+                              int message_count,
+                              int duration_seconds,
+                              const memory_extraction_fallback_t *fallback) {
+   return trigger_extraction(user_id, conversation_id, session_id_str, conversation_history,
+                             message_count, duration_seconds, fallback, false);
+}
+
+/* A queued conversation, read again from the database (its caller's history
+ * may be long gone), on the slot claimed when it was taken.  The trigger
+ * checks it again: one made private, deleted or extracted meanwhile does
+ * nothing. */
+static void *queued_extraction_thread(void *arg) {
+   extraction_queue_entry_t *e = arg;
+   int message_count = 0;
+   struct json_object *history = NULL;
+#ifdef ENABLE_AUTH
+   conversation_t conv;
+   if (conv_db_get(e->conversation_id, e->user_id, &conv) == AUTH_DB_SUCCESS) {
+      message_count = conv.message_count;
+      conv_free(&conv);
+   }
+   if (message_count >= 2) {
+      history = memory_history_load_from_db(e->conversation_id, e->user_id, NULL);
+   }
+#endif
+   if (!history) {
+      OLOG_INFO("memory_extraction: queued conversation %lld has nothing to extract",
+                (long long)e->conversation_id);
+      extraction_slot_release(e->user_id);
+   } else {
+      OLOG_INFO("memory_extraction: running queued extraction of conversation %lld for user %d",
+                (long long)e->conversation_id, e->user_id);
+      trigger_extraction(e->user_id, e->conversation_id, e->session_id[0] ? e->session_id : NULL,
+                         history, message_count, 0, e->has_fallback ? &e->fallback : NULL, true);
+      json_object_put(history);
+   }
+   free(e);
+   return NULL;
+}
+
+/* Start every queued extraction that can run now, each on its own thread (a
+ * release may come on any thread, the WebUI's included). */
+static void queue_dispatch(void) {
+   for (;;) {
+      extraction_queue_entry_t taken;
+      pthread_mutex_lock(&s_extraction_mutex);
+      const bool got = !atomic_load(&s_queue_stopped) &&
+                       extraction_queue_take(queue_entry_ready_locked, NULL, &taken);
+      pthread_mutex_unlock(&s_extraction_mutex);
+      if (!got) {
+         return;
+      }
+      extraction_queue_entry_t *e = malloc(sizeof(*e));
+      pthread_t thread;
+      pthread_attr_t attr;
+      pthread_attr_init(&attr);
+      pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+      const bool started = e && (*e = taken,
+                                 pthread_create(&thread, &attr, queued_extraction_thread, e) == 0);
+      pthread_attr_destroy(&attr);
+      if (!started) {
+         OLOG_WARNING("memory_extraction: couldn't start queued conversation %lld; memory "
+                      "recovery will",
+                      (long long)taken.conversation_id);
+         free(e);
+         pthread_mutex_lock(&s_extraction_mutex);
+         extraction_slot_release_locked(taken.user_id);
+         pthread_mutex_unlock(&s_extraction_mutex);
+      }
+   }
+}
+
+void memory_extraction_unqueue_conversations(int user_id, const int64_t *ids, int n) {
+   pthread_mutex_lock(&s_extraction_mutex);
+   extraction_queue_drop_conversations(user_id, ids, n);
+   pthread_mutex_unlock(&s_extraction_mutex);
+}
+
+void memory_extraction_unqueue_user(int user_id) {
+   pthread_mutex_lock(&s_extraction_mutex);
+   extraction_queue_drop_user(user_id);
+   pthread_mutex_unlock(&s_extraction_mutex);
+}
+
+void memory_extraction_stop_queue(void) {
+   atomic_store(&s_queue_stopped, true);
+   pthread_mutex_lock(&s_extraction_mutex);
+   const int dropped = extraction_queue_count();
+   extraction_queue_clear();
+   pthread_mutex_unlock(&s_extraction_mutex);
+   if (dropped > 0) {
+      OLOG_INFO("memory_extraction: %d queued conversation(s) left for memory recovery", dropped);
+   }
 }
 
 bool memory_extraction_in_progress(int user_id) {
@@ -1807,6 +1968,15 @@ bool memory_extraction_hold_user(int user_id, int timeout_sec) {
    const struct timespec deadline = extraction_deadline(timeout_sec);
 
    pthread_mutex_lock(&s_extraction_mutex);
+   /* While this waits, the queue starts nothing more for the user. */
+   int waiter = -1;
+   for (int i = 0; i < MEMORY_EXTRACTION_MAX_HOLDS && waiter < 0; i++) {
+      if (s_extraction_state.hold_waiter_ids[i] == 0) {
+         s_extraction_state.hold_waiter_ids[i] = user_id;
+         waiter = i;
+      }
+   }
+   bool held = false;
    for (;;) {
       if (!extraction_is_active_locked(user_id)) {
          /* A hold makes no LLM call; it only keeps one from starting for this
@@ -1814,15 +1984,22 @@ bool memory_extraction_hold_user(int user_id, int timeout_sec) {
          const int free_idx = extraction_hold_index_locked(0);
          if (free_idx >= 0) {
             s_extraction_state.held_user_ids[free_idx] = user_id;
-            pthread_mutex_unlock(&s_extraction_mutex);
-            return true;
+            held = true;
+            break;
          }
       }
       if (pthread_cond_timedwait(&s_extraction_cond, &s_extraction_mutex, &deadline) == ETIMEDOUT) {
-         pthread_mutex_unlock(&s_extraction_mutex);
-         return false;
+         break;
       }
    }
+   if (waiter >= 0) {
+      s_extraction_state.hold_waiter_ids[waiter] = 0;
+   }
+   pthread_mutex_unlock(&s_extraction_mutex);
+   if (!held) {
+      queue_dispatch(); /* what waited behind this hold */
+   }
+   return held;
 }
 
 void memory_extraction_release_user(int user_id) {
@@ -1837,6 +2014,7 @@ void memory_extraction_release_user(int user_id) {
       pthread_cond_broadcast(&s_extraction_cond);
    }
    pthread_mutex_unlock(&s_extraction_mutex);
+   queue_dispatch();
 }
 
 bool memory_extraction_consume_last_transient(int user_id) {

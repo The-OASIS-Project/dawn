@@ -1034,7 +1034,9 @@ int memory_db_summary_list_without_embedding(int user_id,
 /**
  * @brief Delete all memories for a user
  *
- * Used when a user requests to be forgotten.
+ * Used when a user requests to be forgotten.  Also marks every conversation of
+ * the user extracted, so memory recovery doesn't learn it all again; call it
+ * through memory_forget_all(), which holds the user's extraction meanwhile.
  *
  * @param user_id User ID
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE

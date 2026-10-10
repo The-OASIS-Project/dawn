@@ -19,10 +19,11 @@
  * WebUI handlers for a conversation's privacy and the memories learned from it:
  * set_private, and the forget offered after a conversation goes private.
  *
- * Counting and forgetting wait for the user's in-flight memory extraction (so
+ * Counting and forgetting (a conversation's memories, or all of the user's:
+ * delete_all_memories) wait for the user's in-flight memory extraction (so
  * they see every row it writes) and touch many rows, so they run on a detached
- * worker and answer through the session's response queue rather than blocking
- * the WebSocket service thread.
+ * worker, one per user at a time, and answer through the session's response
+ * queue rather than blocking the WebSocket service thread.
  */
 
 #include <json-c/json.h>
@@ -43,8 +44,9 @@
 #include "webui/webui_server.h"
 
 typedef enum {
-   CONV_MEMORY_COUNT,  /* report what was learned (after going private) */
-   CONV_MEMORY_FORGET, /* delete it */
+   CONV_MEMORY_COUNT,      /* report what was learned (after going private) */
+   CONV_MEMORY_FORGET,     /* delete it */
+   CONV_MEMORY_FORGET_ALL, /* delete every memory of the user */
 } conv_memory_op_t;
 
 typedef struct {
@@ -131,7 +133,26 @@ static void send_frame(uint32_t session_id, const char *type, json_object *paylo
 static void *conv_memory_worker(void *arg) {
    conv_memory_job_t *job = (conv_memory_job_t *)arg;
    json_object *payload = json_object_new_object();
-   if (payload) {
+   if (payload && job->op == CONV_MEMORY_FORGET_ALL) {
+      conv_db_withdraw_intent_begin(job->user_id); /* the user removing it all */
+      const int rc = memory_forget_all(job->user_id);
+      conv_db_withdraw_intent_end();
+      json_object_object_add(payload, "success", json_object_new_boolean(rc == SUCCESS));
+      if (rc == SUCCESS) {
+         /* All of it leaves the conversations it was sent into, the USER
+          * MEMORY blocks too. */
+         (void)session_withdraw_forgotten(job->user_id, true);
+         json_object_object_add(payload, "message", json_object_new_string("All memories deleted"));
+      } else {
+         json_object_object_add(payload, "error",
+                                json_object_new_string(
+                                    rc == MEMORY_FORGET_BUSY
+                                        ? "Memory is still being saved; try again in a minute"
+                                        : "Failed to delete memories"));
+      }
+      OLOG_INFO("WebUI: user %d deleted all memories: %s", job->user_id,
+                rc == SUCCESS ? "done" : "not done");
+   } else if (payload) {
       json_object_object_add(payload, "conversation_id", json_object_new_int64(job->conv_id));
       memory_conv_learned_t c;
       if (job->op == CONV_MEMORY_COUNT) {
@@ -170,8 +191,9 @@ static void *conv_memory_worker(void *arg) {
    inflight_release(job->user_id);
    if (payload) {
       send_frame(job->session_id,
-                 job->op == CONV_MEMORY_COUNT ? "conversation_learned"
-                                              : "forget_conversation_memories_response",
+                 job->op == CONV_MEMORY_COUNT        ? "conversation_learned"
+                 : job->op == CONV_MEMORY_FORGET_ALL ? "delete_all_memories_response"
+                                                     : "forget_conversation_memories_response",
                  payload);
    }
    free(job);
@@ -371,5 +393,14 @@ void handle_forget_conversation_memories(ws_connection_t *conn, struct json_obje
       send_error(conn, "forget_conversation_memories_response", conv_id,
                  st == CONV_MEMORY_BUSY ? "Still working on a previous request; try again shortly"
                                         : "Could not start; try again");
+   }
+}
+
+void webui_forget_all_memories(ws_connection_t *conn) {
+   const conv_memory_start_t st = start_conv_memory_job(conn, 0, CONV_MEMORY_FORGET_ALL);
+   if (st != CONV_MEMORY_STARTED) {
+      send_error(conn, "delete_all_memories_response", 0,
+                 st == CONV_MEMORY_BUSY ? "Memory is busy with another change; try again shortly"
+                                        : "Failed to delete memories");
    }
 }

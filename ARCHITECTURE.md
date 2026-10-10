@@ -311,6 +311,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Capture thread  — continuous ALSA → ring buffer       │
 │  LLM worker      — blocking HTTP + interrupt polling   │
 │  Memory extract  — session-end, background             │
+│  Queued extract  — detached, one per queued conversa-  │
+│                    tion, started at a slot or hold     │
+│                    release (any thread); holds a slot  │
 │  Music scanner   — periodic local + Plex sync          │
 │  Scheduler       — 1-second polling loop               │
 │  CalDAV sync     — background event pull               │
@@ -510,7 +513,11 @@ Per-module locks (scoped to a single subsystem):
   memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)
   document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (LEAF: never held across a database call; a rebuild reads pages outside it, then installs; scoring holds only this)
   memory_embeddings_entity::s_ent.mutex (src/memory/memory_embeddings_entity.c) — per-user entity-embedding copies (LEAF: held only to look up, score and install; a copy is read from the DB and name-stemmed with no cache lock held; invalidation is lock-free atomics, safe under the auth_db lock)
-  memory_extraction::s_extraction_mutex + s_extraction_cond (src/memory/memory_extraction.c) — per-user extraction slots (leaf); the cond var lets a forget wait out a user's in-flight extraction (memory_extraction_hold_user)
+  memory_extraction::s_extraction_mutex + s_extraction_cond (src/memory/memory_extraction.c) — per-user extraction slots, holds and
+                                                                     the hold waiters, and the extraction queue (memory_extraction_queue.c) (leaf); the cond var
+                                                                     lets a forget wait out a user's in-flight extraction (memory_extraction_hold_user).  A
+                                                                     queued extraction is taken and its slot claimed in one hold of it; its thread starts, and
+                                                                     reads the database, with it released
   email_account_lease::s_mutex (src/tools/email_account_lease.c) — the per-account IMAP lease table (held only to queue, hand over or
                                                                      drop a waiter, never across I/O).  The LEASE itself is the outermost
                                                                      email lock: its holder may take the OAuth per-account mutex and then the

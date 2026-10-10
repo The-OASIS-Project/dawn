@@ -68,6 +68,20 @@ int memory_conversation_learned(int user_id, int64_t conv_id, memory_conv_learne
  */
 int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned_t *deleted_out);
 
+/**
+ * @brief Delete every memory of the user ("delete all memories")
+ *
+ * Waits for an extraction already running for the user and keeps a new one
+ * from starting until done, drops the user's queued extractions, and deletes
+ * (memory_db_delete_user_memories, which also marks every conversation of the
+ * user extracted so recovery doesn't learn it all again).  Blocking: call off
+ * the WebUI service thread.
+ *
+ * @return SUCCESS; MEMORY_FORGET_BUSY (extraction still running, nothing
+ *         deleted); or FAILURE
+ */
+int memory_forget_all(int user_id);
+
 #ifdef __cplusplus
 }
 #endif

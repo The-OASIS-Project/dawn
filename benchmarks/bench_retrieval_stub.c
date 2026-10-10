@@ -64,6 +64,17 @@ int g_stub_defer_result = 1; /* FAILURE */
 int64_t g_stub_defer_conv = 0;
 
 /* No live conversations here: nothing to withdraw a forgotten memory from. */
+/* A queued extraction re-reads its conversation (memory_extraction.c); the
+ * bench never queues one. */
+struct json_object *memory_history_load_from_db(int64_t conv_id, int user_id, size_t *len) {
+   (void)conv_id;
+   (void)user_id;
+   if (len) {
+      *len = 0;
+   }
+   return NULL;
+}
+
 int session_withdraw_forgotten(int user_id, bool memory_bodies) {
    (void)user_id;
    (void)memory_bodies;

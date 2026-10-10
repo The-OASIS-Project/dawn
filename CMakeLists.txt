@@ -1032,6 +1032,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_extraction.c
+    src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_input.c
     src/memory/memory_similarity.c
     src/memory/memory_import.c

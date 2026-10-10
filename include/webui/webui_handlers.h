@@ -242,6 +242,14 @@ void handle_conversation_learned_request(ws_connection_t *conn, struct json_obje
 void handle_forget_conversation_memories(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief Delete every memory of the connection's user, on a worker
+ *        (webui_conv_memory.c; handle_delete_all_memories checks the confirm)
+ *
+ * Answers with delete_all_memories_response.
+ */
+void webui_forget_all_memories(ws_connection_t *conn);
+
+/**
  * @brief Pin or unpin a conversation
  *
  * Pinned conversations float to a dedicated section at the top of the WebUI list.

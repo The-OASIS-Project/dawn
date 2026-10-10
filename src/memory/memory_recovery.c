@@ -261,6 +261,14 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
                                       row->message_count, 0, NULL);
    json_object_put(history);
 
+   if (rc == MEMORY_EXTRACTION_BUSY) {
+      /* Another extraction for the user, or every slot, took it first: not an
+       * attempt; the next pass tries again. */
+      OLOG_INFO("memory_recovery: user %d busy, deferring conv %lld", row->user_id,
+                (long long)row->conv_id);
+      memory_db_undo_extraction_attempt(row->conv_id);
+      return false;
+   }
    if (rc != SUCCESS) {
       OLOG_WARNING("memory_recovery: trigger failed for conv %lld (rc=%d)", (long long)row->conv_id,
                    rc);

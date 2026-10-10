@@ -126,6 +126,8 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Embedding generation for newly created entities (skipped for existing)
    - Existing entity list fed into extraction prompt to prevent duplicate names
    - Respects conversation privacy flag
+   - One extraction per user at a time.  A request refused because the user's extraction is running or held, or every slot is busy, returns `MEMORY_EXTRACTION_BUSY`; a conversation then waits in the queue (`memory_extraction_queue.c`, one entry per conversation, at most 32) and runs at the next slot or hold release, read again from the database. Recovery's own requests aren't queued (it retries on its pass). Shutdown drops the queue (recovery picks those up on the next start)
+   - Forgetting a conversation (`memory_forget_conversation`) or everything (`memory_forget_all`, "delete all memories") holds the user's extraction, drops the queued entries it covers, and marks those conversations extracted: what was learned so far is forgotten, and what is said from now on is extracted as usual
 
 - **memory_callback.c**: Tool handler for `MEMORY` device type
    - `search`: hybrid keyword + semantic search across all memory tables; optional `category` / `time_range` / `as_of` / `include_historical` / `with_source` params
@@ -166,11 +168,11 @@ Memory extraction happens at session end, not during conversation — zero laten
 
 - **memory_recovery.c/h**: Extraction recovery worker
    - Dedicated background thread (`nice 10`) that runs an immediate startup pass and re-scans on `[memory.recovery] recurring_interval_seconds`
-   - Picks up conversations whose `last_extracted_msg_count < message_count` after `idle_threshold_seconds` (default 1 h) — typically left behind by a daemon crash mid-extraction or by an extraction that returned an error
+   - Picks up conversations whose `last_extracted_msg_count < message_count` after `idle_threshold_seconds` (default 1 h) — typically left behind by a daemon crash mid-extraction, an extraction that returned an error, a full extraction queue, or a queue dropped at shutdown
    - Skips private conversations and rows with fewer than 2 messages (matches `memory_trigger_extraction()`'s own gate)
    - Per-conversation tracking: `extraction_attempts` (cap defaults to 2; `0` = unlimited) and `extraction_last_attempt_at`. New activity on the conversation auto-resets the counter via the `extraction_last_attempt_at < updated_at` clause in the scan SQL
    - Reuses `memory_trigger_extraction()`. Successful extraction clears the recovery counters atomically through the existing `memory_db_set_last_extracted` UPDATE
-   - Sequentially processes one stuck conversation at a time, blocking on `memory_extraction_in_progress()` (5-minute per-conv timeout) so the per-user extraction slot never queues
+   - Sequentially processes one stuck conversation at a time, blocking on `memory_extraction_in_progress()` (5-minute per-conv timeout); a trigger answered `MEMORY_EXTRACTION_BUSY` (another extraction took the slot first) is deferred to the next pass without counting an attempt
 
 - **memory_embed_recompute.c/h**: Embedding recomputation worker
    - Detects model swaps via `system_metadata.embedding_model_id` vs `g_config.memory.model_id`

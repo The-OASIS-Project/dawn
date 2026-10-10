@@ -79,7 +79,10 @@ void memory_extraction_build_fallback(struct session *session, memory_extraction
  * @param message_count Number of messages in conversation
  * @param duration_seconds Session duration
  * @param fallback Session's active LLM config to retry with on failure (NULL to disable)
- * @return 0 on success, 1 on failure
+ * @return 0 when started or nothing to do, 1 on failure, MEMORY_EXTRACTION_BUSY when the
+ *         user's extraction is running or held or every slot is busy (a conversation then
+ *         waits in the queue and runs, re-read from the database, at the next release;
+ *         memory recovery's own requests aren't queued)
  */
 int memory_trigger_extraction(int user_id,
                               int64_t conversation_id,
@@ -106,14 +109,29 @@ bool memory_extraction_in_progress(int user_id);
  */
 bool memory_extraction_wait_idle(int user_id, int timeout_sec);
 
+/** memory_trigger_extraction(): refused for now (queued, or recovery retries it). */
+#define MEMORY_EXTRACTION_BUSY 2
+
+/** Drop the user's queued extractions of the conversations in @p ids (a forget,
+ *  while it holds the user, so none runs again after it). */
+void memory_extraction_unqueue_conversations(int user_id, const int64_t *ids, int n);
+
+/** Drop every queued extraction of the user (forgetting all of their memories). */
+void memory_extraction_unqueue_user(int user_id);
+
+/** At shutdown: start nothing more from the queue and drop it (memory recovery
+ *  picks those conversations up on the next start). */
+void memory_extraction_stop_queue(void);
+
 /** Users whose extraction can be held at once (memory_extraction_hold_user). */
 #define MEMORY_EXTRACTION_MAX_HOLDS 32
 
 /**
  * @brief Wait for a user's in-flight extraction to finish, then block new ones
  *
- * Marks the user held, so an extraction triggered meanwhile for this user is
- * skipped as "already in progress" (memory_recovery picks it up later).  Holds
+ * Marks the user held, so an extraction triggered meanwhile for this user
+ * waits in the queue until the hold is released; while the hold waits, the
+ * queue starts nothing for the user.  Holds
  * have their own table (MEMORY_EXTRACTION_MAX_HOLDS), apart from the running
  * extractions' slots, so they never take another user's capacity.  For
  * operations that must see every row an extraction writes (e.g. forgetting a
