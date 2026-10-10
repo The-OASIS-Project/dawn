@@ -88,6 +88,7 @@ static const char *DDL =
    "  role TEXT NOT NULL,"
    "  content TEXT NOT NULL,"
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+   "  kind TEXT DEFAULT NULL,"
    "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
    ");"
    "INSERT INTO messages (id, conversation_id, role, content) VALUES (100, 10, 'user', 'hello');"
@@ -1194,6 +1195,9 @@ void test_forget_marks_conversations_extracted(void) {
           "INSERT INTO messages (id, conversation_id, role, content) VALUES "
           "(7001, 25, 'user', 'a'), (7002, 25, 'assistant', 'b'), (7003, 30, 'user', 'c'), "
           "(7004, 40, 'user', 'd');"
+          /* Request context isn't extracted, so it doesn't move the cursor. */
+          "INSERT INTO messages (id, conversation_id, role, content, kind) "
+          "VALUES (7010, 25, 'user', 'ctx', 'turn_context');"
           "UPDATE conversations SET message_count = 2 WHERE id = 25;"
           "UPDATE conversations SET message_count = 1 WHERE id = 30;");
 

@@ -323,11 +323,12 @@ static int forget_in_tx_locked(int user_id,
    /* Forgetting means what was learned so far: the conversations count as
     * extracted, so memory recovery doesn't learn them again (what is said in
     * them from now on is extracted as usual). */
-   FORGET_STEP("UPDATE conversations SET last_extracted_msg_count = message_count, "
-               "last_extracted_msg_id = COALESCE((SELECT MAX(m.id) FROM messages m WHERE "
-               "m.conversation_id = conversations.id), 0), extraction_attempts = 0 "
-               "WHERE user_id = ?1 AND id IN " MEMORY_FORGET_IN_SET,
-               ignored);
+   FORGET_STEP(
+       "UPDATE conversations SET last_extracted_msg_count = message_count, "
+       "last_extracted_msg_id = COALESCE((SELECT MAX(m.id) FROM messages m WHERE "
+       "m.conversation_id = conversations.id AND m.kind IS NULL), 0), extraction_attempts = 0 "
+       "WHERE user_id = ?1 AND id IN " MEMORY_FORGET_IN_SET,
+       ignored);
 #undef FORGET_STEP
    (void)sqlite3_exec(s_db.db,
                       "DELETE FROM forget_collected; DELETE FROM forget_facts; "
