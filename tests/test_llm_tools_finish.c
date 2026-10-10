@@ -193,6 +193,23 @@ static void test_every_tool_frame_is_known(void) {
    }
 }
 
+/* Only a whole opening line is a frame: with a tag, without one, or before a
+ * CRLF; prose that starts the same way, or a malformed tag, isn't. */
+static void test_frame_needs_whole_open_line(void) {
+   char *tagged = llm_third_party_frame(TOOL_FRAME_WEB, "dawn-ctx-0a1b2c3d", "x\n");
+   TEST_ASSERT_NOT_NULL(tagged);
+   TEST_ASSERT_EQUAL_STRING(TOOL_FRAME_WEB, llm_third_party_present(tagged));
+   free(tagged);
+   TEST_ASSERT_EQUAL_STRING(TOOL_FRAME_EMAIL,
+                            llm_third_party_present("a\r\n--- EMAIL CONTENT ---\r\nb"));
+   TEST_ASSERT_NULL(llm_third_party_present("--- WEB CONTENT ACCESSIBILITY GUIDELINES ---\n"));
+   TEST_ASSERT_NULL(llm_third_party_present("x\n--- EMAIL CONTENT POLICY\n"));
+   TEST_ASSERT_NULL(llm_third_party_present("--- WEB CONTENT (draft) ---\n"));
+   TEST_ASSERT_NULL(llm_third_party_present("--- WEB CONTENT (dawn-ctx-0a1b2c3) ---\n"));
+   TEST_ASSERT_NULL(llm_third_party_present("--- WEB CONTENT --- and more\n"));
+   TEST_ASSERT_NULL(llm_third_party_present("--- WEB CONTENT"));
+}
+
 /* With no finish step, each result is finished as it came. */
 static void test_no_finish_step_finishes_each(void) {
    add_call(FORGED);
@@ -241,6 +258,7 @@ int main(void) {
    RUN_TEST(test_a_header_is_put_on_after_neutralizing);
    RUN_TEST(test_third_party_text_is_framed);
    RUN_TEST(test_every_tool_frame_is_known);
+   RUN_TEST(test_frame_needs_whole_open_line);
    RUN_TEST(test_no_finish_step_finishes_each);
    RUN_TEST(test_a_call_outside_a_batch_finishes_at_once);
    RUN_TEST(test_a_call_to_a_gone_tool_is_refused);

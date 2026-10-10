@@ -21,6 +21,8 @@
 
 #include "llm/llm_third_party.h"
 
+#include <ctype.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,19 +62,42 @@ char *llm_third_party_frame(const char *name, const char *tag, const char *body)
    return framed;
 }
 
+/* Whether @p p, just past "--- NAME", ends the opening line prompt_framed
+ * writes: " ---" (no tag) or " (dawn-ctx-<8 hex>) ---", then the line's end.
+ * Prose that only starts like a frame ("--- WEB CONTENT ACCESSIBILITY") isn't. */
+static bool frame_open_rest(const char *p) {
+   static const char k_tag[] = " (dawn-ctx-";
+   if (strncmp(p, k_tag, sizeof(k_tag) - 1) == 0) {
+      p += sizeof(k_tag) - 1;
+      for (int i = 0; i < 8; i++, p++) {
+         if (!isxdigit((unsigned char)*p)) {
+            return false;
+         }
+      }
+      if (*p++ != ')') {
+         return false;
+      }
+   }
+   if (strncmp(p, " ---", 4) != 0) {
+      return false;
+   }
+   p += 4;
+   return *p == '\0' || *p == '\n' || (*p == '\r' && (p[1] == '\n' || p[1] == '\0'));
+}
+
 const char *llm_third_party_present(const char *text) {
    if (!text) {
       return NULL;
    }
    for (size_t i = 0; i < sizeof(k_frames) / sizeof(k_frames[0]); i++) {
       char open[48];
-      const int n = snprintf(open, sizeof(open), "--- %s ", k_frames[i].name);
+      const int n = snprintf(open, sizeof(open), "--- %s", k_frames[i].name);
       if (n <= 0 || (size_t)n >= sizeof(open)) {
          continue;
       }
       for (const char *p = strstr(text, open); p; p = strstr(p + 1, open)) {
-         /* At a line's start: "--- EMAIL CONTENT (tag) ---" or "... ---". */
-         if (p == text || p[-1] == '\n') {
+         /* A whole opening line: "--- EMAIL CONTENT (tag) ---" or "... ---". */
+         if ((p == text || p[-1] == '\n') && frame_open_rest(p + n)) {
             return k_frames[i].name;
          }
       }
