@@ -315,7 +315,8 @@ int tool_results_db_add(const tool_results_new_t *r, int *evicted_out) {
          } else {
             sqlite3_bind_null(st, 6);
          }
-         sqlite3_bind_int(st, 7, (int)r->kind);
+         const int frame = r->frame >= 0 && r->frame <= TOOL_RESULTS_FRAME_MAX ? r->frame : 0;
+         sqlite3_bind_int(st, 7, (int)r->kind | (frame << 4));
          sqlite3_bind_int64(st, 8, r->chars);
          sqlite3_bind_int64(st, 9, need);
          sqlite3_bind_blob64(st, 10, r->body, (sqlite3_uint64)r->bytes, SQLITE_STATIC);
@@ -353,8 +354,9 @@ int tool_results_db_get(const char *id, tool_results_meta_t *meta, char **body, 
    if (rc == SQLITE_ROW) {
       meta->user_id = sqlite3_column_int(st, 0);
       meta->conversation_id = sqlite3_column_int64(st, 1);
-      meta->kind = sqlite3_column_int(st, 2) == TOOL_RESULTS_JSON ? TOOL_RESULTS_JSON
-                                                                  : TOOL_RESULTS_TEXT;
+      const int kind = sqlite3_column_int(st, 2);
+      meta->kind = (kind & 0xF) == TOOL_RESULTS_JSON ? TOOL_RESULTS_JSON : TOOL_RESULTS_TEXT;
+      meta->frame = (kind >> 4) & TOOL_RESULTS_FRAME_MAX;
       meta->chars = sqlite3_column_int64(st, 3);
       meta->bytes = sqlite3_column_int64(st, 4);
       const char *name = (const char *)sqlite3_column_text(st, 5);

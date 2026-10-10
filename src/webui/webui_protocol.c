@@ -28,6 +28,7 @@
 
 #include "logging.h"
 #include "utils/string_utils.h"
+#include "webui/webui_email_client.h"
 
 /* The feature flags, one line in docs/WEBSOCKET_PROTOCOL.md each.  Names are
  * stable snake_case; a flag is never removed while the protocol version
@@ -62,9 +63,8 @@ static const char *const s_features[] = {
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has
- * none, and the flag isn't advertised.  Must match its declaration in
- * webui/webui_email_panel.h (not included here: that header pulls in the WebUI). */
-bool webui_email_client_enabled(void) __attribute__((weak));
+ * none, and the flag isn't advertised. */
+#pragma weak webui_email_client_enabled
 
 /* Flags that depend on how the daemon runs, each with its check.  Same rules
  * as s_features. */
@@ -75,6 +75,10 @@ static const struct {
    /* The mail panel's verbs answer: email_list, email_search, email_read,
     * email_set_flags, email_unread_counts (docs/WEBSOCKET_PROTOCOL.md, Email). */
    { "email_client", webui_email_client_enabled },
+   /* A text turn may carry email_refs (one email the user attached, by account
+    * and message id); the model reads it with the email tool, and the question
+    * row comes back with email_ref (docs/WEBSOCKET_PROTOCOL.md, Email). */
+   { "email_refs", webui_email_client_enabled },
 };
 
 static bool append_feature(char *out, size_t size, size_t *len, bool first, const char *name) {

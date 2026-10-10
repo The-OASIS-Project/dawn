@@ -14,8 +14,9 @@
 #   3. A TOOL_KIND_PREPARE entry names a confirm that the same table lists as
 #      TOOL_KIND_ACT.
 #   4. Any other entry names no confirm (NULL).
-#   5. Every row is written { "action", TOOL_KIND_X, NULL | "confirm" } (a row
-#      in any other form is reported, not skipped).
+#   5. Every row is written { "action", TOOL_KIND_X, NULL | "confirm" }, with
+#      an optional fourth field NULL | TOOL_FRAME_X (a row in any other form is
+#      reported, not skipped).
 #   6. No tool sets .default_kind = TOOL_KIND_PREPARE, and every metadata that
 #      sets .action_kinds also sets .action_kind_count.
 #
@@ -60,14 +61,14 @@ for f in $FILES; do
          my ($name, $body) = ($1, $2);
          my $written = () = $body =~ /\{/g;
          my (%kind, @rows);
-         while ($body =~ /\{\s*"([^"]+)"\s*,\s*TOOL_KIND_(\w+)\s*,\s*(NULL|"([^"]*)")\s*\}/g) {
+         while ($body =~ /\{\s*"([^"]+)"\s*,\s*TOOL_KIND_(\w+)\s*,\s*(NULL|"([^"]*)")\s*(?:,\s*(?:NULL|TOOL_FRAME_\w+)\s*)?\}/g) {
             my ($a, $k, $c) = ($1, $2, defined $4 ? $4 : undef);
             if (exists $kind{$a}) { print "$ARGV: $name lists \x27$a\x27 twice\n"; $bad = 1; }
             $kind{$a} = $k;
             push @rows, [$a, $k, $c];
          }
          if (@rows != $written) {
-            print "$ARGV: $name: " . ($written - @rows) . " row(s) not written as { \"action\", TOOL_KIND_X, NULL | \"confirm\" }\n";
+            print "$ARGV: $name: " . ($written - @rows) . " row(s) not written as { \"action\", TOOL_KIND_X, NULL | \"confirm\"[, NULL | TOOL_FRAME_X] }\n";
             $bad = 1;
          }
          for my $r (@rows) {

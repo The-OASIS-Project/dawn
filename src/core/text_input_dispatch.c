@@ -50,6 +50,15 @@ char *core_text_input_dispatch(session_t *session,
    if (!session || !text || (text[0] == '\0' && !(opts && opts->question_message))) {
       return NULL;
    }
+   /* What the user attached goes with the turn, or the turn doesn't run:
+    * refused before its question is added or saved. */
+   if (opts && (opts->email_account || opts->email_message_id) &&
+       session_turn_attach_email(session, opts->email_account, opts->email_message_id) != SUCCESS) {
+      OLOG_WARNING("text_input_dispatch: session %u: attached email refused (no running turn of "
+                   "this caller, a bad name, or out of memory)",
+                   session->session_id);
+      return NULL;
+   }
 
    /* Observe-side `status` (background-jobs Phase 2, §6.2).  Three terms, because
     * none alone covers the set: the session type catches a job worker, the
@@ -147,8 +156,11 @@ char *core_text_input_dispatch(session_t *session,
    } else if (opts && opts->conversation_id > 0 && question_kind == MESSAGE_KIND_NONE) {
       const char *persist_text = opts->persist_content_override ? opts->persist_content_override
                                                                 : text;
-      if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", persist_text,
-                                 &user_msg_id) == AUTH_DB_SUCCESS) {
+      const conv_message_row_t row = { .role = "user",
+                                       .content = persist_text,
+                                       .email_ref = opts->email_ref };
+      if (conv_db_add_row(opts->conversation_id, opts->auth_user_id, &row, &user_msg_id) ==
+          AUTH_DB_SUCCESS) {
          session_stamp_last_message_id(session, "user", user_msg_id);
          session_prefix_question_saved(session, opts->conversation_id, opts->auth_user_id,
                                        user_msg_id);

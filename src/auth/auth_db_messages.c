@@ -67,9 +67,9 @@ static const auth_db_stmt_def_t s_msg_stmts[] = {
     * a turn's context goes in front of: a user message, ordinary or an
     * envelope. */
    { "msg_add",
-     "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
-     "reasoning, llm_blocks_len, llm_blocks, created_at, is_error, kind, context_of, images) "
-     "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?14 "
+     "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, reasoning, "
+     "llm_blocks_len, llm_blocks, created_at, is_error, kind, context_of, images, email_ref) "
+     "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?14, ?15 "
      "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?13) "
      "AND (?12 IS NULL OR EXISTS (SELECT 1 FROM messages q WHERE q.id = ?12 "
      "AND q.conversation_id = ?1 AND q.role = 'user' "
@@ -185,6 +185,18 @@ static bool images_ok(const char *json) {
       ok = json_object_is_type(v, json_type_string) && image_id_ok(json_object_get_string(v));
    }
    json_object_put(arr);
+   return ok;
+}
+
+/* Whether @p json is what a question's email_ref holds: a JSON object within
+ * CONV_EMAIL_REF_MAX bytes. */
+static bool email_ref_ok(const char *json) {
+   if (strlen(json) > CONV_EMAIL_REF_MAX) {
+      return false;
+   }
+   struct json_object *obj = json_tokener_parse(json);
+   const bool ok = obj && json_object_is_type(obj, json_type_object);
+   json_object_put(obj);
    return ok;
 }
 
@@ -306,13 +318,15 @@ out:
 /* A row the insert accepts: a known role, a kind that fits it, a question only
  * on a kinded row.  Its blocks come back through @p blocks_out (NULL when the
  * row can't hold them: the text still saves), its images through
- * @p images_out (likewise). */
+ * @p images_out and its email_ref through @p email_ref_out (likewise). */
 static int row_check(int64_t conv_id,
                      const conv_message_row_t *row,
                      const char **blocks_out,
-                     const char **images_out) {
+                     const char **images_out,
+                     const char **email_ref_out) {
    *blocks_out = NULL;
    *images_out = NULL;
+   *email_ref_out = NULL;
    if (conv_id <= 0 || !row || !row->role || !row->content || !valid_role(row->role) ||
        row->context_of < 0) {
       return AUTH_DB_INVALID;
@@ -340,6 +354,16 @@ static int row_check(int64_t conv_id,
       blocks = NULL;
    }
    *blocks_out = blocks;
+
+   /* An attached email's name belongs to the question it was attached to;
+    * elsewhere it is dropped (the text still saves). */
+   if (row->email_ref && (strcmp(row->role, "user") != 0 || kind != MESSAGE_KIND_NONE ||
+                          !email_ref_ok(row->email_ref))) {
+      OLOG_WARNING("conv_db_add_row: email_ref on a %s row in conv %lld dropped", row->role,
+                   (long long)conv_id);
+   } else {
+      *email_ref_out = row->email_ref;
+   }
 
    /* Images belong to a tool result. */
    if (row->images && (strcmp(row->role, "tool") != 0 || !images_ok(row->images))) {
@@ -384,7 +408,8 @@ int msg_insert_locked(int64_t conv_id,
    *id_out = 0;
    const char *blocks = NULL;
    const char *images = NULL;
-   const int checked = row_check(conv_id, row, &blocks, &images);
+   const char *email_ref = NULL;
+   const int checked = row_check(conv_id, row, &blocks, &images, &email_ref);
    if (checked != AUTH_DB_SUCCESS) {
       return checked;
    }
@@ -429,6 +454,7 @@ int msg_insert_locked(int64_t conv_id,
    }
    sqlite3_bind_int(st, 13, user_id);
    bind_text_or_null(st, 14, images);
+   bind_text_or_null(st, 15, email_ref);
 
    int rc = sqlite3_step(st);
    sqlite3_reset(st);
@@ -485,7 +511,8 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
       *id_out = 0;
    const char *blocks = NULL;
    const char *images = NULL;
-   const int checked = row_check(conv_id, row, &blocks, &images);
+   const char *email_ref = NULL;
+   const int checked = row_check(conv_id, row, &blocks, &images, &email_ref);
    if (checked != AUTH_DB_SUCCESS) {
       return checked;
    }
@@ -560,7 +587,8 @@ int conv_db_add_rows(int64_t conv_id,
    for (int i = 0; i < n; i++) {
       const char *blocks = NULL;
       const char *images = NULL;
-      const int checked = row_check(conv_id, &rows[i], &blocks, &images);
+      const char *email_ref = NULL;
+      const int checked = row_check(conv_id, &rows[i], &blocks, &images, &email_ref);
       if (checked != AUTH_DB_SUCCESS || rows[i].context_of_row < 0 || rows[i].context_of_row > i) {
          if (!ids_out) {
             free(ids);

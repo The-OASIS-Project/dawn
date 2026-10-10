@@ -302,6 +302,8 @@ static void session_free(session_t *session) {
    session->turn_pending_user = NULL;
    free(session->turn_pending_reply);
    session->turn_pending_reply = NULL;
+   free(session->turn_attached);
+   session->turn_attached = NULL;
    free(session->unclaimed_user);
    session->unclaimed_user = NULL;
    free(session->unclaimed_reply);
@@ -1572,12 +1574,52 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
    return session_dispatch_user_turn_ex(session, user_turn_text, NULL);
 }
 
+/* @p note with the note naming the email the running turn attached
+ * (session_turn_attach_email) after it: heap, or NULL when there is neither
+ * (or on allocation failure, logged: the turn then goes without them). */
+static char *turn_note_with_email(session_t *session, const char *note) {
+   pthread_mutex_lock(&session->history_mutex);
+   char *email = session->turn_attached ? strdup(session->turn_attached) : NULL;
+   const bool attached = session->turn_attached != NULL;
+   pthread_mutex_unlock(&session->history_mutex);
+   if (attached && !email) {
+      OLOG_ERROR("Session %u: out of memory naming the attached email", session->session_id);
+   }
+   if (!email) {
+      return note ? strdup(note) : NULL;
+   }
+   if (!note || !*note) {
+      return email;
+   }
+   const size_t len = strlen(note) + 1 + strlen(email) + 1;
+   char *both = malloc(len);
+   if (both) {
+      snprintf(both, len, "%s\n%s", note, email);
+   } else {
+      OLOG_ERROR("Session %u: out of memory naming the attached email", session->session_id);
+   }
+   free(email);
+   return both;
+}
+
+static int dispatch_with_note(session_t *session, const char *user_turn_text, const char *note);
+
 int session_dispatch_user_turn_ex(session_t *session,
                                   const char *user_turn_text,
                                   const char *turn_note) {
    if (session == NULL || user_turn_text == NULL)
       return SUCCESS;
+   char *note = turn_note_with_email(session, turn_note);
+   const int rc = dispatch_with_note(session, user_turn_text, note);
+   free(note);
+   return rc;
+}
 
+/* session_dispatch_user_turn_ex() with the turn's whole note (the channel's
+ * and the attached email's). */
+static int dispatch_with_note(session_t *session,
+                              const char *user_turn_text,
+                              const char *turn_note) {
    /* Memory citation signal: clear the per-turn [M#]->item_id stash at the start
     * of every dispatch.  The turn's seam sets it below iff citation is enabled
     * and this turn has memory items; clearing here means a turn without them
@@ -1595,7 +1637,7 @@ int session_dispatch_user_turn_ex(session_t *session,
       /* No builder (a build without one): the base prompt is what a new
        * context freezes; a frozen one keeps its own. */
       composed_prompt_t base = { .stable_prefix = get_command_prompt_dup() };
-      session_compaction_prepare(session, 0);
+      session_compaction_prepare(session, turn_note ? (int)(strlen(turn_note) / 4) : 0);
       session_prefix_apply_turn(session, base.stable_prefix ? &base : NULL, turn_note);
       composed_prompt_free(&base);
       return SUCCESS;

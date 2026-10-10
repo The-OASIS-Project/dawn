@@ -25,13 +25,19 @@
  *   background job, research worker  yes   yes    yes    no      no       no
  *   unattended: a background turn,
  *   no running turn, no context      yes   no     yes    no      no       no
+ *   user, turn carrying someone
+ *   else's text the user attached    yes   yes    yes    no      yes      no
  *
  * A text can claim any number as its sender, so an unverified turn reads and
  * prepares, and an action waits for the user's reply code (DAWN texts the
  * user what was asked and a code; core/tool_call_challenge.h).  Background work reads, looks things
  * up and reports; it never acts: what it read may be steering it.  An unattended turn (a job's
  * follow-up, in whatever session it runs) and a call with no running turn (an MQTT message naming a
- * session) can't reach out either.
+ * session) can't reach out either.  A turn carrying an email the user
+ * attached is the user's, but the email's text could be steering it: it may
+ * read, look up, check state and prepare (a draft waits for the user's own
+ * confirm); a device change or an action (a memory saved included) waits for
+ * the user to ask in a message of their own.
  *
  * Decided once per call, at the one place every model tool call runs
  * (llm_tools_execute_from_treg; plan steps come back through it), and at the
@@ -58,10 +64,11 @@ extern "C" {
 #endif
 
 typedef enum {
-   TOOL_CALLER_USER = 0,   /* a live turn the user started */
-   TOOL_CALLER_UNVERIFIED, /* the same, from a sender the channel can't vouch for */
-   TOOL_CALLER_JOB,        /* a background job's or research worker's own turn */
-   TOOL_CALLER_UNATTENDED, /* a background turn, no running turn, or no context */
+   TOOL_CALLER_USER = 0,    /* a live turn the user started */
+   TOOL_CALLER_UNVERIFIED,  /* the same, from a sender the channel can't vouch for */
+   TOOL_CALLER_JOB,         /* a background job's or research worker's own turn */
+   TOOL_CALLER_UNATTENDED,  /* a background turn, no running turn, or no context */
+   TOOL_CALLER_THIRD_PARTY, /* a live user turn carrying someone else's text it attached */
 } tool_caller_t;
 
 typedef enum {

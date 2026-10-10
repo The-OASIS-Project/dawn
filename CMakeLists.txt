@@ -634,6 +634,7 @@ set(DAWN_SOURCES
     src/llm/llm_turn_blocks.c
     src/llm/llm_history_kind.c
     src/llm/llm_context_text.c
+    src/llm/llm_third_party.c
     src/llm/llm_turn_blocks_stored.c
     src/llm/llm_key_tag.c
     src/llm/llm_history_rows.c
@@ -740,6 +741,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
         src/webui/webui_turn_ref.c
+        src/webui/webui_email_ref.c
         src/webui/webui_attachments.c
         src/webui/webui_http.c
         src/webui/webui_admin.c
@@ -967,6 +969,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v99.c
     src/auth/auth_db_migrations_v100.c
     src/auth/auth_db_migrations_v101.c
+    src/auth/auth_db_migrations_v102.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c

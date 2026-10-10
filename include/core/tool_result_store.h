@@ -116,6 +116,24 @@ int tool_result_store_put(struct session *session,
                           bool *cut_out);
 
 /**
+ * @brief tool_result_store_put for text that is someone else's: @p frame
+ *        (TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, or NULL) is kept with it, and a
+ *        read of it is framed the same way (tool_result_store_frame)
+ */
+int tool_result_store_put_framed(struct session *session,
+                                 const char *tool_name,
+                                 const char *tool_call_id,
+                                 const char *text,
+                                 size_t len,
+                                 bool is_json,
+                                 const char *frame,
+                                 char id_out[TOOL_RESULTS_ID_LEN],
+                                 bool *cut_out);
+
+/** The frame an open result's text goes in (TOOL_FRAME_*), or NULL. */
+const char *tool_result_store_frame(const tool_result_doc_t *doc);
+
+/**
  * @brief Open result @p id for the caller in @p session acting for
  *        @p user_id: allowed when the result is @p user_id's and either in the
  *        caller's conversation (its turn's, else the live history's) or

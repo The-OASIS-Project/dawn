@@ -44,6 +44,7 @@
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "prompts.h"
 #include "utils/string_utils.h"
 
 /* Caller holds history_mutex.  The array a turn-owned append/stamp/rebuild
@@ -1211,6 +1212,8 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
    session->turn_awaits_conversation = false;
    session->turn_background = false;
    session->turn_from_visual = false;
+   free(session->turn_attached);
+   session->turn_attached = NULL;
    session->turn_context_reset = false;
    free(session->turn_pending_user);
    session->turn_pending_user = NULL;
@@ -1459,6 +1462,61 @@ void session_turn_mark_from_visual(session_t *session) {
    pthread_mutex_unlock(&session->history_mutex);
 }
 
+bool session_attach_name_ok(const char *name, size_t max) {
+   const size_t len = name ? strlen(name) : 0;
+   if (len == 0 || len > max || !utf8_is_valid(name, len)) {
+      return false;
+   }
+   for (size_t i = 0; i < len; i++) {
+      const unsigned char c = (unsigned char)name[i];
+      if (c < 0x20 || c == 0x7f) {
+         return false;
+      }
+   }
+   return true;
+}
+
+/* @p name as a JSON string, quotes included: the note quotes names that way so
+ * nothing in one (a quote, a backslash) can end it.  Heap; NULL on failure. */
+static char *json_quoted(const char *name) {
+   struct json_object *s = json_object_new_string(name);
+   const char *q = s ? json_object_to_json_string_ext(s, JSON_C_TO_STRING_NOSLASHESCAPE) : NULL;
+   char *out = q ? strdup(q) : NULL;
+   json_object_put(s);
+   return out;
+}
+
+int session_turn_attach_email(session_t *session, const char *account, const char *message_id) {
+   if (!session || !session_attach_name_ok(account, SESSION_ATTACH_ACCOUNT_MAX) ||
+       !session_attach_name_ok(message_id, SESSION_ATTACH_MESSAGE_ID_MAX)) {
+      return FAILURE;
+   }
+   char *acct_q = json_quoted(account);
+   char *id_q = json_quoted(message_id);
+   const int len = (acct_q && id_q) ? snprintf(NULL, 0, EMAIL_ATTACHED_NOTE_TEMPLATE, acct_q, id_q)
+                                    : -1;
+   char *note = len > 0 ? malloc((size_t)len + 1) : NULL;
+   if (note) {
+      snprintf(note, (size_t)len + 1, EMAIL_ATTACHED_NOTE_TEMPLATE, acct_q, id_q);
+   }
+   free(acct_q);
+   free(id_q);
+   if (!note) {
+      return FAILURE;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   /* Only the running turn's own code: the turn's end is what lets go of it. */
+   const bool ours = turn_is_caller_locked(session);
+   if (ours) {
+      free(session->turn_attached);
+      session->turn_attached = note;
+      note = NULL;
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+   free(note);
+   return ours ? SUCCESS : FAILURE;
+}
+
 void session_turn_mark_background(session_t *session) {
    if (!session) {
       return;
@@ -1518,6 +1576,16 @@ bool session_turn_is_background(session_t *session) {
    return background;
 }
 
+bool session_turn_carries_third_party(session_t *session) {
+   if (!session) {
+      return false;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   const bool attached = turn_is_caller_locked(session) && session->turn_attached;
+   pthread_mutex_unlock(&session->history_mutex);
+   return attached;
+}
+
 bool session_turn_user_originated(session_t *session) {
    if (!session) {
       return false;
@@ -1553,6 +1621,7 @@ bool turn_origin_capture(turn_origin_t *out) {
    const bool user = turn_user_originated_locked(ctx);
    const uint32_t number = ctx->turn_number;
    const bool from_visual = ctx->turn_from_visual;
+   const bool third_party = ctx->turn_attached != NULL;
    pthread_mutex_unlock(&ctx->history_mutex);
    if (!user) {
       return false;
@@ -1562,6 +1631,7 @@ bool turn_origin_capture(turn_origin_t *out) {
    out->turn_number = number;
    out->code_redeemed = s_call_code_redeemed;
    out->from_visual = from_visual;
+   out->third_party = third_party;
    return true;
 }
 
@@ -2030,6 +2100,8 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
    session->turn_active = false;
    session->turn_owner_token = 0;
    session->turn_history_conv = 0;
+   free(session->turn_attached);
+   session->turn_attached = NULL;
    session->turn_pin_conv = 0;
    session->turn_appends = 0;
    /* Messages the turn couldn't save yet.  Decided in this same critical

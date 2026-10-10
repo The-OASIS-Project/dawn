@@ -104,6 +104,10 @@ bool session_turn_is_background(session_t *session) {
    (void)session;
    return false;
 }
+bool session_turn_carries_third_party(session_t *session) {
+   (void)session;
+   return false;
+}
 static __thread bool s_stub_code_redeemed;
 bool session_call_code_redeemed(void) {
    return s_stub_code_redeemed;
@@ -610,6 +614,19 @@ int tool_result_store_put(struct session *session,
       *cut_out = false;
    }
    return TOOL_RESULT_STORE_NO_USER;
+}
+int tool_result_store_put_framed(struct session *session,
+                                 const char *tool_name,
+                                 const char *tool_call_id,
+                                 const char *text,
+                                 size_t len,
+                                 bool is_json,
+                                 const char *frame,
+                                 char id_out[TOOL_RESULTS_ID_LEN],
+                                 bool *cut_out) {
+   (void)frame;
+   return tool_result_store_put(session, tool_name, tool_call_id, text, len, is_json, id_out,
+                                cut_out);
 }
 
 void tool_result_store_tree_seed(struct session *session,

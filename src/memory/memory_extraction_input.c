@@ -32,8 +32,10 @@
 #include "auth/auth_db.h"
 #include "core/automated_event.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_third_party.h"
 #include "logging.h"
 #include "memory/memory_note_guard.h"
+#include "prompts.h"
 #include "utils/string_utils.h"
 
 /* Return a message for the extraction transcript with inline base64 image data
@@ -106,6 +108,95 @@ static struct json_object *extraction_message_strip_images(struct json_object *m
  * content; tool results carry context, not user facts, so truncating them for
  * extraction is safe. */
 #define MEMORY_EXTRACTION_MAX_MSG_BYTES 16384
+
+
+/* Whether a tool result's content (a string, or text parts) was framed as
+ * someone else's (llm_third_party_frame). */
+static bool content_is_third_party(struct json_object *content) {
+   if (json_object_is_type(content, json_type_string)) {
+      return llm_third_party_present(json_object_get_string(content)) != NULL;
+   }
+   if (!json_object_is_type(content, json_type_array)) {
+      return false;
+   }
+   for (size_t i = 0; i < json_object_array_length(content); i++) {
+      struct json_object *text = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(content, i), "text", &text) &&
+          llm_third_party_present(json_object_get_string(text))) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* A copy of @p obj with its "content" replaced by @p content (taken). */
+static struct json_object *with_content(struct json_object *obj, struct json_object *content) {
+   struct json_object *copy = json_object_new_object();
+   if (!copy) {
+      json_object_put(content);
+      return NULL;
+   }
+   json_object_object_foreach(obj, key, val) {
+      if (strcmp(key, "content") != 0) {
+         json_object_object_add(copy, key, json_object_get(val));
+      }
+   }
+   json_object_object_add(copy, "content", content);
+   return copy;
+}
+
+/* @p msg with every tool result DAWN framed as someone else's text (an email,
+ * a page) reduced to a stub: an email the model read can't plant a "fact"
+ * ("my accountant is now x@y") that a later request then acts on.  The model's
+ * own words about it are kept.  Never mutates @p msg; returns an owned ref, or
+ * NULL on allocation failure (the message is then left out, never the email
+ * kept). */
+static struct json_object *extraction_message_stub_third_party(struct json_object *msg) {
+   struct json_object *role = NULL, *content = NULL;
+   if (!json_object_object_get_ex(msg, "content", &content) ||
+       !json_object_object_get_ex(msg, "role", &role)) {
+      return json_object_get(msg);
+   }
+   /* OpenAI: a role:tool message. */
+   if (strcmp(json_object_get_string(role), "tool") == 0) {
+      if (!content_is_third_party(content)) {
+         return json_object_get(msg);
+      }
+      return with_content(msg, json_object_new_string(MEMORY_EXTRACTION_THIRD_PARTY_STUB));
+   }
+   /* Claude: tool_result parts in a user message. */
+   if (!json_object_is_type(content, json_type_array)) {
+      return json_object_get(msg);
+   }
+   bool any = false;
+   const size_t n = json_object_array_length(content);
+   for (size_t i = 0; i < n && !any; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i), *type = NULL, *inner = NULL;
+      any = json_object_object_get_ex(part, "type", &type) &&
+            strcmp(json_object_get_string(type), "tool_result") == 0 &&
+            json_object_object_get_ex(part, "content", &inner) && content_is_third_party(inner);
+   }
+   if (!any) {
+      return json_object_get(msg);
+   }
+   struct json_object *parts = json_object_new_array();
+   for (size_t i = 0; parts && i < n; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i), *type = NULL, *inner = NULL;
+      struct json_object *keep = json_object_get(part);
+      if (json_object_object_get_ex(part, "type", &type) &&
+          strcmp(json_object_get_string(type), "tool_result") == 0 &&
+          json_object_object_get_ex(part, "content", &inner) && content_is_third_party(inner)) {
+         json_object_put(keep);
+         keep = with_content(part, json_object_new_string(MEMORY_EXTRACTION_THIRD_PARTY_STUB));
+      }
+      if (!keep || json_object_array_add(parts, keep) != 0) {
+         json_object_put(keep);
+         json_object_put(parts);
+         parts = NULL;
+      }
+   }
+   return parts ? with_content(msg, parts) : NULL;
+}
 
 /* Cap a single message's string content to MEMORY_EXTRACTION_MAX_MSG_BYTES.
  * Returns an owned ref: the original when within budget, else a copy with
@@ -245,10 +336,15 @@ struct json_object *memory_extraction_build_input(int user_id,
              * OpenAI role:tool message, and carry no id of their own. */
             unverified_user++;
          }
-         /* strip_images then guard-redact: both return an owned ref and never
-          * mutate the live history; chaining yields one redacted copy (or a
-          * shared ref when neither stage changes anything). */
-         struct json_object *stripped = extraction_message_strip_images(msg);
+         /* third-party stubs, strip_images, then guard-redact: each returns an
+          * owned ref and never mutates the live history; chaining yields one
+          * redacted copy (or a shared ref when no stage changes anything). */
+         struct json_object *unframed = extraction_message_stub_third_party(msg);
+         if (!unframed) {
+            continue;
+         }
+         struct json_object *stripped = extraction_message_strip_images(unframed);
+         json_object_put(unframed);
          struct json_object *guarded = memory_note_guard_redact(note_guard, stripped);
          json_object_put(stripped);
          struct json_object *capped = extraction_message_cap_content(

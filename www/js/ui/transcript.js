@@ -313,6 +313,14 @@
       '<polyline points="10 9 9 9 8 9"/>' +
       '</svg>';
 
+   /** SVG envelope icon, for the email a question was asked about */
+   const EMAIL_ICON_SVG =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<rect x="3" y="5" width="18" height="14" rx="2"/>' +
+      '<path d="m3 7 9 6 9-6"/>' +
+      '</svg>';
+
    /** Small download-arrow glyph shown on chips backed by a stored original. */
    const DOWNLOAD_ICON_SVG =
       '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
@@ -358,6 +366,53 @@
          }
          return false;
       }
+   }
+
+   /**
+    * The chip on a question asked about an attached email: who it's from and
+    * its subject (the row's email_ref), text only.  Not a control: the email
+    * itself lives in the mail panel.
+    * @param {{from?: string, subject?: string}} emailRef
+    * @returns {HTMLElement|null}
+    */
+   function createEmailChip(emailRef) {
+      if (!emailRef || typeof emailRef !== 'object') return null;
+      const from = typeof emailRef.from === 'string' ? emailRef.from : '';
+      const subject = typeof emailRef.subject === 'string' ? emailRef.subject : '';
+      const container = document.createElement('div');
+      container.className = 'transcript-doc-container';
+      const chip = document.createElement('span');
+      chip.className = 'transcript-doc-chip email-ref-chip';
+      chip.setAttribute('role', 'note');
+      chip.setAttribute(
+         'aria-label',
+         'Asked about an email' + (from ? ' from ' + from : '') + (subject ? ': ' + subject : '')
+      );
+      chip.title = (subject || '(no subject)') + (from ? ' \u2014 ' + from : '');
+      const icon = document.createElement('span');
+      icon.className = 'transcript-doc-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = EMAIL_ICON_SVG;
+      const type = document.createElement('span');
+      type.className = 'transcript-doc-type';
+      type.dataset.category = 'email';
+      type.textContent = 'EMAIL';
+      const name = document.createElement('span');
+      name.className = 'transcript-doc-name';
+      name.dir = 'auto';
+      name.textContent = subject || '(no subject)';
+      chip.appendChild(icon);
+      chip.appendChild(type);
+      chip.appendChild(name);
+      if (from) {
+         const who = document.createElement('span');
+         who.className = 'transcript-doc-size';
+         who.dir = 'auto';
+         who.textContent = from;
+         chip.appendChild(who);
+      }
+      container.appendChild(chip);
+      return container;
    }
 
    /**
@@ -495,7 +550,7 @@
     * @param {string} role - Message role (user, assistant, system)
     * @param {string} text - Message text
     */
-   async function addNormalEntry(role, text, extractedDocs, messageId) {
+   async function addNormalEntry(role, text, extractedDocs, messageId, emailRef) {
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
@@ -606,6 +661,12 @@
          firstTextEl.appendChild(createDocumentChips(docData.documents));
          transcript.scrollTop = transcript.scrollHeight;
       }
+      // And the email the question was asked about (a user row's email_ref)
+      const emailChip = role === 'user' && firstTextEl ? createEmailChip(emailRef) : null;
+      if (emailChip) {
+         firstTextEl.appendChild(emailChip);
+         transcript.scrollTop = transcript.scrollHeight;
+      }
 
       // Load and add images AFTER entry is visible (async, may involve network requests)
       if (parsed && DawnVision.loadParsedImages) {
@@ -633,7 +694,7 @@
     * @param {string} role - Message role
     * @param {string} text - Message text
     */
-   async function addTranscriptEntry(role, text, reasoning, messageId) {
+   async function addTranscriptEntry(role, text, reasoning, messageId, emailRef) {
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
@@ -775,12 +836,12 @@
       // racing an async image render, and correct even when other entries interleave.
       if (!hasDebugContent) {
          // Pure user-facing message - show normally
-         await addNormalEntry(role, text, extractedDocs, messageId);
+         await addNormalEntry(role, text, extractedDocs, messageId, emailRef);
       } else if (isOnlyDebugContent(text)) {
          // Pure debug message (only commands/tool results) - debug only
          // Still render document chips if present
-         if (extractedDocs.length > 0) {
-            await addNormalEntry(role, '', extractedDocs, messageId);
+         if (extractedDocs.length > 0 || emailRef) {
+            await addNormalEntry(role, '', extractedDocs, messageId, emailRef);
          } else {
             addDebugEntry(`debug (${role})`, text);
          }
@@ -800,8 +861,8 @@
          });
 
          // Add user-facing text if any (or if documents are attached)
-         if (userText.length > 0 || extractedDocs.length > 0) {
-            await addNormalEntry(role, userText, extractedDocs, messageId);
+         if (userText.length > 0 || extractedDocs.length > 0 || emailRef) {
+            await addNormalEntry(role, userText, extractedDocs, messageId, emailRef);
          }
       }
 
@@ -910,5 +971,6 @@
       // Reused by the memory source viewer (mini-chat render)
       createImageElement: createImageElement,
       createDocumentChips: createDocumentChips,
+      createEmailChip: createEmailChip,
    };
 })(window);

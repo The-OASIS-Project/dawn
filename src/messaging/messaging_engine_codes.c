@@ -179,9 +179,12 @@ char *engine_run_reply_code(const inbound_item_t *item,
    taken->args = NULL;
 
    /* What the model is handed: DAWN's header, then the description and the
-    * result as data (both neutralized; the result bounded). */
+    * result as data (both neutralized; the result bounded).  A finished result
+    * was neutralized and framed in the tool loop: neutralizing it again would
+    * defuse DAWN's own frame lines as imitations. */
    const char *outcome = tool_result_content(result);
-   char *safe_outcome = llm_context_neutralize(outcome ? outcome : "");
+   char *safe_outcome = result->finished ? strdup(outcome ? outcome : "")
+                                         : llm_context_neutralize(outcome ? outcome : "");
    char *safe_description = llm_context_neutralize_line(taken->description);
    size_t outcome_len = safe_outcome ? strlen(safe_outcome) : 0;
    bool cut = false;

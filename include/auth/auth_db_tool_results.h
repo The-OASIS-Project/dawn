@@ -52,6 +52,15 @@ typedef enum {
    TOOL_RESULTS_JSON = 1,
 } tool_results_kind_t;
 
+/* The frame a stored result's text goes in when read back (someone else's
+ * text: an email, a page), kept in content_kind's upper bits (the kind is the
+ * low 4), so a row stored before frames reads as none.  The names are the
+ * caller's (core/tool_result_store.c). */
+#define TOOL_RESULTS_FRAME_NONE 0
+#define TOOL_RESULTS_FRAME_EMAIL 1
+#define TOOL_RESULTS_FRAME_WEB 2
+#define TOOL_RESULTS_FRAME_MAX 15
+
 /** A result to store. */
 typedef struct {
    const char *id;           /**< TOOL_RESULTS_ID_PREFIX id (the caller mints it) */
@@ -61,6 +70,7 @@ typedef struct {
    const char *tool_name;    /**< the tool that produced it */
    const char *tool_call_id; /**< may be NULL */
    tool_results_kind_t kind;
+   int frame;     /**< the third-party frame its text goes in (TOOL_RESULTS_FRAME_*) */
    int64_t chars; /**< characters in body */
    const char *body;
    size_t bytes;
@@ -71,6 +81,7 @@ typedef struct {
    int user_id;
    int64_t conversation_id; /**< 0: unbound */
    tool_results_kind_t kind;
+   int frame; /**< TOOL_RESULTS_FRAME_* */
    int64_t chars;
    int64_t bytes;
    char tool_name[TOOL_RESULTS_TOOL_NAME_MAX];

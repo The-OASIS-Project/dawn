@@ -1644,9 +1644,10 @@ int conv_db_update_llm_settings(int64_t conv_id,
  * Message Operations
  * ============================================================================= */
 
-/* Read the content + tool/reasoning columns + created_at + is_error from a message-SELECT row
- * whose projection is (id, conversation_id, role, content, tool_calls, tool_call_id, reasoning,
- * created_at, is_error).  All pointers are borrowed (valid only during the callback). */
+/* Read the content + tool/reasoning columns + created_at + is_error + email_ref from a
+ * message-SELECT row whose projection is (id, conversation_id, role, content, tool_calls,
+ * tool_call_id, reasoning, created_at, is_error, email_ref).  All pointers are borrowed (valid
+ * only during the callback). */
 static void msg_read_columns(conversation_message_t *msg, sqlite3_stmt *stmt) {
    msg->content = (char *)sqlite3_column_text(stmt, 3);
    msg->tool_calls = (char *)sqlite3_column_text(stmt, 4);
@@ -1654,6 +1655,7 @@ static void msg_read_columns(conversation_message_t *msg, sqlite3_stmt *stmt) {
    msg->reasoning = (char *)sqlite3_column_text(stmt, 6);
    msg->created_at = (time_t)sqlite3_column_int64(stmt, 7);
    msg->is_error = sqlite3_column_int(stmt, 8);
+   msg->email_ref = (char *)sqlite3_column_text(stmt, 9);
 }
 
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx) {
@@ -1944,17 +1946,20 @@ int conv_db_get_messages_by_range(int64_t conv_id,
     * conversation's messages occupy a high, narrow ID block far above a
     * provenance range that starts at 1 — an arithmetic ID cap would window
     * past every real row and return nothing. */
-   const char *base = include_private
-                          ? "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-                            "FROM messages m "
-                            "INNER JOIN conversations c ON m.conversation_id = c.id "
-                            "WHERE m.conversation_id = ? AND c.user_id = ? "
-                            "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC"
-                          : "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-                            "FROM messages m "
-                            "INNER JOIN conversations c ON m.conversation_id = c.id "
-                            "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
-                            "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC";
+   const char *base =
+       include_private
+           ? "SELECT m.id, m.conversation_id, m.role, m.content, "
+             "m.created_at, " CONV_MSG_EMAIL_REF_COL(
+                 m) " FROM messages m "
+                    "INNER JOIN conversations c ON m.conversation_id = c.id "
+                    "WHERE m.conversation_id = ? AND c.user_id = ? "
+                    "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC"
+           : "SELECT m.id, m.conversation_id, m.role, m.content, "
+             "m.created_at, " CONV_MSG_EMAIL_REF_COL(
+                 m) " FROM messages m "
+                    "INNER JOIN conversations c ON m.conversation_id = c.id "
+                    "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
+                    "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC";
 
    char sql[512];
    snprintf(sql, sizeof(sql), "%s%s", base, max_rows > 0 ? " LIMIT ?" : "");
@@ -1986,6 +1991,7 @@ int conv_db_get_messages_by_range(int64_t conv_id,
 
       msg.content = (char *)sqlite3_column_text(stmt, 3);
       msg.created_at = (time_t)sqlite3_column_int64(stmt, 4);
+      msg.email_ref = (char *)sqlite3_column_text(stmt, 5);
 
       if (callback(&msg, ctx) != 0)
          break;

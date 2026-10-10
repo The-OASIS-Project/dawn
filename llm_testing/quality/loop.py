@@ -4,13 +4,14 @@
 #
 # License: GPLv3, same as DAWN.
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from . import providers
 from .capture import Capture, instantiate, user_message
-from .mocks import World
+from .mocks import CONTEXT_TAG_RE, World, frame_third_party
 
 # include/llm/llm_tools.h LLM_TOOLS_MAX_ITERATIONS.
 MAX_ITERATIONS = 8
@@ -56,6 +57,7 @@ def run_case(template: Capture, turns: List[str], world: World, now: datetime,
     """Run @p turns through the model in @p template, against @p world."""
     traj = Trajectory(world=world)
     body = None
+    tag = None  # the conversation's tag, read once from the request
     for i, text in enumerate(turns):
         tr = TurnResult(user=text)
         traj.turns.append(tr)
@@ -87,8 +89,11 @@ def run_case(template: Capture, turns: List[str], world: World, now: datetime,
                 providers.append_answer(template, body, reply)
                 break
             results = {}
+            if tag is None:
+                m = CONTEXT_TAG_RE.search(json.dumps(body))
+                tag = m.group(1) if m else ""
             for c in reply.calls:
-                res = world.call(c.name, c.args)
+                res = frame_third_party(c.name, c.args, world.call(c.name, c.args), tag)
                 results[c.id] = res
                 tr.steps.append(Step(c.name, c.args, res, c.bad_args))
             providers.append_results(template, body, reply, results)

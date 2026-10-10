@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "llm/llm_context_text.h"
+#include "llm/llm_history_kind.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -175,7 +176,10 @@ char *llm_compaction_deterministic(struct json_object *to_summarize, int token_b
             for (int j = 0; j < clen; j++) {
                struct json_object *part = json_object_array_get_idx(content_obj, j);
                struct json_object *type_obj = NULL;
-               if (!part || !json_object_object_get_ex(part, "type", &type_obj))
+               /* DAWN's request context (its frames) isn't what was said:
+                * the question's own words are. */
+               if (!part || llm_history_kind_of(part) != MESSAGE_KIND_NONE ||
+                   !json_object_object_get_ex(part, "type", &type_obj))
                   continue;
                const char *ptype = json_object_get_string(type_obj);
                if (!text_part && ptype && strcmp(ptype, "text") == 0) {

@@ -145,6 +145,10 @@ sees the message's structure. It does the rest:
 Part ids are IMAP section numbers ("2", "2.1") on both backends, so a later
 per-part fetch can use them directly.
 
+The email tool's read, recent, search and digest results reach the model framed as `EMAIL CONTENT`
+(third-party text, after the neutralizer; see [llm.md](llm.md), Tool results), from the shared
+formatter `email_render.c` for a read, and memory extraction never learns from them.
+
 Everything taken from a message is the sender's text. Subjects, names, addresses
 and filenames go through `email_display_sanitize`: well-formed UTF-8 only, with
 controls, bidi overrides and isolates, and zero-width characters removed.
@@ -219,6 +223,20 @@ caches the roles). It never uses another user's or a shared namespace.
   message (Gmail) with no stop armed, so it always acts and always sends
   `email_changed`; a stop waits at most for that, and a stop between folders
   leaves the rest where they were.
+
+## Email in chat
+
+A WebUI `text` turn may name one email the user attached (`email_refs`, flag `email_refs`;
+`docs/WEBSOCKET_PROTOCOL.md`, Email in chat). `src/webui/webui_email_ref.c` checks it at
+receipt in the database only: the account is the user's and enabled, the message id has a
+tool id's shape, and the name the model will use for the account resolves back to that same
+account (`email_service_find_account_by_name`). Nothing is fetched then. The turn's context
+names the email (`session_turn_attach_email`), and the model reads it with the email tool's
+`read`, so its text arrives as a framed tool result (`EMAIL CONTENT`), never as the user's
+words (`docs/PROMPT_INJECTION.md`). In that turn no confirm counts and act/device calls are
+refused (`TURN_ORIGIN_THIRD_PARTY`, `TOOL_CALLER_THIRD_PARTY`). The question row keeps
+`messages.email_ref` (account id, message id, and the client's from/subject for the chip,
+which never reach the model).
 
 ## Confirming a send or a trash
 
