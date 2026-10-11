@@ -65,7 +65,11 @@ NC='\033[0m' # No Color
 # Gitignored (*.local.hook).  It gets the pushed-refs lines git gave this hook.
 LOCAL_HOOK=$(find_local_hook pre-push.local.hook)
 if [ -n "$LOCAL_HOOK" ]; then
-   printf '%s\n' "$PUSHED_REFS" | "$LOCAL_HOOK" "$@"
+   if [ -n "$PUSHED_REFS" ]; then
+      printf '%s\n' "$PUSHED_REFS" | "$LOCAL_HOOK" "$@"
+   else
+      "$LOCAL_HOOK" "$@" </dev/null
+   fi
    LOCAL_RC=$?
    if [ "$LOCAL_RC" -ne 0 ]; then
       echo ""
