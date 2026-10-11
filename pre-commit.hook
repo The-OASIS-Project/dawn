@@ -7,8 +7,9 @@
 #  2. Build + test (conditional on staged source/build files)
 #     - Skipped on docs-only / config-only / web-only commits
 #     - Mirrors what the CI runs locally so a green commit ≈ green CI
-#  3. Optional local extension: if ./pre-commit.local.hook exists and is
-#     executable, it runs after phases 1+2 succeed.  Use for per-developer
+#  3. Optional local extension: if pre-commit.local.hook exists and is
+#     executable (in this checkout, or in the main checkout when this is a
+#     worktree), it runs after phases 1+2 succeed.  Use for per-developer
 #     checks that shouldn't live in the public repo.  Gitignored.
 #
 # Install: ./install-git-hooks.sh
@@ -25,13 +26,30 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Optional local-only pre-commit extension.  If ./pre-commit.local.hook
-# exists and is executable, it runs after the tracked phases succeed.
-# The local hook is gitignored (*.local.hook).  Failure (non-zero exit)
-# blocks the commit just like any other phase.
+# Find a local extension: this checkout's, else the main checkout's.  A git
+# worktree shares the main checkout's hooks but not its gitignored files, so
+# without the fallback a worktree would skip the extension without a word.
+find_local_hook() {
+   if [ -x "./$1" ]; then
+      echo "./$1"
+      return
+   fi
+   local common main
+   common=$(git rev-parse --git-common-dir 2>/dev/null) || return
+   main=$(cd "$common/.." 2>/dev/null && pwd) || return
+   if [ -x "$main/$1" ]; then
+      echo "$main/$1"
+   fi
+}
+
+# Optional local-only pre-commit extension (find_local_hook), run after the
+# tracked phases succeed.  The local hook is gitignored (*.local.hook).
+# Failure (non-zero exit) blocks the commit just like any other phase.
 run_local_extension() {
-   if [ -x "./pre-commit.local.hook" ]; then
-      ./pre-commit.local.hook
+   local hook
+   hook=$(find_local_hook pre-commit.local.hook)
+   if [ -n "$hook" ]; then
+      "$hook"
       local rc=$?
       if [ "$rc" -ne 0 ]; then
          echo ""
