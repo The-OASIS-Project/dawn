@@ -698,6 +698,65 @@ static void test_entity_longest_match_wins(void) {
    TEST_ASSERT_EQUAL_INT(2, n);
 }
 
+/* An alias names its entity: "Jordan" names "Jordan Smith", whose own name
+ * needs both words.  Only the user's own aliases count. */
+static void test_entity_named_by_alias(void) {
+   seed_entity_pool(40);
+   seed_entity(40, 4001, 1, "Jordan Smith", "person", false, embed_typical, NULL);
+   s_mock.entity_count = 41;
+   memory_entity_match_t m[8];
+   int n = 0;
+
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   s_mock.aliases[0] = (memory_alias_name_t){ .canonical_id = 4001, .name = "Jordan" };
+   s_mock.alias_user_id[0] = 2;
+   s_mock.alias_count = 1;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   s_mock.alias_user_id[0] = 1;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Jordan Smith", m[0].name);
+   TEST_ASSERT_TRUE(m[0].named);
+
+   /* An alias doesn't take a name away from an entity of its own: with a
+    * country named Jordan, "Jordan" names both.  Named by its full name, the
+    * person is matched by that (the better of its names), which covers the
+    * city's one word. */
+   seed_entity(41, 4002, 1, "Jordan", "place", false, embed_typical, NULL);
+   s_mock.entity_count = 42;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "who is jordan smith",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Jordan Smith", m[0].name);
+
+   /* The context adapter finds it too. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "What do you know about Jordan", embed_q_match_e1,
+                                       MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_TRUE(has_entity(&result, "Jordan Smith"));
+   focus_result_free(&result);
+}
+
 /* Summaries found only by meaning must stand out from the pool; a keyword
  * match always counts; a small pool isn't gated. */
 static void test_summary_relevance_gate(void) {
@@ -1055,6 +1114,7 @@ int main(void) {
    RUN_TEST(test_entity_cache_per_user);
    RUN_TEST(test_summary_relevance_gate);
    RUN_TEST(test_entity_longest_match_wins);
+   RUN_TEST(test_entity_named_by_alias);
 
    /* NULL safety */
    RUN_TEST(test_summary_null_query_text);

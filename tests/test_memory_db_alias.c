@@ -1514,6 +1514,114 @@ static void test_entity_merge_invalidates_entity_cache(void) {
    TEST_ASSERT_GREATER_THAN(prev_inv, g_alias_test_entity_cache_invalidations);
 }
 
+/* A merge moves the source's aliases to the target: "Jordan" still names
+ * someone after "Jordan S." is merged into "Jordan Smith". */
+static void test_entity_merge_moves_aliases(void) {
+   int64_t target = insert_entity_typed(g_test_user_id, "Jordan Smith", "person");
+   int64_t source = insert_entity_typed(g_test_user_id, "Jordan S.", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jordan", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, source, "soft",
+                                                     "operator", 0.95f, NULL, &link_id));
+   TEST_ASSERT_EQUAL_INT64(source, get_entity_canonical_id(alias));
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_merge(g_test_user_id, source, target));
+   TEST_ASSERT_EQUAL_INT64(target, get_entity_canonical_id(alias));
+
+   memory_alias_name_t *names = NULL;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_names(g_test_user_id, &names, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(target, names[0].canonical_id);
+   TEST_ASSERT_EQUAL_STRING("Jordan", names[0].name);
+   free(names);
+
+   /* The link moved too, under the target's name. */
+   memory_alias_listing_row_t rows[4];
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_list(g_test_user_id, target, rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(alias, rows[0].source_entity_id);
+   memory_alias_history_row_t hist[4];
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_history(g_test_user_id, alias, hist, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("jordan smith", hist[0].target_canonical_name);
+}
+
+/* Merging into an entity that is itself an alias: the source's aliases go to
+ * the entity it names, not one level down (an alias of an alias names
+ * nothing).  A source that was an alias of something leaves no live link. */
+static void test_entity_merge_into_an_alias(void) {
+   int64_t root = insert_entity_typed(g_test_user_id, "Jordan Smith", "person");
+   int64_t target = insert_entity_typed(g_test_user_id, "Jo", "person");
+   int64_t source = insert_entity_typed(g_test_user_id, "Jordan S.", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jordan", "person");
+   int64_t other = insert_entity_typed(g_test_user_id, "Other", "person");
+   int64_t sx = insert_entity_typed(g_test_user_id, "J. Smith", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, target, root, "soft",
+                                                     "operator", 0.95f, NULL, &link_id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, source, "soft",
+                                                     "operator", 0.95f, NULL, &link_id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_merge(g_test_user_id, source, target));
+   TEST_ASSERT_EQUAL_INT64(root, get_entity_canonical_id(alias));
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, sx, other, "soft", "operator",
+                                                     0.95f, NULL, &link_id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_merge(g_test_user_id, sx, root));
+   memory_alias_listing_row_t rows[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_list(g_test_user_id, other, rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* Merging an entity into its own alias: the alias becomes canonical and the
+ * link between them is closed, not left pointing at itself. */
+static void test_entity_merge_into_own_alias(void) {
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Jordan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jordan", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft",
+                                                     "operator", 0.95f, NULL, &link_id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_merge(g_test_user_id, canonical, alias));
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(alias));
+   memory_alias_listing_row_t rows[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_list(g_test_user_id, alias, rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(0, n); /* only active links are listed */
+   memory_alias_history_row_t hist[4];
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_history(g_test_user_id, alias, hist, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("merged-into-alias", hist[0].unlink_reason);
+}
+
+/* The abstract "user" alias isn't a name: it never names the user. */
+static void test_alias_names_leave_out_user_placeholder(void) {
+   int64_t self = insert_entity_typed(g_test_user_id, "Pat Example", "person");
+   int64_t placeholder = insert_entity_typed(g_test_user_id, "User", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, placeholder, self, "soft",
+                                                     "operator", 0.95f, NULL, &link_id));
+   memory_alias_name_t *names = NULL;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_names(g_test_user_id, &names, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   free(names);
+}
+
 /* ============================================================================
  * Cache loader filter — memory_db_entity_get_embeddings respects
  * include_aliases.  Insert a canonical row + a soft-alias row, both with
@@ -3488,6 +3596,10 @@ int main(void) {
 
    /* Ckpt 3: cache invalidate fix + loader filter */
    RUN_TEST(test_entity_merge_invalidates_entity_cache);
+   RUN_TEST(test_entity_merge_moves_aliases);
+   RUN_TEST(test_entity_merge_into_own_alias);
+   RUN_TEST(test_entity_merge_into_an_alias);
+   RUN_TEST(test_alias_names_leave_out_user_placeholder);
    RUN_TEST(test_loader_filter_excludes_aliases_by_default);
 
    /* relation listings */

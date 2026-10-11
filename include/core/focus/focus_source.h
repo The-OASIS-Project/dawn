@@ -221,6 +221,15 @@ typedef struct {
    int count;
 } focus_filter_rejection_t;
 
+/* What one consulted source contributed to a compose: candidates that entered
+ * the pool (after the filter and the per-source cap), and how many of those
+ * survived the trim.  For the per-turn log line. */
+typedef struct {
+   const char *source_id;
+   int found;
+   int kept;
+} focus_source_tally_t;
+
 /* =============================================================================
  * Per-candidate score breakdown — Phase 1g-i.
  *
@@ -269,6 +278,8 @@ typedef struct focus_compose_result_s {
    focus_score_breakdown_t *score_breakdowns; /* HEAP — parallel to candidates[] */
    focus_filter_rejection_t rejections[MAX_FOCUS_SOURCES];
    int rejection_count;
+   focus_source_tally_t sources[MAX_FOCUS_SOURCES]; /* each source consulted, in order */
+   int source_count;
 } focus_compose_result_t;
 
 /* =============================================================================

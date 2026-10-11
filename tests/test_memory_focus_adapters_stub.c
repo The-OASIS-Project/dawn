@@ -208,6 +208,28 @@ int memory_db_entity_search(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+int memory_db_entity_alias_names(int user_id, memory_alias_name_t **out, int *count_out) {
+   *out = NULL;
+   *count_out = 0;
+   int n = 0;
+   for (int i = 0; i < s_mock.alias_count; i++) {
+      n += s_mock.alias_user_id[i] == user_id;
+   }
+   if (n == 0) {
+      return MEMORY_DB_SUCCESS;
+   }
+   *out = malloc((size_t)n * sizeof(**out));
+   if (!*out) {
+      return MEMORY_DB_FAILURE;
+   }
+   for (int i = 0; i < s_mock.alias_count; i++) {
+      if (s_mock.alias_user_id[i] == user_id) {
+         (*out)[(*count_out)++] = s_mock.aliases[i];
+      }
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_entity_get_embeddings(int user_id,
                                     bool include_aliases,
                                     int expected_dims,

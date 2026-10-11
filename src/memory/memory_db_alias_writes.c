@@ -1460,20 +1460,6 @@ int memory_db_entity_auto_promote_user_self_by_real_name(int user_id, bool *out_
    return MEMORY_DB_SUCCESS;
 }
 
-/* The literal canonical form the LLM-emitted abstract "User" entity collapses
- * to after memory_make_canonical_name (lowercased, whitespace-trimmed).
- * Single source of truth so the maybe / sweep helpers stay in sync if the
- * canonicalizer ever changes its rules.
- *
- * Intentionally .c-only (not exported in memory_db_aliases.h).  External
- * consumers — including tests in test_memory_db_alias.c — exercise the
- * literal through the public helpers; hardcoding "user" in those test
- * call sites is the right shape since the tests are pinning that exact
- * canonical form as the contract.  Promote to the header only if a
- * non-test consumer in a different TU needs to assert against the
- * literal directly. */
-#define MEMORY_ALIAS_ABSTRACT_USER_CANONICAL "user"
-
 int memory_db_entity_maybe_alias_user_to_self(int user_id,
                                               int64_t entity_id,
                                               const char *canonical_name,

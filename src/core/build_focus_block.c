@@ -58,11 +58,25 @@ static double monotonic_ms_now(void) {
 
 /* Privacy-safe per-call log line — excerpts at most
  * FOCUS_LOG_TURN_EXCERPT_CHARS of the user query and NEVER the
- * candidate text content. */
+ * candidate text content.  Each consulted source's count shows where an
+ * empty turn came up empty: "memory_fact=3/2" is three found, two kept by the
+ * ranking (before items the conversation already shows are left out, so they
+ * can add up to more than candidates=). */
 static void log_focus_summary(const char *turn_text,
+                              const focus_compose_result_t *result,
                               int candidates,
-                              int rejections,
                               double elapsed_ms) {
+   char sources[256] = "";
+   size_t used = 0;
+   for (int i = 0; i < result->source_count && used < sizeof(sources); i++) {
+      const focus_source_tally_t *s = &result->sources[i];
+      const int w = snprintf(sources + used, sizeof(sources) - used, " %s=%d/%d", s->source_id,
+                             s->found, s->kept);
+      if (w < 0) {
+         break;
+      }
+      used += (size_t)w;
+   }
    char excerpt[FOCUS_LOG_TURN_EXCERPT_CHARS + 1];
    const size_t turn_len = (turn_text != NULL) ? strlen(turn_text) : 0;
    const size_t copy = (turn_len > FOCUS_LOG_TURN_EXCERPT_CHARS) ? FOCUS_LOG_TURN_EXCERPT_CHARS
@@ -70,9 +84,9 @@ static void log_focus_summary(const char *turn_text,
    if (copy > 0)
       memcpy(excerpt, turn_text, copy);
    excerpt[copy] = '\0';
-   OLOG_INFO("focus: turn=\"%s%s\" candidates=%d rejections=%d elapsed_ms=%.1f", excerpt,
-             turn_len > FOCUS_LOG_TURN_EXCERPT_CHARS ? "..." : "", candidates, rejections,
-             elapsed_ms);
+   OLOG_INFO("focus: turn=\"%s%s\" candidates=%d rejections=%d elapsed_ms=%.1f sources:%s", excerpt,
+             turn_len > FOCUS_LOG_TURN_EXCERPT_CHARS ? "..." : "", candidates,
+             result->rejection_count, elapsed_ms, sources[0] ? sources : " none");
 }
 
 /* What the context panel is shown of a turn's retrieval: the ranked result,
@@ -101,8 +115,9 @@ static void drop_candidate(focus_compose_result_t *r, int i) {
    r->candidates[i].item_id = NULL;
 }
 
-/* A question this short ("what's that for?", "and the other one?") leans on
- * the one before it, so retrieval's embedding reads both. */
+/* A question this short ("what's that for?", "and the other one?") may lean
+ * on the one before it: when its own words find nothing, retrieval tries
+ * again with an embedding that reads both. */
 #define FOCUS_FOLLOWUP_MAX_WORDS 6
 /* The earlier question's bytes, at most, that go with it. */
 #define FOCUS_FOLLOWUP_PREV_MAX_BYTES 600
@@ -118,10 +133,29 @@ static int word_count(const char *text) {
    return words;
 }
 
-/* The text retrieval embeds: a short follow-up with the previous question in
- * front of it (heap, caller frees), else NULL (embed the turn's own text).
- * Only the embedding reads it: keyword and date matching stay on the turn's
- * own words, so a "tomorrow?" isn't read as the "today" asked about before. */
+/* Embed @p text into @p buf: @p buf, or NULL when there's no embedding (the
+ * vector adapters skip themselves; calendar still runs). */
+static const float *embed_query(const char *text, int user_id, float *buf, int *dims) {
+   *dims = 0;
+   if (!memory_embeddings_available()) {
+      return NULL;
+   }
+   if (memory_embeddings_embed(text, buf, dims) != SUCCESS || *dims <= 0) {
+      OLOG_WARNING("focus: embedding compute failed for user_id=%d — "
+                   "passing NULL embedding to focus_compose (vector adapters skip)",
+                   user_id);
+      *dims = 0; /* a negative dim would wrap to a huge size_t */
+      return NULL;
+   }
+   return buf;
+}
+
+/* The text a short follow-up's retry embeds: the previous question in front
+ * of it (heap, caller frees), else NULL (not a short follow-up, or nothing
+ * before it).  Only the embedding reads it: keyword and date matching stay on
+ * the turn's own words, so a "tomorrow?" isn't read as the "today" asked about
+ * before.  Never the first try: a short question on a new subject ("What do
+ * you know about Dawn?") would be searched as the old one. */
 static char *followup_embed_text(session_t *session, const char *turn_text) {
    if (!session || word_count(turn_text) > FOCUS_FOLLOWUP_MAX_WORDS) {
       return NULL;
@@ -186,27 +220,7 @@ int build_focus_block(session_t *session,
     * synchronously), so it stays at function scope. */
    float query_embed[MAX_EMBEDDING_DIMS];
    int embed_dims = 0;
-   const float *query_ptr = NULL;
-   if (memory_embeddings_available()) {
-      char *followup = followup_embed_text(session, user_turn_text);
-      if (followup) {
-         OLOG_INFO("focus: short follow-up; its embedding reads the previous question too");
-      }
-      const int embed_rc = memory_embeddings_embed(followup ? followup : user_turn_text,
-                                                   query_embed, &embed_dims);
-      free(followup);
-      if (embed_rc == SUCCESS && embed_dims > 0) {
-         query_ptr = query_embed;
-      } else {
-         OLOG_WARNING("focus: embedding compute failed for user_id=%d — "
-                      "passing NULL embedding to focus_compose (vector adapters skip)",
-                      user_id);
-         embed_dims = 0;
-      }
-   }
-   /* A backend that returned a negative dim would wrap to a huge size_t. */
-   if (embed_dims < 0)
-      embed_dims = 0;
+   const float *query_ptr = embed_query(user_turn_text, user_id, query_embed, &embed_dims);
 
    /* top_k is relevance: the top_k most relevant, with no over-fetch.  An
     * item the conversation already shows is named at the seam, not
@@ -220,8 +234,21 @@ int build_focus_block(session_t *session,
       return FAILURE;
    }
    focus_compose_result_t *result = &panel->result;
-   const int rc = focus_compose(user_id, /*include_private*/ false, user_turn_text, query_ptr,
-                                (size_t)embed_dims, now, top_k, result);
+   int rc = focus_compose(user_id, /*include_private*/ false, user_turn_text, query_ptr,
+                          (size_t)embed_dims, now, top_k, result);
+   if (rc == SUCCESS && result->candidate_count == 0 && query_ptr != NULL) {
+      char *followup = followup_embed_text(session, user_turn_text);
+      const bool retry = followup != NULL &&
+                         embed_query(followup, user_id, query_embed, &embed_dims) != NULL;
+      free(followup);
+      if (retry) {
+         OLOG_INFO("focus: nothing on a short turn's own words; retrying with the previous "
+                   "question");
+         focus_result_free(result);
+         rc = focus_compose(user_id, /*include_private*/ false, user_turn_text, query_ptr,
+                            (size_t)embed_dims, now, top_k, result);
+      }
+   }
    if (rc != SUCCESS) {
       OLOG_WARNING("focus: focus_compose failed (user_id=%d)", user_id);
       focus_panel_free(panel);
@@ -331,7 +358,7 @@ int build_focus_block(session_t *session,
    out->focus_panel = panel;
    out->focus_panel_free = focus_panel_free;
 
-   log_focus_summary(user_turn_text, kept, result->rejection_count, monotonic_ms_now() - t_start);
+   log_focus_summary(user_turn_text, result, kept, monotonic_ms_now() - t_start);
    return SUCCESS;
 }
 

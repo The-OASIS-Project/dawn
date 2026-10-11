@@ -35,6 +35,7 @@
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_aliases.h"
 #include "memory/memory_db_internal.h"
 #include "memory/memory_embeddings.h"
 #include "utils/string_utils.h"
@@ -273,6 +274,65 @@ int memory_db_entity_embedding_count(int user_id, int expected_dims, int *count_
    return rc;
 }
 
+int memory_db_entity_alias_names(int user_id, memory_alias_name_t **out, int *count_out) {
+   if (!out || !count_out) {
+      return MEMORY_DB_FAILURE;
+   }
+   *out = NULL;
+   *count_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT canonical_id, name FROM memory_entities WHERE user_id = ? "
+                          "AND canonical_id IS NOT NULL AND canonical_name != ? "
+                          "ORDER BY mention_count DESC LIMIT ?",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("memory_db: prepare entity_alias_names failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, MEMORY_ALIAS_ABSTRACT_USER_CANONICAL, -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 3, MEMORY_ALIAS_NAMES_MAX);
+   memory_alias_name_t *rows = NULL;
+   int n = 0;
+   int cap = 0;
+   int rc = MEMORY_DB_SUCCESS;
+   int step;
+   while ((step = sqlite3_step(stmt)) == SQLITE_ROW) {
+      const char *name = (const char *)sqlite3_column_text(stmt, 1);
+      if (!name || !name[0]) {
+         continue;
+      }
+      if (n == cap) {
+         const int grown = cap ? cap * 2 : 64;
+         memory_alias_name_t *more = realloc(rows, (size_t)grown * sizeof(*rows));
+         if (!more) {
+            rc = MEMORY_DB_FAILURE;
+            break;
+         }
+         rows = more;
+         cap = grown;
+      }
+      rows[n].canonical_id = sqlite3_column_int64(stmt, 0);
+      safe_strscpy(rows[n].name, name);
+      n++;
+   }
+   if (rc == MEMORY_DB_SUCCESS && step != SQLITE_DONE && step != SQLITE_ROW) {
+      OLOG_ERROR("memory_db: entity_alias_names failed: %s", sqlite3_errmsg(s_db.db));
+      rc = MEMORY_DB_FAILURE;
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (rc != MEMORY_DB_SUCCESS) {
+      free(rows);
+      return rc;
+   }
+   *out = rows;
+   *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_entity_update_embedding(int64_t entity_id,
                                       int user_id,
                                       const float *embedding,
@@ -470,8 +530,8 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
    sqlite3_stmt *chk = NULL;
    int rc = sqlite3_prepare_v2(
        s_db.db,
-       "SELECT id, mention_count, first_seen, last_seen FROM memory_entities "
-       "WHERE id = ? AND user_id = ?",
+       "SELECT id, mention_count, first_seen, last_seen, COALESCE(canonical_id, 0) "
+       "FROM memory_entities WHERE id = ? AND user_id = ?",
        -1, &chk, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
@@ -497,6 +557,12 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_NOT_FOUND;
    }
+   /* The source's aliases move to the target's equivalence class: the target,
+    * or the entity it is itself an alias of (an alias of an alias names
+    * nothing).  An alias of the source as target becomes canonical. */
+   const int64_t target_canon = sqlite3_column_int64(chk, 4);
+   const int64_t alias_root = (target_canon > 0 && target_canon != source_id) ? target_canon
+                                                                              : target_id;
    sqlite3_finalize(chk);
 
    /* Begin transaction */
@@ -596,6 +662,45 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
                  sqlite3_bind_int64(_s, 3, src_last_seen);
                  sqlite3_bind_int64(_s, 4, target_id);
                  sqlite3_bind_int(_s, 5, user_id);
+              });
+
+   /* The source's own link (it was an alias of something) ends with it. */
+   MERGE_EXEC("UPDATE memory_entity_aliases SET unlinked_at = strftime('%s','now'), "
+              "unlink_reason = 'source-merged' "
+              "WHERE user_id = ? AND source_entity_id = ? AND unlinked_at IS NULL",
+              {
+                 sqlite3_bind_int(_s, 1, user_id);
+                 sqlite3_bind_int64(_s, 2, source_id);
+              });
+
+   /* The source's aliases now name the class root (the delete below would
+    * otherwise orphan them: canonical_id ON DELETE SET NULL).  The target,
+    * if it was one of them, becomes canonical through that delete. */
+   MERGE_EXEC("UPDATE memory_entities SET canonical_id = ? "
+              "WHERE user_id = ? AND canonical_id = ? AND id != ?",
+              {
+                 sqlite3_bind_int64(_s, 1, alias_root);
+                 sqlite3_bind_int(_s, 2, user_id);
+                 sqlite3_bind_int64(_s, 3, source_id);
+                 sqlite3_bind_int64(_s, 4, alias_root);
+              });
+
+   /* The links into the source now lead to the root, under its name
+    * (target_entity_id is NOT NULL, so the delete's SET NULL would refuse the
+    * whole merge).  A link from the root itself (merging an entity into its
+    * own alias) would point at itself: it is closed instead. */
+   MERGE_EXEC("UPDATE memory_entity_aliases SET target_entity_id = ?1, "
+              "target_canonical_name = COALESCE((SELECT canonical_name FROM memory_entities "
+              "WHERE id = ?1), target_canonical_name), "
+              "unlinked_at = CASE WHEN source_entity_id = ?1 AND unlinked_at IS NULL "
+              "THEN strftime('%s','now') ELSE unlinked_at END, "
+              "unlink_reason = CASE WHEN source_entity_id = ?1 AND unlinked_at IS NULL "
+              "THEN 'merged-into-alias' ELSE unlink_reason END "
+              "WHERE user_id = ?2 AND target_entity_id = ?3",
+              {
+                 sqlite3_bind_int64(_s, 1, alias_root);
+                 sqlite3_bind_int(_s, 2, user_id);
+                 sqlite3_bind_int64(_s, 3, source_id);
               });
 
    /* Delete source entity */

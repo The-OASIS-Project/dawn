@@ -506,7 +506,7 @@ typedef struct {
    float cosine;
    float relevance; /**< cosine measured from the pool's typical level (see
                          embedding_corpus_relevance) */
-   bool named;      /**< the query contains the entity's name */
+   bool named;      /**< the query contains the entity's name, or an alias's */
 } memory_entity_match_t;
 
 /**
@@ -515,7 +515,8 @@ typedef struct {
  * Every canonical entity is considered.  One is relevant when either:
  *   - the query names it: two of its name's content words appear in @p query,
  *     or the one word of a one-word name (a long message's embedding is
- *     diluted, but the name is still there).  Longest match wins: an entity
+ *     diluted, but the name is still there).  An alias's name counts as the
+ *     entity's ("Jordan" names "Jordan Smith").  Longest match wins: an entity
  *     whose matched words all belong to a longer named match isn't named
  *     (the query meant the longer one);
  *   - its relevance reaches @p min_relevance.  Embedding models put

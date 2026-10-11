@@ -248,6 +248,8 @@ int focus_compose_ex(int user_id,
    out_result->score_breakdowns = NULL;
    out_result->rejection_count = 0;
    memset(out_result->rejections, 0, sizeof(out_result->rejections));
+   out_result->source_count = 0;
+   memset(out_result->sources, 0, sizeof(out_result->sources));
 
    if (per_source_max_candidates <= 0)
       per_source_max_candidates = 1;
@@ -385,6 +387,12 @@ int focus_compose_ex(int user_id,
          c->item_id = NULL;
          pool_count++;
          survived++;
+      }
+
+      if (out_result->source_count < MAX_FOCUS_SOURCES) {
+         focus_source_tally_t *tally = &out_result->sources[out_result->source_count++];
+         tally->source_id = a->source_id;
+         tally->found = survived;
       }
 
       if (survived < adapter_count) {
@@ -574,6 +582,13 @@ int focus_compose_ex(int user_id,
          out[out_idx] = pool[p];
          out_breakdowns[out_idx] = pool_breakdowns[p];
          out_idx++;
+         /* A pool entry's source_id is its adapter's own string. */
+         for (int t = 0; t < out_result->source_count; t++) {
+            if (out_result->sources[t].source_id == pool[p].source_id) {
+               out_result->sources[t].kept++;
+               break;
+            }
+         }
          /* Transfer ownership: zero the pool slot so the trim sweep
           * below skips it. */
          pool[p].text = NULL;
@@ -631,4 +646,6 @@ void focus_result_free(focus_compose_result_t *result) {
    result->score_breakdowns = NULL;
    memset(result->rejections, 0, sizeof(result->rejections));
    result->rejection_count = 0;
+   memset(result->sources, 0, sizeof(result->sources));
+   result->source_count = 0;
 }

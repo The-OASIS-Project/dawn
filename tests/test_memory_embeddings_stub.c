@@ -195,7 +195,15 @@ int auth_db_user_set_categories_backfilled_at(int user_id, int64_t ts) {
    return 0;
 }
 
+#include "memory/memory_db_entities.h"
 #include "memory/memory_types.h"
+
+int memory_db_entity_alias_names(int user_id, memory_alias_name_t **out, int *count_out) {
+   (void)user_id;
+   *out = NULL;
+   *count_out = 0;
+   return 0;
+}
 
 int memory_db_entity_get_embeddings(int user_id,
                                     bool include_aliases,

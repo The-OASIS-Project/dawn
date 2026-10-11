@@ -449,6 +449,28 @@ int memory_db_entities_get_by_ids(int user_id,
                                   memory_entity_t *out,
                                   int *count_out);
 
+/** An alias's name and the canonical entity it stands for. */
+typedef struct {
+   int64_t canonical_id;
+   char name[MEMORY_ENTITY_NAME_MAX];
+} memory_alias_name_t;
+
+/** Most alias names read for one user. */
+#define MEMORY_ALIAS_NAMES_MAX 4096
+
+/**
+ * @brief The user's alias names ("Jordan" for "Jordan Smith"), so a query can
+ *        name an entity by any of them
+ *
+ * Every row with a canonical_id, except the abstract "user" placeholder
+ * (MEMORY_ALIAS_ABSTRACT_USER_CANONICAL), at most MEMORY_ALIAS_NAMES_MAX.
+ *
+ * @param out       Output: heap array (caller frees), NULL when there are none
+ * @param count_out Output: rows in @p out
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_alias_names(int user_id, memory_alias_name_t **out, int *count_out);
+
 /**
  * @brief How many canonical entities have an embedding of @p expected_dims
  *
