@@ -100,7 +100,7 @@ make -C build-debug test_<name>
 - Git hooks: `./install-git-hooks.sh` (one-time) installs both:
   - **pre-commit** — `format_code.sh --staged --check`; when source/build files are staged (`src/ include/ common/ tests/ benchmarks/ cmake/`, `CMakeLists.txt`, `*.cmake`) it also builds `tests-ci benches` and runs `ctest -L ci`.
   - **pre-push** — builds `tests-ci` and runs the `ci` suite (prefers `build-ci/`, the WebUI-off build).
-  - Optional `pre-commit.local.hook` / `pre-push.local.hook` (gitignored) run as local extensions.
+  - Optional `pre-commit.local.hook` / `pre-push.local.hook` (gitignored) run as local extensions; a worktree uses the main checkout's when it has none of its own.
 
 ## Code Standards
 

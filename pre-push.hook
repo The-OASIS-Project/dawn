@@ -17,9 +17,10 @@
 # apt packages — so it stays a developer/release-time manual check:
 #   ./tests/smoke_test.sh
 #
-# Optional local extension: if ./pre-push.local.hook exists and is
-# executable, it runs after the tracked check succeeds.  Use for
-# per-developer checks that shouldn't live in the public repo.
+# Optional local extension: if pre-push.local.hook exists and is executable
+# (in this checkout, or in the main checkout when this is a worktree), it
+# runs before the test check, with git's pushed-refs lines on its stdin.
+# Use for per-developer checks that shouldn't live in the public repo.
 # Gitignored.
 #
 # Install: ./install-git-hooks.sh
@@ -29,12 +30,54 @@
 # Change to repository root
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
+# git's pushed-refs lines ("<local ref> <sha> <remote ref> <sha>"), kept for
+# the local extension: the build below must not be what reads them.
+PUSHED_REFS=""
+if [ ! -t 0 ]; then
+   PUSHED_REFS=$(cat)
+fi
+
+# Find a local extension: this checkout's, else the main checkout's.  A git
+# worktree shares the main checkout's hooks but not its gitignored files, so
+# without the fallback a worktree would skip the extension without a word.
+find_local_hook() {
+   if [ -x "./$1" ]; then
+      echo "./$1"
+      return
+   fi
+   local common main
+   common=$(git rev-parse --git-common-dir 2>/dev/null) || return
+   main=$(cd "$common/.." 2>/dev/null && pwd) || return
+   if [ -x "$main/$1" ]; then
+      echo "$main/$1"
+   fi
+}
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Optional local-only pre-push extension (find_local_hook), run first: it is
+# quick, and it must run even where there is no build directory to test.
+# Gitignored (*.local.hook).  It gets the pushed-refs lines git gave this hook.
+LOCAL_HOOK=$(find_local_hook pre-push.local.hook)
+if [ -n "$LOCAL_HOOK" ]; then
+   if [ -n "$PUSHED_REFS" ]; then
+      printf '%s\n' "$PUSHED_REFS" | "$LOCAL_HOOK" "$@"
+   else
+      "$LOCAL_HOOK" "$@" </dev/null
+   fi
+   LOCAL_RC=$?
+   if [ "$LOCAL_RC" -ne 0 ]; then
+      echo ""
+      echo -e "${RED}Local pre-push extension failed (exit $LOCAL_RC).${NC}"
+      echo -e "${YELLOW}Bypass: git push --no-verify${NC}"
+      exit "$LOCAL_RC"
+   fi
+fi
 
 # Find an existing build directory.  Prefer build-ci first — that's the
 # preset CI itself runs (ENABLE_WEBUI=OFF, no CUDA).  Running the test
@@ -99,17 +142,5 @@ fi
 # smoke used to run here.  They moved to GitHub Actions (satellite-build +
 # docker-build jobs) so the hook stays fast; the full ML preset matrix that can't
 # run on stock runners stays a manual `./tests/smoke_test.sh` (see header).
-
-# Optional local-only pre-push extension.  Gitignored (*.local.hook).
-if [ -x "./pre-push.local.hook" ]; then
-   ./pre-push.local.hook
-   LOCAL_RC=$?
-   if [ "$LOCAL_RC" -ne 0 ]; then
-      echo ""
-      echo -e "${RED}Local pre-push extension failed (exit $LOCAL_RC).${NC}"
-      echo -e "${YELLOW}Bypass: git push --no-verify${NC}"
-      exit "$LOCAL_RC"
-   fi
-fi
 
 exit 0
