@@ -628,6 +628,7 @@ typedef struct {
    /* === Entity graph statements (memory_db.c) === */
    sqlite3_stmt *stmt_memory_entity_upsert;
    sqlite3_stmt *stmt_memory_entity_get_by_name;
+   sqlite3_stmt *stmt_memory_entity_root_by_name; /* a name's class id */
    sqlite3_stmt *stmt_memory_entity_update_embedding;
    sqlite3_stmt *stmt_memory_entity_get_embeddings;
    sqlite3_stmt *stmt_memory_relation_create;
@@ -636,6 +637,8 @@ typedef struct {
    sqlite3_stmt *stmt_memory_relation_list_by_subject_at; /* v33 — as-of variant */
    sqlite3_stmt *stmt_memory_relation_list_by_object;
    sqlite3_stmt *stmt_memory_relation_fact_ids_for_entity; /* graph-retrieval 1A */
+   sqlite3_stmt *stmt_memory_fact_ids_for_subject;         /* live facts filed under an entity */
+   sqlite3_stmt *stmt_memory_entity_class_members;         /* an entity and its other names */
    sqlite3_stmt *stmt_memory_entity_search;
    sqlite3_stmt *stmt_memory_entity_delete;
    sqlite3_stmt *stmt_memory_entity_set_photo;

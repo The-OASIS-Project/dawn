@@ -17,7 +17,8 @@
  * the project author(s).
  *
  * @file memory_graph_retrieval.h
- * @brief Entity-graph candidate retrieval for memory.search (Phase 2.b).
+ * @brief Entity-graph candidate retrieval for memory.search and per-turn
+ *        context (via memory_search_graph_candidates).
  *
  * Parallel candidate source to `memory_fact_search_hybrid()` for cat-3
  * style entity-specific queries — "What country did Jolene buy snake
@@ -41,20 +42,22 @@
  * will re-land if a benchmark surfaces genuine multi-hop test cases.
  *
  * Pipeline:
- *   1. Extract proper-noun candidates from the query string.
- *   2. Resolve each candidate against `memory_entities` (canonical names
- *      + aliases).  Discard unresolved candidates.
- *   3. For each resolved seed entity, fan out one hop via
- *      `memory_db_relation_fact_ids_for_entity()`.  Cap fan-out per
- *      query at `[memory.graph_retrieval].max_facts_per_query`.
- *   4. Dedupe fact_ids; fetch the facts; emit as (facts, scores)
+ *   1. Seeds: the entities the query names by any of their names
+ *      (memory_embeddings_entity_matches), then its capitalized words that
+ *      are an entity's exact name; each as its class (an alias's canonical).
+ *   2. For each seed, the facts about it (memory_db_fact_ids_for_subject,
+ *      any name in its class) and the facts its relations came from
+ *      (`memory_db_relation_fact_ids_for_entity()`, any name too), in turn.  Cap fan-out
+ *      per query at `[memory.graph_retrieval].max_facts_per_query`; a seed
+ *      that finds little passes its share on.
+ *   3. Dedupe fact_ids; fetch the facts; emit as (facts, scores)
  *      parallel arrays.  Initial score = `entity_grounding_bonus`
  *      (configurable, defaults to 0.4 — above the 0.30 search floor,
  *      below typical strong hybrid hits).
  *
  * Layer: 2 (alongside memory_fact_search.h).  Pulls memory_types,
- * memory_db_entities, embedding_engine for query-time entity
- * resolution.  No LLM, no logging beyond OLOG.
+ * memory_db_entities, memory_embeddings (named entities) for query-time
+ * entity resolution.  No LLM, no logging beyond OLOG.
  *
  * Thread safety: stateless module functions; each DB call acquires
  * the auth_db mutex internally.  Safe to call from any worker.
@@ -79,20 +82,24 @@ extern "C" {
  * comfortable headroom. */
 #define MEMORY_GRAPH_MAX_SEED_CANDIDATES 8
 
-/** Intermediate graph-candidate pool size used by `memory_action_search`
- * and the parallel bench path.  Caller's working buffer must be at least
- * this large.  The Phase 2 Step 1 query-scoring path widens the
- * candidate pool past the 10-slot LLM-facing cap so topically-relevant
- * graph candidates can compete with hybrid hits before the final
- * truncate.  30 matches `[memory.graph_retrieval] max_facts_per_query`
+/** Intermediate graph-candidate pool size used by `memory_action_search`,
+ * the parallel bench path and per-turn context (the fact focus adapter).
+ * Caller's working buffer must be at least this large.  Query-aware scoring
+ * widens the candidate pool past the 10-slot LLM-facing cap so
+ * topically-relevant graph candidates can compete with hybrid hits before the
+ * final truncate.  30 matches `[memory.graph_retrieval] max_facts_per_query`
  * default; bump together if the per-query cap rises. */
 #define MEMORY_GRAPH_INTERMEDIATE_CAP 30
 
 /**
- * @brief Extract proper-noun candidates from @p query and resolve each
- *        against the user's `memory_entities` table.
+ * @brief The seed entities for @p query: those it names, then proper-noun
+ *        candidates resolved against the user's `memory_entities` table.
  *
- * Heuristic candidate extraction:
+ * Named first: every entity the query names by any of its names, multi-word
+ * names and aliases included (memory_embeddings_entity_matches, names only);
+ * these are class canonicals.  Needs the entity cache (embeddings on).
+ *
+ * Then heuristic candidate extraction:
  *   - Capitalized 3+ letter tokens (alphanumeric, apostrophe and hyphen
  *     allowed inside).
  *   - First-token question-starter filter (What/Why/How/Who/When/Where/
@@ -101,11 +108,9 @@ extern "C" {
  *     nouns in question context.
  *   - 100% coverage on LoCoMo cat-3 questions per the May 2026 profile.
  *
- * Resolution: each candidate goes through `memory_db_entity_get_by_name`
- * first (exact canonical match), then falls back to alias resolution via
- * `memory_db_entity_resolve_alias`.  Candidates that match no real entity
- * are silently dropped (the resolver itself filters question-starters
- * and noise).
+ * Resolution: each candidate goes through `memory_db_entity_root_by_name`
+ * (exact canonical match, as its class: an alias seeds its canonical, so a
+ * class is one seed).  Candidates that match no entity are dropped.
  *
  * @param user_id User ID
  * @param query Raw query text (NULL or empty → SUCCESS with count=0)
@@ -121,14 +126,14 @@ int memory_graph_extract_seed_entities(int user_id,
                                        int *out_count);
 
 /**
- * @brief Phase 1A: expand 1 hop from seed entities, fetch fact-linked
- *        candidates, emit as (facts, scores) parallel arrays.
+ * @brief Expand 1 hop from seed entities: the facts about each and the facts
+ *        its relations came from, as (facts, scores) parallel arrays.
  *
- * For each seed entity, calls `memory_db_relation_fact_ids_for_entity`
- * with a per-seed fan-out budget computed from @p max and the seed
- * count.  Dedupes fact_ids across seeds, fetches each fact via
- * `memory_db_fact_get`, applies a defense-in-depth user_id check,
- * and writes the survivors to @p out_facts / @p out_scores.
+ * For each seed, memory_db_fact_ids_for_subject (any name in its class) and
+ * `memory_db_relation_fact_ids_for_entity`, taken in turn within the seed's
+ * share of @p max (what is left, split over the seeds still to go).  Dedupes
+ * fact_ids across seeds, fetches each fact via `memory_db_fact_get`
+ * (user-scoped in SQL) and drops expired and superseded ones.
  *
  * Scoring: each fact-linked candidate receives a flat
  * `entity_grounding_bonus` score (configurable via

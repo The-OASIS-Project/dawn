@@ -495,6 +495,14 @@ int memory_db_entity_alias_link(int user_id,
    rc = memory_alias_internal_load_entity_full(user_id, target_id, &tgt, &tgt_canon, NULL);
    if (rc != MEMORY_DB_SUCCESS)
       return rc;
+   /* A target that is itself an alias: link to the entity it names, so a
+    * class stays one level deep (an alias of an alias names nothing). */
+   if (tgt_canon > 0 && tgt_canon != source_id) {
+      target_id = tgt_canon;
+      rc = memory_alias_internal_load_entity_full(user_id, target_id, &tgt, &tgt_canon, NULL);
+      if (rc != MEMORY_DB_SUCCESS)
+         return rc;
+   }
 
    /* Refuse to link if the source already has aliases pointing at it (it's
     * canonical for an equivalence class) — would orphan its dependents. */
@@ -1459,20 +1467,6 @@ int memory_db_entity_auto_promote_user_self_by_real_name(int user_id, bool *out_
              (long long)found_id, user_id);
    return MEMORY_DB_SUCCESS;
 }
-
-/* The literal canonical form the LLM-emitted abstract "User" entity collapses
- * to after memory_make_canonical_name (lowercased, whitespace-trimmed).
- * Single source of truth so the maybe / sweep helpers stay in sync if the
- * canonicalizer ever changes its rules.
- *
- * Intentionally .c-only (not exported in memory_db_aliases.h).  External
- * consumers — including tests in test_memory_db_alias.c — exercise the
- * literal through the public helpers; hardcoding "user" in those test
- * call sites is the right shape since the tests are pinning that exact
- * canonical form as the contract.  Promote to the header only if a
- * non-test consumer in a different TU needs to assert against the
- * literal directly. */
-#define MEMORY_ALIAS_ABSTRACT_USER_CANONICAL "user"
 
 int memory_db_entity_maybe_alias_user_to_self(int user_id,
                                               int64_t entity_id,

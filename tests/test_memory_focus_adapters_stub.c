@@ -40,6 +40,7 @@
 #include "core/memory_filter.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_types.h"
@@ -208,6 +209,28 @@ int memory_db_entity_search(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+int memory_db_entity_alias_names(int user_id, memory_alias_name_t **out, int *count_out) {
+   *out = NULL;
+   *count_out = 0;
+   int n = 0;
+   for (int i = 0; i < s_mock.alias_count; i++) {
+      n += s_mock.alias_user_id[i] == user_id;
+   }
+   if (n == 0) {
+      return MEMORY_DB_SUCCESS;
+   }
+   *out = malloc((size_t)n * sizeof(**out));
+   if (!*out) {
+      return MEMORY_DB_FAILURE;
+   }
+   for (int i = 0; i < s_mock.alias_count; i++) {
+      if (s_mock.alias_user_id[i] == user_id) {
+         (*out)[(*count_out)++] = s_mock.aliases[i];
+      }
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_entity_get_embeddings(int user_id,
                                     bool include_aliases,
                                     int expected_dims,
@@ -281,6 +304,44 @@ int memory_db_entities_get_by_ids(int user_id,
    }
    *count_out = count;
    return MEMORY_DB_SUCCESS;
+}
+
+/* Entity classes: this harness has no aliases or user-self entity, so a
+ * class is just the entity. */
+int memory_db_entity_class_members(int user_id,
+                                   int64_t entity_id,
+                                   int64_t *out_ids,
+                                   int max,
+                                   int *count_out) {
+   (void)user_id;
+   *count_out = 0;
+   if (entity_id > 0 && max > 0) {
+      out_ids[0] = entity_id;
+      *count_out = 1;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id) {
+   (void)user_id;
+   *out_id = 0;
+   return MEMORY_DB_NOT_FOUND;
+}
+
+void memory_make_canonical_name(const char *name, char *out, size_t size) {
+   snprintf(out, size, "%s", name ? name : "");
+}
+
+int memory_db_entity_root_by_name(int user_id, const char *canonical_name, int64_t *out_id) {
+   *out_id = 0;
+   for (int i = 0; i < s_mock.entity_count; i++) {
+      if (s_mock.entities[i].user_id == user_id &&
+          strcmp(s_mock.entities[i].canonical_name, canonical_name) == 0) {
+         *out_id = s_mock.entities[i].id;
+         return MEMORY_DB_SUCCESS;
+      }
+   }
+   return MEMORY_DB_NOT_FOUND;
 }
 
 int memory_db_entity_get_by_name(int user_id,
@@ -534,10 +595,13 @@ int memory_graph_extract_seed_entities(int user_id,
                                        int *out_count) {
    (void)user_id;
    (void)query;
-   (void)out_entity_ids;
-   (void)max;
    if (out_count != NULL)
       *out_count = 0;
+   if (s_mock.graph_count > 0 && max > 0) {
+      out_entity_ids[0] = 1;
+      if (out_count != NULL)
+         *out_count = 1;
+   }
    return SUCCESS;
 }
 
@@ -550,12 +614,14 @@ int memory_graph_expand_fact_linked(int user_id,
                                     int *out_count) {
    (void)user_id;
    (void)seed_entity_ids;
-   (void)seed_count;
-   (void)out_facts;
-   (void)out_scores;
-   (void)max;
+   int n = 0;
+   for (int i = 0; i < s_mock.graph_count && n < max && seed_count > 0; i++) {
+      out_facts[n] = s_mock.graph_facts[i];
+      out_scores[n] = 0.4f;
+      n++;
+   }
    if (out_count != NULL)
-      *out_count = 0;
+      *out_count = n;
    return SUCCESS;
 }
 
@@ -611,10 +677,14 @@ int memory_embeddings_rescore_against_query(int user_id,
    (void)query_emb;
    (void)query_norm;
    (void)entity_bonus;
-   (void)fact_ids;
    if (out_scores != NULL) {
-      for (int i = 0; i < fact_count; i++)
+      for (int i = 0; i < fact_count; i++) {
          out_scores[i] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL;
+         for (int g = 0; g < s_mock.graph_count; g++) {
+            if (s_mock.graph_facts[g].id == fact_ids[i])
+               out_scores[i] = s_mock.graph_scores[g];
+         }
+      }
    }
    return SUCCESS;
 }

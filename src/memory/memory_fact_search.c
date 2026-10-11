@@ -37,6 +37,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_graph_retrieval.h"
+#include "memory/memory_implied.h"
 #include "memory/memory_stem.h"
 #include "memory/memory_types.h"
 
@@ -322,6 +323,71 @@ int memory_fact_search_hybrid_ex(int user_id,
                                   out_facts, out_scores, max, out_count);
 }
 
+/* Drop the implied seeds (memory_implied.h).  Returns the new count. */
+static int drop_implied_seeds(int user_id, int64_t *seeds, int count) {
+   memory_implied_entities_t implied;
+   memory_implied_entities_resolve(user_id, &implied);
+   int kept = 0;
+   for (int i = 0; i < count; i++) {
+      if (!memory_implied_entities_has(&implied, seeds[i]))
+         seeds[kept++] = seeds[i];
+   }
+   return kept;
+}
+
+int memory_search_graph_candidates(int user_id,
+                                   const char *query,
+                                   const float *query_emb,
+                                   float query_norm,
+                                   bool for_context,
+                                   memory_fact_t *out_facts,
+                                   float *out_scores,
+                                   int *out_count) {
+   *out_count = 0;
+   if (!g_config.memory.graph_retrieval.enabled || !query || !query[0])
+      return SUCCESS;
+   int64_t seeds[MEMORY_GRAPH_MAX_SEED_CANDIDATES];
+   int seed_count = 0;
+   memory_graph_extract_seed_entities(user_id, query, seeds, MEMORY_GRAPH_MAX_SEED_CANDIDATES,
+                                      &seed_count);
+   if (for_context && seed_count > 0)
+      seed_count = drop_implied_seeds(user_id, seeds, seed_count);
+   if (seed_count <= 0)
+      return SUCCESS;
+   int per_query_cap = g_config.memory.graph_retrieval.max_facts_per_query;
+   if (per_query_cap > MEMORY_GRAPH_INTERMEDIATE_CAP)
+      per_query_cap = MEMORY_GRAPH_INTERMEDIATE_CAP;
+   int count = 0;
+   memory_graph_expand_fact_linked(user_id, seeds, seed_count, out_facts, out_scores, per_query_cap,
+                                   &count);
+
+   /* Query-aware scoring: vec_weight*cosine + entity_bonus, so
+    * topically-irrelevant entity-grounded facts don't unfairly compete with
+    * hybrid hits.  Toggle via graph_retrieval.use_query_scoring. */
+   if (g_config.memory.graph_retrieval.use_query_scoring && count > 0) {
+      int64_t ids[MEMORY_GRAPH_INTERMEDIATE_CAP];
+      for (int i = 0; i < count; i++)
+         ids[i] = out_facts[i].id;
+      memory_embeddings_rescore_against_query(user_id, query_emb, query_norm,
+                                              g_config.memory.graph_retrieval.entity_bonus, ids,
+                                              count, out_scores);
+      /* Drop sentinel-scored facts per the rescore contract. */
+      int kept = 0;
+      for (int i = 0; i < count; i++) {
+         if (out_scores[i] > MEMORY_EMBEDDINGS_RESCORE_SENTINEL) {
+            if (kept != i) {
+               out_facts[kept] = out_facts[i];
+               out_scores[kept] = out_scores[i];
+            }
+            kept++;
+         }
+      }
+      count = kept;
+   }
+   *out_count = count;
+   return SUCCESS;
+}
+
 int memory_search_execute(int user_id,
                           const char *query,
                           time_t since_ts,
@@ -370,55 +436,15 @@ int memory_search_execute(int user_id,
       fact_count = 0;
    }
 
-   /* Step 2: entity-graph candidate expansion (Phase 1A).  Adds candidates
-    * the cosine pool may have ranked too low for top-K. */
+   /* Steps 2-3: entity-graph candidates, scored against the query. */
    if (g_config.memory.graph_retrieval.enabled) {
-      int64_t seeds[MEMORY_GRAPH_MAX_SEED_CANDIDATES];
-      int seed_count = 0;
-      memory_graph_extract_seed_entities(user_id, query, seeds, MEMORY_GRAPH_MAX_SEED_CANDIDATES,
-                                         &seed_count);
-      if (seed_count > 0) {
-         /* Widen the intermediate candidate pool past the LLM-facing cap
-          * so query-scoring sees the full entity-bounded set.  Final
-          * truncate to @p max happens after the merge below. */
-         memory_fact_t graph_facts[MEMORY_GRAPH_INTERMEDIATE_CAP];
-         float graph_scores[MEMORY_GRAPH_INTERMEDIATE_CAP];
-         int graph_count = 0;
-         int per_query_cap = g_config.memory.graph_retrieval.max_facts_per_query;
-         if (per_query_cap > MEMORY_GRAPH_INTERMEDIATE_CAP)
-            per_query_cap = MEMORY_GRAPH_INTERMEDIATE_CAP;
-         memory_graph_expand_fact_linked(user_id, seeds, seed_count, graph_facts, graph_scores,
-                                         per_query_cap, &graph_count);
-
-         /* Step 3: Phase 2 Step 1 query-aware scoring of graph candidates.
-          * Replaces the legacy flat entity_grounding_bonus with
-          * vec_weight*cosine + entity_bonus so topically-irrelevant
-          * entity-grounded facts don't unfairly compete with hybrid hits.
-          * Toggle via g_config.memory.graph_retrieval.use_query_scoring. */
-         if (g_config.memory.graph_retrieval.use_query_scoring && graph_count > 0) {
-            int64_t graph_fact_ids[MEMORY_GRAPH_INTERMEDIATE_CAP];
-            for (int i = 0; i < graph_count; i++)
-               graph_fact_ids[i] = graph_facts[i].id;
-            /* Reuse the query embedding computed above — no second ONNX
-             * inference on this hot path (M3). */
-            memory_embeddings_rescore_against_query(user_id, query_emb_ready ? query_emb : NULL,
-                                                    query_norm,
-                                                    g_config.memory.graph_retrieval.entity_bonus,
-                                                    graph_fact_ids, graph_count, graph_scores);
-            /* Drop sentinel-scored facts per the rescore contract. */
-            int kept = 0;
-            for (int i = 0; i < graph_count; i++) {
-               if (graph_scores[i] > MEMORY_EMBEDDINGS_RESCORE_SENTINEL) {
-                  if (kept != i) {
-                     graph_facts[kept] = graph_facts[i];
-                     graph_scores[kept] = graph_scores[i];
-                  }
-                  kept++;
-               }
-            }
-            graph_count = kept;
-         }
-
+      memory_fact_t graph_facts[MEMORY_GRAPH_INTERMEDIATE_CAP];
+      float graph_scores[MEMORY_GRAPH_INTERMEDIATE_CAP];
+      int graph_count = 0;
+      memory_search_graph_candidates(user_id, query, query_emb_ready ? query_emb : NULL, query_norm,
+                                     /*for_context*/ false, graph_facts, graph_scores,
+                                     &graph_count);
+      if (graph_count > 0) {
          /* Step 4: score-based merge.  Union(hybrid, graph) → sort by
           * score desc → truncate to @p max.  Allows high-scoring graph
           * candidates to displace weak hybrid tail entries. */

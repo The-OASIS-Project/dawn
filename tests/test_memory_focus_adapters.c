@@ -698,6 +698,173 @@ static void test_entity_longest_match_wins(void) {
    TEST_ASSERT_EQUAL_INT(2, n);
 }
 
+/* Facts about an entity the turn names come in from the entity graph into
+ * the slots the gated facts left free, even when nothing else matched; one
+ * the rescore can't score (no embedding) is dropped.  (This harness stubs the
+ * score floor and has no relevance baseline.) */
+static bool has_item(const focus_compose_result_t *r, const char *item_id) {
+   for (int i = 0; i < r->candidate_count; i++) {
+      if (r->candidates[i].item_id && strcmp(r->candidates[i].item_id, item_id) == 0)
+         return true;
+   }
+   return false;
+}
+
+static void test_fact_adapter_adds_named_entity_facts(void) {
+   memory_fact_t *g = s_mock.graph_facts;
+   g[0] = (memory_fact_t){ .id = 200, .user_id = 1, .confidence = 0.9f, .created_at = 1700000000 };
+   strcpy(g[0].fact_text, "Jordan is majoring in chemistry");
+   g[1] = (memory_fact_t){ .id = 201, .user_id = 1, .confidence = 0.9f, .created_at = 1700000000 };
+   strcpy(g[1].fact_text, "Jordan mentioned the weather");
+   s_mock.graph_scores[0] = 0.5f;
+   s_mock.graph_scores[1] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL; /* no embedding */
+   s_mock.graph_count = 2;
+   g_config.memory.graph_retrieval.enabled = true;
+   g_config.memory.graph_retrieval.use_query_scoring = true;
+   g_config.memory.graph_retrieval.max_facts_per_query = 30;
+   g_config.memory.search_score_floor = 0.30f;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   const float dummy[1] = { 0.0f };
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "What do you know about Jordan", dummy, 1,
+                                                1700000200, 5, &result));
+   TEST_ASSERT_TRUE(has_item(&result, "fact:200"));
+   TEST_ASSERT_FALSE(has_item(&result, "fact:201"));
+   focus_result_free(&result);
+
+   /* With a keyword match too, both are kept. */
+   seed_fact(0, 100, 1, "Pepper's birthday is March 14", 0.85f);
+   s_mock.fact_count = 1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "What do you know about Jordan", dummy, 1,
+                                                1700000200, 5, &result));
+   TEST_ASSERT_TRUE(has_item(&result, "fact:200"));
+   TEST_ASSERT_TRUE(has_item(&result, "fact:100"));
+   focus_result_free(&result);
+
+   /* They only fill free slots: with the cap (5) already full, none displaces
+    * a fact that passed the gate. */
+   for (int i = 0; i < 5; i++) {
+      char text[32];
+      snprintf(text, sizeof(text), "kept fact %d", i);
+      seed_fact(i, 300 + i, 1, text, 0.85f);
+   }
+   s_mock.fact_count = 5;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "What do you know about Jordan", dummy, 1,
+                                                1700000200, 5, &result));
+   TEST_ASSERT_FALSE(has_item(&result, "fact:200"));
+   TEST_ASSERT_TRUE(has_item(&result, "fact:304"));
+   focus_result_free(&result);
+}
+
+/* Addressing the assistant by name ("Friday, ...") doesn't bring its entity
+ * or relations; another entity named in the same turn still comes. */
+static void test_assistant_name_is_not_a_subject(void) {
+   seed_entity_pool(40);
+   seed_entity(40, 2001, 1, "Friday", "person", false, embed_typical, NULL);
+   seed_entity(41, 2002, 1, "Jordan", "person", false, embed_typical, NULL);
+   s_mock.entity_count = 42;
+   seed_relation(0, 5000, 1, 2001, "is", "an assistant", 0, 0);
+   seed_relation(1, 5001, 1, 2002, "studies", "chemistry", 0, 0);
+   s_mock.relation_count = 2;
+   snprintf(g_config.general.ai_name, sizeof(g_config.general.ai_name), "Friday");
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "Friday, what's 2 plus 2?", embed_q_match_e1,
+                                       MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_FALSE(has_entity(&result, "Friday"));
+   TEST_ASSERT_EQUAL_INT(0, count_source(&result, "memory_relation"));
+   focus_result_free(&result);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "Friday, what does Jordan study?",
+                                       embed_q_match_e1, MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_FALSE(has_entity(&result, "Friday"));
+   TEST_ASSERT_TRUE(has_entity(&result, "Jordan"));
+   TEST_ASSERT_TRUE(has_item(&result, "relation:5001"));
+   TEST_ASSERT_FALSE(has_item(&result, "relation:5000"));
+   focus_result_free(&result);
+
+   /* Left out, it takes no other subject's place: three more names still
+    * bring all three. */
+   seed_entity(42, 2003, 1, "Marisol", "person", false, embed_typical, NULL);
+   seed_entity(43, 2004, 1, "Theodora", "person", false, embed_typical, NULL);
+   s_mock.entity_count = 44;
+   seed_relation(2, 5002, 1, 2003, "plays", "piano", 0, 0);
+   seed_relation(3, 5003, 1, 2004, "plays", "chess", 0, 0);
+   s_mock.relation_count = 4;
+   memory_embeddings_invalidate_entity_cache();
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "Friday, tell Jordan, Marisol and Theodora hi",
+                                       embed_q_match_e1, MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_TRUE(has_item(&result, "relation:5001"));
+   TEST_ASSERT_TRUE(has_item(&result, "relation:5002"));
+   TEST_ASSERT_TRUE(has_item(&result, "relation:5003"));
+   TEST_ASSERT_FALSE(has_item(&result, "relation:5000"));
+   focus_result_free(&result);
+}
+
+/* An alias names its entity: "Jordan" names "Jordan Smith", whose own name
+ * needs both words.  Only the user's own aliases count. */
+static void test_entity_named_by_alias(void) {
+   seed_entity_pool(40);
+   seed_entity(40, 4001, 1, "Jordan Smith", "person", false, embed_typical, NULL);
+   s_mock.entity_count = 41;
+   memory_entity_match_t m[8];
+   int n = 0;
+
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   s_mock.aliases[0] = (memory_alias_name_t){ .canonical_id = 4001, .name = "Jordan" };
+   s_mock.alias_user_id[0] = 2;
+   s_mock.alias_count = 1;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   s_mock.alias_user_id[0] = 1;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Jordan Smith", m[0].name);
+   TEST_ASSERT_TRUE(m[0].named);
+
+   /* An alias doesn't take a name away from an entity of its own: with a
+    * country named Jordan, "Jordan" names both.  Named by its full name, the
+    * person is matched by that (the better of its names), which covers the
+    * city's one word. */
+   seed_entity(41, 4002, 1, "Jordan", "place", false, embed_typical, NULL);
+   s_mock.entity_count = 42;
+   memory_embeddings_invalidate_entity_cache_for_user(1);
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, memory_embeddings_entity_matches(1, "What do you know about Jordan",
+                                                 embed_q_match_e1, MOCK_DIMS, 0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_embeddings_entity_matches(1, "who is jordan smith",
+                                                                   embed_q_match_e1, MOCK_DIMS,
+                                                                   0.40f, m, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Jordan Smith", m[0].name);
+
+   /* The context adapter finds it too. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "What do you know about Jordan", embed_q_match_e1,
+                                       MOCK_DIMS, 1700000200, 8, &result));
+   TEST_ASSERT_TRUE(has_entity(&result, "Jordan Smith"));
+   focus_result_free(&result);
+}
+
 /* Summaries found only by meaning must stand out from the pool; a keyword
  * match always counts; a small pool isn't gated. */
 static void test_summary_relevance_gate(void) {
@@ -1055,6 +1222,9 @@ int main(void) {
    RUN_TEST(test_entity_cache_per_user);
    RUN_TEST(test_summary_relevance_gate);
    RUN_TEST(test_entity_longest_match_wins);
+   RUN_TEST(test_entity_named_by_alias);
+   RUN_TEST(test_assistant_name_is_not_a_subject);
+   RUN_TEST(test_fact_adapter_adds_named_entity_facts);
 
    /* NULL safety */
    RUN_TEST(test_summary_null_query_text);

@@ -30,9 +30,8 @@
  *      hand the keyword fact_ids + scores to
  *      `memory_embeddings_hybrid_search()` and emit the re-ranked output.
  *      Vector-only hits (those NOT in the keyword set) are fetched via
- *      `memory_db_fact_get()` with a defense-in-depth `user_id`
- *      post-check — `memory_db_fact_get` is NOT user-scoped, so the
- *      caller must verify ownership.
+ *      `memory_db_fact_get()` (user-scoped in SQL) with a
+ *      defense-in-depth `user_id` post-check.
  *   4. Otherwise emit the keyword-only ranking with match counts as the
  *      score.
  *
@@ -46,6 +45,7 @@
 #ifndef MEMORY_FACT_SEARCH_H
 #define MEMORY_FACT_SEARCH_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
@@ -176,6 +176,36 @@ int memory_search_apply_score_floor(memory_fact_t *facts,
  * larger values get clamped silently.  10 matches the LLM-facing slot
  * count used by `memory_action_search`; bench callers can pass 1..10. */
 #define MEMORY_SEARCH_HYBRID_MAX 10
+
+/**
+ * @brief Entity-graph candidates for @p query: facts about the entities it
+ *        names or mentions, scored against it
+ *
+ * Steps 2-3 of memory_search_execute(), shared with per-turn context
+ * injection.  Seeds are the entities the query names (any of their names,
+ * aliases included) and its capitalized words that are an entity's exact
+ * name; each seed contributes the facts about it and the facts its
+ * relations came from (memory_graph_expand_fact_linked).  With
+ * graph_retrieval.use_query_scoring each is rescored as vec_weight * cosine
+ * + entity_bonus, and facts without an embedding are dropped.  Nothing when
+ * graph_retrieval is off.
+ *
+ * @param query_emb   The query's embedding, or NULL (no rescoring possible)
+ * @param for_context For a turn's context: the user's own entity and the
+ *                    assistant's are not seeds (every turn implies them)
+ * @param out_facts  Caller-allocated, MEMORY_GRAPH_INTERMEDIATE_CAP entries
+ * @param out_scores Parallel to @p out_facts
+ * @param out_count  Receives the number written
+ * @return SUCCESS
+ */
+int memory_search_graph_candidates(int user_id,
+                                   const char *query,
+                                   const float *query_emb,
+                                   float query_norm,
+                                   bool for_context,
+                                   memory_fact_t *out_facts,
+                                   float *out_scores,
+                                   int *out_count);
 
 /**
  * @brief Unified retrieval primitive: hybrid + entity-graph + score floor.

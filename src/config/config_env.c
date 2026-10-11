@@ -1646,6 +1646,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                              json_object_new_double(fi->document_min_relevance));
       json_object_object_add(focus, "fact_min_relevance",
                              json_object_new_double(fi->fact_min_relevance));
+      json_object_object_add(focus, "named_fact_min_relevance",
+                             json_object_new_double(fi->named_fact_min_relevance));
       json_object_object_add(focus, "entity_min_relevance",
                              json_object_new_double(fi->entity_min_relevance));
       json_object_object_add(focus, "summary_min_relevance",
@@ -2595,6 +2597,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "min_score = %.2f\n", fi->min_score);
       fprintf(fp, "document_min_relevance = %.2f\n", fi->document_min_relevance);
       fprintf(fp, "fact_min_relevance = %.2f\n", fi->fact_min_relevance);
+      fprintf(fp, "named_fact_min_relevance = %.2f\n", fi->named_fact_min_relevance);
       fprintf(fp, "entity_min_relevance = %.2f\n", fi->entity_min_relevance);
       fprintf(fp, "summary_min_relevance = %.2f\n", fi->summary_min_relevance);
       fprintf(fp, "classifier_enabled = %s\n", fi->classifier_enabled ? "true" : "false");

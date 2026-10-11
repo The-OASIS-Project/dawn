@@ -28,12 +28,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "memory/memory_db_entities.h"   /* for memory_alias_name_t */
 #include "memory/memory_db_provenance.h" /* for memory_provenance_t */
 #include "memory/memory_types.h"
 
 #define MOCK_MAX_FACTS 32
 #define MOCK_MAX_ENTITIES 600 /* past the entity cache's first read (512) */
 #define MOCK_MAX_RELATIONS 32
+#define MOCK_MAX_ALIASES 8
 #define MOCK_MAX_SUMMARIES 16
 #define MOCK_MAX_HYBRID 16
 #define MOCK_DIMS 4 /* keep tiny for fast cosine; production uses 384 */
@@ -59,6 +61,15 @@ typedef struct {
    int entity_count;
    int call_count_entity_embeddings; /* loads of the entity cache */
    int entity_dim;
+   /* Entity-graph candidates (memory_graph_* + rescore): one seed when set */
+   memory_fact_t graph_facts[4];
+   float graph_scores[4]; /* what the rescore gives each */
+   int graph_count;
+
+   /* Aliases: another name for an entity (memory_db_entity_alias_names) */
+   memory_alias_name_t aliases[MOCK_MAX_ALIASES];
+   int alias_user_id[MOCK_MAX_ALIASES];
+   int alias_count;
 
    /* Relations */
    memory_relation_t relations[MOCK_MAX_RELATIONS];

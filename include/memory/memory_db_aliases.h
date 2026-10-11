@@ -401,6 +401,12 @@ int memory_db_relation_list_by_object_class(int user_id,
                                             int max,
                                             int *count_out);
 
+/* The canonical form the LLM-emitted abstract "User" entity collapses to after
+ * memory_make_canonical_name (lowercased, trimmed), which the alias helpers
+ * link to the user's own entity.  Not a name: a query saying "user" doesn't
+ * name the user (memory_db_entity_alias_names leaves it out). */
+#define MEMORY_ALIAS_ABSTRACT_USER_CANONICAL "user"
+
 /**
  * @brief One row of the alias listing for a canonical entity (active aliases
  * only — unlinked rows are filtered).  Populated by

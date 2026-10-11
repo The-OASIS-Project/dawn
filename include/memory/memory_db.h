@@ -205,6 +205,12 @@ int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact);
 bool memory_db_fact_expiry_hidden(int64_t expires_at);
 
 /**
+ * @brief The expiry cutoff a fact query binds: kept when
+ *        (expires_at IS NULL OR expires_at >= cutoff).  0 when expiry is off.
+ */
+int64_t memory_db_fact_expiry_cutoff(void);
+
+/**
  * @brief Sort order for the paginated fact/summary list readers.
  *
  * DEFAULT preserves each list's historical order (facts: confidence DESC;

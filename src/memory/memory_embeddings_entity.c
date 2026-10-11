@@ -22,7 +22,8 @@
  * most-mentioned subset) are held with their embeddings, a running sum of
  * their unit vectors (so a query's mean cosine over the pool is one dot
  * product) and their names' stemmed content words (so "is this entity named in
- * the query" costs no stemming per turn).  A few users' copies are kept, least
+ * the query" costs no stemming per turn).  Their aliases' names are kept the
+ * same way, so "Jordan" names "Jordan Smith".  A few users' copies are kept, least
  * recently used going first, so a household taking turns doesn't reload on
  * every turn.
  *
@@ -64,6 +65,16 @@
  * little more often). */
 #define ENTITY_GEN_BUCKETS 64
 
+/* Another name for a cached entity: an alias row ("Jordan" for "Jordan
+ * Smith"), so a query can name the entity by it. */
+typedef struct {
+   int idx; /* the entity's slot index */
+   uint8_t terms;
+   uint8_t words;
+   char name[MEMORY_ENTITY_NAME_MAX];
+   char stems[MEMORY_ENTITY_NAME_MAX];
+} alias_entry_t;
+
 typedef struct {
    int user_id;
    bool used;
@@ -81,6 +92,8 @@ typedef struct {
    float *embeddings;                          /* count * dims */
    float *norms;
    double *unit_sum; /* dims */
+   alias_entry_t *aliases;
+   int alias_count;
 } entity_slot_t;
 
 static struct {
@@ -113,6 +126,7 @@ static void slot_free(entity_slot_t *s) {
    free(s->embeddings);
    free(s->norms);
    free(s->unit_sum);
+   free(s->aliases);
    memset(s, 0, sizeof(*s));
 }
 
@@ -134,7 +148,8 @@ static int slot_alloc(entity_slot_t *s, int cap, int dims) {
 }
 
 /* Read the user's canonical entities into @p s (not in the cache yet).
- * Aliases are left out so duplicate surface forms don't compete. */
+ * Aliases are left out so duplicate surface forms don't compete; their names
+ * are read by slot_read_aliases. */
 static int slot_read(entity_slot_t *s, int user_id, int dims) {
    int total = 0;
    if (memory_db_entity_embedding_count(user_id, dims, &total) != MEMORY_DB_SUCCESS) {
@@ -170,7 +185,7 @@ static int slot_read(entity_slot_t *s, int user_id, int dims) {
 static void slot_index(entity_slot_t *s, int dims) {
    for (int i = 0; i < s->count; i++) {
       /* The name's content words (matched against the query) and its full
-       * word count (name_match needs both). */
+       * word count (memory_terms_names needs both). */
       const int c = memory_terms_stem_line(s->names[i], true, s->name_stems[i],
                                            sizeof(s->name_stems[i]));
       const int w = memory_terms_word_count(s->names[i]);
@@ -183,6 +198,72 @@ static void slot_index(entity_slot_t *s, int dims) {
          }
       }
    }
+}
+
+typedef struct {
+   int64_t id;
+   int idx;
+} id_idx_t;
+
+static int id_idx_cmp(const void *a, const void *b) {
+   const int64_t x = ((const id_idx_t *)a)->id;
+   const int64_t y = ((const id_idx_t *)b)->id;
+   return (x > y) - (x < y);
+}
+
+/* The user's alias names, each pointing at its entity in @p s (not in the
+ * cache yet).  An alias whose entity isn't cached (no embedding yet) is left
+ * out.  FAILURE when they couldn't be read (the copy still names entities by
+ * their own names). */
+static int slot_read_aliases(entity_slot_t *s, int user_id) {
+   memory_alias_name_t *rows = NULL;
+   int n = 0;
+   if (memory_db_entity_alias_names(user_id, &rows, &n) != MEMORY_DB_SUCCESS) {
+      return FAILURE;
+   }
+   if (n == 0 || s->count == 0) {
+      free(rows);
+      return SUCCESS;
+   }
+   id_idx_t *by_id = malloc((size_t)s->count * sizeof(*by_id));
+   s->aliases = by_id ? malloc((size_t)n * sizeof(*s->aliases)) : NULL;
+   if (!s->aliases) {
+      free(by_id);
+      free(rows);
+      return FAILURE;
+   }
+   for (int i = 0; i < s->count; i++) {
+      by_id[i] = (id_idx_t){ .id = s->ids[i], .idx = i };
+   }
+   qsort(by_id, (size_t)s->count, sizeof(*by_id), id_idx_cmp);
+   for (int i = 0; i < n; i++) {
+      const id_idx_t key = { .id = rows[i].canonical_id };
+      const id_idx_t *hit = bsearch(&key, by_id, (size_t)s->count, sizeof(*by_id), id_idx_cmp);
+      if (!hit) {
+         continue;
+      }
+      alias_entry_t *a = &s->aliases[s->alias_count];
+      a->idx = hit->idx;
+      safe_strscpy(a->name, rows[i].name);
+      const int c = memory_terms_stem_line(a->name, true, a->stems, sizeof(a->stems));
+      const int w = memory_terms_word_count(a->name);
+      a->terms = (uint8_t)(c > UINT8_MAX ? UINT8_MAX : c);
+      a->words = (uint8_t)(w > UINT8_MAX ? UINT8_MAX : w);
+      s->alias_count++;
+   }
+   /* Rows whose entity isn't cached took no entry. */
+   if (s->alias_count == 0) {
+      free(s->aliases);
+      s->aliases = NULL;
+   } else {
+      alias_entry_t *fit = realloc(s->aliases, (size_t)s->alias_count * sizeof(*s->aliases));
+      if (fit) {
+         s->aliases = fit;
+      }
+   }
+   free(by_id);
+   free(rows);
+   return SUCCESS;
 }
 
 /* Caller holds s_ent.mutex.  The user's current copy, or NULL. */
@@ -250,6 +331,11 @@ static entity_slot_t *slot_acquire(int user_id) {
    const int rc = slot_read(&built, user_id, dims);
    if (rc == SUCCESS) {
       slot_index(&built, dims);
+      if (slot_read_aliases(&built, user_id) != SUCCESS) {
+         /* Use the copy, but stale: the next lookup reads it again. */
+         OLOG_WARNING("memory_embeddings: couldn't read entity aliases for user %d", user_id);
+         built.gen_user--;
+      }
       if (built.count == 0 && !atomic_exchange(&s_empty_warned, true)) {
          OLOG_WARNING("memory_embeddings: no entity embeddings at %d dimensions for user %d "
                       "(new user, or a model change the recompute worker hasn't caught up with)",
@@ -348,8 +434,10 @@ static double pool_mean(const entity_slot_t *s, const float *qvec, float qnorm) 
 }
 
 typedef struct {
-   int idx;     /* into the slot */
-   int matched; /* the name's content words the query contains */
+   int idx;           /* into the slot */
+   int matched;       /* the name's content words the query contains */
+   const char *stems; /* the name matched (the entity's own or an alias) */
+   int words;
 } named_t;
 
 /* Whether stem line @p line contains word @p w (@p len bytes). */
@@ -389,50 +477,81 @@ static bool query_words_covered(const memory_terms_t *q, const char *a, const ch
    return true;
 }
 
-/* Whether the query names entity @p i (memory_terms_names), and how many of
- * its content words it matched (0: not named). */
-static int name_match(const entity_slot_t *s, const memory_terms_t *q, const char *query, int i) {
-   return memory_terms_names(q, query, s->names[i], s->name_stems[i], s->name_terms[i],
-                             s->name_words[i]);
-}
-
 /* Whether named entry @p b covers @p a: A's matched content words all belong
  * to B, and B matched more of them, or as many with a shorter name (the exact
  * "Morning Report" over "Morning Report Test" for "morning report"). */
-static bool covers(const entity_slot_t *s,
-                   const memory_terms_t *q,
-                   const named_t *b,
-                   const named_t *a) {
-   const bool longer = b->matched > a->matched ||
-                       (b->matched == a->matched && s->name_words[b->idx] < s->name_words[a->idx]);
-   return longer && query_words_covered(q, s->name_stems[a->idx], s->name_stems[b->idx]);
+static bool covers(const memory_terms_t *q, const named_t *b, const named_t *a) {
+   const bool longer = b->matched > a->matched || (b->matched == a->matched && b->words < a->words);
+   return longer && query_words_covered(q, a->stems, b->stems);
 }
 
-/* The entities @p o's query names, in slot order, into @p named (capacity
- * s->count).  Longest match wins: one whose matched words all belong to a
- * longer named match ("AI" by "ai" when the query says "Marigold AI Planner") isn't
- * named; the query meant the longer one.  It can still count as similar. */
+static int named_idx_cmp(const void *a, const void *b) {
+   return ((const named_t *)a)->idx - ((const named_t *)b)->idx;
+}
+
+/* Whether @p x is the better match of one entity named twice (by its own name
+ * and an alias): more words matched, else the shorter name. */
+static bool better_name(const named_t *x, const named_t *y) {
+   return x->matched > y->matched || (x->matched == y->matched && x->words < y->words);
+}
+
+/* Whether @p o's type filter leaves out entity @p i. */
+static bool type_excluded(const entity_slot_t *s, const select_opts_t *o, int i) {
+   return o->type_filter && o->type_filter[0] && strcmp(s->types[i], o->type_filter) != 0;
+}
+
+/* The entities @p o's query names, by their own names or an alias, in slot
+ * order (one entry each), into @p named (capacity s->count + s->alias_count).
+ * Longest match wins: one whose matched words all belong to a longer named
+ * match ("AI" by "ai" when the query says "Marigold AI Planner") isn't named;
+ * the query meant the longer one.  It can still count as similar. */
 static int find_named(const entity_slot_t *s, const select_opts_t *o, named_t *named) {
    if (!o->terms || o->terms->count == 0) {
       return 0;
    }
    int n = 0;
    for (int i = 0; i < s->count; i++) {
-      if (o->type_filter && o->type_filter[0] && strcmp(s->types[i], o->type_filter) != 0) {
+      if (type_excluded(s, o, i)) {
          continue;
       }
-      const int matched = name_match(s, o->terms, o->query, i);
+      const int matched = memory_terms_names(o->terms, o->query, s->names[i], s->name_stems[i],
+                                             s->name_terms[i], s->name_words[i]);
       if (matched > 0) {
-         named[n].idx = i;
-         named[n].matched = matched;
-         n++;
+         named[n++] = (named_t){ .idx = i,
+                                 .matched = matched,
+                                 .stems = s->name_stems[i],
+                                 .words = s->name_words[i] };
+      }
+   }
+   for (int k = 0; k < s->alias_count; k++) {
+      const alias_entry_t *a = &s->aliases[k];
+      if (type_excluded(s, o, a->idx)) {
+         continue;
+      }
+      const int matched = memory_terms_names(o->terms, o->query, a->name, a->stems, a->terms,
+                                             a->words);
+      if (matched > 0) {
+         named[n++] =
+             (named_t){ .idx = a->idx, .matched = matched, .stems = a->stems, .words = a->words };
+      }
+   }
+   /* Slot order, one entry per entity: the better of its names. */
+   qsort(named, (size_t)n, sizeof(*named), named_idx_cmp);
+   int unique = 0;
+   for (int i = 0; i < n; i++) {
+      if (unique > 0 && named[unique - 1].idx == named[i].idx) {
+         if (better_name(&named[i], &named[unique - 1])) {
+            named[unique - 1] = named[i];
+         }
+      } else {
+         named[unique++] = named[i];
       }
    }
    int kept = 0;
-   for (int a = 0; a < n; a++) {
+   for (int a = 0; a < unique; a++) {
       bool subsumed = false;
-      for (int b = 0; b < n && !subsumed; b++) {
-         subsumed = b != a && covers(s, o->terms, &named[b], &named[a]);
+      for (int b = 0; b < unique && !subsumed; b++) {
+         subsumed = b != a && covers(o->terms, &named[b], &named[a]);
       }
       if (!subsumed) {
          named[kept++] = named[a];
@@ -464,7 +583,7 @@ static int select_locked(const entity_slot_t *s,
    *n_out = 0;
    named_t *named = NULL;
    if (s->count > 0 && o->terms && o->terms->count > 0) {
-      named = malloc((size_t)s->count * sizeof(*named));
+      named = malloc((size_t)(s->count + s->alias_count) * sizeof(*named));
       if (!named) {
          return FAILURE;
       }

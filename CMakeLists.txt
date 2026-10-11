@@ -1017,6 +1017,7 @@ list(APPEND DAWN_SOURCES
     src/core/focus/focus_candidate_helpers.c
     src/core/focus/focus_dominant_token.c
     src/memory/memory_fact_search.c
+    src/memory/memory_implied.c
     src/memory/memory_focus_adapters.c
     src/memory/memory_source_dedup.c
     src/memory/memory_score_floor.c

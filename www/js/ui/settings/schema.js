@@ -1388,6 +1388,17 @@
                      configPath: 'memory.focus_injection.fact_min_relevance',
                      displayValue: (v) => v.toFixed(2),
                   },
+                  focus_named_fact_min_relevance: {
+                     type: 'range',
+                     label: 'Named memory relevance floor',
+                     min: 0,
+                     max: 1,
+                     step: 0.02,
+                     hint: 'The same measure, for memories about a person or thing you name ("What do you know about Sam?"). Lower than the memory relevance floor, because a question about someone can be worded far from what you remember about them. Not used for yourself or the assistant. 0 turns it off. Default 0.20.',
+                     advanced: true,
+                     configPath: 'memory.focus_injection.named_fact_min_relevance',
+                     displayValue: (v) => v.toFixed(2),
+                  },
                   focus_entity_min_relevance: {
                      type: 'range',
                      label: 'People & things relevance floor',

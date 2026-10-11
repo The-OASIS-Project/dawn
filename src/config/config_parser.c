@@ -1460,6 +1460,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "min_score",
                                                 "document_min_relevance",
                                                 "fact_min_relevance",
+                                                "named_fact_min_relevance",
                                                 "entity_min_relevance",
                                                 "summary_min_relevance",
                                                 "classifier_enabled",
@@ -1493,6 +1494,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(focus, "min_score", fi->min_score);
       PARSE_DOUBLE(focus, "document_min_relevance", fi->document_min_relevance);
       PARSE_DOUBLE(focus, "fact_min_relevance", fi->fact_min_relevance);
+      PARSE_DOUBLE(focus, "named_fact_min_relevance", fi->named_fact_min_relevance);
       PARSE_DOUBLE(focus, "entity_min_relevance", fi->entity_min_relevance);
       PARSE_DOUBLE(focus, "summary_min_relevance", fi->summary_min_relevance);
       PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);

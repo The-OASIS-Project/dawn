@@ -353,7 +353,13 @@ static void test_min_score_threshold(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 0, 5, &result));
    TEST_ASSERT_EQUAL_INT(1, result.candidate_count);
    TEST_ASSERT_EQUAL_STRING("high", result.candidates[0].text);
+   /* The tally: two found, one kept past min_score. */
+   TEST_ASSERT_EQUAL_INT(1, result.source_count);
+   TEST_ASSERT_EQUAL_STRING("memory_fact", result.sources[0].source_id);
+   TEST_ASSERT_EQUAL_INT(2, result.sources[0].found);
+   TEST_ASSERT_EQUAL_INT(1, result.sources[0].kept);
    focus_result_free(&result);
+   TEST_ASSERT_EQUAL_INT(0, result.source_count);
 }
 
 /* 5. top_k truncation — fake returns 20; top_k=5; assert 5 highest survive. */
@@ -518,6 +524,7 @@ static void test_requires_embedding_skipped_without_query(void) {
    TEST_ASSERT_EQUAL_INT(0, result.candidate_count);
    TEST_ASSERT_EQUAL_INT(0, result.rejection_count);
    TEST_ASSERT_EQUAL_INT(0, s_fake[0].call_count);
+   TEST_ASSERT_EQUAL_INT(0, result.source_count); /* a skipped source isn't tallied */
    focus_result_free(&result);
 }
 

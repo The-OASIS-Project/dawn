@@ -12,6 +12,27 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-11 — Memories about a person you name are found by any of their names
+
+**What changed.** When a question names someone ("What do you know about Sam?"), memory search now
+finds the facts stored about that person under any of their names (an alias such as "Sam" for "Samantha
+Lee"), not only the facts linked through their relations. Facts that were replaced by newer ones no
+longer come back from this path.
+
+If you turned on per-turn context (`[memory.focus_injection] enabled`), those facts now reach the
+conversation too: before, a loosely worded question about someone often brought none. A new setting,
+`named_fact_min_relevance` (default `0.20`; Settings → Memory → Per-Turn Context Injection, advanced,
+"Named memory relevance floor"), sets how related to the question such a fact must be. It is lower than
+the bar for other facts because the person was named. Naming the assistant or yourself ("Friday, what's
+2 plus 2?") no longer brings in what is stored about either; facts about you still come in when they
+match what you asked.
+
+**What you need to do.** Nothing. Raise `named_fact_min_relevance` if a passing mention of someone
+("remind Sam to buy milk") brings in too many of their facts; lower it if questions about a person miss
+ones you expected.
+
+---
+
 ## 2026-10-09 — Claude Haiku 5.5 is the default Claude and OpenRouter model
 
 **What changed.** When you use Claude without naming a model, DAWN now picks Claude Haiku 5.5
