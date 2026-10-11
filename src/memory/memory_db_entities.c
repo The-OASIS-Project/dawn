@@ -624,6 +624,16 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
                  sqlite3_bind_int(_s, 3, user_id);
               });
 
+   /* Reassign the facts filed under the source (subject_entity_id has no
+    * foreign key: left alone they would name a deleted entity). */
+   MERGE_EXEC("UPDATE memory_facts SET subject_entity_id = ? "
+              "WHERE subject_entity_id = ? AND user_id = ?",
+              {
+                 sqlite3_bind_int64(_s, 1, target_id);
+                 sqlite3_bind_int64(_s, 2, source_id);
+                 sqlite3_bind_int(_s, 3, user_id);
+              });
+
    /* Reassign contacts */
    MERGE_EXEC("UPDATE contacts SET entity_id = ? "
               "WHERE entity_id = ? AND user_id = ?",

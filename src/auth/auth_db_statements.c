@@ -67,6 +67,16 @@ void auth_db_stmts_finalize(const auth_db_stmt_def_t *defs, size_t n) {
    }
 }
 
+/* cls: the class of entity ?2 for user ?1, as a CTE: ?2's canonical (?2
+ * itself, or the entity it is an alias of) and that canonical's aliases.
+ * Classes are one level deep (memory_db_alias_link). */
+#define MEMORY_ENTITY_CLASS_CTE                                                   \
+   "WITH rt(root) AS (SELECT COALESCE((SELECT canonical_id FROM memory_entities " \
+   "                                    WHERE user_id = ?1 AND id = ?2), ?2)), "  \
+   "cls(id) AS (SELECT root FROM rt UNION "                                       \
+   "            SELECT e.id FROM rt CROSS JOIN memory_entities e "                \
+   "            WHERE e.canonical_id = rt.root AND e.user_id = ?1) "
+
 static const auth_db_stmt_def_t s_stmts[] = {
 
    /* User statements */
@@ -1043,32 +1053,31 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "WHERE r.user_id = ? AND r.object_entity_id = ? LIMIT ?",
      &s_db.stmt_memory_relation_list_by_object },
 
-   /* Graph-retrieval Phase 1A: return DISTINCT fact_ids for relations linking
-    * @entity_id (as subject OR object).  Only returns relations with non-NULL
-    * fact_id — the structured-only relations (NULL fact_id, ~60% of rows) are
-    * Phase 1B's territory.  Sorted by confidence DESC so the highest-quality
-    * graph-anchored facts surface first when the caller's fan-out cap trips.
+   /* The fact_ids of fact-linked relations touching any name in ?2's class
+    * (?2's canonical and that canonical's aliases), as subject or object,
+    * best first across the class.  Relations with NULL fact_id are skipped.
     * The unary + keeps the planner off the user_id index (a scan of every
     * relation the user has) and on the subject and object indexes; user_id
     * is still checked on each row. */
    { "memory_relation_fact_ids_for_entity",
-     "SELECT DISTINCT r.fact_id "
-     "FROM memory_relations r "
-     "WHERE +r.user_id = ? "
-     "  AND (r.subject_entity_id = ? OR r.object_entity_id = ?) "
-     "  AND r.fact_id IS NOT NULL "
-     "ORDER BY r.confidence DESC, r.created_at DESC "
-     "LIMIT ?",
+     MEMORY_ENTITY_CLASS_CTE "SELECT DISTINCT r.fact_id "
+                             "FROM memory_relations r "
+                             "WHERE +r.user_id = ?1 "
+                             "  AND (r.subject_entity_id IN cls OR r.object_entity_id IN cls) "
+                             "  AND r.fact_id IS NOT NULL "
+                             "ORDER BY r.confidence DESC, r.created_at DESC "
+                             "LIMIT ?3",
      &s_db.stmt_memory_relation_fact_ids_for_entity },
 
-   /* Live facts filed under one entity id, newest first.  The equality on
-    * (user_id, subject_entity_id) is served by idx_memory_facts_subject in id
-    * order, so it stops at the LIMIT without a sort. */
+   /* Live facts filed under any name in ?2's class, newest first across the
+    * class.  One idx_memory_facts_subject seek per name, then a sort of what
+    * they find. */
    { "memory_fact_ids_for_subject",
-     "SELECT id FROM memory_facts "
-     "WHERE user_id = ?1 AND subject_entity_id = ?2 AND superseded_by IS NULL "
-     "  AND (expires_at IS NULL OR expires_at >= ?4) "
-     "ORDER BY id DESC LIMIT ?3",
+     MEMORY_ENTITY_CLASS_CTE
+     "SELECT f.id FROM cls CROSS JOIN memory_facts f "
+     "WHERE f.user_id = ?1 AND f.subject_entity_id = cls.id AND f.superseded_by IS NULL "
+     "  AND (f.expires_at IS NULL OR f.expires_at >= ?4) "
+     "ORDER BY f.id DESC LIMIT ?3",
      &s_db.stmt_memory_fact_ids_for_subject },
 
    /* An entity's class: its canonical (the entity itself, or the one it is an

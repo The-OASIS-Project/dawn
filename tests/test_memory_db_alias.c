@@ -1516,6 +1516,8 @@ static void test_entity_merge_invalidates_entity_cache(void) {
 
 /* A merge moves the source's aliases to the target: "Jordan" still names
  * someone after "Jordan S." is merged into "Jordan Smith". */
+static int64_t insert_fact_about(int64_t subject, const char *text, int64_t superseded_by);
+
 static void test_entity_merge_moves_aliases(void) {
    int64_t target = insert_entity_typed(g_test_user_id, "Jordan Smith", "person");
    int64_t source = insert_entity_typed(g_test_user_id, "Jordan S.", "person");
@@ -1525,9 +1527,18 @@ static void test_entity_merge_moves_aliases(void) {
                          memory_db_entity_alias_link(g_test_user_id, alias, source, "soft",
                                                      "operator", 0.95f, NULL, &link_id));
    TEST_ASSERT_EQUAL_INT64(source, get_entity_canonical_id(alias));
+   int64_t fact = insert_fact_about(source, "Jordan majors in chemistry", 0);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_merge(g_test_user_id, source, target));
    TEST_ASSERT_EQUAL_INT64(target, get_entity_canonical_id(alias));
+
+   /* The source's facts are filed under the target now. */
+   int64_t fact_ids[4];
+   int n_facts = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_ids_for_subject(g_test_user_id, target,
+                                                                           fact_ids, 4, &n_facts));
+   TEST_ASSERT_EQUAL_INT(1, n_facts);
+   TEST_ASSERT_EQUAL_INT64(fact, fact_ids[0]);
 
    memory_alias_name_t *names = NULL;
    int n = 0;
@@ -1644,8 +1655,14 @@ static void test_fact_ids_for_subject(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
                          memory_db_fact_ids_for_subject(g_test_user_id, jordan, ids, 8, &n));
    TEST_ASSERT_EQUAL_INT(2, n);
-   TEST_ASSERT_EQUAL_INT64(f1, ids[0]); /* the canonical's facts first */
-   TEST_ASSERT_EQUAL_INT64(f2, ids[1]);
+   TEST_ASSERT_EQUAL_INT64(f2, ids[0]); /* newest first across the class */
+   TEST_ASSERT_EQUAL_INT64(f1, ids[1]);
+
+   /* The canonical's facts don't crowd out an alias's newer one. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_ids_for_subject(g_test_user_id, jordan, ids, 1, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(f2, ids[0]);
 
    /* An alias finds the whole class, too. */
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
@@ -1676,23 +1693,36 @@ static void test_class_lookups_by_alias(void) {
                          memory_db_entity_root_by_name(g_test_user_id, "nobody", &root));
 
    int64_t fact = insert_fact_about(alias, "Jordan plays chess", 0);
-   sqlite3_stmt *stmt = NULL;
-   sqlite3_prepare_v2(s_db.db,
-                      "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
-                      "object_value, fact_id, confidence) VALUES (?, ?, 'enjoys', 'cosplay', ?, "
-                      "0.9)",
-                      -1, &stmt, NULL);
-   sqlite3_bind_int(stmt, 1, g_test_user_id);
-   sqlite3_bind_int64(stmt, 2, alias);
-   sqlite3_bind_int64(stmt, 3, fact);
-   sqlite3_step(stmt);
-   sqlite3_finalize(stmt);
+   int64_t weak = insert_fact_about(jordan, "Jordan might like hiking", 0);
+   const struct {
+      int64_t subject;
+      int64_t fact;
+      double confidence;
+   } rels[] = { { jordan, weak, 0.5 }, { alias, fact, 0.9 } };
+   for (size_t i = 0; i < sizeof(rels) / sizeof(rels[0]); i++) {
+      sqlite3_stmt *stmt = NULL;
+      sqlite3_prepare_v2(s_db.db,
+                         "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
+                         "object_value, fact_id, confidence) VALUES (?, ?, 'enjoys', 'it', ?, ?)",
+                         -1, &stmt, NULL);
+      sqlite3_bind_int(stmt, 1, g_test_user_id);
+      sqlite3_bind_int64(stmt, 2, rels[i].subject);
+      sqlite3_bind_int64(stmt, 3, rels[i].fact);
+      sqlite3_bind_double(stmt, 4, rels[i].confidence);
+      sqlite3_step(stmt);
+      sqlite3_finalize(stmt);
+   }
+   /* Best first across the class: the alias's relation isn't crowded out by
+    * the canonical's weaker one. */
    int64_t ids[4];
    int n = 0;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_fact_ids_for_entity(
-                                                g_test_user_id, jordan, ids, 4, &n));
+                                                g_test_user_id, jordan, ids, 1, &n));
    TEST_ASSERT_EQUAL_INT(1, n);
    TEST_ASSERT_EQUAL_INT64(fact, ids[0]);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_fact_ids_for_entity(
+                                                g_test_user_id, jordan, ids, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
 }
 
 /* A class is only ever the user's own: an unknown id or another user's

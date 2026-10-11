@@ -270,7 +270,8 @@ int memory_db_relation_list_by_object(int user_id,
                                       int max,
                                       int *count_out);
 
-/** Most names (an entity and its aliases) one entity class is read with. */
+/** Most names (an entity and its aliases) memory_db_entity_class_members
+ * returns; the by-class fact and relation lookups have no such limit. */
 #define MEMORY_ENTITY_CLASS_MAX 16
 
 /**
@@ -291,8 +292,8 @@ int memory_db_entity_class_members(int user_id,
  * @brief Live facts about an entity, by any of its names: those filed under
  *        any member of its class (memory_db_entity_class_members)
  *
- * Superseded and expired facts are left out.  The canonical's facts come
- * first, then each alias's; newest first within each.
+ * Superseded and expired facts are left out.  Newest first across the whole
+ * class, so a name with many facts doesn't crowd out another's.
  *
  * @param out_fact_ids Caller-allocated array of size @p max
  * @param count_out    Receives the number returned
@@ -309,11 +310,10 @@ int memory_db_fact_ids_for_subject(int user_id,
  *        of its names (memory_db_entity_class_members), as subject or object
  *
  * Walks `memory_relations` for rows where (subject_entity_id = a member OR
- * object_entity_id = a member) AND fact_id IS NOT NULL, the canonical's
- * first.  Returns the
- * linked fact IDs, sorted by relation confidence DESC then created_at DESC
- * so the highest-quality graph anchors come first when the fan-out cap
- * trips.
+ * object_entity_id = a member) AND fact_id IS NOT NULL.  Returns the linked
+ * fact IDs across the whole class, sorted by relation confidence DESC then
+ * created_at DESC so the highest-quality graph anchors come first when the
+ * fan-out cap trips.
  *
  * Skips relations with NULL fact_id — those are structured-only graph
  * edges (Phase 1B territory).  ~40% of relations are fact-linked at the
