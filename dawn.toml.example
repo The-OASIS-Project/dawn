@@ -719,11 +719,12 @@ citation_reinforcement_boost = 0.05
                                   # Throttles CPU; increase to reduce background load.
 
 [memory.graph_retrieval]
-# Entity-graph candidate retrieval for memory.search.  Phase 1A walks 1 hop
-# from query-extracted proper-noun seeds via fact-linked relations.  Phase 2
-# Step 1 (May 14, 2026) added query-aware scoring of graph candidates
-# (+1.1pp cat-3 on LoCoMo with no regressions).
-# enabled = true                   # Default-on; disable to A/B against pure hybrid
+# Entity-graph candidate retrieval for memory.search and per-turn context:
+# the facts about the people and things a query names (any of their names)
+# or mentions by exact name, and the facts their relations came from.
+# Query-aware scoring (May 14, 2026) re-scores them against the query.
+# enabled = true                   # Default-on.  Off also stops facts about a
+                                   # named person reaching per-turn context.
 # entity_grounding_bonus = 0.40    # Legacy flat score for graph candidates when
                                    # use_query_scoring=false.  Range [0.0, 1.0].
 # max_facts_per_query = 30         # Total fan-out cap across all seeds per query.
@@ -798,6 +799,10 @@ citation_reinforcement_boost = 0.05
 # fact_min_relevance = 0.34           # Same measure for remembered facts,
                                       # against your other facts.  Injection
                                       # only; memory search is unaffected.
+                                      # 0 disables.  Range: 0.0 - 1.0
+# named_fact_min_relevance = 0.20     # Lower bar for facts about a person
+                                      # or thing the turn names (not you or
+                                      # the assistant).  Injection only.
                                       # 0 disables.  Range: 0.0 - 1.0
 # summary_min_relevance = 0.22        # Same measure for past conversation
                                       # summaries found by meaning (last 30

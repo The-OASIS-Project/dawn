@@ -106,6 +106,10 @@ static int64_t fact_expiry_guard_now(void) {
    return g_config.memory.expire_enabled ? (int64_t)time(NULL) : 0;
 }
 
+int64_t memory_db_fact_expiry_cutoff(void) {
+   return fact_expiry_guard_now();
+}
+
 bool memory_db_fact_expiry_hidden(int64_t expires_at) {
    /* Mirror the SQL guard: kept when (expires_at IS NULL OR expires_at >= now);
     * hidden otherwise.  Disabled config or durable (0) fact → never hidden. */

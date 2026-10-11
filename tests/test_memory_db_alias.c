@@ -1606,6 +1606,135 @@ static void test_entity_merge_into_own_alias(void) {
    TEST_ASSERT_EQUAL_STRING("merged-into-alias", hist[0].unlink_reason);
 }
 
+/* Facts about an entity: those filed under it or an alias of it, live only. */
+static int64_t insert_fact_about(int64_t subject, const char *text, int64_t superseded_by) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "INSERT INTO memory_facts (user_id, fact_text, subject_entity_id, "
+                      "superseded_by) VALUES (?, ?, ?, ?)",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, g_test_user_id);
+   sqlite3_bind_text(stmt, 2, text, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(stmt, 3, subject);
+   if (superseded_by > 0)
+      sqlite3_bind_int64(stmt, 4, superseded_by);
+   else
+      sqlite3_bind_null(stmt, 4);
+   sqlite3_step(stmt);
+   const int64_t id = sqlite3_last_insert_rowid(s_db.db);
+   sqlite3_finalize(stmt);
+   return id;
+}
+
+static void test_fact_ids_for_subject(void) {
+   int64_t jordan = insert_entity_typed(g_test_user_id, "Jordan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jordan", "person");
+   int64_t other = insert_entity_typed(g_test_user_id, "Dawn Smith", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, jordan, "soft",
+                                                     "operator", 0.95f, NULL, &link_id));
+   int64_t f1 = insert_fact_about(jordan, "Jordan majors in chemistry", 0);
+   int64_t f2 = insert_fact_about(alias, "Jordan plays chess", 0);
+   insert_fact_about(jordan, "Jordan lives in Denver", f1); /* superseded */
+   insert_fact_about(other, "Dawn goes by Dee", 0);
+
+   int64_t ids[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_ids_for_subject(g_test_user_id, jordan, ids, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT64(f1, ids[0]); /* the canonical's facts first */
+   TEST_ASSERT_EQUAL_INT64(f2, ids[1]);
+
+   /* An alias finds the whole class, too. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_ids_for_subject(g_test_user_id, alias, ids, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   int64_t members[4];
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_class_members(g_test_user_id, alias, members, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT64(jordan, members[0]);
+   TEST_ASSERT_EQUAL_INT64(alias, members[1]);
+}
+
+/* A name resolves to its class, and a class's relations include those filed
+ * under an alias. */
+static void test_class_lookups_by_alias(void) {
+   int64_t jordan = insert_entity_typed(g_test_user_id, "Jordan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jordan", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, jordan, "soft",
+                                                     "operator", 0.95f, NULL, &link_id));
+   int64_t root = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_root_by_name(g_test_user_id, "jordan", &root));
+   TEST_ASSERT_EQUAL_INT64(jordan, root);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND,
+                         memory_db_entity_root_by_name(g_test_user_id, "nobody", &root));
+
+   int64_t fact = insert_fact_about(alias, "Jordan plays chess", 0);
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
+                      "object_value, fact_id, confidence) VALUES (?, ?, 'enjoys', 'cosplay', ?, "
+                      "0.9)",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, g_test_user_id);
+   sqlite3_bind_int64(stmt, 2, alias);
+   sqlite3_bind_int64(stmt, 3, fact);
+   sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+   int64_t ids[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_fact_ids_for_entity(
+                                                g_test_user_id, jordan, ids, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(fact, ids[0]);
+}
+
+/* A class is only ever the user's own: an unknown id or another user's
+ * entity has no members. */
+static void test_entity_class_members_scoped(void) {
+   auth_db_create_user("pat", "hash", false);
+   auth_user_t other;
+   memset(&other, 0, sizeof(other));
+   auth_db_get_user("pat", &other);
+   int64_t theirs = insert_entity_typed(other.id, "Jordan Smith", "person");
+   int64_t ids[4];
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_class_members(g_test_user_id, theirs, ids, 4, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_class_members(g_test_user_id, 999999, ids, 4, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* Linking to an alias links to the entity it names: a class stays one level
+ * deep. */
+static void test_alias_link_to_an_alias(void) {
+   int64_t root = insert_entity_typed(g_test_user_id, "Jordan Smith", "person");
+   int64_t mid = insert_entity_typed(g_test_user_id, "Jordan", "person");
+   int64_t leaf = insert_entity_typed(g_test_user_id, "Jo", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, mid, root, "soft", "operator",
+                                                     0.95f, NULL, &link_id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, leaf, mid, "soft", "operator",
+                                                     0.95f, NULL, &link_id));
+   TEST_ASSERT_EQUAL_INT64(root, get_entity_canonical_id(leaf));
+   int64_t ids[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_class_members(g_test_user_id, leaf, ids, 4, &n));
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT64(root, ids[0]);
+}
+
 /* The abstract "user" alias isn't a name: it never names the user. */
 static void test_alias_names_leave_out_user_placeholder(void) {
    int64_t self = insert_entity_typed(g_test_user_id, "Pat Example", "person");
@@ -3600,6 +3729,10 @@ int main(void) {
    RUN_TEST(test_entity_merge_into_own_alias);
    RUN_TEST(test_entity_merge_into_an_alias);
    RUN_TEST(test_alias_names_leave_out_user_placeholder);
+   RUN_TEST(test_fact_ids_for_subject);
+   RUN_TEST(test_entity_class_members_scoped);
+   RUN_TEST(test_class_lookups_by_alias);
+   RUN_TEST(test_alias_link_to_an_alias);
    RUN_TEST(test_loader_filter_excludes_aliases_by_default);
 
    /* relation listings */

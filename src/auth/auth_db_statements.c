@@ -913,6 +913,14 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "FROM memory_entities e "
      "WHERE e.user_id = ? AND e.canonical_name = ?",
      &s_db.stmt_memory_entity_get_by_name },
+
+   /* The id of the class a name belongs to (an alias's canonical), without
+    * get_by_name's aggregates: served by the (user_id, canonical_name)
+    * unique index. */
+   { "memory_entity_root_by_name",
+     "SELECT COALESCE(canonical_id, id) FROM memory_entities "
+     "WHERE user_id = ?1 AND canonical_name = ?2",
+     &s_db.stmt_memory_entity_root_by_name },
    { "memory_entity_update_embedding",
      "UPDATE memory_entities SET embedding = ?, embedding_norm = ? "
      "WHERE id = ? AND user_id = ?",
@@ -1039,16 +1047,42 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * @entity_id (as subject OR object).  Only returns relations with non-NULL
     * fact_id — the structured-only relations (NULL fact_id, ~60% of rows) are
     * Phase 1B's territory.  Sorted by confidence DESC so the highest-quality
-    * graph-anchored facts surface first when the caller's fan-out cap trips. */
+    * graph-anchored facts surface first when the caller's fan-out cap trips.
+    * The unary + keeps the planner off the user_id index (a scan of every
+    * relation the user has) and on the subject and object indexes; user_id
+    * is still checked on each row. */
    { "memory_relation_fact_ids_for_entity",
      "SELECT DISTINCT r.fact_id "
      "FROM memory_relations r "
-     "WHERE r.user_id = ? "
+     "WHERE +r.user_id = ? "
      "  AND (r.subject_entity_id = ? OR r.object_entity_id = ?) "
      "  AND r.fact_id IS NOT NULL "
      "ORDER BY r.confidence DESC, r.created_at DESC "
      "LIMIT ?",
      &s_db.stmt_memory_relation_fact_ids_for_entity },
+
+   /* Live facts filed under one entity id, newest first.  The equality on
+    * (user_id, subject_entity_id) is served by idx_memory_facts_subject in id
+    * order, so it stops at the LIMIT without a sort. */
+   { "memory_fact_ids_for_subject",
+     "SELECT id FROM memory_facts "
+     "WHERE user_id = ?1 AND subject_entity_id = ?2 AND superseded_by IS NULL "
+     "  AND (expires_at IS NULL OR expires_at >= ?4) "
+     "ORDER BY id DESC LIMIT ?3",
+     &s_db.stmt_memory_fact_ids_for_subject },
+
+   /* An entity's class: its canonical (the entity itself, or the one it is an
+    * alias of) first, then that canonical's aliases.  Two indexed lookups
+    * (rowid, idx_memory_entities_canonical). */
+   { "memory_entity_class_members",
+     "WITH r(root) AS (SELECT COALESCE((SELECT canonical_id FROM memory_entities "
+     "                                   WHERE user_id = ?1 AND id = ?2), ?2)) "
+     "SELECT e.id FROM memory_entities e, r WHERE e.id = r.root AND e.user_id = ?1 "
+     "UNION ALL "
+     "SELECT e.id FROM r CROSS JOIN memory_entities e "
+     "WHERE e.canonical_id = r.root AND e.canonical_id IS NOT NULL AND e.user_id = ?1 "
+     "LIMIT ?3",
+     &s_db.stmt_memory_entity_class_members },
 
    /* Equivalence-class aggregation: see entity_get_by_name above for
     * rationale.  ORDER BY uses the row's own mention_count (not the

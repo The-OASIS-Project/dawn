@@ -1314,6 +1314,7 @@ dawn_add_unit_test(test_memory_citation_parse
 dawn_add_unit_test(test_memory_fact_search
    SOURCES test_memory_fact_search.c test_memory_focus_adapters_stub.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/memory/memory_implied.c
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
@@ -1325,6 +1326,7 @@ dawn_add_unit_test(test_memory_focus_adapters
    SOURCES test_memory_focus_adapters.c test_memory_focus_adapters_stub.c
            ${SRC_ROOT}/src/memory/memory_focus_adapters.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/memory/memory_implied.c
            ${SRC_ROOT}/src/memory/memory_embeddings_entity.c
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/core/focus/focus_source.c
@@ -2288,6 +2290,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/memory/memory_implied.c
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
@@ -2403,6 +2406,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/memory/memory_implied.c
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c

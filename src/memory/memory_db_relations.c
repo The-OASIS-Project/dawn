@@ -580,13 +580,11 @@ int memory_db_relation_list_by_object(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-/* Graph-retrieval Phase 1A helper: return DISTINCT fact_ids for fact-linked
- * relations touching @entity_id (as either subject or object).  Skips
- * relations with NULL fact_id — those are structured-only graph edges
- * that Phase 1B will synthesize separately.  Sorted by relation confidence
- * DESC then created_at DESC so the highest-quality graph anchors come
- * first when the fan-out cap (@max) trips.  Caller is responsible for
- * deduplicating across multiple seed entities. */
+/* Fact ids of the fact-linked relations touching any name in @p entity_id's
+ * class (as subject or object), the canonical's first; within a name by
+ * relation confidence then recency.  Relations with NULL fact_id are skipped.
+ * A fact linked from two names can appear twice: the caller dedups across
+ * names and seeds. */
 int memory_db_relation_fact_ids_for_entity(int user_id,
                                            int64_t entity_id,
                                            int64_t *out_fact_ids,
@@ -597,20 +595,89 @@ int memory_db_relation_fact_ids_for_entity(int user_id,
    if (!out_fact_ids || max <= 0 || entity_id <= 0)
       return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_FAIL();
+   int64_t members[MEMORY_ENTITY_CLASS_MAX];
+   int n_members = 0;
+   if (memory_db_entity_class_members(user_id, entity_id, members, MEMORY_ENTITY_CLASS_MAX,
+                                      &n_members) != MEMORY_DB_SUCCESS)
+      return MEMORY_DB_FAILURE;
 
+   AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *stmt = s_db.stmt_memory_relation_fact_ids_for_entity;
+   int count = 0;
+   for (int m = 0; m < n_members && count < max; m++) {
+      sqlite3_reset(stmt);
+      sqlite3_bind_int(stmt, 1, user_id);
+      sqlite3_bind_int64(stmt, 2, members[m]);
+      sqlite3_bind_int64(stmt, 3, members[m]);
+      sqlite3_bind_int(stmt, 4, max - count);
+      while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+         out_fact_ids[count++] = sqlite3_column_int64(stmt, 0);
+      }
+   }
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_class_members(int user_id,
+                                   int64_t entity_id,
+                                   int64_t *out_ids,
+                                   int max,
+                                   int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out_ids || max <= 0 || entity_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = s_db.stmt_memory_entity_class_members;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int64(stmt, 2, entity_id);
-   sqlite3_bind_int64(stmt, 3, entity_id);
-   sqlite3_bind_int(stmt, 4, max);
-
+   sqlite3_bind_int(stmt, 3, max);
    int count = 0;
    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
-      out_fact_ids[count++] = sqlite3_column_int64(stmt, 0);
+      out_ids[count++] = sqlite3_column_int64(stmt, 0);
    }
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
 
+int memory_db_fact_ids_for_subject(int user_id,
+                                   int64_t entity_id,
+                                   int64_t *out_fact_ids,
+                                   int max,
+                                   int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out_fact_ids || max <= 0 || entity_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   int64_t members[MEMORY_ENTITY_CLASS_MAX];
+   int n_members = 0;
+   if (memory_db_entity_class_members(user_id, entity_id, members, MEMORY_ENTITY_CLASS_MAX,
+                                      &n_members) != MEMORY_DB_SUCCESS)
+      return MEMORY_DB_FAILURE;
+
+   /* One indexed lookup per name, the canonical's first, under one lock. */
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = s_db.stmt_memory_fact_ids_for_subject;
+   int count = 0;
+   for (int m = 0; m < n_members && count < max; m++) {
+      sqlite3_reset(stmt);
+      sqlite3_bind_int(stmt, 1, user_id);
+      sqlite3_bind_int64(stmt, 2, members[m]);
+      sqlite3_bind_int(stmt, 3, max - count);
+      sqlite3_bind_int64(stmt, 4, memory_db_fact_expiry_cutoff());
+      while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+         out_fact_ids[count++] = sqlite3_column_int64(stmt, 0);
+      }
+   }
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
    if (count_out)

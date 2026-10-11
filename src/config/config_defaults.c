@@ -469,6 +469,12 @@ void config_set_defaults(dawn_config_t *config) {
     * pulled in (arithmetic, jokes).  Personal facts legitimately relate to many
     * requests, so this is a gentle trim, not a hard filter. */
    config->memory.focus_injection.fact_min_relevance = 0.34f;
+   /* Measured 2026-10 on a real pool of ~5,500 facts: for "What do you know
+    * about <person>?" that person's facts scored 0.04-0.44 (median 0.19-0.27),
+    * mostly under fact_min_relevance; at 0.20 about half to all of them come in,
+    * while a turn that only mentions the name ("remind <person> to ...") brings
+    * in a few. */
+   config->memory.focus_injection.named_fact_min_relevance = 0.20f;
    /* Calibrated 2026-09 on a real pool of ~700 entities: the entities a short
     * query names scored 0.42-1.0, while look-alikes sharing a common word stayed
     * under 0.37.  Names mentioned in a long message are caught by the name

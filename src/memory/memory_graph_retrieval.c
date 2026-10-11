@@ -33,6 +33,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
+#include "memory/memory_embeddings.h"
 #include "memory/memory_types.h"
 
 /* Question-starter words.  When the first sentence-initial capitalized
@@ -117,6 +118,22 @@ int memory_graph_extract_seed_entities(int user_id,
       return SUCCESS;
 
    int seed_count = 0;
+
+   /* Entities the query names by any of their names ("Dawn" names "Dawn
+    * Smith"; an alias names its entity), multi-word names included. */
+   memory_entity_match_t named[MEMORY_GRAPH_MAX_SEED_CANDIDATES];
+   int n_named = 0;
+   const int named_cap = max < MEMORY_GRAPH_MAX_SEED_CANDIDATES ? max
+                                                                : MEMORY_GRAPH_MAX_SEED_CANDIDATES;
+   if (memory_embeddings_entity_matches(user_id, query, NULL, 0, 0.0f, named, named_cap,
+                                        &n_named) == SUCCESS) {
+      for (int i = 0; i < n_named && seed_count < max; i++) {
+         if (named[i].named && !seed_set_contains(out_entity_ids, seed_count, named[i].id)) {
+            out_entity_ids[seed_count++] = named[i].id;
+         }
+      }
+   }
+
    bool first_token = true;
    const char *p = query;
    const char *end = query + strlen(query);
@@ -152,40 +169,54 @@ int memory_graph_extract_seed_entities(int user_id,
       if (canon_len < MIN_CANDIDATE_LEN)
          continue;
 
-      /* Resolve via exact canonical-name match.  The entity-merge work
-       * (May 2026) canonicalizes names to lowercase at insert time, so
-       * the lookup is case-equal after normalize.  No fuzzy path here —
-       * v1 keeps the false-positive surface tight; expand later if
-       * cat-3 coverage proves insufficient. */
-      memory_entity_t e = { 0 };
-      int rc = memory_db_entity_get_by_name(user_id, canon, &e);
-      if (rc != MEMORY_DB_SUCCESS)
+      /* Exact canonical-name match, as its class (an alias seeds its
+       * canonical: the expansion reads every name in the class, so the
+       * alias itself would be the same seed twice). */
+      int64_t root = 0;
+      if (memory_db_entity_root_by_name(user_id, canon, &root) != MEMORY_DB_SUCCESS || root <= 0)
          continue;
-      if (e.id <= 0 || e.user_id != user_id)
+      if (seed_set_contains(out_entity_ids, seed_count, root))
          continue;
-
-      /* Resolve canonical_id chain — if the matched row is a soft alias
-       * (canonical_id != 0 in the entity-merge schema), seed against
-       * the class canonical so a 1-hop expansion sees the full
-       * equivalence class's relations.  Phase 2's memory_db_relation_
-       * fact_ids_for_entity walks by entity_id directly; without this
-       * step a query that uses an alias canonical name (e.g., "Jon"
-       * when "Jonathan Smith" is the canonical) would miss relations
-       * stored against the canonical. */
-      /* Skip — Phase 1 entity-merge keeps relations on whichever entity
-       * the resolver chose at extraction time, and the alias_link
-       * mechanism doesn't migrate relations.  Querying by the
-       * resolved row's own id IS what we want.  Comment kept as a
-       * design note for future maintainers. */
-
-      if (seed_set_contains(out_entity_ids, seed_count, e.id))
-         continue;
-      out_entity_ids[seed_count++] = e.id;
+      out_entity_ids[seed_count++] = root;
    }
 
    if (out_count != NULL)
       *out_count = seed_count;
    return SUCCESS;
+}
+
+/* Fetch fact @p fid into out_facts[*produced] unless it is already there,
+ * gone, or expired.  Whether it was added. */
+static bool add_fact(int user_id,
+                     int64_t fid,
+                     float score,
+                     memory_fact_t *out_facts,
+                     float *out_scores,
+                     int *produced) {
+   if (fid <= 0)
+      return false;
+   for (int j = 0; j < *produced; j++) {
+      if (out_facts[j].id == fid)
+         return false;
+   }
+   /* memory_db_fact_get is user-scoped at the SQL layer (CWE-639
+    * defense-in-depth): a row pointing at another user's fact is NOT_FOUND. */
+   memory_fact_t fact = { 0 };
+   if (memory_db_fact_get(fid, user_id, &fact) != MEMORY_DB_SUCCESS)
+      return false;
+   /* Expiry retrieval guard (v58): this by-id retrieval feeds the LLM like
+    * the vector-only path in memory_fact_search.c, so expired facts (a
+    * scheduled event that hasn't happened) are dropped here. */
+   if (memory_db_fact_expiry_hidden(fact.expires_at))
+      return false;
+   /* A replaced or merged fact isn't current (a relation can still point at
+    * it), and the rescore that would drop it can be off. */
+   if (fact.superseded_by > 0)
+      return false;
+   out_facts[*produced] = fact;
+   out_scores[*produced] = score;
+   (*produced)++;
+   return true;
 }
 
 int memory_graph_expand_fact_linked(int user_id,
@@ -204,71 +235,42 @@ int memory_graph_expand_fact_linked(int user_id,
 
    const float bonus = g_config.memory.graph_retrieval.entity_grounding_bonus;
 
-   /* Per-seed fan-out budget — divide the total cap across seeds,
-    * leaving the first seed with the bigger share when not evenly
-    * divisible.  Caller passes the global cap (typically
-    * graph_retrieval.max_facts_per_query, default 30) so we don't
-    * explode for high-degree entities like John/Tim/Caroline. */
-   int per_seed = max / seed_count;
-   if (per_seed < 1)
-      per_seed = 1;
-   int leftover = max - (per_seed * seed_count);
-
-   /* Dedup set: we walk seeds in order and skip fact_ids already
-    * surfaced by an earlier seed.  out_count is the high-water mark. */
+   /* Per-seed fan-out budget: what is left, shared by the seeds still to go,
+    * so a seed that finds little hands its share on.  Caller passes the global
+    * cap (typically graph_retrieval.max_facts_per_query, default 30) so we
+    * don't explode for high-degree entities like John/Tim/Caroline. */
    int produced = 0;
-   int64_t fact_id_buf[64]; /* Per-seed batch. */
+   int64_t about_ids[64];  /* Per seed: facts about the entity. */
+   int64_t linked_ids[64]; /* Per seed: facts its relations came from. */
+   const int buf_cap = (int)(sizeof(about_ids) / sizeof(about_ids[0]));
 
    for (int s = 0; s < seed_count && produced < max; s++) {
-      int seed_cap = per_seed + (s == 0 ? leftover : 0);
-      if (seed_cap > (int)(sizeof(fact_id_buf) / sizeof(fact_id_buf[0])))
-         seed_cap = (int)(sizeof(fact_id_buf) / sizeof(fact_id_buf[0]));
-      if (produced + seed_cap > max)
-         seed_cap = max - produced;
-      if (seed_cap <= 0)
-         break;
+      int seed_cap = (max - produced) / (seed_count - s);
+      if (seed_cap < 1)
+         seed_cap = 1;
+      if (seed_cap > buf_cap)
+         seed_cap = buf_cap;
 
-      int got = 0;
-      int rc = memory_db_relation_fact_ids_for_entity(user_id, seed_entity_ids[s], fact_id_buf,
-                                                      seed_cap, &got);
-      if (rc != MEMORY_DB_SUCCESS)
-         continue;
+      int n_about = 0;
+      int n_linked = 0;
+      if (memory_db_fact_ids_for_subject(user_id, seed_entity_ids[s], about_ids, seed_cap,
+                                         &n_about) != MEMORY_DB_SUCCESS)
+         n_about = 0;
+      if (memory_db_relation_fact_ids_for_entity(user_id, seed_entity_ids[s], linked_ids, seed_cap,
+                                                 &n_linked) != MEMORY_DB_SUCCESS)
+         n_linked = 0;
 
-      for (int i = 0; i < got && produced < max; i++) {
-         int64_t fid = fact_id_buf[i];
-         if (fid <= 0)
-            continue;
-         /* Dedup against already-produced facts. */
-         bool seen = false;
-         for (int j = 0; j < produced; j++) {
-            if (out_facts[j].id == fid) {
-               seen = true;
-               break;
-            }
+      /* Take the two in turn, so neither crowds out the other. */
+      int taken = 0;
+      for (int k = 0; (k < n_about || k < n_linked) && taken < seed_cap && produced < max; k++) {
+         if (k < n_about &&
+             add_fact(user_id, about_ids[k], bonus, out_facts, out_scores, &produced)) {
+            taken++;
          }
-         if (seen)
-            continue;
-
-         /* memory_db_fact_get is now user-scoped at the SQL layer
-          * (CWE-639 defense-in-depth) — a relations row pointing at
-          * another user's fact returns MEMORY_DB_NOT_FOUND here, which
-          * would still indicate a schema invariant violation but no
-          * longer requires a post-fetch user_id mismatch check. */
-         memory_fact_t fact = { 0 };
-         if (memory_db_fact_get(fid, user_id, &fact) != MEMORY_DB_SUCCESS)
-            continue;
-         /* Expiry retrieval guard (v58): this 1-hop graph expansion is a
-          * second by-id retrieval materialization that feeds the LLM focus
-          * block (mirrors the vector-only path in memory_fact_search.c).  The
-          * fact-embedding seed pool is shared with maintenance, so drop expired
-          * facts here rather than at the source — a scheduled-not-yet-happened
-          * event reachable via a relation triple is exactly the C3 target. */
-         if (memory_db_fact_expiry_hidden(fact.expires_at))
-            continue;
-
-         out_facts[produced] = fact;
-         out_scores[produced] = bonus;
-         produced++;
+         if (k < n_linked && taken < seed_cap && produced < max &&
+             add_fact(user_id, linked_ids[k], bonus, out_facts, out_scores, &produced)) {
+            taken++;
+         }
       }
    }
 

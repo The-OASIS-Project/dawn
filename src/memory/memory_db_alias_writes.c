@@ -495,6 +495,14 @@ int memory_db_entity_alias_link(int user_id,
    rc = memory_alias_internal_load_entity_full(user_id, target_id, &tgt, &tgt_canon, NULL);
    if (rc != MEMORY_DB_SUCCESS)
       return rc;
+   /* A target that is itself an alias: link to the entity it names, so a
+    * class stays one level deep (an alias of an alias names nothing). */
+   if (tgt_canon > 0 && tgt_canon != source_id) {
+      target_id = tgt_canon;
+      rc = memory_alias_internal_load_entity_full(user_id, target_id, &tgt, &tgt_canon, NULL);
+      if (rc != MEMORY_DB_SUCCESS)
+         return rc;
+   }
 
    /* Refuse to link if the source already has aliases pointing at it (it's
     * canonical for an equivalence class) — would orphan its dependents. */

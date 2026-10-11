@@ -589,28 +589,31 @@ typedef struct {
 } focus_source_weights_t;
 
 typedef struct {
-   bool enabled;                 /* Master enable (default off) */
-   int focus_budget_bytes;       /* Byte cap on the assembled focus block (per turn) */
-   int top_k;                    /* Maximum candidates retained after ranking */
-   float min_score;              /* Floor — anything below is dropped */
-   float fact_min_relevance;     /* Facts: same corpus-relative measure against the user's
-                                    other facts; injection only (not the memory tool).
-                                    0 disables. */
-   float summary_min_relevance;  /* Conversation summaries found by meaning: same measure
-                                    against the user's summaries of the last 30 days.
-                                    Keyword matches aren't gated.  0 disables. */
-   float entity_min_relevance;   /* Entities: same measure against the user's other entities,
-                                    for those the query doesn't name (a named entity always
-                                    counts).  Injection, recall and the memory tool.
-                                    0 disables. */
-   float document_min_relevance; /* Document chunks: minimum similarity measured from the
-                                    corpus-typical level toward identical,
-                                    (cos - pool_mean) / (1 - pool_mean).  Model-independent;
-                                    0 disables. */
-   bool classifier_enabled;      /* RAGRoute-style source classifier;
-                                    default false (off, opt-in after probe) */
-   float weight_semantic;        /* Cross-source ranker weights — Generative
-                                    Agents / CrewAI three-factor formula */
+   bool enabled;                   /* Master enable (default off) */
+   int focus_budget_bytes;         /* Byte cap on the assembled focus block (per turn) */
+   int top_k;                      /* Maximum candidates retained after ranking */
+   float min_score;                /* Floor — anything below is dropped */
+   float fact_min_relevance;       /* Facts: same corpus-relative measure against the user's
+                                      other facts; injection only (not the memory tool).
+                                      0 disables. */
+   float named_fact_min_relevance; /* The lower bar for facts about an entity the turn
+                                      names (its subject is named, so its wording can
+                                      sit further from them).  0 disables. */
+   float summary_min_relevance;    /* Conversation summaries found by meaning: same measure
+                                      against the user's summaries of the last 30 days.
+                                      Keyword matches aren't gated.  0 disables. */
+   float entity_min_relevance;     /* Entities: same measure against the user's other entities,
+                                      for those the query doesn't name (a named entity always
+                                      counts).  Injection, recall and the memory tool.
+                                      0 disables. */
+   float document_min_relevance;   /* Document chunks: minimum similarity measured from the
+                                      corpus-typical level toward identical,
+                                      (cos - pool_mean) / (1 - pool_mean).  Model-independent;
+                                      0 disables. */
+   bool classifier_enabled;        /* RAGRoute-style source classifier;
+                                      default false (off, opt-in after probe) */
+   float weight_semantic;          /* Cross-source ranker weights — Generative
+                                      Agents / CrewAI three-factor formula */
    float weight_recency;
    float weight_importance;
    float weight_source;  /* Multiplier on per-source weights below */

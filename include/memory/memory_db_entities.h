@@ -115,6 +115,15 @@ int memory_db_entity_get_by_name(int user_id,
                                  memory_entity_t *out_entity);
 
 /**
+ * @brief The id of the class @p canonical_name belongs to: the entity's own
+ *        id, or its canonical's when it is an alias
+ *
+ * @param out_id Receives the id (0 when not found)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_root_by_name(int user_id, const char *canonical_name, int64_t *out_id);
+
+/**
  * @brief Update entity embedding vector
  *
  * @param entity_id Entity ID
@@ -261,12 +270,47 @@ int memory_db_relation_list_by_object(int user_id,
                                       int max,
                                       int *count_out);
 
+/** Most names (an entity and its aliases) one entity class is read with. */
+#define MEMORY_ENTITY_CLASS_MAX 16
+
 /**
- * @brief Graph-retrieval Phase 1A: return DISTINCT fact_ids of fact-linked
- * relations touching @p entity_id as either subject or object.
+ * @brief An entity's class: the canonical (@p entity_id itself, or the entity
+ *        it is an alias of) first, then the canonical's aliases
  *
- * Walks `memory_relations` for rows where (subject_entity_id = @p entity_id
- * OR object_entity_id = @p entity_id) AND fact_id IS NOT NULL.  Returns the
+ * @param out_ids   Caller-allocated array of size @p max
+ * @param count_out Receives the number returned (0 for an unknown id)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_class_members(int user_id,
+                                   int64_t entity_id,
+                                   int64_t *out_ids,
+                                   int max,
+                                   int *count_out);
+
+/**
+ * @brief Live facts about an entity, by any of its names: those filed under
+ *        any member of its class (memory_db_entity_class_members)
+ *
+ * Superseded and expired facts are left out.  The canonical's facts come
+ * first, then each alias's; newest first within each.
+ *
+ * @param out_fact_ids Caller-allocated array of size @p max
+ * @param count_out    Receives the number returned
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_ids_for_subject(int user_id,
+                                   int64_t entity_id,
+                                   int64_t *out_fact_ids,
+                                   int max,
+                                   int *count_out);
+
+/**
+ * @brief The fact_ids of fact-linked relations touching @p entity_id, by any
+ *        of its names (memory_db_entity_class_members), as subject or object
+ *
+ * Walks `memory_relations` for rows where (subject_entity_id = a member OR
+ * object_entity_id = a member) AND fact_id IS NOT NULL, the canonical's
+ * first.  Returns the
  * linked fact IDs, sorted by relation confidence DESC then created_at DESC
  * so the highest-quality graph anchors come first when the fan-out cap
  * trips.

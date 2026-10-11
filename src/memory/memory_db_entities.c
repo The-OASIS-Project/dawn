@@ -199,6 +199,30 @@ int memory_db_entity_get_by_name(int user_id,
    return result;
 }
 
+int memory_db_entity_root_by_name(int user_id, const char *canonical_name, int64_t *out_id) {
+   if (!canonical_name || !out_id)
+      return MEMORY_DB_FAILURE;
+   *out_id = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = s_db.stmt_memory_entity_root_by_name;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, canonical_name, -1, SQLITE_TRANSIENT);
+   const int rc = sqlite3_step(stmt);
+   int result = MEMORY_DB_NOT_FOUND;
+   if (rc == SQLITE_ROW) {
+      *out_id = sqlite3_column_int64(stmt, 0);
+      result = MEMORY_DB_SUCCESS;
+   } else if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: entity_root_by_name failed: %s", sqlite3_errmsg(s_db.db));
+      result = MEMORY_DB_FAILURE;
+   }
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
 int memory_db_entities_get_by_ids(int user_id,
                                   const int64_t *ids,
                                   int n,

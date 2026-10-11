@@ -69,6 +69,8 @@
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_fact_search.h"
+#include "memory/memory_graph_retrieval.h"
+#include "memory/memory_implied.h"
 #include "memory/memory_types.h"
 #include "utils/string_utils.h"
 
@@ -134,6 +136,83 @@ _Static_assert(RELATION_ADAPTER_MAX_CANDIDATES_CAP >= 64,
  * boundary is enforced at the conv_db_* level only, not at memory_facts.
  * ============================================================================= */
 
+/* Fill the free slots after the @p n facts already chosen (at most @p cap)
+ * with @p query's entity-graph candidates (memory_search_graph_candidates):
+ * facts about what the turn names.  Their subject is named, so they pass the
+ * lower named_fact_min_relevance bar instead of fact_min_relevance (a
+ * question's wording can sit far from what is known about someone), and the
+ * score floor.  They never displace a fact already chosen.  Best score first.
+ * Returns the new count. */
+static int add_graph_facts(int user_id,
+                           const char *query,
+                           const float *query_embedding,
+                           size_t embed_dim,
+                           int cap,
+                           memory_fact_t *facts,
+                           float *scores,
+                           int n) {
+   if (n >= cap) {
+      return n;
+   }
+   memory_fact_t graph[MEMORY_GRAPH_INTERMEDIATE_CAP];
+   float graph_scores[MEMORY_GRAPH_INTERMEDIATE_CAP];
+   int graph_n = 0;
+   const bool has_emb = query_embedding != NULL && embed_dim > 0 &&
+                        (int)embed_dim == embedding_engine_dims();
+   const float norm = has_emb ? memory_embeddings_l2_norm(query_embedding, (int)embed_dim) : 0.0f;
+   memory_search_graph_candidates(user_id, query, has_emb ? query_embedding : NULL, norm,
+                                  /*for_context*/ true, graph, graph_scores, &graph_n);
+   graph_n = memory_search_apply_score_floor(graph, graph_scores, graph_n,
+                                             g_config.memory.search_score_floor);
+
+   /* The named bar, measured like the injection gate.  Without a baseline (a
+    * memory too small to have one, or no embedding) there's no relevance to
+    * measure, and the named entity's facts fill free slots by score alone. */
+   float rel[MEMORY_GRAPH_INTERMEDIATE_CAP] = { 0 };
+   bool gated = false;
+   const float min_rel = g_config.memory.focus_injection.named_fact_min_relevance;
+   if (min_rel > 0.0f && has_emb && graph_n > 0) {
+      int64_t ids[MEMORY_GRAPH_INTERMEDIATE_CAP];
+      int pool = 0;
+      for (int i = 0; i < graph_n; i++)
+         ids[i] = graph[i].id;
+      gated = memory_embeddings_fact_relevance(user_id, query_embedding, ids, graph_n, rel,
+                                               &pool) == SUCCESS &&
+              pool >= EMBEDDING_RELEVANCE_MIN_POOL;
+   }
+
+   /* Best score first into the free slots. */
+   bool used[MEMORY_GRAPH_INTERMEDIATE_CAP] = { false };
+   while (n < cap) {
+      int best = -1;
+      for (int i = 0; i < graph_n; i++) {
+         if (used[i] || graph[i].user_id != user_id ||
+             (gated && !isnan(rel[i]) && rel[i] < min_rel)) {
+            continue;
+         }
+         bool dup = false;
+         for (int j = 0; j < n && !dup; j++) {
+            dup = facts[j].id == graph[i].id;
+         }
+         if (dup) {
+            used[i] = true;
+            continue;
+         }
+         if (best < 0 || graph_scores[i] > graph_scores[best]) {
+            best = i;
+         }
+      }
+      if (best < 0) {
+         break;
+      }
+      used[best] = true;
+      facts[n] = graph[best];
+      scores[n] = graph_scores[best];
+      n++;
+   }
+   return n;
+}
+
 static int fact_adapter_query(int user_id,
                               bool include_private,
                               const char *query_text,
@@ -157,8 +236,6 @@ static int fact_adapter_query(int user_id,
                                  facts, scores, cap, &n) != SUCCESS) {
       return FAILURE;
    }
-   if (n <= 0)
-      return SUCCESS;
 
    /* Defense-in-depth: drop any fact whose user_id doesn't match.  The
     * helper itself already filters at SQL boundary AND post-checks the
@@ -184,8 +261,6 @@ static int fact_adapter_query(int user_id,
     * fabrication surface is identical to the tool path.  Single knob
     * (g_config.memory.search_score_floor) keeps tool-time and injection-time semantics aligned. */
    kept = memory_search_apply_score_floor(facts, scores, kept, g_config.memory.search_score_floor);
-   if (kept <= 0)
-      return SUCCESS;
 
    /* Relevance gate for injection only (the memory tool's search is unaffected).
     * The search floor above sits near the embedding model's unrelated-text
@@ -212,10 +287,15 @@ static int fact_adapter_query(int user_id,
             }
          }
          kept = k2;
-         if (kept <= 0)
-            return SUCCESS;
       }
    }
+
+   /* Facts about the entities the turn names ("What do you know about
+    * Jordan") take the slots left over. */
+   kept = add_graph_facts(user_id, query_text, query_embedding, embed_dim, cap, facts, scores,
+                          kept);
+   if (kept <= 0)
+      return SUCCESS;
 
    /* Batch provenance lookup. */
    int64_t fact_ids[10];
@@ -409,6 +489,29 @@ static void add_matched_entities(int user_id,
    free(found);
 }
 
+/* The implied entities (memory_implied.h), looked up only when a turn names
+ * something. */
+typedef struct {
+   bool resolved;
+   memory_implied_entities_t ids;
+} lazy_implied_t;
+
+/* Whether a match is an implied entity found by its name (left out: naming
+ * the user or the assistant doesn't make either the subject). */
+static bool named_implied(int user_id, lazy_implied_t *implied, bool named, int64_t entity_id) {
+   if (!named)
+      return false;
+   if (!implied->resolved) {
+      memory_implied_entities_resolve(user_id, &implied->ids);
+      implied->resolved = true;
+   }
+   return memory_implied_entities_has(&implied->ids, entity_id);
+}
+
+/* Matches fetched beyond a cap, so the implied entities left out (at most the
+ * user's and the assistant's) don't take relevant ones' places. */
+#define IMPLIED_HEADROOM 2
+
 static int entity_adapter_query(int user_id,
                                 bool include_private,
                                 const char *query_text,
@@ -427,9 +530,11 @@ static int entity_adapter_query(int user_id,
 
    const int cap = (max_candidates > MEMORY_ENTITY_MATCH_MAX) ? MEMORY_ENTITY_MATCH_MAX
                                                               : max_candidates;
-   /* Working set bounded by `2 * cap` (worst case: keyword and vector
-    * paths return disjoint top-cap sets). */
-   const int work_cap = cap * 2;
+   const int fetch = (cap + IMPLIED_HEADROOM > MEMORY_ENTITY_MATCH_MAX) ? MEMORY_ENTITY_MATCH_MAX
+                                                                        : cap + IMPLIED_HEADROOM;
+   /* Working set bounded by `2 * fetch` (worst case: keyword and vector
+    * paths return disjoint sets). */
+   const int work_cap = fetch * 2;
    entity_rank_entry_t *rows = calloc((size_t)work_cap, sizeof(*rows));
    if (rows == NULL) {
       OLOG_ERROR("entity_adapter: OOM allocating rank workspace");
@@ -437,8 +542,15 @@ static int entity_adapter_query(int user_id,
    }
    int row_count = 0;
 
-   add_keyword_entities(user_id, query_text, cap, rows, &row_count, work_cap);
-   add_matched_entities(user_id, query_text, query_embedding, cap, rows, &row_count, work_cap);
+   add_keyword_entities(user_id, query_text, fetch, rows, &row_count, work_cap);
+   add_matched_entities(user_id, query_text, query_embedding, fetch, rows, &row_count, work_cap);
+   lazy_implied_t implied = { 0 };
+   int n_rows = 0;
+   for (int i = 0; i < row_count; i++) {
+      if (!named_implied(user_id, &implied, rows[i].name_matched, rows[i].entity_id))
+         rows[n_rows++] = rows[i];
+   }
+   row_count = n_rows;
 
    if (row_count == 0) {
       free(rows);
@@ -620,16 +732,26 @@ static int relation_adapter_query(int user_id,
    /* Subjects: the entities the query names or clearly resembles, most
     * relevant first (memory_embeddings_entity_matches).  None relevant, no
     * relations. */
-   memory_entity_match_t matches[RELATION_TOP_SUBJECTS];
+   memory_entity_match_t matches[RELATION_TOP_SUBJECTS + IMPLIED_HEADROOM];
    int n_matches = 0;
    const bool semantic = query_embedding != NULL && memory_embeddings_available();
    if (memory_embeddings_entity_matches(user_id, query_text, semantic ? query_embedding : NULL,
                                         semantic ? memory_embeddings_dims() : 0,
                                         g_config.memory.focus_injection.entity_min_relevance,
-                                        matches, RELATION_TOP_SUBJECTS, &n_matches) != SUCCESS ||
+                                        matches, RELATION_TOP_SUBJECTS + IMPLIED_HEADROOM,
+                                        &n_matches) != SUCCESS ||
        n_matches == 0) {
       return SUCCESS;
    }
+   lazy_implied_t implied = { 0 };
+   int kept = 0;
+   for (int i = 0; i < n_matches && kept < RELATION_TOP_SUBJECTS; i++) {
+      if (!named_implied(user_id, &implied, matches[i].named, matches[i].id))
+         matches[kept++] = matches[i];
+   }
+   n_matches = kept;
+   if (n_matches == 0)
+      return SUCCESS;
    rel_subject_t subjects[RELATION_TOP_SUBJECTS] = { 0 };
    const int subject_count = n_matches;
    for (int i = 0; i < n_matches; i++) {

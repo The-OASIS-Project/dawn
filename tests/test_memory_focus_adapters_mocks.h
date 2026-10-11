@@ -61,6 +61,11 @@ typedef struct {
    int entity_count;
    int call_count_entity_embeddings; /* loads of the entity cache */
    int entity_dim;
+   /* Entity-graph candidates (memory_graph_* + rescore): one seed when set */
+   memory_fact_t graph_facts[4];
+   float graph_scores[4]; /* what the rescore gives each */
+   int graph_count;
+
    /* Aliases: another name for an entity (memory_db_entity_alias_names) */
    memory_alias_name_t aliases[MOCK_MAX_ALIASES];
    int alias_user_id[MOCK_MAX_ALIASES];
