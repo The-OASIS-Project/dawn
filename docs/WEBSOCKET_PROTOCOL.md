@@ -1007,7 +1007,8 @@ Response: `list_memory_superseded_response`
    }
 }
 ```
-`superseded_at` is 0 when unknown.
+`superseded_at` is 0 when unknown. `query` is echoed back, so a client can drop a reply to an
+earlier search.
 
 #### `restore_memory_fact`
 Bring a merged or replaced fact back, with the relations its replacement closed.
@@ -1017,7 +1018,8 @@ Bring a merged or replaced fact back, with the relations its replacement closed.
    "payload": { "fact_id": 42 }
 }
 ```
-Response: `restore_memory_fact_response` with `success`, `fact_id`, and `error` on failure
+Response: `restore_memory_fact_response` with `success`, `fact_id`, `both_current` (the newer value
+that replaced it stays current too) and `error` on failure
 (the fact isn't the caller's, or isn't merged any more).
 
 #### `delete_memory_preference`
@@ -1050,11 +1052,14 @@ Delete all memories for the current user. Requires confirmation.
 {
    "type": "delete_all_memories",
    "payload": {
-      "confirm": true
+      "confirm": "DELETE"
    }
 }
 ```
-Response: `delete_all_memories_response`
+Response: `delete_all_memories_response` with `success` and `error` on failure. It runs on a worker and
+waits for a memory extraction in progress; if one doesn't finish in time it fails with "Memory is still
+being saved; try again in a minute" and nothing is deleted. On success the user's conversations count as
+extracted, so their memories aren't learned again from them.
 
 ---
 
@@ -2646,6 +2651,8 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `get_memory_fact_source` | `get_memory_fact_source_response` |
 | `delete_memory_fact` | `delete_memory_fact_response` |
 | `delete_all_memories` | `delete_all_memories_response` |
+| `list_memory_superseded` | `list_memory_superseded_response` |
+| `restore_memory_fact` | `restore_memory_fact_response` |
 | `music_subscribe` | `music_state` |
 | `music_control` | `music_state` |
 | `music_search` | `music_search_response` |

@@ -16,26 +16,36 @@
    let trigger = null;
    let searchTimer = null;
    let lastQuery = '';
+   let trapCleanup = null;
 
    function el(id) {
       return document.getElementById(id);
    }
 
-   function request(query) {
-      lastQuery = query || '';
-      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
-         DawnWS.send({ type: 'list_memory_superseded', payload: { query: lastQuery } });
-      }
+   function connected() {
+      return typeof DawnWS !== 'undefined' && DawnWS.isConnected();
    }
 
-   function setStatus(text) {
+   function request(query) {
+      lastQuery = query || '';
+      if (!connected()) {
+         setStatus('Not connected; try again in a moment', true);
+         return;
+      }
+      DawnWS.send({ type: 'list_memory_superseded', payload: { query: lastQuery } });
+   }
+
+   /* The one live region: loading, counts, empty and error text.  @p clear also
+    * empties the list. */
+   function setStatus(text, clear) {
+      const status = el('memory-merged-status');
+      if (status) status.textContent = text;
       const body = el('memory-merged-body');
-      if (!body) return;
-      body.textContent = '';
-      const p = document.createElement('p');
-      p.className = 'memory-merged-status';
-      p.textContent = text;
-      body.appendChild(p);
+      if (clear && body) body.textContent = '';
+   }
+
+   function emptyText() {
+      return lastQuery ? 'No merged memories match.' : 'No merged or replaced memories.';
    }
 
    function open() {
@@ -43,6 +53,9 @@
       if (!modal) return;
       trigger = document.activeElement;
       modal.classList.remove('hidden');
+      const M = window.DawnSettingsModals;
+      if (trapCleanup) trapCleanup();
+      trapCleanup = M && typeof M.trapFocus === 'function' ? M.trapFocus(modal) : null;
       if (escToken === null && typeof DawnEscStack !== 'undefined') {
          escToken = DawnEscStack.register(() => {
             close();
@@ -52,9 +65,11 @@
       const search = el('memory-merged-search');
       if (search) {
          search.value = '';
-         search.focus();
+         /* On a touch screen focusing the search box opens the keyboard over
+          * the list; the trap's first focus (the close button) is enough. */
+         if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) search.focus();
       }
-      setStatus('Loading…');
+      setStatus('Loading…', true);
       request('');
    }
 
@@ -62,6 +77,10 @@
       const modal = el('memory-merged-modal');
       if (modal) modal.classList.add('hidden');
       clearTimeout(searchTimer);
+      if (trapCleanup) {
+         trapCleanup();
+         trapCleanup = null;
+      }
       if (escToken !== null && typeof DawnEscStack !== 'undefined') {
          DawnEscStack.unregister(escToken);
          escToken = null;
@@ -88,6 +107,7 @@
    function renderRow(f) {
       const item = document.createElement('div');
       item.className = 'memory-item fact';
+      item.setAttribute('role', 'listitem');
       item.dataset.factId = String(f.id);
 
       const header = document.createElement('div');
@@ -128,17 +148,18 @@
       /* A reply to an older search (typing on, or a reopen) is dropped. */
       if (payload && typeof payload.query === 'string' && payload.query !== lastQuery) return;
       if (!payload || !payload.success) {
-         setStatus((payload && payload.error) || "Couldn't load merged memories.");
+         setStatus((payload && payload.error) || "Couldn't load merged memories.", true);
          return;
       }
       const facts = Array.isArray(payload.facts) ? payload.facts : [];
       if (facts.length === 0) {
-         setStatus(lastQuery ? 'No merged memories match.' : 'No merged or replaced memories.');
+         setStatus(emptyText(), true);
          return;
       }
       const body = el('memory-merged-body');
       body.textContent = '';
       facts.forEach((f) => body.appendChild(renderRow(f)));
+      setStatus(facts.length === 1 ? '1 memory' : `${facts.length} memories`, false);
    }
 
    function handleRestoreResponse(payload) {
@@ -159,10 +180,17 @@
       }
       const body = el('memory-merged-body');
       const row = body && body.querySelector(`.memory-item[data-fact-id="${payload.fact_id}"]`);
-      if (row) row.remove();
-      if (body && !body.querySelector('.memory-item')) {
-         setStatus(lastQuery ? 'No merged memories match.' : 'No merged or replaced memories.');
+      if (row) {
+         /* Keep the keyboard where it was: the next row's Restore, else the
+          * previous one's, else the search box. */
+         const near = row.nextElementSibling || row.previousElementSibling;
+         const next = near && near.querySelector('.memory-merged-restore');
+         row.remove();
+         const target = next || el('memory-merged-search');
+         if (target) target.focus();
       }
+      const left = body ? body.querySelectorAll('.memory-item').length : 0;
+      setStatus(left === 0 ? emptyText() : left === 1 ? '1 memory' : `${left} memories`, false);
       if (onMemoriesChanged) onMemoriesChanged();
    }
 
@@ -192,7 +220,7 @@
             if (!btn) return;
             const id = Number(btn.dataset.factId);
             if (!Number.isFinite(id) || id <= 0) return;
-            if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) {
+            if (!connected()) {
                if (typeof DawnToast !== 'undefined') {
                   DawnToast.show('Not connected; try again in a moment', 'error');
                }

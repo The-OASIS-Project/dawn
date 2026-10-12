@@ -593,6 +593,13 @@ int handle_memory_entity_link_user_self(int client_fd, const char *payload, uint
 
 /* Facts one 'memory superseded' lists, at most. */
 #define ADMIN_SUPERSEDED_MAX 50
+/* `memory superseded` rows: characters of a fact's and its keeper's text
+ * shown, the rest of a row (ids, arrow, indent), and room kept for the
+ * "... N more" line. */
+#define SUPERSEDED_TEXT_SHOWN 160
+#define SUPERSEDED_KEEPER_SHOWN 120
+#define SUPERSEDED_ROW_EXTRA 96
+#define SUPERSEDED_MORE_LINE 64
 #define ADMIN_SUPERSEDED_DEFAULT 20
 
 int handle_memory_fact_superseded(int client_fd, const char *payload, uint16_t payload_len) {
@@ -636,16 +643,19 @@ int handle_memory_fact_superseded(int client_fd, const char *payload, uint16_t p
       /* Room for this row and the "more" line, or stop and say so. */
       const size_t text_len = strlen(rows[i].text);
       const size_t keeper_len = strlen(rows[i].keeper_text);
-      const int need = (int)(text_len < 160 ? text_len : 160) +
-                       (int)(keeper_len < 120 ? keeper_len : 120) + 96; /* the row's %.Ns */
-      if (off + need > (int)sizeof(report) - 64) {
+      const int need = (int)(text_len < SUPERSEDED_TEXT_SHOWN ? text_len : SUPERSEDED_TEXT_SHOWN) +
+                       (int)(keeper_len < SUPERSEDED_KEEPER_SHOWN ? keeper_len
+                                                                  : SUPERSEDED_KEEPER_SHOWN) +
+                       SUPERSEDED_ROW_EXTRA;
+      if (off + need > (int)sizeof(report) - SUPERSEDED_MORE_LINE) {
          break;
       }
       shown++;
       report_off_advance(&off,
                          snprintf(report + off, sizeof(report) - (size_t)off,
-                                  "  [%lld] %.160s\n      → [%lld] %.120s\n", (long long)rows[i].id,
-                                  rows[i].text, (long long)rows[i].keeper_id,
+                                  "  [%lld] %.*s\n      → [%lld] %.*s\n", (long long)rows[i].id,
+                                  SUPERSEDED_TEXT_SHOWN, rows[i].text, (long long)rows[i].keeper_id,
+                                  SUPERSEDED_KEEPER_SHOWN,
                                   rows[i].keeper_text[0] ? rows[i].keeper_text : "(gone)"),
                          (int)sizeof(report));
    }

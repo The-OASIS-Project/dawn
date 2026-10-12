@@ -26,8 +26,13 @@
 
 #include "tools/memory_tool.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "memory/memory_db.h"
 #include "memory/memory_types.h" /* MEMORY_FACT_CATEGORIES */
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -319,14 +324,37 @@ static const tool_action_kind_entry_t s_memory_action_kinds[] = {
    { "restore", TOOL_KIND_ACT, NULL },
 };
 
-/* What a call waiting for the user's reply code does: 'remember' by the fact
- * it saves (tool_metadata_t describe_call); the rest by their parameters. */
+/* 'restore' by the text of the fact it brings back: an id means nothing to
+ * the person confirming.  TOOL_DESCRIBE_DEFAULT when there is no such fact
+ * (the call then fails on its own). */
+static int describe_restore(const char *value, char *out, size_t out_len) {
+   char id_text[32] = "";
+   tool_param_extract_base(value, id_text, sizeof(id_text));
+   char *end = NULL;
+   const long long id = strtoll(id_text, &end, 10);
+   memory_fact_t fact;
+   if (id <= 0 || !end || *end != '\0' ||
+       memory_db_fact_get((int64_t)id, tool_get_current_user_id(), &fact) != MEMORY_DB_SUCCESS) {
+      return TOOL_DESCRIBE_DEFAULT;
+   }
+   char shown[400];
+   str_excerpt_line(fact.fact_text, 300, shown, sizeof(shown));
+   const int n = snprintf(out, out_len, "restore: \"%s\"", shown);
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
+/* What a call waiting for the user's reply code does: 'remember' and
+ * 'restore' by the fact (tool_metadata_t describe_call); the rest by their
+ * parameters. */
 static int memory_describe_call(const char *action,
                                 const char *value,
                                 char *out,
                                 size_t out_len,
                                 int *valid_for_sec) {
    (void)valid_for_sec;
+   if (strcmp(action, "restore") == 0) {
+      return describe_restore(value, out, out_len);
+   }
    if (strcmp(action, "remember") != 0) {
       return TOOL_DESCRIBE_DEFAULT;
    }

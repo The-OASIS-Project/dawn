@@ -23,6 +23,7 @@
 
 #include "cmd_memory.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +56,13 @@ int cmd_memory_facts(int argc, char *argv[]) {
       } else if (superseded && strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
          limit = atoi(argv[++i]);
       } else if (!superseded && strcmp(argv[i], "--fact-id") == 0 && i + 1 < argc) {
-         fact_id = strtoll(argv[++i], NULL, 10);
+         /* A typo restores nothing: the whole argument must be the id. */
+         char *end = NULL;
+         errno = 0;
+         fact_id = strtoll(argv[++i], &end, 10);
+         if (errno != 0 || end == argv[i] || *end != '\0') {
+            fact_id = 0;
+         }
       } else {
          usage(argv[0]);
          return 1;

@@ -1582,8 +1582,14 @@
    }
 
    #memory-search-input,
-   #memory-sort {
+   #memory-sort,
+   .memory-merged-controls input {
       font-size: 16px; /* Prevent iOS zoom-on-tap */
+   }
+
+   .memory-merged-restore {
+      min-height: 44px;
+      min-width: 44px;
    }
 
    /* Import modal mobile adjustments */
@@ -1766,11 +1772,30 @@
 }
 
 .memory-merged-status {
-   margin: 0.5rem 0;
+   margin: 0.5rem 1rem 0;
    color: var(--text-secondary);
    font-size: 0.875rem;
 }
 
 .memory-merged-keeper {
    overflow-wrap: anywhere;
+}
+
+/* The search row's link to them (Facts tab only). */
+.memory-merged-link {
+   flex-shrink: 0;
+   white-space: nowrap;
+   font-size: 0.75rem;
+}
+
+.memory-merged-restore {
+   flex-shrink: 0;
+   padding: 0.25rem 0.5rem;
+}
+
+.memory-merged-link:focus-visible,
+.memory-merged-restore:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+   border-radius: 2px;
 }

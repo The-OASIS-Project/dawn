@@ -96,6 +96,11 @@ static const char *visual_block_end(const char *p) {
    if (strncmp(p, k_open, sizeof(k_open) - 1) != 0) {
       return NULL;
    }
+   /* The tag itself, not a longer name that starts the same way. */
+   const char after = p[sizeof(k_open) - 1];
+   if (after != '>' && after != ' ' && after != '\t' && after != '\r' && after != '\n') {
+      return NULL;
+   }
    const char *close = strstr(p, k_close);
    return close ? close + sizeof(k_close) - 1 : NULL;
 }

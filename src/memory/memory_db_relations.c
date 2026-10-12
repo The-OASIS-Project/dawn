@@ -22,26 +22,16 @@
  * plus the SPECIAL_RELATIONS / CONTRADICTORY_PAIRS tables and the
  * memory_db_relation_supersede atomic close-and-create transaction.
  *
- * Contradiction handling — lives in three coordinated locations:
+ * Contradiction handling lives here: SPECIAL_RELATIONS[] and
+ * CONTRADICTORY_PAIRS[] (compile-time data), and
+ * memory_db_relation_supersede_ex(), which in one transaction closes what the
+ * new value replaces, stores it, and retires the facts the closed relations
+ * stated (unless another open relation still backs them).  Extraction only
+ * invalidates its caches afterwards; it doesn't supersede facts itself.
  *
- *   (1) HERE: SPECIAL_RELATIONS[] + CONTRADICTORY_PAIRS[] tables
- *       (compile-time data) and memory_db_relation_supersede() (atomic
- *       close + create transaction; out_old_fact_id surfaces the linked
- *       fact for the caller to propagate).
- *
- *   (2) src/memory/memory_extraction.c — process_extracted_relation()
- *       (around the fact_map build / find_fact_for_relation() call site):
- *       receives the old fact_id from (1) and calls
- *       memory_db_fact_supersede() to mark the linked fact as stale, so
- *       the structured-relation supersede also retires the natural-
- *       language fact rendered from it.
- *
- * Adding a one-at-a-time relation or contradictory pair is a (1)-only edit.
- * Changing the supersede-propagation mechanism is a (1)+(2) edit; if a
- * fourth piece lands (e.g. inline LLM-based contradiction judgment for
- * subtle quantity / negation cases — see dawn/docs/TODO.md "LLM-based
- * contradiction judgment"), this whole cluster should move into a
- * dedicated memory_contradiction.{c,h} module.
+ * Adding a one-at-a-time relation or contradictory pair is a table edit.  A
+ * subtler kind of contradiction (quantity, negation) would belong in its own
+ * memory_contradiction.{c,h} module.
  *
  * One-at-a-time relations have at-most-one open instance per (subject,
  * relation).  When extraction stores a new such relation with a different

@@ -628,6 +628,16 @@
                   aria-label="Sort memories"
                   hidden
                ></select>
+               <!-- Facts tab only (syncSortControl): where a merged or replaced
+                    fact went. -->
+               <button
+                  id="memory-merged"
+                  class="btn-link memory-merged-link"
+                  title="Facts merged into another or replaced by a newer one"
+                  hidden
+               >
+                  Merged &amp; replaced
+               </button>
             </div>
 
             <div
@@ -647,13 +657,6 @@
                   </button>
                   <button id="memory-import" class="btn-link" title="Import memories">
                      Import
-                  </button>
-                  <button
-                     id="memory-merged"
-                     class="btn-link"
-                     title="Memories merged into another or replaced by a newer one"
-                  >
-                     Merged
                   </button>
                   <button id="memory-forget-all" class="btn-danger-small">Forget Everything</button>
                </div>
@@ -1064,7 +1067,8 @@
                      autocomplete="off"
                   />
                </div>
-               <div id="memory-merged-body" class="memory-merged-body" aria-live="polite"></div>
+               <p id="memory-merged-status" class="memory-merged-status" aria-live="polite"></p>
+               <div id="memory-merged-body" class="memory-merged-body" role="list"></div>
             </div>
          </div>
 

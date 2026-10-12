@@ -142,6 +142,8 @@ static void test_visual_mentions_left_alone(void) {
    expect_visuals("A\n<dawn-visual title=\"a\">x</dawn-visual>\nand then more text", NULL);
    /* Unterminated: not a saved block. */
    expect_visuals("A\n<dawn-visual title=\"a\">x", NULL);
+   /* Another tag whose name starts the same way: not a visual. */
+   expect_visuals("A\n<dawn-visualization>x</dawn-visual>\n", NULL);
 }
 
 int main(void) {

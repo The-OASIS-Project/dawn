@@ -133,7 +133,8 @@ Memory extraction happens at session end, not during conversation — zero laten
    - `search`: hybrid keyword + semantic search across all memory tables; optional `category` / `time_range` / `as_of` / `include_historical` / `with_source` params
    - `recent`: windowed retrieval — `query` (lower bound, default `"7d"`, max `"10y"`) + `before` (upper bound) bracket `[now − query, now − before]`; `sort` (`newest` default / `oldest`) + `limit` (1-50). Supports h/m/d/w/y units (Bundle 3, 2026-05-13).
    - `remember`: immediate fact storage with injection filter (`memory_filter_check()`)
-   - `forget`: delete a specific fact by numeric ID
+   - `forget`: delete facts by numeric ID, with the duplicates merged into them (`memory_db_fact_forget`); with `replaced_by`, merge one into another instead
+   - `list_merged` / `restore` (`memory_callback_restore.c`): what was merged into a fact or replaced by a newer one, and bringing one back (`restore` is an act: refused where an outsider's text could ask, and described by the fact's text when it needs a reply code)
    - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; hard merge remains available via `dawn-admin memory entity consolidate`.
    - `save_contact`, `find_contact`, `list_contacts`, `delete_contact`: contact management
    - `append_graph_context()`: entity graph results appended to search output

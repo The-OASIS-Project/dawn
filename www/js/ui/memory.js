@@ -1237,23 +1237,12 @@
    }
 
    function handleClickOutside(e) {
-      // Don't close if clicking inside the contact modal (it's a sibling, not a child)
-      const contactModal = document.getElementById('contact-modal');
-      if (
-         contactModal &&
-         !contactModal.classList.contains('hidden') &&
-         contactModal.contains(e.target)
-      )
-         return;
-
-      // Same for the source-conversation modal (a sibling overlay, not a child of
-      // the panel): a click on it — the ×, the backdrop, or its content — must not
-      // close the panel underneath. `contains()` (no not-hidden check) still matches
-      // a close-button click, which hides the modal before this document-level
-      // handler runs; a truly-closed modal is display:none so its nodes aren't
-      // clickable. No stopPropagation, so the image lightbox still receives clicks.
-      const sourceModal = document.getElementById('memory-source-modal');
-      if (sourceModal && sourceModal.contains(e.target)) return;
+      // A dialog opened over the panel (contact, source, merged, import,
+      // export) is a sibling overlay, not a child: a click on it, its × or its
+      // backdrop must not close the panel underneath.  A closed overlay is
+      // display:none, so its nodes take no clicks.  No stopPropagation, so the
+      // image lightbox still receives them.
+      if (e.target.closest && e.target.closest('.modal-overlay')) return;
 
       if (
          memoryElements.popover &&
@@ -1355,6 +1344,8 @@
    /* Show + populate the sort <select> for the active tab (Facts/Summaries only),
     * reflecting the persisted choice. Called from switchTab and open(). */
    function syncSortControl() {
+      const merged = document.getElementById('memory-merged');
+      if (merged) merged.hidden = memoryState.activeTab !== 'facts';
       const sel = memoryElements.sortSelect;
       if (!sel) return;
       const options = SORT_OPTIONS[memoryState.activeTab];
