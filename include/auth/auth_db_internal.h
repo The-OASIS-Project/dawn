@@ -924,6 +924,22 @@ int auth_db_txn_end_locked(int result, const char *tag);
  */
 int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
 
+/* The highest message id memory extraction reads in conversation @p conv (an
+ * SQL expression naming the conversation's id): request-context rows
+ * (messages.kind) are never extracted.  One definition for the trigger's
+ * cursor (conv_db_get_max_msg_id) and for marking conversations extracted
+ * (CONV_MARK_EXTRACTED_SET_SQL): if they disagree, recovery learns forgotten
+ * memories again, or skips new messages. */
+#define CONV_EXTRACTION_MAX_MSG_ID_SQL(conv)                                    \
+   "COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversation_id = " conv \
+   " AND m.kind IS NULL), 0)"
+
+/* The SET clause marking a conversations row extracted up to now (what was
+ * learned so far: forgetting, delete-all). */
+#define CONV_MARK_EXTRACTED_SET_SQL                                   \
+   "last_extracted_msg_count = message_count, last_extracted_msg_id " \
+   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extraction_attempts = 0"
+
 /* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),
  * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
  * ?5/?6 the new object (entity id / literal: the same object is never closed, so

@@ -200,10 +200,7 @@ int memory_db_delete_user_memories(int user_id) {
       "DELETE FROM memory_preferences WHERE user_id = ?",
       "DELETE FROM memory_summaries WHERE user_id = ?",
       // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): one statement split across lines
-      "UPDATE conversations SET last_extracted_msg_count = message_count, "
-      "last_extracted_msg_id = COALESCE((SELECT MAX(m.id) FROM messages m WHERE "
-      "m.conversation_id = conversations.id AND m.kind IS NULL), 0), extraction_attempts = 0 WHERE "
-      "user_id = ?",
+      "UPDATE conversations SET " CONV_MARK_EXTRACTED_SET_SQL " WHERE user_id = ?",
    };
 
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);

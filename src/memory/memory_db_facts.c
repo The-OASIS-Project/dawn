@@ -1067,62 +1067,31 @@ static int fact_delete_exec_locked(const char *sql, int user_id, int64_t id) {
    return rc;
 }
 
-int memory_db_fact_delete(int64_t fact_id, int user_id) {
-   /* Step 1: look up the fact under the auth_db lock so we know the
-    * owner + can pull the live fact_text for FTS5 maintenance.  Released
-    * BEFORE stemming so the stemmer mutex stays a leaf lock per the
-    * ARCHITECTURE.md acquire-order invariant. */
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-
-   /* stmt_memory_fact_get now filters on (id, user_id) at the SQL layer
-    * (CWE-639 defense-in-depth) — a foreign rowid lookup returns zero
-    * rows here, so the existing `found` gate doubles as the wrong-user
-    * gate (and the legacy `owner != user_id` post-check is now
-    * redundant but kept for belt-and-braces clarity). */
+/* The fact's whole text when @p user_id owns it, else NULL (caller frees).
+ * The insert stemmed all of it, and a contentless FTS5 delete must name
+ * exactly the tokens it indexed. */
+static char *fact_delete_text(int64_t fact_id, int user_id) {
+   AUTH_DB_LOCK_OR_RETURN(NULL);
+   /* stmt_memory_fact_get filters on (id, user_id) (CWE-639): a foreign rowid
+    * returns no row, the same answer as a missing one. */
    sqlite3_stmt *get = s_db.stmt_memory_fact_get;
    sqlite3_reset(get);
    sqlite3_bind_int64(get, 1, fact_id);
    sqlite3_bind_int(get, 2, user_id);
-   int owner = 0;
-   /* The whole text: the insert stemmed all of it, and a contentless FTS5
-    * delete must name exactly the tokens it indexed. */
-   char *text_buf = NULL;
-   bool found = false;
-   if (sqlite3_step(get) == SQLITE_ROW) {
-      owner = sqlite3_column_int(get, 1);
+   char *text = NULL;
+   if (sqlite3_step(get) == SQLITE_ROW && sqlite3_column_int(get, 1) == user_id) {
       const unsigned char *t = sqlite3_column_text(get, 2);
-      text_buf = strdup(t ? (const char *)t : "");
-      found = text_buf != NULL;
+      text = strdup(t ? (const char *)t : "");
    }
    sqlite3_reset(get);
    AUTH_DB_UNLOCK();
+   return text;
+}
 
-   /* SECURITY: verify ownership before any side effects — the SQL filter
-    * above is the primary defense (CWE-639); this is belt-and-braces.
-    * Don't distinguish "wrong user" from "doesn't exist" — same response
-    * a legitimate not-found request would get. */
-   if (!found || owner != user_id) {
-      free(text_buf);
-      return MEMORY_DB_NOT_FOUND;
-   }
-
-   /* Step 2: stem outside any lock so the stemmer mutex doesn't compose
-    * with auth_db.  Same stems the original insert used because fact_text
-    * is immutable post-create. */
-   char fact_stems[MEMORY_FACT_STEMS_MAX];
-   (void)memory_stem_string(text_buf, fact_stems, sizeof(fact_stems));
-   free(text_buf);
-
-   /* Step 3: re-take the lock and run the FTS5 delete + facts DELETE
-    * atomically (within the same critical section). */
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_delete", NULL, NULL, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   (void)memory_db_internal_fts5_delete_fact_locked(fact_id, fact_stems);
-
+/* The fact's relations and the entities they name, in the caller's
+ * savepoint: noted (fact_delete_entities), then deleted or moved on.  The
+ * sqlite3_step result. */
+static int fact_delete_relations_locked(int user_id, int64_t fact_id) {
    /* The relations the fact stated go with it: fact_id is ON DELETE SET NULL,
     * and an edge left with no fact behind it keeps bringing back what was
     * forgotten (graph retrieval, per-turn context).  So do the entities only
@@ -1164,7 +1133,47 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
                                    "fact_id = ?2",
                                    user_id, fact_id);
    }
+   return rc;
+}
 
+/* The entities fact_delete_relations_locked noted that nothing names any
+ * more; into @p gone_out how many.  The sqlite3_step result. */
+static int fact_delete_entities_locked(int user_id, int64_t fact_id, int *gone_out) {
+   int rc = SQLITE_DONE;
+   int ents_gone = 0;
+   for (int pass = 0, gone = 1; pass < FACT_DELETE_ENTITY_PASSES && gone > 0 && rc == SQLITE_DONE;
+        pass++) {
+      rc = fact_delete_exec_locked(
+          "DELETE FROM memory_entities WHERE user_id = ?1 AND ?2 > 0 AND "
+          "id IN (SELECT id FROM fact_delete_entities) AND " MEMORY_ENTITY_UNREFERENCED,
+          user_id, fact_id);
+      gone = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
+      ents_gone += gone;
+   }
+   *gone_out = ents_gone;
+   return rc;
+}
+
+int memory_db_fact_delete(int64_t fact_id, int user_id) {
+   /* Looked up first, then stemmed outside any lock so the stemmer mutex
+    * stays a leaf (ARCHITECTURE.md lock order); fact_text is immutable, so
+    * these are the stems the insert indexed. */
+   char *text = fact_delete_text(fact_id, user_id);
+   if (!text) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   char fact_stems[MEMORY_FACT_STEMS_MAX];
+   (void)memory_stem_string(text, fact_stems, sizeof(fact_stems));
+   free(text);
+
+   /* The FTS5 rows, the relations, the fact and its lone entities: all or none. */
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_delete", NULL, NULL, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   (void)memory_db_internal_fts5_delete_fact_locked(fact_id, fact_stems);
+   int rc = fact_delete_relations_locked(user_id, fact_id);
    int changes = 0;
    if (rc == SQLITE_DONE) {
       sqlite3_stmt *stmt = s_db.stmt_memory_fact_delete;
@@ -1176,14 +1185,8 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
       sqlite3_reset(stmt);
    }
    int ents_gone = 0;
-   for (int pass = 0, gone = 1; pass < FACT_DELETE_ENTITY_PASSES && gone > 0 && rc == SQLITE_DONE;
-        pass++) {
-      rc = fact_delete_exec_locked(
-          "DELETE FROM memory_entities WHERE user_id = ?1 AND ?2 > 0 AND "
-          "id IN (SELECT id FROM fact_delete_entities) AND " MEMORY_ENTITY_UNREFERENCED,
-          user_id, fact_id);
-      gone = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
-      ents_gone += gone;
+   if (rc == SQLITE_DONE) {
+      rc = fact_delete_entities_locked(user_id, fact_id, &ents_gone);
    }
    if (rc == SQLITE_DONE &&
        sqlite3_exec(s_db.db, "RELEASE fact_delete", NULL, NULL, NULL) != SQLITE_OK) {
@@ -1193,7 +1196,6 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
       sqlite3_exec(s_db.db, "ROLLBACK TO fact_delete", NULL, NULL, NULL);
       sqlite3_exec(s_db.db, "RELEASE fact_delete", NULL, NULL, NULL);
    }
-
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {
@@ -1203,10 +1205,8 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
       memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
    if (changes > 0) {
-      /* The embedding cache holds an (id, embedding) entry for this now-deleted
-       * fact — mark it dirty so the next access reloads (mirrors the invalidation
-       * in cleanup_meta_facts).  Without this, a deleted fact lingers in the cache
-       * and re-surfaces in cosine search / find_duplicates. */
+      /* The embedding cache's entry for the fact would surface it in cosine
+       * search and find_duplicates until reloaded. */
       memory_embeddings_invalidate_cache();
       return MEMORY_DB_SUCCESS;
    }

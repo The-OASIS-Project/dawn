@@ -21,6 +21,7 @@
 
 #include <string.h>
 
+#define MEMORY_EXTRACTION_INTERNAL_ALLOWED
 #include "memory/memory_extraction_queue.h"
 #include "unity.h"
 

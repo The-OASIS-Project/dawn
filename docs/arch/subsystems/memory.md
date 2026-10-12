@@ -126,7 +126,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Embedding generation for newly created entities (skipped for existing)
    - Existing entity list fed into extraction prompt to prevent duplicate names
    - Respects conversation privacy flag
-   - One extraction per user at a time.  A request refused because the user's extraction is running or held, or every slot is busy, returns `MEMORY_EXTRACTION_BUSY`; a conversation then waits in the queue (`memory_extraction_queue.c`, one entry per conversation, at most 32) and runs at the next slot or hold release, read again from the database. Recovery's own requests aren't queued (it retries on its pass). Shutdown drops the queue (recovery picks those up on the next start)
+   - One extraction per user at a time.  A request refused because the user's extraction is running or held, or every slot is busy, returns `MEMORY_EXTRACTION_BUSY`; a conversation then waits in the queue (`memory_extraction_slots.c` with `memory_extraction_queue.c`, one entry per conversation, at most 32) and runs at the next slot or hold release, read again from the database. Recovery's own requests aren't queued (it retries on its pass). Shutdown drops the queue (recovery picks those up on the next start)
    - Forgetting a conversation (`memory_forget_conversation`) or everything (`memory_forget_all`, "delete all memories") holds the user's extraction, drops the queued entries it covers, and marks those conversations extracted: what was learned so far is forgotten, and what is said from now on is extracted as usual
 
 - **memory_callback.c**: Tool handler for `MEMORY` device type

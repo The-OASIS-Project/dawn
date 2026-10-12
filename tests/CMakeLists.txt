@@ -2329,6 +2329,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+           ${SRC_ROOT}/src/memory/memory_extraction_slots.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
@@ -2450,6 +2451,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+           ${SRC_ROOT}/src/memory/memory_extraction_slots.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c

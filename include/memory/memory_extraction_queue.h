@@ -29,6 +29,10 @@
 #ifndef MEMORY_EXTRACTION_QUEUE_H
 #define MEMORY_EXTRACTION_QUEUE_H
 
+#ifndef MEMORY_EXTRACTION_INTERNAL_ALLOWED
+#error "memory_extraction_queue.h is private to the memory extraction module"
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
