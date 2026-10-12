@@ -57,7 +57,7 @@ int memory_db_fact_list_superseded(int user_id,
        "SELECT f.id, f.superseded_by, COALESCE(f.superseded_at, 0), "
        "f.fact_text, COALESCE(k.fact_text, '') FROM memory_facts f "
        "LEFT JOIN memory_facts k ON k.id = f.superseded_by AND k.user_id = f.user_id "
-       "WHERE f.user_id = ?1 AND f.superseded_by IS NOT NULL "
+       "WHERE +f.user_id = ?1 AND f.superseded_by IS NOT NULL "
        "AND (?2 = 0 OR f.superseded_by = ?2) "
        "AND (?3 IS NULL OR instr(lower(f.fact_text), lower(?3)) > 0) "
        "ORDER BY f.superseded_at DESC, f.id DESC LIMIT ?4",
@@ -249,7 +249,7 @@ static int forget_tree_locked(int user_id, int64_t fact_id, int64_t *ids, int ma
            "  SELECT id, 0 FROM memory_facts WHERE id = ?1 AND user_id = ?2 "
            "  UNION "
            "  SELECT f.id, t.depth + 1 FROM memory_facts f JOIN tree t ON "
-           "  f.superseded_by = t.id WHERE f.user_id = ?2 AND t.depth < ?3) "
+           "  f.superseded_by = t.id WHERE +f.user_id = ?2 AND t.depth < ?3) "
            "SELECT id FROM tree GROUP BY id ORDER BY id = ?1, MAX(depth) DESC LIMIT ?3",
            -1, &st, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(st, 1, fact_id);

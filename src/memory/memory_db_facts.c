@@ -1028,8 +1028,9 @@ int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id) {
    return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND; /* either fact gone, or not theirs */
 }
 
-/* Entities a fact delete looks at: the fact's subject and its relations' ends. */
-#define FACT_DELETE_ENTITIES_MAX 16
+/* Passes of the unreferenced-entity delete: an alias deleted after its
+ * canonical was checked leaves the canonical unreferenced for the next pass. */
+#define FACT_DELETE_ENTITY_PASSES 3
 
 /* Run @p sql with ?1 = @p user_id and ?2 = @p id; the sqlite3_step result. */
 static int fact_delete_exec_locked(const char *sql, int user_id, int64_t id) {
@@ -1104,26 +1105,21 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
     * and an edge left with no fact behind it keeps bringing back what was
     * forgotten (graph retrieval, per-turn context).  So do the entities only
     * they and the fact named, once nothing else names them. */
-   int64_t ents[FACT_DELETE_ENTITIES_MAX];
-   int n_ents = 0;
-   sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT subject_entity_id FROM memory_facts WHERE id = ?1 AND "
-                               "user_id = ?2 UNION SELECT subject_entity_id FROM memory_relations "
-                               "WHERE fact_id = ?1 AND user_id = ?2 UNION SELECT object_entity_id "
-                               "FROM memory_relations WHERE fact_id = ?1 AND user_id = ?2",
-                               -1, &st, NULL);
-   if (rc == SQLITE_OK) {
-      sqlite3_bind_int64(st, 1, fact_id);
-      sqlite3_bind_int(st, 2, user_id);
-      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-         const int64_t id = sqlite3_column_int64(st, 0);
-         if (id > 0 && n_ents < FACT_DELETE_ENTITIES_MAX) {
-            ents[n_ents++] = id;
-         }
-      }
+   int rc = sqlite3_exec(s_db.db,
+                         "CREATE TEMP TABLE IF NOT EXISTS fact_delete_entities(id INTEGER PRIMARY "
+                         "KEY); DELETE FROM fact_delete_entities;",
+                         NULL, NULL, NULL) == SQLITE_OK
+                ? SQLITE_DONE
+                : SQLITE_ERROR;
+   if (rc == SQLITE_DONE) {
+      rc = fact_delete_exec_locked(
+          "INSERT OR IGNORE INTO fact_delete_entities SELECT subject_entity_id FROM memory_facts "
+          "WHERE id = ?2 AND user_id = ?1 AND subject_entity_id IS NOT NULL UNION SELECT "
+          "subject_entity_id FROM memory_relations WHERE fact_id = ?2 AND user_id = ?1 UNION "
+          "SELECT object_entity_id FROM memory_relations WHERE fact_id = ?2 AND user_id = ?1 AND "
+          "object_entity_id IS NOT NULL",
+          user_id, fact_id);
    }
-   sqlite3_finalize(st);
    /* A relation another conversation also taught stays, moved to the fact this
     * one was merged into (if any): the other conversation still says it. */
    if (rc == SQLITE_DONE) {
@@ -1157,17 +1153,14 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
       changes = sqlite3_changes(s_db.db);
       sqlite3_reset(stmt);
    }
-   /* Again while one goes: an alias deleted after its canonical was checked
-    * leaves the canonical unreferenced. */
    int ents_gone = 0;
-   for (int pass = 0, gone = 1; pass < 3 && gone > 0 && rc == SQLITE_DONE; pass++) {
-      gone = 0;
-      for (int i = 0; i < n_ents && rc == SQLITE_DONE; i++) {
-         rc = fact_delete_exec_locked("DELETE FROM memory_entities WHERE user_id = ?1 AND id = "
-                                      "?2 AND " MEMORY_ENTITY_UNREFERENCED,
-                                      user_id, ents[i]);
-         gone += rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
-      }
+   for (int pass = 0, gone = 1; pass < FACT_DELETE_ENTITY_PASSES && gone > 0 && rc == SQLITE_DONE;
+        pass++) {
+      rc = fact_delete_exec_locked(
+          "DELETE FROM memory_entities WHERE user_id = ?1 AND ?2 > 0 AND "
+          "id IN (SELECT id FROM fact_delete_entities) AND " MEMORY_ENTITY_UNREFERENCED,
+          user_id, fact_id);
+      gone = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
       ents_gone += gone;
    }
    if (rc == SQLITE_DONE &&

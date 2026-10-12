@@ -1562,6 +1562,28 @@ void test_forget_takes_an_entity_only_it_named(void) {
    TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 980"));
 }
 
+/* Every entity a forgotten fact named goes, however many (no cap). */
+void test_forget_takes_every_entity_it_named(void) {
+   int64_t f = 0;
+   memory_db_fact_create(1, "User met twenty people at the meetup", 0.9f, "explicit", "personal",
+                         NULL, &f);
+   q_exec(
+       "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES (1000, 1, 'Me', 1);");
+   char sql[300];
+   for (int i = 1; i <= 20; i++) {
+      snprintf(sql, sizeof(sql),
+               "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES "
+               "(%d, 1, 'Person %d', 0);"
+               "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
+               "object_entity_id, fact_id) VALUES (1, 1000, 'met', %d, %lld);",
+               1000 + i, i, 1000 + i, (long long)f);
+      q_exec(sql);
+   }
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(f, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_entities WHERE id > 1000"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 1000"));
+}
+
 /* A relation another conversation also taught stays when one fact stating it
  * is forgotten, and so does the entity it names; the user's own entity stays. */
 void test_forget_keeps_a_relation_taught_elsewhere(void) {
@@ -1982,6 +2004,7 @@ int main(void) {
    RUN_TEST(test_prune_moves_relations_to_the_kept_fact);
    RUN_TEST(test_forget_takes_an_entity_only_it_named);
    RUN_TEST(test_forget_keeps_a_relation_taught_elsewhere);
+   RUN_TEST(test_forget_takes_every_entity_it_named);
    RUN_TEST(test_forget_takes_a_merged_duplicates_relation_from_both);
    RUN_TEST(test_restore_keeps_a_contradiction_closed);
    RUN_TEST(test_restore_brings_a_merged_fact_back);
