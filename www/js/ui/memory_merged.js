@@ -45,7 +45,7 @@
    }
 
    function emptyText() {
-      return lastQuery ? 'No merged memories match.' : 'No merged or replaced memories.';
+      return lastQuery ? 'No merged or replaced facts match.' : 'No merged or replaced facts.';
    }
 
    function open() {
@@ -119,8 +119,8 @@
       restore.className = 'btn-link memory-merged-restore';
       restore.dataset.factId = String(f.id);
       restore.textContent = 'Restore';
-      const label = (f.text || '').length > 60 ? f.text.slice(0, 60) + '…' : f.text || '';
-      restore.setAttribute('aria-label', 'Restore: ' + label);
+      const restoreLabel = (f.text || '').length > 60 ? f.text.slice(0, 60) + '…' : f.text || '';
+      restore.setAttribute('aria-label', 'Restore: ' + restoreLabel);
       header.appendChild(text);
       header.appendChild(restore);
 
@@ -128,7 +128,9 @@
       meta.className = 'memory-item-meta';
       const kept = document.createElement('span');
       kept.className = 'memory-merged-keeper';
-      kept.textContent = f.keeper_text ? 'Now: ' + f.keeper_text : 'Now: (the kept memory is gone)';
+      /* The fact it went into, which may itself have changed since. */
+      const keeperLabel = f.replaced ? 'Replaced by: ' : 'Merged into: ';
+      kept.textContent = keeperLabel + (f.keeper_text || '(since deleted)');
       meta.appendChild(kept);
       const when = formatWhen(f.superseded_at);
       if (when) {
@@ -148,7 +150,7 @@
       /* A reply to an older search (typing on, or a reopen) is dropped. */
       if (payload && typeof payload.query === 'string' && payload.query !== lastQuery) return;
       if (!payload || !payload.success) {
-         setStatus((payload && payload.error) || "Couldn't load merged memories.", true);
+         setStatus((payload && payload.error) || "Couldn't load merged facts.", true);
          return;
       }
       const facts = Array.isArray(payload.facts) ? payload.facts : [];
@@ -159,38 +161,47 @@
       const body = el('memory-merged-body');
       body.textContent = '';
       facts.forEach((f) => body.appendChild(renderRow(f)));
-      setStatus(facts.length === 1 ? '1 memory' : `${facts.length} memories`, false);
+      setStatus(facts.length === 1 ? '1 fact' : `${facts.length} facts`, false);
    }
 
    function handleRestoreResponse(payload) {
       if (!payload || !payload.success) {
          if (typeof DawnToast !== 'undefined') {
-            DawnToast.show((payload && payload.error) || "Couldn't restore the memory", 'error');
+            DawnToast.show((payload && payload.error) || "Couldn't restore the fact", 'error');
          }
          request(lastQuery);
+         /* The list is rebuilt: keep the keyboard in the dialog. */
+         const search = el('memory-merged-search');
+         if (search) search.focus();
          return;
       }
       if (typeof DawnToast !== 'undefined') {
          DawnToast.show(
-            payload.both_current
-               ? 'Memory restored; the newer one is current too'
-               : 'Memory restored',
+            payload.both_current ? 'Fact restored; the newer one is current too' : 'Fact restored',
             'success'
          );
       }
       const body = el('memory-merged-body');
       const row = body && body.querySelector(`.memory-item[data-fact-id="${payload.fact_id}"]`);
       if (row) {
-         /* Keep the keyboard where it was: the next row's Restore, else the
-          * previous one's, else the search box. */
-         const near = row.nextElementSibling || row.previousElementSibling;
-         const next = near && near.querySelector('.memory-merged-restore');
+         /* If the keyboard was on this row (or nowhere), keep it near: the next
+          * row's Restore still usable, else the previous one's, else the
+          * search box.  Elsewhere (the user moved on), leave it. */
+         const focused = document.activeElement;
+         const wasHere = !focused || focused === document.body || row.contains(focused);
+         const usable = (r) => {
+            const b = r && r.querySelector('.memory-merged-restore');
+            return b && !b.disabled ? b : null;
+         };
+         const target =
+            usable(row.nextElementSibling) ||
+            usable(row.previousElementSibling) ||
+            el('memory-merged-search');
          row.remove();
-         const target = next || el('memory-merged-search');
-         if (target) target.focus();
+         if (wasHere && target) target.focus();
       }
       const left = body ? body.querySelectorAll('.memory-item').length : 0;
-      setStatus(left === 0 ? emptyText() : left === 1 ? '1 memory' : `${left} memories`, false);
+      setStatus(left === 0 ? emptyText() : left === 1 ? '1 fact' : `${left} facts`, false);
       if (onMemoriesChanged) onMemoriesChanged();
    }
 

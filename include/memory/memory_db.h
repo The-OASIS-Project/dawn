@@ -519,6 +519,7 @@ typedef struct {
    int64_t id;
    int64_t keeper_id;
    time_t superseded_at; /* 0 when unknown (superseded before v95) */
+   bool replaced;        /* replaced by a newer value (else merged as a duplicate) */
    char text[MEMORY_FACT_TEXT_MAX];
    char keeper_text[MEMORY_FACT_TEXT_MAX];
 } memory_superseded_fact_t;

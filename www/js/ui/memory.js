@@ -10,6 +10,8 @@
     * ============================================================================= */
 
    const PAGE_SIZE = 20;
+   /* A delete toast that names facts brought back stays long enough to read. */
+   const RESTORED_TOAST_MS = 8000;
 
    /* Per-tab sort options for the Facts/Summaries sort control. `value` is sent
     * to the server as the `sort` field (see webui_memory.c parse_memory_sort).
@@ -464,11 +466,19 @@
       }
 
       if (typeof DawnToast !== 'undefined') {
-         /* Forgetting a value brings back the one it had replaced: say which. */
+         /* Forgetting a value brings back the one it had replaced: say which,
+          * long enough to read. */
          const back = Array.isArray(payload.restored) ? payload.restored : [];
+         const short = (t) => (t.length > 80 ? t.slice(0, 80) + '…' : t);
+         const quoted = back.map((t) => `"${short(t)}"`).join(', ');
          DawnToast.show(
-            back.length ? `Fact deleted. Current again: ${back.join('; ')}` : 'Fact deleted',
-            'success'
+            back.length === 0
+               ? 'Fact deleted'
+               : back.length === 1
+                 ? `Fact deleted. Brought back the earlier one: ${quoted}`
+                 : `Fact deleted. Brought back ${back.length} earlier facts: ${quoted}`,
+            'success',
+            back.length ? RESTORED_TOAST_MS : undefined
          );
       }
 

@@ -64,12 +64,15 @@ typedef struct {
 /* Single-fact deletes in flight, any users: a few quick deletes while an
  * extraction runs each wait for it rather than being turned away. */
 #define CONV_MEMORY_MAX_FACT_JOBS 16
+/* Of those, one user's: a burst of deletes from one user can't refuse
+ * everyone else's. */
+#define CONV_MEMORY_MAX_FACT_JOBS_PER_USER 4
 /* Each in-flight forget holds its user's extraction: there must be room for all. */
 _Static_assert(CONV_MEMORY_MAX_INFLIGHT + CONV_MEMORY_MAX_FACT_JOBS <= MEMORY_EXTRACTION_MAX_HOLDS,
                "every in-flight forget needs an extraction hold");
 static pthread_mutex_t s_inflight_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int s_inflight_users[CONV_MEMORY_MAX_INFLIGHT];
-static int s_fact_jobs;
+static int s_fact_job_users[CONV_MEMORY_MAX_FACT_JOBS]; /* one entry per job (0 = free) */
 
 /* Claim the user's in-flight slot.  false if one is already running (or full). */
 static bool inflight_claim(int user_id) {
@@ -111,8 +114,18 @@ static bool inflight_claim_op(int user_id, conv_memory_op_t op) {
       return inflight_claim(user_id);
    }
    pthread_mutex_lock(&s_inflight_mutex);
-   const bool ok = s_fact_jobs < CONV_MEMORY_MAX_FACT_JOBS;
-   s_fact_jobs += ok;
+   int mine = 0;
+   int free_slot = -1;
+   for (int i = 0; i < CONV_MEMORY_MAX_FACT_JOBS; i++) {
+      mine += s_fact_job_users[i] == user_id;
+      if (s_fact_job_users[i] == 0 && free_slot < 0) {
+         free_slot = i;
+      }
+   }
+   const bool ok = free_slot >= 0 && mine < CONV_MEMORY_MAX_FACT_JOBS_PER_USER;
+   if (ok) {
+      s_fact_job_users[free_slot] = user_id;
+   }
    pthread_mutex_unlock(&s_inflight_mutex);
    return ok;
 }
@@ -123,7 +136,12 @@ static void inflight_release_op(int user_id, conv_memory_op_t op) {
       return;
    }
    pthread_mutex_lock(&s_inflight_mutex);
-   s_fact_jobs--;
+   for (int i = 0; i < CONV_MEMORY_MAX_FACT_JOBS; i++) {
+      if (s_fact_job_users[i] == user_id) {
+         s_fact_job_users[i] = 0;
+         break;
+      }
+   }
    pthread_mutex_unlock(&s_inflight_mutex);
 }
 

@@ -1004,13 +1004,15 @@ Response: `list_memory_superseded_response`
             "text": "...",
             "keeper_id": 17,
             "keeper_text": "...",
+            "replaced": false,
             "superseded_at": 1791648000
          }
       ]
    }
 }
 ```
-`superseded_at` is 0 when unknown. `query` is echoed back, so a client can drop a reply to an
+`superseded_at` is 0 when unknown. `replaced` is true for an older value a newer fact replaced, false
+for a duplicate merged into it; the kept fact (`keeper_text`) may itself have been superseded since. `query` is echoed back, so a client can drop a reply to an
 earlier search.
 
 #### `restore_memory_fact`

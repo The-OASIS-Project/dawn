@@ -69,6 +69,7 @@ void handle_list_memory_superseded(ws_connection_t *conn, struct json_object *pa
          json_object_object_add(f, "text", json_object_new_string(rows[i].text));
          json_object_object_add(f, "keeper_id", json_object_new_int64(rows[i].keeper_id));
          json_object_object_add(f, "keeper_text", json_object_new_string(rows[i].keeper_text));
+         json_object_object_add(f, "replaced", json_object_new_boolean(rows[i].replaced));
          json_object_object_add(f, "superseded_at",
                                 json_object_new_int64((int64_t)rows[i].superseded_at));
          json_object_array_add(facts, f);

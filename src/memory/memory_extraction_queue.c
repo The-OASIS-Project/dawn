@@ -20,7 +20,7 @@
  * The caller holds the extraction mutex around every call.
  */
 
-#define MEMORY_EXTRACTION_INTERNAL_ALLOWED
+#define MEMORY_EXTRACTION_QUEUE_ALLOWED
 #include "memory/memory_extraction_queue.h"
 
 #include <string.h>

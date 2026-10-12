@@ -936,9 +936,12 @@ static void process_extraction_response(int user_id,
                   const char *v = json_object_is_type(repl_obj, json_type_string)
                                       ? json_object_get_string(repl_obj)
                                       : NULL;
-                  if (v && strcasecmp(v, "true") != 0 && strcasecmp(v, "false") != 0) {
+                  /* "unknown" too: a model may spell "can't say which" that way. */
+                  const bool unsure = v &&
+                                      (strcasecmp(v, "true") == 0 || strcasecmp(v, "unknown") == 0);
+                  if (v && !unsure && strcasecmp(v, "false") != 0) {
                      replaces = v[0] ? v : NULL;
-                  } else if (v ? strcasecmp(v, "true") == 0 : json_object_get_boolean(repl_obj)) {
+                  } else if (v ? unsure : json_object_get_boolean(repl_obj)) {
                      replaces = MEMORY_RELATION_REPLACES_UNKNOWN;
                   }
                }

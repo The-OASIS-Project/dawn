@@ -20,17 +20,17 @@
  * extraction ran, or while every extraction slot was busy.  Oldest first, one
  * entry per conversation.
  *
- * memory_extraction.c's alone.  Not locked here: it calls every function under
- * its extraction mutex, so taking an entry and claiming its slot are one step
- * (a lock of its own would only nest under that one).  Nothing else may call
- * these.
+ * memory_extraction_slots.c's alone.  Not locked here: it calls every function
+ * under its extraction mutex, so taking an entry and claiming its slot are one
+ * step (a lock of its own would only nest under that one).  Nothing else may
+ * call these.
  */
 
 #ifndef MEMORY_EXTRACTION_QUEUE_H
 #define MEMORY_EXTRACTION_QUEUE_H
 
-#ifndef MEMORY_EXTRACTION_INTERNAL_ALLOWED
-#error "memory_extraction_queue.h is private to the memory extraction module"
+#ifndef MEMORY_EXTRACTION_QUEUE_ALLOWED
+#error "memory_extraction_queue.h is private to memory_extraction_slots.c"
 #endif
 
 #include <stdbool.h>

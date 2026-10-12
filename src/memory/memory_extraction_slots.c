@@ -22,6 +22,7 @@
  */
 
 #define MEMORY_EXTRACTION_INTERNAL_ALLOWED
+#define MEMORY_EXTRACTION_QUEUE_ALLOWED
 
 #include <errno.h>
 #include <pthread.h>

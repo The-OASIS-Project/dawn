@@ -1664,6 +1664,13 @@ void test_merged_and_replaced_hide_alike(void) {
    memory_db_fact_list(1, facts, 8, 0, &n);
    TEST_ASSERT_EQUAL_INT(1, n);
    TEST_ASSERT_EQUAL_INT64(keep, facts[0].id);
+   memory_superseded_fact_t rows[4];
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, keep, NULL, rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_EQUAL(rows[i].id == old, rows[i].replaced);
+   }
 }
 
 /* Forgetting a value brings back the one it replaced, with the relation it

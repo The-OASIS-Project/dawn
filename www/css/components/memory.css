@@ -1587,6 +1587,7 @@
       font-size: 16px; /* Prevent iOS zoom-on-tap */
    }
 
+   .memory-merged-link,
    .memory-merged-restore {
       min-height: 44px;
       min-width: 44px;
@@ -1783,7 +1784,10 @@
 
 /* The search row's link to them (Facts tab only). */
 .memory-merged-link {
+   display: inline-flex;
+   align-items: center;
    flex-shrink: 0;
+   padding: 0 0.5rem;
    white-space: nowrap;
    font-size: 0.75rem;
 }
