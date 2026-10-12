@@ -242,6 +242,13 @@ void handle_conversation_learned_request(ws_connection_t *conn, struct json_obje
 void handle_forget_conversation_memories(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief Forget one memory fact on a worker (memory_forget_fact): it waits for
+ *        the user's running extraction.  Replies delete_memory_fact_response,
+ *        with "restored" (the values it had replaced, current again).
+ */
+void webui_forget_memory_fact(ws_connection_t *conn, int64_t fact_id);
+
+/**
  * @brief Delete every memory of the connection's user, on a worker
  *        (webui_conv_memory.c; handle_delete_all_memories checks the confirm)
  *

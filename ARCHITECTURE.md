@@ -348,7 +348,8 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    applies the new user                │
 │  Conv memory     — detached: counts/forgets memories   │
 │                    learned from a conversation made    │
-│                    private                             │
+│                    private; forgets one fact, all of   │
+│                    them (waits out an extraction)      │
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │

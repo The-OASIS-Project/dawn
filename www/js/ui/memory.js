@@ -464,7 +464,12 @@
       }
 
       if (typeof DawnToast !== 'undefined') {
-         DawnToast.show('Fact deleted', 'success');
+         /* Forgetting a value brings back the one it had replaced: say which. */
+         const back = Array.isArray(payload.restored) ? payload.restored : [];
+         DawnToast.show(
+            back.length ? `Fact deleted. Current again: ${back.join('; ')}` : 'Fact deleted',
+            'success'
+         );
       }
 
       // Refresh data

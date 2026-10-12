@@ -1856,6 +1856,13 @@ static void *queued_extraction_thread(void *arg) {
    extraction_queue_entry_t *e = arg;
    int message_count = 0;
    struct json_object *history = NULL;
+   /* Shutdown may have stopped the queue after this was taken: touch nothing
+    * (memory recovery extracts it on the next start). */
+   if (atomic_load(&s_queue_stopped)) {
+      extraction_slot_release(e->user_id);
+      free(e);
+      return NULL;
+   }
 #ifdef ENABLE_AUTH
    conversation_t conv;
    if (conv_db_get(e->conversation_id, e->user_id, &conv) == AUTH_DB_SUCCESS) {

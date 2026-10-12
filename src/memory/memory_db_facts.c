@@ -914,11 +914,12 @@ int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t
 }
 
 /* Caller holds the auth_db lock.  Marks @p old_fact_id superseded by
- * @p new_fact_id (both @p user_id's).  SQLITE_DONE on success; *changed says
- * whether a row changed. */
+ * @p new_fact_id (both @p user_id's), as @p kind (MEMORY_SUPERSEDED_*).
+ * SQLITE_DONE on success; *changed says whether a row changed. */
 static int fact_supersede_locked(int64_t old_fact_id,
                                  int64_t new_fact_id,
                                  int user_id,
+                                 int kind,
                                  bool *changed) {
    /* SQL enforces (a) old_fact_id is owned by user_id AND (b) new_fact_id
     * is owned by user_id via EXISTS subquery.  CWE-639 defense-in-depth
@@ -931,6 +932,7 @@ static int fact_supersede_locked(int64_t old_fact_id,
    sqlite3_bind_int(stmt, 3, user_id);
    sqlite3_bind_int64(stmt, 4, new_fact_id);
    sqlite3_bind_int(stmt, 5, user_id);
+   sqlite3_bind_int(stmt, 6, kind);
 
    const int rc = sqlite3_step(stmt);
    *changed = rc == SQLITE_DONE && sqlite3_changes(s_db.db) > 0;
@@ -944,7 +946,8 @@ int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_
 
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
    bool changed = false;
-   const int rc = fact_supersede_locked(old_fact_id, new_fact_id, user_id, &changed);
+   const int rc = fact_supersede_locked(old_fact_id, new_fact_id, user_id,
+                                        MEMORY_SUPERSEDED_REPLACED, &changed);
    AUTH_DB_UNLOCK();
    /* The fact cache loads only current facts; a superseded one leaves recall
     * once its copy is reloaded.  Off the DB lock: a reload holds the cache's
@@ -1007,9 +1010,28 @@ int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id) {
       return MEMORY_DB_FAILURE;
    }
    bool changed = false;
-   bool ok = fact_supersede_locked(old_fact_id, keeper_id, user_id, &changed) == SQLITE_DONE;
+   bool ok = fact_supersede_locked(old_fact_id, keeper_id, user_id, MEMORY_SUPERSEDED_MERGED,
+                                   &changed) == SQLITE_DONE;
    if (ok && changed) {
       ok = merge_sources_locked(old_fact_id, keeper_id, user_id);
+   }
+   /* What the duplicate stated is the kept fact's now: left on it, a later
+    * change of value would retire the duplicate, not the fact the user sees,
+    * and forgetting the kept fact couldn't reach it once the duplicate is
+    * pruned. */
+   if (ok && changed) {
+      sqlite3_stmt *st = NULL;
+      ok = sqlite3_prepare_v2(s_db.db,
+                              "UPDATE memory_relations SET fact_id = ?1 WHERE user_id = ?2 AND "
+                              "fact_id = ?3",
+                              -1, &st, NULL) == SQLITE_OK;
+      if (ok) {
+         sqlite3_bind_int64(st, 1, keeper_id);
+         sqlite3_bind_int(st, 2, user_id);
+         sqlite3_bind_int64(st, 3, old_fact_id);
+         ok = sqlite3_step(st) == SQLITE_DONE;
+      }
+      sqlite3_finalize(st);
    }
    if (!ok) {
       OLOG_WARNING("memory_db: merging fact %lld into %lld failed: %s", (long long)old_fact_id,
@@ -1277,9 +1299,9 @@ int memory_db_fact_find_by_hash(int user_id,
  *   global IDF (~1-5% orphan ratio at realistic prune cadences — below
  *   bench-noise threshold).  Close both prune paths in the same pattern when
  *   pruning gets exercised in production. */
-/* Merge-chain steps one prune moves a relation up (a longer chain's relation
- * is left on a pruned fact, as before). */
-#define PRUNE_RELINK_PASSES_MAX 8
+/* Merge-chain steps one prune moves a relation up: only a cycle in the
+ * chain reaches it. */
+#define PRUNE_RELINK_PASSES_MAX 64
 
 int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_out) {
    if (count_out)
@@ -1293,30 +1315,32 @@ int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_
       return MEMORY_DB_FAILURE;
    }
 
-   /* A relation keeps the fact that first stated it, often a duplicate later
-    * merged away: move it up to the fact kept (a step per pass, so a chain
-    * pruned at once ends on its keeper), or it is left with no fact and no
-    * forget can reach it. */
-   int rc = SQLITE_DONE;
+   /* A relation a merged duplicate stated before merges moved relations (or
+    * one left on it) goes up to the fact kept, a step per pass so a chain
+    * pruned at once ends on its keeper; otherwise it is left with no fact and
+    * no forget can reach it.  A replaced value's relations aren't moved: the
+    * fact that replaced it doesn't say them. */
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE memory_relations SET fact_id = (SELECT f.superseded_by FROM memory_facts f "
+       "WHERE f.id = memory_relations.fact_id) WHERE +user_id = ?1 AND fact_id IN (SELECT id "
+       "FROM memory_facts WHERE +user_id = ?1 AND superseded_by IS NOT NULL AND "
+       "superseded_kind = 0 AND superseded_at IS NOT NULL AND superseded_at < ?2)",
+       -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      rc = SQLITE_DONE;
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, (int64_t)cutoff);
+   }
    for (int pass = 0; pass < PRUNE_RELINK_PASSES_MAX && rc == SQLITE_DONE; pass++) {
-      sqlite3_stmt *st = NULL;
-      rc = sqlite3_prepare_v2(
-          s_db.db,
-          "UPDATE memory_relations SET fact_id = (SELECT f.superseded_by FROM memory_facts f "
-          "WHERE f.id = memory_relations.fact_id) WHERE user_id = ?1 AND fact_id IN (SELECT id "
-          "FROM memory_facts WHERE user_id = ?1 AND superseded_by IS NOT NULL AND "
-          "superseded_at IS NOT NULL AND superseded_at < ?2)",
-          -1, &st, NULL);
-      if (rc == SQLITE_OK) {
-         sqlite3_bind_int(st, 1, user_id);
-         sqlite3_bind_int64(st, 2, (int64_t)cutoff);
-         rc = sqlite3_step(st);
-      }
-      sqlite3_finalize(st);
+      sqlite3_reset(st);
+      rc = sqlite3_step(st);
       if (rc == SQLITE_DONE && sqlite3_changes(s_db.db) == 0) {
          break;
       }
    }
+   sqlite3_finalize(st);
 
    int deleted = 0;
    if (rc == SQLITE_DONE) {

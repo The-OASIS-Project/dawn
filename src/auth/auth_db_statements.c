@@ -654,10 +654,10 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * pointing superseded_by at a foreign row, AND a foreign old_fact_id
     * would let a caller corrupt another user's fact chain. */
    { "memory_fact_supersede",
-     "UPDATE memory_facts SET superseded_by = ?, "
+     "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = ?6, "
      "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-     "WHERE id = ? AND user_id = ? "
-     "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
+     "WHERE id = ?2 AND user_id = ?3 "
+     "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5)",
      &s_db.stmt_memory_fact_supersede },
    { "memory_fact_delete", "DELETE FROM memory_facts WHERE id = ? AND user_id = ?",
      &s_db.stmt_memory_fact_delete },

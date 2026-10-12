@@ -91,13 +91,12 @@ void handle_restore_memory_fact(ws_connection_t *conn, struct json_object *paylo
                                : 0;
    json_object *out = json_object_new_object();
    json_object_object_add(out, "fact_id", json_object_new_int64(fact_id));
-   int kept_closed = 0;
-   const int rc = fact_id > 0
-                      ? memory_db_fact_restore(conn->auth_user_id, fact_id, NULL, &kept_closed)
-                      : MEMORY_DB_NOT_FOUND;
+   memory_restore_result_t rr = { 0 };
+   const int rc = fact_id > 0 ? memory_db_fact_restore(conn->auth_user_id, fact_id, &rr)
+                              : MEMORY_DB_NOT_FOUND;
    json_object_object_add(out, "success", json_object_new_boolean(rc == MEMORY_DB_SUCCESS));
-   /* The value that replaced it is current too: the user may want to forget one. */
-   json_object_object_add(out, "both_current", json_object_new_boolean(kept_closed > 0));
+   /* An older value back beside the newer one: the user may want to forget one. */
+   json_object_object_add(out, "both_current", json_object_new_boolean(rr.replaced));
    if (rc == MEMORY_DB_SUCCESS) {
       OLOG_INFO("WebUI: User %d restored memory fact %lld", conn->auth_user_id, (long long)fact_id);
    } else {

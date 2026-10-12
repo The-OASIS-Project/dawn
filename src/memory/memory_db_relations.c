@@ -322,7 +322,7 @@ static int fact_supersede_in_tx_locked(int user_id, int64_t old_id, int64_t new_
    sqlite3_stmt *st = NULL;
    int changed = -1;
    if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE memory_facts SET superseded_by = ?1, "
+                          "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = 1, "
                           "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
                           "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL "
                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?1 AND user_id = ?3)",

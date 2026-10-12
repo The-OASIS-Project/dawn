@@ -978,7 +978,10 @@ Delete a specific memory fact.
    }
 }
 ```
-Response: `delete_memory_fact_response`. The facts merged into it are deleted with it.
+Response: `delete_memory_fact_response` with `success`, and `error` on failure ("Memory is still being
+saved; try again in a moment" while an extraction for the user runs past the wait). The duplicates merged
+into it are deleted with it; the values it replaced are current again and listed in `restored` (their
+text). It runs on a worker.
 
 #### `list_memory_superseded`
 The caller's merged or replaced facts (recall no longer shows them), newest first, at most 50.

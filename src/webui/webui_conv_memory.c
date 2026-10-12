@@ -44,9 +44,10 @@
 #include "webui/webui_server.h"
 
 typedef enum {
-   CONV_MEMORY_COUNT,      /* report what was learned (after going private) */
-   CONV_MEMORY_FORGET,     /* delete it */
-   CONV_MEMORY_FORGET_ALL, /* delete every memory of the user */
+   CONV_MEMORY_COUNT,       /* report what was learned (after going private) */
+   CONV_MEMORY_FORGET,      /* delete it */
+   CONV_MEMORY_FORGET_ALL,  /* delete every memory of the user */
+   CONV_MEMORY_FORGET_FACT, /* delete one fact (conv_id is the fact's id) */
 } conv_memory_op_t;
 
 typedef struct {
@@ -60,11 +61,15 @@ typedef struct {
  * up to MEMORY_FORGET_WAIT_SEC, so an unbounded number would pin one thread
  * apiece. */
 #define CONV_MEMORY_MAX_INFLIGHT 32
+/* Single-fact deletes in flight, any users: a few quick deletes while an
+ * extraction runs each wait for it rather than being turned away. */
+#define CONV_MEMORY_MAX_FACT_JOBS 16
 /* Each in-flight forget holds its user's extraction: there must be room for all. */
-_Static_assert(CONV_MEMORY_MAX_INFLIGHT <= MEMORY_EXTRACTION_MAX_HOLDS,
+_Static_assert(CONV_MEMORY_MAX_INFLIGHT + CONV_MEMORY_MAX_FACT_JOBS <= MEMORY_EXTRACTION_MAX_HOLDS,
                "every in-flight forget needs an extraction hold");
 static pthread_mutex_t s_inflight_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int s_inflight_users[CONV_MEMORY_MAX_INFLIGHT];
+static int s_fact_jobs;
 
 /* Claim the user's in-flight slot.  false if one is already running (or full). */
 static bool inflight_claim(int user_id) {
@@ -99,6 +104,29 @@ static void inflight_release(int user_id) {
    pthread_mutex_unlock(&s_inflight_mutex);
 }
 
+/* Claim a slot for @p op: a fact delete one of the shared fact-job slots, the
+ * rest the user's one in-flight slot.  false if taken (or full). */
+static bool inflight_claim_op(int user_id, conv_memory_op_t op) {
+   if (op != CONV_MEMORY_FORGET_FACT) {
+      return inflight_claim(user_id);
+   }
+   pthread_mutex_lock(&s_inflight_mutex);
+   const bool ok = s_fact_jobs < CONV_MEMORY_MAX_FACT_JOBS;
+   s_fact_jobs += ok;
+   pthread_mutex_unlock(&s_inflight_mutex);
+   return ok;
+}
+
+static void inflight_release_op(int user_id, conv_memory_op_t op) {
+   if (op != CONV_MEMORY_FORGET_FACT) {
+      inflight_release(user_id);
+      return;
+   }
+   pthread_mutex_lock(&s_inflight_mutex);
+   s_fact_jobs--;
+   pthread_mutex_unlock(&s_inflight_mutex);
+}
+
 /* {facts, outdated, summaries, preferences, relations, memories} for the client.
  * "memories" is what the Memory panel lists; "outdated" are superseded facts it
  * doesn't; relations are graph links. */
@@ -130,10 +158,50 @@ static void send_frame(uint32_t session_id, const char *type, json_object *paylo
    json_object_put(frame);
 }
 
+/* One fact forgotten (delete_memory_fact_response), with the values it had
+ * replaced, current again, in "restored". */
+static void forget_fact(const conv_memory_job_t *job, json_object *payload) {
+   memory_forget_result_t fr;
+   conv_db_withdraw_intent_begin(job->user_id); /* the user removing it */
+   const int rc = memory_forget_fact(job->user_id, job->conv_id, &fr);
+   conv_db_withdraw_intent_end();
+   json_object_object_add(payload, "success", json_object_new_boolean(rc == SUCCESS));
+   if (rc == SUCCESS) {
+      json_object_object_add(payload, "message", json_object_new_string("Fact deleted"));
+   } else {
+      json_object_object_add(payload, "error",
+                             json_object_new_string(
+                                 rc == MEMORY_FORGET_BUSY
+                                     ? "Memory is still being saved; try again in a moment"
+                                 : rc == MEMORY_FORGET_NOT_FOUND ? "Fact not found"
+                                                                 : "Failed to delete fact"));
+   }
+   /* Even a forget that failed partway may have deleted duplicates and
+    * brought values back: say so, and withdraw what's gone. */
+   json_object *restored = json_object_new_array();
+   for (int i = 0; restored && i < fr.restored && i < MEMORY_FORGET_RESTORED_MAX; i++) {
+      memory_fact_t fact;
+      if (memory_db_fact_get(fr.restored_ids[i], job->user_id, &fact) == MEMORY_DB_SUCCESS) {
+         json_object_array_add(restored, json_object_new_string(fact.fact_text));
+      }
+   }
+   if (restored) {
+      json_object_object_add(payload, "restored", restored);
+   }
+   if (rc == SUCCESS || fr.merged > 0) {
+      (void)session_withdraw_forgotten(job->user_id, false);
+   }
+   OLOG_INFO("WebUI: User %d deleted memory fact %lld: %s (%d merged, %d brought back)",
+             job->user_id, (long long)job->conv_id, rc == SUCCESS ? "done" : "not done", fr.merged,
+             fr.restored);
+}
+
 static void *conv_memory_worker(void *arg) {
    conv_memory_job_t *job = (conv_memory_job_t *)arg;
    json_object *payload = json_object_new_object();
-   if (payload && job->op == CONV_MEMORY_FORGET_ALL) {
+   if (payload && job->op == CONV_MEMORY_FORGET_FACT) {
+      forget_fact(job, payload);
+   } else if (payload && job->op == CONV_MEMORY_FORGET_ALL) {
       conv_db_withdraw_intent_begin(job->user_id); /* the user removing it all */
       const int rc = memory_forget_all(job->user_id);
       conv_db_withdraw_intent_end();
@@ -188,12 +256,13 @@ static void *conv_memory_worker(void *arg) {
    }
    /* Free the user's slot before replying, so a client acting on the reply at
     * once isn't told it's still busy. */
-   inflight_release(job->user_id);
+   inflight_release_op(job->user_id, job->op);
    if (payload) {
       send_frame(job->session_id,
-                 job->op == CONV_MEMORY_COUNT        ? "conversation_learned"
-                 : job->op == CONV_MEMORY_FORGET_ALL ? "delete_all_memories_response"
-                                                     : "forget_conversation_memories_response",
+                 job->op == CONV_MEMORY_COUNT         ? "conversation_learned"
+                 : job->op == CONV_MEMORY_FORGET_ALL  ? "delete_all_memories_response"
+                 : job->op == CONV_MEMORY_FORGET_FACT ? "delete_memory_fact_response"
+                                                      : "forget_conversation_memories_response",
                  payload);
    }
    free(job);
@@ -213,12 +282,12 @@ static conv_memory_start_t start_conv_memory_job(ws_connection_t *conn,
    if (!conn->session) {
       return CONV_MEMORY_FAILED;
    }
-   if (!inflight_claim(conn->auth_user_id)) {
+   if (!inflight_claim_op(conn->auth_user_id, op)) {
       return CONV_MEMORY_BUSY;
    }
    conv_memory_job_t *job = calloc(1, sizeof(*job));
    if (!job) {
-      inflight_release(conn->auth_user_id);
+      inflight_release_op(conn->auth_user_id, op);
       return CONV_MEMORY_FAILED;
    }
    job->session_id = conn->session->session_id;
@@ -234,7 +303,7 @@ static conv_memory_start_t start_conv_memory_job(ws_connection_t *conn,
    pthread_attr_destroy(&attr);
    if (rc != 0) {
       OLOG_ERROR("WebUI: could not start conversation-memory worker (%d)", rc);
-      inflight_release(job->user_id);
+      inflight_release_op(job->user_id, job->op);
       free(job);
       return CONV_MEMORY_FAILED;
    }
@@ -393,6 +462,15 @@ void handle_forget_conversation_memories(ws_connection_t *conn, struct json_obje
       send_error(conn, "forget_conversation_memories_response", conv_id,
                  st == CONV_MEMORY_BUSY ? "Still working on a previous request; try again shortly"
                                         : "Could not start; try again");
+   }
+}
+
+void webui_forget_memory_fact(ws_connection_t *conn, int64_t fact_id) {
+   const conv_memory_start_t st = start_conv_memory_job(conn, fact_id, CONV_MEMORY_FORGET_FACT);
+   if (st != CONV_MEMORY_STARTED) {
+      send_error(conn, "delete_memory_fact_response", 0,
+                 st == CONV_MEMORY_BUSY ? "Memory is busy with another change; try again shortly"
+                                        : "Failed to delete fact");
    }
 }
 

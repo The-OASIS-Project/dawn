@@ -687,9 +687,8 @@ int handle_memory_fact_restore(int client_fd, const char *payload, uint16_t payl
    auth_user_t user;
    if (resolve_username_to_user(client_fd, username, &user) != 0)
       return 1;
-   int reopened = 0;
-   int kept_closed = 0;
-   const int rc = memory_db_fact_restore(user.id, fact_id, &reopened, &kept_closed);
+   memory_restore_result_t rr = { 0 };
+   const int rc = memory_db_fact_restore(user.id, fact_id, &rr);
    if (rc == MEMORY_DB_NOT_FOUND) {
       return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND,
                                 "No superseded fact with that id for this user");
@@ -699,7 +698,7 @@ int handle_memory_fact_restore(int client_fd, const char *payload, uint16_t payl
    }
    char report[256];
    snprintf(report, sizeof(report), "Restored fact %lld for user '%s' (%d relation(s) reopened%s).",
-            (long long)fact_id, username, reopened,
-            kept_closed > 0 ? "; the value that replaced it is still current too" : "");
+            (long long)fact_id, username, rr.reopened,
+            rr.replaced ? "; the value that replaced it is still current too" : "");
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
 }

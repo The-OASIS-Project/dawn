@@ -49,6 +49,7 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  last_accessed INTEGER,"
                          "  access_count INTEGER DEFAULT 0,"
                          "  superseded_by INTEGER,"
+                         "  superseded_kind INTEGER NOT NULL DEFAULT 0,"
                          "  superseded_at INTEGER,"
                          "  normalized_hash INTEGER DEFAULT 0,"
                          "  embedding BLOB DEFAULT NULL,"
@@ -153,10 +154,10 @@ static void setup_db(void) {
     * the UPDATE and an EXISTS subquery enforces same-user ownership of
     * new_fact_id (cross-user pointer prevention). */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_facts SET superseded_by = ?, "
+                           "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = ?6, "
                            "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-                           "WHERE id = ? AND user_id = ? "
-                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
+                           "WHERE id = ?2 AND user_id = ?3 "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {
       fprintf(stderr, "prepare fact_supersede failed: %s\n", sqlite3_errmsg(s_db.db));
@@ -784,6 +785,14 @@ static void test_contradictory_close_supersedes_its_fact(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(liked, old_fact_id);
    TEST_ASSERT_EQUAL_INT64(disliked, get_fact_superseded_by(liked));
+   /* A replaced value, not a duplicate: forgetting the new one brings it back. */
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT superseded_kind FROM memory_facts WHERE id = ?", -1, &st,
+                      NULL);
+   sqlite3_bind_int64(st, 1, liked);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_INT(MEMORY_SUPERSEDED_REPLACED, sqlite3_column_int(st, 0));
+   sqlite3_finalize(st);
 }
 
 /* married_to holds one value: a new one closes the old without being told. */

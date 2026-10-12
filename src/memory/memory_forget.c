@@ -101,6 +101,22 @@ int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned
    return SUCCESS;
 }
 
+int memory_forget_fact(int user_id, int64_t fact_id, memory_forget_result_t *out) {
+   if (out) {
+      memset(out, 0, sizeof(*out));
+   }
+   if (!memory_extraction_hold_user(user_id, MEMORY_FORGET_WAIT_SEC)) {
+      OLOG_WARNING("memory_forget: user %d: extraction still running; fact %lld kept for now",
+                   user_id, (long long)fact_id);
+      return MEMORY_FORGET_BUSY;
+   }
+   const int rc = memory_db_fact_forget(fact_id, user_id, out);
+   memory_extraction_release_user(user_id);
+   return rc == MEMORY_DB_SUCCESS     ? SUCCESS
+          : rc == MEMORY_DB_NOT_FOUND ? MEMORY_FORGET_NOT_FOUND
+                                      : FAILURE;
+}
+
 int memory_forget_all(int user_id) {
    if (!memory_extraction_hold_user(user_id, MEMORY_FORGET_WAIT_SEC)) {
       OLOG_WARNING("memory_forget: user %d: extraction still running; not deleting yet", user_id);

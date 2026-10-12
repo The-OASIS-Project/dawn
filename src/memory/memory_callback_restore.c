@@ -90,9 +90,8 @@ char *memory_action_restore(int user_id, const char *query) {
                     "Memory restore needs one numeric ID of a merged or replaced memory "
                     "(from 'list_merged').");
    }
-   int reopened = 0;
-   int kept_closed = 0;
-   const int rc = memory_db_fact_restore(user_id, (int64_t)id, &reopened, &kept_closed);
+   memory_restore_result_t rr = { 0 };
+   const int rc = memory_db_fact_restore(user_id, (int64_t)id, &rr);
    if (rc == MEMORY_DB_NOT_FOUND) {
       return strdup(TOOL_RESULT_ERROR_MARK
                     "No merged or replaced memory with that ID (it may be current already, "
@@ -103,9 +102,9 @@ char *memory_action_restore(int user_id, const char *query) {
    }
    char buf[256];
    snprintf(buf, sizeof(buf), "Restored memory %lld; it is current again%s.%s", id,
-            reopened > 0 ? ", with what it said about relationships and contact details" : "",
-            kept_closed > 0 ? " The value that replaced it is still current too: forget one of "
-                              "them if only one is right."
-                            : "");
+            rr.reopened > 0 ? ", with what it said about relationships and contact details" : "",
+            rr.replaced ? " The value that replaced it is still current too: forget one of "
+                          "them if only one is right."
+                        : "");
    return strdup(buf);
 }

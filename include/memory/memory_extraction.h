@@ -124,7 +124,7 @@ void memory_extraction_unqueue_user(int user_id);
 void memory_extraction_stop_queue(void);
 
 /** Users whose extraction can be held at once (memory_extraction_hold_user). */
-#define MEMORY_EXTRACTION_MAX_HOLDS 32
+#define MEMORY_EXTRACTION_MAX_HOLDS 64
 
 /**
  * @brief Wait for a user's in-flight extraction to finish, then block new ones

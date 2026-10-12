@@ -53,7 +53,9 @@
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_extraction.h"
 #include "memory/memory_fact_search.h"
+#include "memory/memory_forget.h" /* MEMORY_FORGET_WAIT_SEC */
 #include "utils/string_utils.h"
 /* SOURCE_DEDUP_CAP / source_dedup_set_t / source_dedup_{seen,add} live in
  * memory_callback_internal.h so the unit tests can exercise them directly. */
@@ -1191,6 +1193,30 @@ static char *memory_action_remember(int user_id, const char *value) {
 /* Max fact IDs accepted in one bulk 'forget' call — bounds the response size. */
 #define MAX_FORGET_IDS 50
 
+/* Values a forget call names as current again (forget_reply). */
+#define FORGET_BACK_MAX 8
+
+/* @p msg (taken) with what forgetting brought back (@p back, freed). */
+static char *forget_reply(char *msg, strbuf_t *back) {
+   if (!msg || back->len == 0) {
+      strbuf_free(back);
+      return msg;
+   }
+   strbuf_t out;
+   strbuf_init(&out, strlen(msg) + back->len + 160);
+   strbuf_append(&out, msg);
+   free(msg);
+   if (back->len > 0) {
+      strbuf_appendf(&out,
+                     ". Current again, as it was before what was forgotten replaced it: %s (forget "
+                     "it too if it is wrong as well)",
+                     back->buf);
+   }
+   strbuf_free(back);
+   char *result = strbuf_steal(&out);
+   return result ? result : strdup("Memory updated.");
+}
+
 /* Parse one or more comma/space-separated POSITIVE numeric fact IDs into `out`
  * (capacity `max`).  Numeric-only tokens are required (guards against accidental
  * fuzzy-text operations); non-numeric / non-positive tokens are counted in
@@ -1284,17 +1310,37 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    char nf_ids[400] = "";
    size_t ok_pos = 0, nf_pos = 0;
 
+   /* One wait for the user's running extraction covers the whole batch: one
+    * finishing meanwhile could merge into a fact being forgotten. */
+   if (!merge && !memory_extraction_hold_user(user_id, MEMORY_FORGET_WAIT_SEC)) {
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory is still being saved; nothing was forgotten. "
+                                           "Try again in a moment.");
+   }
    /* A forgotten fact is the user removing it (a merge isn't: the kept fact
     * says it). */
    if (!merge) {
       conv_db_withdraw_intent_begin(user_id);
    }
+   /* The values the forgotten facts replaced, current again. */
+   int64_t back_ids[FORGET_BACK_MAX];
+   int back_count = 0;
+   int merged_gone = 0; /* duplicates deleted, also by a forget that failed partway */
    for (int i = 0; i < id_count; i++) {
       memory_fact_t fact;
       bool removed = false;
-      if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS &&
-          (merge ? memory_db_fact_merge(ids[i], replaced_by, user_id)
-                 : memory_db_fact_forget(ids[i], user_id, NULL)) == MEMORY_DB_SUCCESS) {
+      memory_forget_result_t fr = { 0 };
+      int frc = MEMORY_DB_FAILURE;
+      if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS) {
+         frc = merge ? memory_db_fact_merge(ids[i], replaced_by, user_id)
+                     : memory_db_fact_forget(ids[i], user_id, &fr);
+      }
+      for (int k = 0; k < fr.restored && k < MEMORY_FORGET_RESTORED_MAX; k++) {
+         if (back_count < FORGET_BACK_MAX) {
+            back_ids[back_count++] = fr.restored_ids[k];
+         }
+      }
+      merged_gone += fr.merged;
+      if (frc == MEMORY_DB_SUCCESS) {
          removed = true;
          if (forgotten == 0) {
             snprintf(first_text, sizeof(first_text), "%.200s", fact.fact_text);
@@ -1312,9 +1358,23 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
                                  (long long)ids[i]);
    }
    conv_db_withdraw_intent_end();
+   if (!merge) {
+      memory_extraction_release_user(user_id);
+   }
+   /* Named only if still current: a later ID in the call may have forgotten it. */
+   strbuf_t back;
+   strbuf_init(&back, 256);
+   for (int k = 0; k < back_count; k++) {
+      memory_fact_t back_fact;
+      if (memory_db_fact_get(back_ids[k], user_id, &back_fact) == MEMORY_DB_SUCCESS &&
+          back_fact.superseded_by == 0) {
+         strbuf_appendf(&back, "%s[%lld] \"%.120s\"", back.len ? "; " : "", (long long)back_fact.id,
+                        back_fact.fact_text);
+      }
+   }
    /* What was forgotten leaves the conversations it was sent into (a merged
     * fact stays, in the one it merged into). */
-   if (forgotten > 0 && !merge) {
+   if ((forgotten > 0 || merged_gone > 0) && !merge) {
       session_withdraw_forgotten_async(user_id, false);
    }
 
@@ -1331,8 +1391,9 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
             snprintf(msg, 384, "Forgotten (ID %lld): \"%s%s\"", (long long)ids[0], first_text,
                      first_truncated ? "..." : "");
       }
-      return msg ? msg
-                 : strdup(merge ? "Fact merged successfully." : "Fact forgotten successfully.");
+      return forget_reply(
+          msg ? msg : strdup(merge ? "Fact merged successfully." : "Fact forgotten successfully."),
+          &back);
    }
 
    /* Batched summary.  Clamp `pos` after each append so the `SZ - pos` size
@@ -1372,7 +1433,7 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    }
    if (capped)
       snprintf(msg + pos, FORGET_MSG_SZ - pos, " (capped at %d IDs per call)", MAX_FORGET_IDS);
-   return msg;
+   return forget_reply(msg, &back);
 }
 
 /* =============================================================================

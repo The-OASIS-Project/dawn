@@ -320,14 +320,12 @@ void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payloa
    if (!conn_require_auth(conn)) {
       return;
    }
-
-   json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("delete_memory_fact_response"));
-   json_object *resp_payload = json_object_new_object();
-
-   /* Get fact ID */
    json_object *id_obj;
    if (!json_object_object_get_ex(payload, "fact_id", &id_obj)) {
+      json_object *response = json_object_new_object();
+      json_object *resp_payload = json_object_new_object();
+      json_object_object_add(response, "type",
+                             json_object_new_string("delete_memory_fact_response"));
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error", json_object_new_string("Missing fact_id"));
       json_object_object_add(response, "payload", resp_payload);
@@ -335,29 +333,8 @@ void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payloa
       json_object_put(response);
       return;
    }
-
-   int64_t fact_id = json_object_get_int64(id_obj);
-   conv_db_withdraw_intent_begin(conn->auth_user_id); /* the user removing it */
-   int result = memory_db_fact_forget(fact_id, conn->auth_user_id, NULL);
-   conv_db_withdraw_intent_end();
-
-   if (result == MEMORY_DB_SUCCESS) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      json_object_object_add(resp_payload, "message", json_object_new_string("Fact deleted"));
-      session_withdraw_forgotten_async(conn->auth_user_id, false);
-      OLOG_INFO("WebUI: User %d deleted memory fact %lld", conn->auth_user_id, (long long)fact_id);
-   } else if (result == MEMORY_DB_NOT_FOUND) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error", json_object_new_string("Fact not found"));
-   } else {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Failed to delete fact"));
-   }
-
-   json_object_object_add(response, "payload", resp_payload);
-   send_json_response(conn, response);
-   json_object_put(response);
+   /* Waits out the user's running extraction, so it runs on a worker. */
+   webui_forget_memory_fact(conn, json_object_get_int64(id_obj));
 }
 
 /* =============================================================================
