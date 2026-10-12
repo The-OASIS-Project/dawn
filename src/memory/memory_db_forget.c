@@ -302,23 +302,8 @@ static int forget_in_tx_locked(int user_id,
                "x.preference_id = memory_preferences.id), source_msg_id_start = NULL, "
                "source_msg_id_end = NULL" FORGET_IN_CONVS,
                ignored);
-   /* An entity an alias still targets stays: the alias keeps it as a merge
-    * target (and its target column can't be nulled). */
    FORGET_STEP("DELETE FROM memory_entities WHERE user_id = ?1 AND ?2 IS NOT NULL AND "
-               "is_user_self = 0 AND id IN (SELECT id FROM forget_entities) AND "
-               /* One index seek each ("+user_id" keeps the planner off the
-                * user_id index, which scans every relation per entity). */
-               "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "
-               "            r.subject_entity_id = memory_entities.id AND +r.user_id = ?1) AND "
-               "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "
-               "            r.object_entity_id = memory_entities.id AND +r.user_id = ?1) AND "
-               "NOT EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = ?1 AND "
-               "            f.subject_entity_id = memory_entities.id) AND "
-               "NOT EXISTS (SELECT 1 FROM contacts c WHERE c.entity_id = memory_entities.id) AND "
-               "NOT EXISTS (SELECT 1 FROM memory_entities a WHERE "
-               "            a.canonical_id = memory_entities.id) AND "
-               "NOT EXISTS (SELECT 1 FROM memory_entity_aliases al WHERE al.user_id = ?1 AND "
-               "            al.target_entity_id = memory_entities.id)",
+               "id IN (SELECT id FROM forget_entities) AND " MEMORY_ENTITY_UNREFERENCED,
                d->entities);
    /* Forgetting means what was learned so far: the conversations count as
     * extracted, so memory recovery doesn't learn them again (what is said in

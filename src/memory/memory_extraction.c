@@ -1073,12 +1073,14 @@ static void process_extraction_response(int user_id,
                int64_t rel_fact_id = fact_id;
                memory_fact_t fact_check;
                if (memory_db_fact_get(rel_fact_id, user_id, &fact_check) != MEMORY_DB_SUCCESS) {
+                  /* Deleted meanwhile (a forget): the relation goes with it, as
+                   * it would have had it been stored first. */
                   OLOG_WARNING("memory_extraction: fact_id=%lld vanished before relation "
-                               "supersede (subj=%s pred=%s obj=%s) — storing with NULL fact link "
+                               "supersede (subj=%s pred=%s obj=%s) — relation not stored "
                                "[diag origin=%s conv=%lld fact_text='%.80s']",
                                (long long)fact_id, r_subj, canon_pred, r_obj, fact_id_origin,
                                prov ? (long long)prov->conv_id : -1L, text);
-                  rel_fact_id = 0;
+                  continue;
                }
 
                /* "replaces": the user said this value replaced an old one (a new

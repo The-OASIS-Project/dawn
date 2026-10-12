@@ -42,14 +42,17 @@ player.
   ("what did you merge into that?", "bring that back"), use **Merged** in the Memory panel, or
   `dawn-admin memory superseded --user <name>` and `dawn-admin memory restore --user <name> --fact-id
   <id>`. They are kept for `prune_superseded_days` (30 by default) after the merge.
-- **Forgetting is "what was learned so far".** Forgetting a memory (in the Memory panel, or by asking DAWN)
-  now also removes the duplicates merged into it (before, they came back). Forgetting a conversation's memories, or deleting all of them,
-  also stops DAWN from learning them again from those conversations later; what you say from then on is
+- **Forgetting is "what was learned so far".** Forgetting a memory (in the Memory panel, or by asking
+  DAWN) now also removes the duplicates merged into it and what it said about relationships and contact
+  details (before, both came back). Forgetting a conversation's memories, or deleting all of them, also
+  stops DAWN from learning them again from those conversations later; what you say from then on is
   remembered as usual.
 - The database moves to schema v103 on start (one column added), with no manual step.
 
 **What you need to do.** Nothing. Memories an earlier version replaced aren't brought back on their own:
-many were duplicates. If one you want is missing, find it with `dawn-admin memory superseded --user
+many were duplicates. What a memory forgotten on an earlier version said about a relationship or contact
+detail can still come up: a relationship to someone or something goes when you delete their card in the
+Memory panel; a contact detail of yours stays until you tell DAWN a new one. If one you want is missing, find it with `dawn-admin memory superseded --user
 <name> --grep <text>` (or the Memory panel's **Merged**) and restore it.
 
 ---

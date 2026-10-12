@@ -129,6 +129,25 @@ void memory_db_internal_source_add_locked(memory_source_kind_t kind,
                       "memory_relation_sources x WHERE x.relation_id = r.id AND "             \
                       "x.conversation_id NOT IN " MEMORY_FORGET_IN_SET ")"
 #define MEMORY_FORGET_RELATION_IDS MEMORY_FORGET_RELATION_IDS_IN(MEMORY_FORGET_FACT_IDS)
+/* A memory_entities row nothing else names any more (?1: the user): not the
+ * user's own (is_user_self; a generic "user" entity is recreated on its next
+ * mention), no relation or fact about it, no contact, alias or merge pointing at
+ * it.  An entity an alias still targets stays (its target column can't be
+ * nulled).  One index seek each ("+user_id" keeps the planner off the user_id
+ * index, which scans every relation per entity). */
+#define MEMORY_ENTITY_UNREFERENCED                                                     \
+   "memory_entities.is_user_self = 0 AND "                                             \
+   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                               \
+   "            r.subject_entity_id = memory_entities.id AND +r.user_id = ?1) AND "    \
+   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                               \
+   "            r.object_entity_id = memory_entities.id AND +r.user_id = ?1) AND "     \
+   "NOT EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = ?1 AND "                \
+   "            f.subject_entity_id = memory_entities.id) AND "                        \
+   "NOT EXISTS (SELECT 1 FROM contacts c WHERE c.entity_id = memory_entities.id) AND " \
+   "NOT EXISTS (SELECT 1 FROM memory_entities a WHERE "                                \
+   "            a.canonical_id = memory_entities.id) AND "                             \
+   "NOT EXISTS (SELECT 1 FROM memory_entity_aliases al WHERE al.user_id = ?1 AND "     \
+   "            al.target_entity_id = memory_entities.id)"
 /* memory_preferences aliased "p" (sources: every conversation that gave its
  * current value). */
 #define MEMORY_FORGET_PREF_WHERE \

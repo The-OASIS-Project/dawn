@@ -1028,6 +1028,22 @@ int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id) {
    return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND; /* either fact gone, or not theirs */
 }
 
+/* Entities a fact delete looks at: the fact's subject and its relations' ends. */
+#define FACT_DELETE_ENTITIES_MAX 16
+
+/* Run @p sql with ?1 = @p user_id and ?2 = @p id; the sqlite3_step result. */
+static int fact_delete_exec_locked(const char *sql, int user_id, int64_t id) {
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, id);
+      rc = sqlite3_step(st);
+   }
+   sqlite3_finalize(st);
+   return rc;
+}
+
 int memory_db_fact_delete(int64_t fact_id, int user_id) {
    /* Step 1: look up the fact under the auth_db lock so we know the
     * owner + can pull the live fact_text for FTS5 maintenance.  Released
@@ -1077,22 +1093,99 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
    /* Step 3: re-take the lock and run the FTS5 delete + facts DELETE
     * atomically (within the same critical section). */
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_delete", NULL, NULL, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
 
    (void)memory_db_internal_fts5_delete_fact_locked(fact_id, fact_stems);
 
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_delete;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int64(stmt, 1, fact_id);
-   sqlite3_bind_int(stmt, 2, user_id);
+   /* The relations the fact stated go with it: fact_id is ON DELETE SET NULL,
+    * and an edge left with no fact behind it keeps bringing back what was
+    * forgotten (graph retrieval, per-turn context).  So do the entities only
+    * they and the fact named, once nothing else names them. */
+   int64_t ents[FACT_DELETE_ENTITIES_MAX];
+   int n_ents = 0;
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT subject_entity_id FROM memory_facts WHERE id = ?1 AND "
+                               "user_id = ?2 UNION SELECT subject_entity_id FROM memory_relations "
+                               "WHERE fact_id = ?1 AND user_id = ?2 UNION SELECT object_entity_id "
+                               "FROM memory_relations WHERE fact_id = ?1 AND user_id = ?2",
+                               -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, fact_id);
+      sqlite3_bind_int(st, 2, user_id);
+      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+         const int64_t id = sqlite3_column_int64(st, 0);
+         if (id > 0 && n_ents < FACT_DELETE_ENTITIES_MAX) {
+            ents[n_ents++] = id;
+         }
+      }
+   }
+   sqlite3_finalize(st);
+   /* A relation another conversation also taught stays, moved to the fact this
+    * one was merged into (if any): the other conversation still says it. */
+   if (rc == SQLITE_DONE) {
+      rc = fact_delete_exec_locked(
+          "WITH RECURSIVE up(id, depth) AS (SELECT ?2, 0 UNION SELECT f.superseded_by, "
+          "u.depth + 1 FROM memory_facts f JOIN up u ON f.id = u.id WHERE f.user_id = ?1 AND "
+          "f.superseded_by IS NOT NULL AND u.depth < 32), "
+          "src(c) AS (SELECT conversation_id FROM memory_fact_sources WHERE fact_id IN (SELECT "
+          "id FROM up) UNION SELECT source_conversation_id FROM memory_facts WHERE id IN (SELECT "
+          "id FROM up) AND source_conversation_id IS NOT NULL) "
+          "DELETE FROM memory_relations WHERE user_id = ?1 AND fact_id = ?2 AND NOT EXISTS "
+          "(SELECT 1 FROM memory_relation_sources x WHERE x.relation_id = memory_relations.id "
+          "AND x.conversation_id NOT IN (SELECT c FROM src)) AND (source_conversation_id IS NULL "
+          "OR source_conversation_id IN (SELECT c FROM src))",
+          user_id, fact_id);
+   }
+   if (rc == SQLITE_DONE) {
+      rc = fact_delete_exec_locked("UPDATE memory_relations SET fact_id = (SELECT superseded_by "
+                                   "FROM memory_facts WHERE id = ?2) WHERE user_id = ?1 AND "
+                                   "fact_id = ?2",
+                                   user_id, fact_id);
+   }
 
-   int rc = sqlite3_step(stmt);
-   int changes = sqlite3_changes(s_db.db);
-   sqlite3_reset(stmt);
+   int changes = 0;
+   if (rc == SQLITE_DONE) {
+      sqlite3_stmt *stmt = s_db.stmt_memory_fact_delete;
+      sqlite3_reset(stmt);
+      sqlite3_bind_int64(stmt, 1, fact_id);
+      sqlite3_bind_int(stmt, 2, user_id);
+      rc = sqlite3_step(stmt);
+      changes = sqlite3_changes(s_db.db);
+      sqlite3_reset(stmt);
+   }
+   /* Again while one goes: an alias deleted after its canonical was checked
+    * leaves the canonical unreferenced. */
+   int ents_gone = 0;
+   for (int pass = 0, gone = 1; pass < 3 && gone > 0 && rc == SQLITE_DONE; pass++) {
+      gone = 0;
+      for (int i = 0; i < n_ents && rc == SQLITE_DONE; i++) {
+         rc = fact_delete_exec_locked("DELETE FROM memory_entities WHERE user_id = ?1 AND id = "
+                                      "?2 AND " MEMORY_ENTITY_UNREFERENCED,
+                                      user_id, ents[i]);
+         gone += rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
+      }
+      ents_gone += gone;
+   }
+   if (rc == SQLITE_DONE &&
+       sqlite3_exec(s_db.db, "RELEASE fact_delete", NULL, NULL, NULL) != SQLITE_OK) {
+      rc = SQLITE_ERROR;
+   }
+   if (rc != SQLITE_DONE) {
+      sqlite3_exec(s_db.db, "ROLLBACK TO fact_delete", NULL, NULL, NULL);
+      sqlite3_exec(s_db.db, "RELEASE fact_delete", NULL, NULL, NULL);
+   }
 
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {
       return MEMORY_DB_FAILURE;
+   }
+   if (ents_gone > 0) {
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
    if (changes > 0) {
       /* The embedding cache holds an (id, embedding) entry for this now-deleted
@@ -1191,6 +1284,10 @@ int memory_db_fact_find_by_hash(int user_id,
  *   global IDF (~1-5% orphan ratio at realistic prune cadences — below
  *   bench-noise threshold).  Close both prune paths in the same pattern when
  *   pruning gets exercised in production. */
+/* Merge-chain steps one prune moves a relation up (a longer chain's relation
+ * is left on a pruned fact, as before). */
+#define PRUNE_RELINK_PASSES_MAX 8
+
 int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_out) {
    if (count_out)
       *count_out = 0;
@@ -1198,15 +1295,55 @@ int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_
    AUTH_DB_LOCK_OR_FAIL();
 
    time_t cutoff = time(NULL) - (retention_days * 24 * 60 * 60);
+   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_prune", NULL, NULL, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
 
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_prune_superseded;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
+   /* A relation keeps the fact that first stated it, often a duplicate later
+    * merged away: move it up to the fact kept (a step per pass, so a chain
+    * pruned at once ends on its keeper), or it is left with no fact and no
+    * forget can reach it. */
+   int rc = SQLITE_DONE;
+   for (int pass = 0; pass < PRUNE_RELINK_PASSES_MAX && rc == SQLITE_DONE; pass++) {
+      sqlite3_stmt *st = NULL;
+      rc = sqlite3_prepare_v2(
+          s_db.db,
+          "UPDATE memory_relations SET fact_id = (SELECT f.superseded_by FROM memory_facts f "
+          "WHERE f.id = memory_relations.fact_id) WHERE user_id = ?1 AND fact_id IN (SELECT id "
+          "FROM memory_facts WHERE user_id = ?1 AND superseded_by IS NOT NULL AND "
+          "superseded_at IS NOT NULL AND superseded_at < ?2)",
+          -1, &st, NULL);
+      if (rc == SQLITE_OK) {
+         sqlite3_bind_int(st, 1, user_id);
+         sqlite3_bind_int64(st, 2, (int64_t)cutoff);
+         rc = sqlite3_step(st);
+      }
+      sqlite3_finalize(st);
+      if (rc == SQLITE_DONE && sqlite3_changes(s_db.db) == 0) {
+         break;
+      }
+   }
 
-   int rc = sqlite3_step(stmt);
-   int deleted = sqlite3_changes(s_db.db);
-   sqlite3_reset(stmt);
+   int deleted = 0;
+   if (rc == SQLITE_DONE) {
+      sqlite3_stmt *stmt = s_db.stmt_memory_fact_prune_superseded;
+      sqlite3_reset(stmt);
+      sqlite3_bind_int(stmt, 1, user_id);
+      sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
+      rc = sqlite3_step(stmt);
+      deleted = sqlite3_changes(s_db.db);
+      sqlite3_reset(stmt);
+   }
+   if (rc == SQLITE_DONE &&
+       sqlite3_exec(s_db.db, "RELEASE fact_prune", NULL, NULL, NULL) != SQLITE_OK) {
+      rc = SQLITE_ERROR;
+   }
+   if (rc != SQLITE_DONE) {
+      sqlite3_exec(s_db.db, "ROLLBACK TO fact_prune", NULL, NULL, NULL);
+      sqlite3_exec(s_db.db, "RELEASE fact_prune", NULL, NULL, NULL);
+      deleted = 0;
+   }
 
    AUTH_DB_UNLOCK();
 
