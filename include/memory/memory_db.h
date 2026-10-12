@@ -462,6 +462,19 @@ int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_
 int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id);
 
 /**
+ * @brief Mark a fact as an older value a newer fact replaced (the user's
+ *        number changed, they moved)
+ *
+ * Unlike a merge, the old fact keeps its sources, and its open relations are
+ * closed, by the newer fact, in the same transaction: forgetting the newer
+ * fact brings the old one and those relations back.
+ *
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (either fact missing or not the
+ *         user's), or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_replace(int64_t old_fact_id, int64_t newer_id, int user_id);
+
+/**
  * @brief Delete a fact
  *
  * @param fact_id Fact ID

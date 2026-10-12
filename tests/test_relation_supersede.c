@@ -820,7 +820,7 @@ static void test_one_at_a_time_closes_without_replaces(void) {
  * Main
  * ============================================================================ */
 
-/* C4: the dedup-merge path ('forget ... replaced_by: keeper') supersedes a fact into a
+/* C4: the dedup-merge path ('forget ... duplicate_of: keeper') supersedes a fact into a
  * keeper.  Pins the invariants that make the merge safe: the merged fact drops out of the
  * canonical recall set, points at its survivor, and its row survives (recoverable). */
 static void test_fact_supersede_hides_from_recall_but_keeps_row(void) {

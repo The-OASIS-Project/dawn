@@ -1726,6 +1726,32 @@ void test_forget_reopens_what_it_closed(void) {
                                     "valid_to IS NULL AND closed_by_fact_id IS NULL"));
 }
 
+/* Replacing a fact closes what it stated, by the newer fact; forgetting the
+ * newer fact reopens it. */
+void test_replace_closes_and_forget_reopens(void) {
+   int64_t old = 0, fresh = 0;
+   memory_db_fact_create(1, "User's phone is 555-0101", 0.9f, "explicit", "personal", NULL, &old);
+   memory_db_fact_create(1, "User's phone is now 555-0202", 0.9f, "explicit", "personal", NULL,
+                         &fresh);
+   char sql[300];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id) VALUES (1140, 1, 601, 'phone_number_is', '555-0101', %lld);",
+            (long long)old);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_replace(old, fresh, 1));
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM memory_relations WHERE id = 1140 AND fact_id = %lld AND "
+            "valid_to IS NOT NULL AND closed_by_fact_id = %lld",
+            (long long)old, (long long)fresh);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+   memory_forget_result_t fr;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fresh, 1, &fr));
+   TEST_ASSERT_EQUAL_INT(1, fr.restored);
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 1140 AND "
+                                    "valid_to IS NULL"));
+}
+
 /* A merge moves what the duplicate stated to the fact kept. */
 void test_merge_moves_relations_to_the_kept_fact(void) {
    int64_t keep = 0, dup = 0;
@@ -2138,6 +2164,7 @@ int main(void) {
    RUN_TEST(test_merged_and_replaced_hide_alike);
    RUN_TEST(test_forget_brings_back_what_it_replaced);
    RUN_TEST(test_forget_reopens_what_it_closed);
+   RUN_TEST(test_replace_closes_and_forget_reopens);
    RUN_TEST(test_merge_moves_relations_to_the_kept_fact);
    RUN_TEST(test_prune_follows_a_long_merge_chain);
    RUN_TEST(test_forget_takes_a_merged_duplicates_relation_from_both);

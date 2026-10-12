@@ -1050,6 +1050,49 @@ int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id) {
    return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND; /* either fact gone, or not theirs */
 }
 
+int memory_db_fact_replace(int64_t old_fact_id, int64_t newer_id, int user_id) {
+   if (user_id <= 0 || old_fact_id == newer_id)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_replace", NULL, NULL, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   bool changed = false;
+   bool ok = fact_supersede_locked(old_fact_id, newer_id, user_id, MEMORY_SUPERSEDED_REPLACED,
+                                   &changed) == SQLITE_DONE;
+   /* What the old value stated is history now, closed by the newer one. */
+   if (ok && changed) {
+      sqlite3_stmt *st = NULL;
+      ok = sqlite3_prepare_v2(s_db.db,
+                              "UPDATE memory_relations SET valid_to = CAST(strftime('%s', 'now') "
+                              "AS INTEGER), closed_by_fact_id = ?1 WHERE user_id = ?2 AND "
+                              "fact_id = ?3 AND valid_to IS NULL",
+                              -1, &st, NULL) == SQLITE_OK;
+      if (ok) {
+         sqlite3_bind_int64(st, 1, newer_id);
+         sqlite3_bind_int(st, 2, user_id);
+         sqlite3_bind_int64(st, 3, old_fact_id);
+         ok = sqlite3_step(st) == SQLITE_DONE;
+      }
+      sqlite3_finalize(st);
+   }
+   if (!ok) {
+      sqlite3_exec(s_db.db, "ROLLBACK TO fact_replace", NULL, NULL, NULL);
+      changed = false;
+   }
+   sqlite3_exec(s_db.db, "RELEASE fact_replace", NULL, NULL, NULL);
+   AUTH_DB_UNLOCK();
+   if (changed) {
+      memory_embeddings_invalidate_cache_for_user(user_id);
+   }
+   if (!ok) {
+      return MEMORY_DB_FAILURE;
+   }
+   return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
 /* Passes of the unreferenced-entity delete: an alias deleted after its
  * canonical was checked leaves the canonical unreferenced for the next pass. */
 #define FACT_DELETE_ENTITY_PASSES 3

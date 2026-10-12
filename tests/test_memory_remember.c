@@ -33,6 +33,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "memory/memory_db.h"
 #include "unity.h"
 
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -139,11 +140,70 @@ void test_remember_past_the_waiting_limit_is_refused_and_not_stored(void) {
    TEST_ASSERT_FALSE(fact_row("My gate code is 2468", &source, &unsourced));
 }
 
+/* The id of the user's fact with @p text, 0 if none. */
+static int64_t fact_id_of(const char *text) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT id FROM memory_facts WHERE user_id = ? AND fact_text = ?",
+                      -1, &st, NULL);
+   sqlite3_bind_int(st, 1, s_user);
+   sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC);
+   const int64_t id = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : 0;
+   sqlite3_finalize(st);
+   return id;
+}
+
+static char *forget(int64_t id, const char *mode, int64_t keeper) {
+   char value[96];
+   if (mode) {
+      snprintf(value, sizeof(value), "%lld::%s::%lld", (long long)id, mode, (long long)keeper);
+   } else {
+      snprintf(value, sizeof(value), "%lld", (long long)id);
+   }
+   int respond = 0;
+   return memoryCallback("forget", value, &respond);
+}
+
+/* 'replaced_by' files the old value as replaced, so forgetting the newer one
+ * brings it back (and says so); 'duplicate_of' merges, so forgetting the kept
+ * fact takes the duplicate too. */
+void test_forget_tells_a_replacement_from_a_duplicate(void) {
+   free(remember("My phone number is 555-0101"));
+   free(remember("My phone number is now 555-0202"));
+   const int64_t old = fact_id_of("My phone number is 555-0101");
+   const int64_t fresh = fact_id_of("My phone number is now 555-0202");
+   TEST_ASSERT_TRUE(old > 0 && fresh > 0);
+   free(forget(old, "replaced_by", fresh));
+   memory_fact_t f;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(old, s_user, &f));
+   TEST_ASSERT_EQUAL_INT64(fresh, f.superseded_by);
+   char *r = forget(fresh, NULL, 0);
+   TEST_ASSERT_NOT_NULL(strstr(r, "Current again"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "555-0101"));
+   free(r);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(old, s_user, &f));
+   TEST_ASSERT_EQUAL_INT64(0, f.superseded_by);
+
+   free(remember("My bike is a Trek"));
+   free(remember("I ride a Trek bike"));
+   const int64_t keep = fact_id_of("My bike is a Trek");
+   const int64_t dup = fact_id_of("I ride a Trek bike");
+   free(forget(dup, "duplicate_of", keep));
+   r = forget(keep, NULL, 0);
+   TEST_ASSERT_NULL(strstr(r, "Current again"));
+   free(r);
+   TEST_ASSERT_EQUAL_INT64(0, fact_id_of("I ride a Trek bike"));
+
+   r = forget(dup, "replaced_by", keep);
+   TEST_ASSERT_NOT_NULL(r); /* the kept fact is gone: refused, nothing changed */
+   free(r);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_remember_in_a_known_conversation_is_learned_there);
    RUN_TEST(test_remember_outside_a_turn_is_stated_outside_any_conversation);
    RUN_TEST(test_remember_waiting_for_its_conversation_is_kept);
    RUN_TEST(test_remember_past_the_waiting_limit_is_refused_and_not_stored);
+   RUN_TEST(test_forget_tells_a_replacement_from_a_duplicate);
    return UNITY_END();
 }

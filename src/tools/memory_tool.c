@@ -53,9 +53,10 @@ static const treg_param_t memory_params[] = {
            "'get' (retrieve specific memories EXACTLY by numeric ID — the deterministic "
            "counterpart to 'search'; use when you already know the ID(s) and want the exact "
            "stored text rather than a relevance-ranked match), "
-           "'forget' (remove memories by numeric ID — DELETE permanently, or MERGE duplicates "
-           "while keeping one by also setting 'replaced_by'; use search/recent/find_duplicates "
-           "first to find the IDs), 'recent' (list recent memories), "
+           "'forget' (remove memories by numeric ID — DELETE permanently, MERGE duplicates "
+           "into one kept with 'duplicate_of', or file older values a newer one replaced with "
+           "'replaced_by'; use search/recent/find_duplicates first to find the IDs), 'recent' "
+           "(list recent memories), "
            "'find_duplicates' (list clusters of near-identical facts with their IDs so you "
            "can forget the redundant ones), "
            "'list_merged' (memories merged into another or replaced by a newer one, which "
@@ -257,16 +258,27 @@ static const treg_param_t memory_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "confirm_private",
    },
-   /* Merge mode for 'forget': supersede the listed IDs into a keeper instead of deleting. */
+   /* 'forget' with a kept fact: supersede the listed IDs into it instead of deleting. */
+   {
+       .name = "duplicate_of",
+       .description =
+           "For 'forget' ONLY: the fact ID you are KEEPING when the IDs being forgotten say the "
+           "SAME thing (duplicates). Turns 'forget' into a MERGE: they are hidden from recall but "
+           "stay recoverable, instead of being deleted. Use it when the user says 'merge' or you "
+           "clean a find_duplicates cluster. For a value that CHANGED, use 'replaced_by'.",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "duplicate_of",
+   },
    {
        .name = "replaced_by",
        .description =
-           "For 'forget' ONLY: the fact ID you are KEEPING. Setting this turns 'forget' into a "
-           "MERGE — the IDs being forgotten are hidden from recall but stay RECOVERABLE, pointing "
-           "at this keeper, instead of being permanently deleted. THIS is how you merge/dedupe: "
-           "whenever the goal is to consolidate duplicates while keeping one (the user says "
-           "'merge', or you're cleaning a find_duplicates cluster), set 'replaced_by' rather than "
-           "plain-deleting the redundant IDs. Omit ONLY when the facts should be gone for good.",
+           "For 'forget' ONLY: the fact ID of the NEWER value when the IDs being forgotten are "
+           "OLDER values it replaced (a new phone number or address, a new job: the user said it "
+           "changed). They are hidden from recall but kept as history, and come back if the newer "
+           "fact is forgotten (it was wrong). For duplicates use 'duplicate_of'. Omit both only "
+           "when the facts should be gone for good.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -410,12 +422,14 @@ static const tool_metadata_t memory_metadata = {
                   "'search' when you specifically need memory facts and recall isn't warranted. "
                   "Use 'forget' to remove memories by numeric ID (you MUST use 'search', 'recent', "
                   "or 'find_duplicates' first to find the ID); pass a comma-separated list for "
-                  "several. 'forget' has TWO modes — pick deliberately: (1) DELETE (default, "
+                  "several. 'forget' has THREE modes — pick deliberately: (1) DELETE (default, "
                   "permanent) for facts that are wrong or unwanted; (2) MERGE (recoverable) for "
                   "duplicates — when the user asks to merge/consolidate/dedupe while keeping one, "
-                  "OR you are cleaning duplicates, set 'replaced_by' to the keeper's ID so the "
-                  "rest are hidden-but-recoverable rather than permanently deleted. Prefer MERGE "
-                  "for duplicate cleanup so a wrong call is reversible. "
+                  "OR you are cleaning duplicates, set 'duplicate_of' to the keeper's ID; (3) "
+                  "REPLACE for an older value the user says changed (new number, moved, new job): "
+                  "set 'replaced_by' to the newer fact's ID, so the old one is kept as history and "
+                  "comes back if the newer one turns out wrong. Prefer MERGE or REPLACE over "
+                  "DELETE so a wrong call is reversible. "
                   "Use 'recent' to list recently stored memories. "
                   "Use 'save_contact' to store contact info (email, phone) for a person "
                   "(query: person name, field_type: email/phone, value: the address/number, "

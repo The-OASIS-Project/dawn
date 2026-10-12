@@ -1079,8 +1079,10 @@ static char *memory_action_remember_single(int user_id,
 
    if (neighbor_count > 0) {
       strbuf_appendf(&sb,
-                     "\n\nSimilar facts already in memory — if this fact fully replaces any of "
-                     "them, 'forget' that ID (comma-separate to remove several). Leave the rest:");
+                     "\n\nSimilar facts already in memory — if one says the same thing, 'forget' "
+                     "it with 'duplicate_of' set to this ID; if this is a newer value that "
+                     "replaces one (a new number, a move), 'forget' it with 'replaced_by' set to "
+                     "this ID. Leave the rest:");
       /* The embedding cache holds only ids/embeddings/norms, not fact_text, so the
        * text must be fetched per neighbor (bounded by MEMORY_BAND_NEIGHBORS_MAX).
        * Deliberate — don't "fix" by widening the cache with text it doesn't need. */
@@ -1259,7 +1261,13 @@ static int parse_id_list(const char *s, int64_t *out, int max, int *invalid_out,
    return id_count;
 }
 
-static char *memory_action_forget(int user_id, const char *fact_text, int64_t replaced_by) {
+/* 'forget' with @p keeper_id 0 deletes; with a kept fact's ID it merges the
+ * IDs into it as duplicates, or with @p newer_value files them as older values
+ * that fact replaced. */
+static char *memory_action_forget(int user_id,
+                                  const char *fact_text,
+                                  int64_t keeper_id,
+                                  bool newer_value) {
    if (!fact_text || strlen(fact_text) == 0) {
       return strdup("Please specify the fact ID(s) to forget (e.g. '42' or '42,57,91'). Use "
                     "'search', 'recent', or 'find_duplicates' first to find the IDs.");
@@ -1275,27 +1283,26 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
                     "'recent', or 'find_duplicates' first to find the IDs.");
    }
 
-   /* Merge mode (replaced_by set) supersedes each ID into the keeper instead of
-    * hard-deleting: the listed facts are hidden from recall but kept recoverable, pointing
-    * at the survivor (provenance preserved).  Validate the keeper up front — it must exist,
-    * be owned, and not be one of the IDs being merged into it. */
-   const bool merge = (replaced_by > 0);
+   /* With a kept fact (duplicate_of or replaced_by) each ID is superseded into it
+    * instead of deleted: hidden from recall but recoverable, pointing at the fact
+    * kept.  Validate it up front: it must exist, be owned, be current, and not be
+    * one of the IDs. */
+   const bool merge = (keeper_id > 0);
    if (merge) {
       memory_fact_t keep;
-      if (memory_db_fact_get(replaced_by, user_id, &keep) != MEMORY_DB_SUCCESS) {
+      if (memory_db_fact_get(keeper_id, user_id, &keep) != MEMORY_DB_SUCCESS) {
          return strdup(TOOL_RESULT_ERROR_MARK
-                       "The 'replaced_by' keeper ID wasn't found (or isn't yours). "
-                       "Nothing was changed.");
+                       "The kept fact's ID wasn't found (or isn't yours). Nothing was changed.");
       }
       if (keep.superseded_by != 0) {
          return strdup(TOOL_RESULT_ERROR_MARK
-                       "The 'replaced_by' keeper was itself merged into another fact; keep "
-                       "that one instead. Nothing was changed.");
+                       "The kept fact was itself merged or replaced; keep the current one "
+                       "instead. Nothing was changed.");
       }
       for (int i = 0; i < id_count; i++) {
-         if (ids[i] == replaced_by) {
-            return strdup("'replaced_by' must be the fact you are KEEPING, not one of the IDs "
-                          "being merged into it. Nothing was changed.");
+         if (ids[i] == keeper_id) {
+            return strdup("The kept fact can't be one of the IDs being forgotten. Nothing was "
+                          "changed.");
          }
       }
    }
@@ -1331,8 +1338,9 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
       memory_forget_result_t fr = { 0 };
       int frc = MEMORY_DB_FAILURE;
       if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS) {
-         frc = merge ? memory_db_fact_merge(ids[i], replaced_by, user_id)
-                     : memory_db_fact_forget(ids[i], user_id, &fr);
+         frc = !merge        ? memory_db_fact_forget(ids[i], user_id, &fr)
+               : newer_value ? memory_db_fact_replace(ids[i], keeper_id, user_id)
+                             : memory_db_fact_merge(ids[i], keeper_id, user_id);
       }
       for (int k = 0; k < fr.restored && k < MEMORY_FORGET_RESTORED_MAX; k++) {
          if (back_count < FORGET_BACK_MAX) {
@@ -1382,10 +1390,16 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    if (id_count == 1 && forgotten == 1) {
       char *msg = malloc(384);
       if (msg) {
-         if (merge)
+         if (merge && newer_value)
+            snprintf(msg, 384,
+                     "ID %lld is now an older value ID %lld replaced (hidden from recall; back if "
+                     "%lld is forgotten): \"%s%s\"",
+                     (long long)ids[0], (long long)keeper_id, (long long)keeper_id, first_text,
+                     first_truncated ? "..." : "");
+         else if (merge)
             snprintf(msg, 384,
                      "Merged ID %lld into ID %lld (hidden from recall, recoverable): \"%s%s\"",
-                     (long long)ids[0], (long long)replaced_by, first_text,
+                     (long long)ids[0], (long long)keeper_id, first_text,
                      first_truncated ? "..." : "");
          else
             snprintf(msg, 384, "Forgotten (ID %lld): \"%s%s\"", (long long)ids[0], first_text,
@@ -1407,8 +1421,9 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
       return strdup("Memory updated.");
    int pos;
    if (merge)
-      pos = snprintf(msg, FORGET_MSG_SZ, "Merged %d fact%s into ID %lld", forgotten,
-                     forgotten == 1 ? "" : "s", (long long)replaced_by);
+      pos = snprintf(msg, FORGET_MSG_SZ, "%s %d fact%s %s ID %lld",
+                     newer_value ? "Filed" : "Merged", forgotten, forgotten == 1 ? "" : "s",
+                     newer_value ? "as older values replaced by" : "into", (long long)keeper_id);
    else
       pos = snprintf(msg, FORGET_MSG_SZ, "Forgotten %d fact%s", forgotten,
                      forgotten == 1 ? "" : "s");
@@ -1548,7 +1563,7 @@ static char *memory_action_find_duplicates(int user_id, const char *value) {
        &sb,
        "Found %d near-duplicate cluster%s (similarity >= %.2f). For each cluster: if the "
        "facts are the SAME fact restated, keep the best one and 'forget' the redundant "
-       "IDs with 'replaced_by' set to the keeper's ID (this merges them — hidden from "
+       "IDs with 'duplicate_of' set to the keeper's ID (this merges them — hidden from "
        "recall but recoverable). Facts that only share a TOPIC but differ — weather on "
        "different dates, events on different days, an item requested vs. received — are "
        "NOT duplicates; keep them all.\n",
@@ -2288,18 +2303,27 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       free(fact);
       return res;
    } else if (strcmp(actionName, "forget") == 0) {
-      /* IDs are the base value; optional replaced_by switches delete -> supersede (merge).
-       * Base-extract so the ID parser doesn't choke on the ::replaced_by:: suffix. */
+      /* IDs are the base value; duplicate_of merges them into a kept fact,
+       * replaced_by files them as older values a newer fact replaced.  Base-
+       * extract so the ID parser doesn't choke on the ::name:: suffixes. */
       char forget_ids[1024] = "";
+      char dup[32] = "";
       char rb[32] = "";
       tool_param_extract_base(value, forget_ids, sizeof(forget_ids));
-      int64_t replaced_by = 0;
-      if (tool_param_extract_custom(value, "replaced_by", rb, sizeof(rb)) && rb[0]) {
-         replaced_by = (int64_t)strtoll(rb, NULL, 10);
-         if (replaced_by < 0)
-            replaced_by = 0;
+      const long long dup_id = tool_param_extract_custom(value, "duplicate_of", dup, sizeof(dup))
+                                   ? strtoll(dup, NULL, 10)
+                                   : 0;
+      const long long newer_id = tool_param_extract_custom(value, "replaced_by", rb, sizeof(rb))
+                                     ? strtoll(rb, NULL, 10)
+                                     : 0;
+      if (dup_id > 0 && newer_id > 0) {
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Set 'duplicate_of' (same information) or 'replaced_by' (a newer value), "
+                       "not both. Nothing was changed.");
       }
-      return memory_action_forget(user_id, forget_ids, replaced_by);
+      return memory_action_forget(user_id, forget_ids,
+                                  newer_id > 0 ? newer_id : (dup_id > 0 ? dup_id : 0),
+                                  newer_id > 0);
    } else if (strcmp(actionName, "list_merged") == 0) {
       char q[MEMORY_FACT_TEXT_MAX] = "";
       tool_param_extract_base(value, q, sizeof(q));
