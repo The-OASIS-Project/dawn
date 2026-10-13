@@ -336,10 +336,8 @@ static void music_control_locked(ws_connection_t *conn,
       } else if (json_object_object_get_ex(payload, "query", &query_obj)) {
          const char *query = json_object_get_string(query_obj);
 
-         /* Stop any current playback */
-         webui_music_clear_track(state);
-
-         /* Search unified database (all sources) */
+         /* Search unified database (all sources) first: a query that finds
+          * nothing leaves what's playing alone */
          music_search_result_t *results = malloc(WEBUI_MUSIC_MAX_QUEUE *
                                                  sizeof(music_search_result_t));
          if (!results) {
@@ -354,6 +352,9 @@ static void music_control_locked(ws_connection_t *conn,
             webui_music_send_error(conn, "NOT_FOUND", "No music found matching query");
             return;
          }
+
+         /* Stop any current playback */
+         webui_music_clear_track(state);
 
          user_music_queue_t *uq = state->shared_queue;
          pthread_mutex_lock(&uq->queue_mutex);

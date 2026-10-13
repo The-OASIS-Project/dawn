@@ -269,7 +269,11 @@ static char *apply_items_and_report(session_music_state_t *state,
       }
    }
 
-   webui_music_queue_apply_paths(state, pptr, k, replace, oc);
+   /* Replacing with nothing would empty the queue for a list that matched
+    * nothing: leave it (and what's playing) as it is */
+   if (k > 0 || !replace) {
+      webui_music_queue_apply_paths(state, pptr, k, replace, oc);
+   }
 
    strbuf_t added, dup;
    strbuf_init(&added, 256);
@@ -370,34 +374,44 @@ static int music_tool_locked(ws_connection_t *conn,
       /* items[] → REPLACE the queue with an explicit, resolved track list */
       struct json_object *items = decode_items(query);
       if (items) {
-         webui_music_clear_track(state);
-         pthread_mutex_lock(&state->state_mutex);
-         state->queue_index = 0;
-         pthread_mutex_unlock(&state->state_mutex);
-
-         char *report = apply_items_and_report(state, items, true, NULL);
+         /* Resolve first: a list that matches nothing leaves the queue and
+          * what's playing alone */
+         int added = 0;
+         char *report = apply_items_and_report(state, items, true, &added);
          json_object_put(items);
 
          user_music_queue_t *uq = state->shared_queue;
-         char first_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
-         pthread_mutex_lock(&uq->queue_mutex);
-         if (uq->queue_length > 0) {
-            snprintf(first_path, sizeof(first_path), "%s", uq->queue[0].path);
+         bool start_failed = false;
+         if (added > 0) {
+            webui_music_clear_track(state);
+            char first_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
+            pthread_mutex_lock(&uq->queue_mutex);
+            pthread_mutex_lock(&state->state_mutex);
+            state->queue_index = 0;
+            if (uq->queue_length > 0) {
+               snprintf(first_path, sizeof(first_path), "%s", uq->queue[0].path);
+            }
+            pthread_mutex_unlock(&state->state_mutex);
+            pthread_mutex_unlock(&uq->queue_mutex);
+            start_failed = first_path[0] && webui_music_start_playback(state, first_path) != 0;
+            if (start_failed) {
+               webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+            }
+            webui_music_send_state(conn, state);
+            webui_music_broadcast_queue_state(uq, conn);
          }
-         pthread_mutex_unlock(&uq->queue_mutex);
-         bool start_failed = first_path[0] && webui_music_start_playback(state, first_path) != 0;
-         if (start_failed) {
-            webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-         }
-         webui_music_send_state(conn, state);
-         webui_music_broadcast_queue_state(uq, conn);
 
          if (result_out) {
             strbuf_t sb;
             strbuf_init(&sb, 512);
-            strbuf_appendf(&sb, "Replaced queue. %s%s Use 'enqueue' to add without clearing.",
-                           report ? report : "",
-                           start_failed ? " The first track failed to start." : "");
+            if (added > 0) {
+               strbuf_appendf(&sb, "Replaced queue. %s%s Use 'enqueue' to add without clearing.",
+                              report ? report : "",
+                              start_failed ? " The first track failed to start." : "");
+            } else {
+               strbuf_appendf(&sb, "%s Nothing matched, so the queue and playback are unchanged.",
+                              report ? report : "");
+            }
             append_state_footer(&sb, state);
             if (strbuf_oom(&sb)) {
                strbuf_free(&sb);
