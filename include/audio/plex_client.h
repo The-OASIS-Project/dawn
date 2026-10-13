@@ -25,6 +25,7 @@
 #define PLEX_CLIENT_H
 
 #include <json-c/json.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -123,6 +124,9 @@ int plex_client_get_library_updated_at(time_t *updated_at_out);
  * Streaming
  * ============================================================================= */
 
+/** plex_client_download_track() result: the Plex server couldn't be reached */
+#define PLEX_DOWNLOAD_UNREACHABLE 2
+
 /**
  * @brief Download a Plex track to a temporary file
  *
@@ -131,11 +135,17 @@ int plex_client_get_library_updated_at(time_t *updated_at_out);
  * the caller opens it (Unix fd trick).
  *
  * @param part_key The Part.key from Plex API (e.g., "/library/parts/9877/.../file.flac")
+ * @param cancel Optional flag; once set, the download aborts within about a second and the
+ *               call fails.  NULL = not cancellable
  * @param out_path Output: path to the downloaded temp file
  * @param out_path_size Size of out_path buffer
- * @return 0 on success, non-zero on error
+ * @return SUCCESS, PLEX_DOWNLOAD_UNREACHABLE if the server couldn't be reached, or
+ *         FAILURE on any other error
  */
-int plex_client_download_track(const char *part_key, char *out_path, size_t out_path_size);
+int plex_client_download_track(const char *part_key,
+                               const atomic_bool *cancel,
+                               char *out_path,
+                               size_t out_path_size);
 
 /* =============================================================================
  * Playback Reporting

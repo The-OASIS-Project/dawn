@@ -67,6 +67,21 @@ static int g_provider_count = 0;
  * ============================================================================= */
 
 /**
+ * @brief Drop the tracks of a source that is no longer configured
+ *
+ * They can't be played, and local rows would hide the Plex copies of the same
+ * tracks.  A configured source that is merely unreachable (an unmounted drive,
+ * a Plex server down) keeps its rows; this runs only when the setting is gone.
+ */
+static void remove_unconfigured_source(music_source_t source) {
+   int removed = 0;
+   if (music_db_remove_source(source, &removed) == SUCCESS && removed > 0) {
+      OLOG_INFO("Music scanner: removed %d %s tracks (source not configured)", removed,
+                music_source_name(source));
+   }
+}
+
+/**
  * @brief Scanner thread main function
  *
  * Runs periodic scans at the configured interval.
@@ -94,6 +109,8 @@ static void *scanner_thread_func(void *arg) {
          if (result != 0) {
             OLOG_ERROR("Local music scan failed");
          }
+      } else {
+         remove_unconfigured_source(MUSIC_SOURCE_LOCAL);
       }
 
       /* Phase 2: Remote source syncs (registered providers) */
@@ -101,6 +118,8 @@ static void *scanner_thread_func(void *arg) {
          if (g_providers[i]->is_configured()) {
             OLOG_INFO("Syncing %s source...", music_source_name(g_providers[i]->source));
             g_providers[i]->sync();
+         } else {
+            remove_unconfigured_source(g_providers[i]->source);
          }
       }
 

@@ -32,10 +32,39 @@
 
 #include "logging.h"
 
-/* Write callback that streams directly to a FILE* */
+/* Progress callback: a non-zero return makes curl abort the transfer */
+static int abort_if_cancelled(void *clientp,
+                              curl_off_t dltotal,
+                              curl_off_t dlnow,
+                              curl_off_t ultotal,
+                              curl_off_t ulnow) {
+   (void)dltotal;
+   (void)dlnow;
+   (void)ultotal;
+   (void)ulnow;
+   return atomic_load((const atomic_bool *)clientp) ? 1 : 0;
+}
+
+/* Where the body goes, and how much of it is allowed */
+typedef struct {
+   FILE *fp;
+   int64_t written;
+   int64_t max_size; /* 0 = no limit */
+   bool too_big;
+} download_sink_t;
+
+/* Write callback that streams to the temp file.  It enforces the size cap
+ * itself: CURLOPT_MAXFILESIZE only checks a declared Content-Length on older
+ * libcurl, so a chunked response would otherwise pass it. */
 static size_t write_to_file(void *contents, size_t size, size_t nmemb, void *userp) {
-   FILE *fp = (FILE *)userp;
-   return fwrite(contents, size, nmemb, fp);
+   download_sink_t *sink = (download_sink_t *)userp;
+   size_t bytes = size * nmemb;
+   if (sink->max_size > 0 && sink->written + (int64_t)bytes > sink->max_size) {
+      sink->too_big = true;
+      return 0; /* curl aborts with CURLE_WRITE_ERROR */
+   }
+   sink->written += (int64_t)bytes;
+   return fwrite(contents, 1, bytes, sink->fp);
 }
 
 int http_download_to_temp(CURL *curl,
@@ -44,6 +73,7 @@ int http_download_to_temp(CURL *curl,
                           const char *suffix,
                           const char *prefix,
                           int64_t max_size,
+                          const atomic_bool *cancel,
                           char *out_path,
                           size_t out_path_size) {
    if (!curl || !url || !out_path || out_path_size == 0) {
@@ -79,16 +109,16 @@ int http_download_to_temp(CURL *curl,
       return 1;
    }
 
-   /* Configure CURL */
-   curl_easy_reset(curl);
+   /* Configure CURL (on top of whatever the caller set, e.g. TLS options) */
    curl_easy_setopt(curl, CURLOPT_URL, url);
+   download_sink_t sink = { .fp = fp, .max_size = max_size };
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_to_file);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L); /* No redirects — prevents SSRF */
    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
-   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L); /* Hard ceiling prevents hung mutex */
+   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L); /* Hard ceiling: a caller can't hang forever */
    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
@@ -100,18 +130,37 @@ int http_download_to_temp(CURL *curl,
       curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
    }
 
+   if (cancel) {
+      /* curl calls this about once a second, and on every chunk received */
+      curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abort_if_cancelled);
+      curl_easy_setopt(curl, CURLOPT_XFERINFODATA, (void *)cancel);
+      curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+   }
+
    CURLcode res = curl_easy_perform(curl);
 
    fclose(fp); /* Also closes fd */
 
    if (res != CURLE_OK) {
-      if (res == CURLE_FILESIZE_EXCEEDED) {
+      int ret = 1;
+      if (res == CURLE_ABORTED_BY_CALLBACK) {
+         OLOG_INFO("http_download: cancelled");
+      } else if (res == CURLE_FILESIZE_EXCEEDED || sink.too_big) {
          OLOG_ERROR("http_download: file exceeds size limit (%lld bytes)", (long long)max_size);
       } else {
          OLOG_ERROR("http_download: CURL error: %s", curl_easy_strerror(res));
+         /* Unreachable only when the server never answered: a timeout after
+          * the response began (a slow transfer, a 300 s ceiling, a stall) is
+          * a problem with this file, not the server */
+         long code = 0;
+         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+         if (res == CURLE_COULDNT_RESOLVE_HOST || res == CURLE_COULDNT_CONNECT ||
+             (res == CURLE_OPERATION_TIMEDOUT && code == 0 && sink.written == 0)) {
+            ret = HTTP_DOWNLOAD_UNREACHABLE;
+         }
       }
       unlink(out_path);
-      return 1;
+      return ret;
    }
 
    /* Check HTTP response code */

@@ -92,11 +92,9 @@ void handle_music_subscribe(ws_connection_t *conn, struct json_object *payload) 
    }
 
    /* Initialize session state if needed */
-   if (!conn->music_state) {
-      if (webui_music_session_init(conn) != 0) {
-         webui_music_send_error(conn, "INIT_ERROR", "Failed to initialize music session");
-         return;
-      }
+   if (!webui_music_state_get_or_init(conn)) {
+      webui_music_send_error(conn, "INIT_ERROR", "Failed to initialize music session");
+      return;
    }
 
    session_music_state_t *state = (session_music_state_t *)conn->music_state;
@@ -161,14 +159,76 @@ void handle_music_unsubscribe(ws_connection_t *conn) {
    }
 
    /* Stop playback and streaming */
+   webui_music_control_lock(state, true);
    pthread_mutex_lock(&state->state_mutex);
    state->playing = false;
    state->paused = false;
    pthread_mutex_unlock(&state->state_mutex);
 
    webui_music_stop_streaming(state);
+   webui_music_control_unlock(state);
 
    OLOG_INFO("WebUI music: Client unsubscribed");
+}
+
+static void music_control_locked(ws_connection_t *conn,
+                                 session_music_state_t *state,
+                                 struct json_object *payload);
+
+/*
+ * True for a request that stops or replaces what's playing: only these take the
+ * control lock, cancelling a Plex download the LLM tool is running for "play
+ * X".  A read, a volume change or a queue add neither waits for that download
+ * nor throws the user's spoken request away.
+ */
+static bool replaces_playback(struct json_object *payload) {
+   static const char *const k_actions[] = {
+      "play", "play_index",        "next",        "previous", "stop",
+      "seek", "remove_from_queue", "clear_queue", "remove",   "clear"
+   };
+   struct json_object *action_obj;
+   if (!json_object_object_get_ex(payload, "action", &action_obj)) {
+      return false;
+   }
+   const char *action = json_object_get_string(action_obj);
+   for (size_t i = 0; action && i < sizeof(k_actions) / sizeof(k_actions[0]); i++) {
+      if (strcmp(action, k_actions[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* Whether a decoder is loaded for the session's current track */
+static bool track_loaded(session_music_state_t *state) {
+   pthread_mutex_lock(&state->state_mutex);
+   bool loaded = state->decoder != NULL;
+   pthread_mutex_unlock(&state->state_mutex);
+   return loaded;
+}
+
+/* Start the track at the session's queue index, reporting failure */
+static void resume_queued_track(ws_connection_t *conn, session_music_state_t *state, bool paused) {
+   user_music_queue_t *uq = state->shared_queue;
+   char path[WEBUI_MUSIC_PATH_MAX] = { 0 };
+
+   /* Lock order: queue, then state */
+   pthread_mutex_lock(&uq->queue_mutex);
+   pthread_mutex_lock(&state->state_mutex);
+   if (state->queue_index >= 0 && state->queue_index < uq->queue_length) {
+      snprintf(path, sizeof(path), "%s", uq->queue[state->queue_index].path);
+   }
+   pthread_mutex_unlock(&state->state_mutex);
+   pthread_mutex_unlock(&uq->queue_mutex);
+
+   if (path[0] && webui_music_start_playback(state, path) != 0) {
+      webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+   } else if (path[0] && paused) {
+      pthread_mutex_lock(&state->state_mutex);
+      state->paused = true;
+      pthread_mutex_unlock(&state->state_mutex);
+   }
+   webui_music_send_state(conn, state);
 }
 
 void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
@@ -176,16 +236,30 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
-   session_music_state_t *state = (session_music_state_t *)conn->music_state;
+   /* Auto-initialize on first control message */
+   session_music_state_t *state = webui_music_state_get_or_init(conn);
    if (!state) {
-      /* Auto-initialize on first control message */
-      if (webui_music_session_init(conn) != 0) {
-         webui_music_send_error(conn, "INIT_ERROR", "Failed to initialize music session");
-         return;
-      }
-      state = (session_music_state_t *)conn->music_state;
+      webui_music_send_error(conn, "INIT_ERROR", "Failed to initialize music session");
+      return;
    }
 
+   /* Only an action that stops or replaces playback needs the control lock
+    * (and cancels a download the holder runs); the rest touch the queue and
+    * state under their own mutexes, so the WebSocket thread never waits. */
+   bool replaces = replaces_playback(payload);
+   if (replaces) {
+      webui_music_control_lock(state, true);
+   }
+   music_control_locked(conn, state, payload);
+   if (replaces) {
+      webui_music_control_unlock(state);
+   }
+}
+
+/* handle_music_control's body, with the session's control_mutex held */
+static void music_control_locked(ws_connection_t *conn,
+                                 session_music_state_t *state,
+                                 struct json_object *payload) {
    struct json_object *action_obj;
    if (!json_object_object_get_ex(payload, "action", &action_obj)) {
       webui_music_send_error(conn, "INVALID_REQUEST", "Missing action");
@@ -264,7 +338,6 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
          /* Start playback */
          if (webui_music_start_playback(state, path) != 0) {
             webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-            return;
          }
 
          /* Send state to this tab, broadcast to others */
@@ -325,23 +398,23 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
          /* Start playback */
          if (webui_music_start_playback(state, first_path) != 0) {
             webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-            return;
          }
 
          /* Send state to this tab, broadcast to others */
          webui_music_send_state(conn, state);
          webui_music_broadcast_queue_state(uq, conn);
 
-      } else if (state->paused) {
+      } else if (state->paused && track_loaded(state)) {
          /* Resume from pause */
          pthread_mutex_lock(&state->state_mutex);
          state->paused = false;
          pthread_mutex_unlock(&state->state_mutex);
          webui_music_send_state(conn, state);
-      } else if (!state->playing) {
-         /* Stopped with a populated queue: start the current queue track.
-          * A bare "play" (no path/query) after a stop should resume the
-          * queue, not silently echo state. */
+      } else if (!state->playing || !track_loaded(state)) {
+         /* Stopped, or nothing loaded (the current track was removed or
+          * failed), with a populated queue: start the current queue track.
+          * A bare "play" (no path/query) should resume the queue, not
+          * silently echo state. */
          user_music_queue_t *uq = state->shared_queue;
          char play_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
 
@@ -362,7 +435,6 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
          if (play_path[0]) {
             if (webui_music_start_playback(state, play_path) != 0) {
                webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-               return;
             }
          }
          /* Empty queue: nothing to start; just echo state. */
@@ -424,8 +496,8 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
       pthread_mutex_unlock(&state->state_mutex);
       pthread_mutex_unlock(&uq->queue_mutex);
 
-      if (can_advance && next_path[0]) {
-         webui_music_start_playback(state, next_path);
+      if (can_advance && next_path[0] && webui_music_start_playback(state, next_path) != 0) {
+         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
       }
 
       webui_music_send_state(conn, state);
@@ -461,8 +533,8 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
       pthread_mutex_unlock(&state->state_mutex);
       pthread_mutex_unlock(&uq->queue_mutex);
 
-      if (can_go_back && prev_path[0]) {
-         webui_music_start_playback(state, prev_path);
+      if (can_go_back && prev_path[0] && webui_music_start_playback(state, prev_path) != 0) {
+         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
       }
 
       webui_music_send_state(conn, state);
@@ -494,9 +566,25 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
 
          /* Stop streaming thread to safely access decoder
           * This prevents race conditions where thread reads while we seek */
+         pthread_mutex_lock(&state->state_mutex);
+         bool was_active = state->playing; /* playing or paused, not stopped */
+         bool was_paused = state->paused;
+         pthread_mutex_unlock(&state->state_mutex);
          bool was_streaming = atomic_load(&state->streaming);
          if (was_streaming) {
             webui_music_stop_streaming(state);
+         }
+
+         /* A seek that landed while auto-advance was opening the next track
+          * (a Plex download) stopped it before anything was loaded.  The old
+          * track is gone, so carry on with the one it was moving to. */
+         pthread_mutex_lock(&state->state_mutex);
+         bool interrupted_advance = was_active && state->advance_opening && state->decoder == NULL;
+         state->advance_opening = false;
+         pthread_mutex_unlock(&state->state_mutex);
+         if (interrupted_advance) {
+            resume_queued_track(conn, state, was_paused);
+            return;
          }
 
          pthread_mutex_lock(&state->state_mutex);
@@ -543,7 +631,6 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
 
       if (webui_music_start_playback(state, play_path) != 0) {
          webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-         return;
       }
 
       webui_music_send_state(conn, state);
@@ -649,6 +736,11 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
       }
       /* Re-read for auto-play path */
       bool should_autoplay = removing_current && was_playing && uq->queue_length > 0;
+      if (removing_current && !should_autoplay) {
+         /* Its decoder is closed and nothing replaces it: stopped, not paused */
+         state->playing = false;
+         state->paused = false;
+      }
       char next_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
       if (should_autoplay && state->queue_index < uq->queue_length) {
          snprintf(next_path, sizeof(next_path), "%s", uq->queue[state->queue_index].path);
@@ -663,8 +755,8 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
       webui_for_each_conn_by_user(uq->user_id, adjust_index_on_remove, &rctx);
 
       /* Auto-play next track if we were playing the removed one */
-      if (should_autoplay && next_path[0]) {
-         webui_music_start_playback(state, next_path);
+      if (should_autoplay && next_path[0] && webui_music_start_playback(state, next_path) != 0) {
+         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
       }
 
       webui_music_send_state(conn, state);
@@ -1255,6 +1347,10 @@ int webui_music_queue_clear(session_music_state_t *state, int *removed_out) {
    return SUCCESS;
 }
 
+static void music_queue_locked(ws_connection_t *conn,
+                               session_music_state_t *state,
+                               struct json_object *payload);
+
 void handle_music_queue(ws_connection_t *conn, struct json_object *payload) {
    if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
@@ -1266,6 +1362,20 @@ void handle_music_queue(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
+   bool replaces = replaces_playback(payload);
+   if (replaces) {
+      webui_music_control_lock(state, true);
+   }
+   music_queue_locked(conn, state, payload);
+   if (replaces) {
+      webui_music_control_unlock(state);
+   }
+}
+
+/* handle_music_queue's body, with the session's control_mutex held */
+static void music_queue_locked(ws_connection_t *conn,
+                               session_music_state_t *state,
+                               struct json_object *payload) {
    struct json_object *action_obj;
    if (!json_object_object_get_ex(payload, "action", &action_obj)) {
       webui_music_send_error(conn, "INVALID_REQUEST", "Missing action");

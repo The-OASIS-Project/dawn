@@ -479,6 +479,22 @@ Per-module locks (scoped to a single subsystem):
   webui_music_server::s_registry_mutex (src/webui/webui_music_server.c) — authenticated music sockets (taken after
                                                                      s_conn_registry_mutex, before s_music_teardown_mutex; other threads only mark a
                                                                      socket to close and wake the music thread, which alone releases its session reference)
+  webui_music session state (src/webui/webui_music*.c, one set per connection's music state):
+    control_mutex                                              — one music control request at a time (WebUI controls, queue
+                                                                     actions, the LLM music tool), each of which may stop the stream
+                                                                     thread, swap the decoder and start it again.  OUTERMOST for the
+                                                                     state: taken before s_conn_registry_mutex (a queue broadcast),
+                                                                     queue_mutex and state_mutex; never held with
+                                                                     s_music_teardown_mutex; the stream thread never takes it.  The
+                                                                     WebSocket thread takes it only for actions that stop or replace
+                                                                     playback, and sets control_cancel first, which aborts the
+                                                                     holder's Plex download; other WebUI actions don't take it
+    queue_mutex (shared per user) → state_mutex                — queue contents, then the session's playback fields
+    s_music_teardown_mutex (webui_music.c) → write_mutex       — conn->music_state lifetime against the music server's callbacks,
+                                                                     then the write ring (LEAF).  Also held across the state's lazy
+                                                                     creation (webui_music_state_get_or_init, the music server), which
+                                                                     takes s_user_queues_mutex and loads the queue; nothing takes those
+                                                                     and then teardown
   tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
                                                                      history_mutex; held only to find, pin, insert and release a slot, never across a render)
   tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that

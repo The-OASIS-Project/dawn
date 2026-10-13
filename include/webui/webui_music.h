@@ -300,9 +300,21 @@ struct lws;
  * The streaming thread will write directly to this wsi.
  *
  * @param session Main session
- * @param wsi Music WebSocket instance (NULL to clear)
+ * @param wsi Music WebSocket instance
  */
 void webui_music_set_stream_wsi(session_t *session, struct lws *wsi);
+
+/**
+ * @brief Forget a closed music WebSocket
+ *
+ * Called by the music server when a music socket closes.  Clears the session's
+ * stream socket only if it is still this one: a client replacing its socket
+ * registers the new one before the old one's close is processed.
+ *
+ * @param session Main session
+ * @param wsi The music WebSocket that closed
+ */
+void webui_music_clear_stream_wsi(session_t *session, struct lws *wsi);
 
 /** webui_music_write_pending() return: the write failed fatally (lws_write error
  *  or short write). A truncated WebSocket frame desyncs the client's WS parser, so

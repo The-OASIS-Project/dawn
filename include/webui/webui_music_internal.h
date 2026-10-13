@@ -60,6 +60,19 @@ extern "C" {
  *  otherwise the ring silently returns to dropping frames (watch write_drop_count). */
 #define WEBUI_MUSIC_WRITE_RING 8
 
+/** Lowest source sample rate the stream plays.  The stream thread reads one Opus
+ *  frame's worth of source audio at a time, so at 8 kHz that's 160 frames; below
+ *  it the 48 kHz resampler's ratio outgrows its buffers. */
+#define WEBUI_MUSIC_MIN_SOURCE_RATE 8000
+/** Highest source sample rate the stream plays (8x 96 kHz).  A crafted file
+ *  can declare any rate, and the resampler takes an int rate and ratio. */
+#define WEBUI_MUSIC_MAX_SOURCE_RATE 768000
+
+/** Auto-advance stops after this many tracks in a row produced no audio, even
+ *  when the queue holds more, so a run of failures (each a timeout, perhaps)
+ *  isn't walked silently. */
+#define WEBUI_MUSIC_MAX_FAILED_TRACKS 5
+
 /* Closed-loop music buffer flow control (see music_stream_thread pacing in
  * webui_music.c). The server holds the client's worklet ring near a target depth
  * using periodic client buffer reports, bursting to refill after a drain. */
@@ -140,6 +153,24 @@ typedef struct {
    pthread_t stream_thread;     /**< Streaming thread handle */
    pthread_mutex_t state_mutex; /**< Protects non-atomic state */
 
+   /** Serializes control requests (WebUI controls, queue actions, the LLM music
+    *  tool), each of which may stop the stream thread, swap the decoder and
+    *  start it again.  Two at once could free a decoder the other's new thread
+    *  is reading, or join one thread twice.  Outermost: taken before
+    *  s_conn_registry_mutex (queue broadcasts), queue_mutex and state_mutex;
+    *  never held with s_music_teardown_mutex; the stream thread never takes
+    *  it.  Taken through webui_music_control_lock(). */
+   pthread_mutex_t control_mutex;
+   /** Set by a WebSocket-thread request waiting for control_mutex (one that
+    *  stops or replaces playback): cancels the holder's Plex download, so the
+    *  WebSocket thread never waits one out.  Other requests don't take the lock. */
+   atomic_bool control_cancel;
+
+   /** Auto-advance picked the next track and is opening it (state_mutex).
+    *  Left set if a stop interrupts the open, so a seek that did it knows to
+    *  carry on with that track; cleared once a decoder is installed. */
+   bool advance_opening;
+
    /* Thread synchronization for safe shutdown */
    pthread_cond_t decoder_idle_cond; /**< Signaled when decoder is not busy */
    atomic_bool shutdown_ack;         /**< Thread acknowledged shutdown request */
@@ -185,9 +216,6 @@ typedef struct {
 
    /* Position update tracking */
    uint64_t last_position_update_ms;
-
-   /* Plex temp file (downloaded track, unlinked after decoder opens) */
-   char temp_file[256]; /**< Path to Plex temp file (empty = none) */
 
    /* Dedicated music WebSocket (direct streaming).
     *
@@ -245,12 +273,44 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
 void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message);
 
 /**
+ * @brief Take a session's control_mutex
+ *
+ * @param state Session music state
+ * @param preempt True on the WebSocket service thread: a Plex download the
+ *        current holder is running is cancelled rather than waited out (the
+ *        user's latest action wins).  False on other threads, which wait.
+ */
+void webui_music_control_lock(session_music_state_t *state, bool preempt);
+
+/** @brief Release a session's control_mutex */
+void webui_music_control_unlock(session_music_state_t *state);
+
+/**
+ * @brief A connection's music state, created on first use
+ *
+ * Creation happens under the same lock the music server's lazy init uses, so
+ * the WebSocket handlers, the LLM tool and the music server can't each make
+ * one.
+ *
+ * @return The state, or NULL if it couldn't be created
+ */
+session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn);
+
+/**
  * @brief Start playback of a file
+ *
+ * On failure nothing is playing (playing and paused are false); the caller
+ * reports it to the client.
+ *
+ * @pre control_mutex held
+ * @return 0 on success, non-zero on failure
  */
 int webui_music_start_playback(session_music_state_t *state, const char *path);
 
 /**
  * @brief Stop streaming thread safely
+ *
+ * @pre control_mutex held (or the session is being torn down)
  */
 void webui_music_stop_streaming(session_music_state_t *state);
 
@@ -265,6 +325,8 @@ bool webui_music_is_path_valid(const char *path);
 
 /**
  * @brief Start the streaming thread for a session.
+ *
+ * @pre control_mutex held
  */
 int webui_music_start_streaming(session_music_state_t *state);
 
@@ -357,6 +419,7 @@ int webui_music_queue_remove_index(session_music_state_t *state, int index0);
  * Stops streaming, zeroes the queue, resets queue_index/playing, persists.
  * Transport-free.
  *
+ * @pre control_mutex held
  * @param removed_out Optional out: queue length before clearing
  * @return SUCCESS
  */

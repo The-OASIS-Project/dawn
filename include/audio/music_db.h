@@ -140,6 +140,18 @@ bool music_db_is_initialized(void);
 int music_db_scan(const char *music_dir, music_db_scan_stats_t *stats);
 
 /**
+ * @brief Remove every track from one source
+ *
+ * For a source that is no longer configured: its rows can't be played, and a
+ * local row would also hide the Plex copy of the same track.
+ *
+ * @param source Source whose tracks to remove
+ * @param removed_out Optional output: rows removed
+ * @return SUCCESS or FAILURE
+ */
+int music_db_remove_source(music_source_t source, int *removed_out);
+
+/**
  * @brief Get the number of tracks in the database
  *
  * @param count_out Output for track count
