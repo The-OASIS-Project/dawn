@@ -142,7 +142,11 @@ size_t resampler_process(resampler_t *rs,
    SRC_DATA src_data = { .data_in = rs->in_float,
                          .data_out = rs->out_float,
                          .input_frames = (long)(in_samples / rs->channels),
-                         .output_frames = (long)(out_samples_max / rs->channels),
+                         /* libsamplerate writes into rs->out_float, not out */
+                         .output_frames = (long)((out_samples_max < rs->buffer_capacity
+                                                      ? out_samples_max
+                                                      : rs->buffer_capacity) /
+                                                 rs->channels),
                          .src_ratio = rs->ratio,
                          .end_of_input = 0 };
 
@@ -164,7 +168,7 @@ size_t resampler_get_output_size(resampler_t *rs, size_t in_samples) {
    if (!rs)
       return 0;
 
-   // Guard against integer overflow (max ratio ~2.18x, so /4 is conservative)
+   // Guard against integer overflow in in_samples * ratio below
    if (in_samples > SIZE_MAX / 4) {
       OLOG_ERROR("Resampler: Input size %zu too large, overflow risk", in_samples);
       return 0;

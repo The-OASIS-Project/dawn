@@ -27,6 +27,7 @@
 
 #include "audio/plex_client.h"
 
+#include <ctype.h>
 #include <curl/curl.h>
 #include <glob.h>
 #include <pthread.h>
@@ -49,14 +50,12 @@
  * Static State
  * ============================================================================= */
 
-static CURL *s_api_curl = NULL;      /* Persistent handle for API JSON queries */
-static CURL *s_download_curl = NULL; /* Persistent handle for file downloads */
-static int s_section_id = 0;         /* Cached music section ID (0 = not discovered) */
+static CURL *s_api_curl = NULL; /* Persistent handle for API JSON queries */
+static int s_section_id = 0;    /* Cached music section ID (0 = not discovered) */
 
 /* Mutex protection — CURL handles are not thread-safe. Multiple WebUI sessions
  * and LLM tool threads can invoke Plex API calls concurrently. */
 static pthread_mutex_t s_api_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t s_download_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Cached API request headers — rebuilt on token/config change */
 static struct curl_slist *s_cached_headers = NULL;
@@ -396,14 +395,6 @@ int plex_client_init(void) {
       return FAILURE;
    }
 
-   s_download_curl = curl_easy_init();
-   if (!s_download_curl) {
-      OLOG_ERROR("Plex: failed to create download CURL handle");
-      curl_easy_cleanup(s_api_curl);
-      s_api_curl = NULL;
-      return FAILURE;
-   }
-
    /* Generate client_identifier if not set */
    dawn_config_t *mutable_config = (dawn_config_t *)config_get();
    if (!mutable_config->music.plex.client_identifier[0]) {
@@ -427,10 +418,6 @@ void plex_client_cleanup(void) {
    if (s_api_curl) {
       curl_easy_cleanup(s_api_curl);
       s_api_curl = NULL;
-   }
-   if (s_download_curl) {
-      curl_easy_cleanup(s_download_curl);
-      s_download_curl = NULL;
    }
    invalidate_api_headers();
    s_section_id = 0;
@@ -541,12 +528,30 @@ json_object *plex_client_list_all_tracks(int offset, int limit) {
  * Public API: Streaming (Download)
  * ============================================================================= */
 
-int plex_client_download_track(const char *part_key, char *out_path, size_t out_path_size) {
+/* A temp-file suffix taken from a server-supplied key: ".flac", ".mp3" and the
+ * like only, so nothing in it can steer the temp file's path. */
+static bool is_safe_suffix(const char *ext) {
+   size_t len = strlen(ext);
+   if (len < 2 || len > 6 || ext[0] != '.') {
+      return false;
+   }
+   for (size_t i = 1; i < len; i++) {
+      if (!isalnum((unsigned char)ext[i])) {
+         return false;
+      }
+   }
+   return true;
+}
+
+int plex_client_download_track(const char *part_key,
+                               const atomic_bool *cancel,
+                               char *out_path,
+                               size_t out_path_size) {
    if (!part_key || !out_path || out_path_size == 0)
       return FAILURE;
 
-   if (!s_download_curl) {
-      OLOG_ERROR("Plex: download CURL handle not initialized");
+   if (!s_api_curl) {
+      OLOG_ERROR("Plex: client not initialized");
       return FAILURE;
    }
 
@@ -572,6 +577,9 @@ int plex_client_download_track(const char *part_key, char *out_path, size_t out_
 
    /* Extract extension from Part.key for temp file suffix */
    const char *ext = extract_extension(part_key);
+   if (!is_safe_suffix(ext)) {
+      ext = "";
+   }
 
    /* Auth via headers only (token in X-Plex-Token header) */
    struct curl_slist *headers = get_api_headers();
@@ -579,26 +587,28 @@ int plex_client_download_track(const char *part_key, char *out_path, size_t out_
    /* Ensure /var/tmp/ parent dir exists for temp files */
    (void)mkdir("/var/tmp", 0755);
 
-   /* Configure SSL and perform download under mutex */
-   pthread_mutex_lock(&s_download_mutex);
-
-   curl_easy_reset(s_download_curl);
+   /* A handle per download: concurrent sessions don't queue behind each
+    * other's transfers (one request per track, so connection reuse is moot). */
+   CURL *curl = curl_easy_init();
+   if (!curl) {
+      OLOG_ERROR("Plex: failed to create download CURL handle");
+      return FAILURE;
+   }
    const plex_config_t *plex = &g_config.music.plex;
    if (plex->ssl && !plex->ssl_verify) {
-      curl_easy_setopt(s_download_curl, CURLOPT_SSL_VERIFYPEER, 0L);
-      curl_easy_setopt(s_download_curl, CURLOPT_SSL_VERIFYHOST, 2L);
+      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
    }
 
-   int result = http_download_to_temp(s_download_curl, url, headers, ext, PLEX_TEMP_PREFIX,
-                                      PLEX_DOWNLOAD_MAX_SIZE, out_path, out_path_size);
-
-   pthread_mutex_unlock(&s_download_mutex);
+   int result = http_download_to_temp(curl, url, headers, ext, PLEX_TEMP_PREFIX,
+                                      PLEX_DOWNLOAD_MAX_SIZE, cancel, out_path, out_path_size);
+   curl_easy_cleanup(curl);
 
    /* headers are cached — do not free */
 
    if (result != 0) {
       OLOG_ERROR("Plex: failed to download track: %s", part_key);
-      return FAILURE;
+      return result == HTTP_DOWNLOAD_UNREACHABLE ? PLEX_DOWNLOAD_UNREACHABLE : FAILURE;
    }
 
    OLOG_INFO("Plex: downloaded track to %s", out_path);

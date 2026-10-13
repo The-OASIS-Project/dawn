@@ -322,6 +322,12 @@ static char *apply_items_and_report(session_music_state_t *state,
 }
 
 
+static int music_tool_locked(ws_connection_t *conn,
+                             session_music_state_t *state,
+                             const char *action,
+                             const char *query,
+                             char **result_out);
+
 int webui_music_execute_tool(ws_connection_t *conn,
                              const char *action,
                              const char *query,
@@ -331,17 +337,28 @@ int webui_music_execute_tool(ws_connection_t *conn,
    }
 
    /* Ensure music session is initialized */
-   session_music_state_t *state = (session_music_state_t *)conn->music_state;
+   session_music_state_t *state = webui_music_state_get_or_init(conn);
    if (!state) {
-      if (webui_music_session_init(conn) != SUCCESS) {
-         if (result_out) {
-            *result_out = strdup("Failed to initialize music session");
-         }
-         return FAILURE;
+      if (result_out) {
+         *result_out = strdup("Failed to initialize music session");
       }
-      state = (session_music_state_t *)conn->music_state;
+      return FAILURE;
    }
 
+   /* The browser's controls run on another thread against the same state;
+    * this thread waits for them rather than cancelling their work. */
+   webui_music_control_lock(state, false);
+   int ret = music_tool_locked(conn, state, action, query, result_out);
+   webui_music_control_unlock(state);
+   return ret;
+}
+
+/* webui_music_execute_tool's body, with the session's control_mutex held */
+static int music_tool_locked(ws_connection_t *conn,
+                             session_music_state_t *state,
+                             const char *action,
+                             const char *query,
+                             char **result_out) {
    OLOG_INFO("WebUI music tool: action='%s' query='%s'", action, query ? query : "(none)");
 
    /* The bridge passes the packed value string; the real search query is the
@@ -372,8 +389,15 @@ int webui_music_execute_tool(ws_connection_t *conn,
             snprintf(first_path, sizeof(first_path), "%s", uq->queue[0].path);
          }
          pthread_mutex_unlock(&uq->queue_mutex);
-         if (first_path[0]) {
-            webui_music_start_playback(state, first_path);
+         bool start_failed = first_path[0] && webui_music_start_playback(state, first_path) != 0;
+         if (start_failed) {
+            webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+         } else if (!first_path[0]) {
+            /* Nothing resolved: the old track was stopped above, so say so */
+            pthread_mutex_lock(&state->state_mutex);
+            state->playing = false;
+            state->paused = false;
+            pthread_mutex_unlock(&state->state_mutex);
          }
          webui_music_send_state(conn, state);
          webui_music_broadcast_queue_state(uq, conn);
@@ -381,8 +405,9 @@ int webui_music_execute_tool(ws_connection_t *conn,
          if (result_out) {
             strbuf_t sb;
             strbuf_init(&sb, 512);
-            strbuf_appendf(&sb, "Replaced queue. %s Use 'enqueue' to add without clearing.",
-                           report ? report : "");
+            strbuf_appendf(&sb, "Replaced queue. %s%s Use 'enqueue' to add without clearing.",
+                           report ? report : "",
+                           start_failed ? " The first track failed to start." : "");
             append_state_footer(&sb, state);
             if (strbuf_oom(&sb)) {
                strbuf_free(&sb);
@@ -414,16 +439,8 @@ int webui_music_execute_tool(ws_connection_t *conn,
          return FAILURE;
       }
 
-      /* Search unified database and play (REPLACE) */
-      webui_music_stop_streaming(state);
-      pthread_mutex_lock(&state->state_mutex);
-      if (state->decoder) {
-         audio_decoder_close(state->decoder);
-         state->decoder = NULL;
-      }
-      state->queue_index = 0;
-      pthread_mutex_unlock(&state->state_mutex);
-
+      /* Search unified database and play (REPLACE).  Search first: a miss must
+       * leave what's playing alone. */
       if (!music_db_is_initialized()) {
          if (result_out)
             *result_out = strdup("Music database not available");
@@ -447,6 +464,15 @@ int webui_music_execute_tool(ws_connection_t *conn,
          }
          return FAILURE;
       }
+
+      webui_music_stop_streaming(state);
+      pthread_mutex_lock(&state->state_mutex);
+      if (state->decoder) {
+         audio_decoder_close(state->decoder);
+         state->decoder = NULL;
+      }
+      state->queue_index = 0;
+      pthread_mutex_unlock(&state->state_mutex);
 
       user_music_queue_t *uq = state->shared_queue;
       char first_title[WEBUI_MUSIC_STRING_MAX] = { 0 };
@@ -474,6 +500,9 @@ int webui_music_execute_tool(ws_connection_t *conn,
 
       /* Start playback of first track */
       if (webui_music_start_playback(state, first_path) != 0) {
+         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+         webui_music_send_state(conn, state);
+         webui_music_broadcast_queue_state(uq, conn);
          if (result_out) {
             *result_out = strdup("Failed to start playback");
          }
@@ -683,12 +712,17 @@ int webui_music_execute_tool(ws_connection_t *conn,
       pthread_mutex_unlock(&uq->queue_mutex);
 
       if (can_advance && next_path[0]) {
-         webui_music_start_playback(state, next_path);
+         bool started = webui_music_start_playback(state, next_path) == 0;
+         if (!started) {
+            webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+         }
          webui_music_send_state(conn, state);
 
          if (result_out) {
             char buf[256];
-            snprintf(buf, sizeof(buf), "Playing next: %s", next_title[0] ? next_title : "Unknown");
+            snprintf(buf, sizeof(buf), "%s: %s",
+                     started ? "Playing next" : "Failed to start the next track",
+                     next_title[0] ? next_title : "Unknown");
             *result_out = result_with_footer(state, buf);
          }
       } else {
@@ -732,12 +766,16 @@ int webui_music_execute_tool(ws_connection_t *conn,
       pthread_mutex_unlock(&uq->queue_mutex);
 
       if (can_go_back && prev_path[0]) {
-         webui_music_start_playback(state, prev_path);
+         bool started = webui_music_start_playback(state, prev_path) == 0;
+         if (!started) {
+            webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+         }
          webui_music_send_state(conn, state);
 
          if (result_out) {
             char buf[256];
-            snprintf(buf, sizeof(buf), "Playing previous: %s",
+            snprintf(buf, sizeof(buf), "%s: %s",
+                     started ? "Playing previous" : "Failed to start the previous track",
                      prev_title[0] ? prev_title : "Unknown");
             *result_out = result_with_footer(state, buf);
          }

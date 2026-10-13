@@ -281,6 +281,24 @@ static void plex_cleanup(void) {
    OLOG_INFO("Plex sync: database handle closed");
 }
 
+/* Whether the library still holds Plex rows (the scanner drops them while
+ * Plex isn't configured, and they must come back when it is again) */
+static bool plex_rows_exist(void) {
+   bool exist = false;
+   pthread_mutex_lock(&g_plex_db_mutex);
+   if (g_plex_db) {
+      sqlite3_stmt *stmt = NULL;
+      if (sqlite3_prepare_v2(g_plex_db, "SELECT 1 FROM music_metadata WHERE source = ? LIMIT 1", -1,
+                             &stmt, NULL) == SQLITE_OK) {
+         sqlite3_bind_int(stmt, 1, MUSIC_SOURCE_PLEX);
+         exist = sqlite3_step(stmt) == SQLITE_ROW;
+      }
+      sqlite3_finalize(stmt);
+   }
+   pthread_mutex_unlock(&g_plex_db_mutex);
+   return exist;
+}
+
 static int plex_sync(void) {
    struct timespec sync_start;
    clock_gettime(CLOCK_MONOTONIC, &sync_start);
@@ -288,7 +306,8 @@ static int plex_sync(void) {
    /* Phase 0: Check if library has changed since last sync */
    time_t scanned_at = 0;
    if (plex_client_get_library_updated_at(&scanned_at) == 0) {
-      if (scanned_at > 0 && scanned_at == g_last_scanned_at && g_initial_sync_complete) {
+      if (scanned_at > 0 && scanned_at == g_last_scanned_at && g_initial_sync_complete &&
+          plex_rows_exist()) {
          OLOG_INFO("Plex sync: library unchanged (scannedAt=%ld), skipping", (long)scanned_at);
          return 0;
       }

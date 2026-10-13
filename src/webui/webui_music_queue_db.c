@@ -116,7 +116,9 @@ int music_queue_db_save(int user_id, const user_music_queue_t *uq) {
    }
 
    /* Begin transaction */
-   if (sqlite3_exec(s_db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+   /* IMMEDIATE: start as the writer, so a concurrent library scan on another
+    * connection makes this wait (busy timeout) instead of deadlocking it */
+   if (sqlite3_exec(s_db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
       OLOG_ERROR("Music queue DB: BEGIN failed: %s", sqlite3_errmsg(s_db));
       return 1;
    }

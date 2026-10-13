@@ -299,6 +299,32 @@ static void test_search_dedup_local_wins(void) {
    }
 }
 
+static void test_remove_source_unshadows_plex(void) {
+   printf("\n--- test_remove_source_unshadows_plex ---\n");
+   clear_tracks();
+
+   /* A local copy hides the Plex copy; once the local source is gone, the Plex
+    * copy is what search returns. */
+   insert_track("/music/song.flac", "Shadow Song", "Shadow Artist", "Shadow Album", "Rock", 0, 200);
+   insert_track("plex:/library/parts/1/song.mp3", "Shadow Song", "Shadow Artist", "Shadow Album",
+                "Rock", 1, 200);
+   insert_track("/music/other.flac", "Local Only", "Shadow Artist", "Shadow Album", "Rock", 0, 100);
+
+   int removed = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_remove_source(MUSIC_SOURCE_LOCAL, &removed));
+   TEST_ASSERT_EQUAL_INT(2, removed);
+
+   music_search_result_t results[10];
+   int count = 0;
+   search_text("Shadow Song", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, results[0].source);
+
+   int total = 0;
+   music_db_get_track_count(&total);
+   TEST_ASSERT_EQUAL_INT(1, total);
+}
+
 static void test_search_dedup_plex_only(void) {
    printf("\n--- test_search_dedup_plex_only ---\n");
    clear_tracks();
@@ -1018,6 +1044,7 @@ int main(void) {
    RUN_TEST(test_get_by_path_plex);
    RUN_TEST(test_get_by_path_missing);
    RUN_TEST(test_stale_deletion_scoped);
+   RUN_TEST(test_remove_source_unshadows_plex);
    RUN_TEST(test_pick_best_bare_title_prefers_close_match);
    RUN_TEST(test_pick_best_artist_dominates);
    RUN_TEST(test_pick_best_exact_title);

@@ -33,7 +33,9 @@
 
 #include "audio/audio_decoder.h"
 #include "audio_decoder_internal.h"
+#include "audio_downmix.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -41,11 +43,11 @@
  * Constants
  * ============================================================================= */
 
-/* Maximum block size for FLAC (per spec: 65535, but 8192 is typical) */
+/* Default block buffer, in frames; grown at open to the file's max_blocksize */
 #define FLAC_MAX_BLOCK_SIZE 8192
 
-/* Maximum channels we support (stereo) */
-#define FLAC_MAX_CHANNELS 2
+/* Channels handed to the caller: a file with more is downmixed to stereo */
+#define FLAC_OUTPUT_CHANNELS 2
 
 /* Internal buffer size in frames (must hold at least one FLAC block) */
 #define FLAC_BUFFER_FRAMES FLAC_MAX_BLOCK_SIZE
@@ -68,9 +70,14 @@ typedef struct {
 
    /* Stream info (populated from metadata callback) */
    uint32_t sample_rate;
-   uint8_t channels;
+   uint8_t channels;     /* Channels in the file */
+   uint8_t out_channels; /* Channels returned by read(): the file's, at most 2 */
    uint8_t bits_per_sample;
    uint64_t total_samples;
+   uint32_t max_blocksize; /* From STREAMINFO: the largest block the file holds */
+
+   /* Weights for a file with more than FLAC_OUTPUT_CHANNELS channels */
+   audio_downmix_t downmix;
 
    /* Internal sample buffer (interleaved 16-bit) */
    int16_t *buffer;
@@ -104,8 +111,11 @@ static void flac_metadata_callback(const FLAC__StreamDecoder *decoder,
 
       handle->sample_rate = info->sample_rate;
       handle->channels = info->channels;
+      handle->out_channels = info->channels > FLAC_OUTPUT_CHANNELS ? FLAC_OUTPUT_CHANNELS
+                                                                   : info->channels;
       handle->bits_per_sample = info->bits_per_sample;
       handle->total_samples = info->total_samples;
+      handle->max_blocksize = info->max_blocksize;
       handle->metadata_received = true;
 
       OLOG_INFO("FLAC: %uHz %uch %ubps, %llu samples", info->sample_rate, info->channels,
@@ -145,12 +155,20 @@ static FLAC__StreamDecoderWriteStatus flac_write_callback(const FLAC__StreamDeco
       return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
    }
 
-   /* Validate channel count */
-   if (frame->header.channels > FLAC_MAX_CHANNELS) {
-      OLOG_ERROR("FLAC has %u channels, max supported is %d", frame->header.channels,
-                 FLAC_MAX_CHANNELS);
+   /* The buffer and the downmix are sized from STREAMINFO */
+   if (frame->header.channels != handle->channels) {
+      OLOG_ERROR("FLAC frame has %u channels, stream has %u", frame->header.channels,
+                 handle->channels);
       handle->error = true;
       return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
+   }
+
+   if (handle->channels > FLAC_OUTPUT_CHANNELS) {
+      audio_downmix_int32(&handle->downmix, (const int32_t *const *)buffer, handle->bits_per_sample,
+                          frame->header.blocksize, handle->buffer);
+      handle->buffered_frames = frame->header.blocksize;
+      handle->read_position = 0;
+      return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
    }
 
    /* Convert to interleaved 16-bit samples */
@@ -198,9 +216,9 @@ audio_decoder_t *flac_decoder_open(const char *path) {
    handle->base.vtable = flac_get_vtable();
    handle->base.format = AUDIO_FORMAT_FLAC;
 
-   /* Allocate sample buffer (stereo, 16-bit) */
+   /* Allocate sample buffer (at most stereo, 16-bit) */
    handle->buffer_frames = FLAC_BUFFER_FRAMES;
-   handle->buffer = malloc(FLAC_BUFFER_FRAMES * FLAC_MAX_CHANNELS * sizeof(int16_t));
+   handle->buffer = malloc(FLAC_BUFFER_FRAMES * FLAC_OUTPUT_CHANNELS * sizeof(int16_t));
    if (!handle->buffer) {
       OLOG_ERROR("Failed to allocate FLAC sample buffer");
       free(handle);
@@ -248,6 +266,36 @@ audio_decoder_t *flac_decoder_open(const char *path) {
       return NULL;
    }
 
+   /* Hi-res files may use blocks larger than the default buffer (up to 16384
+    * frames for subset streams above 48 kHz, 65535 by the format) */
+   if (handle->max_blocksize > handle->buffer_frames) {
+      int16_t *grown = realloc(handle->buffer, (size_t)handle->max_blocksize *
+                                                   FLAC_OUTPUT_CHANNELS * sizeof(int16_t));
+      if (!grown) {
+         OLOG_ERROR("FLAC: can't allocate a %u-frame block buffer", handle->max_blocksize);
+         FLAC__stream_decoder_finish(handle->flac);
+         FLAC__stream_decoder_delete(handle->flac);
+         free(handle->buffer);
+         free(handle);
+         return NULL;
+      }
+      handle->buffer = grown;
+      handle->buffer_frames = handle->max_blocksize;
+   }
+
+   if (handle->channels > FLAC_OUTPUT_CHANNELS) {
+      if (audio_downmix_init(&handle->downmix, handle->channels, AUDIO_CHANNEL_ORDER_FLAC) !=
+          SUCCESS) {
+         OLOG_ERROR("FLAC: can't downmix %u channels", handle->channels);
+         FLAC__stream_decoder_finish(handle->flac);
+         FLAC__stream_decoder_delete(handle->flac);
+         free(handle->buffer);
+         free(handle);
+         return NULL;
+      }
+      OLOG_INFO("FLAC: downmixing %u channels to stereo", handle->channels);
+   }
+
    return (audio_decoder_t *)handle;
 }
 
@@ -278,7 +326,7 @@ int flac_decoder_get_info(audio_decoder_t *dec, audio_decoder_info_t *info) {
    flac_decoder_handle_t *handle = (flac_decoder_handle_t *)dec;
 
    info->sample_rate = handle->sample_rate;
-   info->channels = handle->channels;
+   info->channels = handle->out_channels;
    info->bits_per_sample = handle->bits_per_sample;
    info->total_samples = handle->total_samples;
    info->format = AUDIO_FORMAT_FLAC;
@@ -302,7 +350,7 @@ ssize_t flac_decoder_read(audio_decoder_t *dec, int16_t *buffer, size_t max_fram
    }
 
    size_t frames_read = 0;
-   size_t channels = handle->channels;
+   size_t channels = handle->out_channels;
 
    while (frames_read < max_frames) {
       /* Check if we have buffered samples to return */

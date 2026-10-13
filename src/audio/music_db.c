@@ -27,6 +27,7 @@
 #include "audio/music_db.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdlib.h>
@@ -54,6 +55,10 @@
 
 /** Yield mutex every N files to allow searches during scan */
 #define SCAN_YIELD_INTERVAL 50
+/* ...or after this long holding the write lock, whichever comes first: a first
+ * scan reads each file's tags off disk, and a queue save on another connection
+ * waits at most its busy timeout (5 s) */
+#define SCAN_YIELD_MS 200
 
 /** Local-metadata extractor version. Bump when the local tag extraction changes
  *  what it stores so a one-time forced re-parse backfills existing rows. Stored
@@ -309,12 +314,51 @@ static int insert_track(const char *path, time_t mtime, const audio_metadata_t *
    return SUCCESS;
 }
 
+/* Every file a scan found.  Rows for local files not in it are deleted, so
+ * it must be complete: a file it failed to record would lose its row. */
+typedef struct {
+   char **paths;
+   int count;
+   int cap;
+   bool incomplete; /* out of memory or an unreadable folder: skip the stale-row delete */
+} seen_list_t;
+
+static void seen_list_add(seen_list_t *seen, const char *path) {
+   if (seen->incomplete) {
+      return;
+   }
+   if (seen->count == seen->cap) {
+      int cap = seen->cap ? seen->cap * 2 : 1024;
+      char **grown = realloc(seen->paths, (size_t)cap * sizeof(*grown));
+      if (!grown) {
+         seen->incomplete = true;
+         return;
+      }
+      seen->paths = grown;
+      seen->cap = cap;
+   }
+   seen->paths[seen->count] = strdup(path);
+   if (!seen->paths[seen->count]) {
+      seen->incomplete = true;
+      return;
+   }
+   seen->count++;
+}
+
+static void seen_list_free(seen_list_t *seen) {
+   for (int i = 0; i < seen->count; i++) {
+      free(seen->paths[i]);
+   }
+   free(seen->paths);
+   seen->paths = NULL;
+   seen->count = 0;
+   seen->cap = 0;
+}
+
 /* Forward declaration */
 static void scan_directory_recursive(const char *dir_path,
                                      music_db_scan_stats_t *stats,
-                                     char **seen_paths,
-                                     int *seen_count,
-                                     int max_seen,
+                                     seen_list_t *seen,
                                      int depth);
 
 /**
@@ -323,6 +367,25 @@ static void scan_directory_recursive(const char *dir_path,
  * Commits current transaction, releases mutex briefly, then re-acquires
  * and starts a new transaction. This reduces lock contention.
  */
+static uint64_t s_scan_txn_start_ms; /* when the scan's current transaction began */
+
+static uint64_t scan_now_ms(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/*
+ * Begin the scan's write transaction as a writer (IMMEDIATE).  A deferred
+ * BEGIN starts as a reader; if another connection to music.db (the queue
+ * store) takes the write lock first, SQLite fails this connection's writes at
+ * once rather than wait, since waiting would deadlock.
+ */
+static void scan_begin(void) {
+   exec_sql("BEGIN IMMEDIATE");
+   s_scan_txn_start_ms = scan_now_ms();
+}
+
 static void scan_yield_for_searches(void) {
    exec_sql("COMMIT");
    pthread_mutex_unlock(&g_music_db_mutex);
@@ -332,7 +395,7 @@ static void scan_yield_for_searches(void) {
    nanosleep(&ts, NULL);
 
    pthread_mutex_lock(&g_music_db_mutex);
-   exec_sql("BEGIN TRANSACTION");
+   scan_begin();
 }
 
 /**
@@ -340,9 +403,7 @@ static void scan_yield_for_searches(void) {
  */
 static void scan_directory_recursive(const char *dir_path,
                                      music_db_scan_stats_t *stats,
-                                     char **seen_paths,
-                                     int *seen_count,
-                                     int max_seen,
+                                     seen_list_t *seen,
                                      int depth) {
    if (depth >= MAX_DIRECTORY_DEPTH) {
       OLOG_WARNING("Max directory depth reached at: %s", dir_path);
@@ -351,6 +412,13 @@ static void scan_directory_recursive(const char *dir_path,
 
    DIR *dir = opendir(dir_path);
    if (!dir) {
+      /* A folder that exists but can't be read (permissions, a network share
+       * hiccup) hides files that are still there: don't delete their rows */
+      if (errno != ENOENT) {
+         OLOG_WARNING("Music scan: can't read %s (%s); keeping rows for files not found", dir_path,
+                      strerror(errno));
+         seen->incomplete = true;
+      }
       return;
    }
 
@@ -390,17 +458,12 @@ static void scan_directory_recursive(const char *dir_path,
 
       if (d_type == DT_DIR) {
          /* Recurse into subdirectory */
-         scan_directory_recursive(full_path, stats, seen_paths, seen_count, max_seen, depth + 1);
+         scan_directory_recursive(full_path, stats, seen, depth + 1);
       } else if (d_type == DT_REG && is_supported_extension(entry->d_name)) {
          stats->files_scanned++;
 
          /* Track this path as "seen" for cleanup */
-         if (*seen_count < max_seen) {
-            seen_paths[*seen_count] = strdup(full_path);
-            if (seen_paths[*seen_count]) {
-               (*seen_count)++;
-            }
-         }
+         seen_list_add(seen, full_path);
 
          /* Check if file needs updating */
          time_t file_mtime = get_file_mtime(full_path);
@@ -426,7 +489,8 @@ static void scan_directory_recursive(const char *dir_path,
          }
 
          /* Periodically yield mutex to allow pending searches */
-         if (stats->files_scanned % SCAN_YIELD_INTERVAL == 0) {
+         if (stats->files_scanned % SCAN_YIELD_INTERVAL == 0 ||
+             scan_now_ms() - s_scan_txn_start_ms >= SCAN_YIELD_MS) {
             scan_yield_for_searches();
          }
       }
@@ -612,50 +676,48 @@ int music_db_scan(const char *music_dir, music_db_scan_stats_t *stats) {
    /* Initialize stats */
    music_db_scan_stats_t local_stats = { 0 };
 
-   /* Allocate array to track seen files for cleanup
-    * Using 10k limit balances memory usage (~80KB for pointers) with typical library sizes.
-    * For larger libraries, some deleted files may not be detected until next scan. */
-   int max_seen = 10000;
-   char **seen_paths = calloc(max_seen, sizeof(char *));
-   int seen_count = 0;
-
-   if (!seen_paths) {
-      OLOG_ERROR("Failed to allocate seen paths array");
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
+   seen_list_t seen = { 0 };
+   bool table_ok = false; /* seen_paths holds every file this scan found */
 
    /* Begin transaction for better performance */
-   exec_sql("BEGIN TRANSACTION");
+   scan_begin();
 
    /* Scan directory recursively */
-   scan_directory_recursive(music_dir, &local_stats, seen_paths, &seen_count, max_seen, 0);
+   scan_directory_recursive(music_dir, &local_stats, &seen, 0);
 
-   /* Warn if we hit the tracking limit */
-   if (seen_count >= max_seen) {
-      OLOG_WARNING("File tracking limit reached (%d files). Some deleted files may persist in DB.",
-                   max_seen);
+   if (seen.incomplete) {
+      OLOG_WARNING("Music scan: file list incomplete; keeping rows for files not found");
    }
 
-   /* Remove files that no longer exist */
-   /* Build a list of paths to keep and delete everything else */
-   /* For efficiency, we delete paths NOT in the seen list */
-   if (seen_count > 0) {
-      /* Delete files not in our seen list using a temporary table approach */
-      exec_sql("CREATE TEMP TABLE IF NOT EXISTS seen_paths (path TEXT PRIMARY KEY)");
-      exec_sql("DELETE FROM seen_paths");
+   /* Remove files that no longer exist: delete local rows NOT in the seen
+    * list.  A scan that found nothing (an unmounted drive) removes nothing. */
+   if (seen.count > 0 && !seen.incomplete) {
+      /* Delete files not in our seen list using a temporary table approach.
+       * The table must hold every seen path, or the delete below would remove
+       * rows for files that exist: any failure building it skips the delete. */
+      table_ok = exec_sql("CREATE TEMP TABLE IF NOT EXISTS seen_paths "
+                          "(path TEXT PRIMARY KEY)") == SUCCESS &&
+                 exec_sql("DELETE FROM seen_paths") == SUCCESS;
 
       sqlite3_stmt *insert_stmt = NULL;
-      sqlite3_prepare_v2(g_music_db, "INSERT INTO seen_paths (path) VALUES (?)", -1, &insert_stmt,
-                         NULL);
-
-      for (int i = 0; i < seen_count; i++) {
-         sqlite3_bind_text(insert_stmt, 1, seen_paths[i], -1, SQLITE_STATIC);
-         sqlite3_step(insert_stmt);
+      if (table_ok && sqlite3_prepare_v2(g_music_db, "INSERT INTO seen_paths (path) VALUES (?)", -1,
+                                         &insert_stmt, NULL) != SQLITE_OK) {
+         table_ok = false;
+      }
+      for (int i = 0; table_ok && i < seen.count; i++) {
+         sqlite3_bind_text(insert_stmt, 1, seen.paths[i], -1, SQLITE_STATIC);
+         if (sqlite3_step(insert_stmt) != SQLITE_DONE) {
+            table_ok = false;
+         }
          sqlite3_reset(insert_stmt);
       }
       sqlite3_finalize(insert_stmt);
+      if (!table_ok) {
+         OLOG_WARNING("Music scan: couldn't record the files found; keeping every local row");
+      }
+   }
 
+   if (table_ok) {
       /* Count stale local files (don't touch remote source rows) */
       char count_sql[256];
       snprintf(count_sql, sizeof(count_sql),
@@ -678,17 +740,15 @@ int music_db_scan(const char *music_dir, music_db_scan_stats_t *stats) {
                "AND path NOT IN (SELECT path FROM seen_paths)",
                MUSIC_SOURCE_LOCAL);
       exec_sql(delete_sql);
-      exec_sql("DROP TABLE seen_paths");
+   }
+   if (seen.count > 0 && !seen.incomplete) {
+      exec_sql("DROP TABLE IF EXISTS seen_paths");
    }
 
    /* Commit transaction */
    exec_sql("COMMIT");
 
-   /* Free seen paths */
-   for (int i = 0; i < seen_count; i++) {
-      free(seen_paths[i]);
-   }
-   free(seen_paths);
+   seen_list_free(&seen);
 
    pthread_mutex_unlock(&g_music_db_mutex);
 
@@ -702,6 +762,37 @@ int music_db_scan(const char *music_dir, music_db_scan_stats_t *stats) {
              local_stats.files_removed, local_stats.files_skipped);
 
    return SUCCESS;
+}
+
+int music_db_remove_source(music_source_t source, int *removed_out) {
+   if (removed_out) {
+      *removed_out = 0;
+   }
+
+   pthread_mutex_lock(&g_music_db_mutex);
+   if (!g_music_db_initialized) {
+      pthread_mutex_unlock(&g_music_db_mutex);
+      return FAILURE;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(g_music_db, "DELETE FROM music_metadata WHERE source = ?", -1, &stmt,
+                               NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(stmt, 1, (int)source);
+      rc = sqlite3_step(stmt);
+   }
+   sqlite3_finalize(stmt);
+   if (rc == SQLITE_DONE && removed_out) {
+      *removed_out = sqlite3_changes(g_music_db);
+   }
+   if (rc != SQLITE_DONE) {
+      /* Read the message before another thread's statement replaces it */
+      OLOG_ERROR("Music DB: failed to remove %s tracks: %s", music_source_name(source),
+                 sqlite3_errmsg(g_music_db));
+   }
+   pthread_mutex_unlock(&g_music_db_mutex);
+   return rc == SQLITE_DONE ? SUCCESS : FAILURE;
 }
 
 int music_db_get_track_count(int *count_out) {

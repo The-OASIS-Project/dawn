@@ -349,7 +349,7 @@ static int callback_music_websocket(struct lws *wsi,
              * thread's: this thread may be inside a callback using it). */
             session_t *session = registry_remove(conn);
             if (session) {
-               webui_music_set_stream_wsi(session, NULL);
+               webui_music_clear_stream_wsi(session, wsi);
                session_release(session);
             }
             conn->authenticated = false;

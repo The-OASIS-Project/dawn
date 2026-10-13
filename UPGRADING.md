@@ -12,6 +12,22 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-12 — Music: a removed music source leaves the library; more files play
+
+**What changed.** If you clear the music folder setting, or turn Plex off, that source's tracks now
+leave the music library on the next scan. Before, they stayed listed but couldn't be played, and local
+copies hid the Plex copies of the same songs. Setting the source again brings its tracks back: Plex
+re-syncs in seconds, but the first scan of a local folder reads every file and can take several
+minutes.
+
+Also new: surround (5.1/7.1) FLAC and Ogg files play, downmixed to stereo; Plex tracks advance on
+their own at the end of a track; a track that can't be played during auto-advance is skipped (playback
+stops after five in a row, or if the Plex server can't be reached); and the end of each track, the
+queue's last seconds and pause/resume no longer lose about two seconds of audio in the browser.
+
+**What you need to do.** Nothing. Reload any open browser tabs after upgrading so they pick up the new
+player.
+
 ## 2026-10-11 — Memories about a person you name are found by any of their names
 
 **What changed.** When a question names someone ("What do you know about Sam?"), memory search now
