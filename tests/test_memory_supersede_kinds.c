@@ -475,6 +475,24 @@ void test_restore_reopens_through_a_merge(void) {
    TEST_ASSERT_TRUE(open_rel(older_rel));
 }
 
+/* A duplicate whose kept fact was later replaced: restoring it reopens what
+ * the replacement closed, as restoring the kept fact would. */
+void test_restore_reopens_what_a_later_replace_closed(void) {
+   const int64_t a = fact("Pat's bike is a Trek", 0);
+   const int64_t r = rel("owns_vehicle", "Trek", a);
+   const int64_t b = fact("Pat rides a Trek", 0);
+   const int64_t c = fact("Pat rides a Specialized now", 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(a, b, s_user));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_replace(b, c, s_user));
+   TEST_ASSERT_FALSE(open_rel(r));
+   TEST_ASSERT_EQUAL_INT64(c, closed_by(r));
+   memory_restore_result_t rr = { 0 };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_restore(s_user, a, &rr));
+   TEST_ASSERT_TRUE(rr.replaced);
+   TEST_ASSERT_EQUAL_INT64(a, rel_fact(r));
+   TEST_ASSERT_TRUE(open_rel(r));
+}
+
 /* A fact restored on its own owes nothing to the merge that moved it:
  * restoring that duplicate later leaves it current. */
 void test_restored_fact_drops_its_merge_mark(void) {
@@ -553,6 +571,7 @@ int main(void) {
    RUN_TEST(test_v104_long_chain);
    RUN_TEST(test_restore_takes_back_what_a_merge_moved);
    RUN_TEST(test_restore_reopens_through_a_merge);
+   RUN_TEST(test_restore_reopens_what_a_later_replace_closed);
    RUN_TEST(test_restored_fact_drops_its_merge_mark);
    RUN_TEST(test_correction_leaves_relations_open);
    RUN_TEST(test_forget_preview_matches_the_forget);

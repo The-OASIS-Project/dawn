@@ -39,7 +39,7 @@ player.
   when you say so ("my new number is ...", "I moved to ...", "I left Acme for ..."). Spouse, birthplace,
   birthday, favorite color, favorite food and main language still hold one value at a time.
 - **Restoring.** A memory merged into another, or replaced by a newer one, can be brought back: ask DAWN
-  ("what did you merge into that?", "bring that back"), use **Merged** in the Memory panel, or
+  ("what did you merge into that?", "bring that back"), use **Duplicates & old values** in the Memory panel, or
   `dawn-admin memory superseded --user <name>` and `dawn-admin memory restore --user <name> --fact-id
   <id>`. A restored duplicate takes back what it said. A merged duplicate is kept for `prune_superseded_days` (30 by default) after the merge; an
   older value a newer one replaced is kept as long as the newer one is.
@@ -62,7 +62,7 @@ player.
 many were duplicates. What a memory forgotten on an earlier version said about a relationship or contact
 detail can still come up: a relationship to someone or something goes when you delete their card in the
 Memory panel; a contact detail of yours stays until you tell DAWN a new one. If one you want is missing, find it with `dawn-admin memory superseded --user
-<name> --grep <text>` (or the Memory panel's **Merged**) and restore it.
+<name> --grep <text>` (or the Memory panel's **Duplicates & old values**) and restore it.
 
 ---
 

@@ -154,8 +154,10 @@ int memory_db_internal_reopen_rows_locked(int user_id,
    return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
-/* The relations @p keeper_id's value closed on @p fact_id (by it, or by a
- * fact since merged into it), reopened as reopen_rows_locked does. */
+/* The relations closed on @p fact_id by @p keeper_id or what it became: a
+ * fact up its chain (a merged fact's relations, moved to the fact kept, are
+ * closed by that fact's later replacement), or a fact merged into one of
+ * those.  Reopened as reopen_rows_locked does. */
 static int reopen_relations_locked(int user_id,
                                    int64_t fact_id,
                                    int64_t keeper_id,
@@ -163,10 +165,15 @@ static int reopen_relations_locked(int user_id,
                                    int *kept_closed) {
    sqlite3_stmt *sel = NULL;
    if (sqlite3_prepare_v2(s_db.db,
-                          "WITH RECURSIVE " MEMORY_MERGED_UNDER_CTE(
-                              "kept", "?3", "?1") " " MEMORY_REOPEN_SELECT
-                                                  "AND fact_id = ?2 AND closed_by_fact_id IN "
-                                                  "(SELECT id FROM kept)",
+                          "WITH RECURSIVE up(id, d) AS (SELECT ?3, 0 UNION SELECT "
+                          "f.superseded_by, u.d + 1 FROM memory_facts f JOIN up u ON f.id = "
+                          "u.id WHERE f.superseded_by IS NOT NULL AND +f.user_id = ?1 AND u.d < "
+                          "" MEMORY_CHAIN_DEPTH_SQL "), "
+                          "kept(id, d) AS (SELECT id, 0 FROM up UNION SELECT f.id, m.d + 1 FROM "
+                          "memory_facts f JOIN kept m ON f.superseded_by = m.id WHERE "
+                          "f.superseded_kind = " MEMORY_MERGED_SQL " AND +f.user_id = ?1 AND "
+                          "m.d < " MEMORY_CHAIN_DEPTH_SQL ") " MEMORY_REOPEN_SELECT
+                          "AND fact_id = ?2 AND closed_by_fact_id IN (SELECT id FROM kept)",
                           -1, &sel, NULL) != SQLITE_OK) {
       sqlite3_finalize(sel);
       return MEMORY_DB_FAILURE;
