@@ -665,14 +665,6 @@ citation_reinforcement_boost = 0.05
                                   # filtered. Drop to 0.10-0.20 if over-filtering,
                                   # push higher if weak fabrications persist.
                                   # Range: 0.0-1.0.
-# memory_text_minimal = true      # Compact memory_text rendering — strip per-fact
-                                  # metadata, demote source excerpts to a single
-                                  # global block. Graduated default-on (May 2026)
-                                  # after +0.98pp leader-comparable validation;
-                                  # re-confirmed post Phase 3 (Phase 4B of Mem0
-                                  # parity): -0.71pp without minimal. Cuts ~30-50%
-                                  # of memory_text bytes. Set false to restore
-                                  # verbose per-fact rendering.
 # temporal_filter_enabled = true  # Hard temporal filter on memory.search results
                                   # (parser-recognized date queries skip results
                                   # outside the resolved window). Graduated

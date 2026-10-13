@@ -368,12 +368,6 @@ void config_set_defaults(dawn_config_t *config) {
     * LoCoMo-blind (parser doesn't fire on cat-2 "what date" shape) but no
     * regression observed; complements (does not replace) soft temporal_weight. */
    config->memory.temporal_filter_enabled = true;
-   /* Minimal memory_text format — graduated to default-on (May 2026) after
-    * +0.98pp leader-comparable validation on n=1525.  Re-confirmed post
-    * Phase 3 specificity (Phase 4B of Mem0 parity): -0.71pp without minimal.
-    * Cuts ~30-50% of memory_text bytes by stripping per-fact metadata +
-    * demoting source excerpts to a single global block. */
-   config->memory.memory_text_minimal = true;
    config->memory.category_threshold = 0.25f;
    /* Entity-graph candidates: the facts about the entities a query names.
     * max_facts_per_query bounds fan-out for high-degree entities. */

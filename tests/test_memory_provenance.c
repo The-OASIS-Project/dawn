@@ -787,73 +787,6 @@ void test_summaries_get_sources_n_chunked_succeeds(void) {
    TEST_ASSERT_EQUAL(101, end[50]);
 }
 
-/* ------------------------------ preferences ------------------------------ */
-
-/* memory_db_pref_upsert returns MEMORY_DB_SUCCESS but does not surface the row
- * id; the test queries it back directly. */
-static int64_t pref_id_for_category(int user_id, const char *cat) {
-   sqlite3_stmt *stmt = NULL;
-   sqlite3_prepare_v2(s_db.db, "SELECT id FROM memory_preferences WHERE user_id=? AND category=?",
-                      -1, &stmt, NULL);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_text(stmt, 2, cat, -1, SQLITE_TRANSIENT);
-   int64_t id = 0;
-   if (sqlite3_step(stmt) == SQLITE_ROW)
-      id = sqlite3_column_int64(stmt, 0);
-   sqlite3_finalize(stmt);
-   return id;
-}
-
-void test_prefs_get_sources_roundtrip(void) {
-   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
-   memory_db_pref_upsert(1, "theme", "dark", 0.8f, "inferred", &prov);
-   int64_t pid = pref_id_for_category(1, "theme");
-   TEST_ASSERT_GREATER_THAN(0, pid);
-   int64_t conv[1] = { 0 }, start[1] = { 0 }, end[1] = { 0 };
-   int rc = memory_db_prefs_get_sources(1, &pid, 1, conv, start, end);
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL(10, conv[0]);
-   TEST_ASSERT_EQUAL(100, start[0]);
-   TEST_ASSERT_EQUAL(101, end[0]);
-}
-
-void test_prefs_get_sources_null_prov_returns_zero(void) {
-   memory_db_pref_upsert(1, "units", "metric", 0.8f, "inferred", NULL);
-   int64_t pid = pref_id_for_category(1, "units");
-   TEST_ASSERT_GREATER_THAN(0, pid);
-   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
-   int rc = memory_db_prefs_get_sources(1, &pid, 1, conv, start, end);
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL(0, conv[0]);
-}
-
-void test_prefs_get_sources_private_conv_filter(void) {
-   memory_provenance_t prov = { .conv_id = 20, .msg_id_start = 200, .msg_id_end = 200 };
-   memory_db_pref_upsert(1, "secret_pref", "x", 0.8f, "inferred", &prov);
-   int64_t pid = pref_id_for_category(1, "secret_pref");
-   TEST_ASSERT_GREATER_THAN(0, pid);
-   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
-   int rc = memory_db_prefs_get_sources(1, &pid, 1, conv, start, end);
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL(0, conv[0]);
-}
-
-void test_prefs_get_sources_n_chunked_succeeds(void) {
-   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
-   memory_db_pref_upsert(1, "chunked_test", "x", 0.8f, "inferred", &prov);
-   int64_t pid = pref_id_for_category(1, "chunked_test");
-   TEST_ASSERT_GREATER_THAN(0, pid);
-   int64_t ids[64];
-   int64_t conv[64] = { 0 }, start[64] = { 0 }, end[64] = { 0 };
-   for (int i = 0; i < 64; i++)
-      ids[i] = (i == 50) ? pid : (i + 1000);
-   int rc = memory_db_prefs_get_sources(1, ids, 64, conv, start, end);
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL(10, conv[50]);
-   TEST_ASSERT_EQUAL(100, start[50]);
-   TEST_ASSERT_EQUAL(101, end[50]);
-}
-
 /* Pin the existing facts batch reader against the same chunked-success
  * contract.  (Pre-Phase-B this silently truncated past ~32 IDs; B.1
  * introduced fail-closed; this fold-in re-expanded the public surface to any N
@@ -2121,10 +2054,6 @@ int main(void) {
    RUN_TEST(test_summaries_get_sources_null_prov_returns_zero);
    RUN_TEST(test_summaries_get_sources_private_conv_filter);
    RUN_TEST(test_summaries_get_sources_n_chunked_succeeds);
-   RUN_TEST(test_prefs_get_sources_roundtrip);
-   RUN_TEST(test_prefs_get_sources_null_prov_returns_zero);
-   RUN_TEST(test_prefs_get_sources_private_conv_filter);
-   RUN_TEST(test_prefs_get_sources_n_chunked_succeeds);
 
    /* Pin the facts batch reader against the same chunked-success contract. */
    RUN_TEST(test_facts_get_sources_n_chunked_succeeds);

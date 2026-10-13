@@ -743,23 +743,6 @@ typedef struct {
     * research synthesis).  Off-by-default for A/B; flip in
     * `config_defaults.c` after bench validation. */
    bool temporal_filter_enabled;
-   /* Minimal-format memory_text output.  When on, memory.search emits a
-    * Mem0/ENGRAM-style compact layout:
-    *   - "Memories:" / "Preferences:" / "Conversation summaries:" headers
-    *     replace "FACTS (N):" / "PREFERENCES:" / "CONVERSATION SUMMARIES (K):"
-    *   - Per-fact [ID:M], confidence, time-ago annotations stripped
-    *   - Per-fact source excerpts demoted to a single "Source evidence:"
-    *     block at the end (top-3 excerpts, one per fact)
-    *   - ENTITIES/RELATIONS graph block omitted from the generator surface
-    *
-    * Empirical basis: ENGRAM @ 916 tokens beats Mem0 @ 7K on LongMemEval
-    * SOTA (2026 research synthesis).  Goal: cut memory_text from ~3K tokens
-    * to ~2K, reducing the LLM's "lost in the middle" surface area.
-    *
-    * Off-by-default for A/B.  Earlier v4 attempt regressed -1pp on 28-Q
-    * sample with a smaller cut (14.8% size reduction); v5 is the more
-    * aggressive shape the research synthesis recommended. */
-   bool memory_text_minimal;
    /* Category backfill — cosine similarity above which a fact is assigned to a
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */

@@ -59,7 +59,7 @@
 #define PROV_ID_MAX_CHARS 21
 
 /* The fixed SELECT/JOIN prefix and the closing ")" must fit alongside N IDs.
- * Measured prefix sizes (longest table-name variant = "memory_preferences"):
+ * Measured with "memory_preferences" (longer than any table name read now):
  *   SELECT/JOIN/WHERE/AND ... ≈ 277 bytes; closing ")" + NUL ≈ 2 bytes.
  * Reserve 320 bytes (= 277 + 43 headroom) so a future variant that grows the
  * format string by a few %s still fits.  If you change build_in_clause's
@@ -152,7 +152,7 @@ int memory_db_fact_get_source(int64_t fact_id,
 
 static int build_in_clause(char *sql,
                            size_t sql_size,
-                           const char *tbl_alias, /* "f", "r", "s", or "p" */
+                           const char *tbl_alias, /* "f", "r" or "s" */
                            const char *tbl_name,  /* table name (string literal) */
                            const int64_t *ids,
                            int n) {
@@ -300,16 +300,6 @@ int memory_db_summaries_get_sources(int user_id,
                                     int64_t *out_starts,
                                     int64_t *out_ends) {
    return batch_get_sources(user_id, "s", "memory_summaries", summary_ids, n, out_conv_ids,
-                            out_starts, out_ends);
-}
-
-int memory_db_prefs_get_sources(int user_id,
-                                const int64_t *pref_ids,
-                                int n,
-                                int64_t *out_conv_ids,
-                                int64_t *out_starts,
-                                int64_t *out_ends) {
-   return batch_get_sources(user_id, "p", "memory_preferences", pref_ids, n, out_conv_ids,
                             out_starts, out_ends);
 }
 
