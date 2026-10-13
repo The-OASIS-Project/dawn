@@ -223,16 +223,9 @@ static int fact_search_hybrid_impl(int user_id,
          kw_ids[i] = kw_facts[i].id;
 
       embedding_search_result_t hybrid[HYBRID_FETCH_LIMIT];
-      int hybrid_count;
-      if (g_config.memory.rrf_enabled) {
-         hybrid_count = memory_embeddings_rrf_search_ex(user_id, query, query_emb, query_norm,
-                                                        kw_ids, kw_scores, kw_count, kw_score_denom,
-                                                        hybrid, work_cap);
-      } else {
-         hybrid_count = memory_embeddings_hybrid_search_ex(user_id, query, query_emb, query_norm,
-                                                           kw_ids, kw_scores, kw_count,
-                                                           kw_score_denom, hybrid, work_cap);
-      }
+      int hybrid_count = memory_embeddings_hybrid_search_ex(user_id, query, query_emb, query_norm,
+                                                            kw_ids, kw_scores, kw_count,
+                                                            kw_score_denom, hybrid, work_cap);
       if (hybrid_count > 0) {
          int produced = 0;
          for (int h = 0; h < hybrid_count && produced < max; h++) {

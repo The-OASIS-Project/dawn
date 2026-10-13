@@ -173,6 +173,25 @@ static void warn_unknown_keys(toml_table_t *table,
    }
 }
 
+/* Keys that once had a meaning stay known, so an older dawn.toml that sets one
+ * gets a note instead of a typo warning; the value is ignored, and the next
+ * settings save drops it from the file.  Logs each key present, once per
+ * process (*told). */
+static void note_retired_keys(toml_table_t *table,
+                              const char *section,
+                              const char *const *keys,
+                              const char *why,
+                              bool *told) {
+   if (!table || *told)
+      return;
+   for (int i = 0; keys[i] != NULL; i++) {
+      if (toml_key_exists(table, keys[i])) {
+         *told = true;
+         OLOG_WARNING("[%s] %s is retired and ignored: %s", section, keys[i], why);
+      }
+   }
+}
+
 /* =============================================================================
  * Section Parsers
  * ============================================================================= */
@@ -1389,6 +1408,12 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                               NULL };
       warn_unknown_keys(embeddings, "memory.embeddings", emb_keys);
 
+      static const char *const retired_search_keys[] = { "rrf_enabled", NULL };
+      static bool s_retired_search_told;
+      note_retired_keys(embeddings, "memory.embeddings", retired_search_keys,
+                        "the search path it chose scored lower and was removed (see UPGRADING.md)",
+                        &s_retired_search_told);
+
       PARSE_STRING(embeddings, "provider", config->embedding_provider);
       PARSE_STRING(embeddings, "model", config->embedding_model);
       PARSE_STRING(embeddings, "endpoint", config->embedding_endpoint);
@@ -1396,7 +1421,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(embeddings, "vector_weight", config->embedding_vector_weight);
       PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_BOOL(embeddings, "temporal_filter_enabled", config->temporal_filter_enabled);
-      PARSE_BOOL(embeddings, "rrf_enabled", config->rrf_enabled);
       PARSE_BOOL(embeddings, "memory_text_minimal", config->memory_text_minimal);
       PARSE_BOOL(embeddings, "bm25_enabled", config->bm25_enabled);
       PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);

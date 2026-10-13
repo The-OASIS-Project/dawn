@@ -745,15 +745,6 @@ typedef struct {
     * research synthesis).  Off-by-default for A/B; flip in
     * `config_defaults.c` after bench validation. */
    bool temporal_filter_enabled;
-   /* Reciprocal Rank Fusion retrieval.  When on, hybrid search builds three
-    * independent rank lists (semantic cosine, keyword multi-token, temporal
-    * proximity when applicable) over the same candidate pool and scores
-    * each fact by RRF: score = Σ 1/(60 + rank_i).  Replaces the weighted-
-    * sum composite (kw_weight * kw + vec_weight * cosine + temporal_weight
-    * * proximity).  Empirical basis: Mem0 v2 + Hindsight TEMPR both cite
-    * RRF over parallel channels as their primary retrieval lever.
-    * Off-by-default for A/B against the existing composite. */
-   bool rrf_enabled;
    /* Minimal-format memory_text output.  When on, memory.search emits a
     * Mem0/ENGRAM-style compact layout:
     *   - "Memories:" / "Preferences:" / "Conversation summaries:" headers

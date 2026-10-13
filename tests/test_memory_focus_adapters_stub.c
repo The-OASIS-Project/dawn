@@ -561,32 +561,13 @@ bool memory_filter_check(const char *text) {
 }
 
 /* =============================================================================
- * Phase 1A graph retrieval + RRF + Phase 2 Step 1 stubs (May 2026 ships).
+ * Graph retrieval and query-rescoring stubs.
  *
  * Adapter tests don't exercise these paths — they exercise the upstream
  * adapter dispatch + focus composition.  No-op stubs return SUCCESS / 0
  * with `count_out = 0` so the linker is satisfied and any path that
  * accidentally hits these gets a quiet empty result rather than a crash.
  * ============================================================================= */
-
-int memory_embeddings_rrf_search(int user_id,
-                                 const char *query,
-                                 const int64_t *keyword_facts,
-                                 const int *keyword_scores,
-                                 int keyword_count,
-                                 int token_count,
-                                 embedding_search_result_t *out_results,
-                                 int max_results) {
-   (void)user_id;
-   (void)query;
-   (void)keyword_facts;
-   (void)keyword_scores;
-   (void)keyword_count;
-   (void)token_count;
-   (void)out_results;
-   (void)max_results;
-   return 0;
-}
 
 int memory_graph_extract_seed_entities(int user_id,
                                        const char *query,
@@ -765,22 +746,6 @@ int memory_embeddings_hybrid_search_ex(int user_id,
    (void)query_norm;
    return memory_embeddings_hybrid_search(user_id, query, keyword_facts, keyword_scores,
                                           keyword_count, token_count, out_results, max_results);
-}
-
-int memory_embeddings_rrf_search_ex(int user_id,
-                                    const char *query,
-                                    const float *query_emb,
-                                    float query_norm,
-                                    const int64_t *keyword_facts,
-                                    const int *keyword_scores,
-                                    int keyword_count,
-                                    int token_count,
-                                    embedding_search_result_t *out_results,
-                                    int max_results) {
-   (void)query_emb;
-   (void)query_norm;
-   return memory_embeddings_rrf_search(user_id, query, keyword_facts, keyword_scores, keyword_count,
-                                       token_count, out_results, max_results);
 }
 
 /* Stemmer stub: words pass through unstemmed.  memory_terms (entity name

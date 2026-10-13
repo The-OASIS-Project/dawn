@@ -368,14 +368,6 @@ void config_set_defaults(dawn_config_t *config) {
     * LoCoMo-blind (parser doesn't fire on cat-2 "what date" shape) but no
     * regression observed; complements (does not replace) soft temporal_weight. */
    config->memory.temporal_filter_enabled = true;
-   /* RRF retrieval — formally dead-letter (May 17, 2026).  Original 2026-05-15
-    * bench showed -3.7pp regression vs composite scorer.  Re-tested post Phase 1
-    * BM25 + Phase 3 specificity rules (Phase 4A of Mem0 parity program): still
-    * -0.58pp regressive.  Flag kept off-by-default; code stays behind the flag
-    * for operator override but is no longer "experimental, may re-enable" —
-    * the parallel-channel RRF design does not compose with DAWN's entity-graph
-    * backbone.  See docs/MEM0_ARCHITECTURAL_PARITY.md §Phase 4A outcome. */
-   config->memory.rrf_enabled = false;
    /* Minimal memory_text format — graduated to default-on (May 2026) after
     * +0.98pp leader-comparable validation on n=1525.  Re-confirmed post
     * Phase 3 specificity (Phase 4B of Mem0 parity): -0.71pp without minimal.

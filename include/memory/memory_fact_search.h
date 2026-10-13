@@ -114,8 +114,7 @@ int memory_fact_search_hybrid(int user_id,
 
 /**
  * @brief Variant of memory_fact_search_hybrid that threads a pre-computed
- *        query embedding through to memory_embeddings_hybrid_search_ex /
- *        memory_embeddings_rrf_search_ex.
+ *        query embedding through to memory_embeddings_hybrid_search_ex.
  *
  * Efficiency M3 (May 2026): callers that have already embedded the query
  * (e.g., memory_search_execute, which also feeds the embedding into the

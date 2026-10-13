@@ -679,15 +679,6 @@ citation_reinforcement_boost = 0.05
                                   # parity bench validation: +2.74pp leader-
                                   # comparable on fresh LoCoMo n=1536. Set to
                                   # false to revert to the legacy LIKE path.
-# rrf_enabled = false             # Reciprocal Rank Fusion (parallel-channel
-                                  # alternative to the weighted-sum composite
-                                  # scorer). FORMALLY DEAD-LETTER (May 17, 2026):
-                                  # original 2026-05-15 bench -3.7pp; re-tested
-                                  # post Phase 1 BM25 + Phase 3 specificity rules
-                                  # still -0.58pp. Code stays behind the flag for
-                                  # operator override but the design does not
-                                  # compose with DAWN's entity-graph backbone.
-                                  # Do not enable for production.
 # memory_text_minimal = true      # Compact memory_text rendering — strip per-fact
                                   # metadata, demote source excerpts to a single
                                   # global block. Graduated default-on (May 2026)

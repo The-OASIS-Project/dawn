@@ -869,7 +869,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_DOUBLE(section, "temporal_weight", config->memory.temporal_weight);
       JSON_TO_CONFIG_BOOL(section, "temporal_filter_enabled",
                           config->memory.temporal_filter_enabled);
-      JSON_TO_CONFIG_BOOL(section, "rrf_enabled", config->memory.rrf_enabled);
       JSON_TO_CONFIG_BOOL(section, "memory_text_minimal", config->memory.memory_text_minimal);
       JSON_TO_CONFIG_BOOL(section, "bm25_enabled", config->memory.bm25_enabled);
       JSON_TO_CONFIG_DOUBLE(section, "category_threshold", config->memory.category_threshold);
