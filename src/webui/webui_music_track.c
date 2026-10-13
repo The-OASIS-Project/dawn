@@ -381,6 +381,8 @@ music_advance_t webui_music_advance(session_music_state_t *state,
          }
          pthread_mutex_unlock(&state->state_mutex);
          pthread_mutex_unlock(&uq->queue_mutex);
+         /* Nothing follows, so a prefetch (its track since removed) won't be used */
+         prefetch_drop(state);
          if (stop_error) {
             webui_music_send_error(conn, "DECODE_ERROR", stop_error);
          }

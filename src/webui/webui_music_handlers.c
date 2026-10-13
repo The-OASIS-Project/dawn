@@ -1068,15 +1068,41 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
    bool removing_current = in_range && index0 == state->queue_index &&
                            (state->decoder || state->pending_path[0] || state->playing);
    bool was_playing = state->playing && !state->paused;
+   bool gone = false; /* another tab or tool call removed it meanwhile */
+   char gone_next[WEBUI_MUSIC_PATH_MAX] = { 0 };
    if (removing_current) {
+      int asked_index = index0;
+      char target[WEBUI_MUSIC_PATH_MAX];
+      snprintf(target, sizeof(target), "%s", uq->queue[index0].path);
       pthread_mutex_unlock(&state->state_mutex);
       pthread_mutex_unlock(&uq->queue_mutex);
-      /* Unload it before the queue moves under it (the stream thread reads
-       * it); with the thread stopped, nothing moves the index meanwhile */
+      /* Unload it before the queue moves under it (the stream thread reads it) */
       webui_music_clear_track(state);
       pthread_mutex_lock(&uq->queue_mutex);
       pthread_mutex_lock(&state->state_mutex);
-      in_range = index0 < uq->queue_length;
+      /* The shared queue may have changed while it was unlocked: remove the
+       * entry by what it is, not where it was (the copy nearest its old place,
+       * if the path is queued twice) */
+      if (index0 >= uq->queue_length || strcmp(uq->queue[index0].path, target) != 0) {
+         int was = index0;
+         index0 = -1;
+         for (int i = 0; i < uq->queue_length; i++) {
+            if (strcmp(uq->queue[i].path, target) == 0 &&
+                (index0 < 0 || abs(i - was) < abs(index0 - was))) {
+               index0 = i;
+            }
+         }
+      }
+      in_range = index0 >= 0;
+      gone = !in_range;
+      if (in_range) {
+         state->queue_index = index0; /* the track that takes its place plays on */
+      } else if (was_playing && state->queue_index == asked_index &&
+                 state->queue_index < uq->queue_length) {
+         /* Removed elsewhere meanwhile, and already unloaded here: play on with
+          * the track now in its place (unless a sibling's removal moved us) */
+         snprintf(gone_next, sizeof(gone_next), "%s", uq->queue[state->queue_index].path);
+      }
    }
 
    char next_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
@@ -1109,9 +1135,12 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
       music_queue_db_save(uq->user_id, uq); /* off state_mutex: the stream thread takes it */
    }
    pthread_mutex_unlock(&uq->queue_mutex);
-   int rc = in_range ? SUCCESS : FAILURE;
+   int rc = in_range || gone ? SUCCESS : FAILURE;
+   if (gone_next[0] && webui_music_start_playback(state, gone_next) != SUCCESS) {
+      webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+   }
 
-   if (rc == SUCCESS) {
+   if (in_range) {
       /* Adjust sibling sessions' queue_index (after releasing queue_mutex) */
       remove_adjust_ctx_t rctx = { .removed_index = index0, .exclude = state->conn };
       webui_for_each_conn_by_user(uq->user_id, adjust_index_on_remove, &rctx);

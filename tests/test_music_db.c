@@ -443,6 +443,11 @@ static void test_query_take_source(void) {
    TEST_ASSERT_EQUAL_STRING(" abbey", out);
    TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_LOCAL, src);
 
+   /* Punctuation before the word is a boundary; a letter or '_' isn't */
+   TEST_ASSERT_TRUE(music_query_take_source("Beatles,source:plex", out, sizeof(out), &src));
+   TEST_ASSERT_EQUAL_STRING("Beatles,", out);
+   TEST_ASSERT_FALSE(music_query_take_source("my_source:plex", out, sizeof(out), &src));
+
    TEST_ASSERT_FALSE(music_query_take_source("abbey road", out, sizeof(out), &src));
    TEST_ASSERT_FALSE(music_query_take_source("source:plexx abbey", out, sizeof(out), &src));
    TEST_ASSERT_FALSE(music_query_take_source("source: plex", out, sizeof(out), &src));

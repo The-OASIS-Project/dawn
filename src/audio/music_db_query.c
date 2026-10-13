@@ -223,7 +223,9 @@ bool music_query_take_source(const char *text, char *out, size_t cap, music_sour
    }
    const size_t word_len = sizeof(MUSIC_QUERY_SOURCE_WORD) - 1;
    for (const char *p = text; *p; p++) {
-      bool word_start = p == text || isspace((unsigned char)p[-1]) || p[-1] == '(';
+      /* Any non-word character before it ("Beatles,source:plex"), not a
+       * letter, digit or '_' ("xsource:plex" is another word) */
+      bool word_start = p == text || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
       if (!word_start || strncasecmp(p, MUSIC_QUERY_SOURCE_WORD, word_len) != 0) {
          continue;
       }

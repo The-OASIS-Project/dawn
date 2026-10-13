@@ -278,16 +278,18 @@ static char *apply_items_and_report(session_music_state_t *state,
    }
 
    /* Replacing with nothing would empty the queue for a list that matched
-    * nothing: leave it (and what's playing) as it is */
+    * nothing: leave it (and what's playing) as it is.  A failed apply left
+    * the queue untouched, and its outcomes unset: nothing was added. */
+   bool applied = true;
    if (k > 0 || !replace) {
-      webui_music_queue_apply_paths(state, pptr, k, replace, oc);
+      applied = webui_music_queue_apply_paths(state, pptr, k, replace, oc) == SUCCESS;
    }
 
    strbuf_t added, dup;
    strbuf_init(&added, 256);
    strbuf_init(&dup, 128);
    int added_count = 0;
-   for (int j = 0; j < k; j++) {
+   for (int j = 0; applied && j < k; j++) {
       if (oc[j] == QUEUE_APPLY_ADDED) {
          strbuf_appendf(&added, "%s%s", added.len ? ", " : "", disp[j]);
          added_count++;
@@ -313,6 +315,9 @@ static char *apply_items_and_report(session_music_state_t *state,
    if (dropped_over_cap > 0) {
       strbuf_appendf(&out, " %d item%s beyond the %d-track queue limit were skipped.",
                      dropped_over_cap, dropped_over_cap == 1 ? "" : "s", WEBUI_MUSIC_MAX_QUEUE);
+   }
+   if (!applied) {
+      strbuf_appendf(&out, " The queue couldn't be updated.");
    }
 
    if (added_count_out) {
@@ -413,7 +418,9 @@ static int music_tool_locked(ws_connection_t *conn,
                               tool_outcome_phrase(outcome));
                strbuf_appendf(&sb, " Use 'enqueue' to add without clearing.");
             } else {
-               strbuf_appendf(&sb, "%s Nothing matched, so the queue and playback are unchanged.",
+               /* Marked: nothing changed, as for the local speaker */
+               strbuf_appendf(&sb,
+                              TOOL_RESULT_ERROR_MARK "%s The queue and playback are unchanged.",
                               report ? report : "");
             }
             append_state_footer(&sb, state);
@@ -467,7 +474,8 @@ static int music_tool_locked(ws_connection_t *conn,
          free(results);
          if (result_out) {
             char buf[WEBUI_MUSIC_PATH_MAX + 64];
-            snprintf(buf, sizeof(buf), "No music found matching '%s'", base_query);
+            snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "No music found matching '%s'",
+                     base_query);
             *result_out = strdup(buf);
          }
          return FAILURE;
