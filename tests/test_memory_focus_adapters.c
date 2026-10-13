@@ -720,7 +720,6 @@ static void test_fact_adapter_adds_named_entity_facts(void) {
    s_mock.graph_scores[1] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL; /* no embedding */
    s_mock.graph_count = 2;
    g_config.memory.graph_retrieval.enabled = true;
-   g_config.memory.graph_retrieval.use_query_scoring = true;
    g_config.memory.graph_retrieval.max_facts_per_query = 30;
    g_config.memory.search_score_floor = 0.30f;
 

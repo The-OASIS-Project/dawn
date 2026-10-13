@@ -1058,7 +1058,6 @@ int memory_embeddings_hybrid_search(int user_id,
 int memory_embeddings_rescore_against_query(int user_id,
                                             const float *query_emb,
                                             float query_norm,
-                                            float entity_bonus,
                                             const int64_t *fact_ids,
                                             int fact_count,
                                             float *out_scores) {
@@ -1073,13 +1072,7 @@ int memory_embeddings_rescore_against_query(int user_id,
     * found in the per-user embedding cache get a real score below.
     * Callers MUST treat negative scores as "this fact could not be
     * query-scored" and skip them — DO NOT merge sentinel-scored facts
-    * into the LLM-facing pool.
-    *
-    * Prior implementations fell back to `entity_bonus` for un-scoreable
-    * facts, which silently dumped low-quality candidates into the merge.
-    * Architecture-review finding (May 14, 2026): that fallback conflated
-    * "I have no evidence" with "I have evidence this is irrelevant" and
-    * was load-bearing on the Step 1 regression. */
+    * into the LLM-facing pool: no evidence is not evidence of relevance. */
    for (int i = 0; i < fact_count; i++)
       out_scores[i] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL;
 
@@ -1117,7 +1110,7 @@ int memory_embeddings_rescore_against_query(int user_id,
       const float cosine = memory_embeddings_cosine_with_norms(
           query_emb, s_cache.embeddings + (size_t)found_idx * (size_t)dims, dims, query_norm,
           s_cache.norms[found_idx]);
-      out_scores[i] = vec_weight * cosine + entity_bonus;
+      out_scores[i] = vec_weight * cosine;
    }
 
    pthread_mutex_unlock(&s_cache.mutex);

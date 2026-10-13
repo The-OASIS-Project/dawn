@@ -784,34 +784,11 @@ typedef struct {
     * at rank 50+.  See memory_graph_retrieval.h for the pipeline. */
    struct {
       bool enabled; /* default true; disable to A/B against pure hybrid */
-      /* Per-fact score assigned to graph-anchored candidates.  Default 0.4
-       * sits above the 0.30 search_score_floor (graph candidates survive
-       * the floor by construction) and below typical strong hybrid hits
-       * (~0.5-0.7 cosine + keyword), so the merge keeps graph candidates
-       * present without dominating the ranking.  Bench-tune. */
-      float entity_grounding_bonus;
       /* Total fan-out cap across all seed entities per query.  Top-degree
        * LoCoMo entities have 50-80 incoming + outgoing relations; 30 is
        * comfortable headroom for the typical 1-3 seeds while bounded
        * against pathological multi-entity queries. */
       int max_facts_per_query;
-      /* Phase 2 Step 1 (May 14, 2026): query-aware scoring of graph
-       * candidates.  When true (default), graph candidates are re-scored
-       * against the query using cosine(query, fact) + entity_bonus.
-       * Replaces the flat entity_grounding_bonus that was disconnected
-       * from query content.  Set false to revert to flat-bonus scoring
-       * for config-toggle ablation.
-       *
-       * See docs/PHASE_2_GRAPH_RETRIEVAL_DESIGN.md §2C Step 1. */
-      bool use_query_scoring;
-      /* Small additive bonus applied to query-scored graph candidates
-       * (when use_query_scoring=true).  Distinguishes graph-rescued
-       * candidates from pure-hybrid candidates at otherwise-tied scores.
-       * Default 0.10 — small enough that hybrid relevance dominates,
-       * large enough that an entity-grounded near-tie wins.  Range
-       * [0.0, 1.0]; 0.0 reproduces pure-hybrid scoring on the graph
-       * candidate pool (no graph preference). */
-      float entity_bonus;
    } graph_retrieval;
 
    /* Memory-tool search score floor.  Drops facts whose hybrid score

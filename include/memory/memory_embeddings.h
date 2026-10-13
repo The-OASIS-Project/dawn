@@ -327,18 +327,16 @@ int memory_embeddings_hybrid_search_ex(int user_id,
 #define MEMORY_EMBEDDINGS_RESCORE_SENTINEL (-1.0f)
 
 /**
- * @brief Phase 2 Step 1: re-score a caller-supplied list of facts against a
- *        pre-computed query embedding using cosine similarity + an optional
- *        additive bonus.
+ * @brief Score a caller-supplied list of facts against a pre-computed query
+ *        embedding by cosine similarity.
  *
- * Used by graph retrieval to apply query-relevance scoring to entity-bounded
- * candidate facts, replacing the legacy flat `entity_grounding_bonus` that
- * was disconnected from query content.
+ * Used by graph retrieval, so entity-grounded candidates compete with hybrid
+ * hits on the same query-relevance scale.
  *
  * Scoring formula (per fact):
  *
  *   if fact_id is in the per-user embedding cache:
- *     score = vec_weight * cosine(query_emb, fact_emb) + entity_bonus
+ *     score = vec_weight * cosine(query_emb, fact_emb)
  *   else:
  *     score = MEMORY_EMBEDDINGS_RESCORE_SENTINEL  // caller MUST drop
  *
@@ -358,9 +356,8 @@ int memory_embeddings_hybrid_search_ex(int user_id,
  *
  * **Caller contract**: facts whose returned score equals
  * `MEMORY_EMBEDDINGS_RESCORE_SENTINEL` MUST be dropped from the merged
- * pool.  Earlier versions silently substituted `entity_bonus` for such
- * facts, which produced low-quality LLM-facing candidates and caused a
- * -9pp Phase 2 Step 1 regression (May 14, 2026 architecture audit).
+ * pool: a fact with no embedding has no evidence of relevance, and
+ * scoring it anyway let low-quality candidates reach the model.
  *
  * If @p query_emb is NULL or the embedding engine is unavailable, EVERY
  * fact gets the sentinel — the caller should treat this as "graph
@@ -372,7 +369,6 @@ int memory_embeddings_hybrid_search_ex(int user_id,
  * @param query_emb Caller-supplied query embedding (size must be
  *                  `embedding_engine_dims()`).  NULL → all sentinels.
  * @param query_norm Pre-computed L2 norm of @p query_emb (saves recomputation).
- * @param entity_bonus Caller-supplied additive bonus (typically 0.0)
  * @param fact_ids Caller-allocated array of fact IDs to score (in)
  * @param fact_count Number of facts
  * @param out_scores Caller-allocated parallel array (out) — overwritten;
@@ -382,7 +378,6 @@ int memory_embeddings_hybrid_search_ex(int user_id,
 int memory_embeddings_rescore_against_query(int user_id,
                                             const float *query_emb,
                                             float query_norm,
-                                            float entity_bonus,
                                             const int64_t *fact_ids,
                                             int fact_count,
                                             float *out_scores);

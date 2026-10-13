@@ -383,31 +383,10 @@ void config_set_defaults(dawn_config_t *config) {
     * and docs/MEM0_ARCHITECTURAL_PARITY.md §Phase 1 outcome. */
    config->memory.bm25_enabled = true;
    config->memory.category_threshold = 0.25f;
-   /* Graph-retrieval Phase 2.b — entity-graph candidate source.  Default-on;
-    * entity_grounding_bonus 0.4 sits between the 0.30 search floor and
-    * typical strong hybrid hits; max_facts_per_query 30 bounds fan-out for
-    * high-degree entities. */
+   /* Entity-graph candidates: the facts about the entities a query names.
+    * max_facts_per_query bounds fan-out for high-degree entities. */
    config->memory.graph_retrieval.enabled = true;
-   config->memory.graph_retrieval.entity_grounding_bonus = 0.40f;
    config->memory.graph_retrieval.max_facts_per_query = 30;
-   /* Phase 2 Step 1: query-aware scoring of graph candidates.
-    * Default ON — replaces the flat entity_grounding_bonus with
-    * vec_weight * cosine(query, fact) + entity_bonus.  Toggle false
-    * for ablation. */
-   config->memory.graph_retrieval.use_query_scoring = true;
-   /* entity_bonus default 0.0 (May 14, 2026 architecture review):
-    * applied asymmetrically (only to facts arriving via the graph
-    * branch) it acted as an unearned thumb-on-the-scale that promoted
-    * entity-mentioning facts over equally-relevant facts that just
-    * didn't lexically name the seed entity.  Cat-3 ("inference")
-    * questions are exactly the case where the answer often doesn't
-    * repeat the seed, so the bonus regressed cat-3 by -10pp.  Keep
-    * the knob; default 0.0 means "use cosine alone for scoring," i.e.
-    * symmetric with hybrid candidates that share the same vec_weight
-    * scale.  Set >0 only as an experimental knob to test whether
-    * boosting graph candidates symmetrically (require Phase 1B
-    * patch first) adds value. */
-   config->memory.graph_retrieval.entity_bonus = 0.0f;
 
    /* Memory-tool search score floor: drops marginal-cosine hits before they
     * reach the LLM.  0.30 sits at the natural kw_weight boundary — pure

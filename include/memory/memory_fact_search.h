@@ -184,12 +184,12 @@ int memory_search_apply_score_floor(memory_fact_t *facts,
  * injection.  Seeds are the entities the query names (any of their names,
  * aliases included) and its capitalized words that are an entity's exact
  * name; each seed contributes the facts about it and the facts its
- * relations came from (memory_graph_expand_fact_linked).  With
- * graph_retrieval.use_query_scoring each is rescored as vec_weight * cosine
- * + entity_bonus, and facts without an embedding are dropped.  Nothing when
- * graph_retrieval is off.
+ * relations came from (memory_graph_expand_fact_linked).  Each is scored
+ * as vec_weight * cosine with the query, and facts without an embedding
+ * are dropped.  Nothing when graph_retrieval is off.
  *
- * @param query_emb   The query's embedding, or NULL (no rescoring possible)
+ * @param query_emb   The query's embedding, or NULL (nothing can be scored,
+ *                    so no candidates)
  * @param for_context For a turn's context: the user's own entity and the
  *                    assistant's are not seeds (every turn implies them)
  * @param out_facts  Caller-allocated, MEMORY_GRAPH_INTERMEDIATE_CAP entries

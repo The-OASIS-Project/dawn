@@ -713,26 +713,11 @@ citation_reinforcement_boost = 0.05
 # Entity-graph candidate retrieval for memory.search and per-turn context:
 # the facts about the people and things a query names (any of their names)
 # or mentions by exact name, and the facts their relations came from.
-# Query-aware scoring (May 14, 2026) re-scores them against the query.
+# Each is scored by its similarity to the query, like any other search hit.
 # enabled = true                   # Default-on.  Off also stops facts about a
                                    # named person reaching per-turn context.
-# entity_grounding_bonus = 0.40    # Legacy flat score for graph candidates when
-                                   # use_query_scoring=false.  Range [0.0, 1.0].
 # max_facts_per_query = 30         # Total fan-out cap across all seeds per query.
                                    # Range [1, 200].
-# use_query_scoring = true         # Phase 2 Step 1: re-score graph candidates
-                                   # against the query (vec_weight*cosine +
-                                   # entity_bonus) instead of using the flat
-                                   # entity_grounding_bonus.  Default true.
-                                   # Set false to revert to flat-bonus scoring
-                                   # for config-toggle ablation.
-# entity_bonus = 0.0               # Additive bonus applied to query-scored graph
-                                   # candidates on top of vec_weight*cosine.  Default
-                                   # 0.0 — the bonus was found to act as an asymmetric
-                                   # thumb-on-scale (only graph-branch facts received
-                                   # it, displacing equally-relevant hybrid hits).
-                                   # Experimental knob; set >0 to test symmetric-
-                                   # bonus designs only.  Range [0.0, 1.0].
 
 [memory.recovery]
 # Re-runs memory extraction on conversations whose last_extracted_msg_count

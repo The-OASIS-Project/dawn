@@ -590,17 +590,13 @@ int memory_graph_expand_fact_linked(int user_id,
                                     const int64_t *seed_entity_ids,
                                     int seed_count,
                                     memory_fact_t *out_facts,
-                                    float *out_scores,
                                     int max,
                                     int *out_count) {
    (void)user_id;
    (void)seed_entity_ids;
    int n = 0;
-   for (int i = 0; i < s_mock.graph_count && n < max && seed_count > 0; i++) {
-      out_facts[n] = s_mock.graph_facts[i];
-      out_scores[n] = 0.4f;
-      n++;
-   }
+   for (int i = 0; i < s_mock.graph_count && n < max && seed_count > 0; i++)
+      out_facts[n++] = s_mock.graph_facts[i];
    if (out_count != NULL)
       *out_count = n;
    return SUCCESS;
@@ -650,14 +646,12 @@ int memory_db_entity_update_embedding(int64_t entity_id,
 int memory_embeddings_rescore_against_query(int user_id,
                                             const float *query_emb,
                                             float query_norm,
-                                            float entity_bonus,
                                             const int64_t *fact_ids,
                                             int fact_count,
                                             float *out_scores) {
    (void)user_id;
    (void)query_emb;
    (void)query_norm;
-   (void)entity_bonus;
    if (out_scores != NULL) {
       for (int i = 0; i < fact_count; i++) {
          out_scores[i] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL;

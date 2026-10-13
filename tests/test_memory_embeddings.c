@@ -214,47 +214,41 @@ static void test_edge_cases(void) {
 }
 
 /* ============================================================================
- * Test: memory_embeddings_rescore_against_query (Phase 2 Step 1 contract)
+ * Test: memory_embeddings_rescore_against_query contract
  * ============================================================================
  *
  * These tests cover the input-validation + sentinel-contract surface of the
  * rescore primitive.  The cache-hit scoring path requires a populated
  * s_cache (which depends on the embedding engine and auth_db) and is
  * exercised via the LoCoMo bench rather than these unit tests.  What we CAN
- * unit-test is the contract that prevents the prior -9pp regression:
+ * unit-test is the contract that keeps unscoreable facts out:
  *
  *   1. NULL out_scores or fact_ids → FAILURE.
  *   2. fact_count == 0 → SUCCESS, no scores touched.
  *   3. NULL query_emb → every score gets the sentinel (caller drops).
  *   4. query_norm too small (< 1e-6f) → every score gets the sentinel.
  *   5. Sentinel is < 0.0f and distinct from any legitimate score
- *      (vec_weight in [0,1] × cosine in [0,1] + entity_bonus in [0,1] is
- *      always >= 0.0).
- *
- * The audit caught two bugs the contract design now prevents:
- *  - asymmetric entity_bonus on cache-miss facts (now: sentinel, not bonus)
- *  - silent fallback to bonus on NULL/missing embedding (now: explicit sentinel)
+ *      (vec_weight in [0,1] × cosine).
  */
 
 static void test_rescore_null_out_scores_returns_failure(void) {
    int64_t fact_ids[] = { 1, 2, 3 };
    int rc = memory_embeddings_rescore_against_query(/*user_id*/ 1, /*query_emb*/ NULL,
-                                                    /*query_norm*/ 0.0f, /*entity_bonus*/ 0.0f,
-                                                    fact_ids, 3, /*out_scores*/ NULL);
+                                                    /*query_norm*/ 0.0f, fact_ids, 3,
+                                                    /*out_scores*/ NULL);
    TEST_ASSERT_EQUAL_INT(1 /* FAILURE */, rc);
 }
 
 static void test_rescore_null_fact_ids_returns_failure(void) {
    float scores[3];
-   int rc = memory_embeddings_rescore_against_query(1, NULL, 0.0f, 0.0f, /*fact_ids*/ NULL, 3,
-                                                    scores);
+   int rc = memory_embeddings_rescore_against_query(1, NULL, 0.0f, /*fact_ids*/ NULL, 3, scores);
    TEST_ASSERT_EQUAL_INT(1 /* FAILURE */, rc);
 }
 
 static void test_rescore_empty_count_is_noop_success(void) {
    float scores[1] = { 12.345f }; /* canary — must remain untouched */
    int64_t fact_ids[1] = { 99 };
-   int rc = memory_embeddings_rescore_against_query(1, NULL, 0.0f, 0.0f, fact_ids, /*fact_count*/ 0,
+   int rc = memory_embeddings_rescore_against_query(1, NULL, 0.0f, fact_ids, /*fact_count*/ 0,
                                                     scores);
    TEST_ASSERT_EQUAL_INT(0 /* SUCCESS */, rc);
    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 12.345f, scores[0]);
@@ -264,7 +258,7 @@ static void test_rescore_null_query_emb_yields_all_sentinels(void) {
    float scores[3] = { 99.0f, 99.0f, 99.0f };
    int64_t fact_ids[] = { 10, 20, 30 };
    int rc = memory_embeddings_rescore_against_query(1, /*query_emb*/ NULL, /*query_norm*/ 1.0f,
-                                                    /*entity_bonus*/ 0.1f, fact_ids, 3, scores);
+                                                    fact_ids, 3, scores);
    TEST_ASSERT_EQUAL_INT(0 /* SUCCESS */, rc);
    TEST_ASSERT_FLOAT_WITHIN(1e-5f, MEMORY_EMBEDDINGS_RESCORE_SENTINEL, scores[0]);
    TEST_ASSERT_FLOAT_WITHIN(1e-5f, MEMORY_EMBEDDINGS_RESCORE_SENTINEL, scores[1]);
@@ -275,7 +269,7 @@ static void test_rescore_zero_query_norm_yields_all_sentinels(void) {
    float qemb[8] = { 0 }; /* zero vector */
    float scores[2] = { 99.0f, 99.0f };
    int64_t fact_ids[] = { 1, 2 };
-   int rc = memory_embeddings_rescore_against_query(1, qemb, /*query_norm*/ 0.0f, 0.1f, fact_ids, 2,
+   int rc = memory_embeddings_rescore_against_query(1, qemb, /*query_norm*/ 0.0f, fact_ids, 2,
                                                     scores);
    TEST_ASSERT_EQUAL_INT(0 /* SUCCESS */, rc);
    TEST_ASSERT_FLOAT_WITHIN(1e-5f, MEMORY_EMBEDDINGS_RESCORE_SENTINEL, scores[0]);
@@ -285,8 +279,8 @@ static void test_rescore_zero_query_norm_yields_all_sentinels(void) {
 static void test_rescore_sentinel_value_invariant(void) {
    /* Sentinel MUST be strictly negative so callers can use the
     * `score > MEMORY_EMBEDDINGS_RESCORE_SENTINEL` pattern to filter.
-    * Legitimate scores fall in [0, vec_weight + entity_bonus] which is
-    * non-negative for any in-range config. */
+    * Legitimate scores are vec_weight * cosine, above it for any
+    * in-range config. */
    TEST_ASSERT_TRUE(MEMORY_EMBEDDINGS_RESCORE_SENTINEL < 0.0f);
 }
 

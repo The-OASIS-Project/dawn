@@ -351,19 +351,16 @@ int memory_search_graph_candidates(int user_id,
    if (per_query_cap > MEMORY_GRAPH_INTERMEDIATE_CAP)
       per_query_cap = MEMORY_GRAPH_INTERMEDIATE_CAP;
    int count = 0;
-   memory_graph_expand_fact_linked(user_id, seeds, seed_count, out_facts, out_scores, per_query_cap,
-                                   &count);
+   memory_graph_expand_fact_linked(user_id, seeds, seed_count, out_facts, per_query_cap, &count);
 
-   /* Query-aware scoring: vec_weight*cosine + entity_bonus, so
-    * topically-irrelevant entity-grounded facts don't unfairly compete with
-    * hybrid hits.  Toggle via graph_retrieval.use_query_scoring. */
-   if (g_config.memory.graph_retrieval.use_query_scoring && count > 0) {
+   /* Score them against the query, so a topically irrelevant fact about a
+    * named entity doesn't outrank relevant hybrid hits. */
+   if (count > 0) {
       int64_t ids[MEMORY_GRAPH_INTERMEDIATE_CAP];
       for (int i = 0; i < count; i++)
          ids[i] = out_facts[i].id;
-      memory_embeddings_rescore_against_query(user_id, query_emb, query_norm,
-                                              g_config.memory.graph_retrieval.entity_bonus, ids,
-                                              count, out_scores);
+      memory_embeddings_rescore_against_query(user_id, query_emb, query_norm, ids, count,
+                                              out_scores);
       /* Drop sentinel-scored facts per the rescore contract. */
       int kept = 0;
       for (int i = 0; i < count; i++) {
