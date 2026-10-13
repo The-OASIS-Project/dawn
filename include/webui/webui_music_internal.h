@@ -189,6 +189,20 @@ typedef struct {
     *  control_mutex (control_cancel), so a waiting LLM tool steps aside */
    pthread_cond_t open_cond;
 
+   /** Plex prefetch (state_mutex): the track after the current one, already
+    *  downloaded and opened by a helper thread the stream thread owns (started
+    *  when a track starts, joined before the stream thread exits).  Used when
+    *  that path is opened next; closed otherwise. */
+   audio_decoder_t *prefetched;
+   char prefetch_path[WEBUI_MUSIC_PATH_MAX]; /**< What's prefetched or prefetching */
+   /** The track planned to follow (-1 none): drawn once under shuffle, so
+    *  auto-advance and manual next play the track that was prefetched */
+   int planned_next_index;
+   char planned_next_path[WEBUI_MUSIC_PATH_MAX];
+   pthread_t prefetch_thread;
+   bool prefetch_running;       /**< Stream thread only */
+   atomic_bool prefetch_cancel; /**< Aborts the helper's download */
+
    /* Thread synchronization for safe shutdown */
    pthread_cond_t decoder_idle_cond; /**< Signaled when decoder is not busy */
    atomic_bool shutdown_ack;         /**< Thread acknowledged shutdown request */
@@ -402,6 +416,17 @@ music_open_result_t webui_music_await_track(session_music_state_t *state,
 bool webui_music_run_pending_open(session_music_state_t *state,
                                   ws_connection_t *conn,
                                   int *failures);
+
+/**
+ * @brief Cancel and join the Plex prefetch helper, if running (stream thread)
+ */
+void webui_music_prefetch_stop(session_music_state_t *state);
+
+/**
+ * @brief Plan the track after the current one and prefetch it if it's on
+ *        Plex (stream thread; no locks held)
+ */
+void webui_music_prefetch_plan(session_music_state_t *state);
 
 /**
  * @brief Report an unresolved pending request as cancelled (thread exit)

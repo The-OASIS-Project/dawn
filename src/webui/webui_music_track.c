@@ -137,6 +137,150 @@ static int music_install_decoder(session_music_state_t *state, audio_decoder_t *
    return SUCCESS;
 }
 
+/* ---- Plex prefetch ------------------------------------------------------ */
+
+/* Take the planned shuffle pick if it still names the same queue entry,
+ * else draw one (queue_mutex and state_mutex held); clears the plan */
+static int take_shuffle_pick(session_music_state_t *state, user_music_queue_t *uq, int q_len) {
+   int planned = state->planned_next_index;
+   state->planned_next_index = -1;
+   if (planned >= 0 && planned < q_len &&
+       strcmp(uq->queue[planned].path, state->planned_next_path) == 0) {
+      return planned;
+   }
+   return webui_music_pick_random_index(state->queue_index, q_len, &state->shuffle_seed);
+}
+
+static void *prefetch_thread(void *arg) {
+   session_music_state_t *state = (session_music_state_t *)arg;
+   char path[WEBUI_MUSIC_PATH_MAX];
+   pthread_mutex_lock(&state->state_mutex);
+   snprintf(path, sizeof(path), "%s", state->prefetch_path);
+   pthread_mutex_unlock(&state->state_mutex);
+
+   audio_decoder_t *decoder = music_open_track(path, &state->prefetch_cancel, NULL);
+
+   pthread_mutex_lock(&state->state_mutex);
+   bool keep = decoder && !atomic_load(&state->prefetch_cancel) &&
+               strcmp(state->prefetch_path, path) == 0;
+   if (keep) {
+      state->prefetched = decoder;
+      decoder = NULL;
+   } else if (strcmp(state->prefetch_path, path) == 0) {
+      /* Nothing kept: a later plan may fetch it again */
+      state->prefetch_path[0] = '\0';
+   }
+   pthread_mutex_unlock(&state->state_mutex);
+   if (decoder) {
+      audio_decoder_close(decoder);
+   }
+   if (keep) {
+      OLOG_INFO("WebUI music: Prefetched %s", path);
+   }
+   return NULL;
+}
+
+void webui_music_prefetch_stop(session_music_state_t *state) {
+   if (!state->prefetch_running) {
+      return;
+   }
+   atomic_store(&state->prefetch_cancel, true);
+   pthread_join(state->prefetch_thread, NULL);
+   state->prefetch_running = false;
+}
+
+/* Wait for a running helper without cancelling it: its track is the one
+ * about to open (a stop still cancels it through stop_streaming) */
+static void prefetch_finish(session_music_state_t *state) {
+   if (state->prefetch_running) {
+      pthread_join(state->prefetch_thread, NULL);
+      state->prefetch_running = false;
+   }
+}
+
+/*
+ * After a track starts: plan the one that follows, and start downloading it
+ * if it's on Plex.  Repeat-one replays the current track, so nothing is
+ * planned.  Prefetch errors are never reported; the real open reports them.
+ */
+void webui_music_prefetch_plan(session_music_state_t *state) {
+   user_music_queue_t *uq = state->shared_queue;
+   char next_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
+
+   pthread_mutex_lock(&uq->queue_mutex);
+   pthread_mutex_lock(&state->state_mutex);
+   int q_len = uq->queue_length;
+   int next = -1;
+   if (q_len > 0 && uq->repeat_mode != MUSIC_REPEAT_ONE) {
+      if (uq->shuffle) {
+         if (q_len > 1) {
+            next = webui_music_pick_random_index(state->queue_index, q_len, &state->shuffle_seed);
+         }
+      } else if (state->queue_index + 1 < q_len) {
+         next = state->queue_index + 1;
+      } else if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
+         next = 0;
+      }
+   }
+   state->planned_next_index = next;
+   if (next >= 0) {
+      snprintf(state->planned_next_path, sizeof(state->planned_next_path), "%s",
+               uq->queue[next].path);
+      snprintf(next_path, sizeof(next_path), "%s", uq->queue[next].path);
+   }
+   bool already = next_path[0] && strcmp(state->prefetch_path, next_path) == 0;
+   pthread_mutex_unlock(&state->state_mutex);
+   pthread_mutex_unlock(&uq->queue_mutex);
+
+   if (already || !next_path[0] || music_source_from_path(next_path) != MUSIC_SOURCE_PLEX) {
+      return;
+   }
+
+   /* A different track than any earlier prefetch: drop that one */
+   webui_music_prefetch_stop(state);
+   pthread_mutex_lock(&state->state_mutex);
+   if (state->prefetched) {
+      audio_decoder_close(state->prefetched);
+      state->prefetched = NULL;
+   }
+   snprintf(state->prefetch_path, sizeof(state->prefetch_path), "%s", next_path);
+   pthread_mutex_unlock(&state->state_mutex);
+
+   atomic_store(&state->prefetch_cancel, false);
+   if (pthread_create(&state->prefetch_thread, NULL, prefetch_thread, state) == 0) {
+      state->prefetch_running = true;
+   } else {
+      pthread_mutex_lock(&state->state_mutex);
+      state->prefetch_path[0] = '\0';
+      pthread_mutex_unlock(&state->state_mutex);
+   }
+}
+
+/* The prefetched decoder for path, if that's what was prefetched; any other
+ * prefetch is dropped (stream thread) */
+static audio_decoder_t *prefetch_take(session_music_state_t *state, const char *path) {
+   pthread_mutex_lock(&state->state_mutex);
+   bool same = strcmp(state->prefetch_path, path) == 0;
+   pthread_mutex_unlock(&state->state_mutex);
+   if (same) {
+      prefetch_finish(state);
+   } else {
+      webui_music_prefetch_stop(state);
+   }
+
+   pthread_mutex_lock(&state->state_mutex);
+   audio_decoder_t *decoder = NULL;
+   if (state->prefetched && same) {
+      decoder = state->prefetched;
+   } else if (state->prefetched) {
+      audio_decoder_close(state->prefetched);
+   }
+   state->prefetched = NULL;
+   state->prefetch_path[0] = '\0';
+   pthread_mutex_unlock(&state->state_mutex);
+   return decoder;
+}
+
 /* Resolve a ticket: record its outcome and wake a waiting tool (state_mutex held) */
 static void publish_open(session_music_state_t *state, uint32_t seq, music_open_result_t result) {
    state->open_done_seq = seq;
@@ -211,7 +355,7 @@ music_advance_t webui_music_advance(session_music_state_t *state,
          next_index = (next_index + 1) % q_len;
       } else if (uq->shuffle) {
          if (q_len > 1) {
-            next_index = webui_music_pick_random_index(next_index, q_len, &state->shuffle_seed);
+            next_index = take_shuffle_pick(state, uq, q_len);
          }
       } else if (++next_index >= q_len) {
          if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
@@ -278,7 +422,10 @@ bool webui_music_run_pending_open(session_music_state_t *state,
     * join waits about a second at most.  Every path that replaces the decoder
     * stops this thread first, so nothing else installs one meanwhile. */
    bool unreachable = false;
-   audio_decoder_t *decoder = music_open_track(path, &state->stop_requested, &unreachable);
+   audio_decoder_t *decoder = prefetch_take(state, path);
+   if (!decoder) {
+      decoder = music_open_track(path, &state->stop_requested, &unreachable);
+   }
 
    pthread_mutex_lock(&state->state_mutex);
    if (atomic_load(&state->stop_requested)) {
@@ -303,6 +450,7 @@ bool webui_music_run_pending_open(session_music_state_t *state,
       pthread_mutex_unlock(&state->state_mutex);
       /* An auto-advance stays tagged so the client keeps its buffered lead */
       webui_music_send_state_impl(conn, state, is_auto);
+      webui_music_prefetch_plan(state);
       return true;
    }
    publish_open(state, seq, unreachable ? MUSIC_OPEN_UNREACHABLE : MUSIC_OPEN_FAILED);
@@ -415,8 +563,7 @@ bool webui_music_nav_step(session_music_state_t *state,
    pthread_mutex_lock(&state->state_mutex);
    if (q_len > 0) {
       if (uq->shuffle && q_len > 1) {
-         state->queue_index = webui_music_pick_random_index(state->queue_index, q_len,
-                                                            &state->shuffle_seed);
+         state->queue_index = take_shuffle_pick(state, uq, q_len);
          moved = true;
       } else if (dir == MUSIC_NAV_NEXT && state->queue_index < q_len - 1) {
          state->queue_index++;
@@ -447,6 +594,12 @@ void webui_music_clear_track(session_music_state_t *state) {
       audio_decoder_close(state->decoder);
       state->decoder = NULL;
    }
+   if (state->prefetched) {
+      audio_decoder_close(state->prefetched);
+      state->prefetched = NULL;
+   }
+   state->prefetch_path[0] = '\0';
+   state->planned_next_index = -1;
    state->playing = false;
    state->paused = false;
    state->position_frames = 0;

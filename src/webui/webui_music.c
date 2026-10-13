@@ -752,6 +752,15 @@ static void *music_stream_thread(void *arg) {
    bool was_closed_loop = false;     /* were we closed-loop last frame? (fallback re-baseline) */
    unsigned pace_log_counter = 0;    /* throttle for the periodic pacing log */
 
+   /* Restarted under a loaded track (a seek, a resume): the previous thread's
+    * prefetch was cancelled with it, so plan again */
+   pthread_mutex_lock(&state->state_mutex);
+   bool replan = state->decoder != NULL && state->pending_path[0] == '\0';
+   pthread_mutex_unlock(&state->state_mutex);
+   if (replan) {
+      webui_music_prefetch_plan(state);
+   }
+
    while (!atomic_load(&state->stop_requested)) {
       /* Quick check without lock first */
       if (!atomic_load(&state->streaming)) {
@@ -1036,6 +1045,7 @@ static void *music_stream_thread(void *arg) {
    /* A request still waiting resolves as cancelled, so a waiting tool never
     * hangs; the slot itself stays for whoever stopped the thread */
    webui_music_cancel_pending_ticket(state);
+   webui_music_prefetch_stop(state);
    OLOG_INFO("WebUI music: Streaming thread stopped");
    atomic_fetch_sub(&s_active_streams, 1);
    atomic_store(&state->streaming, false);
@@ -1083,6 +1093,9 @@ void webui_music_stop_streaming(session_music_state_t *state) {
    }
 
    atomic_store(&state->stop_requested, true);
+   /* The stream thread joins its prefetch helper on the way out: cancel the
+    * helper's download too, so this join stays short */
+   atomic_store(&state->prefetch_cancel, true);
 
    /* Wait for thread to finish */
    pthread_join(state->stream_thread, NULL);
@@ -1188,6 +1201,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_mutex_init(&state->control_mutex, NULL);
    pthread_cond_init(&state->decoder_idle_cond, NULL);
    pthread_cond_init(&state->open_cond, NULL);
+   state->planned_next_index = -1;
    atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
@@ -1313,6 +1327,9 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
 
    if (state->decoder) {
       audio_decoder_close(state->decoder);
+   }
+   if (state->prefetched) {
+      audio_decoder_close(state->prefetched);
    }
    if (state->resampler) {
       resampler_destroy(state->resampler);
