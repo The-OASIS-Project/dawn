@@ -370,12 +370,8 @@ static int music_tool_locked(ws_connection_t *conn,
       /* items[] → REPLACE the queue with an explicit, resolved track list */
       struct json_object *items = decode_items(query);
       if (items) {
-         webui_music_stop_streaming(state);
+         webui_music_clear_track(state);
          pthread_mutex_lock(&state->state_mutex);
-         if (state->decoder) {
-            audio_decoder_close(state->decoder);
-            state->decoder = NULL;
-         }
          state->queue_index = 0;
          pthread_mutex_unlock(&state->state_mutex);
 
@@ -392,12 +388,6 @@ static int music_tool_locked(ws_connection_t *conn,
          bool start_failed = first_path[0] && webui_music_start_playback(state, first_path) != 0;
          if (start_failed) {
             webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-         } else if (!first_path[0]) {
-            /* Nothing resolved: the old track was stopped above, so say so */
-            pthread_mutex_lock(&state->state_mutex);
-            state->playing = false;
-            state->paused = false;
-            pthread_mutex_unlock(&state->state_mutex);
          }
          webui_music_send_state(conn, state);
          webui_music_broadcast_queue_state(uq, conn);
@@ -465,12 +455,8 @@ static int music_tool_locked(ws_connection_t *conn,
          return FAILURE;
       }
 
-      webui_music_stop_streaming(state);
+      webui_music_clear_track(state);
       pthread_mutex_lock(&state->state_mutex);
-      if (state->decoder) {
-         audio_decoder_close(state->decoder);
-         state->decoder = NULL;
-      }
       state->queue_index = 0;
       pthread_mutex_unlock(&state->state_mutex);
 
@@ -639,16 +625,7 @@ static int music_tool_locked(ws_connection_t *conn,
       return SUCCESS;
 
    } else if (strcmp(action, "stop") == 0) {
-      webui_music_stop_streaming(state);
-      pthread_mutex_lock(&state->state_mutex);
-      state->playing = false;
-      state->paused = false;
-      if (state->decoder) {
-         audio_decoder_close(state->decoder);
-         state->decoder = NULL;
-      }
-      state->position_frames = 0;
-      pthread_mutex_unlock(&state->state_mutex);
+      webui_music_clear_track(state);
       webui_music_send_state(conn, state);
 
       if (result_out) {
@@ -678,111 +655,32 @@ static int music_tool_locked(ws_connection_t *conn,
       }
       return SUCCESS;
 
-   } else if (strcmp(action, "next") == 0) {
-      user_music_queue_t *uq = state->shared_queue;
-      bool can_advance = false;
-      char next_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
-      char next_title[WEBUI_MUSIC_STRING_MAX] = { 0 };
-
-      /* Hold queue_mutex across the full computation (hierarchy: queue → state) */
-      pthread_mutex_lock(&uq->queue_mutex);
-      int q_len = uq->queue_length;
-      bool q_shuffle = uq->shuffle;
-      music_repeat_mode_t q_repeat = uq->repeat_mode;
-
-      pthread_mutex_lock(&state->state_mutex);
-      if (q_len > 0) {
-         if (q_shuffle && q_len > 1) {
-            state->queue_index = webui_music_pick_random_index(state->queue_index, q_len,
-                                                               &state->shuffle_seed);
-            can_advance = true;
-         } else if (state->queue_index < q_len - 1) {
-            state->queue_index++;
-            can_advance = true;
-         } else if (q_repeat == MUSIC_REPEAT_ALL) {
-            state->queue_index = 0;
-            can_advance = true;
-         }
-      }
-      if (can_advance && state->queue_index < q_len) {
-         snprintf(next_path, sizeof(next_path), "%s", uq->queue[state->queue_index].path);
-         snprintf(next_title, sizeof(next_title), "%s", uq->queue[state->queue_index].title);
-      }
-      pthread_mutex_unlock(&state->state_mutex);
-      pthread_mutex_unlock(&uq->queue_mutex);
-
-      if (can_advance && next_path[0]) {
-         bool started = webui_music_start_playback(state, next_path) == 0;
-         if (!started) {
-            webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-         }
-         webui_music_send_state(conn, state);
-
+   } else if (strcmp(action, "next") == 0 || strcmp(action, "previous") == 0) {
+      bool next = strcmp(action, "next") == 0;
+      char path[WEBUI_MUSIC_PATH_MAX];
+      char title[WEBUI_MUSIC_STRING_MAX];
+      if (!webui_music_nav_step(state, next ? MUSIC_NAV_NEXT : MUSIC_NAV_PREVIOUS, path,
+                                sizeof(path), title, sizeof(title))) {
          if (result_out) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "%s: %s",
-                     started ? "Playing next" : "Failed to start the next track",
-                     next_title[0] ? next_title : "Unknown");
-            *result_out = result_with_footer(state, buf);
+            *result_out = strdup(next ? "Already at end of queue" : "Already at start of queue");
          }
-      } else {
-         if (result_out) {
-            *result_out = strdup("Already at end of queue");
-         }
+         return SUCCESS;
       }
-      return SUCCESS;
 
-   } else if (strcmp(action, "previous") == 0) {
-      user_music_queue_t *uq = state->shared_queue;
-      bool can_go_back = false;
-      char prev_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
-      char prev_title[WEBUI_MUSIC_STRING_MAX] = { 0 };
-
-      /* Hold queue_mutex across the full computation (hierarchy: queue → state) */
-      pthread_mutex_lock(&uq->queue_mutex);
-      int q_len = uq->queue_length;
-      bool q_shuffle = uq->shuffle;
-      music_repeat_mode_t q_repeat = uq->repeat_mode;
-
-      pthread_mutex_lock(&state->state_mutex);
-      if (q_len > 0) {
-         if (q_shuffle && q_len > 1) {
-            state->queue_index = webui_music_pick_random_index(state->queue_index, q_len,
-                                                               &state->shuffle_seed);
-            can_go_back = true;
-         } else if (state->queue_index > 0) {
-            state->queue_index--;
-            can_go_back = true;
-         } else if (q_repeat == MUSIC_REPEAT_ALL) {
-            state->queue_index = q_len - 1;
-            can_go_back = true;
-         }
+      bool started = webui_music_start_playback(state, path) == 0;
+      if (!started) {
+         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
       }
-      if (can_go_back && state->queue_index < q_len) {
-         snprintf(prev_path, sizeof(prev_path), "%s", uq->queue[state->queue_index].path);
-         snprintf(prev_title, sizeof(prev_title), "%s", uq->queue[state->queue_index].title);
-      }
-      pthread_mutex_unlock(&state->state_mutex);
-      pthread_mutex_unlock(&uq->queue_mutex);
+      webui_music_send_state(conn, state);
 
-      if (can_go_back && prev_path[0]) {
-         bool started = webui_music_start_playback(state, prev_path) == 0;
-         if (!started) {
-            webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-         }
-         webui_music_send_state(conn, state);
-
-         if (result_out) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "%s: %s",
-                     started ? "Playing previous" : "Failed to start the previous track",
-                     prev_title[0] ? prev_title : "Unknown");
-            *result_out = result_with_footer(state, buf);
-         }
-      } else {
-         if (result_out) {
-            *result_out = strdup("Already at start of queue");
-         }
+      if (result_out) {
+         char buf[256];
+         snprintf(buf, sizeof(buf), "%s: %s",
+                  started ? (next ? "Playing next" : "Playing previous")
+                          : (next ? "Failed to start the next track"
+                                  : "Failed to start the previous track"),
+                  title[0] ? title : "Unknown");
+         *result_out = result_with_footer(state, buf);
       }
       return SUCCESS;
 

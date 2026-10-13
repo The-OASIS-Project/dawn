@@ -160,12 +160,7 @@ void handle_music_unsubscribe(ws_connection_t *conn) {
 
    /* Stop playback and streaming */
    webui_music_control_lock(state, true);
-   pthread_mutex_lock(&state->state_mutex);
-   state->playing = false;
-   state->paused = false;
-   pthread_mutex_unlock(&state->state_mutex);
-
-   webui_music_stop_streaming(state);
+   webui_music_clear_track(state);
    webui_music_control_unlock(state);
 
    OLOG_INFO("WebUI music: Client unsubscribed");
@@ -297,13 +292,7 @@ static void music_control_locked(ws_connection_t *conn,
          }
 
          /* Stop any current playback */
-         webui_music_stop_streaming(state);
-         pthread_mutex_lock(&state->state_mutex);
-         if (state->decoder) {
-            audio_decoder_close(state->decoder);
-            state->decoder = NULL;
-         }
-         pthread_mutex_unlock(&state->state_mutex);
+         webui_music_clear_track(state);
 
          /* Mutate shared queue */
          user_music_queue_t *uq = state->shared_queue;
@@ -348,13 +337,7 @@ static void music_control_locked(ws_connection_t *conn,
          const char *query = json_object_get_string(query_obj);
 
          /* Stop any current playback */
-         webui_music_stop_streaming(state);
-         pthread_mutex_lock(&state->state_mutex);
-         if (state->decoder) {
-            audio_decoder_close(state->decoder);
-            state->decoder = NULL;
-         }
-         pthread_mutex_unlock(&state->state_mutex);
+         webui_music_clear_track(state);
 
          /* Search unified database (all sources) */
          music_search_result_t *results = malloc(WEBUI_MUSIC_MAX_QUEUE *
@@ -451,92 +434,16 @@ static void music_control_locked(ws_connection_t *conn,
       webui_music_send_state(conn, state);
 
    } else if (strcmp(action, "stop") == 0) {
-      /* Stop streaming thread completely before closing decoder. */
-      webui_music_stop_streaming(state);
-
-      pthread_mutex_lock(&state->state_mutex);
-      state->playing = false;
-      state->paused = false;
-      if (state->decoder) {
-         audio_decoder_close(state->decoder);
-         state->decoder = NULL;
-      }
-      state->position_frames = 0;
-      pthread_mutex_unlock(&state->state_mutex);
+      webui_music_clear_track(state);
       webui_music_send_state(conn, state);
 
-   } else if (strcmp(action, "next") == 0) {
-      user_music_queue_t *uq = state->shared_queue;
-      bool can_advance = false;
-      char next_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
-
-      /* Hold queue_mutex across the full computation (hierarchy: queue → state) */
-      pthread_mutex_lock(&uq->queue_mutex);
-      int q_len = uq->queue_length;
-      bool q_shuffle = uq->shuffle;
-      music_repeat_mode_t q_repeat = uq->repeat_mode;
-
-      pthread_mutex_lock(&state->state_mutex);
-      if (q_len > 0) {
-         if (q_shuffle && q_len > 1) {
-            state->queue_index = webui_music_pick_random_index(state->queue_index, q_len,
-                                                               &state->shuffle_seed);
-            can_advance = true;
-         } else if (state->queue_index < q_len - 1) {
-            state->queue_index++;
-            can_advance = true;
-         } else if (q_repeat == MUSIC_REPEAT_ALL) {
-            state->queue_index = 0;
-            can_advance = true;
-         }
-      }
-      if (can_advance && state->queue_index < q_len) {
-         snprintf(next_path, sizeof(next_path), "%s", uq->queue[state->queue_index].path);
-      }
-      pthread_mutex_unlock(&state->state_mutex);
-      pthread_mutex_unlock(&uq->queue_mutex);
-
-      if (can_advance && next_path[0] && webui_music_start_playback(state, next_path) != 0) {
+   } else if (strcmp(action, "next") == 0 || strcmp(action, "previous") == 0) {
+      music_nav_dir_t dir = strcmp(action, "next") == 0 ? MUSIC_NAV_NEXT : MUSIC_NAV_PREVIOUS;
+      char path[WEBUI_MUSIC_PATH_MAX];
+      if (webui_music_nav_step(state, dir, path, sizeof(path), NULL, 0) &&
+          webui_music_start_playback(state, path) != 0) {
          webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
       }
-
-      webui_music_send_state(conn, state);
-
-   } else if (strcmp(action, "previous") == 0) {
-      user_music_queue_t *uq = state->shared_queue;
-      bool can_go_back = false;
-      char prev_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
-
-      /* Hold queue_mutex across the full computation (hierarchy: queue → state) */
-      pthread_mutex_lock(&uq->queue_mutex);
-      int q_len = uq->queue_length;
-      bool q_shuffle = uq->shuffle;
-      music_repeat_mode_t q_repeat = uq->repeat_mode;
-
-      pthread_mutex_lock(&state->state_mutex);
-      if (q_len > 0) {
-         if (q_shuffle && q_len > 1) {
-            state->queue_index = webui_music_pick_random_index(state->queue_index, q_len,
-                                                               &state->shuffle_seed);
-            can_go_back = true;
-         } else if (state->queue_index > 0) {
-            state->queue_index--;
-            can_go_back = true;
-         } else if (q_repeat == MUSIC_REPEAT_ALL) {
-            state->queue_index = q_len - 1;
-            can_go_back = true;
-         }
-      }
-      if (can_go_back && state->queue_index < q_len) {
-         snprintf(prev_path, sizeof(prev_path), "%s", uq->queue[state->queue_index].path);
-      }
-      pthread_mutex_unlock(&state->state_mutex);
-      pthread_mutex_unlock(&uq->queue_mutex);
-
-      if (can_go_back && prev_path[0] && webui_music_start_playback(state, prev_path) != 0) {
-         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-      }
-
       webui_music_send_state(conn, state);
 
    } else if (strcmp(action, "toggle_shuffle") == 0) {
@@ -695,9 +602,9 @@ static void music_control_locked(ws_connection_t *conn,
 
       bool removing_current = (remove_index == my_index);
 
-      /* Stop streaming before modifying queue to prevent use-after-free */
+      /* Unload it before modifying the queue (the stream thread reads it) */
       if (removing_current) {
-         webui_music_stop_streaming(state);
+         webui_music_clear_track(state);
       }
 
       pthread_mutex_lock(&uq->queue_mutex);
@@ -720,27 +627,16 @@ static void music_control_locked(ws_connection_t *conn,
       if (remove_index < state->queue_index) {
          state->queue_index--;
       } else if (removing_current) {
-         if (state->decoder) {
-            audio_decoder_close(state->decoder);
-            state->decoder = NULL;
-         }
          if (uq->queue_length > 0) {
             if (state->queue_index >= uq->queue_length) {
                state->queue_index = uq->queue_length - 1;
             }
          } else {
-            state->playing = false;
-            state->paused = false;
             state->queue_index = 0;
          }
       }
       /* Re-read for auto-play path */
       bool should_autoplay = removing_current && was_playing && uq->queue_length > 0;
-      if (removing_current && !should_autoplay) {
-         /* Its decoder is closed and nothing replaces it: stopped, not paused */
-         state->playing = false;
-         state->paused = false;
-      }
       char next_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
       if (should_autoplay && state->queue_index < uq->queue_length) {
          snprintf(next_path, sizeof(next_path), "%s", uq->queue[state->queue_index].path);
@@ -764,28 +660,9 @@ static void music_control_locked(ws_connection_t *conn,
 
    } else if (strcmp(action, "clear_queue") == 0) {
       /* Clear entire queue and stop playback */
-      webui_music_stop_streaming(state);
-
-      user_music_queue_t *uq = state->shared_queue;
-      pthread_mutex_lock(&uq->queue_mutex);
-      uq->queue_length = 0;
-      uq->generation++;
-      music_queue_db_save(uq->user_id, uq);
-      pthread_mutex_unlock(&uq->queue_mutex);
-
-      pthread_mutex_lock(&state->state_mutex);
-      if (state->decoder) {
-         audio_decoder_close(state->decoder);
-         state->decoder = NULL;
-      }
-      state->playing = false;
-      state->paused = false;
-      state->queue_index = 0;
-      state->position_frames = 0;
-      pthread_mutex_unlock(&state->state_mutex);
-
+      webui_music_queue_clear(state, NULL);
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(state->shared_queue, conn);
 
    } else if (strcmp(action, "add_artist") == 0) {
       /* Add all tracks by an artist to queue */
@@ -1323,7 +1200,7 @@ int webui_music_queue_clear(session_music_state_t *state, int *removed_out) {
    if (!state || !state->shared_queue) {
       return FAILURE;
    }
-   webui_music_stop_streaming(state);
+   webui_music_clear_track(state);
 
    user_music_queue_t *uq = state->shared_queue;
    pthread_mutex_lock(&uq->queue_mutex);
@@ -1337,12 +1214,6 @@ int webui_music_queue_clear(session_music_state_t *state, int *removed_out) {
 
    pthread_mutex_lock(&state->state_mutex);
    state->queue_index = 0;
-   state->playing = false;
-   state->position_frames = 0;
-   if (state->decoder) {
-      audio_decoder_close(state->decoder);
-      state->decoder = NULL;
-   }
    pthread_mutex_unlock(&state->state_mutex);
    return SUCCESS;
 }

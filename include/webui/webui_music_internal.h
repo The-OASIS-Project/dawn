@@ -336,6 +336,39 @@ void webui_music_send_state_impl(ws_connection_t *conn,
                                  session_music_state_t *state,
                                  bool advance_auto);
 
+/** Direction for webui_music_nav_step() */
+typedef enum {
+   MUSIC_NAV_NEXT,
+   MUSIC_NAV_PREVIOUS,
+} music_nav_dir_t;
+
+/**
+ * @brief Move the session's queue index one step, as next/previous do
+ *
+ * Shuffle picks a random other track; otherwise the index moves by one, and
+ * wraps only under repeat-all.  Takes queue_mutex then state_mutex.
+ *
+ * @param path_out Receives the new track's path (path_size > 0)
+ * @param title_out Optional: receives its title (NULL or title_size 0 to skip)
+ * @return true if the index moved, false at the end (or start) of the queue
+ */
+bool webui_music_nav_step(session_music_state_t *state,
+                          music_nav_dir_t dir,
+                          char *path_out,
+                          size_t path_size,
+                          char *title_out,
+                          size_t title_size);
+
+/**
+ * @brief Stop and unload the current track
+ *
+ * Stops the stream thread, closes the decoder and leaves the session stopped
+ * at position 0 (not paused).  The queue and queue index are untouched.
+ *
+ * @pre control_mutex held
+ */
+void webui_music_clear_track(session_music_state_t *state);
+
 /**
  * @brief Start playback of a file
  *

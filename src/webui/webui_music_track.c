@@ -314,6 +314,64 @@ music_advance_t webui_music_advance(session_music_state_t *state,
    }
 }
 
+bool webui_music_nav_step(session_music_state_t *state,
+                          music_nav_dir_t dir,
+                          char *path_out,
+                          size_t path_size,
+                          char *title_out,
+                          size_t title_size) {
+   user_music_queue_t *uq = state->shared_queue;
+   bool moved = false;
+   path_out[0] = '\0';
+   if (title_out && title_size > 0) {
+      title_out[0] = '\0';
+   }
+
+   /* Lock order: queue, then state */
+   pthread_mutex_lock(&uq->queue_mutex);
+   int q_len = uq->queue_length;
+   pthread_mutex_lock(&state->state_mutex);
+   if (q_len > 0) {
+      if (uq->shuffle && q_len > 1) {
+         state->queue_index = webui_music_pick_random_index(state->queue_index, q_len,
+                                                            &state->shuffle_seed);
+         moved = true;
+      } else if (dir == MUSIC_NAV_NEXT && state->queue_index < q_len - 1) {
+         state->queue_index++;
+         moved = true;
+      } else if (dir == MUSIC_NAV_PREVIOUS && state->queue_index > 0) {
+         state->queue_index--;
+         moved = true;
+      } else if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
+         state->queue_index = dir == MUSIC_NAV_NEXT ? 0 : q_len - 1;
+         moved = true;
+      }
+   }
+   if (moved && state->queue_index < q_len) {
+      snprintf(path_out, path_size, "%s", uq->queue[state->queue_index].path);
+      if (title_out && title_size > 0) {
+         snprintf(title_out, title_size, "%s", uq->queue[state->queue_index].title);
+      }
+   }
+   pthread_mutex_unlock(&state->state_mutex);
+   pthread_mutex_unlock(&uq->queue_mutex);
+   return moved && path_out[0] != '\0';
+}
+
+void webui_music_clear_track(session_music_state_t *state) {
+   webui_music_stop_streaming(state);
+   pthread_mutex_lock(&state->state_mutex);
+   if (state->decoder) {
+      audio_decoder_close(state->decoder);
+      state->decoder = NULL;
+   }
+   state->playing = false;
+   state->paused = false;
+   state->position_frames = 0;
+   state->advance_opening = false;
+   pthread_mutex_unlock(&state->state_mutex);
+}
+
 /**
  * @brief Start playing a track
  *
