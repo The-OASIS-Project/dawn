@@ -60,6 +60,9 @@ extern "C" {
  *  otherwise the ring silently returns to dropping frames (watch write_drop_count). */
 #define WEBUI_MUSIC_WRITE_RING 8
 
+/** Opus output sample rate: the music stream is always 48 kHz stereo */
+#define OPUS_SAMPLE_RATE 48000
+
 /** Lowest source sample rate the stream plays.  The stream thread reads one Opus
  *  frame's worth of source audio at a time, so at 8 kHz that's 160 frames; below
  *  it the 48 kHz resampler's ratio outgrows its buffers. */
@@ -299,6 +302,39 @@ void webui_music_control_unlock(session_music_state_t *state);
  * @return The state, or NULL if it couldn't be created
  */
 session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn);
+
+/** What the stream thread does after moving on from a finished track */
+typedef enum {
+   MUSIC_ADVANCE_PLAYING, /**< The next track is installed */
+   MUSIC_ADVANCE_STOPPED, /**< Playback ended; the client has been told */
+   MUSIC_ADVANCE_EXIT,    /**< The thread was asked to stop */
+} music_advance_t;
+
+/**
+ * @brief Move to the next track after the current one ended (stream thread)
+ *
+ * Defined in webui_music_track.c.
+ *
+ * @param state Session music state (decoder already closed and NULL)
+ * @param conn Connection to report to
+ * @param track_failed The track that just ended did so on a decode error
+ * @param failures In/out: tracks in a row that produced no audio
+ * @return What happened
+ */
+music_advance_t webui_music_advance(session_music_state_t *state,
+                                    ws_connection_t *conn,
+                                    bool track_failed,
+                                    int *failures);
+
+/**
+ * @brief Send music_state, optionally tagged as a natural advance
+ *
+ * @param advance_auto Tag the frame advance:"auto" (a natural track change or
+ *        end, which the client applies when its buffered audio has played)
+ */
+void webui_music_send_state_impl(ws_connection_t *conn,
+                                 session_music_state_t *state,
+                                 bool advance_auto);
 
 /**
  * @brief Start playback of a file
