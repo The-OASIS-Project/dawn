@@ -97,7 +97,7 @@ void music_search_build_query(music_query_t *out,
    }
 }
 
-int music_search_resolve_item(const char *item, bool local_only, music_search_result_t *out) {
+int music_search_resolve_item(const char *item, music_search_result_t *out) {
    if (!item || !out) {
       return FAILURE;
    }
@@ -109,13 +109,6 @@ int music_search_resolve_item(const char *item, bool local_only, music_search_re
    bool has_source = music_query_take_source(item, clean, sizeof(clean), &source);
    if (has_source) {
       item = clean;
-   }
-   if (local_only) {
-      if (has_source && source != MUSIC_SOURCE_LOCAL) {
-         return MUSIC_SEARCH_WRONG_SOURCE;
-      }
-      has_source = true;
-      source = MUSIC_SOURCE_LOCAL;
    }
 
    /* "Artist - Title": search the title (spaces are word boundaries, so the

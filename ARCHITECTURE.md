@@ -358,6 +358,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    applies seeks, encodes; plus one    │
 │                    helper it owns that prefetches the  │
 │                    next Plex track (joined on exit)    │
+│  Music playback  — the local speaker's track: opens it │
+│                    (Plex downloads; a stop cancels),   │
+│                    plays it, starts the next at its end│
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │

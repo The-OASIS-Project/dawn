@@ -148,13 +148,6 @@ void music_search_append_batch_entry(strbuf_t *sb,
  */
 char *music_library_albums_text(const char *artist, int page, int per_page);
 
-/** music_search_resolve_item(): the item names a source the caller can't play */
-#define MUSIC_SEARCH_WRONG_SOURCE 2
-
-/** Report for an item or query naming a source the local speaker can't play */
-#define MUSIC_SEARCH_LOCAL_ONLY_TEXT \
-   "The local speaker plays local files only; Plex tracks play in the web interface."
-
 /**
  * @brief Resolve one free-text item to its best-matching track (play/enqueue)
  *
@@ -163,13 +156,11 @@ char *music_library_albums_text(const char *artist, int page, int per_page);
  * whose artist matches.  Shared by the WebUI and local-speaker executors; paths
  * are the caller's to look up.
  *
- * @param item       Track name, "Artist - Title", optionally with "source:<name>"
- * @param local_only Only local copies (the local speaker can't stream Plex)
- * @param out        Receives the chosen track
- * @return SUCCESS, FAILURE (no match), or MUSIC_SEARCH_WRONG_SOURCE when
- *         @p local_only and the item asked for another source
+ * @param item Track name, "Artist - Title", optionally with "source:<name>"
+ * @param out  Receives the chosen track
+ * @return SUCCESS, or FAILURE (no match)
  */
-int music_search_resolve_item(const char *item, bool local_only, music_search_result_t *out);
+int music_search_resolve_item(const char *item, music_search_result_t *out);
 
 #ifdef __cplusplus
 }

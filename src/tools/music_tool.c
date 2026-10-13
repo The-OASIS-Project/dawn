@@ -35,10 +35,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "audio/audio_decoder.h"
 #include "audio/flac_playback.h"
 #include "audio/music_db.h"
+#include "audio/music_open.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
@@ -60,6 +62,17 @@
 #define MAX_FILENAME_LENGTH 1024
 #define MAX_PLAYLIST_LENGTH 100
 #define MUSIC_CALLBACK_BUFFER_SIZE 512
+
+/* How often auto-advance retries the lock while a stop may be holding it */
+#define MUSIC_ADVANCE_LOCK_POLL_US 10000
+
+/* The second the current track was asked to start at, for a pause that lands
+ * while it's still opening (s_music_mutex) */
+static unsigned int s_start_seconds = 0;
+
+/* True while music_tool_auto_advance() runs the next track (s_music_mutex):
+ * only then does a run of tracks that won't open carry over */
+static bool s_auto_advancing = false;
 
 /* Albums/artists per 'library' page. (Search page sizes live in music_search.h.) */
 #define MUSIC_LIBRARY_PER_PAGE 50
@@ -293,13 +306,18 @@ static const char *extract_filename(const char *path) {
  *
  * Note: When called from the playback thread itself (auto-advance via
  * music_tool_auto_advance), pthread_join returns EDEADLK (self-join).
- * In that case we clear s_thread_active so start_playback() can proceed;
- * the old thread exits naturally after music_tool_auto_advance() returns.
+ * That thread detaches itself, so it's reclaimed when it exits after
+ * music_tool_auto_advance() returns, and s_thread_active is cleared so
+ * start_playback() can proceed.  A stop during a Plex download waits for the
+ * download to notice it (about a second at most).
  */
 static void stop_current_playback(void) {
    if (s_thread_active) {
       setMusicPlay(0);
       int join_result = pthread_join(s_music_thread, NULL);
+      if (join_result == EDEADLK) {
+         pthread_detach(s_music_thread);
+      }
       if (join_result == 0 || join_result == EDEADLK) {
          s_thread_active = false;
       }
@@ -325,7 +343,15 @@ static char *start_playback_at(unsigned int start_time) {
 
    OLOG_INFO("Playing from %us: %s on %s", start_time, args->file_name, args->sink_name);
 
+   s_start_seconds = start_time;
+   if (!s_auto_advancing) {
+      audio_playback_reset_failed_opens();
+   }
+   /* Before the thread: a stop while the track opens (a Plex download)
+    * clears it and cancels the open */
+   setMusicPlay(1);
    if (pthread_create(&s_music_thread, NULL, playFlacAudio, args)) {
+      setMusicPlay(0);
       OLOG_ERROR("Error creating music thread");
       free(args);
       return NULL;
@@ -352,7 +378,15 @@ static char *start_playback(bool report_result) {
 
    OLOG_INFO("Playing: %s %s %d", args->sink_name, args->file_name, args->start_time);
 
+   s_start_seconds = 0;
+   if (!s_auto_advancing) {
+      audio_playback_reset_failed_opens();
+   }
+   /* Before the thread: a stop while the track opens (a Plex download)
+    * clears it and cancels the open */
+   setMusicPlay(1);
    if (pthread_create(&s_music_thread, NULL, playFlacAudio, args)) {
+      setMusicPlay(0);
       OLOG_ERROR("Error creating music thread");
       free(args);
       return report_result ? strdup("Failed to start music playback") : NULL;
@@ -395,9 +429,8 @@ static int search_music_database(const char *query, Playlist *playlist) {
 
    int count = 0;
    /* Ranked, path-clean query so "play <bare query>" builds a playlist of real
-    * matches (folder-name false-positives dropped, best-first).  Local copies
-    * only: this speaker can't stream Plex. */
-   music_query_t mq = { .text = query, .has_source = true, .source = MUSIC_SOURCE_LOCAL };
+    * matches (folder-name false-positives dropped, best-first). */
+   music_query_t mq = { .text = query };
    if (music_db_query(&mq, results, MAX_PLAYLIST_LENGTH, &count) != SUCCESS) {
       free(results);
       return FAILURE;
@@ -424,46 +457,21 @@ static int search_music_database(const char *query, Playlist *playlist) {
 /**
  * @brief Resolve one free-text item (or path) to its best-match library track
  *
- * An absolute path is looked up exactly; a name goes through
- * music_search_resolve_item() with local copies only. Returns 1 on a match
- * (fills @p out), 0 otherwise.
+ * A library path (local or plex:, the forms 'search' returns) is looked up
+ * exactly; a name goes through music_search_resolve_item(). Returns 1 on a
+ * match (fills @p out), 0 otherwise.
  */
 static int local_resolve_item(const char *item, music_search_result_t *out) {
    if (!item || !item[0]) {
       return 0;
    }
 
-   /* Absolute path → exact lookup (paths from 'search' are exact handles). The
-    * local speaker plays files directly, so only local paths are resolvable
-    * here; a plex: path falls through to search and won't match, which is
-    * correct (local playback can't stream Plex). */
-   if (item[0] == '/') {
+   /* Paths from 'search' are exact handles */
+   if (music_path_is_valid(item)) {
       bool found = false;
-      if (music_db_get_by_path(item, out, &found) == SUCCESS && found) {
-         return 1;
-      }
-      return 0;
+      return music_db_get_by_path(item, out, &found) == SUCCESS && found ? 1 : 0;
    }
-
-   /* A name: local copies only, since this speaker can't stream Plex */
-   return music_search_resolve_item(item, true, out) == SUCCESS ? 1 : 0;
-}
-
-/* Whether any item in a JSON array names a source this speaker can't play */
-static bool local_items_name_other_source(const char *items_json) {
-   struct json_object *arr = json_tokener_parse(items_json);
-   bool other = false;
-   if (arr && json_object_is_type(arr, json_type_array)) {
-      for (size_t i = 0; i < json_object_array_length(arr) && !other; i++) {
-         const char *item = json_object_get_string(json_object_array_get_idx(arr, i));
-         char stripped[MAX_FILENAME_LENGTH];
-         music_source_t asked = MUSIC_SOURCE_LOCAL;
-         other = item && music_query_take_source(item, stripped, sizeof(stripped), &asked) &&
-                 asked != MUSIC_SOURCE_LOCAL;
-      }
-   }
-   json_object_put(arr);
-   return other;
+   return music_search_resolve_item(item, out) == SUCCESS ? 1 : 0;
 }
 
 /**
@@ -576,16 +584,6 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          size_t cap = strlen(value) + 1;
          char *items_json = malloc(cap);
          if (items_json && tool_param_extract_custom(value, "items", items_json, cap)) {
-            /* Asked for a source this speaker can't play: say so, keep what's
-             * playing (as a query does) */
-            if (local_items_name_other_source(items_json)) {
-               free(items_json);
-               if (direct_mode) {
-                  *should_respond = 0;
-                  return NULL;
-               }
-               return strdup(MUSIC_SEARCH_LOCAL_ONLY_TEXT);
-            }
             stop_current_playback();
             s_paused_position = 0;
             s_paused_sample_rate = 0;
@@ -626,18 +624,6 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             return NULL;
          }
          return strdup("Please specify what to play, or pass items:[...] for a track list.");
-      }
-
-      /* Asked for a source this speaker can't play: say so, keep what's playing */
-      char stripped[MAX_FILENAME_LENGTH];
-      music_source_t asked = MUSIC_SOURCE_LOCAL;
-      if (music_query_take_source(base, stripped, sizeof(stripped), &asked) &&
-          asked != MUSIC_SOURCE_LOCAL) {
-         if (direct_mode) {
-            *should_respond = 0;
-            return NULL;
-         }
-         return strdup(MUSIC_SEARCH_LOCAL_ONLY_TEXT);
       }
 
       /* Stop any current playback */
@@ -779,6 +765,12 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          /* Capture current position and sample rate before stopping */
          s_paused_position = audio_playback_get_position();
          s_paused_sample_rate = audio_playback_get_sample_rate();
+         if (s_paused_sample_rate == 0) {
+            /* Still opening (a Plex download): keep the second it was asked to
+             * start at, as a position in 1 Hz units */
+            s_paused_position = s_start_seconds;
+            s_paused_sample_rate = 1;
+         }
 
          stop_current_playback();
          OLOG_INFO("Paused at position %llu samples (rate: %u Hz)",
@@ -1193,9 +1185,23 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
 /* ========== Auto-Advance (called from playback thread) ========== */
 
 void music_tool_auto_advance(void) {
-   pthread_mutex_lock(&s_music_mutex);
+   /* A stop may hold the lock while it joins this thread (it lands while the
+    * last audio drains): taking the lock outright would deadlock.  Such a stop
+    * has already cleared the play flag, so give way to it. */
+   while (pthread_mutex_trylock(&s_music_mutex) != 0) {
+      if (!getMusicPlay()) {
+         return;
+      }
+      usleep(MUSIC_ADVANCE_LOCK_POLL_US);
+   }
+   if (!getMusicPlay()) {
+      pthread_mutex_unlock(&s_music_mutex);
+      return;
+   }
    int should_respond = 0;
+   s_auto_advancing = true;
    char *result = music_tool_callback_inner("next", NULL, &should_respond);
+   s_auto_advancing = false;
    free(result);
    pthread_mutex_unlock(&s_music_mutex);
 }

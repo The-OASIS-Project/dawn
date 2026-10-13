@@ -22,10 +22,13 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Overwrite policy when buffer full
    - Used for smooth audio streaming between threads
 
-- **flac_playback.c/h**: Music/audio file playback
+- **flac_playback.c/h**: Local speaker music playback
    - Multi-format decoding (FLAC, MP3, Ogg Vorbis) via unified audio_decoder API
    - ALSA/PulseAudio output with automatic sample rate conversion
-   - Used for notification sounds, music playback
+   - Plays music library tracks only (local or Plex), opened through music_open.c; a stop
+     cancels a Plex download in progress
+   - A track that won't open is skipped (playback stops at the 5th in a row, or at once when
+     Plex is unreachable)
 
 - **music_open.c/h**: Opening a library track, shared by every player
    - `music_path_is_valid()`: a local path must resolve inside `[paths] music_dir`; a `plex:`

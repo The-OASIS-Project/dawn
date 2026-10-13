@@ -178,7 +178,7 @@ static int resolve_item_to_path(const char *item,
       if (music_db_get_by_path(item, &r, &found) != SUCCESS || !found) {
          return FAILURE;
       }
-   } else if (music_search_resolve_item(item, false, &r) != SUCCESS) {
+   } else if (music_search_resolve_item(item, &r) != SUCCESS) {
       return FAILURE;
    }
 

@@ -63,6 +63,10 @@ typedef struct {
 /**
  * Sets the music playback state.
  *
+ * Set it to 1 before starting playFlacAudio(): a 0 set while the track is
+ * still opening (a Plex download) cancels the open.  Setting 1 clears the saved
+ * position, so a pause before the new track plays saves none.
+ *
  * @param play An integer indicating the desired playback state.
  *             Set to 1 to start playback, or 0 to stop playback.
  */
@@ -71,16 +75,25 @@ void setMusicPlay(int play);
 /**
  * Retrieves the current music playback state.
  *
- * @return An integer representing the playback state.
- *         Returns 1 if playback is active, or 0 if playback is stopped.
+ * @return 1 while playback is wanted: the track is opening (a Plex download) or
+ *         playing; 0 once it's stopped or has ended with nothing to follow.
  */
 int getMusicPlay(void);
 
 /**
- * @brief Plays an audio file (FLAC, MP3, Ogg Vorbis, or other supported formats).
+ * @brief Start a new run of tracks that wouldn't open (no playback thread running)
  *
- * This function uses the unified audio decoder to play audio files. Despite the legacy function
- * name, it supports all formats registered with the audio_decoder subsystem.
+ * The count carries over from track to track only along auto-advance; call it
+ * before a play the user started.
+ */
+void audio_playback_reset_failed_opens(void);
+
+/**
+ * @brief Plays a music library track (FLAC, MP3, Ogg Vorbis, or other supported formats).
+ *
+ * Opens the track through music_open_track(): a local file inside [paths] music_dir, or a plex:
+ * track, downloaded first.  Anything else is refused.  Despite the legacy function name, it
+ * supports all formats registered with the audio_decoder subsystem.
  *
  * @param arg A pointer to a PlaybackArgs structure containing playback parameters such as the file
  * name and audio sink name.
@@ -88,20 +101,21 @@ int getMusicPlay(void);
  * threading.
  *
  * The function performs the following steps:
- * 1. Opens the audio file with the appropriate decoder based on file extension.
+ * 1. Opens the track (downloading a Plex track; a stop cancels the download).
  * 2. Initializes an audio playback stream with the detected sample format.
  * 3. Reads and plays audio samples, applying volume adjustment.
  * 4. Cleans up resources when playback completes or is stopped.
- * 5. If an error occurs, triggers a callback to handle the next action (e.g., skip to next track).
+ * 5. At a natural end, or when a track won't open (until the 5th in a row, and not when the
+ *    Plex server is unreachable), asks the music tool for the next track.
  *
  * @note The function name is retained for backward compatibility. Use playAudioFile() for new code.
  */
 void *playFlacAudio(void *arg);
 
 /**
- * @brief Plays an audio file (wrapper for playFlacAudio with clearer naming).
+ * @brief Plays a music library track (wrapper for playFlacAudio with clearer naming).
  *
- * This is the preferred entry point for playing audio files. It supports all formats
+ * This is the preferred entry point for playing library tracks. It supports all formats
  * registered with the audio_decoder subsystem (FLAC, MP3, Ogg Vorbis, etc.).
  *
  * @param arg A pointer to a PlaybackArgs structure containing playback parameters.
