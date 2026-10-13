@@ -235,11 +235,15 @@ bool music_query_take_source(const char *text, char *out, size_t cap, music_sour
 
 /** One page of a ranked query. */
 typedef struct {
-   int count;        /**< Rows written to the results array */
-   int total;        /**< Total matching rows across all pages (exact) */
-   bool approximate; /**< No row matched every query word; these are the closest
-                          (one word unmatched) — say so rather than presenting them
-                          as exact hits */
+   int count;                    /**< Rows written to the results array */
+   int total;                    /**< Total matching rows across all pages (exact) */
+   bool approximate;             /**< No row matched every query word; these are the closest
+                                      (one word unmatched) — say so rather than presenting them
+                                      as exact hits */
+   bool hid_other_source;        /**< A row on this page has a copy in another
+                                      source that duplicates collapsed (no source
+                                      was named) */
+   music_source_t hidden_source; /**< That other source, when hid_other_source */
 } music_query_page_t;
 
 /**

@@ -321,6 +321,10 @@ typedef char *(*tool_callback_fn)(const char *action, char *value, int *should_r
  * scheduler briefing runner's per-step success count) and strip the marker
  * before the text reaches the LLM, so the human-readable error still survives.
  * Tools that don't use it behave exactly as before.
+ *
+ * A marked result means the tool did NOTHING: mark only failures found before
+ * any side effect.  A local voice shortcut whose tool returns one hands the
+ * request to the LLM, which may call the tool again.
  * ============================================================================= */
 #define TOOL_RESULT_ERROR_MARK "\x01"
 

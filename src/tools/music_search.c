@@ -30,6 +30,17 @@
 #include "dawn_error.h"
 #include "tools/tool_registry.h"
 
+/* After results that collapsed copies in another source: how to reach them */
+static void append_source_hint(strbuf_t *sb, const music_query_page_t *page) {
+   if (page->hid_other_source) {
+      const char *name = music_source_name(page->hidden_source);
+      strbuf_appendf(sb,
+                     "Some of these tracks are also in %s, listed once as the copy shown; add "
+                     "source:%s to the query for those copies.\n",
+                     name, name);
+   }
+}
+
 /** Candidates the resolver picks from (artist preference + tiebreak) */
 #define MUSIC_SEARCH_RESOLVE_CANDIDATES 8
 
@@ -281,6 +292,8 @@ char *music_search_page_text(const char *text,
       for (int i = 0; i < page.count; i++) {
          append_track_row(&sb, &res[i]);
       }
+      /* Without it, a model asked for Plex concludes there are no Plex copies */
+      append_source_hint(&sb, &page);
    }
    free(res);
 
@@ -320,6 +333,7 @@ void music_search_append_batch_entry(strbuf_t *sb,
    for (int j = 0; j < page.count; j++) {
       append_track_row(sb, &buf[j]);
    }
+   append_source_hint(sb, &page);
 }
 
 char *music_library_albums_text(const char *artist, int page, int per_page) {

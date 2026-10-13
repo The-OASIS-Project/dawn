@@ -462,6 +462,58 @@ static int run_page(const resolved_query_t *r,
    return SUCCESS;
 }
 
+/* Bind a row's text field as the DB stores it: an empty tag is NULL there */
+static void bind_tag(sqlite3_stmt *st, int i, const char *value) {
+   if (value[0]) {
+      sqlite3_bind_text(st, i, value, -1, SQLITE_STATIC);
+   } else {
+      sqlite3_bind_null(st, i);
+   }
+}
+
+/*
+ * Whether a row shown on this page has a copy in another source that duplicates
+ * collapsed.  The copy listed comes from the lowest source, so the hidden one is
+ * a higher source with the same artist, album and title (one index seek per
+ * row); under a genre/year filter only a copy with the same genre and year was
+ * collapsed (MUSIC_DEDUP_EXISTS_TAGGED), the rest the filter excluded.  Caller
+ * holds the DB lock.
+ */
+static bool page_hides_other_source(const music_search_result_t *rows,
+                                    int count,
+                                    bool tag_filtered,
+                                    music_source_t *hidden_out) {
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(g_music_db,
+                          "SELECT source FROM music_metadata WHERE artist IS ?1 COLLATE NOCASE "
+                          "AND album IS ?2 COLLATE NOCASE AND title IS ?3 COLLATE NOCASE "
+                          "AND source > ?4 AND (?5 = 0 OR (genre IS ?6 AND year IS ?7)) LIMIT 1",
+                          -1, &st, NULL) != SQLITE_OK) {
+      return false;
+   }
+   bool hid = false;
+   for (int i = 0; i < count && !hid; i++) {
+      bind_tag(st, 1, rows[i].artist);
+      bind_tag(st, 2, rows[i].album);
+      bind_tag(st, 3, rows[i].title);
+      sqlite3_bind_int(st, 4, (int)rows[i].source);
+      sqlite3_bind_int(st, 5, tag_filtered ? 1 : 0);
+      bind_tag(st, 6, rows[i].genre);
+      if (rows[i].year > 0) {
+         sqlite3_bind_int(st, 7, (int)rows[i].year);
+      } else {
+         sqlite3_bind_null(st, 7);
+      }
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         hid = true;
+         *hidden_out = (music_source_t)sqlite3_column_int(st, 0);
+      }
+      sqlite3_reset(st);
+   }
+   sqlite3_finalize(st);
+   return hid;
+}
+
 int music_db_query_page(const music_query_t *q,
                         int offset,
                         music_search_result_t *results,
@@ -496,6 +548,13 @@ int music_db_query_page(const music_query_t *q,
       r.min_score = MUSIC_RANK_PARTIAL;
       ret = run_page(&r, offset, results, max_results, &page_out->count, &page_out->total);
       page_out->approximate = (page_out->total > 0);
+   }
+   /* With no source named, say whether copies in another source were hidden,
+    * so a caller can tell how to reach them */
+   if (ret == SUCCESS && !r.source && page_out->count > 0) {
+      page_out->hid_other_source = page_hides_other_source(results, page_out->count,
+                                                           r.genre || r.ymin || r.ymax,
+                                                           &page_out->hidden_source);
    }
    pthread_mutex_unlock(&g_music_db_mutex);
 

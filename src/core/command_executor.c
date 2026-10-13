@@ -100,6 +100,11 @@ int command_execute_sync(const char *device,
                          const char *topic,
                          cmd_exec_result_t *result,
                          int timeout_ms) {
+   if (!result) {
+      return 1;
+   }
+   /* Every field defined on every path: callers read the flags they don't set */
+   memset(result, 0, sizeof(*result));
    if (research_context_refuses(device, result)) {
       return 1;
    }
@@ -206,15 +211,14 @@ int command_execute(const char *device,
       return 1;
    }
 
-   result->skip_followup = tool->skip_followup;
-
    /* Check for sync_wait tools (need command_router for response) */
    if (tool->sync_wait && tool->topic) {
-      cmd_exec_result_t sync_result;
-      int rc = command_execute_sync(device, action, value, mosq, tool->topic, &sync_result, 0);
-      *result = sync_result;
+      int rc = command_execute_sync(device, action, value, mosq, tool->topic, result, 0);
+      result->skip_followup = tool->skip_followup;
       return rc;
    }
+
+   result->skip_followup = tool->skip_followup;
 
    /* Check for mqtt_only tools - publish to MQTT instead of calling callback */
    if (tool->mqtt_only && tool->topic) {
@@ -231,11 +235,12 @@ int command_execute(const char *device,
                                                                    : tool_default_action(tool);
       char *cb_result = tool->callback(effective_action, value_buf, &should_respond);
 
-      /* Strip the opt-in tool error-marker so it never reaches the LLM.
-       * `success` deliberately stays true — the interactive tool-result path
-       * (llm_tools) keys off it, and a marked error should still flow to the
-       * model as descriptive text.  The scheduler briefing runner inspects the
-       * marker itself (before its own strip) to keep its accounting honest. */
+      /* Strip the opt-in tool error-marker so it never reaches the LLM, keeping
+       * the verdict in tool_error.  `success` deliberately stays true — the
+       * interactive tool-result path (llm_tools) keys off it, and a marked error
+       * should still flow to the model as descriptive text.  The scheduler
+       * briefing runner inspects the marker itself (before its own strip). */
+      result->tool_error = tool_result_is_error(cb_result);
       tool_result_strip_error_mark(cb_result);
 
       result->success = true;
@@ -335,11 +340,13 @@ int command_execute_mqtt_direct(const tool_metadata_t *tool,
 int command_execute_json(struct json_object *cmd_json,
                          struct mosquitto *mosq,
                          cmd_exec_result_t *result) {
-   if (!cmd_json || !result) {
-      if (result) {
-         result->success = false;
-         result->result = strdup("Invalid arguments");
-      }
+   if (!result) {
+      return 1;
+   }
+   memset(result, 0, sizeof(*result)); /* every field defined on every path */
+   if (!cmd_json) {
+      result->success = false;
+      result->result = strdup("Invalid arguments");
       return 1;
    }
 

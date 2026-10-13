@@ -1412,18 +1412,10 @@ static int run_resolved_call(const tool_call_t *call,
       s_current_raw_args = NULL;
 
       /* Capture the tool's self-reported hard-failure mark BEFORE stripping it: `success` stays
-       * true (the marked text still flows to the LLM as description), but the pill must red. This
-       * is the ONE site where a structurally-fine call is still a confirmed failure.
+       * true (the marked text still flows to the LLM as description), but the pill must red.
        *
-       * ASSUMPTION (currently holds; document so it isn't silently load-bearing): marker capture
-       * lives ONLY here on the direct-callback path. The other dispatch paths — command_execute
-       * fallback (below), mqtt_only, viewing — do NOT capture the mark, and command_execute
-       * additionally strips it and forces success=true (command_executor.c), so a marker returned
-       * through those paths is unrecoverable and renders NEUTRAL, not red. Safe (a MISSED red,
-       * never a false one) and unreachable today: every marker-emitting tool
-       * (attention/stat/suit/search/ weather) is a modular direct-callback tool that hits THIS
-       * site. If a legacy MQTT/command device ever adopts TOOL_RESULT_ERROR_MARK, surface the
-       * verdict in cmd_exec_result_t and OR it in on those paths too. */
+       * The command_execute fallback (below) takes cmd_exec_result_t's tool_error too, though
+       * it reaches no callback today (sync-wait and MQTT-only devices never mark). */
       bool marked = tool_result_is_error(cb_result);
 
       /* Strip the opt-in tool error-marker (this native-tool path invokes the
@@ -1477,6 +1469,7 @@ static int run_resolved_call(const tool_call_t *call,
          snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Tool '%s' completed", call->name);
       }
       result->success = true;
+      result->is_error = exec_result.tool_error; /* the tool flagged a hard failure */
       result->skip_followup = meta->skip_followup || exec_result.skip_followup;
       result->should_respond = exec_result.should_respond;
    } else {

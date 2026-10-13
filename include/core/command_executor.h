@@ -64,6 +64,8 @@ typedef struct {
    bool success;        /**< true if execution succeeded */
    bool should_respond; /**< true if caller should provide TTS feedback for result */
    bool skip_followup;  /**< true if LLM follow-up should be skipped */
+   bool tool_error;     /**< The tool marked its result a hard failure
+                             (TOOL_RESULT_ERROR_MARK, stripped from @ref result) */
 } cmd_exec_result_t;
 
 /* =============================================================================

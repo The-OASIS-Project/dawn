@@ -475,12 +475,12 @@ static int local_resolve_item(const char *item, music_search_result_t *out) {
 }
 
 /**
- * @brief Fill s_playlist from a JSON array of item names/paths (local playback)
+ * @brief Fill a playlist from a JSON array of item names/paths (local playback)
  *
- * Caller holds s_music_mutex. When @p replace is true the playlist is cleared
- * first. Returns the number of tracks added.
+ * @param out Empty playlist to fill
+ * @return Number of tracks added
  */
-static int local_fill_playlist_from_items(const char *items_json, bool replace) {
+static int local_fill_playlist_from_items(const char *items_json, Playlist *out) {
    struct json_object *arr = json_tokener_parse(items_json);
    if (!arr || !json_object_is_type(arr, json_type_array)) {
       if (arr) {
@@ -488,26 +488,29 @@ static int local_fill_playlist_from_items(const char *items_json, bool replace) 
       }
       return 0;
    }
-   if (replace) {
-      s_playlist.count = 0;
-      s_current_track = 0;
-   }
    int n = (int)json_object_array_length(arr);
-   int added = 0;
-   for (int i = 0; i < n && s_playlist.count < MAX_PLAYLIST_LENGTH; i++) {
+   for (int i = 0; i < n && out->count < MAX_PLAYLIST_LENGTH; i++) {
       struct json_object *e = json_object_array_get_idx(arr, i);
       const char *item = e ? json_object_get_string(e) : NULL;
       music_search_result_t r;
       if (local_resolve_item(item, &r)) {
-         snprintf(s_playlist.filenames[s_playlist.count], MAX_FILENAME_LENGTH, "%s", r.path);
-         snprintf(s_playlist.display_names[s_playlist.count], MAX_FILENAME_LENGTH, "%s",
-                  r.display_name);
-         s_playlist.count++;
-         added++;
+         snprintf(out->filenames[out->count], MAX_FILENAME_LENGTH, "%s", r.path);
+         snprintf(out->display_names[out->count], MAX_FILENAME_LENGTH, "%s", r.display_name);
+         out->count++;
       }
    }
    json_object_put(arr);
-   return added;
+   return out->count;
+}
+
+/* Replace the playlist with @p found and reset its position; stops the current
+ * track first (the playback thread reads the playlist) */
+static void local_replace_playlist(const Playlist *found) {
+   stop_current_playback();
+   s_playlist = *found;
+   s_current_track = 0;
+   s_paused_position = 0;
+   s_paused_sample_rate = 0;
 }
 
 /* ========== Callback Implementation ========== */
@@ -577,20 +580,25 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
    /* Get command processing mode from global */
    bool direct_mode = (command_processing_mode == CMD_MODE_DIRECT_ONLY);
 
-
    if (strcmp(action, "play") == 0) {
       /* items[] → explicit track list (resolve each, REPLACE, play). */
       if (value && value[0]) {
          size_t cap = strlen(value) + 1;
          char *items_json = malloc(cap);
          if (items_json && tool_param_extract_custom(value, "items", items_json, cap)) {
-            stop_current_playback();
-            s_paused_position = 0;
-            s_paused_sample_rate = 0;
-            int added = local_fill_playlist_from_items(items_json, true);
+            /* Resolve first: a list that matches nothing leaves what's playing */
+            Playlist *found = calloc(1, sizeof(*found));
+            if (!found) {
+               free(items_json);
+               return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate playlist buffer");
+            }
+            int added = local_fill_playlist_from_items(items_json, found);
             free(items_json);
-            if (s_playlist.count > 0) {
-               s_current_track = 0;
+            if (added > 0) {
+               local_replace_playlist(found);
+            }
+            free(found);
+            if (added > 0) {
                if (direct_mode) {
                   *should_respond = 0;
                   start_playback(false);
@@ -626,20 +634,22 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          return strdup("Please specify what to play, or pass items:[...] for a track list.");
       }
 
-      /* Stop any current playback */
-      stop_current_playback();
+      /* Search first, into a playlist of its own: a miss leaves what's playing
+       * alone (and, as a marked error, lets a voice shortcut fall back to the LLM) */
+      Playlist *found = calloc(1, sizeof(*found));
+      if (!found) {
+         return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate playlist buffer");
+      }
+      search_music_database(base, found);
+      OLOG_INFO("Search found %d results for: %s", found->count, base);
 
-      /* Reset playlist and paused state */
-      s_playlist.count = 0;
-      s_current_track = 0;
-      s_paused_position = 0;
-      s_paused_sample_rate = 0;
+      if (found->count > 0) {
+         local_replace_playlist(found);
+      }
+      int found_count = found->count;
+      free(found);
 
-      /* Search by artist, title, album via database */
-      search_music_database(base, &s_playlist);
-      OLOG_INFO("Search found %d results for: %s", s_playlist.count, base);
-
-      if (s_playlist.count > 0) {
+      if (found_count > 0) {
          if (direct_mode) {
             *should_respond = 0;
             start_playback(false);
@@ -664,7 +674,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          size_t rsz = MAX_FILENAME_LENGTH + 64;
          result = malloc(rsz);
          if (result) {
-            snprintf(result, rsz, "No music found matching '%s'", base);
+            snprintf(result, rsz, TOOL_RESULT_ERROR_MARK "No music found matching '%s'", base);
          }
          return result;
       }
