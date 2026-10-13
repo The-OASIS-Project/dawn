@@ -167,8 +167,14 @@ typedef struct {
    /** Set by a WebSocket-thread request waiting for control_mutex (one that
     *  stops or replaces playback): wakes an LLM tool call waiting for its
     *  track to open, which then releases the lock, so the WebSocket thread
-    *  never waits out a download.  Other requests don't take the lock. */
+    *  never waits on it.  Other requests don't take the lock. */
    atomic_bool control_cancel;
+
+   /** A seek for the stream thread to apply between frames (state_mutex),
+    *  so a seek never stops the thread.  Dropped when a track is installed
+    *  or unloaded. */
+   bool seek_pending;
+   uint64_t seek_frames;
 
    /** A Plex track is being downloaded before it can play (state_mutex):
     *  music_state carries loading:true, so a client doesn't expect audio */
@@ -176,15 +182,20 @@ typedef struct {
 
    /** A track waiting for the stream thread to open it (state_mutex), set
     *  by a start request or by auto-advance; empty when none.  Cleared once
-    *  resolved or by webui_music_clear_track().  It survives a stop that
-    *  interrupts the open, so whoever stopped the thread decides: a new
-    *  request overwrites it, clear_track drops it, a restart resumes it. */
+    *  resolved or by webui_music_clear_track().  A stop that interrupts the
+    *  open leaves it to whoever stopped the thread: a new request overwrites
+    *  it, clear_track drops it. */
    char pending_path[WEBUI_MUSIC_PATH_MAX];
    bool pending_auto;      /**< Report the outcome as a natural advance */
    uint32_t pending_seq;   /**< Ticket of the request the slot belongs to */
    uint32_t open_seq;      /**< Last ticket issued (state_mutex) */
    uint32_t open_done_seq; /**< Last ticket resolved (state_mutex) */
-   int open_result;        /**< music_open_result_t for open_done_seq */
+   /** The last ticket webui_music_request_track() issued, and its outcome
+    *  once resolved (state_mutex): kept apart from auto-advance tickets, so
+    *  a track that follows can't hide what the request did */
+   uint32_t request_seq;
+   uint32_t request_done_seq;
+   int request_result; /**< music_open_result_t for request_done_seq */
    /** Broadcast when a ticket resolves, and when a WebSocket request wants
     *  control_mutex (control_cancel), so a waiting LLM tool steps aside */
    pthread_cond_t open_cond;
@@ -196,8 +207,12 @@ typedef struct {
    audio_decoder_t *prefetched;
    char prefetch_path[WEBUI_MUSIC_PATH_MAX]; /**< What's prefetched or prefetching */
    /** The track planned to follow (-1 none): drawn once under shuffle, so
-    *  auto-advance and manual next play the track that was prefetched */
+    *  auto-advance and manual next play the track that was prefetched.  Valid
+    *  only while queue_index is still planned_from and the entry's path still
+    *  matches. */
    int planned_next_index;
+   int planned_from;
+   bool planned_shuffle; /**< Drawn under shuffle */
    char planned_next_path[WEBUI_MUSIC_PATH_MAX];
    pthread_t prefetch_thread;
    bool prefetch_running;       /**< Stream thread only */
@@ -308,9 +323,9 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  * @brief Take a session's control_mutex
  *
  * @param state Session music state
- * @param preempt True on the WebSocket service thread: a Plex download the
- *        current holder is running is cancelled rather than waited out (the
- *        user's latest action wins).  False on other threads, which wait.
+ * @param preempt True on the WebSocket service thread: an LLM tool call
+ *        holding the lock while it waits for its track to open stops waiting
+ *        and releases it.  False on other threads, which wait.
  */
 void webui_music_control_lock(session_music_state_t *state, bool preempt);
 
@@ -371,7 +386,6 @@ typedef enum {
    MUSIC_OPEN_UNREACHABLE, /**< The Plex server couldn't be reached (told) */
    MUSIC_OPEN_CANCELLED,   /**< A stop or a newer request replaced it */
    MUSIC_OPEN_PENDING,     /**< Still opening when the wait ended */
-   MUSIC_OPEN_SUPERSEDED,  /**< A control from a browser needs the lock */
 } music_open_result_t;
 
 /** How long the LLM music tool waits for its track to open: past the Plex
@@ -398,8 +412,9 @@ int webui_music_request_track(session_music_state_t *state, const char *path, ui
 /**
  * @brief Wait for a track request's outcome (LLM tool thread only)
  *
- * Returns early with MUSIC_OPEN_SUPERSEDED when a WebSocket request wants
- * control_mutex.  Never call it on the WebSocket thread.
+ * Returns early with MUSIC_OPEN_PENDING when a WebSocket request wants
+ * control_mutex (the open carries on).  Never call it on the WebSocket
+ * thread.
  *
  * @pre control_mutex held (it keeps the state alive while waiting)
  */
@@ -421,12 +436,6 @@ bool webui_music_run_pending_open(session_music_state_t *state,
  * @brief Cancel and join the Plex prefetch helper, if running (stream thread)
  */
 void webui_music_prefetch_stop(session_music_state_t *state);
-
-/**
- * @brief Plan the track after the current one and prefetch it if it's on
- *        Plex (stream thread; no locks held)
- */
-void webui_music_prefetch_plan(session_music_state_t *state);
 
 /**
  * @brief Report an unresolved pending request as cancelled (thread exit)
@@ -574,11 +583,13 @@ int webui_music_queue_apply_paths(session_music_state_t *state,
  * @brief Remove the queue entry at a 0-based index
  *
  * Shifts remaining entries, adjusts this session's and sibling sessions'
- * queue_index, persists. Transport-free.
+ * queue_index, persists.  Removing the current track unloads it, and if it
+ * was playing, starts the track that took its place.
  *
+ * @pre control_mutex held
  * @return SUCCESS, or FAILURE if index is out of range
  */
-int webui_music_queue_remove_index(session_music_state_t *state, int index0);
+int webui_music_queue_remove_index(ws_connection_t *conn, session_music_state_t *state, int index0);
 
 /**
  * @brief Clear the queue and reset playback for this session

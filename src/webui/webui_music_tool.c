@@ -127,14 +127,18 @@ static const char *tool_outcome_phrase(music_open_result_t result) {
       case MUSIC_OPEN_UNREACHABLE:
          return "can't play: the Plex server isn't reachable";
       case MUSIC_OPEN_PENDING:
-         return "is still loading from Plex and starts when the download finishes";
+         return "is still loading and starts when it's ready";
       case MUSIC_OPEN_CANCELLED:
-      case MUSIC_OPEN_SUPERSEDED:
-         return "was replaced by a newer control from the browser";
+         return "was replaced before it started";
       case MUSIC_OPEN_FAILED:
       default:
          return "couldn't be played";
    }
+}
+
+/* A track that couldn't play fails the call; one still loading doesn't */
+static int tool_outcome_rc(music_open_result_t result) {
+   return result == MUSIC_OPEN_FAILED || result == MUSIC_OPEN_UNREACHABLE ? FAILURE : SUCCESS;
 }
 
 /** strdup(msg) with the state footer appended; falls back to plain msg on OOM. */
@@ -454,7 +458,7 @@ static int music_tool_locked(ws_connection_t *conn,
             }
          }
          free(report);
-         return SUCCESS;
+         return tool_outcome_rc(outcome);
       }
 
       if (base_query[0] == '\0') {
@@ -544,7 +548,7 @@ static int music_tool_locked(ws_connection_t *conn,
                   first_title[0] ? first_title : "Unknown", tool_outcome_phrase(outcome));
          *result_out = result_with_footer(state, buf);
       }
-      return outcome == MUSIC_OPEN_FAILED || outcome == MUSIC_OPEN_UNREACHABLE ? FAILURE : SUCCESS;
+      return tool_outcome_rc(outcome);
 
    } else if (strcmp(action, "enqueue") == 0) {
       /* APPEND to the queue — items[] (preferred) or a single query (top match). */
@@ -640,7 +644,7 @@ static int music_tool_locked(ws_connection_t *conn,
          }
       }
 
-      if (webui_music_queue_remove_index(state, index0) != SUCCESS) {
+      if (webui_music_queue_remove_index(conn, state, index0) != SUCCESS) {
          int len;
          pthread_mutex_lock(&uq->queue_mutex);
          len = uq->queue_length;
@@ -712,7 +716,7 @@ static int music_tool_locked(ws_connection_t *conn,
                   title[0] ? title : "Unknown", tool_outcome_phrase(outcome));
          *result_out = result_with_footer(state, buf);
       }
-      return SUCCESS;
+      return tool_outcome_rc(outcome);
 
    } else if (strcmp(action, "shuffle") == 0) {
       user_music_queue_t *uq = state->shared_queue;

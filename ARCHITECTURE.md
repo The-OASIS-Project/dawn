@@ -350,6 +350,11 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    learned from a conversation made    │
 │                    private; forgets one fact, all of   │
 │                    them (waits out an extraction)      │
+│  Music stream    — one per playing WebUI music session:│
+│                    opens tracks (Plex downloads),      │
+│                    applies seeks, encodes; plus one    │
+│                    helper it owns that prefetches the  │
+│                    next Plex track (joined on exit)    │
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │
@@ -494,7 +499,8 @@ Per-module locks (scoped to a single subsystem):
                                                                      playback, and sets control_cancel first, which wakes an LLM tool
                                                                      call waiting for its track to open so it releases the lock; other
                                                                      WebUI actions don't take it.  Track opens (Plex downloads) run
-                                                                     only on the stream thread, never under it
+                                                                     only on the stream thread or its prefetch helper (which takes
+                                                                     only state_mutex), never under it
     state_mutex + open_cond                                    — the pending-open slot and its ticket; the stream thread
                                                                      broadcasts open_cond when a ticket resolves, a preempting
                                                                      control broadcasts it (state_mutex taken, then released,

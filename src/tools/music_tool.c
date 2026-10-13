@@ -516,7 +516,55 @@ static int local_fill_playlist_from_items(const char *items_json, bool replace) 
 
 static char *music_tool_callback_inner(const char *action, char *value, int *should_respond);
 
+#ifdef ENABLE_WEBUI
+/*
+ * A request from a WebUI session plays in that browser.  Runs without
+ * s_music_mutex (the local player's lock): the session's own control lock
+ * serializes it, and it may wait for a Plex track to open, which mustn't hold
+ * up other users or the local speaker.  Returns true when handled.
+ */
+static bool music_tool_webui(const char *action, char *value, int *should_respond, char **out) {
+   bool direct_mode = (command_processing_mode == CMD_MODE_DIRECT_ONLY);
+   session_t *session = session_get_command_context();
+   if (!session || !session->client_data) {
+      return false;
+   }
+   ws_connection_t *conn = (ws_connection_t *)session->client_data;
+
+   char *webui_result = NULL;
+   int ret = webui_music_execute_tool(conn, action, value, &webui_result);
+   if (ret == SUCCESS || ret > 0) {
+      if (ret == SUCCESS) {
+         OLOG_INFO("Music: Routed '%s' to WebUI session", action);
+      } else {
+         OLOG_WARNING("Music: WebUI handler failed for '%s'", action);
+      }
+      if (direct_mode) {
+         *should_respond = 0;
+         free(webui_result);
+         *out = NULL;
+      } else if (webui_result) {
+         *out = webui_result;
+      } else {
+         *out = strdup(ret == SUCCESS ? "OK" : "Music playback failed");
+      }
+      return true;
+   }
+   /* ret == MUSIC_NOT_HANDLED: the local handler takes it */
+   free(webui_result);
+   OLOG_INFO("Music: WebUI deferred '%s' to local handler", action);
+   return false;
+}
+#endif
+
 static char *music_tool_callback(const char *action, char *value, int *should_respond) {
+   *should_respond = 1;
+#ifdef ENABLE_WEBUI
+   char *webui_out = NULL;
+   if (music_tool_webui(action, value, should_respond, &webui_out)) {
+      return webui_out;
+   }
+#endif
    pthread_mutex_lock(&s_music_mutex);
    char *result = music_tool_callback_inner(action, value, should_respond);
    pthread_mutex_unlock(&s_music_mutex);
@@ -531,40 +579,6 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
    /* Get command processing mode from global */
    bool direct_mode = (command_processing_mode == CMD_MODE_DIRECT_ONLY);
 
-#ifdef ENABLE_WEBUI
-   /* Check if request originated from WebUI session - route to browser streaming */
-   session_t *session = session_get_command_context();
-   if (session && session->client_data) {
-      ws_connection_t *conn = (ws_connection_t *)session->client_data;
-
-      /* Try WebUI music handler for playback actions */
-      char *webui_result = NULL;
-      int ret = webui_music_execute_tool(conn, action, value, &webui_result);
-
-      if (ret == SUCCESS) {
-         /* WebUI handled successfully */
-         OLOG_INFO("Music: Routed '%s' to WebUI session", action);
-         if (direct_mode) {
-            *should_respond = 0;
-            free(webui_result);
-            return NULL;
-         }
-         return webui_result ? webui_result : strdup("OK");
-      } else if (ret > 0) {
-         /* WebUI handler returned error */
-         OLOG_WARNING("Music: WebUI handler failed for '%s'", action);
-         if (direct_mode) {
-            *should_respond = 0;
-            free(webui_result);
-            return NULL;
-         }
-         return webui_result ? webui_result : strdup("Music playback failed");
-      }
-      /* ret == MUSIC_NOT_HANDLED means not handled, fall through to local handler */
-      free(webui_result);
-      OLOG_INFO("Music: WebUI deferred '%s' to local handler", action);
-   }
-#endif
 
    if (strcmp(action, "play") == 0) {
       /* items[] → explicit track list (resolve each, REPLACE, play). */

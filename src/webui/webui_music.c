@@ -752,15 +752,6 @@ static void *music_stream_thread(void *arg) {
    bool was_closed_loop = false;     /* were we closed-loop last frame? (fallback re-baseline) */
    unsigned pace_log_counter = 0;    /* throttle for the periodic pacing log */
 
-   /* Restarted under a loaded track (a seek, a resume): the previous thread's
-    * prefetch was cancelled with it, so plan again */
-   pthread_mutex_lock(&state->state_mutex);
-   bool replan = state->decoder != NULL && state->pending_path[0] == '\0';
-   pthread_mutex_unlock(&state->state_mutex);
-   if (replan) {
-      webui_music_prefetch_plan(state);
-   }
-
    while (!atomic_load(&state->stop_requested)) {
       /* Quick check without lock first */
       if (!atomic_load(&state->streaming)) {
@@ -795,6 +786,25 @@ static void *music_stream_thread(void *arg) {
 
       /* Brief lock to check state and mark decoder busy */
       pthread_mutex_lock(&state->state_mutex);
+
+      /* A seek, applied here between frames (paused too), so it never stops
+       * this thread or what it's prefetching */
+      if (state->seek_pending) {
+         state->seek_pending = false;
+         if (state->decoder && audio_decoder_seek(state->decoder, state->seek_frames) == 0) {
+            state->position_frames = state->seek_frames;
+            state->resample_accum_count = 0;
+         }
+         pthread_mutex_unlock(&state->state_mutex);
+         /* The client flushed for the seek: restart pacing and the estimate */
+         stream_start_time = 0;
+         frames_sent = 0;
+         est_buffered_us = 0;
+         was_closed_loop = false;
+         webui_music_send_state(conn, state);
+         continue;
+      }
+
       if (!state->decoder || !state->playing || state->paused) {
          if (was_sending) {
             OLOG_INFO("WebUI music: Streaming paused (decoder=%p playing=%d paused=%d)",
@@ -921,11 +931,12 @@ static void *music_stream_thread(void *arg) {
             break;
 
          /* Initialize stream timing on first frame. NOTE: est_buffered_us is
-          * deliberately NOT reset here — a brand-new thread (fresh play / seek /
-          * user skip) starts with est=0 as a thread local, while a natural
+          * deliberately NOT reset here — a brand-new thread (fresh play / user
+          * skip) starts with est=0 as a thread local, while a natural
           * auto-advance reaches this point on the SAME thread and must keep its
           * estimate (the buffered lead is continuous across the gapless boundary).
-          * The only in-thread flush boundary, resume-from-pause, resets est above. */
+          * The in-thread flush boundaries, a seek and resume-from-pause, reset
+          * est above. */
          if (stream_start_time == 0) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1200,7 +1211,12 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_mutex_init(&state->write_mutex, NULL);
    pthread_mutex_init(&state->control_mutex, NULL);
    pthread_cond_init(&state->decoder_idle_cond, NULL);
-   pthread_cond_init(&state->open_cond, NULL);
+   /* Monotonic, so a wall-clock step can't stretch the LLM tool's wait */
+   pthread_condattr_t open_attr;
+   pthread_condattr_init(&open_attr);
+   pthread_condattr_setclock(&open_attr, CLOCK_MONOTONIC);
+   pthread_cond_init(&state->open_cond, &open_attr);
+   pthread_condattr_destroy(&open_attr);
    state->planned_next_index = -1;
    atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
@@ -1278,7 +1294,7 @@ void webui_music_control_lock(session_music_state_t *state, bool preempt) {
    if (preempt) {
       /* Only the WebSocket thread preempts, one request at a time, so this is
        * its own request being retired.  A non-preempting caller that gets the
-       * lock first leaves it set: its download is cancelled too, so the
+       * lock first leaves it set: it doesn't wait for its track either, so the
        * waiting request isn't held up. */
       atomic_store(&state->control_cancel, false);
    }
@@ -1306,8 +1322,9 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
       return;
    }
 
-   /* Let a control request already holding control_mutex (the LLM tool, mid
-    * Plex download) finish first, cancelling its download.  This narrows, but
+   /* Let a control request already holding control_mutex (the LLM tool,
+    * waiting for its track to open) finish first; the preempt ends its wait.
+    * This narrows, but
     * doesn't close, the window for a tool call that read conn->music_state just
     * before this and waits for the lock: that needs the connection's lifetime
     * pinned for the call.  Then stop the producer thread (it holds no teardown lock; it only
