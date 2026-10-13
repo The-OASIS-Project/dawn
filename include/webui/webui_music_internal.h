@@ -165,18 +165,29 @@ typedef struct {
     *  it.  Taken through webui_music_control_lock(). */
    pthread_mutex_t control_mutex;
    /** Set by a WebSocket-thread request waiting for control_mutex (one that
-    *  stops or replaces playback): cancels the holder's Plex download, so the
-    *  WebSocket thread never waits one out.  Other requests don't take the lock. */
+    *  stops or replaces playback): wakes an LLM tool call waiting for its
+    *  track to open, which then releases the lock, so the WebSocket thread
+    *  never waits out a download.  Other requests don't take the lock. */
    atomic_bool control_cancel;
 
    /** A Plex track is being downloaded before it can play (state_mutex):
     *  music_state carries loading:true, so a client doesn't expect audio */
    bool loading;
 
-   /** Auto-advance picked the next track and is opening it (state_mutex).
-    *  Left set if a stop interrupts the open, so a seek that did it knows to
-    *  carry on with that track; cleared once a decoder is installed. */
-   bool advance_opening;
+   /** A track waiting for the stream thread to open it (state_mutex), set
+    *  by a start request or by auto-advance; empty when none.  Cleared once
+    *  resolved or by webui_music_clear_track().  It survives a stop that
+    *  interrupts the open, so whoever stopped the thread decides: a new
+    *  request overwrites it, clear_track drops it, a restart resumes it. */
+   char pending_path[WEBUI_MUSIC_PATH_MAX];
+   bool pending_auto;      /**< Report the outcome as a natural advance */
+   uint32_t pending_seq;   /**< Ticket of the request the slot belongs to */
+   uint32_t open_seq;      /**< Last ticket issued (state_mutex) */
+   uint32_t open_done_seq; /**< Last ticket resolved (state_mutex) */
+   int open_result;        /**< music_open_result_t for open_done_seq */
+   /** Broadcast when a ticket resolves, and when a WebSocket request wants
+    *  control_mutex (control_cancel), so a waiting LLM tool steps aside */
+   pthread_cond_t open_cond;
 
    /* Thread synchronization for safe shutdown */
    pthread_cond_t decoder_idle_cond; /**< Signaled when decoder is not busy */
@@ -305,13 +316,16 @@ session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn);
 
 /** What the stream thread does after moving on from a finished track */
 typedef enum {
-   MUSIC_ADVANCE_PLAYING, /**< The next track is installed */
+   MUSIC_ADVANCE_PENDING, /**< The next track is in the pending slot */
    MUSIC_ADVANCE_STOPPED, /**< Playback ended; the client has been told */
    MUSIC_ADVANCE_EXIT,    /**< The thread was asked to stop */
 } music_advance_t;
 
 /**
- * @brief Move to the next track after the current one ended (stream thread)
+ * @brief Pick the next track after the current one ended (stream thread)
+ *
+ * Puts it in the pending slot (the stream thread opens it next), or stops
+ * playback at the end of the queue or after too many failures.
  *
  * Defined in webui_music_track.c.
  *
@@ -335,6 +349,64 @@ music_advance_t webui_music_advance(session_music_state_t *state,
 void webui_music_send_state_impl(ws_connection_t *conn,
                                  session_music_state_t *state,
                                  bool advance_auto);
+
+/** Outcome of a track request, as webui_music_await_track() reports it */
+typedef enum {
+   MUSIC_OPEN_PLAYING,     /**< Opened and installed */
+   MUSIC_OPEN_FAILED,      /**< Couldn't be opened (the client was told) */
+   MUSIC_OPEN_UNREACHABLE, /**< The Plex server couldn't be reached (told) */
+   MUSIC_OPEN_CANCELLED,   /**< A stop or a newer request replaced it */
+   MUSIC_OPEN_PENDING,     /**< Still opening when the wait ended */
+   MUSIC_OPEN_SUPERSEDED,  /**< A control from a browser needs the lock */
+} music_open_result_t;
+
+/** How long the LLM music tool waits for its track to open: past the Plex
+ *  connect timeout, so "unreachable" and "won't open" are answered truthfully,
+ *  without leaving a voice turn silent for a slow download */
+#define WEBUI_MUSIC_TOOL_OPEN_WAIT_MS 15000
+
+/**
+ * @brief Ask the stream thread to open and play a track
+ *
+ * Stops the current track, records the request in the pending slot and
+ * starts the stream thread, which opens it (downloading a Plex track) and
+ * reports the outcome itself: music_state when it plays, music_error plus
+ * music_state when it can't.  Never blocks on the open.  Before returning it
+ * sets what the caller's own state frame reports: playing, position 0, the
+ * queue entry's duration and loading for a Plex track.
+ *
+ * @pre control_mutex held
+ * @param ticket_out Optional: the request's ticket, for webui_music_await_track()
+ * @return SUCCESS, or FAILURE if the stream thread couldn't start
+ */
+int webui_music_request_track(session_music_state_t *state, const char *path, uint32_t *ticket_out);
+
+/**
+ * @brief Wait for a track request's outcome (LLM tool thread only)
+ *
+ * Returns early with MUSIC_OPEN_SUPERSEDED when a WebSocket request wants
+ * control_mutex.  Never call it on the WebSocket thread.
+ *
+ * @pre control_mutex held (it keeps the state alive while waiting)
+ */
+music_open_result_t webui_music_await_track(session_music_state_t *state,
+                                            uint32_t ticket,
+                                            int timeout_ms);
+
+/**
+ * @brief Open the pending track, if any (stream thread)
+ *
+ * @param failures In/out: tracks in a row that produced no audio
+ * @return true if a pending request was handled (the caller resets pacing)
+ */
+bool webui_music_run_pending_open(session_music_state_t *state,
+                                  ws_connection_t *conn,
+                                  int *failures);
+
+/**
+ * @brief Report an unresolved pending request as cancelled (thread exit)
+ */
+void webui_music_cancel_pending_ticket(session_music_state_t *state);
 
 /** Direction for webui_music_nav_step() */
 typedef enum {
@@ -370,13 +442,10 @@ bool webui_music_nav_step(session_music_state_t *state,
 void webui_music_clear_track(session_music_state_t *state);
 
 /**
- * @brief Start playback of a file
- *
- * On failure nothing is playing (playing and paused are false); the caller
- * reports it to the client.
+ * @brief Start playback of a file: webui_music_request_track() without a ticket
  *
  * @pre control_mutex held
- * @return 0 on success, non-zero on failure
+ * @return SUCCESS, or FAILURE if the stream thread couldn't start
  */
 int webui_music_start_playback(session_music_state_t *state, const char *path);
 

@@ -194,36 +194,12 @@ static bool replaces_playback(struct json_object *payload) {
    return false;
 }
 
-/* Whether a decoder is loaded for the session's current track */
+/* Whether the session's current track is loaded or being opened */
 static bool track_loaded(session_music_state_t *state) {
    pthread_mutex_lock(&state->state_mutex);
-   bool loaded = state->decoder != NULL;
+   bool loaded = state->decoder != NULL || state->pending_path[0] != '\0';
    pthread_mutex_unlock(&state->state_mutex);
    return loaded;
-}
-
-/* Start the track at the session's queue index, reporting failure */
-static void resume_queued_track(ws_connection_t *conn, session_music_state_t *state, bool paused) {
-   user_music_queue_t *uq = state->shared_queue;
-   char path[WEBUI_MUSIC_PATH_MAX] = { 0 };
-
-   /* Lock order: queue, then state */
-   pthread_mutex_lock(&uq->queue_mutex);
-   pthread_mutex_lock(&state->state_mutex);
-   if (state->queue_index >= 0 && state->queue_index < uq->queue_length) {
-      snprintf(path, sizeof(path), "%s", uq->queue[state->queue_index].path);
-   }
-   pthread_mutex_unlock(&state->state_mutex);
-   pthread_mutex_unlock(&uq->queue_mutex);
-
-   if (path[0] && webui_music_start_playback(state, path) != 0) {
-      webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-   } else if (path[0] && paused) {
-      pthread_mutex_lock(&state->state_mutex);
-      state->paused = true;
-      pthread_mutex_unlock(&state->state_mutex);
-   }
-   webui_music_send_state(conn, state);
 }
 
 void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
@@ -472,27 +448,21 @@ static void music_control_locked(ws_connection_t *conn,
       if (json_object_object_get_ex(payload, "position_sec", &position_obj)) {
          double position_sec = json_object_get_double(position_obj);
 
+         /* A track still opening has nothing to seek in yet; stopping the
+          * thread would only restart its download */
+         pthread_mutex_lock(&state->state_mutex);
+         bool opening = state->pending_path[0] != '\0';
+         pthread_mutex_unlock(&state->state_mutex);
+         if (opening) {
+            webui_music_send_state(conn, state);
+            return;
+         }
+
          /* Stop streaming thread to safely access decoder
           * This prevents race conditions where thread reads while we seek */
-         pthread_mutex_lock(&state->state_mutex);
-         bool was_active = state->playing; /* playing or paused, not stopped */
-         bool was_paused = state->paused;
-         pthread_mutex_unlock(&state->state_mutex);
          bool was_streaming = atomic_load(&state->streaming);
          if (was_streaming) {
             webui_music_stop_streaming(state);
-         }
-
-         /* A seek that landed while auto-advance was opening the next track
-          * (a Plex download) stopped it before anything was loaded.  The old
-          * track is gone, so carry on with the one it was moving to. */
-         pthread_mutex_lock(&state->state_mutex);
-         bool interrupted_advance = was_active && state->advance_opening && state->decoder == NULL;
-         state->advance_opening = false;
-         pthread_mutex_unlock(&state->state_mutex);
-         if (interrupted_advance) {
-            resume_queued_track(conn, state, was_paused);
-            return;
          }
 
          pthread_mutex_lock(&state->state_mutex);

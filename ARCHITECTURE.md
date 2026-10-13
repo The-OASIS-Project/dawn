@@ -491,8 +491,15 @@ Per-module locks (scoped to a single subsystem):
                                                                      queue_mutex and state_mutex; never held with
                                                                      s_music_teardown_mutex; the stream thread never takes it.  The
                                                                      WebSocket thread takes it only for actions that stop or replace
-                                                                     playback, and sets control_cancel first, which aborts the
-                                                                     holder's Plex download; other WebUI actions don't take it
+                                                                     playback, and sets control_cancel first, which wakes an LLM tool
+                                                                     call waiting for its track to open so it releases the lock; other
+                                                                     WebUI actions don't take it.  Track opens (Plex downloads) run
+                                                                     only on the stream thread, never under it
+    state_mutex + open_cond                                    — the pending-open slot and its ticket; the stream thread
+                                                                     broadcasts open_cond when a ticket resolves, a preempting
+                                                                     control broadcasts it (state_mutex taken, then released,
+                                                                     before control_mutex), and the LLM tool waits on it holding
+                                                                     control_mutex
     queue_mutex (shared per user) → state_mutex                — queue contents, then the session's playback fields
     s_music_teardown_mutex (webui_music.c) → write_mutex       — conn->music_state lifetime against the music server's callbacks,
                                                                      then the write ring (LEAF).  Also held across the state's lazy

@@ -776,6 +776,14 @@ static void *music_stream_thread(void *arg) {
          }
       }
 
+      /* A requested or auto-advanced track waiting to be opened */
+      if (webui_music_run_pending_open(state, conn, &failures)) {
+         /* Reset stream timing for the new track */
+         stream_start_time = 0;
+         frames_sent = 0;
+         continue;
+      }
+
       /* Brief lock to check state and mark decoder busy */
       pthread_mutex_lock(&state->state_mutex);
       if (!state->decoder || !state->playing || state->paused) {
@@ -851,11 +859,8 @@ static void *music_stream_thread(void *arg) {
             }
          }
 
-         if (webui_music_advance(state, conn, track_failed, &failures) == MUSIC_ADVANCE_PLAYING) {
-            /* Reset stream timing for the new track */
-            stream_start_time = 0;
-            frames_sent = 0;
-         }
+         /* Picks the next track into the pending slot (opened above), or stops */
+         webui_music_advance(state, conn, track_failed, &failures);
          continue;
       }
       failures = 0;
@@ -1028,6 +1033,9 @@ static void *music_stream_thread(void *arg) {
       }
    }
 
+   /* A request still waiting resolves as cancelled, so a waiting tool never
+    * hangs; the slot itself stays for whoever stopped the thread */
+   webui_music_cancel_pending_ticket(state);
    OLOG_INFO("WebUI music: Streaming thread stopped");
    atomic_fetch_sub(&s_active_streams, 1);
    atomic_store(&state->streaming, false);
@@ -1179,6 +1187,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_mutex_init(&state->write_mutex, NULL);
    pthread_mutex_init(&state->control_mutex, NULL);
    pthread_cond_init(&state->decoder_idle_cond, NULL);
+   pthread_cond_init(&state->open_cond, NULL);
    atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
@@ -1244,6 +1253,12 @@ int webui_music_session_init(ws_connection_t *conn) {
 void webui_music_control_lock(session_music_state_t *state, bool preempt) {
    if (preempt) {
       atomic_store(&state->control_cancel, true);
+      /* Wake an LLM tool call waiting for its track to open (it holds
+       * control_mutex while it waits).  Under state_mutex, which the waiter
+       * checks the flag under, so the wakeup can't be missed. */
+      pthread_mutex_lock(&state->state_mutex);
+      pthread_cond_broadcast(&state->open_cond);
+      pthread_mutex_unlock(&state->state_mutex);
    }
    pthread_mutex_lock(&state->control_mutex);
    if (preempt) {
@@ -1324,6 +1339,7 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
    }
 
    pthread_cond_destroy(&state->decoder_idle_cond);
+   pthread_cond_destroy(&state->open_cond);
    pthread_mutex_destroy(&state->state_mutex);
    pthread_mutex_destroy(&state->write_mutex);
    pthread_mutex_destroy(&state->control_mutex);

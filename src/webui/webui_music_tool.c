@@ -100,6 +100,43 @@ static void append_state_footer(strbuf_t *sb, session_music_state_t *state) {
    }
 }
 
+/*
+ * Start a track and wait for the stream thread's verdict, so the reply is
+ * true.  The state frame goes out first (playing, and loading for a Plex
+ * track) so the browser shows the change at once; the thread reports the
+ * outcome to the client itself.
+ */
+static music_open_result_t tool_start_track(ws_connection_t *conn,
+                                            session_music_state_t *state,
+                                            const char *path) {
+   uint32_t ticket = 0;
+   if (webui_music_request_track(state, path, &ticket) != SUCCESS) {
+      webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+      webui_music_send_state(conn, state);
+      return MUSIC_OPEN_FAILED;
+   }
+   webui_music_send_state(conn, state);
+   return webui_music_await_track(state, ticket, WEBUI_MUSIC_TOOL_OPEN_WAIT_MS);
+}
+
+/* How an outcome reads after a track's name ("X is playing", "X couldn't...") */
+static const char *tool_outcome_phrase(music_open_result_t result) {
+   switch (result) {
+      case MUSIC_OPEN_PLAYING:
+         return "is playing";
+      case MUSIC_OPEN_UNREACHABLE:
+         return "can't play: the Plex server isn't reachable";
+      case MUSIC_OPEN_PENDING:
+         return "is still loading from Plex and starts when the download finishes";
+      case MUSIC_OPEN_CANCELLED:
+      case MUSIC_OPEN_SUPERSEDED:
+         return "was replaced by a newer control from the browser";
+      case MUSIC_OPEN_FAILED:
+      default:
+         return "couldn't be played";
+   }
+}
+
 /** strdup(msg) with the state footer appended; falls back to plain msg on OOM. */
 static char *result_with_footer(session_music_state_t *state, const char *msg) {
    strbuf_t sb;
@@ -381,7 +418,7 @@ static int music_tool_locked(ws_connection_t *conn,
          json_object_put(items);
 
          user_music_queue_t *uq = state->shared_queue;
-         bool start_failed = false;
+         music_open_result_t outcome = MUSIC_OPEN_PLAYING;
          if (added > 0) {
             webui_music_clear_track(state);
             char first_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
@@ -393,21 +430,17 @@ static int music_tool_locked(ws_connection_t *conn,
             }
             pthread_mutex_unlock(&state->state_mutex);
             pthread_mutex_unlock(&uq->queue_mutex);
-            start_failed = first_path[0] && webui_music_start_playback(state, first_path) != 0;
-            if (start_failed) {
-               webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-            }
-            webui_music_send_state(conn, state);
             webui_music_broadcast_queue_state(uq, conn);
+            outcome = first_path[0] ? tool_start_track(conn, state, first_path) : MUSIC_OPEN_FAILED;
          }
 
          if (result_out) {
             strbuf_t sb;
             strbuf_init(&sb, 512);
             if (added > 0) {
-               strbuf_appendf(&sb, "Replaced queue. %s%s Use 'enqueue' to add without clearing.",
-                              report ? report : "",
-                              start_failed ? " The first track failed to start." : "");
+               strbuf_appendf(&sb, "Replaced queue. %s The first track %s.", report ? report : "",
+                              tool_outcome_phrase(outcome));
+               strbuf_appendf(&sb, " Use 'enqueue' to add without clearing.");
             } else {
                strbuf_appendf(&sb, "%s Nothing matched, so the queue and playback are unchanged.",
                               report ? report : "");
@@ -499,29 +532,19 @@ static int music_tool_locked(ws_connection_t *conn,
       free(results);
 
       /* Start playback of first track */
-      if (webui_music_start_playback(state, first_path) != 0) {
-         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-         webui_music_send_state(conn, state);
-         webui_music_broadcast_queue_state(uq, conn);
-         if (result_out) {
-            *result_out = strdup("Failed to start playback");
-         }
-         return FAILURE;
-      }
-
-      webui_music_send_state(conn, state);
       webui_music_broadcast_queue_state(uq, conn);
+      music_open_result_t outcome = tool_start_track(conn, state, first_path);
 
       if (result_out) {
-         char buf[WEBUI_MUSIC_PATH_MAX + 256];
+         char buf[WEBUI_MUSIC_PATH_MAX + 320];
          snprintf(buf, sizeof(buf),
-                  "Replaced queue with %d track%s matching '%s'; now playing #1: %s. "
+                  "Replaced queue with %d track%s matching '%s'; #1, %s, %s. "
                   "(Use 'enqueue' to add without clearing.)",
                   total_queued, total_queued == 1 ? "" : "s", base_query,
-                  first_title[0] ? first_title : "Unknown");
+                  first_title[0] ? first_title : "Unknown", tool_outcome_phrase(outcome));
          *result_out = result_with_footer(state, buf);
       }
-      return SUCCESS;
+      return outcome == MUSIC_OPEN_FAILED || outcome == MUSIC_OPEN_UNREACHABLE ? FAILURE : SUCCESS;
 
    } else if (strcmp(action, "enqueue") == 0) {
       /* APPEND to the queue — items[] (preferred) or a single query (top match). */
@@ -681,19 +704,12 @@ static int music_tool_locked(ws_connection_t *conn,
          return SUCCESS;
       }
 
-      bool started = webui_music_start_playback(state, path) == 0;
-      if (!started) {
-         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-      }
-      webui_music_send_state(conn, state);
+      music_open_result_t outcome = tool_start_track(conn, state, path);
 
       if (result_out) {
-         char buf[256];
-         snprintf(buf, sizeof(buf), "%s: %s",
-                  started ? (next ? "Playing next" : "Playing previous")
-                          : (next ? "Failed to start the next track"
-                                  : "Failed to start the previous track"),
-                  title[0] ? title : "Unknown");
+         char buf[384];
+         snprintf(buf, sizeof(buf), "%s track, %s, %s.", next ? "Next" : "Previous",
+                  title[0] ? title : "Unknown", tool_outcome_phrase(outcome));
          *result_out = result_with_footer(state, buf);
       }
       return SUCCESS;
