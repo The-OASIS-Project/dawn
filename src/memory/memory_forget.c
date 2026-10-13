@@ -83,6 +83,8 @@ int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned
                    user_id, (long long)conv_id);
       return MEMORY_FORGET_BUSY;
    }
+   /* A queued extraction of these would learn them again once the hold lets go. */
+   memory_extraction_unqueue_conversations(user_id, ids, n);
    int rc = memory_db_conversations_forget(user_id, ids, n, &d);
    memory_extraction_release_user(user_id);
    if (rc != MEMORY_DB_SUCCESS) {
@@ -90,11 +92,38 @@ int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned
    }
 
    OLOG_INFO("memory_forget: user %d conversation %lld (+%d continuation(s)): removed %d facts, "
-             "%d summaries, %d relations, %d preferences, %d entities",
+             "%d summaries, %d relations, %d preferences, %d entities; %d earlier value(s) back",
              user_id, (long long)conv_id, n - 1, d.facts, d.summaries, d.relations, d.preferences,
-             d.entities);
+             d.entities, d.restored);
    if (deleted_out) {
       *deleted_out = d;
    }
    return SUCCESS;
+}
+
+int memory_forget_fact(int user_id, int64_t fact_id, memory_forget_result_t *out) {
+   if (out) {
+      memset(out, 0, sizeof(*out));
+   }
+   if (!memory_extraction_hold_user(user_id, MEMORY_FORGET_WAIT_SEC)) {
+      OLOG_WARNING("memory_forget: user %d: extraction still running; fact %lld kept for now",
+                   user_id, (long long)fact_id);
+      return MEMORY_FORGET_BUSY;
+   }
+   const int rc = memory_db_fact_forget(fact_id, user_id, out);
+   memory_extraction_release_user(user_id);
+   return rc == MEMORY_DB_SUCCESS     ? SUCCESS
+          : rc == MEMORY_DB_NOT_FOUND ? MEMORY_FORGET_NOT_FOUND
+                                      : FAILURE;
+}
+
+int memory_forget_all(int user_id) {
+   if (!memory_extraction_hold_user(user_id, MEMORY_FORGET_WAIT_SEC)) {
+      OLOG_WARNING("memory_forget: user %d: extraction still running; not deleting yet", user_id);
+      return MEMORY_FORGET_BUSY;
+   }
+   memory_extraction_unqueue_user(user_id);
+   const int rc = memory_db_delete_user_memories(user_id);
+   memory_extraction_release_user(user_id);
+   return rc == MEMORY_DB_SUCCESS ? SUCCESS : FAILURE;
 }

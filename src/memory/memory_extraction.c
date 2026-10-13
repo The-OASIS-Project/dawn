@@ -25,13 +25,16 @@
 
 #define _GNU_SOURCE /* strcasestr */
 
+#define MEMORY_EXTRACTION_INTERNAL_ALLOWED
 #include "memory/memory_extraction.h"
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "auth/auth_db.h"
@@ -51,7 +54,10 @@
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_embeddings_internal.h"
 #include "memory/memory_extraction_input.h"
+#include "memory/memory_extraction_internal.h"
+#include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
 #include "memory/memory_predicate_dedup.h"
 #include "memory/memory_types.h"
@@ -73,131 +79,6 @@ typedef struct {
    bool has_fallback;                     /* Whether fallback LLM info is available */
    memory_extraction_fallback_t fallback; /* Session's active LLM for retry */
 } extraction_context_t;
-
-/* =============================================================================
- * Extraction Concurrency Tracking
- *
- * Tracks in-progress extractions using a bounded array instead of a bitmap.
- * This removes the 64-user limit and enables system-wide concurrency limiting
- * tied to max_clients configuration.
- * ============================================================================= */
-
-#define MAX_EXTRACTION_SLOTS 16 /* Compile-time max; runtime limit is min(this, max_clients) */
-
-static struct {
-   int user_ids[MAX_EXTRACTION_SLOTS]; /* User IDs with active extractions (0 = empty slot) */
-   int count;                          /* Current number of running extractions */
-   /* Users held by memory_extraction_hold_user (no LLM call; 0 = empty). */
-   int held_user_ids[MEMORY_EXTRACTION_MAX_HOLDS];
-} s_extraction_state;
-static pthread_mutex_t s_extraction_mutex = PTHREAD_MUTEX_INITIALIZER;
-/* Signalled whenever a slot is released (see memory_extraction_hold_user).  Uses
- * CLOCK_MONOTONIC so a wall-clock change can't stretch or cut a timed wait. */
-static pthread_cond_t s_extraction_cond;
-static pthread_once_t s_extraction_cond_once = PTHREAD_ONCE_INIT;
-
-static void extraction_cond_init(void) {
-   pthread_condattr_t attr;
-   pthread_condattr_init(&attr);
-   pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
-   pthread_cond_init(&s_extraction_cond, &attr);
-   pthread_condattr_destroy(&attr);
-}
-
-/* Last-extraction-outcome flag for the recovery/reextract orchestrator.
- * Set by the extraction thread when an LLM call signals transient failure
- * (LLM_ERR_TRANSIENT_NETWORK), read+cleared by memory_recovery's
- * post-wait branch via memory_extraction_consume_last_transient().  Lives
- * outside the slot table because the slot is released BEFORE the recovery
- * worker observes "not in progress" — the flag must survive that
- * transition.  Single-pair design: recovery serializes within a pass and
- * only waits on one user at a time, so race with a concurrent webui
- * session-end extraction is rare and best-effort.  Guarded by the
- * existing s_extraction_mutex to avoid adding another lock. */
-static struct {
-   int last_user_id;
-   bool was_transient;
-} s_last_outcome = { 0, false };
-
-/* Stamp the most-recent outcome under the extraction mutex.  Called only
- * from the extraction thread before it releases the slot. */
-static void set_last_outcome_locked(int user_id, bool was_transient) {
-   s_last_outcome.last_user_id = user_id;
-   s_last_outcome.was_transient = was_transient;
-}
-
-/* Helper: Get runtime concurrency limit */
-static int get_max_concurrent_extractions(void) {
-   int limit = g_config.webui.max_clients;
-   if (limit <= 0 || limit > MAX_EXTRACTION_SLOTS) {
-      limit = MAX_EXTRACTION_SLOTS;
-   }
-   return limit;
-}
-
-/* Helper: Check if user has active extraction (must hold mutex) */
-static bool extraction_running_locked(int user_id) {
-   for (int i = 0; i < MAX_EXTRACTION_SLOTS; i++) {
-      if (s_extraction_state.user_ids[i] == user_id) {
-         return true;
-      }
-   }
-   return false;
-}
-
-/* Helper: the user's hold entry, or -1 (must hold mutex) */
-static int extraction_hold_index_locked(int user_id) {
-   for (int i = 0; i < MEMORY_EXTRACTION_MAX_HOLDS; i++) {
-      if (s_extraction_state.held_user_ids[i] == user_id) {
-         return i;
-      }
-   }
-   return -1;
-}
-
-/* Helper: an extraction is running for the user, or it is held (must hold mutex) */
-static bool extraction_is_active_locked(int user_id) {
-   return extraction_running_locked(user_id) || extraction_hold_index_locked(user_id) >= 0;
-}
-
-/* Helper: Try to acquire extraction slot for user (must hold mutex)
- * Returns true if slot acquired, false if user already active or slots full */
-static bool extraction_slot_acquire_locked(int user_id) {
-   /* Check if user already has active extraction */
-   if (extraction_is_active_locked(user_id)) {
-      return false;
-   }
-
-   /* Check if we've hit the concurrency limit */
-   int max_concurrent = get_max_concurrent_extractions();
-   if (s_extraction_state.count >= max_concurrent) {
-      return false;
-   }
-
-   /* Find empty slot and claim it */
-   for (int i = 0; i < MAX_EXTRACTION_SLOTS; i++) {
-      if (s_extraction_state.user_ids[i] == 0) {
-         s_extraction_state.user_ids[i] = user_id;
-         s_extraction_state.count++;
-         return true;
-      }
-   }
-
-   return false; /* Should not reach here if count is accurate */
-}
-
-/* Helper: Release extraction slot for user (must hold mutex) */
-static void extraction_slot_release_locked(int user_id) {
-   pthread_once(&s_extraction_cond_once, extraction_cond_init);
-   for (int i = 0; i < MAX_EXTRACTION_SLOTS; i++) {
-      if (s_extraction_state.user_ids[i] == user_id) {
-         s_extraction_state.user_ids[i] = 0;
-         s_extraction_state.count--;
-         pthread_cond_broadcast(&s_extraction_cond);
-         return;
-      }
-   }
-}
 
 /* =============================================================================
  * Helper: Build existing profile string
@@ -1036,29 +917,44 @@ static void process_extraction_response(int user_id,
                int64_t rel_fact_id = fact_id;
                memory_fact_t fact_check;
                if (memory_db_fact_get(rel_fact_id, user_id, &fact_check) != MEMORY_DB_SUCCESS) {
+                  /* Deleted meanwhile (a forget): the relation goes with it, as
+                   * it would have had it been stored first. */
                   OLOG_WARNING("memory_extraction: fact_id=%lld vanished before relation "
-                               "supersede (subj=%s pred=%s obj=%s) — storing with NULL fact link "
+                               "supersede (subj=%s pred=%s obj=%s) — relation not stored "
                                "[diag origin=%s conv=%lld fact_text='%.80s']",
                                (long long)fact_id, r_subj, canon_pred, r_obj, fact_id_origin,
                                prov ? (long long)prov->conv_id : -1L, text);
-                  rel_fact_id = 0;
+                  continue;
                }
 
-               int64_t old_fact_id = 0;
-               int rel_rc = memory_db_relation_supersede(user_id, r_subj_id, canon_pred, r_obj_id,
-                                                         (r_obj_id == 0) ? r_obj : NULL,
-                                                         rel_fact_id, 0.8f, valid_from, valid_to,
-                                                         prov, &old_fact_id);
-               if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
-                  if (memory_db_fact_supersede(old_fact_id, rel_fact_id, user_id) ==
-                      MEMORY_DB_SUCCESS) {
-                     OLOG_INFO("memory_extraction: contradiction — fact %ld superseded by %ld "
-                               "(relation: %s)",
-                               (long)old_fact_id, (long)rel_fact_id, canon_pred);
-                  } else {
-                     OLOG_WARNING("memory_extraction: fact supersede failed for %ld -> %ld",
-                                  (long)old_fact_id, (long)rel_fact_id);
+               /* "replaces": the user said this value replaced an old one (a new
+                * number, a move, a job change): the old value it names, or true
+                * when it can't say which. */
+               struct json_object *repl_obj = NULL;
+               const char *replaces = NULL;
+               if (json_object_object_get_ex(rel, "replaces", &repl_obj)) {
+                  const char *v = json_object_is_type(repl_obj, json_type_string)
+                                      ? json_object_get_string(repl_obj)
+                                      : NULL;
+                  /* "unknown" too: a model may spell "can't say which" that way. */
+                  const bool unsure = v &&
+                                      (strcasecmp(v, "true") == 0 || strcasecmp(v, "unknown") == 0);
+                  if (v && !unsure && strcasecmp(v, "false") != 0) {
+                     replaces = v[0] ? v : NULL;
+                  } else if (v ? unsure : json_object_get_boolean(repl_obj)) {
+                     replaces = MEMORY_RELATION_REPLACES_UNKNOWN;
                   }
+               }
+               int64_t old_fact_id = 0;
+               int rel_rc = memory_db_relation_supersede_ex(
+                   user_id, r_subj_id, canon_pred, r_obj_id, (r_obj_id == 0) ? r_obj : NULL,
+                   rel_fact_id, 0.8f, valid_from, valid_to, replaces, prov, &old_fact_id);
+               if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
+                  /* Superseded in the same transaction; the cache keeps current facts. */
+                  memory_embeddings_invalidate_cache_for_user(user_id);
+                  OLOG_INFO("memory_extraction: contradiction — fact %ld superseded by %ld "
+                            "(relation: %s)",
+                            (long)old_fact_id, (long)rel_fact_id, canon_pred);
                }
                if (valid_from || valid_to) {
                   OLOG_INFO("memory_extraction: relation: (%s, %s, %s) valid [%ld..%ld]", r_subj,
@@ -1125,7 +1021,15 @@ static void process_extraction_response(int user_id,
                memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", NULL, prov,
                                         conv_created_at, &new_id);
                if (new_id > 0) {
-                  memory_db_fact_supersede(similar[0].id, new_id, user_id);
+                  /* The old fact is an older value the correction replaced
+                   * (back if the correction is forgotten); what it stated stays
+                   * open, since a correction rarely retracts all of it.
+                   * Refused (logged) when the old one was already superseded. */
+                  if (memory_db_fact_correct(similar[0].id, new_id, user_id) != MEMORY_DB_SUCCESS) {
+                     OLOG_WARNING("memory_extraction: correction of fact %lld not applied "
+                                  "(already merged or replaced)",
+                                  (long long)similar[0].id);
+                  }
                   OLOG_INFO("memory_extraction: corrected fact: %s -> %s", old_fact, new_fact);
                   /* Embed the corrected fact */
                   if (memory_embeddings_available()) {
@@ -1553,9 +1457,7 @@ static void *extraction_thread(void *arg) {
    {
       bool was_transient = (response == NULL && (primary_was_transient ||
                                                  llm_last_error() == LLM_ERR_TRANSIENT_NETWORK));
-      pthread_mutex_lock(&s_extraction_mutex);
-      set_last_outcome_locked(ctx->user_id, was_transient);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_record_outcome(ctx->user_id, was_transient);
    }
 
    free(prompt);
@@ -1568,9 +1470,7 @@ cleanup:
    int saved_user_id = ctx->user_id;
    free(ctx);
 
-   pthread_mutex_lock(&s_extraction_mutex);
-   extraction_slot_release_locked(saved_user_id);
-   pthread_mutex_unlock(&s_extraction_mutex);
+   extraction_slot_release(saved_user_id);
 
    OLOG_INFO("memory_extraction: completed for user %d", saved_user_id);
    return NULL;
@@ -1581,19 +1481,31 @@ cleanup:
  * ============================================================================= */
 
 
-int memory_trigger_extraction(int user_id,
+/* A request refused before it started: with @p have_slot (a queued run's slot,
+ * claimed when it was taken) the slot goes back. */
+static int trigger_skip(int user_id, bool have_slot, int rc) {
+   if (have_slot) {
+      extraction_slot_release(user_id);
+   }
+   return rc;
+}
+
+/* memory_trigger_extraction(), or a queued run (@p have_slot: its slot is
+ * already claimed, and every return lets it go or hands it to the thread). */
+static int trigger_extraction(int user_id,
                               int64_t conversation_id,
                               const char *session_id_str,
                               struct json_object *conversation_history,
                               int message_count,
                               int duration_seconds,
-                              const memory_extraction_fallback_t *fallback) {
+                              const memory_extraction_fallback_t *fallback,
+                              bool have_slot) {
    if (user_id <= 0 || !conversation_history) {
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
 
    if (!g_config.memory.enabled) {
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
 
 #ifdef ENABLE_AUTH
@@ -1609,7 +1521,7 @@ int memory_trigger_extraction(int user_id,
          OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
                    (long long)conversation_id,
                    priv_rc == AUTH_DB_SUCCESS ? "private" : "unreadable");
-         return 0;
+         return trigger_skip(user_id, have_slot, 0);
       }
       /* A background job's transcript is research the model did, not what the
        * user said; memory comes from the parent conversation it reports into. */
@@ -1619,7 +1531,7 @@ int memory_trigger_extraction(int user_id,
          OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
                    (long long)conversation_id,
                    job_rc == AUTH_DB_SUCCESS ? "a background job" : "unreadable (job check)");
-         return 0;
+         return trigger_skip(user_id, have_slot, 0);
       }
    }
 #endif
@@ -1634,7 +1546,7 @@ int memory_trigger_extraction(int user_id,
          memory_db_set_last_extracted(conversation_id, message_count,
                                       0); /* 0 = leave msg_id cursor unchanged */
       }
-      return 0;
+      return trigger_skip(user_id, have_slot, 0);
    }
 
    /* ID-based incremental extraction cursor.
@@ -1652,36 +1564,25 @@ int memory_trigger_extraction(int user_id,
       if (max_msg_id > 0 && max_msg_id <= last_msg_id) {
          OLOG_INFO("memory_extraction: skipping — no new messages (max_id=%lld, last=%lld)",
                    (long long)max_msg_id, (long long)last_msg_id);
-         return 0;
+         return trigger_skip(user_id, have_slot, 0);
       }
    }
 
    int new_messages = message_count - last_extracted;
 
-   /* Check concurrency limits and acquire extraction slot */
-   pthread_mutex_lock(&s_extraction_mutex);
-   if (!extraction_slot_acquire_locked(user_id)) {
-      /* Either user already has extraction in progress, or we've hit max concurrent */
-      bool user_active = extraction_is_active_locked(user_id);
-      int max_concurrent = get_max_concurrent_extractions();
-      pthread_mutex_unlock(&s_extraction_mutex);
-
-      if (user_active) {
-         OLOG_INFO("memory_extraction: already in progress for user %d", user_id);
-      } else {
-         OLOG_INFO("memory_extraction: at capacity (%d/%d), skipping user %d",
-                   s_extraction_state.count, max_concurrent, user_id);
-      }
-      return 0;
+   /* Check concurrency limits and acquire extraction slot.  Refused (the
+    * user's extraction is running or held, or every slot is busy): a
+    * conversation waits in the queue for the next release; recovery's own
+    * requests retry on its pass instead. */
+   if (!have_slot &&
+       !extraction_slot_claim_or_queue(user_id, conversation_id, session_id_str, fallback)) {
+      return MEMORY_EXTRACTION_BUSY;
    }
-   pthread_mutex_unlock(&s_extraction_mutex);
 
    /* Prepare context */
    extraction_context_t *ctx = calloc(1, sizeof(extraction_context_t));
    if (!ctx) {
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
 
@@ -1707,9 +1608,7 @@ int memory_trigger_extraction(int user_id,
                                                                 conversation_history, last_msg_id);
    if (!filtered) {
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 0;
    }
 
@@ -1719,9 +1618,7 @@ int memory_trigger_extraction(int user_id,
    json_object_put(filtered);
    if (!safe) {
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
    ctx->conversation_json = strdup(json_object_to_json_string_ext(safe, JSON_C_TO_STRING_PLAIN));
@@ -1729,9 +1626,7 @@ int memory_trigger_extraction(int user_id,
 
    if (!ctx->conversation_json) {
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
 
@@ -1751,9 +1646,7 @@ int memory_trigger_extraction(int user_id,
       OLOG_ERROR("memory_extraction: failed to create thread: %d", rc);
       free(ctx->conversation_json);
       free(ctx);
-      pthread_mutex_lock(&s_extraction_mutex);
-      extraction_slot_release_locked(user_id);
-      pthread_mutex_unlock(&s_extraction_mutex);
+      extraction_slot_release(user_id);
       return 1;
    }
 
@@ -1761,97 +1654,27 @@ int memory_trigger_extraction(int user_id,
    return 0;
 }
 
-bool memory_extraction_in_progress(int user_id) {
-   if (user_id <= 0) {
-      return false;
-   }
-
-   pthread_mutex_lock(&s_extraction_mutex);
-   bool in_progress = extraction_is_active_locked(user_id);
-   pthread_mutex_unlock(&s_extraction_mutex);
-
-   return in_progress;
+int memory_trigger_extraction(int user_id,
+                              int64_t conversation_id,
+                              const char *session_id_str,
+                              struct json_object *conversation_history,
+                              int message_count,
+                              int duration_seconds,
+                              const memory_extraction_fallback_t *fallback) {
+   return trigger_extraction(user_id, conversation_id, session_id_str, conversation_history,
+                             message_count, duration_seconds, fallback, false);
 }
 
-/* Deadline @p timeout_sec from now on the condition variable's clock. */
-static struct timespec extraction_deadline(int timeout_sec) {
-   struct timespec deadline;
-   clock_gettime(CLOCK_MONOTONIC, &deadline);
-   deadline.tv_sec += timeout_sec > 0 ? timeout_sec : 0;
-   return deadline;
-}
-
-bool memory_extraction_wait_idle(int user_id, int timeout_sec) {
-   if (user_id <= 0) {
-      return true;
-   }
-   pthread_once(&s_extraction_cond_once, extraction_cond_init);
-   const struct timespec deadline = extraction_deadline(timeout_sec);
-   pthread_mutex_lock(&s_extraction_mutex);
-   bool idle = true;
-   while (extraction_running_locked(user_id)) {
-      if (pthread_cond_timedwait(&s_extraction_cond, &s_extraction_mutex, &deadline) == ETIMEDOUT) {
-         idle = !extraction_running_locked(user_id);
-         break;
-      }
-   }
-   pthread_mutex_unlock(&s_extraction_mutex);
-   return idle;
-}
-
-bool memory_extraction_hold_user(int user_id, int timeout_sec) {
-   if (user_id <= 0) {
-      return false;
-   }
-   pthread_once(&s_extraction_cond_once, extraction_cond_init);
-   const struct timespec deadline = extraction_deadline(timeout_sec);
-
-   pthread_mutex_lock(&s_extraction_mutex);
-   for (;;) {
-      if (!extraction_is_active_locked(user_id)) {
-         /* A hold makes no LLM call; it only keeps one from starting for this
-          * user, so it takes an entry of its own, not an extraction slot. */
-         const int free_idx = extraction_hold_index_locked(0);
-         if (free_idx >= 0) {
-            s_extraction_state.held_user_ids[free_idx] = user_id;
-            pthread_mutex_unlock(&s_extraction_mutex);
-            return true;
-         }
-      }
-      if (pthread_cond_timedwait(&s_extraction_cond, &s_extraction_mutex, &deadline) == ETIMEDOUT) {
-         pthread_mutex_unlock(&s_extraction_mutex);
-         return false;
-      }
-   }
-}
-
-void memory_extraction_release_user(int user_id) {
-   if (user_id <= 0) {
-      return;
-   }
-   pthread_once(&s_extraction_cond_once, extraction_cond_init);
-   pthread_mutex_lock(&s_extraction_mutex);
-   const int idx = extraction_hold_index_locked(user_id);
-   if (idx >= 0) {
-      s_extraction_state.held_user_ids[idx] = 0;
-      pthread_cond_broadcast(&s_extraction_cond);
-   }
-   pthread_mutex_unlock(&s_extraction_mutex);
-}
-
-bool memory_extraction_consume_last_transient(int user_id) {
-   if (user_id <= 0) {
-      return false;
-   }
-   pthread_mutex_lock(&s_extraction_mutex);
-   bool result = (s_last_outcome.last_user_id == user_id && s_last_outcome.was_transient);
-   if (result) {
-      /* Clear so a subsequent consume returns false — the recovery
-       * worker reads once per extraction it triggered. */
-      s_last_outcome.was_transient = false;
-   }
-   pthread_mutex_unlock(&s_extraction_mutex);
-   return result;
+/* A queued conversation's run, on the slot claimed when it was taken
+ * (memory_extraction_slots.c). */
+int extraction_run_queued(int user_id,
+                          int64_t conversation_id,
+                          const char *session_id,
+                          struct json_object *history,
+                          int message_count,
+                          const memory_extraction_fallback_t *fallback) {
+   return trigger_extraction(user_id, conversation_id, session_id, history, message_count, 0,
+                             fallback, true);
 }
 
 size_t memory_extraction_get_template_size_chars(void) {

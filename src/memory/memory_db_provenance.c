@@ -569,6 +569,24 @@ int memory_db_conversations_learned_count(int user_id,
           "SELECT COUNT(*) FROM memory_preferences p WHERE " MEMORY_FORGET_PREF_WHERE, user_id, ids,
           &out->preferences, NULL);
    }
+   /* The older values forgetting them would bring back (the same settle the
+    * forget runs), so what the user confirms is what happens. */
+   if (rc == MEMORY_DB_SUCCESS) {
+      sqlite3_stmt *fill = NULL;
+      bool ok = memory_db_internal_going_reset_locked() == MEMORY_DB_SUCCESS &&
+                sqlite3_prepare_v2(s_db.db, "INSERT INTO fact_going " MEMORY_FORGET_FACT_IDS, -1,
+                                   &fill, NULL) == SQLITE_OK;
+      if (ok) {
+         sqlite3_bind_int(fill, 1, user_id);
+         sqlite3_bind_text(fill, 2, ids, -1, SQLITE_STATIC);
+         ok = sqlite3_step(fill) == SQLITE_DONE;
+      }
+      sqlite3_finalize(fill);
+      ok = ok && memory_db_internal_settle_count_locked(user_id, &out->restored, NULL) ==
+                     MEMORY_DB_SUCCESS;
+      (void)sqlite3_exec(s_db.db, "DELETE FROM fact_going;", NULL, NULL, NULL);
+      rc = ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+   }
 #undef IN_CONVS
    AUTH_DB_UNLOCK();
    return rc;

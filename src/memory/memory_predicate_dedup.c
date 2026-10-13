@@ -45,11 +45,11 @@
  * source.  Predicates in this list have semantic guarantees in the
  * memory subsystem:
  *
- *   - Some are exclusive (works_at, lives_in, married_to, ...) — see
- *     EXCLUSIVE_RELATIONS[] in memory_db.c.  Adding a new exclusive
- *     relation requires updating that list too.
+ *   - Some are one-at-a-time (married_to, born_in, ...) or identifying
+ *     (email_is, works_at, ...) — see SPECIAL_RELATIONS[] in
+ *     memory_db_relations.c.  Adding one requires updating that list too.
  *   - Contradiction pairs (likes/dislikes, enjoys/hates, can/cannot,
- *     is/is_not) are in CONTRADICTORY_PAIRS[] in memory_db.c.  This
+ *     is/is_not) are in CONTRADICTORY_PAIRS[] in memory_db_relations.c.  This
  *     list intentionally still includes both halves of each pair so
  *     the resolver doesn't accidentally collapse `dislikes` onto
  *     `likes`.

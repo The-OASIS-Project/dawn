@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "memory/memory_history_loader.h"
+#include "prompts.h"
 #include "unity.h"
 
 void setUp(void) {
@@ -106,8 +107,49 @@ static void test_replacement_never_grows_the_buffer(void) {
    free(got);
 }
 
+/* A reply's saved visuals (body, "\n", each block, "\n") never reach a model. */
+static void expect_visuals(const char *in, const char *want) {
+   char *got = memory_history_strip_visuals(in);
+   if (!want) {
+      TEST_ASSERT_NULL(got);
+      return;
+   }
+   TEST_ASSERT_NOT_NULL(got);
+   TEST_ASSERT_EQUAL_STRING(want, got);
+   free(got);
+}
+
+static void test_visuals_stripped_from_a_reply(void) {
+   expect_visuals("The diagram is above.\n<dawn-visual title=\"a\" type=\"svg\">\n<svg/>\n"
+                  "</dawn-visual>\n",
+                  "The diagram is above.");
+   expect_visuals("Two of them.\n<dawn-visual title=\"a\" type=\"svg\">\n<svg/>\n</dawn-visual>\n"
+                  "<dawn-visual title=\"b\" type=\"html\">\n<div>x</div>\n</dawn-visual>",
+                  "Two of them.");
+   /* A visual whose code holds an opening tag (only closers are escaped). */
+   expect_visuals("Here.\n<dawn-visual title=\"a\" type=\"html\">\n<p><dawn-visual</p>\n"
+                  "</dawn-visual>\n",
+                  "Here.");
+   expect_visuals("<dawn-visual title=\"a\" type=\"svg\">\n<svg/>\n</dawn-visual>\n",
+                  HISTORY_VISUAL_ONLY_REPLY);
+}
+
+static void test_visual_mentions_left_alone(void) {
+   expect_visuals("No visuals here.", NULL);
+   expect_visuals(NULL, NULL);
+   /* Mid-text, or not ending the reply: the model wrote it. */
+   expect_visuals("Use <dawn-visual> tags.", NULL);
+   expect_visuals("A\n<dawn-visual title=\"a\">x</dawn-visual>\nand then more text", NULL);
+   /* Unterminated: not a saved block. */
+   expect_visuals("A\n<dawn-visual title=\"a\">x", NULL);
+   /* Another tag whose name starts the same way: not a visual. */
+   expect_visuals("A\n<dawn-visualization>x</dawn-visual>\n", NULL);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_visuals_stripped_from_a_reply);
+   RUN_TEST(test_visual_mentions_left_alone);
    RUN_TEST(test_no_markers_is_byte_identical);
    RUN_TEST(test_markers_are_replaced);
    RUN_TEST(test_unterminated_marker_is_copied_verbatim);

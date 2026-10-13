@@ -753,6 +753,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_conv_memory.c
         src/webui/webui_restore.c
         src/webui/webui_memory.c
+        src/webui/webui_memory_merged.c
         src/webui/webui_config.c
         src/webui/webui_reasoning.c
         src/webui/webui_session.c
@@ -972,6 +973,8 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v100.c
     src/auth/auth_db_migrations_v101.c
     src/auth/auth_db_migrations_v102.c
+    src/auth/auth_db_migrations_v103.c
+    src/auth/auth_db_migrations_v104.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
@@ -1002,6 +1005,8 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_citation.c
     src/memory/memory_citation_parse.c
     src/memory/memory_db_facts.c
+    src/memory/memory_db_facts_restore.c
+    src/memory/memory_db_fact_settle.c
     src/memory/memory_db_summaries.c
     src/memory/memory_db_prefs.c
     src/memory/memory_db_entities.c
@@ -1031,7 +1036,11 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_note_bridge.c
     src/memory/memory_context.c
     src/memory/memory_callback.c
+    src/memory/memory_callback_restore.c
+    src/memory/memory_callback_forget.c
     src/memory/memory_extraction.c
+    src/memory/memory_extraction_queue.c
+    src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c
     src/memory/memory_similarity.c
     src/memory/memory_import.c
@@ -1406,6 +1415,7 @@ if(ENABLE_AUTH)
     add_executable(dawn-admin
         dawn-admin/main.c
         dawn-admin/cmd_llm.c
+        dawn-admin/cmd_memory.c
         dawn-admin/socket_client.c
         dawn-admin/password_prompt.c)
     target_include_directories(dawn-admin PRIVATE ${CMAKE_SOURCE_DIR}/include)

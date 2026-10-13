@@ -64,20 +64,26 @@
       const memories = learned.memories || 0;
       const outdated = learned.outdated || 0;
       const links = learned.relations || 0;
+      const back = learned.restored || 0;
       const name =
          typeof DawnFormat !== 'undefined' && DawnFormat.assistantName
             ? DawnFormat.assistantName()
             : 'The assistant';
       let what = countNoun(memories, 'memory', 'memories');
       if (outdated > 0) {
-         what += `, ${countNoun(outdated, 'older version', 'older versions')} of memories`;
+         what += `, ${countNoun(outdated, 'outdated or duplicate copy', 'outdated or duplicate copies')}`;
       }
       if (links > 0) {
          what += ` and ${countNoun(links, 'connection', 'connections')} between people and things`;
       }
+      const comesBack =
+         back > 0
+            ? ` ${countNoun(back, 'earlier value', 'earlier values')} they replaced will be ` +
+              'current again.'
+            : '';
       const confirmed = await DawnDialog.confirm(
          `${name} already learned ${what} from this conversation (and any continuation of it) ` +
-            'before it was private. Forget them too? This cannot be undone.',
+            `before it was private. Forget them too?${comesBack} This cannot be undone.`,
          {
             title: 'Forget what was learned?',
             okText: 'Forget',
@@ -85,10 +91,11 @@
             danger: true,
             detail:
                'This includes anything saved here with "remember". What another ' +
-               'conversation also taught stays, as do imported memories. An older ' +
-               'version a removed memory had replaced is removed too, so it does not ' +
-               'come back as current. Memories saved before September 2026 may not ' +
-               'record where they came from; check the Memory panel for those.',
+               'conversation also taught stays, as do imported memories. A value a ' +
+               'removed memory had replaced (an old phone number, an earlier address) ' +
+               'can be forgotten in the Memory panel if it is wrong too. ' +
+               'Memories saved before September 2026 may not record where they came ' +
+               'from; check the Memory panel for those.',
          }
       );
       if (confirmed) sendForget(conversationId);

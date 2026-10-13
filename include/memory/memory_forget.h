@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 
+#include "memory/memory_db.h"
 #include "memory/memory_db_provenance.h"
 
 #ifdef __cplusplus
@@ -38,6 +39,9 @@ extern "C" {
 /** The conversation has more than CONV_CHAIN_MAX continuations; nothing was
  *  counted or deleted. */
 #define MEMORY_FORGET_TOO_LONG 3
+
+/** memory_forget_fact(): no such fact of the user. */
+#define MEMORY_FORGET_NOT_FOUND 4
 
 /** Longest a count or forget waits for the user's in-flight extraction. */
 #define MEMORY_FORGET_WAIT_SEC 120
@@ -67,6 +71,34 @@ int memory_conversation_learned(int user_id, int64_t conv_id, memory_conv_learne
  *         deleted); MEMORY_FORGET_TOO_LONG; or FAILURE (nothing deleted)
  */
 int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned_t *deleted_out);
+
+/**
+ * @brief Forget one fact (memory_db_fact_forget) with the user's extraction
+ *        held, so one finishing meanwhile can't merge into it or use an
+ *        entity it takes with it
+ *
+ * Waits (up to MEMORY_FORGET_WAIT_SEC) for an extraction already running for
+ * the user.  The caller marks the removal (conv_db_withdraw_intent_begin) and
+ * withdraws it.  Blocking: call off the WebUI service thread.
+ * @param out What else it did (may be NULL)
+ * @return SUCCESS; MEMORY_FORGET_BUSY (extraction still running, nothing
+ *         deleted); MEMORY_FORGET_NOT_FOUND (not the user's); or FAILURE
+ */
+int memory_forget_fact(int user_id, int64_t fact_id, memory_forget_result_t *out);
+
+/**
+ * @brief Delete every memory of the user ("delete all memories")
+ *
+ * Waits for an extraction already running for the user and keeps a new one
+ * from starting until done, drops the user's queued extractions, and deletes
+ * (memory_db_delete_user_memories, which also marks every conversation of the
+ * user extracted so recovery doesn't learn it all again).  Blocking: call off
+ * the WebUI service thread.
+ *
+ * @return SUCCESS; MEMORY_FORGET_BUSY (extraction still running, nothing
+ *         deleted); or FAILURE
+ */
+int memory_forget_all(int user_id);
 
 #ifdef __cplusplus
 }

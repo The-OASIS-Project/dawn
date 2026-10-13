@@ -4,6 +4,7 @@
 #  1. Formatting check (always; fast)
 #     - C/C++ files: clang-format
 #     - JS/CSS/HTML files: prettier (if available)
+#     - Staged WebUI scripts parse (node --check, if available)
 #  2. Build + test (conditional on staged source/build files)
 #     - Skipped on docs-only / config-only / web-only commits
 #     - Mirrors what the CI runs locally so a green commit ≈ green CI
@@ -83,6 +84,28 @@ if [ $FORMAT_RESULT -ne 0 ]; then
    echo -e "${YELLOW}Then re-stage and commit again.${NC}"
    echo -e "${YELLOW}Bypass:   git commit --no-verify${NC}"
    exit 1
+fi
+
+# Phase 1b — staged WebUI scripts must parse (node --check, if node is
+# installed).  Prettier formats what it can parse and says nothing of a
+# redeclared const, which stops the whole file from loading in the browser.
+if command -v node >/dev/null 2>&1; then
+   JS_TMP=$(mktemp -d) || exit 1
+   JS_FAILED=0
+   while IFS= read -r js; do
+      [ -z "$js" ] && continue
+      git show ":$js" > "$JS_TMP/check.js" 2>/dev/null || continue
+      if ! node --check "$JS_TMP/check.js" 2>"$JS_TMP/err"; then
+         echo -e "${RED}Pre-commit: $js does not parse:${NC}"
+         sed "s|$JS_TMP/check.js|$js|" "$JS_TMP/err" | head -5
+         JS_FAILED=1
+      fi
+   done <<< "$(git diff --cached --name-only --diff-filter=ACMR -- 'www/*.js' ':!www/js/vendor/*')"
+   rm -rf "$JS_TMP"
+   if [ $JS_FAILED -ne 0 ]; then
+      echo -e "${YELLOW}Bypass: git commit --no-verify${NC}"
+      exit 1
+   fi
 fi
 
 # -----------------------------------------------------------------------------

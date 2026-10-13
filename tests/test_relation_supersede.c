@@ -16,9 +16,10 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Unit tests for relation-driven fact supersede.  Verifies that when an
- * exclusive relation is superseded, the old relation's linked fact_id is
- * returned so the caller can propagate the supersede to the fact layer.
+ * Unit tests for relation-driven fact supersede.  Verifies which open
+ * relations a new value closes (one-at-a-time relations, or a value said to
+ * replace another), and that a closed relation's fact is superseded only when
+ * nothing open rests on it.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -48,10 +49,14 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  last_accessed INTEGER,"
                          "  access_count INTEGER DEFAULT 0,"
                          "  superseded_by INTEGER,"
+                         "  superseded_kind INTEGER NOT NULL DEFAULT 0,"
+                         "  merged_from_id INTEGER DEFAULT NULL,"
                          "  superseded_at INTEGER,"
                          "  normalized_hash INTEGER DEFAULT 0,"
                          "  embedding BLOB DEFAULT NULL,"
-                         "  embedding_norm REAL DEFAULT NULL"
+                         "  embedding_norm REAL DEFAULT NULL,"
+                         "  source_conversation_id INTEGER DEFAULT NULL,"
+                         "  origin_unsourced INTEGER NOT NULL DEFAULT 0"
                          ");"
                          "CREATE TABLE IF NOT EXISTS memory_entities ("
                          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -67,6 +72,11 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  mention_count INTEGER DEFAULT 1,"
                          "  UNIQUE(user_id, canonical_name)"
                          ");"
+                         /* What memory_db_fact_merge copies to the fact kept. */
+                         "CREATE TABLE IF NOT EXISTS memory_fact_sources ("
+                         "  fact_id INTEGER NOT NULL, conversation_id INTEGER NOT NULL,"
+                         "  PRIMARY KEY (fact_id, conversation_id));"
+                         "CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY);"
                          "CREATE TABLE IF NOT EXISTS memory_relations ("
                          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
                          "  user_id INTEGER NOT NULL,"
@@ -79,6 +89,8 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
                          "  valid_from INTEGER DEFAULT NULL,"
                          "  valid_to INTEGER DEFAULT NULL,"
+                         "  merged_from_fact_id INTEGER DEFAULT NULL,"
+                         "  closed_by_fact_id INTEGER DEFAULT NULL,"
                          /* v40 + v49 columns — mirror production so the upsert
                           * prepared statement's 12 bind slots all have targets
                           * and the partial UNIQUE index has rows to constrain. */
@@ -139,28 +151,23 @@ static void setup_db(void) {
       exit(1);
    }
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_relations SET valid_to = ? "
-                           "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
-                           "  AND valid_to IS NULL "
-                           "  AND (COALESCE(object_entity_id, 0) != COALESCE(?, 0) "
-                           "    OR COALESCE(object_value, '') != COALESCE(?, '')) "
-                           "RETURNING fact_id",
-                           -1, &s_db.stmt_memory_relation_close_open, NULL);
+   rc = sqlite3_prepare_v2(s_db.db, MEMORY_RELATION_CLOSE_OPEN_SQL, -1,
+                           &s_db.stmt_memory_relation_close_open, NULL);
    if (rc != SQLITE_OK) {
       fprintf(stderr, "prepare relation_close_open failed: %s\n", sqlite3_errmsg(s_db.db));
       exit(1);
    }
 
-   /* Prepare statements used by memory_db_fact_supersede() — SQL mirrors
+   /* Prepare statements used by the fact supersede — SQL mirrors
     * the CWE-639 defense-in-depth in production: (old_id, user_id) gates
     * the UPDATE and an EXISTS subquery enforces same-user ownership of
     * new_fact_id (cross-user pointer prevention). */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_facts SET superseded_by = ?, "
+                           "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = ?6, "
                            "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-                           "WHERE id = ? AND user_id = ? "
-                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
+                           "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL AND ?2 != ?4 "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5 "
+                           "AND superseded_by IS NULL)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {
       fprintf(stderr, "prepare fact_supersede failed: %s\n", sqlite3_errmsg(s_db.db));
@@ -181,7 +188,8 @@ static void teardown_db(void) {
    s_db.stmt_memory_relation_close_open = NULL;
    s_db.stmt_memory_fact_supersede = NULL;
    if (s_db.db)
-      sqlite3_close(s_db.db);
+      memory_db_release_statements_locked(); /* the store's kept statements */
+   sqlite3_close(s_db.db);
    pthread_mutex_destroy(&s_db.mutex);
    memset(&s_db, 0, sizeof(s_db));
 }
@@ -270,7 +278,7 @@ static int64_t get_fact_superseded_by(int64_t fact_id) {
  * Tests
  * ============================================================================ */
 
-static void test_exclusive_supersede_returns_old_fact_id(void) {
+static void test_replacing_supersede_returns_old_fact_id(void) {
    int user_id = 1;
    int64_t fact_a = insert_fact(user_id, "Alice works at Google");
    int64_t alice = insert_entity(user_id, "alice", "person");
@@ -282,13 +290,15 @@ static void test_exclusive_supersede_returns_old_fact_id(void) {
 
    int64_t fact_b = insert_fact(user_id, "Alice works at Microsoft");
    int64_t old_fact_id = 0;
-   int rc = memory_db_relation_supersede(user_id, alice, "works_at", microsoft, NULL, fact_b, 0.9f,
-                                         0, 0, NULL, &old_fact_id);
+   /* works_at holds several: the new job closes the old only when said to. */
+   int rc = memory_db_relation_supersede_ex(user_id, alice, "works_at", microsoft, NULL, fact_b,
+                                            0.9f, 0, 0, MEMORY_RELATION_REPLACES_UNKNOWN, NULL,
+                                            &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
 
-   memory_db_fact_supersede(old_fact_id, fact_b, user_id);
+   /* Retired in the relation supersede's own transaction. */
    int64_t superseded_by = get_fact_superseded_by(fact_a);
    TEST_ASSERT_EQUAL_INT64(fact_b, superseded_by);
 }
@@ -302,8 +312,8 @@ static void test_no_fact_id_on_old_relation(void) {
    memory_db_relation_supersede(user_id, bob, "lives_in", nyc, NULL, 0, 0.8f, 0, 0, NULL, NULL);
 
    int64_t old_fact_id = -1;
-   int rc = memory_db_relation_supersede(user_id, bob, "lives_in", sf, NULL, 0, 0.8f, 0, 0, NULL,
-                                         &old_fact_id);
+   int rc = memory_db_relation_supersede_ex(user_id, bob, "lives_in", sf, NULL, 0, 0.8f, 0, 0,
+                                            MEMORY_RELATION_REPLACES_UNKNOWN, NULL, &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
@@ -646,8 +656,8 @@ static void test_supersede_to_different_object_starts_fresh_mention_count(void) 
     * semantically replaces — close-then-upsert is correct, not "increment
     * the new object's count to 4". */
    int64_t old_fact_id = 0;
-   int rc = memory_db_relation_supersede(user_id, kate, "lives_in", seattle, NULL, 0, 0.9f, 0, 0,
-                                         NULL, &old_fact_id);
+   int rc = memory_db_relation_supersede_ex(user_id, kate, "lives_in", seattle, NULL, 0, 0.9f, 0, 0,
+                                            MEMORY_RELATION_REPLACES_UNKNOWN, NULL, &old_fact_id);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
 
    /* boston row is now closed (valid_to set) — not visible via open query. */
@@ -657,11 +667,174 @@ static void test_supersede_to_different_object_starts_fresh_mention_count(void) 
    TEST_ASSERT_EQUAL_INT(1, query_open_mention_count(user_id, kate, "lives_in", seattle, NULL));
 }
 
+/* A person can have several emails: a second one is added, not a replacement. */
+static void test_plural_relation_keeps_both(void) {
+   int user_id = 40;
+   int64_t fact_a = insert_fact(user_id, "Lee uses a@example.com");
+   int64_t lee = insert_entity(user_id, "lee", "person");
+   memory_db_relation_supersede(user_id, lee, "email_is", 0, "a@example.com", fact_a, 0.9f, 0, 0,
+                                NULL, NULL);
+   int64_t fact_b = insert_fact(user_id, "Lee also uses b@example.com");
+   int64_t old_fact_id = -1;
+   int rc = memory_db_relation_supersede(user_id, lee, "email_is", 0, "b@example.com", fact_b, 0.9f,
+                                         0, 0, NULL, &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, lee, "email_is", 0, "a@example.com"));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, lee, "email_is", 0, "b@example.com"));
+}
+
+/* A named replaced value closes only that one; the fact listing both numbers
+ * stays while the other is still open. */
+static void test_replaced_value_closes_only_that_one(void) {
+   int user_id = 41;
+   int64_t both = insert_fact(user_id, "Mo's numbers are 555-0100 and 555-0199");
+   int64_t mo = insert_entity(user_id, "mo", "person");
+   memory_db_relation_supersede(user_id, mo, "phone_number_is", 0, "555-0100", both, 0.9f, 0, 0,
+                                NULL, NULL);
+   memory_db_relation_supersede(user_id, mo, "phone_number_is", 0, "555-0199", both, 0.9f, 0, 0,
+                                NULL, NULL);
+   int64_t fresh = insert_fact(user_id, "Mo's new cell is 555-0123");
+   int64_t old_fact_id = -1;
+   int rc = memory_db_relation_supersede_ex(user_id, mo, "phone_number_is", 0, "555-0123", fresh,
+                                            0.9f, 0, 0, "555-0100", NULL, &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, mo, "phone_number_is", 0, "555-0100"));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, mo, "phone_number_is", 0, "555-0199"));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, mo, "phone_number_is", 0, "555-0123"));
+   /* 555-0199 still rests on it: the fact isn't handed back to supersede. */
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
+}
+
+/* A replaced value named by its entity's name, case aside. */
+static void test_replaced_entity_matched_by_name(void) {
+   int user_id = 42;
+   int64_t fact_a = insert_fact(user_id, "Ny works at Acme");
+   int64_t ny = insert_entity(user_id, "ny", "person");
+   int64_t acme = insert_entity(user_id, "Acme", "org");
+   int64_t beta = insert_entity(user_id, "Beta", "org");
+   int64_t gamma = insert_entity(user_id, "Gamma", "org");
+   memory_db_relation_supersede(user_id, ny, "works_at", acme, NULL, fact_a, 0.9f, 0, 0, NULL,
+                                NULL);
+   memory_db_relation_supersede(user_id, ny, "works_at", beta, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   int64_t fact_c = insert_fact(user_id, "Ny left Acme for Gamma");
+   int64_t old_fact_id = 0;
+   int rc = memory_db_relation_supersede_ex(user_id, ny, "works_at", gamma, NULL, fact_c, 0.9f, 0,
+                                            0, "acme", NULL, &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, ny, "works_at", acme, NULL));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, ny, "works_at", beta, NULL));
+   TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
+}
+
+/* "Replaces", but not which: with two numbers open, guessing would lose one, so
+ * none closes; with one, that one does. */
+static void test_unknown_replacement_closes_only_a_single_other(void) {
+   int user_id = 44;
+   int64_t pip = insert_entity(user_id, "pip", "person");
+   memory_db_relation_supersede(user_id, pip, "phone_number_is", 0, "555-0001", 0, 0.9f, 0, 0, NULL,
+                                NULL);
+   memory_db_relation_supersede(user_id, pip, "phone_number_is", 0, "555-0002", 0, 0.9f, 0, 0, NULL,
+                                NULL);
+   int rc = memory_db_relation_supersede_ex(user_id, pip, "phone_number_is", 0, "555-0003", 0, 0.9f,
+                                            0, 0, MEMORY_RELATION_REPLACES_UNKNOWN, NULL, NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, pip, "phone_number_is", 0, "555-0001"));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, pip, "phone_number_is", 0, "555-0002"));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, pip, "phone_number_is", 0, "555-0003"));
+}
+
+/* A new relation resting on the old relation's own fact never supersedes it. */
+static void test_same_fact_never_supersedes_itself(void) {
+   int user_id = 45;
+   int64_t f = insert_fact(user_id, "Rae is married to Sam, formerly to Tom");
+   int64_t rae = insert_entity(user_id, "rae", "person");
+   int64_t sam = insert_entity(user_id, "sam", "person");
+   int64_t tom = insert_entity(user_id, "tom", "person");
+   memory_db_relation_supersede(user_id, rae, "married_to", tom, NULL, f, 0.9f, 0, 0, NULL, NULL);
+   int64_t old_fact_id = -1;
+   int rc = memory_db_relation_supersede(user_id, rae, "married_to", sam, NULL, f, 0.9f, 0, 0, NULL,
+                                         &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
+   TEST_ASSERT_EQUAL_INT64(0, get_fact_superseded_by(f));
+}
+
+/* A fact already merged into another keeps its keeper when a relation it still
+ * backs is closed. */
+static void test_merged_fact_keeps_its_keeper(void) {
+   int user_id = 46;
+   int64_t keeper = insert_fact(user_id, "Uma is married to Vic");
+   int64_t merged = insert_fact(user_id, "Uma's spouse is Vic");
+   int64_t uma = insert_entity(user_id, "uma", "person");
+   int64_t vic = insert_entity(user_id, "vic", "person");
+   int64_t wes = insert_entity(user_id, "wes", "person");
+   memory_db_relation_supersede(user_id, uma, "married_to", vic, NULL, merged, 0.9f, 0, 0, NULL,
+                                NULL);
+   memory_db_fact_merge(merged, keeper, user_id);
+   int64_t fresh = insert_fact(user_id, "Uma is married to Wes");
+   int64_t old_fact_id = -1;
+   int rc = memory_db_relation_supersede(user_id, uma, "married_to", wes, NULL, fresh, 0.9f, 0, 0,
+                                         NULL, &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, uma, "married_to", vic, NULL));
+   TEST_ASSERT_EQUAL_INT64(keeper, get_fact_superseded_by(merged));
+   /* The merge moved the relation to the kept fact, so the new value retires
+    * the fact the user sees, not the hidden duplicate. */
+   TEST_ASSERT_EQUAL_INT64(keeper, old_fact_id);
+   TEST_ASSERT_EQUAL_INT64(fresh, get_fact_superseded_by(keeper));
+}
+
+/* The contradictory close supersedes the old fact when nothing else rests on it. */
+static void test_contradictory_close_supersedes_its_fact(void) {
+   int user_id = 47;
+   int64_t liked = insert_fact(user_id, "Xia likes olives");
+   int64_t xia = insert_entity(user_id, "xia", "person");
+   int64_t olives = insert_entity(user_id, "olives", "thing");
+   memory_db_relation_supersede(user_id, xia, "likes", olives, NULL, liked, 0.9f, 0, 0, NULL, NULL);
+   int64_t disliked = insert_fact(user_id, "Xia dislikes olives");
+   int64_t old_fact_id = 0;
+   int rc = memory_db_relation_supersede(user_id, xia, "dislikes", olives, NULL, disliked, 0.9f, 0,
+                                         0, NULL, &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(liked, old_fact_id);
+   TEST_ASSERT_EQUAL_INT64(disliked, get_fact_superseded_by(liked));
+   /* A replaced value, not a duplicate: forgetting the new one brings it back. */
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT superseded_kind FROM memory_facts WHERE id = ?", -1, &st,
+                      NULL);
+   sqlite3_bind_int64(st, 1, liked);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_INT(MEMORY_SUPERSEDED_REPLACED, sqlite3_column_int(st, 0));
+   sqlite3_finalize(st);
+}
+
+/* married_to holds one value: a new one closes the old without being told. */
+static void test_one_at_a_time_closes_without_replaces(void) {
+   int user_id = 43;
+   int64_t fact_a = insert_fact(user_id, "Oz is married to Pat");
+   int64_t oz = insert_entity(user_id, "oz", "person");
+   int64_t pat = insert_entity(user_id, "pat", "person");
+   int64_t quinn = insert_entity(user_id, "quinn", "person");
+   memory_db_relation_supersede(user_id, oz, "married_to", pat, NULL, fact_a, 0.9f, 0, 0, NULL,
+                                NULL);
+   int64_t fact_b = insert_fact(user_id, "Oz is married to Quinn");
+   int64_t old_fact_id = 0;
+   int rc = memory_db_relation_supersede(user_id, oz, "married_to", quinn, NULL, fact_b, 0.9f, 0, 0,
+                                         NULL, &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, oz, "married_to", pat, NULL));
+   TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
+   TEST_ASSERT_TRUE(memory_db_relation_is_merge_evidence("email_is"));
+   TEST_ASSERT_FALSE(memory_db_relation_is_one_at_a_time("email_is"));
+   TEST_ASSERT_TRUE(memory_db_relation_is_one_at_a_time("married_to"));
+}
+
 /* ============================================================================
  * Main
  * ============================================================================ */
 
-/* C4: the dedup-merge path ('forget ... replaced_by: keeper') supersedes a fact into a
+/* C4: the dedup-merge path ('forget ... duplicate_of: keeper') supersedes a fact into a
  * keeper.  Pins the invariants that make the merge safe: the merged fact drops out of the
  * canonical recall set, points at its survivor, and its row survives (recoverable). */
 static void test_fact_supersede_hides_from_recall_but_keeps_row(void) {
@@ -671,7 +844,7 @@ static void test_fact_supersede_hides_from_recall_but_keeps_row(void) {
 
    TEST_ASSERT_EQUAL_INT(2, count_active_facts(user_id)); /* both active to start */
 
-   int rc = memory_db_fact_supersede(dupe, keep, user_id);
+   int rc = memory_db_fact_merge(dupe, keep, user_id);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
 
    /* Hidden from recall (superseded_by IS NULL filter), keeper still active. */
@@ -693,14 +866,22 @@ static void test_fact_supersede_no_cross_user_pointer(void) {
    insert_fact(2, "fact owned by user 2");
    int64_t theirs = sqlite3_last_insert_rowid(s_db.db);
 
-   memory_db_fact_supersede(mine, theirs, 1);
+   memory_db_fact_merge(mine, theirs, 1);
    TEST_ASSERT_EQUAL_INT64(0, get_fact_superseded_by(mine)); /* no cross-user pointer */
    TEST_ASSERT_EQUAL_INT(1, count_active_facts(1));          /* still in recall */
 }
 
 int main(void) {
    UNITY_BEGIN();
-   RUN_TEST(test_exclusive_supersede_returns_old_fact_id);
+   RUN_TEST(test_replacing_supersede_returns_old_fact_id);
+   RUN_TEST(test_plural_relation_keeps_both);
+   RUN_TEST(test_replaced_value_closes_only_that_one);
+   RUN_TEST(test_replaced_entity_matched_by_name);
+   RUN_TEST(test_one_at_a_time_closes_without_replaces);
+   RUN_TEST(test_unknown_replacement_closes_only_a_single_other);
+   RUN_TEST(test_same_fact_never_supersedes_itself);
+   RUN_TEST(test_merged_fact_keeps_its_keeper);
+   RUN_TEST(test_contradictory_close_supersedes_its_fact);
    RUN_TEST(test_no_fact_id_on_old_relation);
    RUN_TEST(test_non_exclusive_skips);
    RUN_TEST(test_null_out_param);

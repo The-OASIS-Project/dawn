@@ -21,6 +21,7 @@
 
 #include "memory/memory_history_loader.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,6 +35,7 @@
 #include "llm/llm_tool_defs.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "prompts.h"
 
 typedef struct {
    struct json_object *array;
@@ -86,6 +88,57 @@ char *memory_history_strip_image_markers(const char *src) {
    return dst;
 }
 
+/* Just past the visual block opening at @p p (its first closing tag: the
+ * render tool escapes any "</dawn-visual" inside the code), or NULL. */
+static const char *visual_block_end(const char *p) {
+   static const char k_open[] = "<dawn-visual";
+   static const char k_close[] = "</dawn-visual>";
+   if (strncmp(p, k_open, sizeof(k_open) - 1) != 0) {
+      return NULL;
+   }
+   /* The tag itself, not a longer name that starts the same way. */
+   const char after = p[sizeof(k_open) - 1];
+   if (after != '>' && after != ' ' && after != '\t' && after != '\r' && after != '\n') {
+      return NULL;
+   }
+   const char *close = strstr(p, k_close);
+   return close ? close + sizeof(k_close) - 1 : NULL;
+}
+
+/* Whether @p p, at a line's start, begins a run of visual blocks (blank lines
+ * between) that ends the text. */
+static bool visual_run_to_end(const char *p) {
+   while (p && *p) {
+      p = visual_block_end(p);
+      if (!p) {
+         return false;
+      }
+      p += strspn(p, " \t\r\n");
+   }
+   return p != NULL;
+}
+
+char *memory_history_strip_visuals(const char *content) {
+   if (!content) {
+      return NULL;
+   }
+   for (const char *p = strstr(content, "<dawn-visual"); p; p = strstr(p + 1, "<dawn-visual")) {
+      if ((p != content && p[-1] != '\n') || !visual_run_to_end(p)) {
+         continue;
+      }
+      size_t keep = (size_t)(p - content);
+      while (keep > 0 && strchr(" \t\r\n", content[keep - 1])) {
+         keep--;
+      }
+      char *out = keep > 0 ? strndup(content, keep) : strdup(HISTORY_VISUAL_ONLY_REPLY);
+      if (!out) {
+         OLOG_WARNING("memory_history_loader: out of memory stripping a reply's visuals");
+      }
+      return out;
+   }
+   return NULL;
+}
+
 static int append_message_to_history(const conversation_llm_row_t *msg, void *ctx_ptr) {
    history_build_ctx_t *ctx = (history_build_ctx_t *)ctx_ptr;
    if (!ctx || !ctx->array || !msg) {
@@ -96,6 +149,13 @@ static int append_message_to_history(const conversation_llm_row_t *msg, void *ct
    if (!stripped) {
       OLOG_WARNING("memory_history_loader: OOM stripping message content; aborting iteration");
       return 1;
+   }
+   if (strcmp(msg->role, "assistant") == 0) {
+      char *plain = memory_history_strip_visuals(stripped);
+      if (plain) {
+         free(stripped);
+         stripped = plain;
+      }
    }
 
    struct json_object *entry = json_object_new_object();
@@ -427,6 +487,11 @@ static struct json_object *request_message(int user_id, struct json_object *row)
    if (stripped) {
       content = stripped;
    }
+   char *plain = (role && strcmp(role, "assistant") == 0) ? memory_history_strip_visuals(content)
+                                                          : NULL;
+   if (plain) {
+      content = plain;
+   }
    struct json_object *tc = NULL;
    struct json_object *tcid = NULL;
    const bool has_tc = json_object_object_get_ex(row, "tool_calls", &tc);
@@ -462,6 +527,7 @@ static struct json_object *request_message(int user_id, struct json_object *row)
          json_object_object_add(m, "content", json_object_new_string(content ? content : ""));
       }
    }
+   free(plain);
    free(stripped);
    if (!m) {
       return NULL;

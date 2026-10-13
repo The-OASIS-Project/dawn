@@ -242,6 +242,21 @@ void handle_conversation_learned_request(ws_connection_t *conn, struct json_obje
 void handle_forget_conversation_memories(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief Forget one memory fact on a worker (memory_forget_fact): it waits for
+ *        the user's running extraction.  Replies delete_memory_fact_response,
+ *        with "restored" (the values it had replaced, current again).
+ */
+void webui_forget_memory_fact(ws_connection_t *conn, int64_t fact_id);
+
+/**
+ * @brief Delete every memory of the connection's user, on a worker
+ *        (webui_conv_memory.c; handle_delete_all_memories checks the confirm)
+ *
+ * Answers with delete_all_memories_response.
+ */
+void webui_forget_all_memories(ws_connection_t *conn);
+
+/**
  * @brief Pin or unpin a conversation
  *
  * Pinned conversations float to a dedicated section at the top of the WebUI list.
@@ -301,6 +316,18 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
  * @brief Delete a memory fact
  */
 void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief List the user's merged or replaced memory facts, newest first
+ *        (webui_memory_merged.c; payload: optional "query" text filter)
+ */
+void handle_list_memory_superseded(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Restore a merged or replaced memory fact ("fact_id")
+ *        (webui_memory_merged.c)
+ */
+void handle_restore_memory_fact(ws_connection_t *conn, struct json_object *payload);
 
 /**
  * @brief List memory preferences for the current user (paginated)

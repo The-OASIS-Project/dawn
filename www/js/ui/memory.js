@@ -10,6 +10,9 @@
     * ============================================================================= */
 
    const PAGE_SIZE = 20;
+   /* A delete toast that names facts brought back stays long enough to read. */
+   const RESTORED_TOAST_MS = 8000;
+   const TOAST_MS_PER_CHAR = 60; /* reading time for a long one */
 
    /* Per-tab sort options for the Facts/Summaries sort control. `value` is sent
     * to the server as the `sort` field (see webui_memory.c parse_memory_sort).
@@ -464,7 +467,24 @@
       }
 
       if (typeof DawnToast !== 'undefined') {
-         DawnToast.show('Fact deleted', 'success');
+         /* Forgetting a value brings back the one it had replaced: say which,
+          * long enough to read. */
+         const back = Array.isArray(payload.restored) ? payload.restored : [];
+         const count = Math.max(back.length, payload.restored_count || 0);
+         const short = (t) => (t.length > 80 ? t.slice(0, 80) + '…' : t);
+         const quoted = back.map((t) => `"${short(t)}"`).join(', ');
+         const more = count > back.length ? ` and ${count - back.length} more` : '';
+         const text =
+            back.length === 0
+               ? 'Fact deleted'
+               : count === 1
+                 ? `Deleted. ${quoted} is current again.`
+                 : `Deleted. These are current again: ${quoted}${more}`;
+         DawnToast.show(
+            text,
+            'success',
+            back.length ? Math.max(RESTORED_TOAST_MS, TOAST_MS_PER_CHAR * text.length) : undefined
+         );
       }
 
       // Refresh data
@@ -1237,23 +1257,12 @@
    }
 
    function handleClickOutside(e) {
-      // Don't close if clicking inside the contact modal (it's a sibling, not a child)
-      const contactModal = document.getElementById('contact-modal');
-      if (
-         contactModal &&
-         !contactModal.classList.contains('hidden') &&
-         contactModal.contains(e.target)
-      )
-         return;
-
-      // Same for the source-conversation modal (a sibling overlay, not a child of
-      // the panel): a click on it — the ×, the backdrop, or its content — must not
-      // close the panel underneath. `contains()` (no not-hidden check) still matches
-      // a close-button click, which hides the modal before this document-level
-      // handler runs; a truly-closed modal is display:none so its nodes aren't
-      // clickable. No stopPropagation, so the image lightbox still receives clicks.
-      const sourceModal = document.getElementById('memory-source-modal');
-      if (sourceModal && sourceModal.contains(e.target)) return;
+      // A dialog opened over the panel (contact, source, merged, import,
+      // export) is a sibling overlay, not a child: a click on it, its × or its
+      // backdrop must not close the panel underneath.  A closed overlay is
+      // display:none, so its nodes take no clicks.  No stopPropagation, so the
+      // image lightbox still receives them.
+      if (e.target.closest && e.target.closest('.modal-overlay')) return;
 
       if (
          memoryElements.popover &&
@@ -1355,6 +1364,8 @@
    /* Show + populate the sort <select> for the active tab (Facts/Summaries only),
     * reflecting the persisted choice. Called from switchTab and open(). */
    function syncSortControl() {
+      const merged = document.getElementById('memory-merged');
+      if (merged) merged.hidden = memoryState.activeTab !== 'facts';
       const sel = memoryElements.sortSelect;
       if (!sel) return;
       const options = SORT_OPTIONS[memoryState.activeTab];
@@ -1616,6 +1627,17 @@
       if (window.DawnMemoryImport) {
          DawnMemoryImport.init({
             escapeHtml: escapeHtml,
+            onMemoriesChanged: () => {
+               requestStats();
+               switchTab(memoryState.activeTab);
+            },
+         });
+      }
+
+      /* Merged and replaced facts (memory_merged.js): a restore brings one
+       * back into the Facts list. */
+      if (window.DawnMemoryMerged) {
+         DawnMemoryMerged.init({
             onMemoriesChanged: () => {
                requestStats();
                switchTab(memoryState.activeTab);

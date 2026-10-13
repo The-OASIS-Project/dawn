@@ -2283,6 +2283,12 @@ static int handle_client(int client_fd) {
       case ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF:
          return handle_memory_entity_link_user_self(client_fd, payload, header.payload_len);
 
+      case ADMIN_MSG_MEMORY_FACT_SUPERSEDED:
+         return handle_memory_fact_superseded(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_FACT_RESTORE:
+         return handle_memory_fact_restore(client_fd, payload, header.payload_len);
+
       /* Phase 6.6: Memory cleanup utilities */
       case ADMIN_MSG_MEMORY_CLEANUP_META_FACTS:
          return handle_memory_cleanup_meta_facts(client_fd, payload, header.payload_len);

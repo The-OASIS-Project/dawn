@@ -138,6 +138,8 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v100.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v101.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v102.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v103.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v104.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -1701,6 +1703,8 @@ dawn_add_unit_test(test_memory_provenance
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
@@ -1725,6 +1729,7 @@ dawn_add_unit_test(test_memory_db_admin
            # memory_db.c linked so memory_db_undo_extraction_attempt is
            # exercised directly (transient-failure rollback path).
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_stem.c
    LIBS    dawn_common unity sqlite3 pthread m stemmer
@@ -1773,6 +1778,9 @@ dawn_add_unit_test(test_memory_note_bridge
            ${SRC_ROOT}/src/memory/memory_db_entities.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -1789,6 +1797,9 @@ dawn_add_unit_test(test_memory_fact_prune
            ${SRC_ROOT}/src/memory/memory_db_entities.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -1811,6 +1822,12 @@ dawn_add_unit_test(test_memory_similarity
    SOURCES test_memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
    LIBS    unity m
+   LABEL   ci)
+
+dawn_add_unit_test(test_memory_extraction_queue
+   SOURCES test_memory_extraction_queue.c
+           ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+   LIBS    unity
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_extraction
@@ -2298,6 +2315,11 @@ dawn_add_unit_test(bench_retrieval
            # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/memory/memory_callback.c
+           ${SRC_ROOT}/src/memory/memory_callback_restore.c
+           ${SRC_ROOT}/src/memory/memory_callback_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
@@ -2316,6 +2338,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+           ${SRC_ROOT}/src/memory/memory_extraction_slots.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
@@ -2416,6 +2440,11 @@ dawn_add_unit_test(test_memory_remember
            # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/memory/memory_callback.c
+           ${SRC_ROOT}/src/memory/memory_callback_restore.c
+           ${SRC_ROOT}/src/memory/memory_callback_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
@@ -2434,6 +2463,128 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+           ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+           ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/memory/memory_note_guard.c
+           ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/memory/memory_implied.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_turn_result.c
+           ${SRC_ROOT}/src/llm/llm_local_provider.c
+           ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_request_capture.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
+           ${SRC_ROOT}/src/llm/llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_claude_route.c
+           ${SRC_ROOT}/src/llm/llm_claude_binding.c
+           ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_claude_tools.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
+           ${SRC_ROOT}/src/llm/llm_openai.c
+           ${SRC_ROOT}/src/llm/llm_openai_cache.c
+           ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
+           ${SRC_ROOT}/src/llm/llm_key_tag.c
+           ${SRC_ROOT}/src/core/crypto_store.c
+           ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/core/tool_call_policy.c
+           ${SRC_ROOT}/src/core/tool_call_challenge.c
+           ${SRC_ROOT}/src/llm/llm_tools_reply_code.c
+           ${SRC_ROOT}/src/core/reply_code.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/llm/llm_tools_filter.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
+           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+           ${SRC_ROOT}/src/llm/llm_tools_dup.c
+           ${SRC_ROOT}/src/llm/llm_rate_limit.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
+           ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_compaction.c
+           ${SRC_ROOT}/src/llm/llm_models_toml.c
+           ${SRC_ROOT}/src/llm/llm_cache_monitor.c
+           ${SRC_ROOT}/src/llm/llm_pricing.c
+           ${SRC_ROOT}/src/llm/llm_command_parser.c
+           ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
+           ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
+           ${SRC_ROOT}/src/llm/llm_tool_view.c
+           ${SRC_ROOT}/src/llm/llm_tool_view_path.c
+           ${SRC_ROOT}/src/llm/llm_history_rows.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/sse_parser.c
+           ${SRC_ROOT}/src/core/iso8601.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/config/config_parser.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/src/config/config_validate.c
+           ${SRC_ROOT}/src/config/config_env.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Merged vs replaced facts on every path (real schema; same sources as above).
+dawn_add_unit_test(test_memory_supersede_kinds
+   SOURCES test_memory_supersede_kinds.c test_memory_remember_stub.c
+           ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
+           ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
+           ${SRC_ROOT}/src/tools/document_db_embeddings.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/llm/llm_third_party.c
+           ${SRC_ROOT}/src/core/time_query_parser.c
+           ${SRC_ROOT}/src/core/embedding_engine.c
+           ${SRC_ROOT}/src/memory/memory_embed_ollama.c
+           ${SRC_ROOT}/src/memory/memory_embed_openai.c
+           # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_callback.c
+           ${SRC_ROOT}/src/memory/memory_callback_restore.c
+           ${SRC_ROOT}/src/memory/memory_callback_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/contacts_db.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
+           ${SRC_ROOT}/src/memory/memory_source_dedup.c
+           ${SRC_ROOT}/src/memory/memory_score_floor.c
+           ${SRC_ROOT}/src/memory/memory_graph_retrieval.c
+           ${SRC_ROOT}/src/memory/memory_predicate_dedup.c
+           ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_embeddings_entity.c
+           ${SRC_ROOT}/src/memory/memory_terms.c
+           ${SRC_ROOT}/src/memory/memory_embed_backfill.c
+           ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+           ${SRC_ROOT}/src/memory/memory_extraction_slots.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
@@ -2576,4 +2727,5 @@ set_tests_properties(check_settings_sections_rendered PROPERTIES LABELS "ci")
 # The tests that load models.toml read the copy compiled in (models_toml_builtin.h).
 add_dependencies(bench_retrieval models_toml_builtin)
 add_dependencies(test_memory_remember models_toml_builtin)
+add_dependencies(test_memory_supersede_kinds models_toml_builtin)
 add_dependencies(test_llm_models_toml models_toml_builtin)

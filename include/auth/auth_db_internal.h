@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 102
+#define AUTH_DB_SCHEMA_VERSION 104
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -538,8 +538,6 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_find_similar;
    sqlite3_stmt *stmt_memory_fact_find_by_hash;
    sqlite3_stmt *stmt_memory_fact_prune_superseded;
-   sqlite3_stmt *stmt_memory_fact_prune_stale;
-   sqlite3_stmt *stmt_memory_fact_prune_expired; /* v58: hard-delete expired facts */
 
    /* v48: FTS5 BM25 keyword search.  See docs/MEM0_ARCHITECTURAL_PARITY.md
     * Phase 1.  External-content rows live in memory_facts_fts; the search
@@ -917,12 +915,62 @@ int auth_db_txn_begin_locked(const char *tag);
 int auth_db_txn_end_locked(int result, const char *tag);
 
 /**
+ * @brief SAVEPOINT @p name on the shared handle (the auth_db lock held): a
+ *        transaction of its own, or nested in the caller's
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (logged)
+ */
+int auth_db_savepoint_begin_locked(const char *name);
+
+/**
+ * @brief End savepoint @p name: RELEASE when @p result is AUTH_DB_SUCCESS, else
+ *        ROLLBACK TO and RELEASE
+ *
+ * A RELEASE that fails (it is the commit when no transaction encloses it) is
+ * logged and rolled back, and the result becomes AUTH_DB_FAILURE.
+ */
+int auth_db_savepoint_end_locked(int result, const char *name);
+
+/**
  * @brief The first column of the first row of @p sql, an integer (one-number
  * queries: a pragma, a count)
  *
  * @return The value, or -1 when the statement fails or returns no row
  */
 int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
+
+/* The highest message id memory extraction reads in conversation @p conv (an
+ * SQL expression naming the conversation's id): request-context rows
+ * (messages.kind) are never extracted.  One definition for the trigger's
+ * cursor (conv_db_get_max_msg_id) and for marking conversations extracted
+ * (CONV_MARK_EXTRACTED_SET_SQL): if they disagree, recovery learns forgotten
+ * memories again, or skips new messages. */
+#define CONV_EXTRACTION_MAX_MSG_ID_SQL(conv)                                    \
+   "COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversation_id = " conv \
+   " AND m.kind IS NULL), 0)"
+
+/* The SET clause marking a conversations row extracted up to now (what was
+ * learned so far: forgetting, delete-all). */
+#define CONV_MARK_EXTRACTED_SET_SQL                                   \
+   "last_extracted_msg_count = message_count, last_extracted_msg_id " \
+   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extraction_attempts = 0"
+
+/* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),
+ * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
+ * ?5/?6 the new object (entity id / literal: the same object is never closed, so
+ * a re-mention is idempotent), ?7 the one replaced value to close (a literal or an
+ * entity's name, case aside), or NULL for every other open value, ?8 the new
+ * value's fact (closed_by_fact_id: what a restore of the old fact reopens; NULL
+ * with none).  Shared with the tests that prepare it themselves. */
+#define MEMORY_RELATION_CLOSE_OPEN_SQL                                             \
+   "UPDATE memory_relations SET valid_to = ?1, closed_by_fact_id = ?8 "            \
+   "WHERE user_id = ?2 AND subject_entity_id = ?3 AND relation = ?4 "              \
+   "  AND valid_to IS NULL "                                                       \
+   "  AND (COALESCE(object_entity_id, 0) != COALESCE(?5, 0) "                      \
+   "    OR COALESCE(object_value, '') != COALESCE(?6, '')) "                       \
+   "  AND (?7 IS NULL OR object_value = ?7 COLLATE NOCASE OR object_entity_id IN " \
+   "    (SELECT id FROM memory_entities WHERE user_id = ?2 AND "                   \
+   "     (name = ?7 COLLATE NOCASE OR canonical_name = ?7 COLLATE NOCASE))) "      \
+   "RETURNING fact_id"
 
 /* =============================================================================
  * Schema + Statement Lifecycle (defined in sibling modules)
@@ -1086,6 +1134,20 @@ int auth_db_migrations_v101(sqlite3 *db);
  * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (rolled back; retried next start).
  */
 int auth_db_migrations_v102(sqlite3 *db);
+
+/**
+ * @brief Schema v103: memory_relations.closed_by_fact_id (the fact whose new
+ *        value closed the relation; what a restore reopens).  Idempotent.
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (retried next start).
+ */
+int auth_db_migrations_v103(sqlite3 *db);
+
+/**
+ * @brief Schema v104: memory_facts.superseded_kind (merged duplicate or replaced
+ *        value) and an index on memory_relations.closed_by_fact_id.  Idempotent.
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (retried next start).
+ */
+int auth_db_migrations_v104(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

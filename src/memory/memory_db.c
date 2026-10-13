@@ -25,7 +25,7 @@
  *   memory_db_summaries.c   (12 summary functions incl. semantic search)
  *   memory_db_prefs.c       (5 preference functions)
  *   memory_db_entities.c    (11 entity functions + memory_make_canonical_name)
- *   memory_db_relations.c   (9 relation functions + EXCLUSIVE_RELATIONS /
+ *   memory_db_relations.c   (9 relation functions + SPECIAL_RELATIONS /
  *                            CONTRADICTORY_PAIRS / memory_db_relation_supersede)
  *   memory_db_alias.c       (Phase 1/2 equivalence-class resolver cascade)
  *   memory_db_provenance.c  (Phase B provenance reads)
@@ -188,103 +188,43 @@ int memory_db_delete_user_memories(int user_id) {
       return MEMORY_DB_FAILURE;
    }
 
+   /* FK-safe order: relations -> entities -> facts -> prefs -> summaries.
+    * Last, "delete all" forgets what was learned so far: every conversation
+    * counts as extracted, so memory recovery doesn't learn it all again (what
+    * is said from now on is extracted as usual).  One transaction: all of it,
+    * or none (a delete whose marks failed would come back). */
+   static const char *const k_steps[] = {
+      "DELETE FROM memory_relations WHERE user_id = ?",
+      "DELETE FROM memory_entities WHERE user_id = ?",
+      "DELETE FROM memory_facts WHERE user_id = ?",
+      "DELETE FROM memory_preferences WHERE user_id = ?",
+      "DELETE FROM memory_summaries WHERE user_id = ?",
+      // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): one statement split across lines
+      "UPDATE conversations SET " CONV_MARK_EXTRACTED_SET_SQL " WHERE user_id = ?",
+   };
+
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-
-   sqlite3_stmt *stmt = NULL;
-   int rc;
-
-   /* Delete in FK-safe order: relations -> entities -> facts -> prefs -> summaries */
-
-   /* Delete relations first (FK references entities) */
-   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_relations WHERE user_id = ?", -1, &stmt,
-                           NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("memory_db: delete_user_memories (relations) prepare failed: %s",
-                 sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
+   bool ok = auth_db_txn_begin_locked("memory_db: delete_user_memories") == AUTH_DB_SUCCESS;
+   for (size_t i = 0; ok && i < sizeof(k_steps) / sizeof(k_steps[0]); i++) {
+      sqlite3_stmt *stmt = NULL;
+      ok = sqlite3_prepare_v2(s_db.db, k_steps[i], -1, &stmt, NULL) == SQLITE_OK;
+      if (ok) {
+         sqlite3_bind_int(stmt, 1, user_id);
+         ok = sqlite3_step(stmt) == SQLITE_DONE;
+      }
+      if (!ok) {
+         OLOG_ERROR("memory_db: delete_user_memories step %zu failed: %s", i,
+                    sqlite3_errmsg(s_db.db));
+      }
+      sqlite3_finalize(stmt);
    }
-   sqlite3_bind_int(stmt, 1, user_id);
-   rc = sqlite3_step(stmt);
-   sqlite3_finalize(stmt);
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: delete_user_memories (relations) failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   /* Delete entities */
-   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_entities WHERE user_id = ?", -1, &stmt,
-                           NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("memory_db: delete_user_memories (entities) prepare failed: %s",
-                 sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-   rc = sqlite3_step(stmt);
-   sqlite3_finalize(stmt);
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: delete_user_memories (entities) failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   /* Delete facts */
-   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_facts WHERE user_id = ?", -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("memory_db: delete_user_memories (facts) prepare failed: %s",
-                 sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-   rc = sqlite3_step(stmt);
-   sqlite3_finalize(stmt);
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: delete_user_memories (facts) failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   /* Delete preferences */
-   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_preferences WHERE user_id = ?", -1, &stmt,
-                           NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("memory_db: delete_user_memories (prefs) prepare failed: %s",
-                 sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-   rc = sqlite3_step(stmt);
-   sqlite3_finalize(stmt);
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: delete_user_memories (prefs) failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   /* Delete summaries */
-   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_summaries WHERE user_id = ?", -1, &stmt,
-                           NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("memory_db: delete_user_memories (summaries) prepare failed: %s",
-                 sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-   rc = sqlite3_step(stmt);
-   sqlite3_finalize(stmt);
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: delete_user_memories (summaries) failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
+   const bool committed = auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                                                 "memory_db: delete_user_memories") ==
+                          AUTH_DB_SUCCESS;
    AUTH_DB_UNLOCK();
+   if (!ok || !committed) {
+      return MEMORY_DB_FAILURE;
+   }
 
    /* Drop in-memory embedding caches.  Without this, hybrid_search keeps
     * returning the deleted facts/entities until another invalidation fires
@@ -541,66 +481,32 @@ int memory_db_prune_low_confidence(int user_id, float threshold, int *count_out)
    if (count_out)
       *count_out = 0;
 
+   /* Log facts that will be pruned (audit trail for an irreversible operation). */
    AUTH_DB_LOCK_OR_FAIL();
-
-   /* Wrap audit log + delete in a transaction for consistency */
-   sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-
-   /* Log facts that will be pruned (audit trail for irreversible operation) */
    sqlite3_stmt *log_stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT id, fact_text, confidence, source FROM memory_facts "
-                               "WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL",
-                               -1, &log_stmt, NULL);
-   if (rc == SQLITE_OK) {
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id, fact_text, confidence, source FROM memory_facts "
+                          "WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL",
+                          -1, &log_stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int(log_stmt, 1, user_id);
       sqlite3_bind_double(log_stmt, 2, (double)threshold);
-
       while (sqlite3_step(log_stmt) == SQLITE_ROW) {
          OLOG_INFO("memory_decay: pruning fact %ld (%.2f, %s): %.60s",
                    (long)sqlite3_column_int64(log_stmt, 0), sqlite3_column_double(log_stmt, 2),
                    (const char *)sqlite3_column_text(log_stmt, 3),
                    (const char *)sqlite3_column_text(log_stmt, 1));
       }
-      sqlite3_finalize(log_stmt);
    }
-
-   /* Delete low-confidence facts */
-   sqlite3_stmt *stmt = NULL;
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       /* note_doc_id IS NULL: never prune memory→note bridge glosses (v61) — they
-        * are removed with their note, not by confidence. */
-       "DELETE FROM memory_facts WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL "
-       "AND note_doc_id IS NULL",
-       -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("memory_db: prune_low_confidence prepare failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_double(stmt, 2, (double)threshold);
-
-   rc = sqlite3_step(stmt);
-   int deleted = sqlite3_changes(s_db.db);
-   sqlite3_finalize(stmt);
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: prune_low_confidence failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+   sqlite3_finalize(log_stmt);
    AUTH_DB_UNLOCK();
 
-   if (count_out)
-      *count_out = deleted;
-   return MEMORY_DB_SUCCESS;
+   /* With their history; note_doc_id IS NULL: never prune memory→note bridge
+    * glosses (v61) — they are removed with their note, not by confidence. */
+   return memory_db_internal_prune_with_history(
+       user_id,
+       "SELECT id, 0 FROM memory_facts WHERE user_id = ?1 AND confidence < ?3 AND superseded_by "
+       "IS NULL AND note_doc_id IS NULL",
+       0, (double)threshold, "low-confidence", count_out);
 }
 
 int memory_db_prune_old_summaries(int user_id, int retention_days, int *count_out) {

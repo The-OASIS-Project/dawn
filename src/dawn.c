@@ -145,6 +145,7 @@
 #include "auth/auth_maintenance.h"
 #include "document_original_store.h"
 #include "image_store.h"
+#include "memory/memory_extraction.h"
 #include "memory/memory_recovery.h"
 #endif
 #ifdef ENABLE_AEC
@@ -4149,6 +4150,8 @@ server_shutdown:
     * compile under ENABLE_AUTH only; calling their _stop()s on a non-AUTH
     * build is dead code at best.  Recompute worker is part of the same
     * group; auth_maintenance is its own concern. */
+   OLOG_INFO("Shutdown: memory_extraction_stop_queue");
+   memory_extraction_stop_queue();
    OLOG_INFO("Shutdown: memory_recovery_stop");
    memory_recovery_stop();
    OLOG_INFO("Shutdown: memory_embed_recompute_stop");

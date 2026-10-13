@@ -501,9 +501,9 @@ int memory_alias_internal_find_user_self_id(int user_id, int64_t *out_id) {
 }
 
 /* Compute exclusive_relation_overlap signal between two entities.
- *   1.0 if any open exclusive relation shares object_entity_id (or
+ *   1.0 if any open identifying relation shares object_entity_id (or
  *       canonical-equal object_value)
- *   0.5 if any non-exclusive relation shares object
+ *   0.5 if any other relation shares object
  *   0   otherwise
  * Uses the partial index idx_memory_relations_subject_open. */
 float memory_alias_internal_compute_exclusive_relation_overlap(int user_id,
@@ -602,7 +602,7 @@ float memory_alias_internal_compute_exclusive_relation_overlap(int user_id,
          if (!object_match)
             continue;
 
-         float weight = memory_db_relation_is_exclusive(a_rels[i].relation) ? 1.0f : 0.5f;
+         float weight = memory_db_relation_is_merge_evidence(a_rels[i].relation) ? 1.0f : 0.5f;
          if (weight > best)
             best = weight;
          if (best >= 1.0f)

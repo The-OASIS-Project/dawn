@@ -28,6 +28,44 @@ queue's last seconds and pause/resume no longer lose about two seconds of audio 
 **What you need to do.** Nothing. Reload any open browser tabs after upgrading so they pick up the new
 player.
 
+---
+
+## 2026-10-11 — Memory keeps a second email, phone, car, job, school or home
+
+**What changed.**
+- **Several of one kind are kept.** Memory used to treat email address, phone number, vehicle, employer,
+  school and home as one-per-person: learning a second email address replaced the first, and the first
+  dropped out of recall. Now a person can have several of each. A new value replaces an old one only
+  when you say so ("my new number is ...", "I moved to ...", "I left Acme for ..."). Spouse, birthplace,
+  birthday, favorite color, favorite food and main language still hold one value at a time.
+- **Restoring.** A memory merged into another, or replaced by a newer one, can be brought back: ask DAWN
+  ("what did you merge into that?", "bring that back"), use **Duplicates & old values** in the Memory panel, or
+  `dawn-admin memory superseded --user <name>` and `dawn-admin memory restore --user <name> --fact-id
+  <id>`. A restored duplicate takes back what it said. A merged duplicate is kept for `prune_superseded_days` (30 by default) after the merge; an
+  older value a newer one replaced is kept as long as the newer one is.
+- **Forgetting is "what was learned so far".** Forgetting a memory (in the Memory panel, or by asking
+  DAWN) now also removes the duplicates merged into it and what it said about relationships and contact
+  details (before, both came back). If it had replaced an older value ("I moved to Denver" after
+  "Atlanta"), the older one is current again, and DAWN says so: forget it too if it is wrong as well,
+  or to erase it. Forgetting a conversation does the same, and its confirm screen says how many older
+  values will come back. Forgetting a conversation's memories, or deleting all of them, also stops
+  DAWN from learning them again from those conversations later; what you say from then on is
+  remembered as usual.
+- **Cleanup takes history with it.** When nightly cleanup removes a memory (stale, low confidence or
+  expired), the duplicates merged into it and the older values it replaced go with it.
+- The database moves to schema v104 on start (columns and an index added), with no manual step. A
+  memory replaced before this version counts as merged (forgetting what replaced it deletes it too, as
+  before), unless the database shows it was a newer value: one whose relationship or contact detail the
+  newer memory closed counts as replaced.
+
+**What you need to do.** Nothing. Memories an earlier version replaced aren't brought back on their own:
+many were duplicates. What a memory forgotten on an earlier version said about a relationship or contact
+detail can still come up: a relationship to someone or something goes when you delete their card in the
+Memory panel; a contact detail of yours stays until you tell DAWN a new one. If one you want is missing, find it with `dawn-admin memory superseded --user
+<name> --grep <text>` (or the Memory panel's **Duplicates & old values**) and restore it.
+
+---
+
 ## 2026-10-11 — Memories about a person you name are found by any of their names
 
 **What changed.** When a question names someone ("What do you know about Sam?"), memory search now

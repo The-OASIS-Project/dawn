@@ -28,7 +28,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-DELETES='memory_db_fact_delete|memory_db_summary_delete|memory_db_entity_delete|memory_db_relation_delete|memory_db_pref_delete|memory_db_delete_user_memories|memory_db_facts_delete_by_patterns|memory_db_conversations_forget|memory_db_admin_reset_derived|memory_forget_conversation|document_db_delete_indexed|document_db_delete|memory_note_bridge_delete_gloss|auth_db_delete_user'
+DELETES='memory_db_fact_delete|memory_db_fact_forget|memory_db_summary_delete|memory_db_entity_delete|memory_db_relation_delete|memory_db_pref_delete|memory_db_delete_user_memories|memory_db_facts_delete_by_patterns|memory_db_conversations_forget|memory_db_admin_reset_derived|memory_forget_conversation|memory_forget_all|memory_forget_fact|document_db_delete_indexed|document_db_delete|memory_note_bridge_delete_gloss|auth_db_delete_user'
 
 # The modules that implement the deletes are the deletes, not their callers.
 # CHECK_USER_REMOVAL_FILES (space-separated) checks those files instead: for

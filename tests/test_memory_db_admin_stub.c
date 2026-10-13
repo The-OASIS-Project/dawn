@@ -101,3 +101,22 @@ float memory_embeddings_l2_norm(const float *vec, int dim) {
                    "exercise vector ops\n");
    abort();
 }
+
+/* memory_db_prune_low_confidence deletes through memory_db_facts.c, which this
+ * test doesn't link: no fact is pruned here. */
+int memory_db_internal_prune_with_history(int user_id,
+                                          const char *seed_sql,
+                                          int64_t cutoff,
+                                          double threshold,
+                                          const char *what,
+                                          int *count_out) {
+   (void)user_id;
+   (void)seed_sql;
+   (void)cutoff;
+   (void)threshold;
+   (void)what;
+   if (count_out) {
+      *count_out = 0;
+   }
+   return 0;
+}

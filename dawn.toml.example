@@ -587,7 +587,7 @@
                                   # stale when the note is edited. Exact-match redaction
                                   # (zero false positives). Default on.
 # pruning_enabled = true          # Automatically remove old superseded and stale facts
-# prune_superseded_days = 30      # Keep superseded facts for N days before deletion
+# prune_superseded_days = 30      # Keep merged duplicates for N days (older values stay with the newer one)
 # prune_stale_days = 180          # Delete low-confidence facts not accessed in N days
 # prune_stale_min_confidence = 0.50  # Only prune stale facts with confidence below this
 # Fact expiry / ephemerality (C3) — auto-expire transient dated facts (weather

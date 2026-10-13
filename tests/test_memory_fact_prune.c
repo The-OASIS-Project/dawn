@@ -128,7 +128,7 @@ static void test_prune_counts_from_the_merge(void) {
    const int64_t now = (int64_t)time(NULL);
    const int64_t keep = fact_at("Jon prefers direct feedback", now);
    const int64_t old = fact_at("Jon wants to be told when he is wrong", now - 100 * DAY);
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_supersede(old, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(old, keep, 1));
    TEST_ASSERT_INT64_WITHIN(5, now, column_of(old, "superseded_at"));
 
    int pruned = -1;
@@ -151,7 +151,7 @@ static void test_migration_gives_earlier_merges_a_window(void) {
    const int64_t now = (int64_t)time(NULL);
    const int64_t keep = fact_at("Jon lives in Georgia", now);
    const int64_t old = fact_at("Jon is based in Georgia", now - 200 * DAY);
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_supersede(old, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(old, keep, 1));
    set_column(old, "superseded_at", "NULL"); /* merged before v95 */
 
    int pruned = -1;

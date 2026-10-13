@@ -86,6 +86,31 @@ int auth_db_txn_end_locked(int result, const char *tag) {
    return result;
 }
 
+int auth_db_savepoint_begin_locked(const char *name) {
+   char sql[64];
+   snprintf(sql, sizeof(sql), "SAVEPOINT %s", name);
+   if (sqlite3_exec(s_db.db, sql, NULL, NULL, NULL) == SQLITE_OK) {
+      return AUTH_DB_SUCCESS;
+   }
+   OLOG_ERROR("%s: SAVEPOINT failed: %s", name, sqlite3_errmsg(s_db.db));
+   return AUTH_DB_FAILURE;
+}
+
+int auth_db_savepoint_end_locked(int result, const char *name) {
+   char sql[96];
+   if (result == AUTH_DB_SUCCESS) {
+      snprintf(sql, sizeof(sql), "RELEASE %s", name);
+      if (sqlite3_exec(s_db.db, sql, NULL, NULL, NULL) == SQLITE_OK) {
+         return AUTH_DB_SUCCESS;
+      }
+      OLOG_ERROR("%s: RELEASE failed: %s", name, sqlite3_errmsg(s_db.db));
+      result = AUTH_DB_FAILURE;
+   }
+   snprintf(sql, sizeof(sql), "ROLLBACK TO %s; RELEASE %s", name, name);
+   sqlite3_exec(s_db.db, sql, NULL, NULL, NULL);
+   return result;
+}
+
 int64_t auth_db_query_int64(sqlite3 *db, const char *sql) {
    sqlite3_stmt *st = NULL;
    int64_t v = -1;

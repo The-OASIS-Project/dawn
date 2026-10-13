@@ -88,6 +88,7 @@ static const char *DDL =
    "  role TEXT NOT NULL,"
    "  content TEXT NOT NULL,"
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+   "  kind TEXT DEFAULT NULL,"
    "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
    ");"
    "INSERT INTO messages (id, conversation_id, role, content) VALUES (100, 10, 'user', 'hello');"
@@ -105,6 +106,8 @@ static const char *DDL =
    "  last_accessed INTEGER,"
    "  access_count INTEGER DEFAULT 0,"
    "  superseded_by INTEGER,"
+   "  superseded_kind INTEGER NOT NULL DEFAULT 0,"
+   "  merged_from_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  superseded_at INTEGER DEFAULT NULL,"
    "  normalized_hash INTEGER DEFAULT 0,"
    "  embedding BLOB DEFAULT NULL,"
@@ -219,10 +222,13 @@ static const char *DDL =
    "  relation TEXT NOT NULL,"
    "  object_entity_id INTEGER DEFAULT 0,"
    "  object_name TEXT,"
+   "  object_value TEXT DEFAULT NULL,"
    "  confidence REAL DEFAULT 1.0,"
    "  fact_id INTEGER DEFAULT NULL,"
    "  valid_from INTEGER DEFAULT NULL,"
    "  valid_to INTEGER DEFAULT NULL,"
+   "  merged_from_fact_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
+   "  closed_by_fact_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
@@ -298,6 +304,14 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return FAILURE;
 
+   /* Mirror of auth_db_statements.c's memory_fact_prune_superseded. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM memory_facts WHERE user_id = ? AND superseded_by IS NOT "
+                           "NULL AND superseded_at IS NOT NULL AND superseded_at < ?",
+                           -1, &s_db.stmt_memory_fact_prune_superseded, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+
    /* v58 expiry-guard tests: mirror the production fact_list (with the
     * expires_at retrieval guard, numbered params) + prune_expired statements
     * so memory_db_fact_list / memory_db_fact_prune_expired exercise their real
@@ -337,13 +351,6 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return FAILURE;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "DELETE FROM memory_facts WHERE user_id = ? "
-                           "AND expires_at IS NOT NULL AND expires_at < ?",
-                           -1, &s_db.stmt_memory_fact_prune_expired, NULL);
-   if (rc != SQLITE_OK)
-      return FAILURE;
-
    /* Forget: keep in sync with auth_db_statements.c. */
    rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_facts WHERE id = ? AND user_id = ?", -1,
                            &s_db.stmt_memory_fact_delete, NULL);
@@ -351,10 +358,11 @@ static int prepare_statements(void) {
       return FAILURE;
    /* Merge: keep in sync with auth_db_statements.c. */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_facts SET superseded_by = ?, "
+                           "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = ?6, "
                            "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-                           "WHERE id = ? AND user_id = ? "
-                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
+                           "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL AND ?2 != ?4 "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5 "
+                           "AND superseded_by IS NULL)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
@@ -423,8 +431,8 @@ static void close_db(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_list_created_desc);
    if (s_db.stmt_memory_fact_list_created_asc)
       sqlite3_finalize(s_db.stmt_memory_fact_list_created_asc);
-   if (s_db.stmt_memory_fact_prune_expired)
-      sqlite3_finalize(s_db.stmt_memory_fact_prune_expired);
+   if (s_db.stmt_memory_fact_prune_superseded)
+      sqlite3_finalize(s_db.stmt_memory_fact_prune_superseded);
    if (s_db.stmt_memory_fact_delete)
       sqlite3_finalize(s_db.stmt_memory_fact_delete);
    if (s_db.stmt_memory_fact_supersede)
@@ -450,7 +458,7 @@ static void close_db(void) {
    s_db.stmt_memory_fact_list = NULL;
    s_db.stmt_memory_fact_list_created_desc = NULL;
    s_db.stmt_memory_fact_list_created_asc = NULL;
-   s_db.stmt_memory_fact_prune_expired = NULL;
+   memory_db_release_statements_locked(); /* the store's kept statements */
    sqlite3_close(s_db.db);
    s_db.db = NULL;
 }
@@ -1183,6 +1191,47 @@ static void q_exec(const char *sql) {
                                  err ? err : sql);
 }
 
+/* Forgetting is of what was learned so far: the forgotten conversation, or
+ * every conversation of the user after "delete all", counts as extracted, so
+ * memory recovery doesn't learn it again.  Another user's stays as it was. */
+void test_forget_marks_conversations_extracted(void) {
+   q_exec("UPDATE conversations SET message_count = 0, last_extracted_msg_count = 0, "
+          "last_extracted_msg_id = 0, extraction_attempts = 1;"
+          "INSERT INTO conversations (id, user_id, is_private, message_count) "
+          "VALUES (40, 2, 0, 2);"
+          "INSERT INTO messages (id, conversation_id, role, content) VALUES "
+          "(7001, 25, 'user', 'a'), (7002, 25, 'assistant', 'b'), (7003, 30, 'user', 'c'), "
+          "(7004, 40, 'user', 'd');"
+          /* Request context isn't extracted, so it doesn't move the cursor. */
+          "INSERT INTO messages (id, conversation_id, role, content, kind) "
+          "VALUES (7010, 25, 'user', 'ctx', 'turn_context');"
+          "UPDATE conversations SET message_count = 2 WHERE id = 25;"
+          "UPDATE conversations SET message_count = 1 WHERE id = 30;");
+
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT64(7002, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                       "WHERE id = 25"));
+   TEST_ASSERT_EQUAL_INT64(2, q_int("SELECT last_extracted_msg_count FROM conversations "
+                                    "WHERE id = 25"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT extraction_attempts FROM conversations WHERE id = 25"));
+   /* Not the one forgotten. */
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                    "WHERE id = 30"));
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_delete_user_memories(1));
+   TEST_ASSERT_EQUAL_INT64(7003, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                       "WHERE id = 30"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT last_extracted_msg_count FROM conversations "
+                                    "WHERE id = 30"));
+   TEST_ASSERT_EQUAL_INT64(q_int("SELECT MAX(id) FROM messages WHERE conversation_id = 10"),
+                           q_int("SELECT last_extracted_msg_id FROM conversations WHERE id = 10"));
+   /* Another user's conversation is left alone. */
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT last_extracted_msg_id FROM conversations "
+                                    "WHERE id = 40"));
+}
+
 /* Forgetting conversation 25 removes what only it taught, keeps (and re-points)
  * what another conversation also taught, and cleans up orphaned entities. */
 void test_forget_keeps_facts_taught_elsewhere(void) {
@@ -1396,6 +1445,447 @@ void test_merge_with_a_deleted_source_conversation(void) {
             (long long)keep);
    TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_merge(old, 424242, 1));
+}
+
+/* Forgetting a fact takes what was merged into it: left alone they would point
+ * at nothing and come back as current. */
+void test_forget_takes_what_was_merged_into_it(void) {
+   int64_t keep = 0, dup1 = 0, dup2 = 0, other = 0;
+   memory_db_fact_create(1, "User drinks oat milk", 0.9f, "explicit", "health", NULL, &keep);
+   memory_db_fact_create(1, "User likes oat milk", 0.9f, "explicit", "health", NULL, &dup1);
+   memory_db_fact_create(1, "User prefers oat milk", 0.9f, "explicit", "health", NULL, &dup2);
+   memory_db_fact_create(1, "User lives near a park", 0.9f, "explicit", "personal", NULL, &other);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup1, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup2, keep, 1));
+   memory_forget_result_t fr;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(keep, 1, &fr));
+   TEST_ASSERT_EQUAL_INT(2, fr.merged);
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_facts"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_forget(424242, 1, NULL));
+}
+
+/* A merge chain (A into B, B into K) goes with K, at any depth. */
+void test_forget_takes_a_merge_chain(void) {
+   int64_t k = 0, b = 0, a = 0;
+   memory_db_fact_create(1, "User runs on Sundays", 0.9f, "explicit", "health", NULL, &k);
+   memory_db_fact_create(1, "User jogs on Sundays", 0.9f, "explicit", "health", NULL, &b);
+   memory_db_fact_create(1, "User goes running Sundays", 0.9f, "explicit", "health", NULL, &a);
+   char sql[200];
+   snprintf(sql, sizeof(sql),
+            "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;"
+            "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;",
+            (long long)k, (long long)b, (long long)b, (long long)a);
+   q_exec(sql);
+   memory_forget_result_t fr;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(k, 1, &fr));
+   TEST_ASSERT_EQUAL_INT(2, fr.merged);
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_facts"));
+}
+
+/* Forgetting a fact takes the relations it and its merged duplicates stated:
+ * left with no fact, they would keep bringing it back.  Another fact's stay. */
+void test_forget_takes_the_facts_relations(void) {
+   int64_t keep = 0, dup = 0, other = 0;
+   memory_db_fact_create(1, "User's work email is a@example.com", 0.9f, "explicit", "personal",
+                         NULL, &keep);
+   memory_db_fact_create(1, "User uses a@example.com for work", 0.9f, "explicit", "personal", NULL,
+                         &dup);
+   memory_db_fact_create(1, "User's home email is b@example.com", 0.9f, "explicit", "personal",
+                         NULL, &other);
+   char sql[600];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id, valid_to) VALUES "
+            "(970, 1, 601, 'email_is', 'a@example.com', %lld, NULL), "
+            "(971, 1, 601, 'email_is', 'old@example.com', %lld, 100), "
+            "(972, 1, 601, 'email_is', 'b@example.com', %lld, NULL);",
+            (long long)keep, (long long)dup, (long long)other);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(keep, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(0,
+                           q_int("SELECT COUNT(*) FROM memory_relations WHERE id IN (970, 971)"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 972 AND "
+                                    "fact_id IS NOT NULL"));
+}
+
+/* A relation on a merged duplicate moves to the fact kept when the duplicate
+ * is pruned, so forgetting the kept fact still reaches it. */
+void test_prune_moves_relations_to_the_kept_fact(void) {
+   int64_t keep = 0, dup = 0;
+   memory_db_fact_create(1, "User's phone is 555-0100", 0.9f, "explicit", "personal", NULL, &keep);
+   memory_db_fact_create(1, "User can be reached at 555-0100", 0.9f, "explicit", "personal", NULL,
+                         &dup);
+   char sql[400];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id) VALUES (975, 1, 601, 'phone_number_is', '555-0100', %lld);",
+            (long long)dup);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+   snprintf(sql, sizeof(sql), "UPDATE memory_facts SET superseded_at = 100 WHERE id = %lld;",
+            (long long)dup);
+   q_exec(sql);
+   int pruned = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_prune_superseded(1, 30, &pruned));
+   TEST_ASSERT_EQUAL_INT(1, pruned);
+   snprintf(sql, sizeof(sql), "SELECT fact_id FROM memory_relations WHERE id = 975");
+   TEST_ASSERT_EQUAL_INT64(keep, q_int(sql));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(keep, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 975"));
+}
+
+/* Forgetting a fact takes an entity only it named; one something else names stays. */
+void test_forget_takes_an_entity_only_it_named(void) {
+   int64_t f = 0, g = 0;
+   memory_db_fact_create(1, "User is married to Jane Roe", 0.9f, "explicit", "relationships", NULL,
+                         &f);
+   memory_db_fact_create(1, "User works with Sam Poe", 0.9f, "explicit", "work", NULL, &g);
+   char sql[700];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES "
+            "(980, 1, 'Me', 1), (981, 1, 'Jane Roe', 0), (982, 1, 'Sam Poe', 0);"
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_entity_id, fact_id) VALUES (983, 1, 980, 'married_to', 981, %lld), "
+            "(984, 1, 980, 'works_with', 982, %lld), (985, 1, 982, 'knows', 980, NULL);",
+            (long long)f, (long long)g);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(f, 1, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(g, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 981"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 982"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 980"));
+}
+
+/* Every entity a forgotten fact named goes, however many (no cap). */
+void test_forget_takes_every_entity_it_named(void) {
+   int64_t f = 0;
+   memory_db_fact_create(1, "User met twenty people at the meetup", 0.9f, "explicit", "personal",
+                         NULL, &f);
+   q_exec(
+       "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES (1000, 1, 'Me', 1);");
+   char sql[300];
+   for (int i = 1; i <= 20; i++) {
+      snprintf(sql, sizeof(sql),
+               "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES "
+               "(%d, 1, 'Person %d', 0);"
+               "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
+               "object_entity_id, fact_id) VALUES (1, 1000, 'met', %d, %lld);",
+               1000 + i, i, 1000 + i, (long long)f);
+      q_exec(sql);
+   }
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(f, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_entities WHERE id > 1000"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 1000"));
+}
+
+/* A relation another conversation also taught stays when one fact stating it
+ * is forgotten, and so does the entity it names; the user's own entity stays. */
+void test_forget_keeps_a_relation_taught_elsewhere(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t f = 0, g = 0;
+   memory_db_fact_create(1, "User is married to Jane Roe", 0.9f, "explicit", "relationships", &p25,
+                         &f);
+   memory_db_fact_create(1, "User's sister is Ann Roe", 0.9f, "explicit", "relationships", &p25,
+                         &g);
+   char sql[700];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES "
+            "(990, 1, 'Me', 1), (991, 1, 'Jane Roe', 0), (992, 1, 'Ann Roe', 0);"
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_entity_id, fact_id, source_conversation_id) VALUES "
+            "(993, 1, 990, 'married_to', 991, %lld, 25), (994, 1, 990, 'sibling_of', 992, %lld, "
+            "25);"
+            "INSERT INTO memory_relation_sources VALUES (993, 25), (993, 30), (994, 25);",
+            (long long)f, (long long)g);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(f, 1, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(g, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 993 AND "
+                                    "fact_id IS NULL"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 991"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 994"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 992"));
+   q_exec("DELETE FROM memory_relations WHERE id = 993;");
+   int64_t h = 0;
+   memory_db_fact_create(1, "User likes tea", 0.9f, "explicit", "preferences", NULL, &h);
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id) VALUES (995, 1, 990, 'likes', 'tea', %lld);",
+            (long long)h);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(h, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 990"));
+}
+
+/* A duplicate from another conversation merged into the fact forgotten: its
+ * relation, taught by both conversations, goes with the pair. */
+void test_forget_takes_a_merged_duplicates_relation_from_both(void) {
+   memory_provenance_t p25 = { .conv_id = 25 }, p30 = { .conv_id = 30 };
+   int64_t keep = 0, dup = 0;
+   memory_db_fact_create(1, "User's phone is 555-0101", 0.9f, "explicit", "personal", &p30, &keep);
+   memory_db_fact_create(1, "User's number is 555-0101", 0.9f, "explicit", "personal", &p25, &dup);
+   char sql[500];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id, source_conversation_id) VALUES "
+            "(996, 1, 601, 'phone_number_is', '555-0101', %lld, 30);"
+            "INSERT INTO memory_relation_sources VALUES (996, 25), (996, 30);",
+            (long long)dup);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(keep, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 996"));
+}
+
+/* A merge and a replacement are told apart, and recall hides both alike. */
+void test_merged_and_replaced_hide_alike(void) {
+   int64_t keep = 0, dup = 0, old = 0;
+   memory_db_fact_create(1, "User drives a blue car", 0.9f, "explicit", "personal", NULL, &keep);
+   memory_db_fact_create(1, "User's car is blue", 0.9f, "explicit", "personal", NULL, &dup);
+   memory_db_fact_create(1, "User drives a red car", 0.9f, "explicit", "personal", NULL, &old);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_replace(old, keep, 1));
+   char sql[160];
+   snprintf(sql, sizeof(sql), "SELECT superseded_kind FROM memory_facts WHERE id = %lld",
+            (long long)dup);
+   TEST_ASSERT_EQUAL_INT64(MEMORY_SUPERSEDED_MERGED, q_int(sql));
+   snprintf(sql, sizeof(sql), "SELECT superseded_kind FROM memory_facts WHERE id = %lld",
+            (long long)old);
+   TEST_ASSERT_EQUAL_INT64(MEMORY_SUPERSEDED_REPLACED, q_int(sql));
+   memory_fact_t facts[8];
+   int n = 0;
+   memory_db_fact_list(1, facts, 8, 0, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(keep, facts[0].id);
+   memory_superseded_fact_t rows[4];
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, keep, NULL, rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_EQUAL(rows[i].id == old, rows[i].replaced);
+   }
+}
+
+/* Forgetting a value brings back the one it replaced, with the relation it
+ * closed, even for a one-at-a-time relation (the forgotten one's goes first);
+ * its merged duplicates go with it. */
+void test_forget_brings_back_what_it_replaced(void) {
+   int64_t old = 0, fresh = 0, dup = 0;
+   memory_db_fact_create(1, "User is married to Alex", 0.9f, "explicit", "relationships", NULL,
+                         &old);
+   memory_db_fact_create(1, "User is married to Sam", 0.9f, "explicit", "relationships", NULL,
+                         &fresh);
+   memory_db_fact_create(1, "User's spouse is Sam", 0.9f, "explicit", "relationships", NULL, &dup);
+   char sql[700];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id, valid_to, closed_by_fact_id) VALUES "
+            "(1100, 1, 601, 'married_to', 'Alex', %lld, 100, %lld), "
+            "(1101, 1, 601, 'married_to', 'Sam', %lld, NULL, NULL);"
+            "UPDATE memory_facts SET superseded_by = %lld, superseded_kind = 1, superseded_at = "
+            "100 WHERE id = %lld;",
+            (long long)old, (long long)fresh, (long long)fresh, (long long)fresh, (long long)old);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, fresh, 1));
+   memory_forget_result_t fr;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fresh, 1, &fr));
+   TEST_ASSERT_EQUAL_INT(1, fr.merged);
+   TEST_ASSERT_EQUAL_INT(1, fr.restored);
+   TEST_ASSERT_EQUAL_INT64(old, fr.restored_ids[0]);
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM memory_facts WHERE id = %lld AND superseded_by IS NULL AND "
+            "superseded_kind = 0 AND superseded_at IS NULL",
+            (long long)old);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 1100 AND "
+                                    "valid_to IS NULL"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 1101"));
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM memory_facts WHERE id IN (%lld, %lld)",
+            (long long)fresh, (long long)dup);
+   TEST_ASSERT_EQUAL_INT64(0, q_int(sql));
+}
+
+/* Forgetting a value reopens what it closed even when the old fact stayed
+ * current (it stated another value too). */
+void test_forget_reopens_what_it_closed(void) {
+   int64_t both = 0, fresh = 0;
+   memory_db_fact_create(1, "User's phone is 555-0100 and email a@example.com", 0.9f, "explicit",
+                         "personal", NULL, &both);
+   memory_db_fact_create(1, "User's new phone is 555-0199", 0.9f, "explicit", "personal", NULL,
+                         &fresh);
+   char sql[500];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id, valid_to, closed_by_fact_id) VALUES "
+            "(1130, 1, 601, 'phone_number_is', '555-0100', %lld, 100, %lld), "
+            "(1131, 1, 601, 'email_is', 'a@example.com', %lld, NULL, NULL);",
+            (long long)both, (long long)fresh, (long long)both);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fresh, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 1130 AND "
+                                    "valid_to IS NULL AND closed_by_fact_id IS NULL"));
+}
+
+/* Replacing a fact closes what it stated, by the newer fact; forgetting the
+ * newer fact reopens it. */
+void test_replace_closes_and_forget_reopens(void) {
+   int64_t old = 0, fresh = 0;
+   memory_db_fact_create(1, "User's phone is 555-0101", 0.9f, "explicit", "personal", NULL, &old);
+   memory_db_fact_create(1, "User's phone is now 555-0202", 0.9f, "explicit", "personal", NULL,
+                         &fresh);
+   char sql[300];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id) VALUES (1140, 1, 601, 'phone_number_is', '555-0101', %lld);",
+            (long long)old);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_replace(old, fresh, 1));
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM memory_relations WHERE id = 1140 AND fact_id = %lld AND "
+            "valid_to IS NOT NULL AND closed_by_fact_id = %lld",
+            (long long)old, (long long)fresh);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+   memory_forget_result_t fr;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fresh, 1, &fr));
+   TEST_ASSERT_EQUAL_INT(1, fr.restored);
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 1140 AND "
+                                    "valid_to IS NULL"));
+}
+
+/* A merge moves what the duplicate stated to the fact kept. */
+void test_merge_moves_relations_to_the_kept_fact(void) {
+   int64_t keep = 0, dup = 0;
+   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", "personal", NULL, &keep);
+   memory_db_fact_create(1, "User's home is Atlanta", 0.9f, "explicit", "personal", NULL, &dup);
+   char sql[300];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id) VALUES (1110, 1, 601, 'lives_in', 'Atlanta', %lld);",
+            (long long)dup);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+   TEST_ASSERT_EQUAL_INT64(keep, q_int("SELECT fact_id FROM memory_relations WHERE id = 1110"));
+}
+
+/* A prune moves a relation up a merge chain of any length to the fact kept;
+ * a replaced value's relation stays on it. */
+void test_prune_follows_a_long_merge_chain(void) {
+   int64_t chain[12];
+   char text[64];
+   for (int i = 0; i < 12; i++) {
+      snprintf(text, sizeof(text), "User has %d email accounts, take %d", 4, i);
+      memory_db_fact_create(1, text, 0.9f, "explicit", "personal", NULL, &chain[i]);
+   }
+   char sql[400];
+   for (int i = 0; i < 11; i++) { /* chain[i] merged into chain[i + 1], long ago */
+      snprintf(sql, sizeof(sql),
+               "UPDATE memory_facts SET superseded_by = %lld, superseded_at = 100 WHERE id = %lld;",
+               (long long)chain[i + 1], (long long)chain[i]);
+      q_exec(sql);
+   }
+   int64_t old = 0;
+   memory_db_fact_create(1, "User's old address is gone", 0.9f, "explicit", "personal", NULL, &old);
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id) VALUES (1120, 1, 601, 'email_is', 'a@example.com', %lld),"
+            "(1121, 1, 601, 'email_is', 'old@example.com', %lld);"
+            "UPDATE memory_facts SET superseded_by = %lld, superseded_kind = 1, superseded_at = "
+            "100 WHERE id = %lld;",
+            (long long)chain[0], (long long)old, (long long)chain[11], (long long)old);
+   q_exec(sql);
+   int pruned = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_prune_superseded(1, 30, &pruned));
+   TEST_ASSERT_EQUAL_INT(12, pruned);
+   TEST_ASSERT_EQUAL_INT64(chain[11],
+                           q_int("SELECT fact_id FROM memory_relations WHERE id = 1120"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 1121 AND "
+                                    "fact_id IS NULL"));
+}
+
+/* Restore doesn't reopen "likes X" while the "dislikes X" that closed it is open. */
+void test_restore_keeps_a_contradiction_closed(void) {
+   int64_t liked = 0, disliked = 0;
+   memory_db_fact_create(1, "User likes cilantro", 0.9f, "explicit", "preferences", NULL, &liked);
+   memory_db_fact_create(1, "User dislikes cilantro", 0.9f, "explicit", "preferences", NULL,
+                         &disliked);
+   char sql[600];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_value, fact_id, valid_to, closed_by_fact_id) VALUES "
+            "(960, 1, 601, 'likes', 'cilantro', %lld, 100, %lld), "
+            "(961, 1, 601, 'dislikes', 'cilantro', %lld, NULL, NULL);"
+            "UPDATE memory_facts SET superseded_by = %lld, superseded_at = 100 WHERE id = %lld;",
+            (long long)liked, (long long)disliked, (long long)disliked, (long long)disliked,
+            (long long)liked);
+   q_exec(sql);
+   memory_restore_result_t rr;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_restore(1, liked, &rr));
+   TEST_ASSERT_EQUAL_INT(0, rr.reopened);
+   TEST_ASSERT_EQUAL_INT(1, rr.kept_closed);
+   TEST_ASSERT_EQUAL_INT64(100, q_int("SELECT valid_to FROM memory_relations WHERE id = 960"));
+}
+
+/* A merged fact is listed with the one kept, and comes back on restore; not
+ * another user's, and not twice. */
+void test_restore_brings_a_merged_fact_back(void) {
+   int64_t keep = 0, dup = 0;
+   memory_db_fact_create(1, "User's cat is named Miso", 0.9f, "explicit", "personal", NULL, &keep);
+   memory_db_fact_create(1, "User has a cat called Miso", 0.9f, "explicit", "personal", NULL, &dup);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+
+   memory_superseded_fact_t rows[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, keep, NULL, rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(dup, rows[0].id);
+   TEST_ASSERT_EQUAL_STRING("User's cat is named Miso", rows[0].keeper_text);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, 0, "CALLED miso", rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_list_superseded(1, 0, "parrot", rows, 4, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_restore(2, dup, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_restore(1, dup, NULL));
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM memory_facts WHERE id = %lld AND superseded_by IS NULL AND "
+            "superseded_at IS NULL",
+            (long long)dup);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_restore(1, dup, NULL));
+}
+
+/* Restore reopens only what the replacement closed: not a relation stated as
+ * ended, and not a one-at-a-time value while another is open. */
+void test_restore_reopens_what_its_replacement_closed(void) {
+   int64_t old = 0, fresh = 0;
+   memory_db_fact_create(1, "User's email is old@example.com", 0.9f, "explicit", "personal", NULL,
+                         &old);
+   memory_db_fact_create(1, "User's email is new@example.com", 0.9f, "explicit", "personal", NULL,
+                         &fresh);
+   char sql[1024];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_entity_id, object_value, fact_id, valid_to, closed_by_fact_id) VALUES "
+            "(950, 1, 600, 'email_is', NULL, 'old@example.com', %lld, 100, %lld), "
+            "(951, 1, 600, 'works_at', NULL, 'Acme', %lld, 100, NULL), "
+            "(952, 1, 600, 'married_to', NULL, 'Pat', %lld, 100, %lld), "
+            "(953, 1, 600, 'married_to', NULL, 'Sam', %lld, NULL, NULL);"
+            "UPDATE memory_facts SET superseded_by = %lld, superseded_at = 100 WHERE id = %lld;",
+            (long long)old, (long long)fresh, (long long)old, (long long)old, (long long)fresh,
+            (long long)fresh, (long long)fresh, (long long)old);
+   q_exec(sql);
+   memory_restore_result_t rr;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_restore(1, old, &rr));
+   TEST_ASSERT_EQUAL_INT(1, rr.reopened);
+   TEST_ASSERT_EQUAL_INT(1, rr.kept_closed); /* married_to: Sam is open */
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT valid_to FROM memory_relations WHERE id = 950"));
+   TEST_ASSERT_EQUAL_INT64(100, q_int("SELECT valid_to FROM memory_relations WHERE id = 951"));
+   TEST_ASSERT_EQUAL_INT64(100, q_int("SELECT valid_to FROM memory_relations WHERE id = 952"));
 }
 
 /* An entity an alias still targets is kept (its target column can't be nulled),
@@ -1657,6 +2147,7 @@ int main(void) {
    RUN_TEST(test_fact_list_sort_orders);
    RUN_TEST(test_prune_expired_removes_past_only);
    RUN_TEST(test_forget_keeps_facts_taught_elsewhere);
+   RUN_TEST(test_forget_marks_conversations_extracted);
    RUN_TEST(test_forget_is_user_scoped);
    RUN_TEST(test_preference_sources_follow_the_value);
    RUN_TEST(test_forget_keeps_relation_taught_elsewhere);
@@ -1664,6 +2155,23 @@ int main(void) {
    RUN_TEST(test_forget_keeps_what_a_merge_brought);
    RUN_TEST(test_merge_carries_unsourced_origin);
    RUN_TEST(test_merge_with_a_deleted_source_conversation);
+   RUN_TEST(test_forget_takes_what_was_merged_into_it);
+   RUN_TEST(test_forget_takes_a_merge_chain);
+   RUN_TEST(test_forget_takes_the_facts_relations);
+   RUN_TEST(test_prune_moves_relations_to_the_kept_fact);
+   RUN_TEST(test_forget_takes_an_entity_only_it_named);
+   RUN_TEST(test_forget_keeps_a_relation_taught_elsewhere);
+   RUN_TEST(test_forget_takes_every_entity_it_named);
+   RUN_TEST(test_merged_and_replaced_hide_alike);
+   RUN_TEST(test_forget_brings_back_what_it_replaced);
+   RUN_TEST(test_forget_reopens_what_it_closed);
+   RUN_TEST(test_replace_closes_and_forget_reopens);
+   RUN_TEST(test_merge_moves_relations_to_the_kept_fact);
+   RUN_TEST(test_prune_follows_a_long_merge_chain);
+   RUN_TEST(test_forget_takes_a_merged_duplicates_relation_from_both);
+   RUN_TEST(test_restore_keeps_a_contradiction_closed);
+   RUN_TEST(test_restore_brings_a_merged_fact_back);
+   RUN_TEST(test_restore_reopens_what_its_replacement_closed);
    RUN_TEST(test_forget_keeps_alias_target_entity);
    RUN_TEST(test_conversation_delete_drops_sources);
    RUN_TEST(test_forget_queries_use_their_indexes);

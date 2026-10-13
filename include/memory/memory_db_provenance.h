@@ -211,13 +211,15 @@ int memory_db_prefs_get_sources(int user_id,
  *  that set removes (including superseded facts and closed relations). */
 typedef struct {
    int facts;       /**< current facts learned only from these conversations */
-   int outdated;    /**< superseded facts going with them (older versions the Memory
-                         panel doesn't list, and every fact a going one replaced) */
+   int outdated;    /**< superseded facts going with them (duplicates, and older
+                         values learned only here; the Memory panel doesn't
+                         list either) */
    int summaries;   /**< conversation summaries */
    int relations;   /**< entity relations (graph links, not shown as memories) going
                          with those facts or sourced from these conversations */
    int preferences; /**< preferences whose latest source is one of the conversations */
    int entities;    /**< forget only: named entities left with no remaining reference */
+   int restored;    /**< older values the going facts replaced, current again */
 } memory_conv_learned_t;
 
 /**
@@ -240,8 +242,10 @@ int memory_db_conversations_learned_count(int user_id,
  *  - summaries of these conversations and preferences they last set;
  *  - any named entity those rows referenced that nothing references afterwards
  *    (not the user, no contact details, no other fact or relation, no alias).
- * Deleting a fact that superseded an older one makes the older one current
- * again (the superseded_by link is cleared by the schema).
+ * The duplicates merged into a deleted fact go with it.  A fact it replaced
+ * passes to the nearest fact up its chain that stays, or, when none does, is
+ * current again with the relations the deleted facts closed reopened
+ * (counted in restored).
  *
  * @param deleted_out Rows deleted per table (may be NULL)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE (nothing deleted)

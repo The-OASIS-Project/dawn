@@ -942,10 +942,10 @@
             },
             prune_superseded_days: {
                type: 'number',
-               label: 'Superseded Retention (days)',
+               label: 'Keep Merged Duplicates (days)',
                min: 1,
                max: 365,
-               hint: 'Keep superseded facts for this many days before deletion',
+               hint: 'Duplicates merged into another memory are deleted after this many days. Old values a newer one replaced are kept as long as the newer one is.',
                advanced: true,
             },
             prune_stale_days: {

@@ -110,8 +110,19 @@ static void test_an_existing_file_is_converted(void) {
  * at the next write. */
 static void test_the_storage_thread_checkpoints(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(TEST_DB));
-   const uint64_t before = auth_db_storage_checkpoints();
    main_exec("CREATE TABLE burst(b)");
+   /* The schema's own writes can pass the threshold, so that commit may wake
+    * the thread: let its checkpoint finish, so the one counted below is the
+    * burst's. */
+   uint64_t before = auth_db_storage_checkpoints();
+   for (int i = 0; i < 20; i++) {
+      usleep(5 * AUTH_DB_CHECKPOINT_MIN_GAP_MS * 1000);
+      const uint64_t now = auth_db_storage_checkpoints();
+      if (now == before) {
+         break;
+      }
+      before = now;
+   }
    main_exec("INSERT INTO burst VALUES (zeroblob(24 * 1024 * 1024))");
    for (int i = 0; i < 100 && auth_db_storage_checkpoints() == before; i++) {
       usleep(50 * 1000);

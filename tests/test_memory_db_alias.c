@@ -1038,7 +1038,7 @@ static void test_consider_auto_merge_longer_canonical_swap_skipped_dependents(vo
 
    int64_t short_form = insert_entity_typed(g_test_user_id, "Jon", "person");
    insert_contact(g_test_user_id, short_form, "email", "smithfab@example.com");
-   /* born_in is in EXCLUSIVE_RELATIONS[] — its presence on short_form
+   /* born_in is identifying (SPECIAL_RELATIONS[]) — its presence on short_form
     * blocks the swap regardless of whether inbound also has it. */
    int64_t city = insert_entity_typed(g_test_user_id, "Atlanta", "place");
    insert_open_relation(g_test_user_id, short_form, "born_in", city, NULL);

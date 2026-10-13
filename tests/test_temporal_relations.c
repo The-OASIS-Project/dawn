@@ -17,8 +17,8 @@
  * the project author(s).
  *
  * Unit tests for v33 temporal relations:
- *   - memory_db_relation_supersede auto-closes prior open exclusive relation
- *   - memory_db_relation_supersede leaves non-exclusive open
+ *   - memory_db_relation_supersede auto-closes a one-at-a-time relation's prior value
+ *   - memory_db_relation_supersede leaves other relations open
  *   - memory_db_relation_supersede skips close when same target re-mentioned
  *   - memory_db_relation_list_by_subject_at returns the right slice
  *   - default ("currently true") path filters out closed rows
@@ -98,6 +98,7 @@ static const char *DDL =
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  valid_from INTEGER DEFAULT NULL,"
    "  valid_to INTEGER DEFAULT NULL,"
+   "  closed_by_fact_id INTEGER DEFAULT NULL,"
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
@@ -140,14 +141,8 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE memory_relations SET valid_to = ? "
-                           "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
-                           "  AND valid_to IS NULL "
-                           "  AND (COALESCE(object_entity_id, 0) != COALESCE(?, 0) "
-                           "    OR COALESCE(object_value, '') != COALESCE(?, '')) "
-                           "RETURNING fact_id",
-                           -1, &s_db.stmt_memory_relation_close_open, NULL);
+   rc = sqlite3_prepare_v2(s_db.db, MEMORY_RELATION_CLOSE_OPEN_SQL, -1,
+                           &s_db.stmt_memory_relation_close_open, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -245,16 +240,17 @@ static int count_open_relations(int subject_id, const char *relation) {
  * Tests
  * ============================================================================ */
 
+/* A one-at-a-time relation (married_to): a new value closes the old. */
 static void test_supersede_exclusive(void) {
-   /* Insert: Alice works_at Google */
-   int rc = memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   /* Insert: Alice married_to entity 20 */
+   int rc = memory_db_relation_supersede(1, 10, "married_to", 20, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "works_at"));
+   TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "married_to"));
 
-   /* Now: Alice works_at Microsoft — must auto-close Google */
-   rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   /* Now: Alice married_to entity 21 — must auto-close 20 */
+   rc = memory_db_relation_supersede(1, 10, "married_to", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "works_at"));
+   TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "married_to"));
 }
 
 static void test_supersede_idempotent_same_object(void) {
@@ -331,37 +327,37 @@ static void test_supersede_closes_at_new_valid_from(void) {
    int64_t t2018 = 1514764800;
    int64_t t2020 = 1577836800;
 
-   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, 0, NULL, NULL);
-   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, t2020, 0, NULL, NULL);
+   memory_db_relation_supersede(1, 10, "married_to", 20, NULL, 0, 0.9f, t2018, 0, NULL, NULL);
+   memory_db_relation_supersede(1, 10, "married_to", 21, NULL, 0, 0.9f, t2020, 0, NULL, NULL);
 
-   /* As-of 2019: only Google should be valid */
+   /* As-of 2019: only A should be valid */
    memory_relation_t out[10];
    int n = 0;
    int rc = memory_db_relation_list_by_subject_at(1, 10, 1546300800, out, 10, &n);
    TEST_ASSERT_EQUAL_INT(0, rc);
-   int works_at_count = 0;
+   int married_to_count = 0;
    for (int i = 0; i < n; i++) {
-      if (strcmp(out[i].relation, "works_at") == 0)
-         works_at_count++;
+      if (strcmp(out[i].relation, "married_to") == 0)
+         married_to_count++;
    }
-   TEST_ASSERT_EQUAL_INT_MESSAGE(1, works_at_count,
-                                 "as-of 2019: exactly one works_at — no overlap");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(1, married_to_count,
+                                 "as-of 2019: exactly one married_to — no overlap");
 }
 
 static void test_supersede_skips_close_for_historical_insert(void) {
-   /* Establish current reality: Alice works_at Microsoft, ongoing */
-   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   /* Establish current reality: Alice married_to entity 21, ongoing */
+   memory_db_relation_supersede(1, 10, "married_to", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
 
-   /* Ingest HISTORICAL: Alice worked at Google 2018-2020 */
+   /* Ingest HISTORICAL: Alice was married to A 2018-2020 */
    int64_t t2018 = 1514764800;
    int64_t t2020 = 1577836800;
-   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, t2020, NULL, NULL);
+   memory_db_relation_supersede(1, 10, "married_to", 20, NULL, 0, 0.9f, t2018, t2020, NULL, NULL);
 
-   /* Microsoft row should still be open */
+   /* B row should still be open */
    sqlite3_stmt *stmt = NULL;
    sqlite3_prepare_v2(s_db.db,
                       "SELECT COUNT(*) FROM memory_relations "
-                      "WHERE subject_entity_id = 10 AND relation = 'works_at' "
+                      "WHERE subject_entity_id = 10 AND relation = 'married_to' "
                       "  AND object_entity_id = 21 AND valid_to IS NULL",
                       -1, &stmt, NULL);
    int open_microsoft = 0;
@@ -369,19 +365,19 @@ static void test_supersede_skips_close_for_historical_insert(void) {
       open_microsoft = sqlite3_column_int(stmt, 0);
    sqlite3_finalize(stmt);
    TEST_ASSERT_EQUAL_INT_MESSAGE(1, open_microsoft,
-                                 "historical insert does not close current Microsoft row");
+                                 "historical insert does not close current entity-21 row");
 
-   /* As-of 2019 returns Google */
+   /* As-of 2019 returns entity 20 */
    memory_relation_t out[10];
    int n = 0;
    int rc = memory_db_relation_list_by_subject_at(1, 10, 1546300800, out, 10, &n);
    TEST_ASSERT_EQUAL_INT(0, rc);
    bool found_google_2019 = false;
    for (int i = 0; i < n; i++) {
-      if (strcmp(out[i].relation, "works_at") == 0 && out[i].object_entity_id == 20)
+      if (strcmp(out[i].relation, "married_to") == 0 && out[i].object_entity_id == 20)
          found_google_2019 = true;
    }
-   TEST_ASSERT_TRUE_MESSAGE(found_google_2019, "as-of 2019: Google row is valid");
+   TEST_ASSERT_TRUE_MESSAGE(found_google_2019, "as-of 2019: entity-20 row is valid");
 }
 
 static void test_canonical_categories(void) {

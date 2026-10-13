@@ -929,6 +929,12 @@
             case 'get_memory_fact_source_response':
                DawnMemory.handleFactSourceResponse(msg.payload);
                break;
+            case 'list_memory_superseded_response':
+               if (window.DawnMemoryMerged) DawnMemoryMerged.handleListResponse(msg.payload);
+               break;
+            case 'restore_memory_fact_response':
+               if (window.DawnMemoryMerged) DawnMemoryMerged.handleRestoreResponse(msg.payload);
+               break;
             // Contacts management responses
             case 'contacts_list_response':
                if (typeof DawnContacts !== 'undefined')

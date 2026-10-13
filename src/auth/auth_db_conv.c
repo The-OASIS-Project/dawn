@@ -2030,8 +2030,7 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
       return AUTH_DB_FORBIDDEN;
    }
 
-   const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ? "
-                     "AND kind IS NULL";
+   const char *sql = "SELECT " CONV_EXTRACTION_MAX_MSG_ID_SQL("?");
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {

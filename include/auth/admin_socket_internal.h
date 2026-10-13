@@ -56,6 +56,8 @@ int handle_memory_entity_merge(int client_fd, const char *payload, uint16_t payl
 int handle_memory_entity_split(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_entity_aliases(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_entity_history(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_fact_superseded(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_fact_restore(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_entity_list(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_entity_link_user_self(int client_fd, const char *payload, uint16_t payload_len);
 
