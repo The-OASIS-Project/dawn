@@ -57,9 +57,8 @@ llm_testing/results/model_tests/
 llm_testing/results/quality_tests/
 llm_testing/scripts/archive/
 
-# Local planning/tracking docs (not for git)
-docs/TODO.md
-docs/DONE.md
+# Local docs never committed: planning (TODO/DONE), unshipped designs, private notes
+docs/private/
 .cleanup-state.md
 
 # Local-only git hook extensions.  Chained from pre-commit.hook /
