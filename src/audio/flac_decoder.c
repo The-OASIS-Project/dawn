@@ -89,6 +89,7 @@ typedef struct {
    bool eof;               /* End of file reached */
    bool error;             /* Decode error occurred */
    bool metadata_received; /* Metadata callback was invoked */
+   unsigned error_count;   /* Decode errors seen; logged once, totalled at close */
 } flac_decoder_handle_t;
 
 /* Forward declarations for vtable */
@@ -132,7 +133,11 @@ static void flac_error_callback(const FLAC__StreamDecoder *decoder,
    flac_decoder_handle_t *handle = (flac_decoder_handle_t *)client_data;
    handle->error = true;
 
-   OLOG_ERROR("FLAC decode error: %s", FLAC__StreamDecoderErrorStatusString[status]);
+   /* A damaged file reports an error per frame it resyncs over (thousands
+    * of LOST_SYNC lines); log the first and the total at close */
+   if (handle->error_count++ == 0) {
+      OLOG_ERROR("FLAC decode error: %s", FLAC__StreamDecoderErrorStatusString[status]);
+   }
 }
 
 /**
@@ -310,6 +315,9 @@ void flac_decoder_close(audio_decoder_t *dec) {
       FLAC__stream_decoder_finish(handle->flac);
       FLAC__stream_decoder_delete(handle->flac);
       handle->flac = NULL;
+   }
+   if (handle->error_count > 1) {
+      OLOG_WARNING("FLAC: %u decode errors in this file", handle->error_count);
    }
 
    free(handle->buffer);
