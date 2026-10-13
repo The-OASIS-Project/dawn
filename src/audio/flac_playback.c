@@ -45,6 +45,7 @@
 #include "audio/audio_converter.h"
 #include "audio/audio_decoder.h"
 #include "audio/audio_utils.h"
+#include "audio/music_open.h"
 #include "logging.h"
 #ifdef DAWN_ENABLE_MUSIC_TOOL
 #include "tools/music_tool.h"
@@ -67,11 +68,15 @@
  */
 static _Atomic float global_volume = 0.5f;
 
-/* Global variable to control music playback state.
- * When set to 0, music playback is stopped.
- * When set to 1, music playback is active.
- */
-static int music_play = 0;
+/* Set when playback is stopped, clear while it's wanted (opening or playing).
+ * One atomic flag: the playback loop, the download's cancel check, the main
+ * loop's ducking and the phone service all read it from their own threads. */
+static atomic_bool s_music_stopped = true;
+
+/* Tracks in a row that wouldn't open: past this a failed track stops playback
+ * instead of skipping, so a playlist of unplayable tracks can't spin */
+#define PLAYBACK_MAX_FAILED_OPENS 5
+static int s_failed_opens = 0;
 
 /* Current playback position in samples (per channel).
  * Used for pause/resume functionality - allows resuming from
@@ -86,11 +91,20 @@ static volatile uint64_t s_current_position = 0;
 static volatile uint32_t s_current_sample_rate = 0;
 
 void setMusicPlay(int play) {
-   music_play = play;
+   if (play) {
+      /* A new track: until it plays, a pause must not save the last one's place */
+      s_current_position = 0;
+      s_current_sample_rate = 0;
+   }
+   atomic_store(&s_music_stopped, play == 0);
 }
 
 int getMusicPlay(void) {
-   return music_play;
+   return !atomic_load(&s_music_stopped);
+}
+
+void audio_playback_reset_failed_opens(void) {
+   s_failed_opens = 0;
 }
 
 uint64_t audio_playback_get_position(void) {
@@ -139,12 +153,18 @@ void *playFlacAudio(void *arg) {
       goto cleanup;
    }
 
-   /* Open audio file with decoder (auto-detects format by extension) */
-   decoder = audio_decoder_open(args->file_name);
+   /* Open the track (a Plex track downloads first; a stop cancels it) */
+   bool unreachable = false;
+   decoder = music_open_track(args->file_name, &s_music_stopped, &unreachable);
    if (!decoder) {
-      OLOG_ERROR("Failed to open audio file: %s", args->file_name);
+      /* Skip it as the WebUI does, unless the Plex server is down (every Plex
+       * track would wait out the same timeout) or it was stopped */
+      bool skip = !unreachable && getMusicPlay() && ++s_failed_opens < PLAYBACK_MAX_FAILED_OPENS;
+      OLOG_ERROR("Failed to open audio file: %s%s", args->file_name, skip ? ", skipping it" : "");
+      song_finished_naturally = skip;
       goto cleanup;
    }
+   s_failed_opens = 0;
 
    /* Get audio file info */
    audio_decoder_info_t info;
@@ -212,8 +232,6 @@ void *playFlacAudio(void *arg) {
          goto cleanup;
       }
    }
-
-   music_play = 1; /* Enable playback */
 
    /* Seek to start time if specified */
    if (args->start_time > 0) {
@@ -313,6 +331,13 @@ cleanup:
          audio_stream_playback_drain(playback_handle);
       }
       audio_stream_playback_close(playback_handle);
+   }
+
+   /* Anything but a natural end leaves nothing playing (ducking and the phone
+    * read this).  A natural end keeps it for the next track, which this thread
+    * starts below; every other start joins this thread first. */
+   if (!song_finished_naturally) {
+      setMusicPlay(0);
    }
 
    /* Auto-play next track only if song finished naturally (not manually stopped or error) */

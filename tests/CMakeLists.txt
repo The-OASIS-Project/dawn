@@ -1860,6 +1860,12 @@ dawn_add_unit_test(test_llm_interrupt_ctx
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_path_utils
+   SOURCES test_path_utils.c
+           ${SRC_ROOT}/src/core/path_utils.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_utterance_dedup
    SOURCES test_utterance_dedup.c
            ${SRC_ROOT}/src/core/utterance_dedup.c

@@ -509,6 +509,40 @@ static void end_local_turn(void) {
    s_local_turn_open = false;
    s_local_turn_token = 0;
 }
+
+/*
+ * Run a voice shortcut's command and speak its reply.  Returns false when the
+ * shortcut should give way to the LLM: a pattern can catch a sentence it doesn't
+ * understand ("play a track from Plex"), so in direct_first a hard failure the
+ * tool marked (nothing done, see TOOL_RESULT_ERROR_MARK) goes to the LLM, which
+ * can.  Any other failure, or one in direct_only (no LLM to ask), is handled.
+ */
+static bool run_direct_command(const char *treg_command) {
+   struct json_object *cmd_json = json_tokener_parse(treg_command);
+   if (!cmd_json) {
+      OLOG_ERROR("TREG command unreadable: %s", treg_command);
+      return command_processing_mode != CMD_MODE_DIRECT_FIRST; /* nothing ran */
+   }
+   cmd_exec_result_t exec_result;
+   int rc = command_execute_json(cmd_json, mosq, &exec_result);
+   json_object_put(cmd_json);
+
+   const char *text = exec_result.result ? exec_result.result : "";
+   bool fall_back = exec_result.tool_error && command_processing_mode == CMD_MODE_DIRECT_FIRST;
+   if (fall_back) {
+      OLOG_INFO("TREG command failed (%s); passing the request to the LLM", text);
+      metrics_log_activity("TREG fell back to the LLM");
+   } else if (rc != 0 || !exec_result.success) {
+      OLOG_ERROR("TREG command execution failed: %s", text[0] ? text : "unknown error");
+   } else {
+      metrics_log_activity("TREG executed: %s", text[0] ? text : "OK");
+      if (exec_result.should_respond && exec_result.result) {
+         text_to_speech(exec_result.result);
+      }
+   }
+   cmd_exec_result_free(&exec_result);
+   return !fall_back;
+}
 // Note: Vision is handled by native tool calling - viewing tool captures image
 // and streaming code passes it to recursive LLM calls automatically
 
@@ -3865,27 +3899,8 @@ mqtt_disabled:
 
                   metrics_log_activity("TREG direct match");
 
-                  /* Execute via unified command executor */
-                  struct json_object *cmd_json = json_tokener_parse(treg_command);
-                  if (cmd_json) {
-                     cmd_exec_result_t exec_result;
-                     rc = command_execute_json(cmd_json, mosq, &exec_result);
-                     json_object_put(cmd_json);
-
-                     if (rc != 0 || !exec_result.success) {
-                        OLOG_ERROR("TREG command execution failed: %s",
-                                   exec_result.result ? exec_result.result : "unknown error");
-                     } else {
-                        metrics_log_activity("TREG executed: %s",
-                                             exec_result.result ? exec_result.result : "OK");
-                        if (exec_result.should_respond && exec_result.result) {
-                           text_to_speech(exec_result.result);
-                        }
-                     }
-                     cmd_exec_result_free(&exec_result);
-                  }
-
-                  direct_command_found = 1;
+                  /* Handled, or it gives way to the LLM below */
+                  direct_command_found = run_direct_command(treg_command);
                }
 
                /* Note: JSON-based pattern matching removed - tool_registry handles all patterns */

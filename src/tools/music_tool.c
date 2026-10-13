@@ -35,11 +35,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "audio/audio_decoder.h"
 #include "audio/flac_playback.h"
 #include "audio/music_db.h"
-#include "audio/music_rank.h"
+#include "audio/music_open.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
@@ -62,8 +63,16 @@
 #define MAX_PLAYLIST_LENGTH 100
 #define MUSIC_CALLBACK_BUFFER_SIZE 512
 
-/* Candidate window pulled from the DB for relevance ranking in the resolver. */
-#define MUSIC_RESOLVE_CANDIDATES 8
+/* How often auto-advance retries the lock while a stop may be holding it */
+#define MUSIC_ADVANCE_LOCK_POLL_US 10000
+
+/* The second the current track was asked to start at, for a pause that lands
+ * while it's still opening (s_music_mutex) */
+static unsigned int s_start_seconds = 0;
+
+/* True while music_tool_auto_advance() runs the next track (s_music_mutex):
+ * only then does a run of tracks that won't open carry over */
+static bool s_auto_advancing = false;
 
 /* Albums/artists per 'library' page. (Search page sizes live in music_search.h.) */
 #define MUSIC_LIBRARY_PER_PAGE 50
@@ -128,7 +137,9 @@ static const treg_param_t music_params[] = {
        .name = "query",
        .description =
            "For 'play'/'search'/'enqueue': search terms — best as one artist, title, or album per "
-           "query (see the tool description for search rules). For 'select'/'remove': track "
+           "query (see the tool description for search rules). A track in both libraries plays "
+           "the local copy; add 'source:plex' or 'source:local' to use that library's copy. For "
+           "'select'/'remove': track "
            "number (1-based); 'remove' also accepts a title to match. For 'shuffle': 'on' or "
            "'off'. For 'repeat': 'none', 'all', or 'one'. For 'library': 'artists', 'albums' "
            "(add artist:'X' for that artist's albums), or omit for stats.",
@@ -215,7 +226,8 @@ static const treg_param_t music_params[] = {
        .name = "items",
        .description =
            "For 'play'/'enqueue': a list of track names or file paths to queue (names resolve to "
-           "the best match; paths from a 'search' result are exact). For 'search': a list of "
+           "the best match, and accept the same source: word; paths from a 'search' result are "
+           "exact). For 'search': a list of "
            "queries to run in one batch. Build playlists by collecting names/paths and passing "
            "them here.",
        .type = TOOL_PARAM_TYPE_ARRAY,
@@ -294,13 +306,18 @@ static const char *extract_filename(const char *path) {
  *
  * Note: When called from the playback thread itself (auto-advance via
  * music_tool_auto_advance), pthread_join returns EDEADLK (self-join).
- * In that case we clear s_thread_active so start_playback() can proceed;
- * the old thread exits naturally after music_tool_auto_advance() returns.
+ * That thread detaches itself, so it's reclaimed when it exits after
+ * music_tool_auto_advance() returns, and s_thread_active is cleared so
+ * start_playback() can proceed.  A stop during a Plex download waits for the
+ * download to notice it (about a second at most).
  */
 static void stop_current_playback(void) {
    if (s_thread_active) {
       setMusicPlay(0);
       int join_result = pthread_join(s_music_thread, NULL);
+      if (join_result == EDEADLK) {
+         pthread_detach(s_music_thread);
+      }
       if (join_result == 0 || join_result == EDEADLK) {
          s_thread_active = false;
       }
@@ -326,7 +343,15 @@ static char *start_playback_at(unsigned int start_time) {
 
    OLOG_INFO("Playing from %us: %s on %s", start_time, args->file_name, args->sink_name);
 
+   s_start_seconds = start_time;
+   if (!s_auto_advancing) {
+      audio_playback_reset_failed_opens();
+   }
+   /* Before the thread: a stop while the track opens (a Plex download)
+    * clears it and cancels the open */
+   setMusicPlay(1);
    if (pthread_create(&s_music_thread, NULL, playFlacAudio, args)) {
+      setMusicPlay(0);
       OLOG_ERROR("Error creating music thread");
       free(args);
       return NULL;
@@ -353,7 +378,15 @@ static char *start_playback(bool report_result) {
 
    OLOG_INFO("Playing: %s %s %d", args->sink_name, args->file_name, args->start_time);
 
+   s_start_seconds = 0;
+   if (!s_auto_advancing) {
+      audio_playback_reset_failed_opens();
+   }
+   /* Before the thread: a stop while the track opens (a Plex download)
+    * clears it and cancels the open */
+   setMusicPlay(1);
    if (pthread_create(&s_music_thread, NULL, playFlacAudio, args)) {
+      setMusicPlay(0);
       OLOG_ERROR("Error creating music thread");
       free(args);
       return report_result ? strdup("Failed to start music playback") : NULL;
@@ -424,65 +457,30 @@ static int search_music_database(const char *query, Playlist *playlist) {
 /**
  * @brief Resolve one free-text item (or path) to its best-match library track
  *
- * Mirrors the WebUI resolver: splits an optional "Artist - Title", runs a single
- * relevance-ranked, path-clean query on the title portion, then prefers a
- * candidate whose artist matches. Returns 1 on a match (fills @p out), 0 otherwise.
+ * A library path (local or plex:, the forms 'search' returns) is looked up
+ * exactly; a name goes through music_search_resolve_item(). Returns 1 on a
+ * match (fills @p out), 0 otherwise.
  */
 static int local_resolve_item(const char *item, music_search_result_t *out) {
    if (!item || !item[0]) {
       return 0;
    }
 
-   /* Absolute path → exact lookup (paths from 'search' are exact handles). The
-    * local speaker plays files directly, so only local paths are resolvable
-    * here; a plex: path falls through to search and won't match, which is
-    * correct (local playback can't stream Plex). */
-   if (item[0] == '/') {
+   /* Paths from 'search' are exact handles */
+   if (music_path_is_valid(item)) {
       bool found = false;
-      if (music_db_get_by_path(item, out, &found) == SUCCESS && found) {
-         return 1;
-      }
-      return 0;
+      return music_db_get_by_path(item, out, &found) == SUCCESS && found ? 1 : 0;
    }
-
-   music_search_result_t r[MUSIC_RESOLVE_CANDIDATES];
-   int count = 0;
-
-   /* Split an optional "Artist - Title"; search the title (or whole item) and
-    * rank candidates by relevance so a bare/generic title ("Africa") doesn't
-    * pick the DB's alphabetical top row. */
-   const char *dash = strstr(item, " - ");
-   char artist[sizeof(out->artist)] = { 0 };
-   const char *title_query = item;
-   if (dash) {
-      size_t alen = (size_t)(dash - item);
-      if (alen >= sizeof(artist)) {
-         alen = sizeof(artist) - 1;
-      }
-      memcpy(artist, item, alen);
-      artist[alen] = '\0';
-      title_query = dash + 3;
-   }
-
-   /* Fetch path-clean, relevance-ranked candidates (strict matching — never the
-    * approximate fallback, since this plays what it finds), then apply the artist
-    * preference + shorter-title tiebreak. */
-   music_query_t mq = { .text = title_query };
-   if (music_db_query(&mq, r, MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS && count > 0) {
-      int pick = music_rank_pick_best(r, count, title_query, dash ? artist : NULL);
-      *out = r[pick];
-      return 1;
-   }
-   return 0;
+   return music_search_resolve_item(item, out) == SUCCESS ? 1 : 0;
 }
 
 /**
- * @brief Fill s_playlist from a JSON array of item names/paths (local playback)
+ * @brief Fill a playlist from a JSON array of item names/paths (local playback)
  *
- * Caller holds s_music_mutex. When @p replace is true the playlist is cleared
- * first. Returns the number of tracks added.
+ * @param out Empty playlist to fill
+ * @return Number of tracks added
  */
-static int local_fill_playlist_from_items(const char *items_json, bool replace) {
+static int local_fill_playlist_from_items(const char *items_json, Playlist *out) {
    struct json_object *arr = json_tokener_parse(items_json);
    if (!arr || !json_object_is_type(arr, json_type_array)) {
       if (arr) {
@@ -490,33 +488,84 @@ static int local_fill_playlist_from_items(const char *items_json, bool replace) 
       }
       return 0;
    }
-   if (replace) {
-      s_playlist.count = 0;
-      s_current_track = 0;
-   }
    int n = (int)json_object_array_length(arr);
-   int added = 0;
-   for (int i = 0; i < n && s_playlist.count < MAX_PLAYLIST_LENGTH; i++) {
+   for (int i = 0; i < n && out->count < MAX_PLAYLIST_LENGTH; i++) {
       struct json_object *e = json_object_array_get_idx(arr, i);
       const char *item = e ? json_object_get_string(e) : NULL;
       music_search_result_t r;
       if (local_resolve_item(item, &r)) {
-         snprintf(s_playlist.filenames[s_playlist.count], MAX_FILENAME_LENGTH, "%s", r.path);
-         snprintf(s_playlist.display_names[s_playlist.count], MAX_FILENAME_LENGTH, "%s",
-                  r.display_name);
-         s_playlist.count++;
-         added++;
+         snprintf(out->filenames[out->count], MAX_FILENAME_LENGTH, "%s", r.path);
+         snprintf(out->display_names[out->count], MAX_FILENAME_LENGTH, "%s", r.display_name);
+         out->count++;
       }
    }
    json_object_put(arr);
-   return added;
+   return out->count;
+}
+
+/* Replace the playlist with @p found and reset its position; stops the current
+ * track first (the playback thread reads the playlist) */
+static void local_replace_playlist(const Playlist *found) {
+   stop_current_playback();
+   s_playlist = *found;
+   s_current_track = 0;
+   s_paused_position = 0;
+   s_paused_sample_rate = 0;
 }
 
 /* ========== Callback Implementation ========== */
 
 static char *music_tool_callback_inner(const char *action, char *value, int *should_respond);
 
+#ifdef ENABLE_WEBUI
+/*
+ * A request from a WebUI session plays in that browser.  Runs without
+ * s_music_mutex (the local player's lock): the session's own control lock
+ * serializes it, and it may wait for a Plex track to open, which mustn't hold
+ * up other users or the local speaker.  Returns true when handled.
+ */
+static bool music_tool_webui(const char *action, char *value, int *should_respond, char **out) {
+   bool direct_mode = (command_processing_mode == CMD_MODE_DIRECT_ONLY);
+   session_t *session = session_get_command_context();
+   if (!session || !session->client_data) {
+      return false;
+   }
+   ws_connection_t *conn = (ws_connection_t *)session->client_data;
+
+   char *webui_result = NULL;
+   int ret = webui_music_execute_tool(conn, action, value, &webui_result);
+   if (ret == SUCCESS || ret > 0) {
+      if (ret == SUCCESS) {
+         OLOG_INFO("Music: Routed '%s' to WebUI session", action);
+      } else {
+         OLOG_WARNING("Music: WebUI handler failed for '%s'", action);
+      }
+      if (direct_mode) {
+         *should_respond = 0;
+         free(webui_result);
+         *out = NULL;
+      } else if (webui_result) {
+         *out = webui_result;
+      } else {
+         *out = strdup(ret == SUCCESS ? "OK" : "Music playback failed");
+      }
+      return true;
+   }
+   /* ret == MUSIC_NOT_HANDLED: the local handler takes it */
+   free(webui_result);
+   OLOG_INFO("Music: WebUI deferred '%s' to local handler", action);
+   return false;
+}
+#endif
+
 static char *music_tool_callback(const char *action, char *value, int *should_respond) {
+   *should_respond = 1;
+#ifdef ENABLE_WEBUI
+   char *webui_out = NULL;
+   if (music_tool_webui(action, value, should_respond, &webui_out)) {
+      return webui_out;
+   }
+#endif
    pthread_mutex_lock(&s_music_mutex);
    char *result = music_tool_callback_inner(action, value, should_respond);
    pthread_mutex_unlock(&s_music_mutex);
@@ -531,54 +580,25 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
    /* Get command processing mode from global */
    bool direct_mode = (command_processing_mode == CMD_MODE_DIRECT_ONLY);
 
-#ifdef ENABLE_WEBUI
-   /* Check if request originated from WebUI session - route to browser streaming */
-   session_t *session = session_get_command_context();
-   if (session && session->client_data) {
-      ws_connection_t *conn = (ws_connection_t *)session->client_data;
-
-      /* Try WebUI music handler for playback actions */
-      char *webui_result = NULL;
-      int ret = webui_music_execute_tool(conn, action, value, &webui_result);
-
-      if (ret == SUCCESS) {
-         /* WebUI handled successfully */
-         OLOG_INFO("Music: Routed '%s' to WebUI session", action);
-         if (direct_mode) {
-            *should_respond = 0;
-            free(webui_result);
-            return NULL;
-         }
-         return webui_result ? webui_result : strdup("OK");
-      } else if (ret > 0) {
-         /* WebUI handler returned error */
-         OLOG_WARNING("Music: WebUI handler failed for '%s'", action);
-         if (direct_mode) {
-            *should_respond = 0;
-            free(webui_result);
-            return NULL;
-         }
-         return webui_result ? webui_result : strdup("Music playback failed");
-      }
-      /* ret == MUSIC_NOT_HANDLED means not handled, fall through to local handler */
-      free(webui_result);
-      OLOG_INFO("Music: WebUI deferred '%s' to local handler", action);
-   }
-#endif
-
    if (strcmp(action, "play") == 0) {
       /* items[] → explicit track list (resolve each, REPLACE, play). */
       if (value && value[0]) {
          size_t cap = strlen(value) + 1;
          char *items_json = malloc(cap);
          if (items_json && tool_param_extract_custom(value, "items", items_json, cap)) {
-            stop_current_playback();
-            s_paused_position = 0;
-            s_paused_sample_rate = 0;
-            int added = local_fill_playlist_from_items(items_json, true);
+            /* Resolve first: a list that matches nothing leaves what's playing */
+            Playlist *found = calloc(1, sizeof(*found));
+            if (!found) {
+               free(items_json);
+               return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate playlist buffer");
+            }
+            int added = local_fill_playlist_from_items(items_json, found);
             free(items_json);
-            if (s_playlist.count > 0) {
-               s_current_track = 0;
+            if (added > 0) {
+               local_replace_playlist(found);
+            }
+            free(found);
+            if (added > 0) {
                if (direct_mode) {
                   *should_respond = 0;
                   start_playback(false);
@@ -614,20 +634,22 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          return strdup("Please specify what to play, or pass items:[...] for a track list.");
       }
 
-      /* Stop any current playback */
-      stop_current_playback();
+      /* Search first, into a playlist of its own: a miss leaves what's playing
+       * alone (and, as a marked error, lets a voice shortcut fall back to the LLM) */
+      Playlist *found = calloc(1, sizeof(*found));
+      if (!found) {
+         return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate playlist buffer");
+      }
+      search_music_database(base, found);
+      OLOG_INFO("Search found %d results for: %s", found->count, base);
 
-      /* Reset playlist and paused state */
-      s_playlist.count = 0;
-      s_current_track = 0;
-      s_paused_position = 0;
-      s_paused_sample_rate = 0;
+      if (found->count > 0) {
+         local_replace_playlist(found);
+      }
+      int found_count = found->count;
+      free(found);
 
-      /* Search by artist, title, album via database */
-      search_music_database(base, &s_playlist);
-      OLOG_INFO("Search found %d results for: %s", s_playlist.count, base);
-
-      if (s_playlist.count > 0) {
+      if (found_count > 0) {
          if (direct_mode) {
             *should_respond = 0;
             start_playback(false);
@@ -652,7 +674,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          size_t rsz = MAX_FILENAME_LENGTH + 64;
          result = malloc(rsz);
          if (result) {
-            snprintf(result, rsz, "No music found matching '%s'", base);
+            snprintf(result, rsz, TOOL_RESULT_ERROR_MARK "No music found matching '%s'", base);
          }
          return result;
       }
@@ -753,6 +775,12 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          /* Capture current position and sample rate before stopping */
          s_paused_position = audio_playback_get_position();
          s_paused_sample_rate = audio_playback_get_sample_rate();
+         if (s_paused_sample_rate == 0) {
+            /* Still opening (a Plex download): keep the second it was asked to
+             * start at, as a position in 1 Hz units */
+            s_paused_position = s_start_seconds;
+            s_paused_sample_rate = 1;
+         }
 
          stop_current_playback();
          OLOG_INFO("Paused at position %llu samples (rate: %u Hz)",
@@ -1167,9 +1195,23 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
 /* ========== Auto-Advance (called from playback thread) ========== */
 
 void music_tool_auto_advance(void) {
-   pthread_mutex_lock(&s_music_mutex);
+   /* A stop may hold the lock while it joins this thread (it lands while the
+    * last audio drains): taking the lock outright would deadlock.  Such a stop
+    * has already cleared the play flag, so give way to it. */
+   while (pthread_mutex_trylock(&s_music_mutex) != 0) {
+      if (!getMusicPlay()) {
+         return;
+      }
+      usleep(MUSIC_ADVANCE_LOCK_POLL_US);
+   }
+   if (!getMusicPlay()) {
+      pthread_mutex_unlock(&s_music_mutex);
+      return;
+   }
    int should_respond = 0;
+   s_auto_advancing = true;
    char *result = music_tool_callback_inner("next", NULL, &should_respond);
+   s_auto_advancing = false;
    free(result);
    pthread_mutex_unlock(&s_music_mutex);
 }

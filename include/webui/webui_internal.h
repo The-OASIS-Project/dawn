@@ -639,11 +639,6 @@ session_t *lookup_session_by_token(const char *token);
 const char *get_mime_type(const char *path);
 
 /**
- * @brief Check if path contains directory traversal patterns
- */
-bool contains_path_traversal(const char *path);
-
-/**
  * @brief Validate path is within www directory after symlink resolution
  */
 bool is_path_within_www(const char *filepath, const char *www_path);

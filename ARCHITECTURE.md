@@ -188,6 +188,9 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── src/auth/                   Users, settings, conversations and messages; auth_db_messages.c is the one
 │                               message insert (and the LLM replay read)
 ├── src/tts/, src/asr/, common/src/asr/   Speech in and out (shared engines in common/)
+├── src/audio/                  Capture, playback, decoders, the music library and Plex; every library track
+│                               a player opens goes through music_open_track() (music_open.c: the library
+│                               path check and the Plex download)
 └── src/mosquitto_comms.c       MQTT
 
 Layer 3 (Tools and channels) — deps: Layers 0-2
@@ -350,6 +353,14 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    learned from a conversation made    │
 │                    private; forgets one fact, all of   │
 │                    them (waits out an extraction)      │
+│  Music stream    — one per playing WebUI music session:│
+│                    opens tracks (Plex downloads),      │
+│                    applies seeks, encodes; plus one    │
+│                    helper it owns that prefetches the  │
+│                    next Plex track (joined on exit)    │
+│  Music playback  — the local speaker's track: opens it │
+│                    (Plex downloads; a stop cancels),   │
+│                    plays it, starts the next at its end│
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │
@@ -491,8 +502,16 @@ Per-module locks (scoped to a single subsystem):
                                                                      queue_mutex and state_mutex; never held with
                                                                      s_music_teardown_mutex; the stream thread never takes it.  The
                                                                      WebSocket thread takes it only for actions that stop or replace
-                                                                     playback, and sets control_cancel first, which aborts the
-                                                                     holder's Plex download; other WebUI actions don't take it
+                                                                     playback, and sets control_cancel first, which wakes an LLM tool
+                                                                     call waiting for its track to open so it releases the lock; other
+                                                                     WebUI actions don't take it.  Track opens (Plex downloads) run
+                                                                     only on the stream thread or its prefetch helper (which takes
+                                                                     only state_mutex), never under it
+    state_mutex + open_cond                                    — the pending-open slot and its ticket; the stream thread
+                                                                     broadcasts open_cond when a ticket resolves, a preempting
+                                                                     control broadcasts it (state_mutex taken, then released,
+                                                                     before control_mutex), and the LLM tool waits on it holding
+                                                                     control_mutex
     queue_mutex (shared per user) → state_mutex                — queue contents, then the session's playback fields
     s_music_teardown_mutex (webui_music.c) → write_mutex       — conn->music_state lifetime against the music server's callbacks,
                                                                      then the write ring (LEAF).  Also held across the state's lazy

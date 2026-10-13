@@ -148,6 +148,20 @@ void music_search_append_batch_entry(strbuf_t *sb,
  */
 char *music_library_albums_text(const char *artist, int page, int per_page);
 
+/**
+ * @brief Resolve one free-text item to its best-matching track (play/enqueue)
+ *
+ * Takes off a source word, splits an optional "Artist - Title", runs one strict,
+ * relevance-ranked query on the title (or whole item) and prefers a candidate
+ * whose artist matches.  Shared by the WebUI and local-speaker executors; paths
+ * are the caller's to look up.
+ *
+ * @param item Track name, "Artist - Title", optionally with "source:<name>"
+ * @param out  Receives the chosen track
+ * @return SUCCESS, or FAILURE (no match)
+ */
+int music_search_resolve_item(const char *item, music_search_result_t *out);
+
 #ifdef __cplusplus
 }
 #endif

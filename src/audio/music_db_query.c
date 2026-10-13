@@ -21,6 +21,7 @@
  * scanning and browsing live in music_db.c.
  */
 
+#include <ctype.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdio.h>
@@ -31,6 +32,7 @@
 #include "audio/music_db.h"
 #include "audio/music_db_internal.h"
 #include "audio/music_rank.h"
+#include "audio/music_source.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -198,19 +200,77 @@ static bool sql_append(char *sql, size_t cap, int *off, const char *frag) {
 }
 
 /* Resolved query: which constraints are active, plus the LIKE pattern for genre
- * (kept alive for the SQLITE_STATIC binds). */
+ * and the free text without its source word (kept alive for the SQLITE_STATIC
+ * binds). */
 typedef struct {
    const music_query_t *q;
-   bool text, artist, title, album, genre, ymin, ymax;
+   bool text, artist, title, album, genre, ymin, ymax, source;
+   music_source_t source_id;
    int min_score;         /* text score floor for this pass */
+   const char *text_str;  /* free text to match: q->text, or text_buf */
    const char *rank_text; /* term that orders results, or NULL for alpha order */
    char p_genre[AUDIO_METADATA_STRING_MAX * 2];
+   char text_buf[AUDIO_METADATA_STRING_MAX * 2];
 } resolved_query_t;
+
+#define MUSIC_QUERY_SOURCE_WORD "source:"
+/* What ends a source name: whitespace or punctuation typed after the word */
+#define MUSIC_QUERY_SOURCE_NAME_END " \t\r\n,.;:!?)\"'"
+
+bool music_query_take_source(const char *text, char *out, size_t cap, music_source_t *source_out) {
+   if (!text || !out || !source_out) {
+      return false;
+   }
+   const size_t word_len = sizeof(MUSIC_QUERY_SOURCE_WORD) - 1;
+   for (const char *p = text; *p; p++) {
+      /* Any non-word character before it ("Beatles,source:plex"), not a
+       * letter, digit or '_' ("xsource:plex" is another word) */
+      bool word_start = p == text || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+      if (!word_start || strncasecmp(p, MUSIC_QUERY_SOURCE_WORD, word_len) != 0) {
+         continue;
+      }
+      const char *name = p + word_len;
+      size_t name_len = strcspn(name, MUSIC_QUERY_SOURCE_NAME_END);
+      for (int s = 0; s < MUSIC_SOURCE_COUNT; s++) {
+         const char *known = music_source_name((music_source_t)s);
+         if (name_len != strlen(known) || strncasecmp(name, known, name_len) != 0) {
+            continue;
+         }
+         size_t before = (size_t)(p - text);
+         const char *after = name + name_len;
+         size_t after_len = strlen(after);
+         if (before + after_len >= cap) {
+            return false;
+         }
+         /* memmove: out may be text itself */
+         memmove(out, text, before);
+         memmove(out + before, after, after_len + 1);
+         *source_out = (music_source_t)s;
+         return true;
+      }
+   }
+   return false;
+}
 
 static bool resolve_query(const music_query_t *q, resolved_query_t *r) {
    memset(r, 0, sizeof(*r));
    r->q = q;
-   r->text = q->text && q->text[0] && content_char_count(q->text) >= 2;
+   r->text_str = q->text;
+   /* A source word always comes out of the text; the structured field wins */
+   if (music_query_take_source(q->text, r->text_buf, sizeof(r->text_buf), &r->source_id)) {
+      r->source = true;
+      r->text_str = r->text_buf;
+   }
+   if (q->has_source) {
+      r->source = true;
+      r->source_id = q->source;
+   }
+   /* Searchable text: two content characters, and a word once punctuation is
+    * folded away (so "(source:plex)" leaves nothing, not "()") */
+   size_t text_chars = r->text_str ? content_char_count(r->text_str) : 0;
+   char folded[sizeof(r->text_buf)];
+   size_t folded_len = r->text_str ? music_rank_fold(r->text_str, folded, sizeof(folded)) : 0;
+   r->text = text_chars >= 2 && folded_len > 0;
    r->artist = q->artist && q->artist[0];
    r->title = q->title && q->title[0];
    r->album = q->album && q->album[0];
@@ -224,12 +284,15 @@ static bool resolve_query(const music_query_t *q, resolved_query_t *r) {
    }
    /* Rank by the most specific search term: free text if given, else the fielded
     * artist/title/album value. Genre/year are pure filters and never rank. */
-   r->rank_text = r->text     ? q->text
+   r->rank_text = r->text     ? r->text_str
                   : r->artist ? q->artist
                   : r->title  ? q->title
                   : r->album  ? q->album
                               : NULL;
-   return r->text || r->artist || r->title || r->album || r->genre || r->ymin || r->ymax;
+   bool other = r->text || r->artist || r->title || r->album || r->genre || r->ymin || r->ymax;
+   /* The source alone lists it only where the caller shows results, and only
+    * when nothing else was typed: "source:plex X" matches nothing, as "X" does */
+   return other || (r->source && q->list_source && folded_len == 0);
 }
 
 /* WHERE body shared by the page and count statements. */
@@ -238,6 +301,9 @@ static bool append_where(char *sql, size_t cap, int *off, const resolved_query_t
     * so the year/genre/single-field tests trim rows before the 4-field text score.
     * The correlated dedup subquery is always evaluated last. */
    bool ok = sql_append(sql, cap, off, " FROM music_metadata WHERE 1=1");
+   if (ok && r->source) {
+      ok = sql_append(sql, cap, off, " AND source = ?");
+   }
    if (ok && r->ymin) {
       ok = sql_append(sql, cap, off, " AND year >= ?");
    }
@@ -261,6 +327,11 @@ static bool append_where(char *sql, size_t cap, int *off, const resolved_query_t
    if (ok && r->text) {
       ok = sql_append(sql, cap, off, " AND music_score(artist, title, album, genre, ?) >= ?");
    }
+   /* One source: its rows aren't hidden by another source's copies.  Its
+    * same-source branch already requires equal genre and year. */
+   if (r->source) {
+      return ok && sql_append(sql, cap, off, " AND " MUSIC_DEDUP_EXISTS_SAME_SOURCE);
+   }
    /* Under a genre/year filter the dedup must not let a copy that fails the
     * filter hide one that passes it. */
    if (r->genre || r->ymin || r->ymax) {
@@ -272,6 +343,9 @@ static bool append_where(char *sql, size_t cap, int *off, const resolved_query_t
 /* Bind the WHERE params in append_where() order; returns the next index. */
 static int bind_where(sqlite3_stmt *st, int i, const resolved_query_t *r) {
    const music_query_t *q = r->q;
+   if (r->source) {
+      sqlite3_bind_int(st, i++, (int)r->source_id);
+   }
    if (r->ymin) {
       sqlite3_bind_int(st, i++, q->year_min);
    }
@@ -294,7 +368,7 @@ static int bind_where(sqlite3_stmt *st, int i, const resolved_query_t *r) {
       sqlite3_bind_int(st, i++, MUSIC_RANK_FIELD_MIN);
    }
    if (r->text) {
-      sqlite3_bind_text(st, i++, q->text, -1, SQLITE_STATIC);
+      sqlite3_bind_text(st, i++, r->text_str, -1, SQLITE_STATIC);
       sqlite3_bind_int(st, i++, r->min_score);
    }
    return i;
@@ -390,6 +464,58 @@ static int run_page(const resolved_query_t *r,
    return SUCCESS;
 }
 
+/* Bind a row's text field as the DB stores it: an empty tag is NULL there */
+static void bind_tag(sqlite3_stmt *st, int i, const char *value) {
+   if (value[0]) {
+      sqlite3_bind_text(st, i, value, -1, SQLITE_STATIC);
+   } else {
+      sqlite3_bind_null(st, i);
+   }
+}
+
+/*
+ * Whether a row shown on this page has a copy in another source that duplicates
+ * collapsed.  The copy listed comes from the lowest source, so the hidden one is
+ * a higher source with the same artist, album and title (one index seek per
+ * row); under a genre/year filter only a copy with the same genre and year was
+ * collapsed (MUSIC_DEDUP_EXISTS_TAGGED), the rest the filter excluded.  Caller
+ * holds the DB lock.
+ */
+static bool page_hides_other_source(const music_search_result_t *rows,
+                                    int count,
+                                    bool tag_filtered,
+                                    music_source_t *hidden_out) {
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(g_music_db,
+                          "SELECT source FROM music_metadata WHERE artist IS ?1 COLLATE NOCASE "
+                          "AND album IS ?2 COLLATE NOCASE AND title IS ?3 COLLATE NOCASE "
+                          "AND source > ?4 AND (?5 = 0 OR (genre IS ?6 AND year IS ?7)) LIMIT 1",
+                          -1, &st, NULL) != SQLITE_OK) {
+      return false;
+   }
+   bool hid = false;
+   for (int i = 0; i < count && !hid; i++) {
+      bind_tag(st, 1, rows[i].artist);
+      bind_tag(st, 2, rows[i].album);
+      bind_tag(st, 3, rows[i].title);
+      sqlite3_bind_int(st, 4, (int)rows[i].source);
+      sqlite3_bind_int(st, 5, tag_filtered ? 1 : 0);
+      bind_tag(st, 6, rows[i].genre);
+      if (rows[i].year > 0) {
+         sqlite3_bind_int(st, 7, (int)rows[i].year);
+      } else {
+         sqlite3_bind_null(st, 7);
+      }
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         hid = true;
+         *hidden_out = (music_source_t)sqlite3_column_int(st, 0);
+      }
+      sqlite3_reset(st);
+   }
+   sqlite3_finalize(st);
+   return hid;
+}
+
 int music_db_query_page(const music_query_t *q,
                         int offset,
                         music_search_result_t *results,
@@ -424,6 +550,13 @@ int music_db_query_page(const music_query_t *q,
       r.min_score = MUSIC_RANK_PARTIAL;
       ret = run_page(&r, offset, results, max_results, &page_out->count, &page_out->total);
       page_out->approximate = (page_out->total > 0);
+   }
+   /* With no source named, say whether copies in another source were hidden,
+    * so a caller can tell how to reach them */
+   if (ret == SUCCESS && !r.source && page_out->count > 0) {
+      page_out->hid_other_source = page_hides_other_source(results, page_out->count,
+                                                           r.genre || r.ymin || r.ymax,
+                                                           &page_out->hidden_source);
    }
    pthread_mutex_unlock(&g_music_db_mutex);
 

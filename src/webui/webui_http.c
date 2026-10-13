@@ -35,6 +35,7 @@
 
 #include "config/dawn_config.h"
 #include "core/ota.h"
+#include "core/path_utils.h"
 #include "core/rate_limiter.h"
 #include "git_sha.h"
 #include "logging.h"
@@ -308,7 +309,7 @@ static aurora_route_t aurora_route(const char *path, char *out_sub, size_t out_s
    /* "/aurora" is 7 chars, so path+7 keeps the leading '/'; a bare "/aurora/"
     * maps to the SPA shell. */
    const char *sub = (strcmp(path, "/aurora/") == 0) ? "/index.html" : path + 7;
-   /* Reject dotfiles / hidden components (contains_path_traversal only catches
+   /* Reject dotfiles / hidden components (path_has_traversal only catches
     * ".."); blocks /aurora/.git/config, /aurora/.env, and "/.." underflow. */
    if (strstr(sub, "/."))
       return AURORA_FORBIDDEN;
@@ -1779,7 +1780,7 @@ int callback_http(struct lws *wsi,
          }
 
          /* Prevent directory traversal - check for patterns including URL-encoded */
-         if (contains_path_traversal(path)) {
+         if (path_has_traversal(path)) {
             OLOG_WARNING("WebUI: Directory traversal attempt blocked: %s", path);
             lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
             return LWS_CLOSE_CONNECTION;

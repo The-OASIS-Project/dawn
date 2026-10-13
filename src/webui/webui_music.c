@@ -26,7 +26,6 @@
 
 #include "webui/webui_music.h"
 
-#include <ctype.h>
 #include <json-c/json.h>
 #include <libwebsockets.h>
 #include <limits.h>
@@ -79,9 +78,6 @@ const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT] = {
    "high",
    "hifi",
 };
-
-/** Opus output sample rate */
-#define OPUS_SAMPLE_RATE 48000
 
 /** Position update interval in milliseconds */
 #define POSITION_UPDATE_INTERVAL_MS 1000
@@ -320,118 +316,6 @@ bool wait_decoder_idle(session_music_state_t *state, int timeout_ms) {
    return idle;
 }
 
-/* True if s holds a percent-encoded '.', '/' or '\\' (%2e, %2f, %5c, any case) */
-static bool has_encoded_path_char(const char *s) {
-   for (const char *p = strchr(s, '%'); p; p = strchr(p + 1, '%')) {
-      char hi = p[1];
-      char lo = (char)tolower((unsigned char)(hi ? p[2] : '\0'));
-      if ((hi == '2' && (lo == 'e' || lo == 'f')) || (hi == '5' && lo == 'c')) {
-         return true;
-      }
-   }
-   return false;
-}
-
-/**
- * @brief Validate that a file path is within the music library directory
- *
- * Security check to prevent path traversal attacks. Uses realpath() to resolve
- * symlinks and relative paths, then verifies the canonical path is within
- * the configured music library directory.
- *
- * @param path The file path to validate
- * @return true if path is safe (within music library), false otherwise
- */
-bool webui_music_is_path_valid(const char *path) {
-   if (!path || path[0] == '\0') {
-      return false;
-   }
-
-   /* Plex paths: validate prefix, source config, and Part.key format */
-   if (strncmp(path, "plex:", 5) == 0) {
-      if (!plex_client_is_configured()) {
-         OLOG_WARNING("WebUI music: Plex path rejected (Plex not configured): %s", path);
-         return false;
-      }
-      const char *part_key = path + 5;
-      /* Validate Part.key starts with expected Plex API path */
-      if (strncmp(part_key, "/library/parts/", 15) != 0 &&
-          strncmp(part_key, "/library/metadata/", 18) != 0) {
-         OLOG_WARNING("WebUI music: Invalid Plex part key: %s", part_key);
-         return false;
-      }
-      /* No authority injection */
-      if (strchr(part_key, '@') != NULL) {
-         OLOG_WARNING("WebUI music: Authority injection in Plex path: %s", path);
-         return false;
-      }
-      /* No query string or fragment injection */
-      if (strchr(part_key, '?') != NULL || strchr(part_key, '#') != NULL) {
-         OLOG_WARNING("WebUI music: Query/fragment injection in Plex path: %s", path);
-         return false;
-      }
-      /* No percent-encoded dot or slash: the server decodes them, so "%2e%2e"
-       * would walk out of /library/parts with the admin's token */
-      if (has_encoded_path_char(part_key)) {
-         OLOG_WARNING("WebUI music: Encoded traversal in Plex path: %s", path);
-         return false;
-      }
-      /* No path traversal in the Part.key */
-      if (contains_path_traversal(part_key)) {
-         OLOG_WARNING("WebUI music: Path traversal in Plex path: %s", path);
-         return false;
-      }
-      return true;
-   }
-
-   /* Local paths: existing realpath() validation */
-
-   /* Quick check for obvious traversal patterns */
-   if (contains_path_traversal(path)) {
-      OLOG_WARNING("WebUI music: Path traversal detected in: %s", path);
-      return false;
-   }
-
-   /* Check if music directory is configured */
-   if (g_config.paths.music_dir[0] == '\0') {
-      OLOG_WARNING("WebUI music: No music directory configured");
-      return false;
-   }
-
-   char resolved_path[PATH_MAX];
-   char resolved_music_dir[PATH_MAX];
-
-   /* Resolve the music library base path. music_dir_resolved has '~' expanded
-    * once at startup; realpath() does not expand a leading tilde itself. */
-   if (realpath(g_config.paths.music_dir_resolved, resolved_music_dir) == NULL) {
-      OLOG_ERROR("WebUI music: Cannot resolve music directory: %s",
-                 g_config.paths.music_dir_resolved);
-      return false;
-   }
-
-   /* Resolve the requested file path */
-   if (realpath(path, resolved_path) == NULL) {
-      /* File doesn't exist - not valid for playback */
-      OLOG_WARNING("WebUI music: Cannot resolve path: %s", path);
-      return false;
-   }
-
-   /* Ensure resolved path starts with resolved music directory */
-   size_t music_dir_len = strlen(resolved_music_dir);
-   if (strncmp(resolved_path, resolved_music_dir, music_dir_len) != 0) {
-      OLOG_WARNING("WebUI music: Path outside music library: %s", path);
-      return false;
-   }
-
-   /* Ensure it's either exact match or followed by '/' */
-   if (resolved_path[music_dir_len] != '\0' && resolved_path[music_dir_len] != '/') {
-      OLOG_WARNING("WebUI music: Path prefix mismatch: %s", path);
-      return false;
-   }
-
-   return true;
-}
-
 /**
  * @brief Parse quality string to enum
  */
@@ -492,9 +376,9 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
  * Callers do NOT need to hold any lock.
  * Lock hierarchy: queue_mutex → state_mutex (never reversed).
  */
-static void webui_music_send_state_impl(ws_connection_t *conn,
-                                        session_music_state_t *state,
-                                        bool advance_auto) {
+void webui_music_send_state_impl(ws_connection_t *conn,
+                                 session_music_state_t *state,
+                                 bool advance_auto) {
    user_music_queue_t *uq = state->shared_queue;
    if (!uq) {
       return;
@@ -710,289 +594,6 @@ void webui_music_broadcast_queue_state(user_music_queue_t *uq, ws_connection_t *
  * ============================================================================= */
 
 /**
- * @brief Open a queue path for decoding
- *
- * Every track the stream plays goes through here, so it is the one place a
- * path is checked against the library and a decoder against what the stream
- * can handle.  A plex: path is downloaded to a temp file first; the file is
- * unlinked once the decoder has it open (the decoder keeps its descriptor), so
- * nothing is left on disk.  Blocks for the whole download: call without
- * state_mutex.
- *
- * @param path Queue path (local file or plex:/library/...)
- * @param cancel Aborts a Plex download once set (NULL = not cancellable)
- * @param unreachable Optional output: set when the Plex server couldn't be
- *        reached, so the next Plex track would fail the same way
- * @return Decoder, or NULL if the path, the download or the open failed
- */
-static audio_decoder_t *music_open_track(const char *path,
-                                         const atomic_bool *cancel,
-                                         bool *unreachable) {
-   if (unreachable) {
-      *unreachable = false;
-   }
-   if (!webui_music_is_path_valid(path)) {
-      OLOG_WARNING("WebUI music: Refusing to open %s (not in the music library)", path);
-      return NULL;
-   }
-
-   audio_decoder_t *decoder = NULL;
-   if (music_source_from_path(path) == MUSIC_SOURCE_PLEX) {
-      char local_path[PATH_MAX];
-      const char *part_key = path + strlen(music_source_path_prefix(MUSIC_SOURCE_PLEX));
-      int rc = plex_client_download_track(part_key, cancel, local_path, sizeof(local_path));
-      if (rc != SUCCESS) {
-         OLOG_ERROR("WebUI music: Plex download failed for: %s", path);
-         if (unreachable && rc == PLEX_DOWNLOAD_UNREACHABLE) {
-            *unreachable = true;
-         }
-         return NULL;
-      }
-      decoder = audio_decoder_open(local_path);
-      unlink(local_path);
-   } else {
-      decoder = audio_decoder_open(path);
-   }
-   if (!decoder) {
-      return NULL;
-   }
-
-   /* Below the minimum one Opus frame needs more source frames than a read
-    * buffer holds; decoders hand out mono or stereo only. */
-   audio_decoder_info_t info;
-   audio_decoder_get_info(decoder, &info);
-   if (info.sample_rate < WEBUI_MUSIC_MIN_SOURCE_RATE ||
-       info.sample_rate > WEBUI_MUSIC_MAX_SOURCE_RATE || info.channels < 1 || info.channels > 2) {
-      OLOG_ERROR("WebUI music: Can't stream %s (%u Hz, %u channels)", path, info.sample_rate,
-                 info.channels);
-      audio_decoder_close(decoder);
-      return NULL;
-   }
-   return decoder;
-}
-
-/**
- * @brief Tell the client a Plex track is downloading before it can play
- *
- * Sends music_state with loading:true and the track at the session's queue
- * index (position 0).  Only for plex: paths; a local open is immediate.  The
- * caller clears state->loading once the open returns.
- *
- * @param advance_auto Tag the frame as part of a natural advance
- */
-static void music_announce_loading(ws_connection_t *conn,
-                                   session_music_state_t *state,
-                                   const char *path,
-                                   bool advance_auto) {
-   if (music_source_from_path(path) != MUSIC_SOURCE_PLEX) {
-      return;
-   }
-   pthread_mutex_lock(&state->state_mutex);
-   state->loading = true;
-   state->position_frames = 0;
-   pthread_mutex_unlock(&state->state_mutex);
-   webui_music_send_state_impl(conn, state, advance_auto);
-}
-
-/**
- * @brief Install a freshly opened decoder (state_mutex held)
- *
- * The resampler always runs stereo: the stream thread expands mono before
- * resampling.
- *
- * @return SUCCESS, or FAILURE if no resampler could be made (decoder closed)
- */
-static int music_install_decoder(session_music_state_t *state, audio_decoder_t *decoder) {
-   audio_decoder_info_t info;
-   audio_decoder_get_info(decoder, &info);
-
-   if (state->resampler) {
-      resampler_destroy(state->resampler);
-      state->resampler = NULL;
-   }
-   if (info.sample_rate != OPUS_SAMPLE_RATE) {
-      state->resampler = resampler_create(info.sample_rate, OPUS_SAMPLE_RATE, 2);
-      if (!state->resampler) {
-         OLOG_ERROR("WebUI music: Failed to create resampler");
-         audio_decoder_close(decoder);
-         return FAILURE;
-      }
-   }
-
-   state->decoder = decoder;
-   state->advance_opening = false;
-   state->source_rate = info.sample_rate;
-   state->source_channels = info.channels;
-   state->source_format = info.format;
-   state->position_frames = 0;
-   state->resample_accum_count = 0;
-   return SUCCESS;
-}
-
-/** What the stream thread does after moving on from a finished track */
-typedef enum {
-   MUSIC_ADVANCE_PLAYING, /**< The next track is installed */
-   MUSIC_ADVANCE_STOPPED, /**< Playback ended; the client has been told */
-   MUSIC_ADVANCE_EXIT,    /**< The thread was asked to stop */
-} music_advance_t;
-
-/**
- * @brief Move to the next track after the current one ended
- *
- * A track that won't open is skipped.  Playback stops once as many tracks in a
- * row have produced no audio as the queue holds, or at once under repeat-one
- * after a failure, so a queue of unplayable tracks can't spin.
- *
- * @param state Session music state (decoder already closed and NULL)
- * @param conn Connection to report to
- * @param track_failed The track that just ended did so on a decode error
- * @param failures In/out: tracks in a row that produced no audio
- * @return What happened
- */
-static music_advance_t music_advance(session_music_state_t *state,
-                                     ws_connection_t *conn,
-                                     bool track_failed,
-                                     int *failures) {
-   user_music_queue_t *uq = state->shared_queue;
-
-   for (;;) {
-      /* Pick the next track.  Lock order: queue, then state. */
-      pthread_mutex_lock(&uq->queue_mutex);
-      pthread_mutex_lock(&state->state_mutex);
-      if (atomic_load(&state->stop_requested)) {
-         /* Whoever stopped us decides what plays next; until then nothing is */
-         state->playing = false;
-         pthread_mutex_unlock(&state->state_mutex);
-         pthread_mutex_unlock(&uq->queue_mutex);
-         return MUSIC_ADVANCE_EXIT;
-      }
-
-      int q_len = uq->queue_length;
-      int next_index = state->queue_index;
-      bool repeat_one = uq->repeat_mode == MUSIC_REPEAT_ONE;
-      bool stop = false;
-      bool end_of_queue = false;
-      const char *stop_error = NULL;
-
-      if (q_len == 0) {
-         stop = true;
-         end_of_queue = true;
-      } else if (track_failed && repeat_one) {
-         stop = true; /* replaying it would fail the same way */
-      } else if (*failures >= q_len) {
-         stop = true;
-         stop_error = "None of the queued tracks would play";
-      } else if (*failures >= WEBUI_MUSIC_MAX_FAILED_TRACKS) {
-         stop = true;
-         stop_error = "Stopped: several tracks in a row wouldn't play";
-      } else if (repeat_one) {
-         /* Repeat one: replay the same track */
-      } else if (uq->shuffle && *failures > 0) {
-         /* Step past a failure in order: random picks can repeat, so a few
-          * playable tracks could go untried before the cap is reached */
-         next_index = (next_index + 1) % q_len;
-      } else if (uq->shuffle) {
-         if (q_len > 1) {
-            next_index = webui_music_pick_random_index(next_index, q_len, &state->shuffle_seed);
-         }
-      } else if (++next_index >= q_len) {
-         if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
-            next_index = 0;
-         } else {
-            stop = true;
-            end_of_queue = true;
-         }
-      }
-
-      if (stop) {
-         state->playing = false;
-         if (end_of_queue) {
-            state->queue_index = 0;
-            state->position_frames = 0; /* nothing is loaded; don't report the old end */
-         }
-         pthread_mutex_unlock(&state->state_mutex);
-         pthread_mutex_unlock(&uq->queue_mutex);
-         if (stop_error) {
-            webui_music_send_error(conn, "DECODE_ERROR", stop_error);
-         }
-         /* Tagged like a natural advance: the client still holds the ended
-          * track's last ~2 s and plays them out before showing the stop */
-         webui_music_send_state_impl(conn, state, true);
-         return MUSIC_ADVANCE_STOPPED;
-      }
-
-      if (next_index >= q_len) {
-         next_index = 0; /* the queue shrank under a repeat-one or shuffle index */
-      }
-      char next_path[WEBUI_MUSIC_PATH_MAX];
-      snprintf(next_path, sizeof(next_path), "%s", uq->queue[next_index].path);
-      /* A mixed queue keeps playing its local tracks if Plex goes down */
-      bool queue_has_local = false;
-      for (int i = 0; i < q_len && !queue_has_local; i++) {
-         queue_has_local = music_source_from_path(uq->queue[i].path) != MUSIC_SOURCE_PLEX;
-      }
-      state->queue_index = next_index;
-      state->cached_duration_sec = uq->queue[next_index].duration_sec;
-      state->advance_opening = true;
-      pthread_mutex_unlock(&state->state_mutex);
-      pthread_mutex_unlock(&uq->queue_mutex);
-
-      /* Open without the lock: a Plex track is downloaded first.  A control
-       * request that stops this thread sets stop_requested, which cancels the
-       * download, so its join waits about a second at most.  Every path that
-       * replaces the decoder stops this thread first, so nothing else installs
-       * one meanwhile. */
-      music_announce_loading(conn, state, next_path, true);
-      bool unreachable = false;
-      audio_decoder_t *next_decoder = music_open_track(next_path, &state->stop_requested,
-                                                       &unreachable);
-
-      pthread_mutex_lock(&state->state_mutex);
-      state->loading = false;
-      if (atomic_load(&state->stop_requested)) {
-         /* Whoever stopped us decides what plays next; until then nothing is */
-         state->playing = false;
-         state->position_frames = 0;
-         pthread_mutex_unlock(&state->state_mutex);
-         if (next_decoder) {
-            audio_decoder_close(next_decoder);
-         }
-         return MUSIC_ADVANCE_EXIT;
-      }
-      if (unreachable && !queue_has_local) {
-         /* Every track is on Plex and would wait out the same connect timeout */
-         state->advance_opening = false;
-         state->playing = false;
-         pthread_mutex_unlock(&state->state_mutex);
-         webui_music_send_error(conn, "PLEX_UNREACHABLE", "The Plex server isn't reachable");
-         webui_music_send_state_impl(conn, state, true); /* see the stop above */
-         return MUSIC_ADVANCE_STOPPED;
-      }
-      if (!next_decoder || music_install_decoder(state, next_decoder) != SUCCESS) {
-         state->advance_opening = false;
-         pthread_mutex_unlock(&state->state_mutex);
-         OLOG_WARNING("WebUI music: Couldn't open %s%s", next_path,
-                      repeat_one ? "" : ", skipping it");
-         (*failures)++;
-         track_failed = true;
-         if (*failures == 1) {
-            webui_music_send_error(conn, "DECODE_ERROR",
-                                   repeat_one ? "Couldn't play this track"
-                                              : "Couldn't play a track, skipping it");
-         }
-         continue;
-      }
-      pthread_mutex_unlock(&state->state_mutex);
-
-      /* Tag as a natural auto-advance so the client keeps its buffered lead
-       * (gapless) instead of flushing. */
-      webui_music_send_state_impl(conn, state, true);
-      return MUSIC_ADVANCE_PLAYING;
-   }
-}
-
-
-/**
  * @brief Music streaming thread
  *
  * Reads audio from decoder, resamples to 48kHz, encodes to Opus,
@@ -1062,8 +663,35 @@ static void *music_stream_thread(void *arg) {
          }
       }
 
+      /* A requested or auto-advanced track waiting to be opened */
+      if (webui_music_run_pending_open(state, conn, &failures)) {
+         /* Reset stream timing for the new track */
+         stream_start_time = 0;
+         frames_sent = 0;
+         continue;
+      }
+
       /* Brief lock to check state and mark decoder busy */
       pthread_mutex_lock(&state->state_mutex);
+
+      /* A seek, applied here between frames (paused too), so it never stops
+       * this thread or what it's prefetching */
+      if (state->seek_pending) {
+         state->seek_pending = false;
+         if (state->decoder && audio_decoder_seek(state->decoder, state->seek_frames) == 0) {
+            state->position_frames = state->seek_frames;
+            state->resample_accum_count = 0;
+         }
+         pthread_mutex_unlock(&state->state_mutex);
+         /* The client flushed for the seek: restart pacing and the estimate */
+         stream_start_time = 0;
+         frames_sent = 0;
+         est_buffered_us = 0;
+         was_closed_loop = false;
+         webui_music_send_state(conn, state);
+         continue;
+      }
+
       if (!state->decoder || !state->playing || state->paused) {
          if (was_sending) {
             OLOG_INFO("WebUI music: Streaming paused (decoder=%p playing=%d paused=%d)",
@@ -1137,11 +765,8 @@ static void *music_stream_thread(void *arg) {
             }
          }
 
-         if (music_advance(state, conn, track_failed, &failures) == MUSIC_ADVANCE_PLAYING) {
-            /* Reset stream timing for the new track */
-            stream_start_time = 0;
-            frames_sent = 0;
-         }
+         /* Picks the next track into the pending slot (opened above), or stops */
+         webui_music_advance(state, conn, track_failed, &failures);
          continue;
       }
       failures = 0;
@@ -1193,11 +818,12 @@ static void *music_stream_thread(void *arg) {
             break;
 
          /* Initialize stream timing on first frame. NOTE: est_buffered_us is
-          * deliberately NOT reset here — a brand-new thread (fresh play / seek /
-          * user skip) starts with est=0 as a thread local, while a natural
+          * deliberately NOT reset here — a brand-new thread (fresh play / user
+          * skip) starts with est=0 as a thread local, while a natural
           * auto-advance reaches this point on the SAME thread and must keep its
           * estimate (the buffered lead is continuous across the gapless boundary).
-          * The only in-thread flush boundary, resume-from-pause, resets est above. */
+          * The in-thread flush boundaries, a seek and resume-from-pause, reset
+          * est above. */
          if (stream_start_time == 0) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1314,6 +940,10 @@ static void *music_stream_thread(void *arg) {
       }
    }
 
+   /* A request still waiting resolves as cancelled, so a waiting tool never
+    * hangs; the slot itself stays for whoever stopped the thread */
+   webui_music_cancel_pending_ticket(state);
+   webui_music_prefetch_stop(state);
    OLOG_INFO("WebUI music: Streaming thread stopped");
    atomic_fetch_sub(&s_active_streams, 1);
    atomic_store(&state->streaming, false);
@@ -1361,6 +991,9 @@ void webui_music_stop_streaming(session_music_state_t *state) {
    }
 
    atomic_store(&state->stop_requested, true);
+   /* The stream thread joins its prefetch helper on the way out: cancel the
+    * helper's download too, so this join stays short */
+   atomic_store(&state->prefetch_cancel, true);
 
    /* Wait for thread to finish */
    pthread_join(state->stream_thread, NULL);
@@ -1369,77 +1002,6 @@ void webui_music_stop_streaming(session_music_state_t *state) {
 /* =============================================================================
  * Playback Control
  * ============================================================================= */
-
-/**
- * @brief Start playing a track
- *
- * IMPORTANT: Stops any existing streaming thread before changing decoder/resampler.
- * This prevents race conditions where the old thread uses freed resources.
- */
-int webui_music_start_playback(session_music_state_t *state, const char *path) {
-   /* Stop existing streaming thread first - this is critical to prevent crashes
-    * where the streaming thread accesses freed decoder/resampler */
-   webui_music_stop_streaming(state);
-
-   /* Blocks the caller for a Plex download.  On the WebSocket thread that's
-    * acceptable on a home LAN; on another thread (the LLM tool) a WebSocket
-    * request waiting for control_mutex cancels it via control_cancel. */
-   music_announce_loading(state->conn, state, path, false);
-   audio_decoder_t *decoder = music_open_track(path, &state->control_cancel, NULL);
-
-   pthread_mutex_lock(&state->state_mutex);
-   state->loading = false;
-
-   /* Close any existing decoder */
-   if (state->decoder) {
-      audio_decoder_close(state->decoder);
-      state->decoder = NULL;
-   }
-
-   if (!decoder || music_install_decoder(state, decoder) != SUCCESS) {
-      /* Nothing is playing now; callers report this state to the client */
-      state->playing = false;
-      state->paused = false;
-      pthread_mutex_unlock(&state->state_mutex);
-      OLOG_ERROR("WebUI music: Failed to open: %s", path);
-      return 1;
-   }
-
-   OLOG_INFO("WebUI music: Playing %s (%s %u Hz, %u ch)", path,
-             audio_decoder_format_name(state->source_format), state->source_rate,
-             state->source_channels);
-
-   state->playing = true;
-   state->paused = false;
-   int qidx = state->queue_index;
-   user_music_queue_t *uq = state->shared_queue;
-   pthread_mutex_unlock(&state->state_mutex);
-
-   /* Cache the track duration for the 1 Hz position updates. Do NOT hold
-    * state_mutex while taking queue_mutex — the documented lock order is
-    * queue_mutex → state_mutex, so holding state here and then taking queue
-    * (state → queue) inverts it and can deadlock against paths that correctly
-    * nest queue → state (e.g. next/previous). Snapshot the index under state
-    * above, read the duration under queue alone, then store it under state. */
-   if (uq) {
-      bool have_dur = false;
-      uint32_t dur = 0;
-      pthread_mutex_lock(&uq->queue_mutex);
-      if (qidx >= 0 && qidx < uq->queue_length) {
-         dur = uq->queue[qidx].duration_sec;
-         have_dur = true;
-      }
-      pthread_mutex_unlock(&uq->queue_mutex);
-      if (have_dur) {
-         pthread_mutex_lock(&state->state_mutex);
-         state->cached_duration_sec = dur;
-         pthread_mutex_unlock(&state->state_mutex);
-      }
-   }
-
-   /* Start streaming thread if not already running */
-   return webui_music_start_streaming(state);
-}
 
 /* =============================================================================
  * Lifecycle Functions
@@ -1536,6 +1098,13 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_mutex_init(&state->write_mutex, NULL);
    pthread_mutex_init(&state->control_mutex, NULL);
    pthread_cond_init(&state->decoder_idle_cond, NULL);
+   /* Monotonic, so a wall-clock step can't stretch the LLM tool's wait */
+   pthread_condattr_t open_attr;
+   pthread_condattr_init(&open_attr);
+   pthread_condattr_setclock(&open_attr, CLOCK_MONOTONIC);
+   pthread_cond_init(&state->open_cond, &open_attr);
+   pthread_condattr_destroy(&open_attr);
+   state->planned_next_index = -1;
    atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
@@ -1601,12 +1170,18 @@ int webui_music_session_init(ws_connection_t *conn) {
 void webui_music_control_lock(session_music_state_t *state, bool preempt) {
    if (preempt) {
       atomic_store(&state->control_cancel, true);
+      /* Wake an LLM tool call waiting for its track to open (it holds
+       * control_mutex while it waits).  Under state_mutex, which the waiter
+       * checks the flag under, so the wakeup can't be missed. */
+      pthread_mutex_lock(&state->state_mutex);
+      pthread_cond_broadcast(&state->open_cond);
+      pthread_mutex_unlock(&state->state_mutex);
    }
    pthread_mutex_lock(&state->control_mutex);
    if (preempt) {
       /* Only the WebSocket thread preempts, one request at a time, so this is
        * its own request being retired.  A non-preempting caller that gets the
-       * lock first leaves it set: its download is cancelled too, so the
+       * lock first leaves it set: it doesn't wait for its track either, so the
        * waiting request isn't held up. */
       atomic_store(&state->control_cancel, false);
    }
@@ -1634,8 +1209,9 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
       return;
    }
 
-   /* Let a control request already holding control_mutex (the LLM tool, mid
-    * Plex download) finish first, cancelling its download.  This narrows, but
+   /* Let a control request already holding control_mutex (the LLM tool,
+    * waiting for its track to open) finish first; the preempt ends its wait.
+    * This narrows, but
     * doesn't close, the window for a tool call that read conn->music_state just
     * before this and waits for the lock: that needs the connection's lifetime
     * pinned for the call.  Then stop the producer thread (it holds no teardown lock; it only
@@ -1655,6 +1231,9 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
 
    if (state->decoder) {
       audio_decoder_close(state->decoder);
+   }
+   if (state->prefetched) {
+      audio_decoder_close(state->prefetched);
    }
    if (state->resampler) {
       resampler_destroy(state->resampler);
@@ -1681,6 +1260,7 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
    }
 
    pthread_cond_destroy(&state->decoder_idle_cond);
+   pthread_cond_destroy(&state->open_cond);
    pthread_mutex_destroy(&state->state_mutex);
    pthread_mutex_destroy(&state->write_mutex);
    pthread_mutex_destroy(&state->control_mutex);

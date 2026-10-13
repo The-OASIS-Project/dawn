@@ -42,6 +42,7 @@ int audio_decoder_get_metadata(const char *path, audio_metadata_t *metadata) {
    return 0;
 }
 
+
 static char g_db_path[64];
 static sqlite3 *g_test_db = NULL;
 
@@ -104,6 +105,44 @@ static void test_page_header_reports_total_and_pages(void) {
    out = music_search_page_text("", &f, 3, 25);
    TEST_ASSERT_NOT_NULL(strstr(out, "showing 51-60 (page 3 of 3)."));
    TEST_ASSERT_NULL(strstr(out, "for more"));
+   free(out);
+}
+
+static void test_page_source_hint(void) {
+   seed_big_artist();
+   music_search_filters_t f = { 0 };
+   snprintf(f.artist, sizeof(f.artist), "Ben Folds");
+   const char *hint = "add source:plex to the query";
+
+   /* No copy anywhere else: nothing to say */
+   char *out = music_search_page_text("", &f, 1, 25);
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_NULL(strstr(out, hint));
+   free(out);
+
+   /* A shown track also on Plex (hidden as a duplicate): say how to reach it */
+   sqlite3_exec(g_test_db,
+                "INSERT INTO music_metadata (path, mtime, title, artist, album, genre, source, "
+                "duration_sec, year) VALUES ('plex:/library/parts/1/x.flac', 1, 'Song 00', "
+                "'Ben Folds', 'Rockin'' the Suburbs', '', 1, 100, 2001)",
+                NULL, NULL, NULL);
+   out = music_search_page_text("", &f, 1, 25);
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, hint), out);
+   free(out);
+
+   /* Batch entries say it too */
+   strbuf_t sb;
+   strbuf_init(&sb, 256);
+   music_search_result_t buf[MUSIC_BATCH_SEARCH_LIMIT];
+   music_search_append_batch_entry(&sb, "Song 00", NULL, buf);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(sb.buf, hint), sb.buf);
+   strbuf_free(&sb);
+
+   /* A source named: nothing is hidden, no hint */
+   out = music_search_page_text("source:local", &f, 1, 25);
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_NULL(strstr(out, hint));
    free(out);
 }
 
@@ -267,6 +306,7 @@ int main(void) {
 
    UNITY_BEGIN();
    RUN_TEST(test_page_header_reports_total_and_pages);
+   RUN_TEST(test_page_source_hint);
    RUN_TEST(test_page_past_end_and_empty);
    RUN_TEST(test_page_single_and_limits);
    RUN_TEST(test_page_approximate_is_labeled);

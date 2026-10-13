@@ -21,7 +21,7 @@
  * WebUI Server Implementation - libwebsockets HTTP + WebSocket handling
  */
 
-#define _GNU_SOURCE /* For strcasestr */
+#define _GNU_SOURCE /* For pthread_timedjoin_np */
 
 #include "webui/webui_server.h"
 
@@ -426,52 +426,6 @@ const char *get_mime_type(const char *path) {
    }
 
    return "application/octet-stream";
-}
-
-/**
- * @brief Check if a path contains directory traversal patterns
- *
- * Checks for literal ".." as well as URL-encoded variants (%2e, %252e)
- * to prevent path traversal attacks.
- *
- * @param path The URL path to check
- * @return true if traversal pattern detected, false if path is safe
- */
-bool contains_path_traversal(const char *path) {
-   if (!path) {
-      return false;
-   }
-
-   /* Check for literal ".." as a path component (not inside filenames like "file..ext") */
-   const char *p = path;
-   while ((p = strstr(p, "..")) != NULL) {
-      /* Check if preceded by '/' or at start of string */
-      bool at_start = (p == path) || (*(p - 1) == '/');
-      /* Check if followed by '/' or null or end of string */
-      bool at_end = (p[2] == '\0') || (p[2] == '/');
-      if (at_start && at_end) {
-         return true;
-      }
-      p += 2;
-   }
-
-   /* Check for URL-encoded variants (case-insensitive) */
-   /* %2e = ".", so %2e%2e = ".." */
-   if (strcasestr(path, "%2e%2e") != NULL) {
-      return true;
-   }
-
-   /* Single encoded dot followed by literal dot or vice versa */
-   if (strcasestr(path, "%2e.") != NULL || strcasestr(path, ".%2e") != NULL) {
-      return true;
-   }
-
-   /* Double-encoded: %252e = "%2e" after first decode */
-   if (strcasestr(path, "%252e") != NULL) {
-      return true;
-   }
-
-   return false;
 }
 
 /**

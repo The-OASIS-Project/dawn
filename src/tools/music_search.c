@@ -26,8 +26,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audio/music_rank.h"
 #include "dawn_error.h"
 #include "tools/tool_registry.h"
+
+/* After results that collapsed copies in another source: how to reach them */
+static void append_source_hint(strbuf_t *sb, const music_query_page_t *page) {
+   if (page->hid_other_source) {
+      const char *name = music_source_name(page->hidden_source);
+      strbuf_appendf(sb,
+                     "Some of these tracks are also in %s, listed once as the copy shown; add "
+                     "source:%s to the query for those copies.\n",
+                     name, name);
+   }
+}
+
+/** Candidates the resolver picks from (artist preference + tiebreak) */
+#define MUSIC_SEARCH_RESOLVE_CANDIDATES 8
 
 /* Parse one sanity-bounded year param from the tool value, 0 if absent/invalid. */
 static int parse_year_param(const char *value, const char *field) {
@@ -91,6 +106,47 @@ void music_search_build_query(music_query_t *out,
       out->year_min = f->year_min;
       out->year_max = f->year_max;
    }
+}
+
+int music_search_resolve_item(const char *item, music_search_result_t *out) {
+   if (!item || !out) {
+      return FAILURE;
+   }
+
+   /* A source word comes off first, so it can't land in the artist or skew
+    * the picker */
+   char clean[AUDIO_METADATA_STRING_MAX * 2];
+   music_source_t source = MUSIC_SOURCE_LOCAL;
+   bool has_source = music_query_take_source(item, clean, sizeof(clean), &source);
+   if (has_source) {
+      item = clean;
+   }
+
+   /* "Artist - Title": search the title (spaces are word boundaries, so the
+    * combined form usually misses) and prefer the matching artist, which picks
+    * Toto's "Africa" over an unrelated top match */
+   const char *dash = strstr(item, " - ");
+   char artist[sizeof(out->artist)] = { 0 };
+   const char *title_query = item;
+   if (dash) {
+      size_t alen = (size_t)(dash - item);
+      if (alen >= sizeof(artist)) {
+         alen = sizeof(artist) - 1;
+      }
+      memcpy(artist, item, alen);
+      artist[alen] = '\0';
+      title_query = dash + 3;
+   }
+
+   /* Strict matching, never the approximate fallback: this plays what it finds */
+   music_search_result_t r[MUSIC_SEARCH_RESOLVE_CANDIDATES];
+   int count = 0;
+   music_query_t mq = { .text = title_query, .has_source = has_source, .source = source };
+   if (music_db_query(&mq, r, MUSIC_SEARCH_RESOLVE_CANDIDATES, &count) != SUCCESS || count <= 0) {
+      return FAILURE;
+   }
+   *out = r[music_rank_pick_best(r, count, title_query, dash ? artist : NULL)];
+   return SUCCESS;
 }
 
 /* Echo the query back ("query 'x', artist 'y', years 1980-1989") so the LLM can
@@ -205,6 +261,7 @@ char *music_search_page_text(const char *text,
    music_query_t mq;
    music_search_build_query(&mq, text, f);
    mq.allow_partial = true; /* shown to the LLM, labeled approximate */
+   mq.list_source = true;
    music_query_page_t page;
    int offset = (page_no - 1) * limit;
    if (music_db_query_page(&mq, offset, res, limit, &page) != SUCCESS) {
@@ -235,6 +292,8 @@ char *music_search_page_text(const char *text,
       for (int i = 0; i < page.count; i++) {
          append_track_row(&sb, &res[i]);
       }
+      /* Without it, a model asked for Plex concludes there are no Plex copies */
+      append_source_hint(&sb, &page);
    }
    free(res);
 
@@ -255,6 +314,7 @@ void music_search_append_batch_entry(strbuf_t *sb,
    music_query_t mq;
    music_search_build_query(&mq, q, f);
    mq.allow_partial = true; /* shown to the LLM, labeled below */
+   mq.list_source = true;
    music_query_page_t page;
    if (music_db_query_page(&mq, 0, buf, MUSIC_BATCH_SEARCH_LIMIT, &page) != SUCCESS) {
       strbuf_appendf(sb, "%s:\n  Search failed (music database error)\n", q);
@@ -273,6 +333,7 @@ void music_search_append_batch_entry(strbuf_t *sb,
    for (int j = 0; j < page.count; j++) {
       append_track_row(sb, &buf[j]);
    }
+   append_source_hint(sb, &page);
 }
 
 char *music_library_albums_text(const char *artist, int page, int per_page) {
