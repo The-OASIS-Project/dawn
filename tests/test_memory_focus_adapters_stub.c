@@ -78,31 +78,9 @@ int memory_db_fact_search(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-/* v48: BM25-ranked search stub.  Mirrors the LIKE search but assigns a
- * uniform 1.0 score so tests gated on the bm25_enabled path get the
- * same fact set without depending on FTS5 + libstemmer in the unit
- * harness.  Tests that need score variation set them post-call. */
-int memory_db_fact_search_bm25(int user_id,
-                               const char *query,
-                               memory_fact_t *out_facts,
-                               float *out_scores,
-                               int max_facts,
-                               int *count_out) {
-   (void)query;
-   int n = 0;
-   for (int i = 0; i < s_mock.fact_count && n < max_facts; i++) {
-      if (s_mock.facts[i].user_id != user_id)
-         continue;
-      out_facts[n] = s_mock.facts[i];
-      if (out_scores)
-         out_scores[n] = 1.0f;
-      n++;
-   }
-   if (count_out)
-      *count_out = n;
-   return MEMORY_DB_SUCCESS;
-}
-
+/* BM25-ranked search stub.  Mirrors the LIKE search but assigns a
+ * uniform 1.0 score, so memory search gets the same fact set without
+ * depending on FTS5 + libstemmer in the unit harness. */
 int memory_db_fact_search_bm25_since(int user_id,
                                      const char *query,
                                      time_t since_ts,
@@ -121,26 +99,6 @@ int memory_db_fact_search_bm25_since(int user_id,
       if (out_scores)
          out_scores[n] = 1.0f;
       n++;
-   }
-   if (count_out)
-      *count_out = n;
-   return MEMORY_DB_SUCCESS;
-}
-
-int memory_db_fact_search_since(int user_id,
-                                const char *keywords,
-                                time_t since_ts,
-                                memory_fact_t *out_facts,
-                                int max_facts,
-                                int *count_out) {
-   (void)keywords;
-   int n = 0;
-   for (int i = 0; i < s_mock.fact_count && n < max_facts; i++) {
-      if (s_mock.facts[i].user_id != user_id)
-         continue;
-      if (s_mock.facts[i].created_at < since_ts)
-         continue;
-      out_facts[n++] = s_mock.facts[i];
    }
    if (count_out)
       *count_out = n;

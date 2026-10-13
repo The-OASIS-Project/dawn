@@ -543,9 +543,8 @@ typedef struct {
     * Phase 1.  External-content rows live in memory_facts_fts; the search
     * statement JOINs back to memory_facts to filter superseded rows and
     * scope by user_id.  `_since` variant adds `AND mf.created_at >= ?`
-    * so time-windowed callers (focus-adapter recent windows + memory.recent
-    * with since_ts) use BM25 too rather than silently falling back to the
-    * legacy LIKE path. */
+    * for time-windowed callers (focus-adapter recent windows + memory.recent
+    * with since_ts). */
    sqlite3_stmt *stmt_memory_fact_search_bm25;
    sqlite3_stmt *stmt_memory_fact_search_bm25_since;
    sqlite3_stmt *stmt_memory_facts_fts_insert;
@@ -570,7 +569,6 @@ typedef struct {
    sqlite3_stmt *stmt_memory_summary_search;
 
    /* Date-filtered memory queries */
-   sqlite3_stmt *stmt_memory_fact_search_since;
    sqlite3_stmt *stmt_memory_summary_search_since;
 
    /* Bundle 3 (2026-05-13) — windowed/sorted variants for the LLM 'recent'

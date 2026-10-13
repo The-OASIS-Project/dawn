@@ -374,14 +374,6 @@ void config_set_defaults(dawn_config_t *config) {
     * Cuts ~30-50% of memory_text bytes by stripping per-fact metadata +
     * demoting source excerpts to a single global block. */
    config->memory.memory_text_minimal = true;
-   /* BM25 keyword retrieval (FTS5 + Porter2).  Graduated to default-on
-    * (May 17, 2026) after Phase 1 Mem0 parity bench validation: +2.74pp
-    * leader-comparable on fresh LoCoMo n=1536 (BM25 OFF 0.7057 → ON 0.7331),
-    * plus stable burn-in on the dev's live deployment.  Operator override
-    * via [memory.embeddings] bm25_enabled = false to revert to the legacy
-    * LIKE + multi-token match-count path.  See NOTICE for Mem0 attribution
-    * and docs/MEM0_ARCHITECTURAL_PARITY.md §Phase 1 outcome. */
-   config->memory.bm25_enabled = true;
    config->memory.category_threshold = 0.25f;
    /* Entity-graph candidates: the facts about the entities a query names.
     * max_facts_per_query bounds fan-out for high-degree entities. */

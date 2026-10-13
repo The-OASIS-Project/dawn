@@ -760,15 +760,6 @@ typedef struct {
     * sample with a smaller cut (14.8% size reduction); v5 is the more
     * aggressive shape the research synthesis recommended. */
    bool memory_text_minimal;
-   /* BM25 keyword retrieval via SQLite FTS5 + Porter2 stemming.  When on,
-    * memory_fact_search_hybrid routes the keyword channel through
-    * memory_db_fact_search_bm25 (one FTS5 MATCH per query, BM25 ranking,
-    * sigmoid-normalized to [0, 1]) instead of the legacy tokenize +
-    * multi-LIKE + match-count path.  Phase 1 of the Mem0 Architectural
-    * Parity program (docs/MEM0_ARCHITECTURAL_PARITY.md).  Algorithm and
-    * sigmoid params adapted from Mem0 (Apache-2.0); see NOTICE.
-    * Off-by-default for A/B; flip after bench validation. */
-   bool bm25_enabled;
    /* Category backfill — cosine similarity above which a fact is assigned to a
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */

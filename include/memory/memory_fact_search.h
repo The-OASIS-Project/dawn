@@ -23,17 +23,15 @@
  *        semantics.
  *
  * Pipeline:
- *   1. Tokenize the query string.
- *   2. Multi-token keyword search (with optional `since_ts` time filter)
- *      with per-fact match-count scoring.
- *   3. If embeddings are available AND a `query_embedding` was supplied,
+ *   1. BM25 keyword search (FTS5, with optional `since_ts` time filter),
+ *      scores normalized to [0, 1].
+ *   2. If embeddings are available AND a `query_embedding` was supplied,
  *      hand the keyword fact_ids + scores to
  *      `memory_embeddings_hybrid_search()` and emit the re-ranked output.
  *      Vector-only hits (those NOT in the keyword set) are fetched via
  *      `memory_db_fact_get()` (user-scoped in SQL) with a
  *      defense-in-depth `user_id` post-check.
- *   4. Otherwise emit the keyword-only ranking with match counts as the
- *      score.
+ *   3. Otherwise emit the keyword-only ranking.
  *
  * Layer: 2.  Header pulls only `memory_types.h` + libc.
  *

@@ -38,95 +38,9 @@
 #include "memory/memory_embeddings.h"
 #include "memory/memory_graph_retrieval.h"
 #include "memory/memory_implied.h"
-#include "memory/memory_stem.h"
 #include "memory/memory_types.h"
 
-/* Token bookkeeping caps preserved verbatim from the original
- * `multi_token_fact_search` helper — bounded so the pipeline stays
- * stack-allocated. */
-#define MAX_SEARCH_TOKENS 8
-#define MAX_DEDUP_RESULTS 30
-#define KEYWORD_FETCH_LIMIT 10
 #define HYBRID_FETCH_LIMIT 10
-
-/* Tokenize the query into lowercase 2+ char stems via the shared
- * memory-subsystem tokenizer.  Thin local alias for
- * memory_stem_tokenize_padded — call sites use the local symbol for grep
- * familiarity but the implementation has one source of truth. */
-static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
-   int cap = (max_tokens > MAX_SEARCH_TOKENS) ? MAX_SEARCH_TOKENS : max_tokens;
-   return memory_stem_tokenize_padded(keywords, tokens, cap, 2);
-}
-
-/* Multi-token keyword search with per-fact match-count scoring.
- * Insertion-sorts by score desc, then confidence desc.  Fills
- * `out_scores` with raw match counts (parallel to `results`). */
-static int multi_token_fact_search(int user_id,
-                                   char tokens[][64],
-                                   int token_count,
-                                   int per_token_limit,
-                                   memory_fact_t *results,
-                                   int max_results,
-                                   time_t since_ts,
-                                   int *out_scores) {
-   int64_t seen_ids[MAX_DEDUP_RESULTS];
-   int seen_scores[MAX_DEDUP_RESULTS];
-   memory_fact_t seen_facts[MAX_DEDUP_RESULTS];
-   int seen_count = 0;
-
-   for (int t = 0; t < token_count; t++) {
-      memory_fact_t token_results[KEYWORD_FETCH_LIMIT];
-      int limit = per_token_limit > KEYWORD_FETCH_LIMIT ? KEYWORD_FETCH_LIMIT : per_token_limit;
-      int n = 0;
-      if (since_ts > 0)
-         memory_db_fact_search_since(user_id, tokens[t], since_ts, token_results, limit, &n);
-      else
-         memory_db_fact_search(user_id, tokens[t], token_results, limit, &n);
-      for (int j = 0; j < n; j++) {
-         int found = -1;
-         for (int k = 0; k < seen_count; k++) {
-            if (seen_ids[k] == token_results[j].id) {
-               found = k;
-               break;
-            }
-         }
-         if (found >= 0) {
-            seen_scores[found]++;
-         } else if (seen_count < MAX_DEDUP_RESULTS) {
-            seen_ids[seen_count] = token_results[j].id;
-            seen_scores[seen_count] = 1;
-            seen_facts[seen_count] = token_results[j];
-            seen_count++;
-         }
-      }
-   }
-
-   for (int i = 1; i < seen_count; i++) {
-      int64_t tmp_id = seen_ids[i];
-      int tmp_score = seen_scores[i];
-      memory_fact_t tmp_fact = seen_facts[i];
-      int j = i - 1;
-      while (j >= 0 &&
-             (seen_scores[j] < tmp_score ||
-              (seen_scores[j] == tmp_score && seen_facts[j].confidence < tmp_fact.confidence))) {
-         seen_ids[j + 1] = seen_ids[j];
-         seen_scores[j + 1] = seen_scores[j];
-         seen_facts[j + 1] = seen_facts[j];
-         j--;
-      }
-      seen_ids[j + 1] = tmp_id;
-      seen_scores[j + 1] = tmp_score;
-      seen_facts[j + 1] = tmp_fact;
-   }
-
-   int count = (seen_count > max_results) ? max_results : seen_count;
-   for (int i = 0; i < count; i++) {
-      results[i] = seen_facts[i];
-      if (out_scores != NULL)
-         out_scores[i] = seen_scores[i];
-   }
-   return count;
-}
 
 /* Internal common implementation: `query_emb`/`query_norm` are optional
  * pre-computed query embedding (NULL/0 → memory_embeddings_hybrid_search_ex
@@ -154,64 +68,26 @@ static int fact_search_hybrid_impl(int user_id,
     * intermediates use the same bound to keep stack frames compact. */
    const int work_cap = (max > HYBRID_FETCH_LIMIT) ? HYBRID_FETCH_LIMIT : max;
 
-   /* 1. Tokenize. */
-   char tokens[MAX_SEARCH_TOKENS][64];
-   int token_count = tokenize_query(query, tokens, MAX_SEARCH_TOKENS);
-
-   /* 2. Keyword search.
-    *
-    * Two paths, gated by `[memory] bm25_enabled`:
-    *   - On (Phase 1 of the Mem0 parity program): one FTS5 MATCH call,
-    *     BM25-ranked, sigmoid-normalized to [0, 1].  No fan-out per
-    *     token, no LIKE pattern building, no match-count integer step.
-    *   - Off (legacy): tokenize → multi-LIKE → per-token result merge,
-    *     scoring by token-coverage match count.
-    *
-    * Both paths feed the same `hybrid_search` downstream — we keep its
-    * int*+token_count signature by mapping BM25 [0, 1] floats onto the
-    * (match_count / token_count) shape (multiply by 100, fix
-    * token_count=100).  kw_score downstream comes out identical to the
-    * normalized BM25 value. */
+   /* 1. Keyword search: one FTS5 MATCH, BM25-ranked and sigmoid-normalized to
+    *    [0, 1].  hybrid_search takes integer match scores over a denominator,
+    *    so the score is carried as hundredths. */
    memory_fact_t kw_facts[HYBRID_FETCH_LIMIT];
    int kw_scores[HYBRID_FETCH_LIMIT];
    int kw_count = 0;
-   int kw_score_denom = (token_count > 0) ? token_count : 1;
-
-   if (g_config.memory.bm25_enabled) {
-      /* BM25 path — single FTS5 MATCH replaces the legacy tokenize →
-       * multi-LIKE fan-out → match-count merge.  Time-windowed callers
-       * dispatch to the `_since` variant (since_ts > 0) so focus-adapter
-       * recent windows also get BM25 ranking instead of silently falling
-       * back to LIKE. */
-      float bm25_scores[HYBRID_FETCH_LIMIT];
-      memory_db_fact_search_bm25_since(user_id, query, since_ts, kw_facts, bm25_scores, work_cap,
-                                       &kw_count);
-      /* Map [0,1] BM25 score → (int, denom=100) so hybrid_search's kw
-       * normalization (`match/denom`) emits the same float. */
-      kw_score_denom = 100;
-      for (int i = 0; i < kw_count; i++) {
-         int s = (int)(bm25_scores[i] * 100.0f + 0.5f);
-         if (s < 1)
-            s = 1;
-         if (s > 100)
-            s = 100;
-         kw_scores[i] = s;
-      }
-   } else if (token_count <= 1) {
-      /* Single-token (or zero — `query` was non-empty but contained
-       * only delimiters): single SQL call mirrors the existing path. */
-      if (since_ts > 0)
-         memory_db_fact_search_since(user_id, query, since_ts, kw_facts, work_cap, &kw_count);
-      else
-         memory_db_fact_search(user_id, query, kw_facts, work_cap, &kw_count);
-      for (int i = 0; i < kw_count; i++)
-         kw_scores[i] = 1;
-   } else {
-      kw_count = multi_token_fact_search(user_id, tokens, token_count, KEYWORD_FETCH_LIMIT,
-                                         kw_facts, work_cap, since_ts, kw_scores);
+   const int kw_score_denom = 100;
+   float bm25_scores[HYBRID_FETCH_LIMIT];
+   memory_db_fact_search_bm25_since(user_id, query, since_ts, kw_facts, bm25_scores, work_cap,
+                                    &kw_count);
+   for (int i = 0; i < kw_count; i++) {
+      int s = (int)(bm25_scores[i] * 100.0f + 0.5f);
+      if (s < 1)
+         s = 1;
+      if (s > 100)
+         s = 100;
+      kw_scores[i] = s;
    }
 
-   /* 3. Hybrid re-rank when embeddings are available AND caller opted in
+   /* 2. Hybrid re-rank when embeddings are available AND caller opted in
     *    to the hybrid path.  Both gates required: hybrid_search consumes
     *    a query string + cached query embedding; if the engine isn't
     *    ready we must not enter that path.  When the caller supplied a
@@ -271,7 +147,7 @@ static int fact_search_hybrid_impl(int user_id,
       /* hybrid_count == 0 → fall through to keyword-only output. */
    }
 
-   /* 4. Keyword-only fallback. */
+   /* 3. Keyword-only fallback. */
    const int produced = (kw_count > max) ? max : kw_count;
    for (int i = 0; i < produced; i++) {
       out_facts[i] = kw_facts[i];

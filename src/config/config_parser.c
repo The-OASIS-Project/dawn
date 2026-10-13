@@ -1408,7 +1408,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                               NULL };
       warn_unknown_keys(embeddings, "memory.embeddings", emb_keys);
 
-      static const char *const retired_search_keys[] = { "rrf_enabled", NULL };
+      static const char *const retired_search_keys[] = { "rrf_enabled", "bm25_enabled", NULL };
       static bool s_retired_search_told;
       note_retired_keys(embeddings, "memory.embeddings", retired_search_keys,
                         "the search path it chose scored lower and was removed (see UPGRADING.md)",
@@ -1422,7 +1422,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_BOOL(embeddings, "temporal_filter_enabled", config->temporal_filter_enabled);
       PARSE_BOOL(embeddings, "memory_text_minimal", config->memory_text_minimal);
-      PARSE_BOOL(embeddings, "bm25_enabled", config->bm25_enabled);
       PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);
       PARSE_DOUBLE(embeddings, "search_score_floor", config->search_score_floor);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);

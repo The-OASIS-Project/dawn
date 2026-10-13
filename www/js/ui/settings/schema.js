@@ -1201,13 +1201,6 @@
                      displayValue: (v) => Math.round(v * 100) + '%',
                      advanced: true,
                   },
-                  bm25_enabled: {
-                     type: 'checkbox',
-                     label: 'BM25 Keyword Ranking (Experimental)',
-                     hint: 'Use BM25 ranking with stemming for the keyword half of memory search. Matches plurals and tense variants ("memories" finds "memory", "attending" finds "attend"), and ranks rare words above common ones. Off-by-default while it bench-validates against the existing path.',
-                     configPath: 'memory.bm25_enabled',
-                     advanced: true,
-                  },
                   category_threshold: {
                      type: 'range',
                      label: 'Category Classification Threshold',

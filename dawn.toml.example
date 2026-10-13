@@ -665,20 +665,6 @@ citation_reinforcement_boost = 0.05
                                   # filtered. Drop to 0.10-0.20 if over-filtering,
                                   # push higher if weak fabrications persist.
                                   # Range: 0.0-1.0.
-# bm25_enabled = true             # BM25 keyword retrieval (FTS5 + Porter2 stemming).
-                                  # When on, the keyword channel of memory.search
-                                  # uses SQLite FTS5 with bm25() ranking + Porter2
-                                  # stems, instead of the legacy SQL LIKE +
-                                  # multi-token match-count path. Catches plurals
-                                  # + verb tenses ("memories"→"memori",
-                                  # "attending"→"attend") and ranks rare-term
-                                  # matches above common-term matches. Algorithm
-                                  # + sigmoid params adapted from Mem0
-                                  # (Apache-2.0; see NOTICE). Graduated to
-                                  # default-on (May 17, 2026) after Phase 1 Mem0
-                                  # parity bench validation: +2.74pp leader-
-                                  # comparable on fresh LoCoMo n=1536. Set to
-                                  # false to revert to the legacy LIKE path.
 # memory_text_minimal = true      # Compact memory_text rendering — strip per-fact
                                   # metadata, demote source excerpts to a single
                                   # global block. Graduated default-on (May 2026)

@@ -568,18 +568,7 @@ int memory_db_internal_fts5_delete_fact_locked(int64_t fact_id, const char *fact
  * the (midpoint, steepness) row picked for `count_out` query terms.
  *
  * On migration-incomplete DBs (stmt_memory_fact_search_bm25 NULL), or
- * empty queries / zero stems, returns SUCCESS with *count_out=0 so the
- * caller can fall back to the legacy LIKE path. */
-int memory_db_fact_search_bm25(int user_id,
-                               const char *query,
-                               memory_fact_t *out_facts,
-                               float *out_scores,
-                               int max_facts,
-                               int *count_out) {
-   return memory_db_fact_search_bm25_since(user_id, query, /*since_ts*/ 0, out_facts, out_scores,
-                                           max_facts, count_out);
-}
-
+ * empty queries / zero stems, returns SUCCESS with *count_out=0. */
 int memory_db_fact_search_bm25_since(int user_id,
                                      const char *query,
                                      time_t since_ts,
@@ -1851,44 +1840,6 @@ int memory_db_facts_delete_by_patterns(int user_id,
 /* =============================================================================
  * Date-Filtered Fact Queries
  * ============================================================================= */
-
-int memory_db_fact_search_since(int user_id,
-                                const char *keywords,
-                                time_t since_ts,
-                                memory_fact_t *out_facts,
-                                int max_facts,
-                                int *count_out) {
-   if (count_out)
-      *count_out = 0;
-   if (!keywords || !out_facts || max_facts <= 0) {
-      return MEMORY_DB_FAILURE;
-   }
-
-   char pattern[MEMORY_FACT_TEXT_MAX];
-   memory_db_internal_build_like_pattern(keywords, pattern, sizeof(pattern));
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_search_since;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC);
-   sqlite3_bind_int64(stmt, 3, (int64_t)since_ts);
-   sqlite3_bind_int(stmt, 4, max_facts);
-   sqlite3_bind_int64(stmt, 5, fact_expiry_guard_now()); /* expiry guard (v58) */
-
-   int count = 0;
-   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
-      populate_fact_from_row(stmt, &out_facts[count]);
-      count++;
-   }
-
-   sqlite3_reset(stmt);
-   AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
-   return MEMORY_DB_SUCCESS;
-}
 
 int memory_db_fact_list_window(int user_id,
                                time_t since_ts,
