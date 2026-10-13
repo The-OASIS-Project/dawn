@@ -190,20 +190,45 @@ int music_db_get_stats(music_db_stats_t *stats);
  * artist/title/album are word-boundary-strict filters requiring every word;
  * genre is a substring filter; year bounds are inclusive. The file path is never
  * matched, so folder names don't leak into results.
+ *
+ * A source filter (@ref has_source, or a "source:<name>" word in @ref text such
+ * as "source:plex" or "source:local", spelled as music_source_name() does)
+ * limits the results to that source, with duplicates collapsed only within it,
+ * so a track on both shows its copy from that source.  The first source word
+ * is taken out of the text (a later one stays in it); @ref has_source wins over
+ * it.  On its own, a source lists that source only with @ref list_source.
  */
 typedef struct {
-   const char *text;   /**< Free text, ranked across artist/title/album/genre (NULL = none) */
-   const char *artist; /**< Artist filter, whole words (NULL = none) */
-   const char *title;  /**< Title filter, whole words (NULL = none) */
-   const char *album;  /**< Album filter, whole words (NULL = none) */
-   const char *genre;  /**< Genre filter, substring (NULL = none) */
-   int year_min;       /**< Inclusive lower year bound (0 = unbounded) */
-   int year_max;       /**< Inclusive upper year bound (0 = unbounded) */
-   bool allow_partial; /**< When no row matches every word of @ref text, fall back to
-                            rows missing one word (flagged approximate). Only for
-                            surfaces that SHOW results and can say so — never for
-                            play/enqueue/resolve, which act on them. */
+   const char *text;      /**< Free text, ranked across artist/title/album/genre (NULL = none) */
+   const char *artist;    /**< Artist filter, whole words (NULL = none) */
+   const char *title;     /**< Title filter, whole words (NULL = none) */
+   const char *album;     /**< Album filter, whole words (NULL = none) */
+   const char *genre;     /**< Genre filter, substring (NULL = none) */
+   int year_min;          /**< Inclusive lower year bound (0 = unbounded) */
+   int year_max;          /**< Inclusive upper year bound (0 = unbounded) */
+   bool has_source;       /**< Limit to @ref source (else a source word in text) */
+   music_source_t source; /**< Source to limit to when @ref has_source */
+   bool list_source;      /**< A source with nothing else to match lists that
+                               source (paged). Only for surfaces that SHOW results;
+                               one that plays what it finds gets nothing. */
+   bool allow_partial;    /**< When no row matches every word of @ref text, fall back to
+                               rows missing one word (flagged approximate). Only for
+                               surfaces that SHOW results and can say so — never for
+                               play/enqueue/resolve, which act on them. */
 } music_query_t;
+
+/**
+ * @brief Take the first "source:<name>" word out of query text
+ *
+ * For a caller that splits or ranks the text itself: it strips the word, then
+ * passes the source in music_query_t.has_source.  @p out may be @p text.
+ *
+ * @param out Receives the text without the word (untouched when false)
+ * @param source_out Receives the source (untouched when false)
+ * @return true if a word naming a known source was taken; false if there's none,
+ *         or the rest doesn't fit @p out
+ */
+bool music_query_take_source(const char *text, char *out, size_t cap, music_source_t *source_out);
 
 /** Upper sanity bound for a parsed release year (exclusive); rejects garbage. */
 #define MUSIC_QUERY_YEAR_MAX 3000

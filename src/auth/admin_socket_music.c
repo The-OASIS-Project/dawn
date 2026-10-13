@@ -80,7 +80,7 @@ int admin_handle_music_search(int client_fd, const char *payload, uint16_t len) 
 
    int count = 0;
    /* Ranked, path-clean query — same relevance as the assistant/browser surfaces. */
-   music_query_t mq = { .text = payload };
+   music_query_t mq = { .text = payload, .list_source = true };
    if (music_db_query(&mq, results, 50, &count) != SUCCESS) {
       free(results);
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Search failed");

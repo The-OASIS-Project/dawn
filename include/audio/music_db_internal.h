@@ -62,8 +62,9 @@ extern bool g_music_db_initialized;
  *  filter would reject. The "source <=" bound makes this ONE idx_music_dedup range
  *  seek (the "+" keeps the id test off the index); the OR then filters the few
  *  rows it finds. IS (not =) so NULL IS NULL. @p cross_extra is ANDed onto the
- *  cross-source branch. */
-#define MUSIC_DEDUP_EXISTS_(cross_extra)                                                  \
+ *  cross-source branch, @p same_extra onto the same-source one (which on its own
+ *  also matches a lower source: the cross branch hides those rows anyway). */
+#define MUSIC_DEDUP_EXISTS_2(cross_extra, same_extra)                                     \
    "NOT EXISTS ("                                                                         \
    "   SELECT 1 FROM music_metadata m2 "                                                  \
    "   WHERE m2.artist IS music_metadata.artist COLLATE NOCASE "                          \
@@ -71,7 +72,7 @@ extern bool g_music_db_initialized;
    "   AND m2.title IS music_metadata.title COLLATE NOCASE "                              \
    "   AND m2.source <= music_metadata.source AND +m2.id <> music_metadata.id "           \
    "   AND ((m2.source < music_metadata.source" cross_extra ") "                          \
-   "        OR (m2.id < music_metadata.id "                                               \
+   "        OR (m2.id < music_metadata.id" same_extra " "                                 \
    "            AND m2.genre IS music_metadata.genre "                                    \
    "            AND m2.year IS music_metadata.year "                                      \
    "            AND m2.duration_sec > 0 AND music_metadata.duration_sec > 0 "             \
@@ -80,6 +81,8 @@ extern bool g_music_db_initialized;
                                        ") "
 
 /** Plain dedup (browse, stats, unfiltered search). */
+#define MUSIC_DEDUP_EXISTS_(cross_extra) MUSIC_DEDUP_EXISTS_2(cross_extra, "")
+
 #define MUSIC_DEDUP_EXISTS MUSIC_DEDUP_EXISTS_("")
 
 /** Dedup for queries filtering on genre or year: a higher-priority source only
@@ -92,6 +95,12 @@ extern bool g_music_db_initialized;
 
 /** Dedup clause appended after an existing WHERE condition. */
 #define MUSIC_DEDUP_CLAUSE "AND " MUSIC_DEDUP_EXISTS
+
+/** Dedup for a query filtered to one source: another source's copy never hides
+ *  a row (the cross-source branch is off), so the local copy of a track can't
+ *  hide its Plex copy; a library indexed twice still collapses. */
+#define MUSIC_DEDUP_EXISTS_SAME_SOURCE \
+   MUSIC_DEDUP_EXISTS_2(" AND 0", " AND m2.source = music_metadata.source")
 
 /** Dedup clause for queries that have no preceding WHERE condition. */
 #define MUSIC_DEDUP_WHERE "WHERE " MUSIC_DEDUP_EXISTS

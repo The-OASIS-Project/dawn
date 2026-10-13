@@ -60,7 +60,8 @@ typedef enum {
  * Source Utilities
  * ============================================================================= */
 
-/** Human-readable name for logging/display (e.g., "local", "plex") */
+/** Name for logging/display (e.g., "local", "plex").  It is also the word a
+ *  query names the source with ("source:plex"), so keep it one lowercase token. */
 const char *music_source_name(music_source_t source);
 
 /** Path prefix used to identify tracks from this source (e.g., "plex:") */

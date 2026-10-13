@@ -39,7 +39,6 @@
 #include "audio/audio_decoder.h"
 #include "audio/flac_playback.h"
 #include "audio/music_db.h"
-#include "audio/music_rank.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
@@ -61,9 +60,6 @@
 #define MAX_FILENAME_LENGTH 1024
 #define MAX_PLAYLIST_LENGTH 100
 #define MUSIC_CALLBACK_BUFFER_SIZE 512
-
-/* Candidate window pulled from the DB for relevance ranking in the resolver. */
-#define MUSIC_RESOLVE_CANDIDATES 8
 
 /* Albums/artists per 'library' page. (Search page sizes live in music_search.h.) */
 #define MUSIC_LIBRARY_PER_PAGE 50
@@ -128,7 +124,9 @@ static const treg_param_t music_params[] = {
        .name = "query",
        .description =
            "For 'play'/'search'/'enqueue': search terms — best as one artist, title, or album per "
-           "query (see the tool description for search rules). For 'select'/'remove': track "
+           "query (see the tool description for search rules). A track in both libraries plays "
+           "the local copy; add 'source:plex' or 'source:local' to use that library's copy. For "
+           "'select'/'remove': track "
            "number (1-based); 'remove' also accepts a title to match. For 'shuffle': 'on' or "
            "'off'. For 'repeat': 'none', 'all', or 'one'. For 'library': 'artists', 'albums' "
            "(add artist:'X' for that artist's albums), or omit for stats.",
@@ -215,7 +213,8 @@ static const treg_param_t music_params[] = {
        .name = "items",
        .description =
            "For 'play'/'enqueue': a list of track names or file paths to queue (names resolve to "
-           "the best match; paths from a 'search' result are exact). For 'search': a list of "
+           "the best match, and accept the same source: word; paths from a 'search' result are "
+           "exact). For 'search': a list of "
            "queries to run in one batch. Build playlists by collecting names/paths and passing "
            "them here.",
        .type = TOOL_PARAM_TYPE_ARRAY,
@@ -396,8 +395,9 @@ static int search_music_database(const char *query, Playlist *playlist) {
 
    int count = 0;
    /* Ranked, path-clean query so "play <bare query>" builds a playlist of real
-    * matches (folder-name false-positives dropped, best-first). */
-   music_query_t mq = { .text = query };
+    * matches (folder-name false-positives dropped, best-first).  Local copies
+    * only: this speaker can't stream Plex. */
+   music_query_t mq = { .text = query, .has_source = true, .source = MUSIC_SOURCE_LOCAL };
    if (music_db_query(&mq, results, MAX_PLAYLIST_LENGTH, &count) != SUCCESS) {
       free(results);
       return FAILURE;
@@ -424,9 +424,9 @@ static int search_music_database(const char *query, Playlist *playlist) {
 /**
  * @brief Resolve one free-text item (or path) to its best-match library track
  *
- * Mirrors the WebUI resolver: splits an optional "Artist - Title", runs a single
- * relevance-ranked, path-clean query on the title portion, then prefers a
- * candidate whose artist matches. Returns 1 on a match (fills @p out), 0 otherwise.
+ * An absolute path is looked up exactly; a name goes through
+ * music_search_resolve_item() with local copies only. Returns 1 on a match
+ * (fills @p out), 0 otherwise.
  */
 static int local_resolve_item(const char *item, music_search_result_t *out) {
    if (!item || !item[0]) {
@@ -445,35 +445,25 @@ static int local_resolve_item(const char *item, music_search_result_t *out) {
       return 0;
    }
 
-   music_search_result_t r[MUSIC_RESOLVE_CANDIDATES];
-   int count = 0;
+   /* A name: local copies only, since this speaker can't stream Plex */
+   return music_search_resolve_item(item, true, out) == SUCCESS ? 1 : 0;
+}
 
-   /* Split an optional "Artist - Title"; search the title (or whole item) and
-    * rank candidates by relevance so a bare/generic title ("Africa") doesn't
-    * pick the DB's alphabetical top row. */
-   const char *dash = strstr(item, " - ");
-   char artist[sizeof(out->artist)] = { 0 };
-   const char *title_query = item;
-   if (dash) {
-      size_t alen = (size_t)(dash - item);
-      if (alen >= sizeof(artist)) {
-         alen = sizeof(artist) - 1;
+/* Whether any item in a JSON array names a source this speaker can't play */
+static bool local_items_name_other_source(const char *items_json) {
+   struct json_object *arr = json_tokener_parse(items_json);
+   bool other = false;
+   if (arr && json_object_is_type(arr, json_type_array)) {
+      for (size_t i = 0; i < json_object_array_length(arr) && !other; i++) {
+         const char *item = json_object_get_string(json_object_array_get_idx(arr, i));
+         char stripped[MAX_FILENAME_LENGTH];
+         music_source_t asked = MUSIC_SOURCE_LOCAL;
+         other = item && music_query_take_source(item, stripped, sizeof(stripped), &asked) &&
+                 asked != MUSIC_SOURCE_LOCAL;
       }
-      memcpy(artist, item, alen);
-      artist[alen] = '\0';
-      title_query = dash + 3;
    }
-
-   /* Fetch path-clean, relevance-ranked candidates (strict matching — never the
-    * approximate fallback, since this plays what it finds), then apply the artist
-    * preference + shorter-title tiebreak. */
-   music_query_t mq = { .text = title_query };
-   if (music_db_query(&mq, r, MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS && count > 0) {
-      int pick = music_rank_pick_best(r, count, title_query, dash ? artist : NULL);
-      *out = r[pick];
-      return 1;
-   }
-   return 0;
+   json_object_put(arr);
+   return other;
 }
 
 /**
@@ -586,6 +576,16 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          size_t cap = strlen(value) + 1;
          char *items_json = malloc(cap);
          if (items_json && tool_param_extract_custom(value, "items", items_json, cap)) {
+            /* Asked for a source this speaker can't play: say so, keep what's
+             * playing (as a query does) */
+            if (local_items_name_other_source(items_json)) {
+               free(items_json);
+               if (direct_mode) {
+                  *should_respond = 0;
+                  return NULL;
+               }
+               return strdup(MUSIC_SEARCH_LOCAL_ONLY_TEXT);
+            }
             stop_current_playback();
             s_paused_position = 0;
             s_paused_sample_rate = 0;
@@ -626,6 +626,18 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             return NULL;
          }
          return strdup("Please specify what to play, or pass items:[...] for a track list.");
+      }
+
+      /* Asked for a source this speaker can't play: say so, keep what's playing */
+      char stripped[MAX_FILENAME_LENGTH];
+      music_source_t asked = MUSIC_SOURCE_LOCAL;
+      if (music_query_take_source(base, stripped, sizeof(stripped), &asked) &&
+          asked != MUSIC_SOURCE_LOCAL) {
+         if (direct_mode) {
+            *should_respond = 0;
+            return NULL;
+         }
+         return strdup(MUSIC_SEARCH_LOCAL_ONLY_TEXT);
       }
 
       /* Stop any current playback */

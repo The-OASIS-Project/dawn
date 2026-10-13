@@ -343,6 +343,121 @@ static void test_search_dedup_plex_only(void) {
    }
 }
 
+static void test_search_source_word(void) {
+   printf("\n--- test_search_source_word ---\n");
+   clear_tracks();
+
+   /* A track on both sources, plus one only on each */
+   insert_track("/music/both.flac", "Both Song", "Src Artist", "Src Album", "Rock", 0, 200);
+   insert_track("plex:/library/parts/1/both.mp3", "Both Song", "Src Artist", "Src Album", "Rock", 1,
+                200);
+   insert_track("/music/local.flac", "Local Song", "Src Artist", "Src Album", "Rock", 0, 150);
+   insert_track("plex:/library/parts/2/plex.mp3", "Plex Song", "Src Artist", "Src Album", "Rock", 1,
+                160);
+
+   music_search_result_t results[10];
+   int count = 0;
+
+   /* The Plex copy of a track the local library also has */
+   search_text("source:plex Both Song", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, results[0].source);
+
+   /* Anywhere in the text, any case */
+   search_text("Both Song SOURCE:Local", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_LOCAL, results[0].source);
+
+   /* On its own it lists that source, only where the caller shows results */
+   music_query_t list = { .text = "source:plex", .list_source = true };
+   count = 0;
+   music_db_query(&list, results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   for (int i = 0; i < count; i++) {
+      TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, results[i].source);
+   }
+   search_text("source:plex", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(0, count);
+
+   /* Too little left to search matches nothing, as that text alone would */
+   list.text = "source:plex X";
+   count = 0;
+   music_db_query(&list, results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(0, count);
+
+   /* Punctuation and tabs around the word */
+   search_text("Both Song (source:plex)", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, results[0].source);
+   search_text("Both Song\tsource:plex,", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, results[0].source);
+
+   /* Punctuation left behind isn't something to match */
+   list.text = "(source:plex)";
+   count = 0;
+   music_db_query(&list, results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+
+   /* The structured field does the same, and wins over a word in the text */
+   music_query_t q = { .text = "Both Song", .has_source = true, .source = MUSIC_SOURCE_PLEX };
+   count = 0;
+   music_db_query(&q, results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, results[0].source);
+   q.text = "source:local Both Song";
+   count = 0;
+   music_db_query(&q, results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, results[0].source);
+
+   /* Not a source word: an unknown name, or "source:" inside another word */
+   search_text("source:spotify Both Song", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(0, count);
+   search_text("xsource:plex Both Song", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(0, count);
+
+   /* A second copy from the same source (a library indexed twice) still collapses */
+   insert_track("plex:/library/parts/3/both.mp3", "Both Song", "Src Artist", "Src Album", "Rock", 1,
+                200);
+   search_text("source:plex Both Song", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+
+   /* Without one, the local copy still wins */
+   search_text("Both Song", results, 10, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_LOCAL, results[0].source);
+}
+
+static void test_query_take_source(void) {
+   printf("\n--- test_query_take_source ---\n");
+   char out[64];
+   music_source_t src = MUSIC_SOURCE_LOCAL;
+
+   TEST_ASSERT_TRUE(
+       music_query_take_source("Beatles - Something source:plex", out, sizeof(out), &src));
+   TEST_ASSERT_EQUAL_STRING("Beatles - Something ", out);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_PLEX, src);
+
+   TEST_ASSERT_TRUE(music_query_take_source("source:local abbey", out, sizeof(out), &src));
+   TEST_ASSERT_EQUAL_STRING(" abbey", out);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_LOCAL, src);
+
+   TEST_ASSERT_FALSE(music_query_take_source("abbey road", out, sizeof(out), &src));
+   TEST_ASSERT_FALSE(music_query_take_source("source:plexx abbey", out, sizeof(out), &src));
+   TEST_ASSERT_FALSE(music_query_take_source("source: plex", out, sizeof(out), &src));
+   TEST_ASSERT_FALSE(music_query_take_source(NULL, out, sizeof(out), &src));
+
+   /* The rest doesn't fit: nothing taken */
+   char tiny[4];
+   TEST_ASSERT_FALSE(music_query_take_source("source:plex abbey", tiny, sizeof(tiny), &src));
+
+   /* In place */
+   char buf[32] = "abbey source:plex road";
+   TEST_ASSERT_TRUE(music_query_take_source(buf, buf, sizeof(buf), &src));
+   TEST_ASSERT_EQUAL_STRING("abbey  road", buf);
+}
+
 static void test_search_dedup_case_insensitive(void) {
    printf("\n--- test_search_dedup_case_insensitive ---\n");
    clear_tracks();
@@ -1033,6 +1148,8 @@ int main(void) {
    RUN_TEST(test_search_by_genre);
    RUN_TEST(test_search_dedup_local_wins);
    RUN_TEST(test_search_dedup_plex_only);
+   RUN_TEST(test_search_source_word);
+   RUN_TEST(test_query_take_source);
    RUN_TEST(test_search_dedup_case_insensitive);
    RUN_TEST(test_search_dedup_different_titles);
    RUN_TEST(test_search_like_escaping);

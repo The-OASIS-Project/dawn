@@ -700,7 +700,7 @@ void handle_music_search(ws_connection_t *conn, struct json_object *payload) {
    int count = 0;
    /* Ranked, path-clean query so the browser search box matches the assistant's
     * results (real artist first, folder-name false-positives dropped). */
-   music_query_t mq = { .text = query };
+   music_query_t mq = { .text = query, .list_source = true };
    if (music_db_query(&mq, results, limit, &count) != SUCCESS) {
       free(results);
       webui_music_send_error(conn, "SEARCH_FAILED", "Music search failed");

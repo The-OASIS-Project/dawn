@@ -37,7 +37,6 @@
 #include <strings.h>
 
 #include "audio/music_db.h"
-#include "audio/music_rank.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
 #include "core/strbuf.h"
@@ -54,9 +53,6 @@
 
 /* "Artist - Title" display string size for resolved items. */
 #define WEBUI_MUSIC_DISPLAY_MAX (WEBUI_MUSIC_STRING_MAX * 2)
-
-/* Candidate window pulled from the DB for relevance ranking in the resolver. */
-#define WEBUI_MUSIC_RESOLVE_CANDIDATES 8
 
 /* =============================================================================
  * LLM-facing helpers: state footer, item resolution, batch apply + report
@@ -157,12 +153,9 @@ static char *result_with_footer(session_music_state_t *state, const char *msg) {
 /**
  * @brief Resolve a free-text track name or library path to a playable path
  *
- * Accepts an absolute library path (exact lookup) or a name (best-match
- * search). For an "Artist - Title" item we search the TITLE portion (spaces are
- * intra-field wildcards, so the combined form usually misses) and prefer a
- * candidate whose artist matches the artist portion — this disambiguates
- * generic titles (e.g. "Toto - Africa" picks Toto's track, not an unrelated
- * top match). Returns SUCCESS and fills path_out (+ optional display).
+ * Accepts an absolute library path (exact lookup) or a name (best match, see
+ * music_search_resolve_item()). Returns SUCCESS and fills path_out (+ optional
+ * display).
  */
 static int resolve_item_to_path(const char *item,
                                 char *path_out,
@@ -173,8 +166,7 @@ static int resolve_item_to_path(const char *item,
       return FAILURE;
    }
 
-   music_search_result_t r[WEBUI_MUSIC_RESOLVE_CANDIDATES];
-   int count = 0;
+   music_search_result_t r;
 
    /* Exact library path → exact lookup. webui_music_is_path_valid() accepts both
     * local absolute paths and validated plex: paths (the forms 'search' returns),
@@ -182,48 +174,22 @@ static int resolve_item_to_path(const char *item,
     * below. Doubles as defense in depth (no out-of-library file). */
    if (webui_music_is_path_valid(item)) {
       bool found = false;
-      if (music_db_get_by_path(item, &r[0], &found) == SUCCESS && found) {
-         safe_strncpy(path_out, r[0].path, path_len);
-         if (display_out) {
-            /* Format into a full-size buffer (can't truncate → no
-             * -Wformat-truncation), then copy-truncate into the caller's. */
-            char label[2 * AUDIO_METADATA_STRING_MAX + 4];
-            snprintf(label, sizeof(label), "%s - %s", r[0].artist, r[0].title);
-            safe_strncpy(display_out, label, display_len);
-         }
-         return SUCCESS;
+      if (music_db_get_by_path(item, &r, &found) != SUCCESS || !found) {
+         return FAILURE;
       }
+   } else if (music_search_resolve_item(item, false, &r) != SUCCESS) {
       return FAILURE;
    }
 
-   /* Split an optional "Artist - Title"; the title (or whole item) drives a
-    * ranked query and the picker then prefers the matching artist. */
-   const char *dash = strstr(item, " - ");
-   char artist[sizeof(r[0].artist)] = { 0 };
-   const char *title_query = item;
-   if (dash) {
-      size_t alen = (size_t)(dash - item);
-      if (alen >= sizeof(artist)) {
-         alen = sizeof(artist) - 1;
-      }
-      memcpy(artist, item, alen);
-      artist[alen] = '\0';
-      title_query = dash + 3;
+   safe_strncpy(path_out, r.path, path_len);
+   if (display_out) {
+      /* Format into a full-size buffer (can't truncate → no
+       * -Wformat-truncation), then copy-truncate into the caller's. */
+      char label[2 * AUDIO_METADATA_STRING_MAX + 4];
+      snprintf(label, sizeof(label), "%s - %s", r.artist, r.title);
+      safe_strncpy(display_out, label, display_len);
    }
-
-   /* Path-clean, relevance-ranked candidates, then artist preference + tiebreak. */
-   music_query_t mq = { .text = title_query };
-   if (music_db_query(&mq, r, WEBUI_MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS && count > 0) {
-      int pick = music_rank_pick_best(r, count, title_query, dash ? artist : NULL);
-      safe_strncpy(path_out, r[pick].path, path_len);
-      if (display_out) {
-         char label[2 * AUDIO_METADATA_STRING_MAX + 4];
-         snprintf(label, sizeof(label), "%s - %s", r[pick].artist, r[pick].title);
-         safe_strncpy(display_out, label, display_len);
-      }
-      return SUCCESS;
-   }
-   return FAILURE;
+   return SUCCESS;
 }
 
 /**
