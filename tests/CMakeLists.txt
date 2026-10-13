@@ -703,6 +703,36 @@ dawn_add_unit_test(test_audio_metadata
    INCLUDES ${SRC_ROOT}/common/include
    LABEL   ci)
 
+dawn_add_unit_test(test_audio_downmix
+   SOURCES test_audio_downmix.c
+           ${SRC_ROOT}/src/audio/audio_downmix.c
+   LIBS    unity
+   INCLUDES ${SRC_ROOT}/src/audio
+   LABEL   ci)
+
+# audio_decoder.c registers the MP3/Ogg decoders when the build enables them
+set(DECODER_TEST_SOURCES
+   ${SRC_ROOT}/src/audio/audio_decoder.c
+   ${SRC_ROOT}/src/audio/flac_decoder.c
+   ${SRC_ROOT}/src/audio/audio_downmix.c
+   ${SRC_ROOT}/src/audio/audio_metadata_util.c
+   ${SRC_ROOT}/src/core/path_utils.c)
+set(DECODER_TEST_LIBS dawn_common unity FLAC)
+if(DAWN_ENABLE_MP3)
+   list(APPEND DECODER_TEST_SOURCES ${SRC_ROOT}/src/audio/mp3_decoder.c)
+   list(APPEND DECODER_TEST_LIBS ${MPG123_LIBRARIES})
+endif()
+if(DAWN_ENABLE_OGG)
+   list(APPEND DECODER_TEST_SOURCES ${SRC_ROOT}/src/audio/ogg_decoder.c)
+   list(APPEND DECODER_TEST_LIBS ${VORBISFILE_LIBRARIES} ${VORBIS_LIBRARIES})
+endif()
+
+dawn_add_unit_test(test_audio_decoder_channels
+   SOURCES test_audio_decoder_channels.c ${DECODER_TEST_SOURCES}
+   LIBS    ${DECODER_TEST_LIBS}
+   INCLUDES ${SRC_ROOT}/src/audio
+   LABEL   ci)
+
 dawn_add_unit_test(test_music_search
    SOURCES test_music_search.c
            ${SRC_ROOT}/src/tools/music_search.c

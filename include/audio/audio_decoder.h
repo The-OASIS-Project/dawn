@@ -116,8 +116,9 @@ typedef struct audio_decoder audio_decoder_t;
  */
 typedef struct {
    uint32_t sample_rate;       /**< Sample rate in Hz (e.g., 44100, 48000) */
-   uint8_t channels;           /**< Number of channels (1=mono, 2=stereo) */
-   uint8_t bits_per_sample;    /**< Bits per sample (typically 16 or 24) */
+   uint8_t channels;           /**< Channels read() returns: 1=mono, 2=stereo.  A file with
+                                    more is downmixed to stereo (ITU-R BS.775) */
+   uint8_t bits_per_sample;    /**< The file's bit depth (read() always returns 16-bit) */
    uint64_t total_samples;     /**< Total samples (per channel), 0 if unknown */
    audio_format_type_t format; /**< Detected audio format */
 } audio_decoder_info_t;

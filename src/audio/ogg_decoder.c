@@ -33,7 +33,9 @@
 
 #include "audio/audio_decoder.h"
 #include "audio_decoder_internal.h"
+#include "audio_downmix.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -41,8 +43,8 @@
  * Constants
  * ============================================================================= */
 
-/* Maximum channels we support (stereo) */
-#define OGG_MAX_CHANNELS 2
+/* Channels handed to the caller: a file with more is downmixed to stereo */
+#define OGG_OUTPUT_CHANNELS 2
 
 /* =============================================================================
  * Ogg Vorbis Decoder Handle
@@ -63,8 +65,12 @@ typedef struct {
 
    /* Stream info */
    long sample_rate;
-   int channels;
+   int channels;     /* Channels in the file */
+   int out_channels; /* Channels returned by read(): the file's, at most 2 */
    ogg_int64_t total_samples;
+
+   /* Weights for a file with more than OGG_OUTPUT_CHANNELS channels */
+   audio_downmix_t downmix;
 
    /* Current logical bitstream index (for chained streams) */
    int current_section;
@@ -133,6 +139,18 @@ audio_decoder_t *ogg_decoder_open(const char *path) {
 
    handle->sample_rate = vi->rate;
    handle->channels = vi->channels;
+   handle->out_channels = vi->channels > OGG_OUTPUT_CHANNELS ? OGG_OUTPUT_CHANNELS : vi->channels;
+
+   if (handle->channels > OGG_OUTPUT_CHANNELS) {
+      if (audio_downmix_init(&handle->downmix, handle->channels, AUDIO_CHANNEL_ORDER_VORBIS) !=
+          SUCCESS) {
+         OLOG_ERROR("Ogg: can't downmix %d channels: %s", handle->channels, path);
+         ov_clear(&handle->vf);
+         free(handle);
+         return NULL;
+      }
+      OLOG_INFO("Ogg: downmixing %d channels to stereo", handle->channels);
+   }
 
    /* Get total samples (returns -1 for unseekable streams) */
    handle->total_samples = ov_pcm_total(&handle->vf, -1);
@@ -166,12 +184,29 @@ int ogg_decoder_get_info(audio_decoder_t *dec, audio_decoder_info_t *info) {
    ogg_decoder_handle_t *handle = (ogg_decoder_handle_t *)dec;
 
    info->sample_rate = (uint32_t)handle->sample_rate;
-   info->channels = (uint8_t)handle->channels;
+   info->channels = (uint8_t)handle->out_channels;
    info->bits_per_sample = 16; /* We request 16-bit output */
    info->total_samples = handle->total_samples >= 0 ? (uint64_t)handle->total_samples : 0;
    info->format = AUDIO_FORMAT_OGG_VORBIS;
 
    return AUDIO_DECODER_SUCCESS;
+}
+
+/*
+ * A chained stream can change its channel count or rate between sections, but
+ * the caller's buffer, the downmix and the caller's resampler are set up from
+ * the first.  A section that differs ends the track (its data is discarded)
+ * rather than being misread or played at the wrong pitch.
+ */
+static bool ogg_section_matches(ogg_decoder_handle_t *handle) {
+   vorbis_info *vi = ov_info(&handle->vf, -1);
+   if (vi && vi->channels == handle->channels && vi->rate == handle->sample_rate) {
+      return true;
+   }
+   OLOG_ERROR("Ogg: chained section is %d ch %ld Hz, stream is %d ch %ld Hz", vi ? vi->channels : 0,
+              vi ? vi->rate : 0L, handle->channels, handle->sample_rate);
+   handle->error = true;
+   return false;
 }
 
 ssize_t ogg_decoder_read(audio_decoder_t *dec, int16_t *buffer, size_t max_frames) {
@@ -189,22 +224,42 @@ ssize_t ogg_decoder_read(audio_decoder_t *dec, int16_t *buffer, size_t max_frame
       return 0;
    }
 
-   size_t bytes_wanted = max_frames * handle->channels * sizeof(int16_t);
+   size_t frame_bytes = (size_t)handle->out_channels * sizeof(int16_t);
+   size_t bytes_wanted = max_frames * frame_bytes;
    size_t bytes_read = 0;
    char *buf_ptr = (char *)buffer;
 
    while (bytes_read < bytes_wanted) {
-      /* Read up to bytes_wanted bytes
-       * Parameters: vf, buffer, length, bigendianp, word, sgned, current_section
-       * - bigendianp: 0 for little-endian
-       * - word: 2 for 16-bit samples
-       * - sgned: 1 for signed samples
-       */
-      long result = ov_read(&handle->vf, buf_ptr + bytes_read, (int)(bytes_wanted - bytes_read),
-                            0, /* little-endian */
-                            2, /* 16-bit */
-                            1, /* signed */
-                            &handle->current_section);
+      long result;
+      if (handle->channels > OGG_OUTPUT_CHANNELS) {
+         /* Planar float, downmixed into the caller's stereo buffer */
+         float **pcm = NULL;
+         int frames_left = (int)((bytes_wanted - bytes_read) / frame_bytes);
+         result = ov_read_float(&handle->vf, &pcm, frames_left, &handle->current_section);
+         if (result > 0) {
+            if (!ogg_section_matches(handle)) {
+               break;
+            }
+            audio_downmix_float(&handle->downmix, (const float *const *)pcm, (size_t)result,
+                                (int16_t *)(buf_ptr + bytes_read));
+            result *= (long)frame_bytes;
+         }
+      } else {
+         /* Read up to bytes_wanted bytes
+          * Parameters: vf, buffer, length, bigendianp, word, sgned, current_section
+          * - bigendianp: 0 for little-endian
+          * - word: 2 for 16-bit samples
+          * - sgned: 1 for signed samples
+          */
+         result = ov_read(&handle->vf, buf_ptr + bytes_read, (int)(bytes_wanted - bytes_read),
+                          0, /* little-endian */
+                          2, /* 16-bit */
+                          1, /* signed */
+                          &handle->current_section);
+         if (result > 0 && !ogg_section_matches(handle)) {
+            break;
+         }
+      }
 
       if (result == 0) {
          /* EOF */
@@ -241,8 +296,12 @@ ssize_t ogg_decoder_read(audio_decoder_t *dec, int16_t *buffer, size_t max_frame
       }
    }
 
+   if (handle->error && bytes_read == 0) {
+      return -AUDIO_DECODER_ERR_READ;
+   }
+
    /* Convert bytes to frames */
-   size_t frames_read = bytes_read / (handle->channels * sizeof(int16_t));
+   size_t frames_read = bytes_read / frame_bytes;
    return (ssize_t)frames_read;
 }
 
