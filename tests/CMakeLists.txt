@@ -724,14 +724,14 @@ if(DAWN_ENABLE_MP3)
 endif()
 if(DAWN_ENABLE_OGG)
    list(APPEND DECODER_TEST_SOURCES ${SRC_ROOT}/src/audio/ogg_decoder.c)
-   # vorbisenc writes the test's 5.1 Vorbis file (it ships with libvorbis-dev)
-   list(APPEND DECODER_TEST_LIBS ${VORBISFILE_LIBRARIES} ${VORBIS_LIBRARIES} vorbisenc ogg m)
+   list(APPEND DECODER_TEST_LIBS ${VORBISFILE_LIBRARIES} ${VORBIS_LIBRARIES})
 endif()
 
 dawn_add_unit_test(test_audio_decoder_channels
    SOURCES test_audio_decoder_channels.c ${DECODER_TEST_SOURCES}
-   LIBS    ${DECODER_TEST_LIBS}
+   LIBS    ${DECODER_TEST_LIBS} m
    INCLUDES ${SRC_ROOT}/src/audio
+   DEFINES DECODER_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio"
    LABEL   ci)
 
 dawn_add_unit_test(test_music_search
