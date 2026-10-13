@@ -718,11 +718,17 @@
                // plain next would skip it
                action = 'play_index';
                opts = { index: held.queue_index || 0 };
-            } else if (action === 'pause' && !held.playing) {
-               // Pausing the queue's last seconds: it has already stopped
-               // server-side, so just silence the tail
+            } else if (!held.playing && (action === 'pause' || action === 'next')) {
+               // The queue's last seconds: it has already stopped server-side
+               // (its index reset to 0), and nothing follows the heard track.
+               // Just silence the tail.
                flushWorklet();
                return;
+            } else if (!held.playing && action === 'previous') {
+               // The server's index is already back at 0: go to the track before
+               // the heard one (or restart it if it's the only one)
+               action = 'play_index';
+               opts = { index: Math.max(0, heardIndex - 1) };
             }
          }
       }

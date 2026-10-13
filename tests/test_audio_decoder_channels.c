@@ -17,14 +17,19 @@
  * the project author(s).
  *
  * Unit tests for the decoder channel contract: audio_decoder_read() returns
- * mono or stereo only, so a 5.1 FLAC is downmixed into a stereo-sized buffer
- * (it used to be refused, and played as a silently skipped track).
+ * mono or stereo only, so a 5.1 FLAC or Ogg Vorbis file is downmixed into a
+ * stereo-sized buffer.  (FLAC used to refuse it and play a silently skipped
+ * track; Ogg wrote all six channels and overran the caller's buffer.)
  */
 
 #include <FLAC/stream_encoder.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef DAWN_ENABLE_OGG
+#include <vorbis/vorbisenc.h>
+#endif
 
 #include "audio/audio_decoder.h"
 #include "unity.h"
@@ -142,10 +147,120 @@ static void test_stereo_flac_is_unchanged(void) {
    audio_decoder_close(dec);
 }
 
+#ifdef DAWN_ENABLE_OGG
+/* Write all pending pages of an Ogg stream to fp */
+static void write_pages(ogg_stream_state *os, FILE *fp, bool flush) {
+   ogg_page og;
+   while (flush ? ogg_stream_flush(os, &og) : ogg_stream_pageout(os, &og)) {
+      fwrite(og.header, 1, (size_t)og.header_len, fp);
+      fwrite(og.body, 1, (size_t)og.body_len, fp);
+   }
+}
+
+/* Write a Vorbis file with a 440 Hz sine on one channel, silence elsewhere */
+static void write_vorbis(int channels, int tone_channel) {
+   snprintf(s_path, sizeof(s_path), "/tmp/dawn_test_chXXXXXX.ogg");
+   int fd = mkstemps(s_path, 4);
+   TEST_ASSERT_TRUE(fd >= 0);
+   FILE *fp = fdopen(fd, "wb");
+   TEST_ASSERT_NOT_NULL(fp);
+
+   vorbis_info vi;
+   vorbis_comment vc;
+   vorbis_dsp_state vd;
+   vorbis_block vb;
+   ogg_stream_state os;
+   vorbis_info_init(&vi);
+   TEST_ASSERT_EQUAL_INT(0, vorbis_encode_init_vbr(&vi, channels, RATE, 0.5f));
+   vorbis_comment_init(&vc);
+   vorbis_analysis_init(&vd, &vi);
+   vorbis_block_init(&vd, &vb);
+   ogg_stream_init(&os, 1);
+
+   ogg_packet header, header_comm, header_code;
+   vorbis_analysis_headerout(&vd, &vc, &header, &header_comm, &header_code);
+   ogg_stream_packetin(&os, &header);
+   ogg_stream_packetin(&os, &header_comm);
+   ogg_stream_packetin(&os, &header_code);
+   write_pages(&os, fp, true);
+
+   float **buf = vorbis_analysis_buffer(&vd, FRAMES);
+   for (int ch = 0; ch < channels; ch++) {
+      for (int i = 0; i < FRAMES; i++) {
+         buf[ch][i] = ch == tone_channel ? 0.5f * sinf(2.0f * (float)M_PI * 440.0f * i / RATE)
+                                         : 0.0f;
+      }
+   }
+   vorbis_analysis_wrote(&vd, FRAMES);
+   vorbis_analysis_wrote(&vd, 0); /* end of stream */
+
+   ogg_packet op;
+   while (vorbis_analysis_blockout(&vd, &vb) == 1) {
+      vorbis_analysis(&vb, NULL);
+      vorbis_bitrate_addblock(&vb);
+      while (vorbis_bitrate_flushpacket(&vd, &op)) {
+         ogg_stream_packetin(&os, &op);
+         write_pages(&os, fp, false);
+      }
+   }
+   write_pages(&os, fp, true);
+
+   ogg_stream_clear(&os);
+   vorbis_block_clear(&vb);
+   vorbis_dsp_clear(&vd);
+   vorbis_comment_clear(&vc);
+   vorbis_info_clear(&vi);
+   fclose(fp);
+}
+
+static void test_51_ogg_reads_as_stereo(void) {
+   write_vorbis(6, 0); /* sine on front left (Vorbis order: L C R ...) */
+   audio_decoder_t *dec = audio_decoder_open(s_path);
+   TEST_ASSERT_NOT_NULL(dec);
+
+   audio_decoder_info_t info;
+   TEST_ASSERT_EQUAL_INT(AUDIO_DECODER_SUCCESS, audio_decoder_get_info(dec, &info));
+   TEST_ASSERT_EQUAL_UINT8(2, info.channels);
+
+   /* Stereo-sized buffer with a canary after it: six channels written here
+    * is the overrun this test guards against */
+   int16_t buf[READ_FRAMES * 2 + 16];
+   for (int i = READ_FRAMES * 2; i < READ_FRAMES * 2 + 16; i++) {
+      buf[i] = CANARY;
+   }
+   double sum_l = 0.0;
+   double sum_r = 0.0;
+   long total = 0;
+   ssize_t n;
+   while ((n = audio_decoder_read(dec, buf, READ_FRAMES)) > 0) {
+      for (ssize_t i = 0; i < n; i++) {
+         sum_l += (double)buf[i * 2] * buf[i * 2];
+         sum_r += (double)buf[i * 2 + 1] * buf[i * 2 + 1];
+      }
+      total += n;
+   }
+   TEST_ASSERT_EQUAL_INT(0, n);
+   for (int i = READ_FRAMES * 2; i < READ_FRAMES * 2 + 16; i++) {
+      TEST_ASSERT_EQUAL_HEX16(CANARY, (uint16_t)buf[i]);
+   }
+   TEST_ASSERT_TRUE(total >= FRAMES / 2);
+
+   /* Front left stays left (lossy, so compare energy, not samples) */
+   double rms_l = sqrt(sum_l / (double)total);
+   double rms_r = sqrt(sum_r / (double)total);
+   TEST_ASSERT_TRUE(rms_l > 1000.0);
+   TEST_ASSERT_TRUE(rms_r < rms_l / 20.0);
+   audio_decoder_close(dec);
+}
+#endif
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_51_flac_reads_as_stereo);
    RUN_TEST(test_51_flac_drops_lfe);
    RUN_TEST(test_stereo_flac_is_unchanged);
+#ifdef DAWN_ENABLE_OGG
+   RUN_TEST(test_51_ogg_reads_as_stereo);
+#endif
    return UNITY_END();
 }

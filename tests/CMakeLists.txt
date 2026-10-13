@@ -724,7 +724,8 @@ if(DAWN_ENABLE_MP3)
 endif()
 if(DAWN_ENABLE_OGG)
    list(APPEND DECODER_TEST_SOURCES ${SRC_ROOT}/src/audio/ogg_decoder.c)
-   list(APPEND DECODER_TEST_LIBS ${VORBISFILE_LIBRARIES} ${VORBIS_LIBRARIES})
+   # vorbisenc writes the test's 5.1 Vorbis file (it ships with libvorbis-dev)
+   list(APPEND DECODER_TEST_LIBS ${VORBISFILE_LIBRARIES} ${VORBIS_LIBRARIES} vorbisenc ogg m)
 endif()
 
 dawn_add_unit_test(test_audio_decoder_channels
