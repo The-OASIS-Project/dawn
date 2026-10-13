@@ -166,6 +166,10 @@ typedef struct {
     *  WebSocket thread never waits one out.  Other requests don't take the lock. */
    atomic_bool control_cancel;
 
+   /** A Plex track is being downloaded before it can play (state_mutex):
+    *  music_state carries loading:true, so a client doesn't expect audio */
+   bool loading;
+
    /** Auto-advance picked the next track and is opening it (state_mutex).
     *  Left set if a stop interrupts the open, so a seek that did it knows to
     *  carry on with that track; cleared once a decoder is installed. */

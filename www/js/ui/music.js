@@ -91,6 +91,7 @@
       seekTarget: 0, // Optimistic seek/track-change position (s), shown until the server confirms
       seekPendingUntil: 0, // ms epoch: suppress stale pre-seek position echoes until then
       trackChangePending: false, // optimistic next/prev/play_index in flight (see changeTrack)
+      shownPositionSec: 0, // last position rendered (audible, not the decode position)
    };
 
    // Optimistic-UI timing. Coupled: an echo must converge to the target within the
@@ -533,7 +534,8 @@
       if (dur <= 0) return;
       // Accumulate off the pending optimistic target so repeated presses add up.
       const pending = localState.seekPendingUntil && Date.now() < localState.seekPendingUntil;
-      const base = pending ? localState.seekTarget : st.positionSec || 0;
+      // The shown (audible) position: the raw decode position runs ~2 s ahead
+      const base = pending ? localState.seekTarget : localState.shownPositionSec;
       let target;
       switch (e.key) {
          case 'ArrowRight':
@@ -892,6 +894,7 @@
     * @param {number} durationSec
     */
    function applyProgress(positionSec, durationSec) {
+      localState.shownPositionSec = positionSec;
       if (elements.progressFill && durationSec > 0) {
          elements.progressFill.style.width = `${(positionSec / durationSec) * 100}%`;
       }

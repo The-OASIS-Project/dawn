@@ -519,6 +519,7 @@ static void webui_music_send_state_impl(ws_connection_t *conn,
    queue_index = state->queue_index;
    bool playing = state->playing;
    bool paused = state->paused;
+   bool loading = state->loading;
    double position_sec = 0.0;
    if (state->source_rate > 0) {
       position_sec = (double)state->position_frames / state->source_rate;
@@ -544,6 +545,9 @@ static void webui_music_send_state_impl(ws_connection_t *conn,
    struct json_object *payload = json_object_new_object();
    json_object_object_add(payload, "playing", json_object_new_boolean(playing));
    json_object_object_add(payload, "paused", json_object_new_boolean(paused));
+   if (loading) {
+      json_object_object_add(payload, "loading", json_object_new_boolean(true));
+   }
 
    /* Tag a natural end-of-track advance so the client keeps its buffer (gapless):
     * with the server running a lead, EOF fires ~2s before the user hears the
@@ -768,6 +772,29 @@ static audio_decoder_t *music_open_track(const char *path,
 }
 
 /**
+ * @brief Tell the client a Plex track is downloading before it can play
+ *
+ * Sends music_state with loading:true and the track at the session's queue
+ * index (position 0).  Only for plex: paths; a local open is immediate.  The
+ * caller clears state->loading once the open returns.
+ *
+ * @param advance_auto Tag the frame as part of a natural advance
+ */
+static void music_announce_loading(ws_connection_t *conn,
+                                   session_music_state_t *state,
+                                   const char *path,
+                                   bool advance_auto) {
+   if (music_source_from_path(path) != MUSIC_SOURCE_PLEX) {
+      return;
+   }
+   pthread_mutex_lock(&state->state_mutex);
+   state->loading = true;
+   state->position_frames = 0;
+   pthread_mutex_unlock(&state->state_mutex);
+   webui_music_send_state_impl(conn, state, advance_auto);
+}
+
+/**
  * @brief Install a freshly opened decoder (state_mutex held)
  *
  * The resampler always runs stereo: the stream thread expands mono before
@@ -881,13 +908,16 @@ static music_advance_t music_advance(session_music_state_t *state,
          state->playing = false;
          if (end_of_queue) {
             state->queue_index = 0;
+            state->position_frames = 0; /* nothing is loaded; don't report the old end */
          }
          pthread_mutex_unlock(&state->state_mutex);
          pthread_mutex_unlock(&uq->queue_mutex);
          if (stop_error) {
             webui_music_send_error(conn, "DECODE_ERROR", stop_error);
          }
-         webui_music_send_state(conn, state);
+         /* Tagged like a natural advance: the client still holds the ended
+          * track's last ~2 s and plays them out before showing the stop */
+         webui_music_send_state_impl(conn, state, true);
          return MUSIC_ADVANCE_STOPPED;
       }
 
@@ -912,11 +942,13 @@ static music_advance_t music_advance(session_music_state_t *state,
        * download, so its join waits about a second at most.  Every path that
        * replaces the decoder stops this thread first, so nothing else installs
        * one meanwhile. */
+      music_announce_loading(conn, state, next_path, true);
       bool unreachable = false;
       audio_decoder_t *next_decoder = music_open_track(next_path, &state->stop_requested,
                                                        &unreachable);
 
       pthread_mutex_lock(&state->state_mutex);
+      state->loading = false;
       if (atomic_load(&state->stop_requested)) {
          /* Whoever stopped us decides what plays next; until then nothing is */
          state->playing = false;
@@ -933,7 +965,7 @@ static music_advance_t music_advance(session_music_state_t *state,
          state->playing = false;
          pthread_mutex_unlock(&state->state_mutex);
          webui_music_send_error(conn, "PLEX_UNREACHABLE", "The Plex server isn't reachable");
-         webui_music_send_state(conn, state);
+         webui_music_send_state_impl(conn, state, true); /* see the stop above */
          return MUSIC_ADVANCE_STOPPED;
       }
       if (!next_decoder || music_install_decoder(state, next_decoder) != SUCCESS) {
@@ -1049,10 +1081,12 @@ static void *music_stream_thread(void *arg) {
          stream_start_time = 0;
          frames_sent = 0;
          state->resample_accum_count = 0;
-         /* Resume is a client-flush boundary (the client clears its worklet on
-          * resume), so the client buffer is empty — reset the estimate to refill
-          * from scratch. (Natural auto-advance, by contrast, is gapless and must
-          * NOT reset the estimate; it stays continuous across the boundary.) */
+         /* Reset the estimate on resume.  A client resuming from a pause keeps its
+          * frozen buffer (it suspends playback rather than flushing), so this
+          * briefly over-refills until its next buffer report corrects the
+          * estimate; one resuming from a stop or seek has flushed. (Natural auto-advance, by
+          * contrast, is gapless and must NOT reset the estimate; it stays continuous across the
+          * boundary.) */
          est_buffered_us = 0;
       }
 
@@ -1350,9 +1384,11 @@ int webui_music_start_playback(session_music_state_t *state, const char *path) {
    /* Blocks the caller for a Plex download.  On the WebSocket thread that's
     * acceptable on a home LAN; on another thread (the LLM tool) a WebSocket
     * request waiting for control_mutex cancels it via control_cancel. */
+   music_announce_loading(state->conn, state, path, false);
    audio_decoder_t *decoder = music_open_track(path, &state->control_cancel, NULL);
 
    pthread_mutex_lock(&state->state_mutex);
+   state->loading = false;
 
    /* Close any existing decoder */
    if (state->decoder) {

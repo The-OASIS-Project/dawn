@@ -518,8 +518,10 @@
    /** Resume a suspended AudioContext (call on the play/control user gesture — the
     *  worker path never sees the audio data, so resume can't ride on data arrival). */
    function resumeContext() {
-      if (audioContext && audioContext.state === 'suspended') {
-         audioContext.resume().catch(() => {});
+      // Unconditional: right after a pause, state can still read 'running' while
+      // the suspend is pending, and resume() queues behind it either way
+      if (audioContext && audioContext.state !== 'closed') {
+         audioContext.resume().catch((e) => console.warn('Music playback: resume failed:', e));
       }
    }
 
@@ -559,8 +561,10 @@
          await initOpusDecoder();
       }
 
-      // Resume context if suspended (browser autoplay policy)
-      if (audioContext && audioContext.state === 'suspended') {
+      // Resume context if suspended (browser autoplay policy) — but not while
+      // paused: frames still in flight would undo the pause's freeze and drain
+      // the buffered lead silently
+      if (audioContext && audioContext.state === 'suspended' && state.playing && !state.paused) {
          await audioContext.resume();
       }
 
@@ -673,6 +677,7 @@
 
       DawnWS.send({ type: 'music_unsubscribe' });
 
+      clearPendingAdvance();
       state.subscribed = false;
       state.playing = false;
       state.paused = false;
@@ -691,6 +696,37 @@
     * @param {object} opts - Additional options (query for play, position_sec for seek)
     */
    function control(action, opts = {}) {
+      if (pendingAdvance) {
+         // The server has already moved on (to the next track, or to a stop at
+         // the queue's end); the user still hears the previous track.  Act on
+         // what was meant for the track being heard.
+         const held = pendingAdvance.payload;
+         const heardIndex = state.queueIndex;
+         const movedToNext = held.playing && (held.queue_index || 0) !== heardIndex;
+         clearPendingAdvance();
+         if (action === 'seek') {
+            // A seek on the heard track: it's gone server-side, so start it again
+            // at the target (the seek below follows) rather than show the next one
+            DawnWS.send({
+               type: 'music_control',
+               payload: { action: 'play_index', index: heardIndex },
+            });
+         } else {
+            applyStateUpdate(held);
+            if (action === 'next' && movedToNext) {
+               // "Next" from the heard track is the one the server moved to; a
+               // plain next would skip it
+               action = 'play_index';
+               opts = { index: held.queue_index || 0 };
+            } else if (action === 'pause' && !held.playing) {
+               // Pausing the queue's last seconds: it has already stopped
+               // server-side, so just silence the tail
+               flushWorklet();
+               return;
+            }
+         }
+      }
+
       // Clear audio buffer immediately for actions that change playback position
       // (optimistic — before the server echoes music_state) so the UI feels responsive.
       const bufferClearActions = ['seek', 'next', 'previous', 'play_index', 'stop'];
@@ -737,13 +773,74 @@
       });
    }
 
+   // The server reaches the end of a track ~bufferedMs before the listener does
+   // (it streams that far ahead). A state it tags advance:'auto' (the next track,
+   // or the queue's natural end) is held until the buffered tail has played, so
+   // the title and counter change when the listener hears it, and a natural stop
+   // doesn't flush the last seconds of the final track.
+   let pendingAdvance = null; // { payload, applyAt (performance.now ms), timer }
+
+   function clearPendingAdvance() {
+      if (pendingAdvance) {
+         clearTimeout(pendingAdvance.timer);
+         pendingAdvance = null;
+      }
+   }
+
    /**
     * Handle music state update from server
     * @param {object} payload - State payload
     */
    function handleStateUpdate(payload) {
+      if (pendingAdvance && payload.advance === 'auto') {
+         // The same transition, further along (a Plex track loading, then
+         // ready; or the stop after a failed load): replace the held state and
+         // keep its timer, which ends when the previous track's audio does
+         pendingAdvance.payload = payload;
+         return;
+      }
+
+      let landedHold = false;
+      if (pendingAdvance) {
+         // A newer state supersedes the wait: land the held one first, so the
+         // track comparison below starts from what the user is hearing.
+         const held = pendingAdvance.payload;
+         clearPendingAdvance();
+         applyStateUpdate(held);
+         landedHold = true;
+      }
+
+      const leadMs = state.bufferedMs || 0;
+      if (payload.advance === 'auto' && state.playing && !state.paused && leadMs > 0) {
+         pendingAdvance = {
+            payload,
+            applyAt: performance.now() + leadMs,
+            timer: setTimeout(() => {
+               const held = pendingAdvance.payload;
+               pendingAdvance = null;
+               if (callbacks.onPositionUpdate && state.durationSec > 0) {
+                  callbacks.onPositionUpdate(state.durationSec, state.durationSec);
+               }
+               applyStateUpdate(held);
+            }, leadMs),
+         };
+         return;
+      }
+      applyStateUpdate(payload, landedHold);
+   }
+
+   /**
+    * Apply a music state from the server to local state and audio output
+    * @param {object} payload - State payload
+    * @param {boolean} [afterHold] - A held state was just landed: its position is
+    *    the next track's start, while this one reports the server's decode position
+    *    up to ~2 s further on, which is not a seek
+    */
+   function applyStateUpdate(payload, afterHold = false) {
       const wasPlaying = state.playing && !state.paused;
+      const wasPaused = state.playing && state.paused;
       const prevQueueIndex = state.queueIndex;
+      const prevPath = state.track ? state.track.path : null;
       const prevPosition = state.positionSec;
 
       state.playing = payload.playing || false;
@@ -770,8 +867,10 @@
       }
 
       // Detect track change or seek (position jump > 2 seconds)
-      const trackChanged = state.queueIndex !== prevQueueIndex;
-      const seeked = Math.abs(state.positionSec - prevPosition) > 2;
+      const trackChanged =
+         state.queueIndex !== prevQueueIndex ||
+         (prevPath !== null && state.track !== null && state.track.path !== prevPath);
+      const seeked = !afterHold && Math.abs(state.positionSec - prevPosition) > 2;
 
       // A server-tagged natural auto-advance is gapless: the server keeps streaming
       // the next track into our existing buffered lead, and both the index change
@@ -785,16 +884,26 @@
          flushWorklet();
       }
 
-      // Handle audio output based on playback state
+      // Handle audio output based on playback state.  A natural stop (tagged
+      // auto) has nothing stale to drop: the server sent its last audio and the
+      // buffer plays out on its own, whatever the hold timer's accuracy.
       const isPlaying = state.playing && !state.paused;
-      if (gainNode) {
+      const naturalStop = autoAdvance && !state.playing;
+      if (gainNode && !naturalStop) {
          if (!isPlaying && wasPlaying) {
             // Mute immediately when pausing/stopping
             gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+            if (state.playing) {
+               // Paused: freeze the buffered lead (the server's ~2 s ahead)
+               // instead of letting it drain silently, so resume loses nothing
+               audioContext.suspend().catch(() => {});
+            }
          } else if (isPlaying && !wasPlaying) {
-            // Clear stale audio from ring buffer before resuming —
-            // buffer holds pre-pause audio at the wrong position
-            flushWorklet();
+            // From a pause the frozen buffer is exactly what comes next; from a
+            // stop it holds nothing worth keeping
+            if (!wasPaused) {
+               flushWorklet();
+            }
             // Resume the context (worker path can't resume on data arrival) + volume.
             resumeContext();
             gainNode.gain.setValueAtTime(state.volume, audioContext.currentTime);
@@ -802,11 +911,18 @@
       }
 
       // Clear buffer when stopped (not paused)
-      if (!state.playing) {
+      if (!state.playing && !naturalStop) {
          flushWorklet();
       }
 
       notifyStateChange();
+
+      // H1: the progress bar only moves on position updates (1 Hz, and none
+      // after a stop).  Landing an advance puts the listener at the new track's
+      // start; a stop shows the current track at 0.
+      if (callbacks.onPositionUpdate && (autoAdvance || !state.playing)) {
+         callbacks.onPositionUpdate(0, state.durationSec);
+      }
    }
 
    /**
@@ -814,6 +930,19 @@
     * @param {object} payload - Position payload
     */
    function handlePositionUpdate(payload) {
+      if (pendingAdvance) {
+         // Still hearing the previous track's tail (this update is about the next
+         // one): count the previous track out to its end.
+         if (callbacks.onPositionUpdate && state.durationSec > 0) {
+            const remainingSec = Math.max(0, pendingAdvance.applyAt - performance.now()) / 1000;
+            callbacks.onPositionUpdate(
+               Math.max(0, state.durationSec - remainingSec),
+               state.durationSec
+            );
+         }
+         return;
+      }
+
       // Keep the raw decode position in state (used for seek detection); surface an
       // audible-corrected position to the UI. The server streams a ~2s lead, so its
       // decode position runs ahead of what the user hears — subtract our own buffered
