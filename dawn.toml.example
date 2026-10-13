@@ -753,12 +753,10 @@ citation_reinforcement_boost = 0.05
                                       # Default 86400 (daily).
 
 [memory.focus_injection]
-# Per-turn dynamic context injection (Phase 1 of the dynamic context
-# injection workstream).  When enabled, the daemon retrieves
-# memory facts, entities, relations, summaries, document chunks, calendar
-# events, and recent emails relevant to each user turn and injects them
-# as a budget-bounded "current context" block in the LLM prompt.
-# Currently disabled by default — adapters land in Phase 1c/1d.
+# Per-turn context injection.  When enabled, the daemon retrieves memory
+# facts, entities, relations, summaries, document chunks and calendar
+# events relevant to each user turn and adds them to that turn as a
+# budget-bounded "context for this turn" block.  Off by default.
 # enabled = false                     # Master enable
 # focus_budget_bytes = 10240          # Byte cap on the assembled focus block (per turn).
                                       # Range: 1024 - 65536  (~4 bytes/token; exact byte budget)
@@ -805,8 +803,6 @@ citation_reinforcement_boost = 0.05
                                       # always counts.  Injection, recall and
                                       # memory search.  0 disables.
                                       # Range: 0.0 - 1.0
-# classifier_enabled = false          # RAGRoute-style source classifier
-                                      # (default off — opt-in only after probe).
 # weight_semantic = 1.0               # Generative-Agents three-factor ranker
 # weight_recency = 0.30               # weights.  Range each: 0.0 - 5.0.  Phase
 # weight_importance = 1.0             # 1j tuning (May 2026) lifted w_imp 0.2 →

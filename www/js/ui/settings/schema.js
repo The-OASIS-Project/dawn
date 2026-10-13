@@ -1465,13 +1465,6 @@
                      displayValue: (v) => v.toFixed(2),
                      advanced: true,
                   },
-                  focus_classifier_enabled: {
-                     type: 'checkbox',
-                     label: 'Enable source classifier',
-                     hint: 'RAGRoute-style classifier picks a subset of sources per query. Off by default; opt-in only after probe validates.',
-                     configPath: 'memory.focus_injection.classifier_enabled',
-                     advanced: true,
-                  },
                   focus_dominant_token_enabled: {
                      type: 'checkbox',
                      label: 'Dominant-token heuristic',

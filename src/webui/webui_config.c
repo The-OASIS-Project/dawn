@@ -942,7 +942,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          JSON_TO_CONFIG_DOUBLE(focus_obj, "named_fact_min_relevance", fi->named_fact_min_relevance);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "entity_min_relevance", fi->entity_min_relevance);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "summary_min_relevance", fi->summary_min_relevance);
-         JSON_TO_CONFIG_BOOL(focus_obj, "classifier_enabled", fi->classifier_enabled);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_semantic", fi->weight_semantic);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_recency", fi->weight_recency);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_importance", fi->weight_importance);

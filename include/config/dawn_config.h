@@ -610,8 +610,6 @@ typedef struct {
                                       corpus-typical level toward identical,
                                       (cos - pool_mean) / (1 - pool_mean).  Model-independent;
                                       0 disables. */
-   bool classifier_enabled;        /* RAGRoute-style source classifier;
-                                      default false (off, opt-in after probe) */
    float weight_semantic;          /* Cross-source ranker weights — Generative
                                       Agents / CrewAI three-factor formula */
    float weight_recency;

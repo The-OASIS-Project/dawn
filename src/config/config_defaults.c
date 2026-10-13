@@ -477,7 +477,6 @@ void config_set_defaults(dawn_config_t *config) {
     * Summaries are long, so their relevance runs lower than facts' or
     * entities'. */
    config->memory.focus_injection.summary_min_relevance = 0.22f;
-   config->memory.focus_injection.classifier_enabled = false;
    config->memory.focus_injection.summary_max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.
     * Probe Component 6 fix-rate lifted 7/11 → 11/11 across all three

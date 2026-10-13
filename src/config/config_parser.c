@@ -1498,6 +1498,12 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 NULL };
       warn_unknown_keys(focus, "memory.focus_injection", focus_keys);
 
+      static const char *const retired_focus_keys[] = { "classifier_enabled", NULL };
+      static bool s_retired_focus_told;
+      note_retired_keys(focus, "memory.focus_injection", retired_focus_keys,
+                        "the classifier it switched on was never built (see UPGRADING.md)",
+                        &s_retired_focus_told);
+
       focus_injection_config_t *fi = &config->focus_injection;
       PARSE_BOOL(focus, "enabled", fi->enabled);
       PARSE_INT(focus, "focus_budget_bytes", fi->focus_budget_bytes);
@@ -1521,7 +1527,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(focus, "named_fact_min_relevance", fi->named_fact_min_relevance);
       PARSE_DOUBLE(focus, "entity_min_relevance", fi->entity_min_relevance);
       PARSE_DOUBLE(focus, "summary_min_relevance", fi->summary_min_relevance);
-      PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);
       PARSE_DOUBLE(focus, "weight_semantic", fi->weight_semantic);
       PARSE_DOUBLE(focus, "weight_recency", fi->weight_recency);
       PARSE_DOUBLE(focus, "weight_importance", fi->weight_importance);
