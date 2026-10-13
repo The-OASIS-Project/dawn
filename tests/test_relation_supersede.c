@@ -50,10 +50,13 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  access_count INTEGER DEFAULT 0,"
                          "  superseded_by INTEGER,"
                          "  superseded_kind INTEGER NOT NULL DEFAULT 0,"
+                         "  merged_from_id INTEGER DEFAULT NULL,"
                          "  superseded_at INTEGER,"
                          "  normalized_hash INTEGER DEFAULT 0,"
                          "  embedding BLOB DEFAULT NULL,"
-                         "  embedding_norm REAL DEFAULT NULL"
+                         "  embedding_norm REAL DEFAULT NULL,"
+                         "  source_conversation_id INTEGER DEFAULT NULL,"
+                         "  origin_unsourced INTEGER NOT NULL DEFAULT 0"
                          ");"
                          "CREATE TABLE IF NOT EXISTS memory_entities ("
                          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -69,6 +72,11 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  mention_count INTEGER DEFAULT 1,"
                          "  UNIQUE(user_id, canonical_name)"
                          ");"
+                         /* What memory_db_fact_merge copies to the fact kept. */
+                         "CREATE TABLE IF NOT EXISTS memory_fact_sources ("
+                         "  fact_id INTEGER NOT NULL, conversation_id INTEGER NOT NULL,"
+                         "  PRIMARY KEY (fact_id, conversation_id));"
+                         "CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY);"
                          "CREATE TABLE IF NOT EXISTS memory_relations ("
                          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
                          "  user_id INTEGER NOT NULL,"
@@ -81,6 +89,7 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
                          "  valid_from INTEGER DEFAULT NULL,"
                          "  valid_to INTEGER DEFAULT NULL,"
+                         "  merged_from_fact_id INTEGER DEFAULT NULL,"
                          "  closed_by_fact_id INTEGER DEFAULT NULL,"
                          /* v40 + v49 columns — mirror production so the upsert
                           * prepared statement's 12 bind slots all have targets
@@ -149,15 +158,16 @@ static void setup_db(void) {
       exit(1);
    }
 
-   /* Prepare statements used by memory_db_fact_supersede() — SQL mirrors
+   /* Prepare statements used by the fact supersede — SQL mirrors
     * the CWE-639 defense-in-depth in production: (old_id, user_id) gates
     * the UPDATE and an EXISTS subquery enforces same-user ownership of
     * new_fact_id (cross-user pointer prevention). */
    rc = sqlite3_prepare_v2(s_db.db,
                            "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = ?6, "
                            "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-                           "WHERE id = ?2 AND user_id = ?3 "
-                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5)",
+                           "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL AND ?2 != ?4 "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5 "
+                           "AND superseded_by IS NULL)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {
       fprintf(stderr, "prepare fact_supersede failed: %s\n", sqlite3_errmsg(s_db.db));
@@ -178,7 +188,8 @@ static void teardown_db(void) {
    s_db.stmt_memory_relation_close_open = NULL;
    s_db.stmt_memory_fact_supersede = NULL;
    if (s_db.db)
-      sqlite3_close(s_db.db);
+      memory_db_release_statements_locked(); /* the store's kept statements */
+   sqlite3_close(s_db.db);
    pthread_mutex_destroy(&s_db.mutex);
    memset(&s_db, 0, sizeof(s_db));
 }
@@ -287,7 +298,7 @@ static void test_replacing_supersede_returns_old_fact_id(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
 
-   memory_db_fact_supersede(old_fact_id, fact_b, user_id);
+   /* Retired in the relation supersede's own transaction. */
    int64_t superseded_by = get_fact_superseded_by(fact_a);
    TEST_ASSERT_EQUAL_INT64(fact_b, superseded_by);
 }
@@ -760,7 +771,7 @@ static void test_merged_fact_keeps_its_keeper(void) {
    int64_t wes = insert_entity(user_id, "wes", "person");
    memory_db_relation_supersede(user_id, uma, "married_to", vic, NULL, merged, 0.9f, 0, 0, NULL,
                                 NULL);
-   memory_db_fact_supersede(merged, keeper, user_id);
+   memory_db_fact_merge(merged, keeper, user_id);
    int64_t fresh = insert_fact(user_id, "Uma is married to Wes");
    int64_t old_fact_id = -1;
    int rc = memory_db_relation_supersede(user_id, uma, "married_to", wes, NULL, fresh, 0.9f, 0, 0,
@@ -768,7 +779,10 @@ static void test_merged_fact_keeps_its_keeper(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, uma, "married_to", vic, NULL));
    TEST_ASSERT_EQUAL_INT64(keeper, get_fact_superseded_by(merged));
-   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
+   /* The merge moved the relation to the kept fact, so the new value retires
+    * the fact the user sees, not the hidden duplicate. */
+   TEST_ASSERT_EQUAL_INT64(keeper, old_fact_id);
+   TEST_ASSERT_EQUAL_INT64(fresh, get_fact_superseded_by(keeper));
 }
 
 /* The contradictory close supersedes the old fact when nothing else rests on it. */
@@ -830,7 +844,7 @@ static void test_fact_supersede_hides_from_recall_but_keeps_row(void) {
 
    TEST_ASSERT_EQUAL_INT(2, count_active_facts(user_id)); /* both active to start */
 
-   int rc = memory_db_fact_supersede(dupe, keep, user_id);
+   int rc = memory_db_fact_merge(dupe, keep, user_id);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
 
    /* Hidden from recall (superseded_by IS NULL filter), keeper still active. */
@@ -852,7 +866,7 @@ static void test_fact_supersede_no_cross_user_pointer(void) {
    insert_fact(2, "fact owned by user 2");
    int64_t theirs = sqlite3_last_insert_rowid(s_db.db);
 
-   memory_db_fact_supersede(mine, theirs, 1);
+   memory_db_fact_merge(mine, theirs, 1);
    TEST_ASSERT_EQUAL_INT64(0, get_fact_superseded_by(mine)); /* no cross-user pointer */
    TEST_ASSERT_EQUAL_INT(1, count_active_facts(1));          /* still in recall */
 }

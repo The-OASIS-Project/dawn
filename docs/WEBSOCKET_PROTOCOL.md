@@ -749,12 +749,14 @@ Response: `conversation_learned`
       "outdated": 1,
       "summaries": 1,
       "preferences": 1,
-      "relations": 2
+      "relations": 2,
+      "restored": 1
    }
 }
 ```
 - `memories` is what the Memory panel lists (facts, summaries and preferences); `outdated` are
-  superseded facts it doesn't show; `relations` are links in the entity graph.
+  older or duplicate versions of facts, which it doesn't show; `relations` are links in the entity
+  graph; `restored` are older values those facts replaced, which a forget makes current again.
 - A conversation that isn't the user's, or isn't private, gets `success: false` with `error`.
   `success: false` with `busy: true` means another of the user's memory requests is still
   running: ask again shortly. `success: false` can also come with neither (the count couldn't
@@ -979,9 +981,10 @@ Delete a specific memory fact.
 }
 ```
 Response: `delete_memory_fact_response` with `success`, and `error` on failure ("Memory is still being
-saved; try again in a moment" while an extraction for the user runs past the wait). The duplicates merged
-into it are deleted with it; the values it replaced are current again and listed in `restored` (their
-text). It runs on a worker.
+saved; try again in a moment" while an extraction for the user runs past the wait; "Memory is busy with
+another change; try again shortly" when the user already has several deletes running). The duplicates
+merged into it are deleted with it; the values it replaced are current again: `restored_count` says how
+many, `restored` lists the text of the first few. It runs on a worker.
 
 #### `list_memory_superseded`
 The caller's merged or replaced facts (recall no longer shows them), newest first, at most 50.
@@ -1007,16 +1010,19 @@ Response: `list_memory_superseded_response`
             "replaced": false,
             "superseded_at": 1791648000
          }
-      ]
+      ],
+      "truncated": false
    }
 }
 ```
+`truncated` is true when there may be more than the 50 listed (search to find them).
 `superseded_at` is 0 when unknown. `replaced` is true for an older value a newer fact replaced, false
-for a duplicate merged into it; the kept fact (`keeper_text`) may itself have been superseded since. `query` is echoed back, so a client can drop a reply to an
-earlier search.
+for a duplicate merged into it; the kept fact (`keeper_text`) may itself have been superseded since. `query` is echoed back,
+so a client can drop a reply to an earlier search.
 
 #### `restore_memory_fact`
-Bring a merged or replaced fact back, with the relations its replacement closed.
+Bring a merged or replaced fact back, with the relations its replacement closed; a merged fact also
+takes back what the merge moved onto the kept fact (what it stated, the values it replaced).
 ```json
 {
    "type": "restore_memory_fact",
@@ -1025,7 +1031,7 @@ Bring a merged or replaced fact back, with the relations its replacement closed.
 ```
 Response: `restore_memory_fact_response` with `success`, `fact_id`, `both_current` (the newer value
 that replaced it stays current too) and `error` on failure
-(the fact isn't the caller's, or isn't merged any more).
+(the fact isn't the caller's, or was already restored or deleted).
 
 #### `delete_memory_preference`
 Delete a specific user preference.

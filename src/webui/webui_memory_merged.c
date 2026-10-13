@@ -75,6 +75,8 @@ void handle_list_memory_superseded(ws_connection_t *conn, struct json_object *pa
          json_object_array_add(facts, f);
       }
       json_object_object_add(out, "facts", facts);
+      /* The newest SUPERSEDED_LIST_MAX only: a search finds the rest. */
+      json_object_object_add(out, "truncated", json_object_new_boolean(n == SUPERSEDED_LIST_MAX));
    } else {
       json_object_object_add(out, "error", json_object_new_string("Couldn't load merged memories"));
    }
@@ -102,9 +104,10 @@ void handle_restore_memory_fact(ws_connection_t *conn, struct json_object *paylo
       OLOG_INFO("WebUI: User %d restored memory fact %lld", conn->auth_user_id, (long long)fact_id);
    } else {
       json_object_object_add(out, "error",
-                             json_object_new_string(rc == MEMORY_DB_NOT_FOUND
-                                                        ? "That memory isn't merged any more"
-                                                        : "Couldn't restore the memory"));
+                             json_object_new_string(
+                                 rc == MEMORY_DB_NOT_FOUND
+                                     ? "That memory was already restored or deleted"
+                                     : "Couldn't restore the memory"));
    }
    send_payload(conn, "restore_memory_fact_response", out);
 }

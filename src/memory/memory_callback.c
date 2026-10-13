@@ -1081,7 +1081,7 @@ static char *memory_action_remember_single(int user_id,
       strbuf_appendf(&sb,
                      "\n\nSimilar facts already in memory — if one says the same thing, 'forget' "
                      "it with 'duplicate_of' set to this ID; if this is a newer value that "
-                     "replaces one (a new number, a move), 'forget' it with 'replaced_by' set to "
+                     "replaces one (a new number, a move), 'forget' it with 'newer_fact_id' set to "
                      "this ID. Leave the rest:");
       /* The embedding cache holds only ids/embeddings/norms, not fact_text, so the
        * text must be fetched per neighbor (bounded by MEMORY_BAND_NEIGHBORS_MAX).
@@ -1189,269 +1189,6 @@ static char *memory_action_remember(int user_id, const char *value) {
 }
 
 /* =============================================================================
- * Action: Forget
- * ============================================================================= */
-
-/* Max fact IDs accepted in one bulk 'forget' call — bounds the response size. */
-#define MAX_FORGET_IDS 50
-
-/* Values a forget call names as current again (forget_reply). */
-#define FORGET_BACK_MAX 8
-
-/* @p msg (taken) with what forgetting brought back (@p back, freed). */
-static char *forget_reply(char *msg, strbuf_t *back) {
-   if (!msg || back->len == 0) {
-      strbuf_free(back);
-      return msg;
-   }
-   strbuf_t out;
-   strbuf_init(&out, strlen(msg) + back->len + 160);
-   strbuf_append(&out, msg);
-   free(msg);
-   if (back->len > 0) {
-      strbuf_appendf(&out,
-                     ". Current again, as it was before what was forgotten replaced it: %s (forget "
-                     "it too if it is wrong as well)",
-                     back->buf);
-   }
-   strbuf_free(back);
-   char *result = strbuf_steal(&out);
-   return result ? result : strdup("Memory updated.");
-}
-
-/* Parse one or more comma/space-separated POSITIVE numeric fact IDs into `out`
- * (capacity `max`).  Numeric-only tokens are required (guards against accidental
- * fuzzy-text operations); non-numeric / non-positive tokens are counted in
- * *invalid_out and skipped.  *capped_out is set when more than `max` IDs were
- * present.  Returns the number of IDs written.  Shared by 'forget' and 'get'. */
-static int parse_id_list(const char *s, int64_t *out, int max, int *invalid_out, bool *capped_out) {
-   int id_count = 0;
-   int invalid_count = 0;
-   bool capped = false;
-
-   while (s && *s) {
-      while (*s == ',' || *s == ' ' || *s == '\t')
-         s++;
-      if (!*s)
-         break;
-      if (id_count >= max) {
-         capped = true;
-         break;
-      }
-      char *endptr = NULL;
-      errno = 0;
-      long long v = strtoll(s, &endptr, 10);
-      const char *after = endptr;
-      while (*after == ' ' || *after == '\t')
-         after++;
-      if (endptr == s || (*after != '\0' && *after != ',') || v <= 0 || errno == ERANGE) {
-         invalid_count++;
-         while (*s && *s != ',') /* skip the bad token */
-            s++;
-         continue;
-      }
-      out[id_count++] = (int64_t)v;
-      s = after;
-   }
-
-   if (invalid_out)
-      *invalid_out = invalid_count;
-   if (capped_out)
-      *capped_out = capped;
-   return id_count;
-}
-
-/* 'forget' with @p keeper_id 0 deletes; with a kept fact's ID it merges the
- * IDs into it as duplicates, or with @p newer_value files them as older values
- * that fact replaced. */
-static char *memory_action_forget(int user_id,
-                                  const char *fact_text,
-                                  int64_t keeper_id,
-                                  bool newer_value) {
-   if (!fact_text || strlen(fact_text) == 0) {
-      return strdup("Please specify the fact ID(s) to forget (e.g. '42' or '42,57,91'). Use "
-                    "'search', 'recent', or 'find_duplicates' first to find the IDs.");
-   }
-
-   int64_t ids[MAX_FORGET_IDS];
-   int invalid_count = 0;
-   bool capped = false;
-   int id_count = parse_id_list(fact_text, ids, MAX_FORGET_IDS, &invalid_count, &capped);
-
-   if (id_count == 0) {
-      return strdup("Please provide numeric fact ID(s) (e.g. '42' or '42,57,91'). Use 'search', "
-                    "'recent', or 'find_duplicates' first to find the IDs.");
-   }
-
-   /* With a kept fact (duplicate_of or replaced_by) each ID is superseded into it
-    * instead of deleted: hidden from recall but recoverable, pointing at the fact
-    * kept.  Validate it up front: it must exist, be owned, be current, and not be
-    * one of the IDs. */
-   const bool merge = (keeper_id > 0);
-   if (merge) {
-      memory_fact_t keep;
-      if (memory_db_fact_get(keeper_id, user_id, &keep) != MEMORY_DB_SUCCESS) {
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "The kept fact's ID wasn't found (or isn't yours). Nothing was changed.");
-      }
-      if (keep.superseded_by != 0) {
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "The kept fact was itself merged or replaced; keep the current one "
-                       "instead. Nothing was changed.");
-      }
-      for (int i = 0; i < id_count; i++) {
-         if (ids[i] == keeper_id) {
-            return strdup("The kept fact can't be one of the IDs being forgotten. Nothing was "
-                          "changed.");
-         }
-      }
-   }
-
-   /* Apply to each, tracking outcomes.  fact_get verifies existence + ownership
-    * (SQL filters by user_id — wrong-user lookups return NOT_FOUND, no oracle). */
-   int forgotten = 0;
-   int not_removed = 0;
-   char first_text[256] = "";
-   bool first_truncated = false;
-   char ok_ids[600] = "";
-   char nf_ids[400] = "";
-   size_t ok_pos = 0, nf_pos = 0;
-
-   /* One wait for the user's running extraction covers the whole batch: one
-    * finishing meanwhile could merge into a fact being forgotten. */
-   if (!merge && !memory_extraction_hold_user(user_id, MEMORY_FORGET_WAIT_SEC)) {
-      return strdup(TOOL_RESULT_ERROR_MARK "Memory is still being saved; nothing was forgotten. "
-                                           "Try again in a moment.");
-   }
-   /* A forgotten fact is the user removing it (a merge isn't: the kept fact
-    * says it). */
-   if (!merge) {
-      conv_db_withdraw_intent_begin(user_id);
-   }
-   /* The values the forgotten facts replaced, current again. */
-   int64_t back_ids[FORGET_BACK_MAX];
-   int back_count = 0;
-   int merged_gone = 0; /* duplicates deleted, also by a forget that failed partway */
-   for (int i = 0; i < id_count; i++) {
-      memory_fact_t fact;
-      bool removed = false;
-      memory_forget_result_t fr = { 0 };
-      int frc = MEMORY_DB_FAILURE;
-      if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS) {
-         frc = !merge        ? memory_db_fact_forget(ids[i], user_id, &fr)
-               : newer_value ? memory_db_fact_replace(ids[i], keeper_id, user_id)
-                             : memory_db_fact_merge(ids[i], keeper_id, user_id);
-      }
-      for (int k = 0; k < fr.restored && k < MEMORY_FORGET_RESTORED_MAX; k++) {
-         if (back_count < FORGET_BACK_MAX) {
-            back_ids[back_count++] = fr.restored_ids[k];
-         }
-      }
-      merged_gone += fr.merged;
-      if (frc == MEMORY_DB_SUCCESS) {
-         removed = true;
-         if (forgotten == 0) {
-            snprintf(first_text, sizeof(first_text), "%.200s", fact.fact_text);
-            first_truncated = strlen(fact.fact_text) > 200;
-         }
-         forgotten++;
-      }
-      char *list = removed ? ok_ids : nf_ids;
-      size_t *lp = removed ? &ok_pos : &nf_pos;
-      size_t cap = removed ? sizeof(ok_ids) : sizeof(nf_ids);
-      if (!removed)
-         not_removed++;
-      if (*lp < cap - 24)
-         *lp += (size_t)snprintf(list + *lp, cap - *lp, "%s%lld", *lp ? ", " : "",
-                                 (long long)ids[i]);
-   }
-   conv_db_withdraw_intent_end();
-   if (!merge) {
-      memory_extraction_release_user(user_id);
-   }
-   /* Named only if still current: a later ID in the call may have forgotten it. */
-   strbuf_t back;
-   strbuf_init(&back, 256);
-   for (int k = 0; k < back_count; k++) {
-      memory_fact_t back_fact;
-      if (memory_db_fact_get(back_ids[k], user_id, &back_fact) == MEMORY_DB_SUCCESS &&
-          back_fact.superseded_by == 0) {
-         strbuf_appendf(&back, "%s[%lld] \"%.120s\"", back.len ? "; " : "", (long long)back_fact.id,
-                        back_fact.fact_text);
-      }
-   }
-   /* What was forgotten leaves the conversations it was sent into (a merged
-    * fact stays, in the one it merged into). */
-   if ((forgotten > 0 || merged_gone > 0) && !merge) {
-      session_withdraw_forgotten_async(user_id, false);
-   }
-
-   /* Single valid ID that succeeded → detailed response (back-compat). */
-   if (id_count == 1 && forgotten == 1) {
-      char *msg = malloc(384);
-      if (msg) {
-         if (merge && newer_value)
-            snprintf(msg, 384,
-                     "ID %lld is now an older value ID %lld replaced (hidden from recall; back if "
-                     "%lld is forgotten): \"%s%s\"",
-                     (long long)ids[0], (long long)keeper_id, (long long)keeper_id, first_text,
-                     first_truncated ? "..." : "");
-         else if (merge)
-            snprintf(msg, 384,
-                     "Merged ID %lld into ID %lld (hidden from recall, recoverable): \"%s%s\"",
-                     (long long)ids[0], (long long)keeper_id, first_text,
-                     first_truncated ? "..." : "");
-         else
-            snprintf(msg, 384, "Forgotten (ID %lld): \"%s%s\"", (long long)ids[0], first_text,
-                     first_truncated ? "..." : "");
-      }
-      return forget_reply(
-          msg ? msg : strdup(merge ? "Fact merged successfully." : "Fact forgotten successfully."),
-          &back);
-   }
-
-   /* Batched summary.  Clamp `pos` after each append so the `SZ - pos` size
-    * argument can never underflow to a huge size_t if the ok_ids/nf_ids caps
-    * are later enlarged (defense-in-depth — today's worst case is ~1099). */
-   enum {
-      FORGET_MSG_SZ = 1200
-   };
-   char *msg = malloc(FORGET_MSG_SZ);
-   if (!msg)
-      return strdup("Memory updated.");
-   int pos;
-   if (merge)
-      pos = snprintf(msg, FORGET_MSG_SZ, "%s %d fact%s %s ID %lld",
-                     newer_value ? "Filed" : "Merged", forgotten, forgotten == 1 ? "" : "s",
-                     newer_value ? "as older values replaced by" : "into", (long long)keeper_id);
-   else
-      pos = snprintf(msg, FORGET_MSG_SZ, "Forgotten %d fact%s", forgotten,
-                     forgotten == 1 ? "" : "s");
-   if (pos < 0 || pos >= FORGET_MSG_SZ)
-      pos = FORGET_MSG_SZ - 1;
-   if (forgotten > 0) {
-      pos += snprintf(msg + pos, FORGET_MSG_SZ - pos,
-                      merge ? " (IDs %s — hidden from recall, recoverable)" : " (IDs %s)", ok_ids);
-      if (pos >= FORGET_MSG_SZ)
-         pos = FORGET_MSG_SZ - 1;
-   }
-   if (not_removed > 0) {
-      pos += snprintf(msg + pos, FORGET_MSG_SZ - pos, "; %d not found (%s)", not_removed, nf_ids);
-      if (pos >= FORGET_MSG_SZ)
-         pos = FORGET_MSG_SZ - 1;
-   }
-   if (invalid_count > 0) {
-      pos += snprintf(msg + pos, FORGET_MSG_SZ - pos, "; ignored %d non-numeric token%s",
-                      invalid_count, invalid_count == 1 ? "" : "s");
-      if (pos >= FORGET_MSG_SZ)
-         pos = FORGET_MSG_SZ - 1;
-   }
-   if (capped)
-      snprintf(msg + pos, FORGET_MSG_SZ - pos, " (capped at %d IDs per call)", MAX_FORGET_IDS);
-   return forget_reply(msg, &back);
-}
-
-/* =============================================================================
  * Action: Get (deterministic retrieval by ID)
  *
  * The exact-fetch counterpart to 'search': returns specific facts verbatim by
@@ -1459,7 +1196,7 @@ static char *memory_action_forget(int user_id,
  * already known (from a prior search/recent/find_duplicates result) and the
  * exact stored text is wanted — search is semantic and can bury an exact
  * record under its near-twins.  Shares the 'forget' ID parser (positive,
- * comma/space-separated, non-numeric tokens ignored, capped at MAX_FORGET_IDS).
+ * comma/space-separated, non-numeric tokens ignored, capped at MEMORY_FORGET_IDS_MAX).
  * ============================================================================= */
 static char *memory_action_get(int user_id, const char *value) {
    if (!value || !value[0]) {
@@ -1467,10 +1204,10 @@ static char *memory_action_get(int user_id, const char *value) {
                     "'7858,7854'). IDs come from a prior search/recent/find_duplicates result.");
    }
 
-   int64_t ids[MAX_FORGET_IDS];
+   int64_t ids[MEMORY_FORGET_IDS_MAX];
    int invalid_count = 0;
    bool capped = false;
-   int id_count = parse_id_list(value, ids, MAX_FORGET_IDS, &invalid_count, &capped);
+   int id_count = memory_parse_id_list(value, ids, MEMORY_FORGET_IDS_MAX, &invalid_count, &capped);
 
    if (id_count == 0) {
       return strdup("Please provide numeric memory ID(s) (e.g. '7858' or '7858,7854').");
@@ -1511,7 +1248,7 @@ static char *memory_action_get(int user_id, const char *value) {
    if (nf_ids[0])
       strbuf_appendf(&sb, "(not found: %s)\n", nf_ids);
    if (capped)
-      strbuf_appendf(&sb, "(capped at %d IDs per call)\n", MAX_FORGET_IDS);
+      strbuf_appendf(&sb, "(capped at %d IDs per call)\n", MEMORY_FORGET_IDS_MAX);
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
@@ -2303,27 +2040,7 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       free(fact);
       return res;
    } else if (strcmp(actionName, "forget") == 0) {
-      /* IDs are the base value; duplicate_of merges them into a kept fact,
-       * replaced_by files them as older values a newer fact replaced.  Base-
-       * extract so the ID parser doesn't choke on the ::name:: suffixes. */
-      char forget_ids[1024] = "";
-      char dup[32] = "";
-      char rb[32] = "";
-      tool_param_extract_base(value, forget_ids, sizeof(forget_ids));
-      const long long dup_id = tool_param_extract_custom(value, "duplicate_of", dup, sizeof(dup))
-                                   ? strtoll(dup, NULL, 10)
-                                   : 0;
-      const long long newer_id = tool_param_extract_custom(value, "replaced_by", rb, sizeof(rb))
-                                     ? strtoll(rb, NULL, 10)
-                                     : 0;
-      if (dup_id > 0 && newer_id > 0) {
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "Set 'duplicate_of' (same information) or 'replaced_by' (a newer value), "
-                       "not both. Nothing was changed.");
-      }
-      return memory_action_forget(user_id, forget_ids,
-                                  newer_id > 0 ? newer_id : (dup_id > 0 ? dup_id : 0),
-                                  newer_id > 0);
+      return memory_action_forget(user_id, value);
    } else if (strcmp(actionName, "list_merged") == 0) {
       char q[MEMORY_FACT_TEXT_MAX] = "";
       tool_param_extract_base(value, q, sizeof(q));

@@ -37,6 +37,9 @@
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
+/* Fact ids a forget's confirm text looks at (the tool takes at most 50). */
+#define MEMORY_FORGET_DESCRIBE_IDS_MAX 50
+
 /* Forward declaration of callback from memory/memory_callback.c */
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
 
@@ -55,7 +58,7 @@ static const treg_param_t memory_params[] = {
            "stored text rather than a relevance-ranked match), "
            "'forget' (remove memories by numeric ID — DELETE permanently, MERGE duplicates "
            "into one kept with 'duplicate_of', or file older values a newer one replaced with "
-           "'replaced_by'; use search/recent/find_duplicates first to find the IDs), 'recent' "
+           "'newer_fact_id'; use search/recent/find_duplicates first to find the IDs), 'recent' "
            "(list recent memories), "
            "'find_duplicates' (list clusters of near-identical facts with their IDs so you "
            "can forget the redundant ones), "
@@ -265,20 +268,31 @@ static const treg_param_t memory_params[] = {
            "For 'forget' ONLY: the fact ID you are KEEPING when the IDs being forgotten say the "
            "SAME thing (duplicates). Turns 'forget' into a MERGE: they are hidden from recall but "
            "stay recoverable, instead of being deleted. Use it when the user says 'merge' or you "
-           "clean a find_duplicates cluster. For a value that CHANGED, use 'replaced_by'.",
+           "clean a find_duplicates cluster. For a value that CHANGED, use 'newer_fact_id'.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "duplicate_of",
    },
    {
-       .name = "replaced_by",
+       .name = "newer_fact_id",
        .description =
            "For 'forget' ONLY: the fact ID of the NEWER value when the IDs being forgotten are "
            "OLDER values it replaced (a new phone number or address, a new job: the user said it "
            "changed). They are hidden from recall but kept as history, and come back if the newer "
-           "fact is forgotten (it was wrong). For duplicates use 'duplicate_of'. Omit both only "
-           "when the facts should be gone for good.",
+           "fact is forgotten (it was wrong). Coarse: everything an old fact said is closed. For "
+           "duplicates use 'duplicate_of'. Omit both only when the facts should be gone for good.",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "newer_fact_id",
+   },
+   /* duplicate_of's earlier name: a conversation keeps the tool definition it
+    * started with, and its turns may still send it.  Declared so it reaches the
+    * callback (only declared parameters do), which treats it as duplicate_of. */
+   {
+       .name = "replaced_by",
+       .description = "Older name for 'duplicate_of' (same meaning). Use 'duplicate_of'.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -332,8 +346,11 @@ static const tool_action_kind_entry_t s_memory_action_kinds[] = {
    { "find_contact", TOOL_KIND_READ, NULL },
    { "list_contacts", TOOL_KIND_READ, NULL },
    { "list_merged", TOOL_KIND_READ, NULL },
-   /* Changes what recall returns: refused where an outsider's text could ask. */
+   /* Change what recall returns (forget can't be undone): acts, so they wait
+    * for the user where a turn is someone else's (an attached email, an
+    * unverified sender); a fetched email or page doesn't make it one yet. */
    { "restore", TOOL_KIND_ACT, NULL },
+   { "forget", TOOL_KIND_ACT, NULL },
 };
 
 /* 'restore' by the text of the fact it brings back: an id means nothing to
@@ -355,6 +372,115 @@ static int describe_restore(const char *value, char *out, size_t out_len) {
    return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
 }
 
+/* Whether @p name carries a kept fact's id: absent, empty and 0 mean none,
+ * as the callback reads them. */
+static bool keeper_given(const char *value, const char *name, int64_t *id_out) {
+   char v[32] = "";
+   if (!tool_param_extract_custom(value, name, v, sizeof(v)) || !v[0] || strcmp(v, "0") == 0) {
+      return false;
+   }
+   *id_out = strtoll(v, NULL, 10);
+   return true;
+}
+
+/* What a forget of @p ids takes beyond them and brings back, summed over the
+ * ids (the confirm's numbers): merged duplicates, values back, the first. */
+static void forget_preview(const int64_t *ids,
+                           int n,
+                           int user_id,
+                           int *merged,
+                           int *back,
+                           int64_t *first_back) {
+   *merged = 0;
+   *back = 0;
+   *first_back = 0;
+   for (int i = 0; i < n; i++) {
+      int m = 0;
+      int r = 0;
+      int64_t first = 0;
+      if (memory_db_fact_forget_preview(ids[i], user_id, &m, &r, &first) == MEMORY_DB_SUCCESS) {
+         *merged += m;
+         *back += r;
+         if (!*first_back) {
+            *first_back = first;
+         }
+      }
+   }
+}
+
+/* 'forget' as the person confirming needs it: ids alone mean nothing, so the
+ * first fact's text and how many more; for a merge or replace, the fact kept
+ * (it becomes the current value); for a delete, the duplicates that go with
+ * it and the older values that come back.  TOOL_DESCRIBE_DEFAULT when the
+ * first id isn't a fact. */
+static int describe_forget(const char *value, char *out, size_t out_len) {
+   char list[1024] = "";
+   tool_param_extract_base(value, list, sizeof(list));
+   int64_t ids[MEMORY_FORGET_DESCRIBE_IDS_MAX];
+   int n = 0;
+   for (char *p = list; *p && n < MEMORY_FORGET_DESCRIBE_IDS_MAX;) {
+      char *end = NULL;
+      const long long v = strtoll(p, &end, 10);
+      if (end == p) {
+         p++;
+         continue;
+      }
+      if (v > 0) {
+         ids[n++] = (int64_t)v;
+      }
+      p = end;
+   }
+   const int user_id = tool_get_current_user_id();
+   memory_fact_t fact;
+   if (n == 0 || memory_db_fact_get(ids[0], user_id, &fact) != MEMORY_DB_SUCCESS) {
+      return TOOL_DESCRIBE_DEFAULT;
+   }
+   char text[200];
+   str_excerpt_line(fact.fact_text, 150, text, sizeof(text));
+   char others[32] = "";
+   if (n > 1) {
+      snprintf(others, sizeof(others), " and %d more", n - 1);
+   }
+   int64_t keeper = 0;
+   const bool merge = keeper_given(value, "duplicate_of", &keeper) ||
+                      keeper_given(value, "replaced_by", &keeper);
+   const bool replace = !merge && keeper_given(value, "newer_fact_id", &keeper);
+   int w;
+   if (merge || replace) {
+      memory_fact_t kept;
+      char kept_text[200] = "?";
+      if (memory_db_fact_get(keeper, user_id, &kept) == MEMORY_DB_SUCCESS) {
+         str_excerpt_line(kept.fact_text, 150, kept_text, sizeof(kept_text));
+      }
+      w = snprintf(out, out_len, "%s \"%s\"%s, keeping \"%s\"",
+                   merge ? "merge as a duplicate" : "file as an older value", text, others,
+                   kept_text);
+   } else {
+      int merged = 0;
+      int back = 0;
+      int64_t first_back = 0;
+      forget_preview(ids, n, user_id, &merged, &back, &first_back);
+      char extra[64] = "";
+      if (merged > 0) {
+         snprintf(extra, sizeof(extra), ", with %d merged duplicate%s", merged,
+                  merged == 1 ? "" : "s");
+      }
+      char back_text[200] = "";
+      memory_fact_t bf;
+      if (back > 0 && memory_db_fact_get(first_back, user_id, &bf) == MEMORY_DB_SUCCESS) {
+         str_excerpt_line(bf.fact_text, 120, back_text, sizeof(back_text));
+      }
+      char more_back[32] = "";
+      if (back > 1) {
+         snprintf(more_back, sizeof(more_back), " and %d more", back - 1);
+      }
+      w = snprintf(out, out_len, "forget \"%s\"%s%s%s%s%s%s", text, others, extra,
+                   back_text[0] ? "; brings back \"" : "", back_text, back_text[0] ? "\"" : "",
+                   back_text[0] ? more_back : "");
+   }
+   return (w > 0 && (size_t)w < out_len) ? SUCCESS : FAILURE;
+}
+
 /* What a call waiting for the user's reply code does: 'remember' and
  * 'restore' by the fact (tool_metadata_t describe_call); the rest by their
  * parameters. */
@@ -366,6 +492,9 @@ static int memory_describe_call(const char *action,
    (void)valid_for_sec;
    if (strcmp(action, "restore") == 0) {
       return describe_restore(value, out, out_len);
+   }
+   if (strcmp(action, "forget") == 0) {
+      return describe_forget(value, out, out_len);
    }
    if (strcmp(action, "remember") != 0) {
       return TOOL_DESCRIBE_DEFAULT;
@@ -427,9 +556,11 @@ static const tool_metadata_t memory_metadata = {
                   "duplicates — when the user asks to merge/consolidate/dedupe while keeping one, "
                   "OR you are cleaning duplicates, set 'duplicate_of' to the keeper's ID; (3) "
                   "REPLACE for an older value the user says changed (new number, moved, new job): "
-                  "set 'replaced_by' to the newer fact's ID, so the old one is kept as history and "
-                  "comes back if the newer one turns out wrong. Prefer MERGE or REPLACE over "
-                  "DELETE so a wrong call is reversible. "
+                  "set 'newer_fact_id' to the newer fact's ID, so the old one is kept as history "
+                  "and comes back if the newer one turns out wrong. Forgetting a value brings "
+                  "back the one it replaced (the reply says which): tell the user, and forget "
+                  "that one too only if the user says to. Prefer MERGE or REPLACE over DELETE so a "
+                  "wrong call is reversible. "
                   "Use 'recent' to list recently stored memories. "
                   "Use 'save_contact' to store contact info (email, phone) for a person "
                   "(query: person name, field_type: email/phone, value: the address/number, "

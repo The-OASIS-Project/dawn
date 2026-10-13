@@ -145,7 +145,8 @@ static void inflight_release_op(int user_id, conv_memory_op_t op) {
    pthread_mutex_unlock(&s_inflight_mutex);
 }
 
-/* {facts, outdated, summaries, preferences, relations, memories} for the client.
+/* {facts, outdated, summaries, preferences, relations, restored, memories} for
+ * the client ("restored": older values the forget brings back).
  * "memories" is what the Memory panel lists; "outdated" are superseded facts it
  * doesn't; relations are graph links. */
 static void add_counts(json_object *payload, const memory_conv_learned_t *c) {
@@ -156,6 +157,7 @@ static void add_counts(json_object *payload, const memory_conv_learned_t *c) {
    json_object_object_add(payload, "summaries", json_object_new_int(c->summaries));
    json_object_object_add(payload, "preferences", json_object_new_int(c->preferences));
    json_object_object_add(payload, "relations", json_object_new_int(c->relations));
+   json_object_object_add(payload, "restored", json_object_new_int(c->restored));
 }
 
 /* Reply to the session if it is still connected (takes @p payload). */
@@ -194,8 +196,9 @@ static void forget_fact(const conv_memory_job_t *job, json_object *payload) {
                                  : rc == MEMORY_FORGET_NOT_FOUND ? "Fact not found"
                                                                  : "Failed to delete fact"));
    }
-   /* Even a forget that failed partway may have deleted duplicates and
-    * brought values back: say so, and withdraw what's gone. */
+   /* The values it had replaced, current again: their text (the first few)
+    * and how many (a forget that failed changed nothing: none). */
+   json_object_object_add(payload, "restored_count", json_object_new_int(fr.restored));
    json_object *restored = json_object_new_array();
    for (int i = 0; restored && i < fr.restored && i < MEMORY_FORGET_RESTORED_MAX; i++) {
       memory_fact_t fact;
@@ -206,7 +209,7 @@ static void forget_fact(const conv_memory_job_t *job, json_object *payload) {
    if (restored) {
       json_object_object_add(payload, "restored", restored);
    }
-   if (rc == SUCCESS || fr.merged > 0) {
+   if (rc == SUCCESS) {
       (void)session_withdraw_forgotten(job->user_id, false);
    }
    OLOG_INFO("WebUI: User %d deleted memory fact %lld: %s (%d merged, %d brought back)",

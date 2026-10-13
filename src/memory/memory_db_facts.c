@@ -784,7 +784,7 @@ int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t enti
    /* CWE-639 defense-in-depth: EXISTS subquery refuses to write a
     * subject_entity_id that belongs to a different user.  SQLite FK
     * constraints would already catch a cross-user FK at write time, but
-    * matching the shape used by memory_db_fact_supersede keeps the
+    * matching the shape used by the fact supersede keeps the
     * defense at the SQL layer regardless of FK pragma state. */
    int rc = sqlite3_prepare_v2(s_db.db,
                                "UPDATE memory_facts SET subject_entity_id = ? "
@@ -913,14 +913,11 @@ int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t
    return MEMORY_DB_SUCCESS;
 }
 
-/* Caller holds the auth_db lock.  Marks @p old_fact_id superseded by
- * @p new_fact_id (both @p user_id's), as @p kind (MEMORY_SUPERSEDED_*).
- * SQLITE_DONE on success; *changed says whether a row changed. */
-static int fact_supersede_locked(int64_t old_fact_id,
-                                 int64_t new_fact_id,
-                                 int user_id,
-                                 int kind,
-                                 bool *changed) {
+int memory_db_internal_fact_supersede_locked(int64_t old_fact_id,
+                                             int64_t new_fact_id,
+                                             int user_id,
+                                             int kind,
+                                             bool *changed) {
    /* SQL enforces (a) old_fact_id is owned by user_id AND (b) new_fact_id
     * is owned by user_id via EXISTS subquery.  CWE-639 defense-in-depth
     * + cross-user pointer prevention (foreign new_fact_id would let a
@@ -940,22 +937,73 @@ static int fact_supersede_locked(int64_t old_fact_id,
    return rc;
 }
 
-int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id) {
-   if (user_id <= 0)
-      return MEMORY_DB_FAILURE;
+/* Statements memory_db_internal_exec_locked keeps, by their SQL literal's
+ * address.  Every slot is written under the auth_db lock. */
+#define EXEC_CACHE_MAX 32
+static struct {
+   const char *sql;
+   sqlite3_stmt *st;
+} s_exec_cache[EXEC_CACHE_MAX];
 
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-   bool changed = false;
-   const int rc = fact_supersede_locked(old_fact_id, new_fact_id, user_id,
-                                        MEMORY_SUPERSEDED_REPLACED, &changed);
-   AUTH_DB_UNLOCK();
-   /* The fact cache loads only current facts; a superseded one leaves recall
-    * once its copy is reloaded.  Off the DB lock: a reload holds the cache's
-    * lock while it reads the DB. */
-   if (changed) {
-      memory_embeddings_invalidate_cache_for_user(user_id);
+void memory_db_release_statements_locked(void) {
+   for (int i = 0; i < EXEC_CACHE_MAX; i++) {
+      sqlite3_finalize(s_exec_cache[i].st);
+      s_exec_cache[i].st = NULL;
+      s_exec_cache[i].sql = NULL;
    }
-   return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+/* The kept statement for @p sql, prepared on first use; NULL when it doesn't
+ * prepare.  *kept false when every slot is taken (the caller finalizes it). */
+static sqlite3_stmt *exec_statement(const char *sql, bool *kept) {
+   int free_slot = -1;
+   for (int i = 0; i < EXEC_CACHE_MAX; i++) {
+      if (s_exec_cache[i].sql == sql) {
+         *kept = true;
+         return s_exec_cache[i].st;
+      }
+      if (!s_exec_cache[i].sql && free_slot < 0) {
+         free_slot = i;
+      }
+   }
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v3(s_db.db, sql, -1, free_slot >= 0 ? SQLITE_PREPARE_PERSISTENT : 0, &st,
+                          NULL) != SQLITE_OK) {
+      sqlite3_finalize(st);
+      return NULL;
+   }
+   *kept = free_slot >= 0;
+   if (*kept) {
+      s_exec_cache[free_slot].sql = sql;
+      s_exec_cache[free_slot].st = st;
+   }
+   return st;
+}
+
+int memory_db_internal_exec_locked(const char *sql, int user_id, int64_t a, int64_t b) {
+   bool kept = false;
+   sqlite3_stmt *st = exec_statement(sql, &kept);
+   if (!st) {
+      return SQLITE_ERROR;
+   }
+   const int params = sqlite3_bind_parameter_count(st);
+   if (params >= 1) {
+      sqlite3_bind_int(st, 1, user_id);
+   }
+   if (params >= 2) {
+      sqlite3_bind_int64(st, 2, a);
+   }
+   if (params >= 3) {
+      sqlite3_bind_int64(st, 3, b);
+   }
+   const int rc = sqlite3_step(st);
+   if (kept) {
+      sqlite3_reset(st);
+      sqlite3_clear_bindings(st);
+   } else {
+      sqlite3_finalize(st);
+   }
+   return rc;
 }
 
 /* The kept fact takes the merged one's sources: what that fact was learned
@@ -1000,115 +1048,85 @@ static bool merge_sources_locked(int64_t old_fact_id, int64_t keeper_id, int use
    return true;
 }
 
-int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id) {
-   if (user_id <= 0 || old_fact_id == keeper_id)
+/* What fact_supersede does after marking the old fact. */
+typedef enum {
+   SUPERSEDE_MERGE,   /* a duplicate: the kept fact takes its relations and history */
+   SUPERSEDE_REPLACE, /* an older value: its open relations closed by the newer one */
+   SUPERSEDE_CORRECT, /* an older value, its relations left alone (a correction) */
+} supersede_mode_t;
+
+/* Supersede @p old_id by @p new_id in one savepoint, then @p mode's own step. */
+static int fact_supersede(int64_t old_id, int64_t new_id, int user_id, supersede_mode_t mode) {
+   if (user_id <= 0 || old_id == new_id)
       return MEMORY_DB_FAILURE;
 
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_merge", NULL, NULL, NULL) != SQLITE_OK) {
+   if (auth_db_savepoint_begin_locked("fact_supersede") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
    bool changed = false;
-   bool ok = fact_supersede_locked(old_fact_id, keeper_id, user_id, MEMORY_SUPERSEDED_MERGED,
-                                   &changed) == SQLITE_DONE;
-   if (ok && changed) {
-      ok = merge_sources_locked(old_fact_id, keeper_id, user_id);
-   }
-   /* What the duplicate stated is the kept fact's now: left on it, a later
-    * change of value would retire the duplicate, not the fact the user sees,
-    * and forgetting the kept fact couldn't reach it once the duplicate is
-    * pruned. */
-   if (ok && changed) {
-      sqlite3_stmt *st = NULL;
-      ok = sqlite3_prepare_v2(s_db.db,
-                              "UPDATE memory_relations SET fact_id = ?1 WHERE user_id = ?2 AND "
-                              "fact_id = ?3",
-                              -1, &st, NULL) == SQLITE_OK;
-      if (ok) {
-         sqlite3_bind_int64(st, 1, keeper_id);
-         sqlite3_bind_int(st, 2, user_id);
-         sqlite3_bind_int64(st, 3, old_fact_id);
-         ok = sqlite3_step(st) == SQLITE_DONE;
-      }
-      sqlite3_finalize(st);
+   const int kind = mode == SUPERSEDE_MERGE ? MEMORY_SUPERSEDED_MERGED : MEMORY_SUPERSEDED_REPLACED;
+   bool ok = memory_db_internal_fact_supersede_locked(old_id, new_id, user_id, kind, &changed) ==
+             SQLITE_DONE;
+   if (ok && changed && mode == SUPERSEDE_MERGE) {
+      /* The kept fact is the duplicate: its sources, what it stated (else a
+       * later change of value would retire the duplicate, not the fact the
+       * user sees), and the values it replaced.  What moved is marked with
+       * where it came from (unless an earlier merge marked it), so restoring
+       * the duplicate takes it back.  What it closed stays on it: restore and
+       * reopen look through merged facts. */
+      ok = merge_sources_locked(old_id, new_id, user_id) &&
+           memory_db_internal_exec_locked(
+               "UPDATE memory_relations SET fact_id = ?3, merged_from_fact_id = "
+               "COALESCE(merged_from_fact_id, ?2) WHERE user_id = ?1 AND fact_id = ?2",
+               user_id, old_id, new_id) == SQLITE_DONE &&
+           memory_db_internal_exec_locked(
+               "UPDATE memory_facts SET superseded_by = ?3, merged_from_id = "
+               "COALESCE(merged_from_id, ?2) WHERE user_id = ?1 AND superseded_by = ?2 AND "
+               "superseded_kind = " MEMORY_REPLACED_SQL,
+               user_id, old_id, new_id) == SQLITE_DONE;
+   } else if (ok && changed && mode == SUPERSEDE_REPLACE) {
+      /* An older value: what it stated is history, closed by the newer one. */
+      ok = memory_db_internal_exec_locked("UPDATE memory_relations SET valid_to = "
+                                          "CAST(strftime('%s', 'now') AS INTEGER), "
+                                          "closed_by_fact_id = ?3 WHERE user_id = ?1 AND "
+                                          "fact_id = ?2 AND valid_to IS NULL",
+                                          user_id, old_id, new_id) == SQLITE_DONE;
    }
    if (!ok) {
-      OLOG_WARNING("memory_db: merging fact %lld into %lld failed: %s", (long long)old_fact_id,
-                   (long long)keeper_id, sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK TO fact_merge", NULL, NULL, NULL);
-      changed = false;
+      OLOG_WARNING("memory_db: superseding fact %lld by %lld failed: %s", (long long)old_id,
+                   (long long)new_id, sqlite3_errmsg(s_db.db));
    }
-   sqlite3_exec(s_db.db, "RELEASE fact_merge", NULL, NULL, NULL);
+   ok = auth_db_savepoint_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE, "fact_supersede") ==
+        AUTH_DB_SUCCESS;
    AUTH_DB_UNLOCK();
-   if (changed) {
-      memory_embeddings_invalidate_cache_for_user(user_id);
-   }
    if (!ok) {
       return MEMORY_DB_FAILURE;
    }
-   return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND; /* either fact gone, or not theirs */
+   if (changed) {
+      memory_embeddings_invalidate_cache_for_user(user_id);
+   }
+   /* Unchanged: either fact gone, not theirs, or not current. */
+   return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id) {
+   return fact_supersede(old_fact_id, keeper_id, user_id, SUPERSEDE_MERGE);
 }
 
 int memory_db_fact_replace(int64_t old_fact_id, int64_t newer_id, int user_id) {
-   if (user_id <= 0 || old_fact_id == newer_id)
-      return MEMORY_DB_FAILURE;
+   return fact_supersede(old_fact_id, newer_id, user_id, SUPERSEDE_REPLACE);
+}
 
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_replace", NULL, NULL, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   bool changed = false;
-   bool ok = fact_supersede_locked(old_fact_id, newer_id, user_id, MEMORY_SUPERSEDED_REPLACED,
-                                   &changed) == SQLITE_DONE;
-   /* What the old value stated is history now, closed by the newer one. */
-   if (ok && changed) {
-      sqlite3_stmt *st = NULL;
-      ok = sqlite3_prepare_v2(s_db.db,
-                              "UPDATE memory_relations SET valid_to = CAST(strftime('%s', 'now') "
-                              "AS INTEGER), closed_by_fact_id = ?1 WHERE user_id = ?2 AND "
-                              "fact_id = ?3 AND valid_to IS NULL",
-                              -1, &st, NULL) == SQLITE_OK;
-      if (ok) {
-         sqlite3_bind_int64(st, 1, newer_id);
-         sqlite3_bind_int(st, 2, user_id);
-         sqlite3_bind_int64(st, 3, old_fact_id);
-         ok = sqlite3_step(st) == SQLITE_DONE;
-      }
-      sqlite3_finalize(st);
-   }
-   if (!ok) {
-      sqlite3_exec(s_db.db, "ROLLBACK TO fact_replace", NULL, NULL, NULL);
-      changed = false;
-   }
-   sqlite3_exec(s_db.db, "RELEASE fact_replace", NULL, NULL, NULL);
-   AUTH_DB_UNLOCK();
-   if (changed) {
-      memory_embeddings_invalidate_cache_for_user(user_id);
-   }
-   if (!ok) {
-      return MEMORY_DB_FAILURE;
-   }
-   return changed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+int memory_db_fact_correct(int64_t old_fact_id, int64_t newer_id, int user_id) {
+   return fact_supersede(old_fact_id, newer_id, user_id, SUPERSEDE_CORRECT);
 }
 
 /* Passes of the unreferenced-entity delete: an alias deleted after its
  * canonical was checked leaves the canonical unreferenced for the next pass. */
 #define FACT_DELETE_ENTITY_PASSES 3
 
-/* Run @p sql with ?1 = @p user_id and ?2 = @p id; the sqlite3_step result. */
-static int fact_delete_exec_locked(const char *sql, int user_id, int64_t id) {
-   sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
-   if (rc == SQLITE_OK) {
-      sqlite3_bind_int(st, 1, user_id);
-      sqlite3_bind_int64(st, 2, id);
-      rc = sqlite3_step(st);
-   }
-   sqlite3_finalize(st);
-   return rc;
-}
 
 /* The fact's whole text when @p user_id owns it, else NULL (caller frees).
  * The insert stemmed all of it, and a contentless FTS5 delete must name
@@ -1139,42 +1157,43 @@ static int fact_delete_relations_locked(int user_id, int64_t fact_id) {
     * and an edge left with no fact behind it keeps bringing back what was
     * forgotten (graph retrieval, per-turn context).  So do the entities only
     * they and the fact named, once nothing else names them. */
-   int rc = sqlite3_exec(s_db.db,
-                         "CREATE TEMP TABLE IF NOT EXISTS fact_delete_entities(id INTEGER PRIMARY "
-                         "KEY); DELETE FROM fact_delete_entities;",
-                         NULL, NULL, NULL) == SQLITE_OK
-                ? SQLITE_DONE
-                : SQLITE_ERROR;
+   int rc = memory_db_internal_exec_locked(
+       "CREATE TEMP TABLE IF NOT EXISTS fact_delete_entities(id INTEGER PRIMARY KEY)", 0, 0, 0);
    if (rc == SQLITE_DONE) {
-      rc = fact_delete_exec_locked(
+      rc = memory_db_internal_exec_locked("DELETE FROM fact_delete_entities", 0, 0, 0);
+   }
+   if (rc == SQLITE_DONE) {
+      rc = memory_db_internal_exec_locked(
           "INSERT OR IGNORE INTO fact_delete_entities SELECT subject_entity_id FROM memory_facts "
           "WHERE id = ?2 AND user_id = ?1 AND subject_entity_id IS NOT NULL UNION SELECT "
           "subject_entity_id FROM memory_relations WHERE fact_id = ?2 AND user_id = ?1 UNION "
           "SELECT object_entity_id FROM memory_relations WHERE fact_id = ?2 AND user_id = ?1 AND "
           "object_entity_id IS NOT NULL",
-          user_id, fact_id);
+          user_id, fact_id, 0);
    }
-   /* A relation another conversation also taught stays, moved to the fact this
-    * one was merged into (if any): the other conversation still says it. */
+   /* A relation another conversation also taught stays: moved to the fact this
+    * one was merged into, which says the same (a replaced value's newer fact
+    * doesn't), or left with no fact.  "Another" is any conversation but this
+    * fact's and those of the facts it was merged into. */
    if (rc == SQLITE_DONE) {
-      rc = fact_delete_exec_locked(
+      rc = memory_db_internal_exec_locked(
           "WITH RECURSIVE up(id, depth) AS (SELECT ?2, 0 UNION SELECT f.superseded_by, "
           "u.depth + 1 FROM memory_facts f JOIN up u ON f.id = u.id WHERE f.user_id = ?1 AND "
-          "f.superseded_by IS NOT NULL AND u.depth < 32), "
+          "f.superseded_by IS NOT NULL AND f.superseded_kind = " MEMORY_MERGED_SQL
+          " AND u.depth < " MEMORY_CHAIN_DEPTH_SQL "), "
           "src(c) AS (SELECT conversation_id FROM memory_fact_sources WHERE fact_id IN (SELECT "
           "id FROM up) UNION SELECT source_conversation_id FROM memory_facts WHERE id IN (SELECT "
           "id FROM up) AND source_conversation_id IS NOT NULL) "
-          "DELETE FROM memory_relations WHERE user_id = ?1 AND fact_id = ?2 AND NOT EXISTS "
-          "(SELECT 1 FROM memory_relation_sources x WHERE x.relation_id = memory_relations.id "
-          "AND x.conversation_id NOT IN (SELECT c FROM src)) AND (source_conversation_id IS NULL "
-          "OR source_conversation_id IN (SELECT c FROM src))",
-          user_id, fact_id);
+          "DELETE FROM memory_relations WHERE user_id = ?1 AND fact_id = ?2 "
+          "AND " MEMORY_ROW_TAUGHT_ONLY_BY("memory_relations", "memory_relation_sources",
+                                           "relation_id", "(SELECT c FROM src)"),
+          user_id, fact_id, 0);
    }
    if (rc == SQLITE_DONE) {
-      rc = fact_delete_exec_locked("UPDATE memory_relations SET fact_id = (SELECT superseded_by "
-                                   "FROM memory_facts WHERE id = ?2) WHERE user_id = ?1 AND "
-                                   "fact_id = ?2",
-                                   user_id, fact_id);
+      rc = memory_db_internal_exec_locked(
+          "UPDATE memory_relations SET fact_id = (SELECT superseded_by FROM memory_facts WHERE id "
+          "= ?2 AND superseded_kind = " MEMORY_MERGED_SQL ") WHERE user_id = ?1 AND fact_id = ?2",
+          user_id, fact_id, 0);
    }
    return rc;
 }
@@ -1186,10 +1205,10 @@ static int fact_delete_entities_locked(int user_id, int64_t fact_id, int *gone_o
    int ents_gone = 0;
    for (int pass = 0, gone = 1; pass < FACT_DELETE_ENTITY_PASSES && gone > 0 && rc == SQLITE_DONE;
         pass++) {
-      rc = fact_delete_exec_locked(
+      rc = memory_db_internal_exec_locked(
           "DELETE FROM memory_entities WHERE user_id = ?1 AND ?2 > 0 AND "
           "id IN (SELECT id FROM fact_delete_entities) AND " MEMORY_ENTITY_UNREFERENCED,
-          user_id, fact_id);
+          user_id, fact_id, 0);
       gone = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
       ents_gone += gone;
    }
@@ -1197,57 +1216,73 @@ static int fact_delete_entities_locked(int user_id, int64_t fact_id, int *gone_o
    return rc;
 }
 
-int memory_db_fact_delete(int64_t fact_id, int user_id) {
-   /* Looked up first, then stemmed outside any lock so the stemmer mutex
-    * stays a leaf (ARCHITECTURE.md lock order); fact_text is immutable, so
-    * these are the stems the insert indexed. */
-   char *text = fact_delete_text(fact_id, user_id);
-   if (!text) {
-      return MEMORY_DB_NOT_FOUND;
-   }
-   char fact_stems[MEMORY_FACT_STEMS_MAX];
-   (void)memory_stem_string(text, fact_stems, sizeof(fact_stems));
-   free(text);
-
+int memory_db_internal_fact_delete_locked(int user_id,
+                                          int64_t fact_id,
+                                          const char *stems,
+                                          int *entities_gone,
+                                          bool *deleted) {
+   *entities_gone = 0;
+   *deleted = false;
    /* The FTS5 rows, the relations, the fact and its lone entities: all or none. */
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_delete", NULL, NULL, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
+   if (auth_db_savepoint_begin_locked("fact_delete") != AUTH_DB_SUCCESS) {
       return MEMORY_DB_FAILURE;
    }
-   (void)memory_db_internal_fts5_delete_fact_locked(fact_id, fact_stems);
+   (void)memory_db_internal_fts5_delete_fact_locked(fact_id, stems);
    int rc = fact_delete_relations_locked(user_id, fact_id);
-   int changes = 0;
    if (rc == SQLITE_DONE) {
       sqlite3_stmt *stmt = s_db.stmt_memory_fact_delete;
       sqlite3_reset(stmt);
       sqlite3_bind_int64(stmt, 1, fact_id);
       sqlite3_bind_int(stmt, 2, user_id);
       rc = sqlite3_step(stmt);
-      changes = sqlite3_changes(s_db.db);
+      *deleted = rc == SQLITE_DONE && sqlite3_changes(s_db.db) > 0;
       sqlite3_reset(stmt);
    }
-   int ents_gone = 0;
    if (rc == SQLITE_DONE) {
-      rc = fact_delete_entities_locked(user_id, fact_id, &ents_gone);
+      rc = fact_delete_entities_locked(user_id, fact_id, entities_gone);
    }
-   if (rc == SQLITE_DONE &&
-       sqlite3_exec(s_db.db, "RELEASE fact_delete", NULL, NULL, NULL) != SQLITE_OK) {
-      rc = SQLITE_ERROR;
+   if (auth_db_savepoint_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                                    "fact_delete") != AUTH_DB_SUCCESS) {
+      *entities_gone = 0;
+      *deleted = false;
+      return MEMORY_DB_FAILURE;
    }
-   if (rc != SQLITE_DONE) {
-      sqlite3_exec(s_db.db, "ROLLBACK TO fact_delete", NULL, NULL, NULL);
-      sqlite3_exec(s_db.db, "RELEASE fact_delete", NULL, NULL, NULL);
+   return MEMORY_DB_SUCCESS;
+}
+
+char *memory_db_internal_fact_stems(int64_t fact_id, int user_id, char *stems, size_t size) {
+   char *text = fact_delete_text(fact_id, user_id);
+   if (text) {
+      (void)memory_stem_string(text, stems, size);
    }
+   return text;
+}
+
+int memory_db_fact_delete(int64_t fact_id, int user_id) {
+   /* Looked up first, then stemmed outside any lock so the stemmer mutex
+    * stays a leaf (ARCHITECTURE.md lock order); fact_text is immutable, so
+    * these are the stems the insert indexed. */
+   char fact_stems[MEMORY_FACT_STEMS_MAX];
+   char *text = memory_db_internal_fact_stems(fact_id, user_id, fact_stems, sizeof(fact_stems));
+   if (!text) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   free(text);
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   int ents_gone = 0;
+   bool deleted = false;
+   const int rc = memory_db_internal_fact_delete_locked(user_id, fact_id, fact_stems, &ents_gone,
+                                                        &deleted);
    AUTH_DB_UNLOCK();
 
-   if (rc != SQLITE_DONE) {
+   if (rc != MEMORY_DB_SUCCESS) {
       return MEMORY_DB_FAILURE;
    }
    if (ents_gone > 0) {
       memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
-   if (changes > 0) {
+   if (deleted) {
       /* The embedding cache's entry for the fact would surface it in cosine
        * search and find_duplicates until reloaded. */
       memory_embeddings_invalidate_cache();
@@ -1335,162 +1370,301 @@ int memory_db_fact_find_by_hash(int user_id,
 /* v48 FTS5 orphan cleanup status (Phase 9.5):
  *   memory_db_facts_delete_by_patterns NOW fires fts5_delete_fact_stems_locked
  *   per victim before the bulk DELETE — see the FTS5 sync pre-pass.
- *   memory_db_fact_prune_superseded / memory_db_fact_prune_stale below still
- *   leave orphan FTS5 rows.  Live search recall is unaffected because the
- *   BM25 search JOIN's `memory_facts mf ON mf.id = memory_facts_fts.rowid`
- *   filter drops orphans, but they accumulate token-posting storage and bias
- *   global IDF (~1-5% orphan ratio at realistic prune cadences — below
- *   bench-noise threshold).  Close both prune paths in the same pattern when
- *   pruning gets exercised in production. */
-/* Merge-chain steps one prune moves a relation up: only a cycle in the
- * chain reaches it. */
-#define PRUNE_RELINK_PASSES_MAX 64
+ *   memory_db_fact_prune_stale / _expired and memory_db_prune_low_confidence
+ *   delete through memory_db_internal_fact_delete_locked (FTS5 included).
+ *   memory_db_fact_prune_superseded below still leaves orphan FTS5 rows for
+ *   the merged duplicates it removes.  Live search recall is unaffected
+ *   because the BM25 search JOIN's `memory_facts mf ON mf.id =
+ *   memory_facts_fts.rowid` filter drops orphans. */
+/* A merged duplicate past the window, ?2 the cutoff: what the prune removes. */
+#define PRUNE_GOING                                                                      \
+   "(SELECT id FROM memory_facts WHERE +user_id = ?1 AND superseded_by IS NOT NULL AND " \
+   "superseded_kind = " MEMORY_MERGED_SQL " AND superseded_at IS NOT NULL AND "          \
+   "superseded_at < ?2)"
+
+/* What a pruned duplicate still holds goes up to the fact it was merged
+ * into, a step per pass so a chain pruned at once ends on its keeper: a
+ * relation it stated (one left on it before merges moved them), one it closed
+ * (restore reopens through it), and a fact still under it that isn't pruned
+ * (an older value, or a duplicate with no merge time).  Left behind, the relation has no fact a
+ * forget reaches, and the fact comes back as current. */
+static bool prune_hand_up_locked(int user_id, int64_t cutoff) {
+   for (int pass = 0; pass < MEMORY_CHAIN_DEPTH_MAX; pass++) {
+      int moved = 0;
+      if (memory_db_internal_exec_locked(
+              "UPDATE memory_relations SET fact_id = (SELECT f.superseded_by FROM memory_facts f "
+              "WHERE f.id = memory_relations.fact_id) WHERE +user_id = ?1 AND fact_id "
+              "IN " PRUNE_GOING,
+              user_id, cutoff, 0) != SQLITE_DONE) {
+         return false;
+      }
+      moved += sqlite3_changes(s_db.db);
+      if (memory_db_internal_exec_locked(
+              "UPDATE memory_relations SET closed_by_fact_id = (SELECT f.superseded_by FROM "
+              "memory_facts f WHERE f.id = memory_relations.closed_by_fact_id) WHERE +user_id = ?1 "
+              "AND closed_by_fact_id IN " PRUNE_GOING,
+              user_id, cutoff, 0) != SQLITE_DONE) {
+         return false;
+      }
+      moved += sqlite3_changes(s_db.db);
+      if (memory_db_internal_exec_locked(
+              "UPDATE memory_facts SET superseded_by = (SELECT f.superseded_by FROM memory_facts f "
+              "WHERE f.id = memory_facts.superseded_by) WHERE +user_id = ?1 AND id NOT "
+              "IN " PRUNE_GOING " AND superseded_by IN " PRUNE_GOING,
+              user_id, cutoff, 0) != SQLITE_DONE) {
+         return false;
+      }
+      moved += sqlite3_changes(s_db.db);
+      if (moved == 0) {
+         break;
+      }
+   }
+   return true;
+}
 
 int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_out) {
    if (count_out)
       *count_out = 0;
 
    AUTH_DB_LOCK_OR_FAIL();
-
-   time_t cutoff = time(NULL) - (retention_days * 24 * 60 * 60);
-   if (sqlite3_exec(s_db.db, "SAVEPOINT fact_prune", NULL, NULL, NULL) != SQLITE_OK) {
+   const int64_t cutoff = (int64_t)(time(NULL) - (time_t)retention_days * 24 * 60 * 60);
+   if (auth_db_savepoint_begin_locked("fact_prune") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
-
-   /* A relation a merged duplicate stated before merges moved relations (or
-    * one left on it) goes up to the fact kept, a step per pass so a chain
-    * pruned at once ends on its keeper; otherwise it is left with no fact and
-    * no forget can reach it.  A replaced value's relations aren't moved: the
-    * fact that replaced it doesn't say them. */
-   sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(
-       s_db.db,
-       "UPDATE memory_relations SET fact_id = (SELECT f.superseded_by FROM memory_facts f "
-       "WHERE f.id = memory_relations.fact_id) WHERE +user_id = ?1 AND fact_id IN (SELECT id "
-       "FROM memory_facts WHERE +user_id = ?1 AND superseded_by IS NOT NULL AND "
-       "superseded_kind = 0 AND superseded_at IS NOT NULL AND superseded_at < ?2)",
-       -1, &st, NULL);
-   if (rc == SQLITE_OK) {
-      rc = SQLITE_DONE;
-      sqlite3_bind_int(st, 1, user_id);
-      sqlite3_bind_int64(st, 2, (int64_t)cutoff);
-   }
-   for (int pass = 0; pass < PRUNE_RELINK_PASSES_MAX && rc == SQLITE_DONE; pass++) {
-      sqlite3_reset(st);
-      rc = sqlite3_step(st);
-      if (rc == SQLITE_DONE && sqlite3_changes(s_db.db) == 0) {
-         break;
-      }
-   }
-   sqlite3_finalize(st);
-
+   bool ok = prune_hand_up_locked(user_id, cutoff);
    int deleted = 0;
-   if (rc == SQLITE_DONE) {
+   if (ok) {
       sqlite3_stmt *stmt = s_db.stmt_memory_fact_prune_superseded;
       sqlite3_reset(stmt);
       sqlite3_bind_int(stmt, 1, user_id);
-      sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
-      rc = sqlite3_step(stmt);
-      deleted = sqlite3_changes(s_db.db);
+      sqlite3_bind_int64(stmt, 2, cutoff);
+      ok = sqlite3_step(stmt) == SQLITE_DONE;
+      deleted = ok ? sqlite3_changes(s_db.db) : 0;
       sqlite3_reset(stmt);
    }
-   if (rc == SQLITE_DONE &&
-       sqlite3_exec(s_db.db, "RELEASE fact_prune", NULL, NULL, NULL) != SQLITE_OK) {
-      rc = SQLITE_ERROR;
-   }
-   if (rc != SQLITE_DONE) {
-      sqlite3_exec(s_db.db, "ROLLBACK TO fact_prune", NULL, NULL, NULL);
-      sqlite3_exec(s_db.db, "RELEASE fact_prune", NULL, NULL, NULL);
-      deleted = 0;
-   }
-
-   AUTH_DB_UNLOCK();
-
-   if (rc != SQLITE_DONE) {
+   if (!ok) {
       OLOG_ERROR("memory_db: prune_superseded failed: %s", sqlite3_errmsg(s_db.db));
+   }
+   ok = auth_db_savepoint_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE, "fact_prune") ==
+            AUTH_DB_SUCCESS &&
+        ok;
+   AUTH_DB_UNLOCK();
+   if (!ok) {
       return MEMORY_DB_FAILURE;
    }
 
    if (count_out)
       *count_out = deleted;
    if (deleted > 0) {
-      OLOG_INFO("memory_db: pruned %d superseded facts for user %d", deleted, user_id);
+      OLOG_INFO("memory_db: pruned %d merged duplicates for user %d", deleted, user_id);
    }
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence, int *count_out) {
-   if (count_out)
-      *count_out = 0;
+/* Facts a history prune deletes per transaction: the lock is let go between
+ * them, so a backlog (pruning turned on after months) doesn't stall every
+ * other database call for seconds. */
+#define PRUNE_CHUNK 100
 
-   AUTH_DB_LOCK_OR_FAIL();
+/* Times a prune collects again when its set changed before it could delete
+ * (a merge or correction landing in between). */
+#define PRUNE_ATTEMPTS 3
 
-   time_t cutoff = time(NULL) - (stale_days * 24 * 60 * 60);
-
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_prune_stale;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
-   sqlite3_bind_double(stmt, 3, min_confidence);
-
-   int rc = sqlite3_step(stmt);
-   int deleted = sqlite3_changes(s_db.db);
-   sqlite3_reset(stmt);
-
-   AUTH_DB_UNLOCK();
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: prune_stale failed: %s", sqlite3_errmsg(s_db.db));
+/* The facts @p seed_sql selects and every fact superseded under them, deepest
+ * first, into *ids_out (caller frees; NULL when none).  Caller holds the lock. */
+static int prune_collect_locked(int user_id,
+                                const char *seed_sql,
+                                int64_t cutoff,
+                                double threshold,
+                                int64_t **ids_out,
+                                int *n_out) {
+   *ids_out = NULL;
+   *n_out = 0;
+   char sql[1024];
+   const int len = snprintf(sql, sizeof(sql),
+                            "WITH RECURSIVE hist(id, depth) AS (%s UNION SELECT f.id, h.depth + 1 "
+                            "FROM memory_facts f JOIN hist h ON f.superseded_by = h.id WHERE "
+                            "+f.user_id = ?1 AND h.depth < " MEMORY_CHAIN_DEPTH_SQL
+                            ") SELECT id FROM hist GROUP BY id ORDER BY MAX(depth) DESC, "
+                            "id",
+                            seed_sql);
+   if (len < 0 || (size_t)len >= sizeof(sql)) {
       return MEMORY_DB_FAILURE;
    }
-
-   if (count_out)
-      *count_out = deleted;
-   if (deleted > 0) {
-      OLOG_INFO("memory_db: pruned %d stale facts for user %d", deleted, user_id);
+   int64_t *ids = NULL;
+   int n = 0;
+   int cap = 0;
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      const int params = sqlite3_bind_parameter_count(st);
+      sqlite3_bind_int(st, 1, user_id);
+      if (params >= 2) {
+         sqlite3_bind_int64(st, 2, cutoff);
+      }
+      if (params >= 3) {
+         sqlite3_bind_double(st, 3, threshold);
+      }
+      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+         if (n == cap) {
+            const int ncap = cap ? cap * 2 : 64;
+            int64_t *grown = realloc(ids, (size_t)ncap * sizeof(*ids));
+            if (!grown) {
+               rc = SQLITE_NOMEM;
+               break;
+            }
+            ids = grown;
+            cap = ncap;
+         }
+         ids[n++] = sqlite3_column_int64(st, 0);
+      }
    }
+   sqlite3_finalize(st);
+   if (rc != SQLITE_DONE) {
+      free(ids);
+      return MEMORY_DB_FAILURE;
+   }
+   *ids_out = ids;
+   *n_out = n;
    return MEMORY_DB_SUCCESS;
+}
+
+/* Deletes @p ids (stemmed in @p stems), deepest first, PRUNE_CHUNK per
+ * transaction.  Each first checks the facts left are still what the seed
+ * selects (*changed when not: a fact superseded under one of them meanwhile
+ * would otherwise come back as current); deleting deepest first leaves the
+ * rest of the list exactly what a fresh collect returns. */
+static int prune_delete(int user_id,
+                        const char *seed_sql,
+                        int64_t cutoff,
+                        double threshold,
+                        const int64_t *ids,
+                        int n,
+                        char (*stems)[MEMORY_FACT_STEMS_MAX],
+                        bool *changed,
+                        int *deleted,
+                        int *ents_gone) {
+   *changed = false;
+   bool ok = true;
+   for (int pos = 0; ok && pos < n; pos += PRUNE_CHUNK) {
+      const int end = n - pos > PRUNE_CHUNK ? pos + PRUNE_CHUNK : n;
+      AUTH_DB_LOCK_OR_FAIL();
+      ok = auth_db_txn_begin_locked("memory_db: prune") == AUTH_DB_SUCCESS;
+      int64_t *now = NULL;
+      int now_n = 0;
+      ok = ok && prune_collect_locked(user_id, seed_sql, cutoff, threshold, &now, &now_n) ==
+                     MEMORY_DB_SUCCESS;
+      if (ok &&
+          (now_n != n - pos || memcmp(now, ids + pos, (size_t)(n - pos) * sizeof(*ids)) != 0)) {
+         *changed = true;
+         ok = false; /* roll back; the caller collects again */
+      }
+      free(now);
+      int chunk_deleted = 0;
+      int chunk_gone = 0;
+      for (int i = pos; ok && i < end; i++) {
+         int gone = 0;
+         bool was = false;
+         ok = memory_db_internal_fact_delete_locked(user_id, ids[i], stems[i], &gone, &was) ==
+              MEMORY_DB_SUCCESS;
+         chunk_deleted += was;
+         chunk_gone += gone;
+      }
+      ok = auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE, "memory_db: prune") ==
+               AUTH_DB_SUCCESS &&
+           ok;
+      AUTH_DB_UNLOCK();
+      if (ok) {
+         *deleted += chunk_deleted;
+         *ents_gone += chunk_gone;
+      }
+   }
+   return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+int memory_db_internal_prune_with_history(int user_id,
+                                          const char *seed_sql,
+                                          int64_t cutoff,
+                                          double threshold,
+                                          const char *what,
+                                          int *count_out) {
+   if (count_out) {
+      *count_out = 0;
+   }
+   int deleted = 0;
+   int ents_gone = 0;
+   bool changed = true;
+   bool ok = true;
+   /* Chunks a failed or changed attempt already committed stay deleted
+    * (and counted): each was a whole, checked set. */
+   for (int attempt = 0; ok && changed && attempt < PRUNE_ATTEMPTS; attempt++) {
+      int64_t *ids = NULL;
+      int n = 0;
+      AUTH_DB_LOCK_OR_FAIL();
+      ok = prune_collect_locked(user_id, seed_sql, cutoff, threshold, &ids, &n) ==
+           MEMORY_DB_SUCCESS;
+      AUTH_DB_UNLOCK();
+      if (!ok || n == 0) {
+         changed = false;
+         free(ids);
+         break;
+      }
+      /* Stems outside the lock (the stemmer mutex is a leaf). */
+      char(*stems)[MEMORY_FACT_STEMS_MAX] = calloc((size_t)n, sizeof(*stems));
+      if (!stems) {
+         free(ids);
+         ok = false;
+         break;
+      }
+      for (int i = 0; i < n; i++) {
+         free(memory_db_internal_fact_stems(ids[i], user_id, stems[i], sizeof(stems[i])));
+      }
+      const int rc = prune_delete(user_id, seed_sql, cutoff, threshold, ids, n, stems, &changed,
+                                  &deleted, &ents_gone);
+      ok = rc == MEMORY_DB_SUCCESS || changed;
+      free(stems);
+      free(ids);
+   }
+   if (!ok || changed) {
+      OLOG_ERROR("memory_db: prune_%s failed for user %d%s", what, user_id,
+                 changed ? " (memory kept changing; next run)" : "");
+   }
+   if (ents_gone > 0) {
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
+   }
+   if (deleted > 0) {
+      memory_embeddings_invalidate_cache_for_user(user_id);
+      OLOG_INFO("memory_db: pruned %d %s facts (with their history) for user %d", deleted, what,
+                user_id);
+   }
+   if (count_out) {
+      *count_out = deleted;
+   }
+   return ok && !changed ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence, int *count_out) {
+   /* note_doc_id IS NULL: bridge glosses live and die with their note. */
+   return memory_db_internal_prune_with_history(
+       user_id,
+       "SELECT id, 0 FROM memory_facts WHERE user_id = ?1 AND superseded_by IS NULL AND "
+       "last_accessed < ?2 AND confidence < ?3 AND note_doc_id IS NULL",
+       (int64_t)(time(NULL) - (time_t)stale_days * 24 * 60 * 60), (double)min_confidence, "stale",
+       count_out);
 }
 
 /* v58 (C3): hard-delete facts whose expiry passed more than @p retention_days
  * ago — the "hard phase" of fact ephemerality.  The retrieval guard already
  * hides them (soft phase) the moment expires_at < now; this reclaims the row
  * after the recoverable window.  retention_days = 0 collapses to hard-expire on
- * the reference date (cutoff == now).  Leaf-lock single DELETE, copies nothing
- * out — mirrors prune_superseded.  Carries the same known FTS5-orphan debt as
- * prune_superseded / prune_stale (see the block comment above prune_superseded);
- * close all three together when pruning is exercised in production. */
+ * the reference date (cutoff == now). */
 int memory_db_fact_prune_expired(int user_id, int retention_days, int *count_out) {
-   if (count_out)
-      *count_out = 0;
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   time_t cutoff = time(NULL) - (retention_days * 24 * 60 * 60);
-
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_prune_expired;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
-
-   int rc = sqlite3_step(stmt);
-   int deleted = sqlite3_changes(s_db.db);
-   sqlite3_reset(stmt);
-
-   AUTH_DB_UNLOCK();
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: prune_expired failed: %s", sqlite3_errmsg(s_db.db));
-      return MEMORY_DB_FAILURE;
-   }
-
-   if (count_out)
-      *count_out = deleted;
-   if (deleted > 0) {
-      OLOG_INFO("memory_db: pruned %d expired facts for user %d", deleted, user_id);
-   }
-   return MEMORY_DB_SUCCESS;
+   return memory_db_internal_prune_with_history(
+       user_id,
+       "SELECT id, 0 FROM memory_facts WHERE user_id = ?1 AND expires_at IS NOT NULL AND "
+       "expires_at < ?2",
+       (int64_t)(time(NULL) - (time_t)retention_days * 24 * 60 * 60), 0.0, "expired", count_out);
 }
 
 int memory_db_facts_delete_by_patterns(int user_id,

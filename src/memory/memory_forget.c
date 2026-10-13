@@ -92,9 +92,9 @@ int memory_forget_conversation(int user_id, int64_t conv_id, memory_conv_learned
    }
 
    OLOG_INFO("memory_forget: user %d conversation %lld (+%d continuation(s)): removed %d facts, "
-             "%d summaries, %d relations, %d preferences, %d entities",
+             "%d summaries, %d relations, %d preferences, %d entities; %d earlier value(s) back",
              user_id, (long long)conv_id, n - 1, d.facts, d.summaries, d.relations, d.preferences,
-             d.entities);
+             d.entities, d.restored);
    if (deleted_out) {
       *deleted_out = d;
    }

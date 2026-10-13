@@ -107,6 +107,7 @@ static const char *DDL =
    "  access_count INTEGER DEFAULT 0,"
    "  superseded_by INTEGER,"
    "  superseded_kind INTEGER NOT NULL DEFAULT 0,"
+   "  merged_from_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  superseded_at INTEGER DEFAULT NULL,"
    "  normalized_hash INTEGER DEFAULT 0,"
    "  embedding BLOB DEFAULT NULL,"
@@ -226,6 +227,7 @@ static const char *DDL =
    "  fact_id INTEGER DEFAULT NULL,"
    "  valid_from INTEGER DEFAULT NULL,"
    "  valid_to INTEGER DEFAULT NULL,"
+   "  merged_from_fact_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  closed_by_fact_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  source_conversation_id INTEGER DEFAULT NULL,"
@@ -349,13 +351,6 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return FAILURE;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "DELETE FROM memory_facts WHERE user_id = ? "
-                           "AND expires_at IS NOT NULL AND expires_at < ?",
-                           -1, &s_db.stmt_memory_fact_prune_expired, NULL);
-   if (rc != SQLITE_OK)
-      return FAILURE;
-
    /* Forget: keep in sync with auth_db_statements.c. */
    rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_facts WHERE id = ? AND user_id = ?", -1,
                            &s_db.stmt_memory_fact_delete, NULL);
@@ -365,8 +360,9 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = ?6, "
                            "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-                           "WHERE id = ?2 AND user_id = ?3 "
-                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5)",
+                           "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL AND ?2 != ?4 "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5 "
+                           "AND superseded_by IS NULL)",
                            -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
@@ -435,8 +431,6 @@ static void close_db(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_list_created_desc);
    if (s_db.stmt_memory_fact_list_created_asc)
       sqlite3_finalize(s_db.stmt_memory_fact_list_created_asc);
-   if (s_db.stmt_memory_fact_prune_expired)
-      sqlite3_finalize(s_db.stmt_memory_fact_prune_expired);
    if (s_db.stmt_memory_fact_prune_superseded)
       sqlite3_finalize(s_db.stmt_memory_fact_prune_superseded);
    if (s_db.stmt_memory_fact_delete)
@@ -464,7 +458,7 @@ static void close_db(void) {
    s_db.stmt_memory_fact_list = NULL;
    s_db.stmt_memory_fact_list_created_desc = NULL;
    s_db.stmt_memory_fact_list_created_asc = NULL;
-   s_db.stmt_memory_fact_prune_expired = NULL;
+   memory_db_release_statements_locked(); /* the store's kept statements */
    sqlite3_close(s_db.db);
    s_db.db = NULL;
 }
@@ -1651,7 +1645,7 @@ void test_merged_and_replaced_hide_alike(void) {
    memory_db_fact_create(1, "User's car is blue", 0.9f, "explicit", "personal", NULL, &dup);
    memory_db_fact_create(1, "User drives a red car", 0.9f, "explicit", "personal", NULL, &old);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_supersede(old, keep, 1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_replace(old, keep, 1));
    char sql[160];
    snprintf(sql, sizeof(sql), "SELECT superseded_kind FROM memory_facts WHERE id = %lld",
             (long long)dup);

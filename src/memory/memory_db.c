@@ -481,66 +481,32 @@ int memory_db_prune_low_confidence(int user_id, float threshold, int *count_out)
    if (count_out)
       *count_out = 0;
 
+   /* Log facts that will be pruned (audit trail for an irreversible operation). */
    AUTH_DB_LOCK_OR_FAIL();
-
-   /* Wrap audit log + delete in a transaction for consistency */
-   sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-
-   /* Log facts that will be pruned (audit trail for irreversible operation) */
    sqlite3_stmt *log_stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT id, fact_text, confidence, source FROM memory_facts "
-                               "WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL",
-                               -1, &log_stmt, NULL);
-   if (rc == SQLITE_OK) {
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id, fact_text, confidence, source FROM memory_facts "
+                          "WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL",
+                          -1, &log_stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int(log_stmt, 1, user_id);
       sqlite3_bind_double(log_stmt, 2, (double)threshold);
-
       while (sqlite3_step(log_stmt) == SQLITE_ROW) {
          OLOG_INFO("memory_decay: pruning fact %ld (%.2f, %s): %.60s",
                    (long)sqlite3_column_int64(log_stmt, 0), sqlite3_column_double(log_stmt, 2),
                    (const char *)sqlite3_column_text(log_stmt, 3),
                    (const char *)sqlite3_column_text(log_stmt, 1));
       }
-      sqlite3_finalize(log_stmt);
    }
-
-   /* Delete low-confidence facts */
-   sqlite3_stmt *stmt = NULL;
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       /* note_doc_id IS NULL: never prune memory→note bridge glosses (v61) — they
-        * are removed with their note, not by confidence. */
-       "DELETE FROM memory_facts WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL "
-       "AND note_doc_id IS NULL",
-       -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("memory_db: prune_low_confidence prepare failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_double(stmt, 2, (double)threshold);
-
-   rc = sqlite3_step(stmt);
-   int deleted = sqlite3_changes(s_db.db);
-   sqlite3_finalize(stmt);
-
-   if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: prune_low_confidence failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-
-   sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+   sqlite3_finalize(log_stmt);
    AUTH_DB_UNLOCK();
 
-   if (count_out)
-      *count_out = deleted;
-   return MEMORY_DB_SUCCESS;
+   /* With their history; note_doc_id IS NULL: never prune memory→note bridge
+    * glosses (v61) — they are removed with their note, not by confidence. */
+   return memory_db_internal_prune_with_history(
+       user_id,
+       "SELECT id, 0 FROM memory_facts WHERE user_id = ?1 AND confidence < ?3 AND superseded_by "
+       "IS NULL AND note_doc_id IS NULL",
+       0, (double)threshold, "low-confidence", count_out);
 }
 
 int memory_db_prune_old_summaries(int user_id, int retention_days, int *count_out) {

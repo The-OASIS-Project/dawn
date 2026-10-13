@@ -1021,7 +1021,15 @@ static void process_extraction_response(int user_id,
                memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", NULL, prov,
                                         conv_created_at, &new_id);
                if (new_id > 0) {
-                  memory_db_fact_supersede(similar[0].id, new_id, user_id);
+                  /* The old fact is an older value the correction replaced
+                   * (back if the correction is forgotten); what it stated stays
+                   * open, since a correction rarely retracts all of it.
+                   * Refused (logged) when the old one was already superseded. */
+                  if (memory_db_fact_correct(similar[0].id, new_id, user_id) != MEMORY_DB_SUCCESS) {
+                     OLOG_WARNING("memory_extraction: correction of fact %lld not applied "
+                                  "(already merged or replaced)",
+                                  (long long)similar[0].id);
+                  }
                   OLOG_INFO("memory_extraction: corrected fact: %s -> %s", old_fact, new_fact);
                   /* Embed the corrected fact */
                   if (memory_embeddings_available()) {

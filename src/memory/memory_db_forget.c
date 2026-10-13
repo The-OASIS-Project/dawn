@@ -48,8 +48,9 @@ typedef struct {
  * if a fact joined it after its text was collected, collect again. */
 #define FORGET_ATTEMPTS 3
 
-/* forget_in_tx() outcomes beyond SUCCESS/FAILURE. */
-#define FORGET_SET_CHANGED 2
+/* A forget transaction's outcome beyond MEMORY_DB_SUCCESS / _FAILURE /
+ * _NOT_FOUND (0-2): the set changed since it was collected, collect again. */
+#define FORGET_SET_CHANGED 3
 
 /* Run one forget statement bound as ?1 = user_id, ?2 = the conversation ids
  * (statements that don't use ?2 reference it as "?2 IS NOT NULL" so every
@@ -207,6 +208,13 @@ static int forget_in_tx_locked(int user_id,
    if (ok && joined) {
       return auth_db_txn_end_locked(FORGET_SET_CHANGED, "memory_db: forget");
    }
+   /* What the going facts replaced, or what stays under them: settled before
+    * the deletes clear the links. */
+   ok = ok && memory_db_internal_going_reset_locked() == MEMORY_DB_SUCCESS &&
+        run_forget_sql_locked("INSERT INTO fact_going SELECT id FROM forget_facts WHERE ?1 > 0 "
+                              "AND ?2 IS NOT NULL",
+                              user_id, ids, &n) == SUCCESS &&
+        memory_db_internal_settle_going_locked(user_id) == MEMORY_DB_SUCCESS;
 
    /* Relations are decided before their facts go (that clears their fact_id). */
    ok = ok && run_forget_sql_locked(
@@ -270,6 +278,10 @@ static int forget_in_tx_locked(int user_id,
    FORGET_STEP("DELETE FROM memory_relations WHERE user_id = ?1 AND ?2 IS NOT NULL AND id IN "
                "(SELECT id FROM forget_relations)",
                d->relations);
+   /* After the going relations (one still open would block a reopen), before
+    * the entity sweep (a fact back keeps its entities). */
+   ok = ok && memory_db_internal_restore_settled_locked(user_id, NULL, 0, &d->restored) ==
+                  MEMORY_DB_SUCCESS;
    FORGET_STEP("DELETE FROM memory_preferences WHERE id IN (SELECT p.id FROM "
                "memory_preferences p WHERE " MEMORY_FORGET_PREF_WHERE ")",
                d->preferences);
@@ -314,7 +326,8 @@ static int forget_in_tx_locked(int user_id,
 #undef FORGET_STEP
    (void)sqlite3_exec(s_db.db,
                       "DELETE FROM forget_collected; DELETE FROM forget_facts; "
-                      "DELETE FROM forget_relations; DELETE FROM forget_entities;",
+                      "DELETE FROM forget_relations; DELETE FROM forget_entities; "
+                      "DELETE FROM fact_going;",
                       NULL, NULL, NULL);
    if (!ok) {
       OLOG_ERROR("memory_db: forget for user %d failed: %s", user_id, sqlite3_errmsg(s_db.db));
@@ -361,7 +374,7 @@ int memory_db_conversations_forget(int user_id,
    if (d.entities > 0) {
       memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
-   if (d.facts + d.outdated > 0) {
+   if (d.facts + d.outdated + d.restored > 0) {
       memory_embeddings_invalidate_cache_for_user(user_id); /* another user's copy stays */
    }
    if (deleted_out) {
@@ -371,3 +384,222 @@ int memory_db_conversations_forget(int user_id,
 }
 
 #undef FORGET_IN_CONVS
+
+/* =============================================================================
+ * One fact
+ * ============================================================================= */
+
+/* Facts one forget takes at most (the fact and what was merged into it). */
+#define FORGET_TREE_MAX 512
+
+/* @p fact_id and the facts merged into it, at any depth, deepest first and
+ * @p fact_id last (a merge cycle can't put it earlier), into @p ids, how many
+ * into *n_out (0: no such fact).  MEMORY_DB_FAILURE on error or when it holds
+ * more than @p max.  Caller holds the lock. */
+static int forget_tree_locked(int user_id, int64_t fact_id, int64_t *ids, int max, int *n_out) {
+   *n_out = 0;
+   sqlite3_stmt *st = NULL;
+   int n = 0;
+   int rc = SQLITE_ERROR;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "WITH RECURSIVE tree(id, depth) AS ("
+                          "  SELECT id, 0 FROM memory_facts WHERE id = ?2 AND user_id = ?1 "
+                          "  UNION "
+                          "  SELECT f.id, t.depth + 1 FROM memory_facts f JOIN tree t ON "
+                          "  f.superseded_by = t.id WHERE +f.user_id = ?1 AND "
+                          "  f.superseded_kind = " MEMORY_MERGED_SQL " AND t.depth < ?3) "
+                          "SELECT id FROM tree GROUP BY id ORDER BY id = ?2, MAX(depth) DESC, id "
+                          "LIMIT ?3",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, fact_id);
+      sqlite3_bind_int(st, 3, max + 1);
+      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+         if (n == max) {
+            rc = SQLITE_FULL; /* more than a forget takes at once */
+            break;
+         }
+         ids[n++] = sqlite3_column_int64(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   *n_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+/* The tree and each fact's keyword-index stems, stemmed outside the lock (the
+ * stemmer mutex is a leaf).  MEMORY_DB_FAILURE when the tree is too big. */
+static int forget_collect(int user_id,
+                          int64_t fact_id,
+                          int64_t *ids,
+                          forget_fact_t **facts_out,
+                          int *n_out) {
+   *facts_out = NULL;
+   *n_out = 0;
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   int n = 0;
+   const int rc = forget_tree_locked(user_id, fact_id, ids, FORGET_TREE_MAX, &n);
+   AUTH_DB_UNLOCK();
+   if (rc != MEMORY_DB_SUCCESS || n == 0) {
+      return rc;
+   }
+   forget_fact_t *facts = calloc((size_t)n, sizeof(*facts));
+   if (!facts) {
+      return MEMORY_DB_FAILURE;
+   }
+   for (int i = 0; i < n; i++) {
+      facts[i].id = ids[i];
+      free(memory_db_internal_fact_stems(ids[i], user_id, facts[i].stems, sizeof(facts[i].stems)));
+   }
+   *facts_out = facts;
+   *n_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+/* The forget itself, in one transaction: the tree again (FORGET_SET_CHANGED
+ * when it changed since it was stemmed), settle, the deletes, then bring back
+ * what is current again.  Caller holds the lock. */
+static int forget_fact_tx_locked(int user_id,
+                                 int64_t fact_id,
+                                 const forget_fact_t *facts,
+                                 int n,
+                                 int64_t *ids,
+                                 memory_forget_result_t *out,
+                                 int *entities_gone) {
+   if (auth_db_txn_begin_locked("memory_db: forget fact") != AUTH_DB_SUCCESS) {
+      return MEMORY_DB_FAILURE;
+   }
+   int now = 0;
+   bool same = forget_tree_locked(user_id, fact_id, ids, FORGET_TREE_MAX, &now) ==
+                   MEMORY_DB_SUCCESS &&
+               now == n;
+   for (int i = 0; same && i < n; i++) {
+      same = ids[i] == facts[i].id;
+   }
+   if (!same) {
+      return auth_db_txn_end_locked(FORGET_SET_CHANGED, "memory_db: forget fact");
+   }
+   bool ok = memory_db_internal_going_reset_locked() == MEMORY_DB_SUCCESS;
+   for (int i = 0; ok && i < n; i++) {
+      ok = memory_db_internal_exec_locked("INSERT INTO fact_going VALUES (?2)", user_id,
+                                          facts[i].id, 0) == SQLITE_DONE;
+   }
+   ok = ok && memory_db_internal_settle_going_locked(user_id) == MEMORY_DB_SUCCESS;
+   /* Deepest first, the fact last: a merged fact is never left pointing at a
+    * deleted one. */
+   for (int i = 0; ok && i < n; i++) {
+      int gone = 0;
+      bool deleted = false;
+      ok = memory_db_internal_fact_delete_locked(user_id, facts[i].id, facts[i].stems, &gone,
+                                                 &deleted) == MEMORY_DB_SUCCESS;
+      *entities_gone += gone;
+      if (ok && deleted && facts[i].id != fact_id && out) {
+         out->merged++;
+      }
+   }
+   int restored = 0;
+   ok = ok && memory_db_internal_restore_settled_locked(user_id, out ? out->restored_ids : NULL,
+                                                        out ? MEMORY_FORGET_RESTORED_MAX : 0,
+                                                        &restored) == MEMORY_DB_SUCCESS;
+   if (out) {
+      out->restored = restored;
+   }
+   (void)sqlite3_exec(s_db.db, "DELETE FROM fact_going;", NULL, NULL, NULL);
+   return auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                                 "memory_db: forget fact") == AUTH_DB_SUCCESS
+              ? MEMORY_DB_SUCCESS
+              : MEMORY_DB_FAILURE;
+}
+
+int memory_db_fact_forget(int64_t fact_id, int user_id, memory_forget_result_t *out) {
+   if (out) {
+      memset(out, 0, sizeof(*out));
+   }
+   if (user_id <= 0 || fact_id <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   int64_t *ids = malloc(FORGET_TREE_MAX * sizeof(*ids));
+   if (!ids) {
+      return MEMORY_DB_FAILURE;
+   }
+   int rc = FORGET_SET_CHANGED;
+   int entities_gone = 0;
+   for (int attempt = 0; attempt < FORGET_ATTEMPTS && rc == FORGET_SET_CHANGED; attempt++) {
+      forget_fact_t *facts = NULL;
+      int n = 0;
+      if (forget_collect(user_id, fact_id, ids, &facts, &n) != MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("memory_db: forget of fact %lld for user %d: merge tree unreadable or "
+                      "over %d facts; fact kept",
+                      (long long)fact_id, user_id, FORGET_TREE_MAX);
+         rc = MEMORY_DB_FAILURE;
+         break;
+      }
+      if (n == 0) {
+         rc = MEMORY_DB_NOT_FOUND;
+         break;
+      }
+      if (out) {
+         memset(out, 0, sizeof(*out));
+      }
+      entities_gone = 0;
+      AUTH_DB_LOCK_OR_RETURN((free(facts), free(ids), MEMORY_DB_FAILURE));
+      rc = forget_fact_tx_locked(user_id, fact_id, facts, n, ids, out, &entities_gone);
+      AUTH_DB_UNLOCK();
+      free(facts);
+   }
+   free(ids);
+   if (rc == FORGET_SET_CHANGED) {
+      OLOG_WARNING("memory_db: forget of fact %lld for user %d gave up: memory kept changing",
+                   (long long)fact_id, user_id);
+      rc = MEMORY_DB_FAILURE;
+   }
+   if (rc == MEMORY_DB_SUCCESS) {
+      if (entities_gone > 0) {
+         memory_embeddings_invalidate_entity_cache_for_user(user_id);
+      }
+      memory_embeddings_invalidate_cache_for_user(user_id);
+   } else if (out) {
+      memset(out, 0, sizeof(*out));
+   }
+   return rc;
+}
+
+int memory_db_fact_forget_preview(int64_t fact_id,
+                                  int user_id,
+                                  int *merged,
+                                  int *restored,
+                                  int64_t *first_restored) {
+   *merged = 0;
+   *restored = 0;
+   *first_restored = 0;
+   if (user_id <= 0 || fact_id <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   int64_t *ids = malloc(FORGET_TREE_MAX * sizeof(*ids));
+   if (!ids) {
+      return MEMORY_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_RETURN((free(ids), MEMORY_DB_FAILURE));
+   int n = 0;
+   bool ok = forget_tree_locked(user_id, fact_id, ids, FORGET_TREE_MAX, &n) == MEMORY_DB_SUCCESS;
+   ok = ok && memory_db_internal_going_reset_locked() == MEMORY_DB_SUCCESS;
+   for (int i = 0; ok && i < n; i++) {
+      ok = memory_db_internal_exec_locked("INSERT INTO fact_going VALUES (?2)", user_id, ids[i],
+                                          0) == SQLITE_DONE;
+   }
+   ok = ok && memory_db_internal_settle_count_locked(user_id, restored, first_restored) ==
+                  MEMORY_DB_SUCCESS;
+   (void)sqlite3_exec(s_db.db, "DELETE FROM fact_going;", NULL, NULL, NULL);
+   AUTH_DB_UNLOCK();
+   free(ids);
+   if (!ok || n == 0) {
+      *restored = 0;
+      *first_restored = 0;
+      return ok ? MEMORY_DB_NOT_FOUND : MEMORY_DB_FAILURE;
+   }
+   *merged = n - 1;
+   return MEMORY_DB_SUCCESS;
+}

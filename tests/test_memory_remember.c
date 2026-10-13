@@ -163,7 +163,7 @@ static char *forget(int64_t id, const char *mode, int64_t keeper) {
    return memoryCallback("forget", value, &respond);
 }
 
-/* 'replaced_by' files the old value as replaced, so forgetting the newer one
+/* 'newer_fact_id' files the old value as replaced, so forgetting the newer one
  * brings it back (and says so); 'duplicate_of' merges, so forgetting the kept
  * fact takes the duplicate too. */
 void test_forget_tells_a_replacement_from_a_duplicate(void) {
@@ -172,7 +172,7 @@ void test_forget_tells_a_replacement_from_a_duplicate(void) {
    const int64_t old = fact_id_of("My phone number is 555-0101");
    const int64_t fresh = fact_id_of("My phone number is now 555-0202");
    TEST_ASSERT_TRUE(old > 0 && fresh > 0);
-   free(forget(old, "replaced_by", fresh));
+   free(forget(old, "newer_fact_id", fresh));
    memory_fact_t f;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(old, s_user, &f));
    TEST_ASSERT_EQUAL_INT64(fresh, f.superseded_by);
@@ -193,8 +193,89 @@ void test_forget_tells_a_replacement_from_a_duplicate(void) {
    free(r);
    TEST_ASSERT_EQUAL_INT64(0, fact_id_of("I ride a Trek bike"));
 
-   r = forget(dup, "replaced_by", keep);
-   TEST_ASSERT_NOT_NULL(r); /* the kept fact is gone: refused, nothing changed */
+   r = forget(dup, "duplicate_of", keep);
+   TEST_ASSERT_NOT_NULL(strstr(r, "wasn't found")); /* the kept fact is gone: refused */
+   free(r);
+}
+
+/* 'replaced_by' is what 'duplicate_of' was called before: still a merge. */
+void test_forget_replaced_by_still_merges(void) {
+   free(remember("My car is a Volvo"));
+   free(remember("I drive a Volvo"));
+   const int64_t keep = fact_id_of("My car is a Volvo");
+   const int64_t dup = fact_id_of("I drive a Volvo");
+   free(forget(dup, "replaced_by", keep));
+   char *r = forget(keep, NULL, 0);
+   TEST_ASSERT_NULL(strstr(r, "Current again"));
+   free(r);
+   TEST_ASSERT_EQUAL_INT64(0, fact_id_of("I drive a Volvo"));
+}
+
+/* Two kept-fact parameters, or a malformed one, change nothing. */
+void test_forget_refuses_conflicting_or_malformed_keepers(void) {
+   free(remember("My dog is Rex"));
+   free(remember("My dog is called Rex"));
+   const int64_t a = fact_id_of("My dog is Rex");
+   const int64_t b = fact_id_of("My dog is called Rex");
+   char value[128];
+   snprintf(value, sizeof(value), "%lld::duplicate_of::%lld::newer_fact_id::%lld", (long long)b,
+            (long long)a, (long long)a);
+   int respond = 0;
+   char *r = memoryCallback("forget", value, &respond);
+   TEST_ASSERT_NOT_NULL(strstr(r, "not both"));
+   free(r);
+   snprintf(value, sizeof(value), "%lld::duplicate_of::%lldx", (long long)b, (long long)a);
+   r = memoryCallback("forget", value, &respond);
+   TEST_ASSERT_NOT_NULL(strstr(r, "single positive number"));
+   free(r);
+   memory_fact_t f;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(b, s_user, &f));
+   TEST_ASSERT_EQUAL_INT64(0, f.superseded_by);
+   /* 0 is "none" (a model filling an optional number): a plain forget. */
+   snprintf(value, sizeof(value), "%lld::duplicate_of::0", (long long)b);
+   r = memoryCallback("forget", value, &respond);
+   TEST_ASSERT_NOT_NULL(strstr(r, "Forgotten"));
+   free(r);
+   TEST_ASSERT_EQUAL_INT64(0, fact_id_of("My dog is called Rex"));
+}
+
+/* list_merged names how each one was superseded; restore brings one back and
+ * says when the newer value is still current. */
+void test_list_merged_and_restore(void) {
+   free(remember("My locker code is 1111"));
+   free(remember("My locker code is now 2222"));
+   const int64_t old = fact_id_of("My locker code is 1111");
+   const int64_t fresh = fact_id_of("My locker code is now 2222");
+   free(forget(old, "newer_fact_id", fresh));
+   int respond = 0;
+   char empty[] = "";
+   char *r = memoryCallback("list_merged", empty, &respond);
+   TEST_ASSERT_NOT_NULL(strstr(r, "replaced by"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "1111"));
+   free(r);
+   char id[32];
+   snprintf(id, sizeof(id), "%lld", (long long)old);
+   r = memoryCallback("restore", id, &respond);
+   TEST_ASSERT_NOT_NULL(strstr(r, "Restored memory"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "still current too"));
+   free(r);
+   r = memoryCallback("restore", id, &respond); /* current now: nothing to restore */
+   TEST_ASSERT_NOT_NULL(strstr(r, "No merged or replaced memory"));
+   free(r);
+}
+
+/* A merge of a fact already merged says so, not "not found". */
+void test_forget_reports_already_merged(void) {
+   free(remember("My bag is blue"));
+   free(remember("I carry a blue bag"));
+   free(remember("My umbrella is green"));
+   const int64_t a = fact_id_of("My bag is blue");
+   const int64_t b = fact_id_of("I carry a blue bag");
+   const int64_t c = fact_id_of("My umbrella is green");
+   TEST_ASSERT_TRUE(a > 0 && b > 0 && c > 0);
+   free(forget(b, "duplicate_of", a));
+   char *r = forget(b, "duplicate_of", c);
+   TEST_ASSERT_NOT_NULL(strstr(r, "already merged or replaced"));
    free(r);
 }
 
@@ -205,5 +286,9 @@ int main(void) {
    RUN_TEST(test_remember_waiting_for_its_conversation_is_kept);
    RUN_TEST(test_remember_past_the_waiting_limit_is_refused_and_not_stored);
    RUN_TEST(test_forget_tells_a_replacement_from_a_duplicate);
+   RUN_TEST(test_forget_replaced_by_still_merges);
+   RUN_TEST(test_forget_refuses_conflicting_or_malformed_keepers);
+   RUN_TEST(test_list_merged_and_restore);
+   RUN_TEST(test_forget_reports_already_merged);
    return UNITY_END();
 }

@@ -36,6 +36,7 @@
 #include "auth/auth_db_tool_results.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
+#include "memory/memory_db.h"
 
 /* =============================================================================
  * Prepared Statement Management
@@ -652,12 +653,16 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * same user (EXISTS subquery).  A foreign new_fact_id would otherwise
     * let a caller "hide" another user's fact from their own retrieval by
     * pointing superseded_by at a foreign row, AND a foreign old_fact_id
-    * would let a caller corrupt another user's fact chain. */
-   { "memory_fact_supersede",
+    * would let a caller corrupt another user's fact chain.  Both facts must
+    * be current: a superseded fact keeps its place in its chain, and nothing
+    * is kept under a hidden fact (no cycles). */
+   { "memory_fact_supersede", /* Both current; never onto a note's gloss, which its note deletes
+                               * without handing on what was under it. */
      "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = ?6, "
      "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-     "WHERE id = ?2 AND user_id = ?3 "
-     "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5)",
+     "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL AND ?2 != ?4 "
+     "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?4 AND user_id = ?5 "
+     "AND superseded_by IS NULL AND note_doc_id IS NULL)",
      &s_db.stmt_memory_fact_supersede },
    { "memory_fact_delete", "DELETE FROM memory_facts WHERE id = ? AND user_id = ?",
      &s_db.stmt_memory_fact_delete },
@@ -676,26 +681,14 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "SELECT id, fact_text, confidence FROM memory_facts "
      "WHERE user_id = ? AND normalized_hash = ? AND superseded_by IS NULL",
      &s_db.stmt_memory_fact_find_by_hash },
-   { "memory_fact_prune_superseded", /* A retention window after the merge (superseded_at), never
-                                      * after creation: an old fact merged today stays recoverable
-                                      * for the window. Without a merge time it is kept. */
+   { "memory_fact_prune_superseded", /* Merged duplicates only (a replaced value is history, kept
+                                      * while its newer fact lives), a window after the merge
+                                      * (superseded_at), never after creation: an old fact merged
+                                      * today stays recoverable for the window. Without a merge
+                                      * time it is kept. */
      "DELETE FROM memory_facts WHERE user_id = ? AND superseded_by IS NOT NULL "
-     "AND superseded_at IS NOT NULL AND superseded_at < ?",
+     "AND superseded_kind = 0 AND superseded_at IS NOT NULL AND superseded_at < ?",
      &s_db.stmt_memory_fact_prune_superseded },
-
-   /* note_doc_id IS NULL: bridge glosses live/die with their note (deleted via
-    * the note-delete path), never by staleness pruning. */
-   { "memory_fact_prune_stale",
-     "DELETE FROM memory_facts WHERE user_id = ? AND superseded_by IS NULL "
-     "AND last_accessed < ? AND confidence < ? AND note_doc_id IS NULL",
-     &s_db.stmt_memory_fact_prune_stale },
-
-   /* v58: hard-delete expired facts (the hard phase of fact ephemerality).
-    * expires_at < cutoff, where the caller sets cutoff = now - prune_expired_days. */
-   { "memory_fact_prune_expired",
-     "DELETE FROM memory_facts WHERE user_id = ? "
-     "AND expires_at IS NOT NULL AND expires_at < ?",
-     &s_db.stmt_memory_fact_prune_expired },
 
    /* Memory preference statements.  source_* columns updated on every upsert
     * (latest-source-wins — mirrors the value/confidence overwrite). */
@@ -1573,8 +1566,14 @@ int auth_db_prepare_statements(void) {
    return AUTH_DB_SUCCESS;
 }
 
+/* The memory store's own statements; a no-op where the store isn't linked
+ * (memory_db_facts.c has the real one). */
+__attribute__((weak)) void memory_db_release_statements_locked(void) {
+}
+
 void auth_db_finalize_statements(void) {
    tool_results_db_release_locked(); /* the store's own, kept on first use */
+   memory_db_release_statements_locked();
    auth_db_messages_finalize();
    auth_db_stmts_finalize(s_stmts, STMT_COUNT);
 }

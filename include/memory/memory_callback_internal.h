@@ -30,6 +30,18 @@
 #include <stdint.h>
 #include <time.h>
 
+/* Most fact IDs one 'forget' or 'get' takes (bounds the response size). */
+#define MEMORY_FORGET_IDS_MAX 50
+
+/* Comma/space-separated positive numeric fact IDs from @p s into @p out (room
+ * for @p max); malformed tokens are counted in *invalid_out and skipped, and
+ * *capped_out set when more than @p max were given.  The count written. */
+int memory_parse_id_list(const char *s, int64_t *out, int max, int *invalid_out, bool *capped_out);
+
+/* 'forget' (memory_callback_forget.c): @p value is the IDs with optional
+ * duplicate_of / newer_fact_id (replaced_by: an old name for duplicate_of). */
+char *memory_action_forget(int user_id, const char *value);
+
 /* 'list_merged': the facts merged into (or replaced by) a fact, by its ID, or
  * those whose text contains @p query, or the newest (memory_callback_restore.c). */
 char *memory_action_list_merged(int user_id, const char *query);

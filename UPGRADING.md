@@ -41,16 +41,22 @@ player.
 - **Restoring.** A memory merged into another, or replaced by a newer one, can be brought back: ask DAWN
   ("what did you merge into that?", "bring that back"), use **Merged** in the Memory panel, or
   `dawn-admin memory superseded --user <name>` and `dawn-admin memory restore --user <name> --fact-id
-  <id>`. They are kept for `prune_superseded_days` (30 by default) after the merge.
+  <id>`. A restored duplicate takes back what it said. A merged duplicate is kept for `prune_superseded_days` (30 by default) after the merge; an
+  older value a newer one replaced is kept as long as the newer one is.
 - **Forgetting is "what was learned so far".** Forgetting a memory (in the Memory panel, or by asking
   DAWN) now also removes the duplicates merged into it and what it said about relationships and contact
   details (before, both came back). If it had replaced an older value ("I moved to Denver" after
-  "Atlanta"), the older one is current again, and DAWN says so: forget it too if it is wrong as well.
-  Forgetting a conversation's memories, or deleting all of them, also stops DAWN from learning them
-  again from those conversations later; what you say from then on is remembered as usual.
+  "Atlanta"), the older one is current again, and DAWN says so: forget it too if it is wrong as well,
+  or to erase it. Forgetting a conversation does the same, and its confirm screen says how many older
+  values will come back. Forgetting a conversation's memories, or deleting all of them, also stops
+  DAWN from learning them again from those conversations later; what you say from then on is
+  remembered as usual.
+- **Cleanup takes history with it.** When nightly cleanup removes a memory (stale, low confidence or
+  expired), the duplicates merged into it and the older values it replaced go with it.
 - The database moves to schema v104 on start (columns and an index added), with no manual step. A
-  memory replaced before this version counts as merged: forgetting what replaced it deletes it too, as
-  before.
+  memory replaced before this version counts as merged (forgetting what replaced it deletes it too, as
+  before), unless the database shows it was a newer value: one whose relationship or contact detail the
+  newer memory closed counts as replaced.
 
 **What you need to do.** Nothing. Memories an earlier version replaced aren't brought back on their own:
 many were duplicates. What a memory forgotten on an earlier version said about a relationship or contact

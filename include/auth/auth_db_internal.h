@@ -538,8 +538,6 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_find_similar;
    sqlite3_stmt *stmt_memory_fact_find_by_hash;
    sqlite3_stmt *stmt_memory_fact_prune_superseded;
-   sqlite3_stmt *stmt_memory_fact_prune_stale;
-   sqlite3_stmt *stmt_memory_fact_prune_expired; /* v58: hard-delete expired facts */
 
    /* v48: FTS5 BM25 keyword search.  See docs/MEM0_ARCHITECTURAL_PARITY.md
     * Phase 1.  External-content rows live in memory_facts_fts; the search
@@ -915,6 +913,22 @@ int auth_db_txn_begin_locked(const char *tag);
  * AUTH_DB_FAILURE; any other result is returned as it came.
  */
 int auth_db_txn_end_locked(int result, const char *tag);
+
+/**
+ * @brief SAVEPOINT @p name on the shared handle (the auth_db lock held): a
+ *        transaction of its own, or nested in the caller's
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE (logged)
+ */
+int auth_db_savepoint_begin_locked(const char *name);
+
+/**
+ * @brief End savepoint @p name: RELEASE when @p result is AUTH_DB_SUCCESS, else
+ *        ROLLBACK TO and RELEASE
+ *
+ * A RELEASE that fails (it is the commit when no transaction encloses it) is
+ * logged and rolled back, and the result becomes AUTH_DB_FAILURE.
+ */
+int auth_db_savepoint_end_locked(int result, const char *name);
 
 /**
  * @brief The first column of the first row of @p sql, an integer (one-number

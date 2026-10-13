@@ -429,35 +429,22 @@ int memory_db_fact_set_note_doc_id(int64_t fact_id, int user_id, int64_t note_do
 int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t *fact_id_out);
 
 /**
- * @brief Mark a fact as superseded by another
- *
- * Used when a fact is corrected (MEMORY_SUPERSEDED_REPLACED; its relations
- * are left as they are: which of them changed is the relation supersede's
- * to say).  Both fact IDs must belong to
- * the same user (defense-in-depth: foreign-rowid CWE-639 + cross-user
- * pointer prevention — a foreign new_fact_id could otherwise "hide" another
- * user's fact from their own retrieval).  SQL enforces both owners.
- *
- * @param old_fact_id Fact being superseded
- * @param new_fact_id Fact that supersedes it
- * @param user_id     User ID (ownership check for BOTH fact IDs)
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id);
-
-/**
  * @brief Merge a duplicate fact into the one kept
  *
- * As memory_db_fact_supersede, and in the same transaction the kept fact takes
- * the merged one's sources (its conversations, or its having been learned
- * outside any conversation), so forgetting a conversation only the kept fact
- * came from doesn't take what another conversation taught.
+ * Hides @p old_fact_id from recall, pointing at the kept fact, and in the same
+ * transaction the kept fact takes the merged one's sources (its conversations,
+ * or its having been learned outside any conversation), so forgetting a
+ * conversation only the kept fact came from doesn't take what another
+ * conversation taught; and what it stated and the values it replaced, marked
+ * so that restoring it (memory_db_fact_restore) moves them back.  What it
+ * closed stays on it.  Both facts must be current, and the kept fact not a
+ * note's gloss.
  *
  * @param old_fact_id Fact merged away
  * @param keeper_id   Fact kept
  * @param user_id     User ID (owns both)
- * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (either fact missing or not the
- *         user's), or MEMORY_DB_FAILURE
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (either fact missing, not the
+ *         user's, or not current), or MEMORY_DB_FAILURE
  */
 int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id);
 
@@ -465,23 +452,48 @@ int memory_db_fact_merge(int64_t old_fact_id, int64_t keeper_id, int user_id);
  * @brief Mark a fact as an older value a newer fact replaced (the user's
  *        number changed, they moved)
  *
- * Unlike a merge, the old fact keeps its sources, and its open relations are
- * closed, by the newer fact, in the same transaction: forgetting the newer
- * fact brings the old one and those relations back.
+ * Unlike a merge, the old fact keeps its sources and history, and its open
+ * relations are closed, by the newer fact, in the same transaction: forgetting
+ * the newer fact brings the old one and those relations back.  Both facts must
+ * be current.
  *
- * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (either fact missing or not the
- *         user's), or MEMORY_DB_FAILURE
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (either fact missing, not the
+ *         user's, or not current), or MEMORY_DB_FAILURE
  */
 int memory_db_fact_replace(int64_t old_fact_id, int64_t newer_id, int user_id);
 
 /**
+ * @brief Mark a fact as an older value a correction replaced, leaving its
+ *        relations alone
+ *
+ * As memory_db_fact_replace, but nothing the old fact stated is closed: a
+ * correction ("I'm CTO there, not an engineer") rarely retracts all of it, and
+ * a value that did change is closed by its relation's own replace.
+ * Forgetting the correction brings the old fact back.
+ *
+ * @return As memory_db_fact_replace
+ */
+int memory_db_fact_correct(int64_t old_fact_id, int64_t newer_id, int user_id);
+
+/**
  * @brief Delete a fact
+ *
+ * Only for a fact nothing is superseded under (a fact just created, a note's
+ * gloss): one that was would come back as current through the foreign key.
+ * A user's delete is memory_db_fact_forget.
  *
  * @param fact_id Fact ID
  * @param user_id User ID (for ownership check)
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
  */
 int memory_db_fact_delete(int64_t fact_id, int user_id);
+
+/**
+ * @brief Finalize the statements the memory store keeps after first use;
+ *        auth_db calls it before the database closes.  Caller holds the
+ *        auth_db lock.
+ */
+void memory_db_release_statements_locked(void);
 
 /** How a fact was superseded (memory_facts.superseded_kind, schema v104).
  *  Recall hides both the same way; forgetting tells them apart. */
@@ -501,18 +513,31 @@ typedef struct {
 /**
  * @brief Forget a fact: delete it and the duplicates merged into it, at any
  *        depth (deleting the keeper alone would bring them back as current),
- *        deepest first, the fact last; and bring back the values it, or one of
- *        those duplicates, replaced (MEMORY_SUPERSEDED_REPLACED), as
- *        memory_db_fact_restore does: forgetting a new value is usually saying
- *        it was wrong.  A failure leaves the fact, and nothing pointing at a
- *        deleted one.  Hold the user's extraction around it (memory_forget_fact)
- *        so a merge can't land in between.
+ *        deepest first, the fact last, in one transaction; the values it, or
+ *        one of those duplicates, replaced (MEMORY_SUPERSEDED_REPLACED) come
+ *        back, as memory_db_fact_settle.c settles them: forgetting a new value
+ *        is usually saying it was wrong.  A failure changes nothing.  Hold the user's extraction
+ * around it (memory_forget_fact) so a merge can't land in between.
  *
  * @param out What else it did (may be NULL)
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE (also
  *         when more than a few hundred facts were merged into it: nothing deleted)
  */
 int memory_db_fact_forget(int64_t fact_id, int user_id, memory_forget_result_t *out);
+
+/**
+ * @brief What memory_db_fact_forget would do, without doing it: how many
+ *        merged duplicates go with the fact, how many values it replaced come
+ *        back, and the first of those (the confirm a user sees)
+ *
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE (also
+ *         when the merge tree is over what one forget takes)
+ */
+int memory_db_fact_forget_preview(int64_t fact_id,
+                                  int user_id,
+                                  int *merged,
+                                  int *restored,
+                                  int64_t *first_restored);
 
 /** A superseded fact and the fact it was merged into (memory_db_fact_list_superseded). */
 typedef struct {
@@ -601,13 +626,14 @@ int memory_db_fact_find_by_hash(int user_id,
                                 int *count_out);
 
 /**
- * @brief Prune old superseded facts
+ * @brief Prune old merged duplicates
  *
- * Deletes facts that have been superseded by newer facts and are older
- * than the retention period.
+ * Deletes duplicates merged into another fact more than the retention period
+ * ago.  Older values a newer fact replaced stay: they are its history, kept
+ * while it is.
  *
  * @param user_id User ID
- * @param retention_days Keep superseded facts for this many days
+ * @param retention_days Keep merged duplicates for this many days
  * @param count_out Output: number of facts deleted
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
@@ -620,6 +646,8 @@ int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_
  * the "hard phase" of fact ephemerality.  The retrieval guard already hides
  * expired facts (soft phase); this reclaims the row after the buffer.
  * @p retention_days = 0 hard-expires on the reference date (no buffer).
+ * Each goes with its history (the facts merged into it and the values it
+ * replaced, at any depth); nothing is brought back.
  *
  * @param user_id User ID
  * @param retention_days Keep expired facts recoverable for this many days
@@ -631,8 +659,8 @@ int memory_db_fact_prune_expired(int user_id, int retention_days, int *count_out
 /**
  * @brief Prune stale low-confidence facts
  *
- * Deletes facts that haven't been accessed in a long time and have
- * low confidence scores.
+ * Deletes current facts that haven't been accessed in a long time and have
+ * low confidence scores, each with its history (as memory_db_fact_prune_expired).
  *
  * @param user_id User ID
  * @param stale_days Prune facts not accessed in this many days
@@ -699,7 +727,8 @@ int memory_db_apply_fact_decay(int user_id,
 int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor, int *count_out);
 
 /**
- * @brief Delete facts with confidence below threshold
+ * @brief Delete current facts with confidence below threshold, each with its
+ *        history (as memory_db_fact_prune_expired)
  *
  * Logs pruned facts before deletion for audit trail.
  *

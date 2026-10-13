@@ -45,7 +45,7 @@
    }
 
    function emptyText() {
-      return lastQuery ? 'No merged or replaced facts match.' : 'No merged or replaced facts.';
+      return lastQuery ? 'No duplicates or old values match.' : 'No duplicates or old values.';
    }
 
    function open() {
@@ -129,7 +129,7 @@
       const kept = document.createElement('span');
       kept.className = 'memory-merged-keeper';
       /* The fact it went into, which may itself have changed since. */
-      const keeperLabel = f.replaced ? 'Replaced by: ' : 'Merged into: ';
+      const keeperLabel = f.replaced ? 'Replaced by: ' : 'Duplicate of: ';
       kept.textContent = keeperLabel + (f.keeper_text || '(since deleted)');
       meta.appendChild(kept);
       const when = formatWhen(f.superseded_at);
@@ -150,7 +150,7 @@
       /* A reply to an older search (typing on, or a reopen) is dropped. */
       if (payload && typeof payload.query === 'string' && payload.query !== lastQuery) return;
       if (!payload || !payload.success) {
-         setStatus((payload && payload.error) || "Couldn't load merged facts.", true);
+         setStatus((payload && payload.error) || "Couldn't load duplicates and old values.", true);
          return;
       }
       const facts = Array.isArray(payload.facts) ? payload.facts : [];
@@ -161,7 +161,14 @@
       const body = el('memory-merged-body');
       body.textContent = '';
       facts.forEach((f) => body.appendChild(renderRow(f)));
-      setStatus(facts.length === 1 ? '1 fact' : `${facts.length} facts`, false);
+      setStatus(
+         payload.truncated
+            ? `Showing the ${facts.length} newest; search to find others`
+            : facts.length === 1
+              ? '1 fact'
+              : `${facts.length} facts`,
+         false
+      );
    }
 
    function handleRestoreResponse(payload) {
@@ -177,7 +184,9 @@
       }
       if (typeof DawnToast !== 'undefined') {
          DawnToast.show(
-            payload.both_current ? 'Fact restored; the newer one is current too' : 'Fact restored',
+            payload.both_current
+               ? 'Restored. The newer value is still current too; delete whichever is wrong.'
+               : 'Restored',
             'success'
          );
       }

@@ -315,28 +315,6 @@ static int other_open_count_locked(int user_id,
    return count;
 }
 
-/* Supersede @p old_id by @p new_id inside the caller's transaction, when it is
- * current (a fact already merged into another keeps its keeper and merge time).
- * Both facts the user's.  The rows changed (0 or 1), or -1 on error. */
-static int fact_supersede_in_tx_locked(int user_id, int64_t old_id, int64_t new_id) {
-   sqlite3_stmt *st = NULL;
-   int changed = -1;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE memory_facts SET superseded_by = ?1, superseded_kind = 1, "
-                          "superseded_at = CAST(strftime('%s', 'now') AS INTEGER) "
-                          "WHERE id = ?2 AND user_id = ?3 AND superseded_by IS NULL "
-                          "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ?1 AND user_id = ?3)",
-                          -1, &st, NULL) == SQLITE_OK) {
-      sqlite3_bind_int64(st, 1, new_id);
-      sqlite3_bind_int64(st, 2, old_id);
-      sqlite3_bind_int(st, 3, user_id);
-      if (sqlite3_step(st) == SQLITE_DONE) {
-         changed = sqlite3_changes(s_db.db);
-      }
-   }
-   sqlite3_finalize(st);
-   return changed;
-}
 
 int memory_db_relation_supersede_ex(int user_id,
                                     int64_t subject_entity_id,
@@ -599,15 +577,16 @@ int memory_db_relation_supersede_ex(int user_id,
       if (fact_id <= 0) {
          continue; /* nothing to point it at */
       }
-      const int changed = fact_supersede_in_tx_locked(user_id, old_id, fact_id);
-      if (changed < 0) {
+      bool changed = false;
+      if (memory_db_internal_fact_supersede_locked(
+              old_id, fact_id, user_id, MEMORY_SUPERSEDED_REPLACED, &changed) != SQLITE_DONE) {
          OLOG_ERROR("memory_db: relation_supersede fact %lld failed: %s", (long long)old_id,
                     sqlite3_errmsg(s_db.db));
          sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
          AUTH_DB_UNLOCK();
          return MEMORY_DB_FAILURE;
       }
-      if (changed > 0 && out_old_fact_id && *out_old_fact_id == 0) {
+      if (changed && out_old_fact_id && *out_old_fact_id == 0) {
          *out_old_fact_id = old_id;
       }
    }

@@ -16,9 +16,8 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Superseded facts: listing them, restoring one (a merge undone, or a value
- * a later one replaced by mistake), and forgetting a fact together with the
- * facts merged into it.
+ * Superseded facts: listing them, and restoring one (a merge undone, with what
+ * the merge moved; or a value a later one replaced by mistake).
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -32,11 +31,9 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
+#include "memory/memory_db_internal.h"
 #include "memory/memory_embeddings_internal.h"
 #include "utils/string_utils.h"
-
-/* Facts one forget takes with it: the fact and what was merged into it. */
-#define FORGET_TREE_MAX 512
 
 int memory_db_fact_list_superseded(int user_id,
                                    int64_t keeper_id,
@@ -97,16 +94,10 @@ int memory_db_fact_list_superseded(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-/* The columns reopen_rows_locked reads, from closed relations of the user (?1). */
-#define REOPEN_SELECT                                                        \
-   "SELECT id, subject_entity_id, relation, COALESCE(object_entity_id, 0), " \
-   "COALESCE(object_value, '') FROM memory_relations WHERE user_id = ?1 AND valid_to IS NOT NULL "
-
-/* Reopen the relations @p sel selects (REOPEN_SELECT, bound), unless a value
- * is open again already (that one, any for a one-at-a-time relation, or its
- * contradiction on the same object; counted in @p kept_closed).  Caller holds
- * the lock inside the transaction; @p sel is finalized.  Reopened count, or -1. */
-static int reopen_rows_locked(int user_id, sqlite3_stmt *sel, int *kept_closed) {
+int memory_db_internal_reopen_rows_locked(int user_id,
+                                          sqlite3_stmt *sel,
+                                          int *reopened_out,
+                                          int *kept_closed) {
    sqlite3_stmt *open_any = NULL;
    sqlite3_stmt *reopen = NULL;
    int reopened = 0;
@@ -159,25 +150,50 @@ static int reopen_rows_locked(int user_id, sqlite3_stmt *sel, int *kept_closed) 
    sqlite3_finalize(sel);
    sqlite3_finalize(open_any);
    sqlite3_finalize(reopen);
-   return ok ? reopened : -1;
+   *reopened_out = ok ? reopened : 0;
+   return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
-/* The relations @p keeper_id's value closed on @p fact_id, reopened as
- * reopen_rows_locked does. */
+/* The relations @p keeper_id's value closed on @p fact_id (by it, or by a
+ * fact since merged into it), reopened as reopen_rows_locked does. */
 static int reopen_relations_locked(int user_id,
                                    int64_t fact_id,
                                    int64_t keeper_id,
+                                   int *reopened,
                                    int *kept_closed) {
    sqlite3_stmt *sel = NULL;
-   if (sqlite3_prepare_v2(s_db.db, REOPEN_SELECT "AND fact_id = ?2 AND closed_by_fact_id = ?3", -1,
-                          &sel, NULL) != SQLITE_OK) {
+   if (sqlite3_prepare_v2(s_db.db,
+                          "WITH RECURSIVE " MEMORY_MERGED_UNDER_CTE(
+                              "kept", "?3", "?1") " " MEMORY_REOPEN_SELECT
+                                                  "AND fact_id = ?2 AND closed_by_fact_id IN "
+                                                  "(SELECT id FROM kept)",
+                          -1, &sel, NULL) != SQLITE_OK) {
       sqlite3_finalize(sel);
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
    sqlite3_bind_int(sel, 1, user_id);
    sqlite3_bind_int64(sel, 2, fact_id);
    sqlite3_bind_int64(sel, 3, keeper_id);
-   return reopen_rows_locked(user_id, sel, kept_closed);
+   return memory_db_internal_reopen_rows_locked(user_id, sel, reopened, kept_closed);
+}
+
+/* What merges moved off @p fact_id and the facts merged into it (relations
+ * it stated, values it replaced), back on it now it is current again. */
+static bool restore_moved_back_locked(int user_id, int64_t fact_id) {
+   return memory_db_internal_exec_locked(
+              "WITH RECURSIVE " MEMORY_MERGED_UNDER_CTE(
+                  "mine", "?2", "?1") " UPDATE memory_relations SET fact_id = ?2, "
+                                      "merged_from_fact_id = NULLIF(merged_from_fact_id, ?2) "
+                                      "WHERE +user_id = ?1 AND merged_from_fact_id IN (SELECT id "
+                                      "FROM mine)",
+              user_id, fact_id, 0) == SQLITE_DONE &&
+          memory_db_internal_exec_locked(
+              "WITH RECURSIVE " MEMORY_MERGED_UNDER_CTE(
+                  "mine", "?2", "?1") " UPDATE memory_facts SET superseded_by = ?2, "
+                                      "merged_from_id = NULLIF(merged_from_id, ?2) WHERE "
+                                      "+user_id = ?1 AND id != ?2 AND superseded_by IS NOT NULL "
+                                      "AND merged_from_id IN (SELECT id FROM mine)",
+              user_id, fact_id, 0) == SQLITE_DONE;
 }
 
 int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t *out) {
@@ -189,21 +205,29 @@ int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t
    }
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
    int64_t keeper_id = 0;
-   int kind = MEMORY_SUPERSEDED_MERGED;
-   bool keeper_current = false;
+   /* Whether a newer value stays current beside it: some link up its chain
+    * is a replace, and the chain reaches a current fact (a walk that runs out
+    * of steps says no). */
+   bool newer_current = false;
    sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT f.superseded_by, f.superseded_kind, COALESCE(k.superseded_by "
-                          "IS NULL, 0) FROM memory_facts f LEFT JOIN memory_facts k ON k.id = "
-                          "f.superseded_by WHERE f.id = ?1 AND f.user_id = ?2 AND "
-                          "f.superseded_by IS NOT NULL",
-                          -1, &st, NULL) == SQLITE_OK) {
+   if (sqlite3_prepare_v2(
+           s_db.db,
+           "WITH RECURSIVE up(id, next, rep, depth) AS (SELECT id, superseded_by, superseded_kind, "
+           "0 FROM memory_facts WHERE id = ?1 AND user_id = ?2 AND superseded_by IS NOT NULL "
+           "UNION ALL SELECT p.id, p.superseded_by, " MEMORY_LINK_KIND(
+               "p", "u.rep") ", "
+                             "u.depth + 1 FROM up u JOIN memory_facts p ON p.id = u.next WHERE "
+                             "u.depth < "
+                             "" MEMORY_CHAIN_DEPTH_SQL ") "
+                             "SELECT (SELECT next FROM up WHERE depth = 0), MAX(rep), MAX(next IS "
+                             "NULL) FROM up",
+           -1, &st, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(st, 1, fact_id);
       sqlite3_bind_int(st, 2, user_id);
-      if (sqlite3_step(st) == SQLITE_ROW) {
+      if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL) {
          keeper_id = sqlite3_column_int64(st, 0);
-         kind = sqlite3_column_int(st, 1);
-         keeper_current = sqlite3_column_int(st, 2) != 0;
+         newer_current = sqlite3_column_int(st, 1) == MEMORY_SUPERSEDED_REPLACED &&
+                         sqlite3_column_int(st, 2) != 0;
       }
    }
    sqlite3_finalize(st);
@@ -213,22 +237,16 @@ int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t
    }
 
    bool ok = auth_db_txn_begin_locked("memory_db: restore") == AUTH_DB_SUCCESS;
-   st = NULL;
-   ok = ok && sqlite3_prepare_v2(s_db.db,
-                                 "UPDATE memory_facts SET superseded_by = NULL, "
-                                 "superseded_at = NULL, superseded_kind = 0 WHERE id = ?1 AND "
-                                 "user_id = ?2",
-                                 -1, &st, NULL) == SQLITE_OK;
-   if (ok) {
-      sqlite3_bind_int64(st, 1, fact_id);
-      sqlite3_bind_int(st, 2, user_id);
-      ok = sqlite3_step(st) == SQLITE_DONE;
-   }
-   sqlite3_finalize(st);
+   ok = ok && memory_db_internal_exec_locked("UPDATE memory_facts SET superseded_by = NULL, "
+                                             "superseded_at = NULL, merged_from_id = NULL, "
+                                             "superseded_kind = " MEMORY_MERGED_SQL
+                                             " WHERE id = ?2 AND user_id = ?1",
+                                             user_id, fact_id, 0) == SQLITE_DONE;
+   ok = ok && restore_moved_back_locked(user_id, fact_id);
+   int reopened = 0;
    int kept_closed = 0;
-   const int reopened = ok ? reopen_relations_locked(user_id, fact_id, keeper_id, &kept_closed)
-                           : -1;
-   ok = ok && reopened >= 0;
+   ok = ok && reopen_relations_locked(user_id, fact_id, keeper_id, &reopened, &kept_closed) ==
+                  MEMORY_DB_SUCCESS;
    const bool committed = auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
                                                  "memory_db: restore") == AUTH_DB_SUCCESS;
    AUTH_DB_UNLOCK();
@@ -244,215 +262,7 @@ int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t
    if (out) {
       out->reopened = reopened;
       out->kept_closed = kept_closed;
-      /* The newer value is current too (unless something replaced it since). */
-      out->replaced = kind == MEMORY_SUPERSEDED_REPLACED && keeper_current;
+      out->replaced = newer_current;
    }
    return MEMORY_DB_SUCCESS;
-}
-
-/* @p fact_id and every fact merged into it, at any depth, deepest first and
- * @p fact_id last (a merge cycle can't put it earlier), into @p ids.  -1 on
- * error or when it holds more than @p max. */
-static int forget_tree_locked(int user_id, int64_t fact_id, int64_t *ids, int max) {
-   sqlite3_stmt *st = NULL;
-   int n = 0;
-   int rc = SQLITE_ERROR;
-   if (sqlite3_prepare_v2(
-           s_db.db,
-           "WITH RECURSIVE tree(id, depth) AS ("
-           "  SELECT id, 0 FROM memory_facts WHERE id = ?1 AND user_id = ?2 "
-           "  UNION "
-           "  SELECT f.id, t.depth + 1 FROM memory_facts f JOIN tree t ON "
-           "  f.superseded_by = t.id WHERE +f.user_id = ?2 AND f.superseded_kind = 0 AND "
-           "  t.depth < ?3) "
-           "SELECT id FROM tree GROUP BY id ORDER BY id = ?1, MAX(depth) DESC LIMIT ?3",
-           -1, &st, NULL) == SQLITE_OK) {
-      sqlite3_bind_int64(st, 1, fact_id);
-      sqlite3_bind_int(st, 2, user_id);
-      sqlite3_bind_int(st, 3, max + 1);
-      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-         if (n == max) {
-            n = -1; /* more than a forget takes at once */
-            break;
-         }
-         ids[n++] = sqlite3_column_int64(st, 0);
-      }
-   }
-   sqlite3_finalize(st);
-   return (n < 0 || (rc != SQLITE_DONE && rc != SQLITE_ROW)) ? -1 : n;
-}
-
-/* Merges into a tree being forgotten (an extraction finishing meanwhile) are
- * caught by collecting it again; past this many rounds the fact stays. */
-#define FORGET_ROUNDS_MAX 3
-
-/* Run @p sql with ?1 user, ?2 id, ?3 token; the sqlite3_step result. */
-static int forget_exec_locked(const char *sql, int user_id, int64_t id, int64_t token) {
-   sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
-   if (rc == SQLITE_OK) {
-      sqlite3_bind_int(st, 1, user_id);
-      sqlite3_bind_int64(st, 2, id);
-      sqlite3_bind_int64(st, 3, token);
-      rc = sqlite3_step(st);
-   }
-   sqlite3_finalize(st);
-   return rc;
-}
-
-/* Tells one forget's notes from another's: the lock is released between
- * noting, deleting and restoring.  Changed under the lock. */
-static int64_t s_forget_token;
-
-/* Note, under @p token, what the @p n facts in @p ids replaced (forget_restore)
- * and every relation one of them closed (forget_reopen): deleting the facts
- * clears both links, so they are read first. */
-static bool forget_note_replaced_locked(int user_id, const int64_t *ids, int n, int64_t token) {
-   bool ok = sqlite3_exec(s_db.db,
-                          "CREATE TEMP TABLE IF NOT EXISTS forget_restore(token INTEGER, id "
-                          "INTEGER, PRIMARY KEY (token, id));"
-                          "CREATE TEMP TABLE IF NOT EXISTS forget_reopen(token INTEGER, id "
-                          "INTEGER, PRIMARY KEY (token, id));",
-                          NULL, NULL, NULL) == SQLITE_OK;
-   for (int i = 0; ok && i < n; i++) {
-      ok = forget_exec_locked("INSERT OR IGNORE INTO forget_restore SELECT ?3, id FROM "
-                              "memory_facts WHERE user_id = ?1 AND superseded_by = ?2 AND "
-                              "superseded_kind = 1",
-                              user_id, ids[i], token) == SQLITE_DONE &&
-           forget_exec_locked("INSERT OR IGNORE INTO forget_reopen SELECT ?3, id FROM "
-                              "memory_relations WHERE user_id = ?1 AND closed_by_fact_id = ?2 AND "
-                              "valid_to IS NOT NULL",
-                              user_id, ids[i], token) == SQLITE_DONE;
-   }
-   return ok;
-}
-
-/* Bring back what @p token's notes name whose replacement is gone (a fact
- * no longer superseded; a relation whose closer is deleted): reset, and the
- * relations reopened as a restore does.  Then drop the notes.  Into @p out
- * the facts that came back. */
-static void forget_restore_replaced(int user_id, int64_t token, memory_forget_result_t *out) {
-   AUTH_DB_LOCK_OR_RETURN_VOID();
-   bool ok = auth_db_txn_begin_locked("memory_db: forget restore") == AUTH_DB_SUCCESS;
-   ok = ok && forget_exec_locked("UPDATE memory_facts SET superseded_at = NULL, superseded_kind = "
-                                 "0 WHERE user_id = ?1 AND superseded_by IS NULL AND id IN "
-                                 "(SELECT id FROM forget_restore WHERE token = ?3)",
-                                 user_id, 0, token) == SQLITE_DONE;
-   sqlite3_stmt *sel = NULL;
-   if (ok) {
-      ok = sqlite3_prepare_v2(s_db.db,
-                              REOPEN_SELECT "AND closed_by_fact_id IS NULL AND id IN (SELECT id "
-                                            "FROM forget_reopen WHERE token = ?2)",
-                              -1, &sel, NULL) == SQLITE_OK;
-      sqlite3_bind_int(sel, 1, user_id);
-      sqlite3_bind_int64(sel, 2, token);
-   }
-   int kept_closed = 0;
-   ok = ok && reopen_rows_locked(user_id, sel, &kept_closed) >= 0;
-   if (ok && out) {
-      sqlite3_stmt *st = NULL;
-      if (sqlite3_prepare_v2(s_db.db,
-                             "SELECT id FROM forget_restore WHERE token = ?2 AND id IN (SELECT id "
-                             "FROM memory_facts WHERE user_id = ?1 AND superseded_by IS NULL) "
-                             "ORDER BY id",
-                             -1, &st, NULL) == SQLITE_OK) {
-         sqlite3_bind_int(st, 1, user_id);
-         sqlite3_bind_int64(st, 2, token);
-         while (sqlite3_step(st) == SQLITE_ROW) {
-            if (out->restored < MEMORY_FORGET_RESTORED_MAX) {
-               out->restored_ids[out->restored] = sqlite3_column_int64(st, 0);
-            }
-            out->restored++;
-         }
-      }
-      sqlite3_finalize(st);
-   }
-   if (auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
-                              "memory_db: forget restore") != AUTH_DB_SUCCESS ||
-       !ok) {
-      /* The facts are current anyway (their keeper is gone); only their
-       * relations stay closed. */
-      OLOG_WARNING("memory_db: user %d: reopening what a forgotten fact replaced failed", user_id);
-      if (out) {
-         out->restored = 0;
-      }
-   }
-   (void)forget_exec_locked("DELETE FROM forget_restore WHERE token = ?3", user_id, 0, token);
-   (void)forget_exec_locked("DELETE FROM forget_reopen WHERE token = ?3", user_id, 0, token);
-   AUTH_DB_UNLOCK();
-}
-
-int memory_db_fact_forget(int64_t fact_id, int user_id, memory_forget_result_t *out) {
-   if (out) {
-      memset(out, 0, sizeof(*out));
-   }
-   if (user_id <= 0 || fact_id <= 0) {
-      return MEMORY_DB_FAILURE;
-   }
-   int64_t *ids = malloc(FORGET_TREE_MAX * sizeof(*ids));
-   if (!ids) {
-      return MEMORY_DB_FAILURE;
-   }
-   /* What was merged into it goes first, deepest first, and the fact only once
-    * nothing is merged into it any more: a merged fact left pointing at a
-    * deleted one would be current again (superseded_by is ON DELETE SET NULL),
-    * and a failure leaves the fact, with nothing pointing at a deleted one.
-    * What the tree replaced is noted before, and brought back after (also
-    * after a failure, for what the deletes made current already). */
-   int64_t token = 0;
-   bool noted_any = false;
-   int rc = MEMORY_DB_FAILURE;
-   for (int round = 0; round < FORGET_ROUNDS_MAX; round++) {
-      AUTH_DB_LOCK_OR_RETURN((free(ids), MEMORY_DB_FAILURE));
-      if (token == 0) {
-         token = ++s_forget_token;
-      }
-      const int n = forget_tree_locked(user_id, fact_id, ids, FORGET_TREE_MAX);
-      const bool noted = n > 0 && forget_note_replaced_locked(user_id, ids, n, token);
-      AUTH_DB_UNLOCK();
-      noted_any = noted_any || n > 0;
-      if (n < 0 || (n > 0 && !noted)) {
-         OLOG_WARNING("memory_db: forget of fact %lld for user %d: merge tree unreadable or "
-                      "over %d facts; fact kept",
-                      (long long)fact_id, user_id, FORGET_TREE_MAX);
-         rc = MEMORY_DB_FAILURE;
-         break;
-      }
-      if (n == 0) {
-         /* Gone already: never there, or forgotten meanwhile by another call. */
-         rc = round == 0 ? MEMORY_DB_NOT_FOUND : MEMORY_DB_SUCCESS;
-         break;
-      }
-      rc = MEMORY_DB_SUCCESS;
-      for (int i = 0; i < n - 1 && rc == MEMORY_DB_SUCCESS; i++) {
-         rc = memory_db_fact_delete(ids[i], user_id);
-         if (rc == MEMORY_DB_SUCCESS && out) {
-            out->merged++;
-         }
-         if (rc == MEMORY_DB_NOT_FOUND) {
-            rc = MEMORY_DB_SUCCESS; /* gone meanwhile (a prune): the goal */
-         }
-      }
-      if (rc != MEMORY_DB_SUCCESS) {
-         break;
-      }
-      /* The fact itself, once nothing more was merged into it meanwhile. */
-      AUTH_DB_LOCK_OR_RETURN((free(ids), MEMORY_DB_FAILURE));
-      const int left = forget_tree_locked(user_id, fact_id, ids, FORGET_TREE_MAX);
-      AUTH_DB_UNLOCK();
-      if (left == 1) {
-         rc = memory_db_fact_delete(fact_id, user_id);
-         rc = rc == MEMORY_DB_NOT_FOUND ? MEMORY_DB_SUCCESS : rc; /* gone meanwhile */
-         break;
-      }
-      rc = left == 0 ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE; /* rounds out: kept */
-      if (left == 0) {
-         break;
-      }
-   }
-   if (noted_any) {
-      forget_restore_replaced(user_id, token, out);
-   }
-   free(ids);
-   return rc;
 }

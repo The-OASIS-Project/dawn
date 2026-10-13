@@ -1587,12 +1587,6 @@
       font-size: 16px; /* Prevent iOS zoom-on-tap */
    }
 
-   .memory-merged-link,
-   .memory-merged-restore {
-      min-height: 44px;
-      min-width: 44px;
-   }
-
    /* Import modal mobile adjustments */
    .memory-import-modal {
       max-height: 85vh;
@@ -1783,6 +1777,10 @@
 }
 
 /* The search row's link to them (Facts tab only). */
+.memory-merged-link[hidden] {
+   display: none; /* the display below would beat the hidden attribute */
+}
+
 .memory-merged-link {
    display: inline-flex;
    align-items: center;
@@ -1794,7 +1792,17 @@
 
 .memory-merged-restore {
    flex-shrink: 0;
+   min-height: 24px;
    padding: 0.25rem 0.5rem;
+}
+
+/* A finger needs a bigger target than a mouse, on any screen size. */
+@media (pointer: coarse) {
+   .memory-merged-link,
+   .memory-merged-restore {
+      min-height: 44px;
+      min-width: 44px;
+   }
 }
 
 .memory-merged-link:focus-visible,

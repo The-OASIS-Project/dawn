@@ -12,6 +12,7 @@
    const PAGE_SIZE = 20;
    /* A delete toast that names facts brought back stays long enough to read. */
    const RESTORED_TOAST_MS = 8000;
+   const TOAST_MS_PER_CHAR = 60; /* reading time for a long one */
 
    /* Per-tab sort options for the Facts/Summaries sort control. `value` is sent
     * to the server as the `sort` field (see webui_memory.c parse_memory_sort).
@@ -469,16 +470,20 @@
          /* Forgetting a value brings back the one it had replaced: say which,
           * long enough to read. */
          const back = Array.isArray(payload.restored) ? payload.restored : [];
+         const count = Math.max(back.length, payload.restored_count || 0);
          const short = (t) => (t.length > 80 ? t.slice(0, 80) + '…' : t);
          const quoted = back.map((t) => `"${short(t)}"`).join(', ');
-         DawnToast.show(
+         const more = count > back.length ? ` and ${count - back.length} more` : '';
+         const text =
             back.length === 0
                ? 'Fact deleted'
-               : back.length === 1
-                 ? `Fact deleted. Brought back the earlier one: ${quoted}`
-                 : `Fact deleted. Brought back ${back.length} earlier facts: ${quoted}`,
+               : count === 1
+                 ? `Deleted. ${quoted} is current again.`
+                 : `Deleted. These are current again: ${quoted}${more}`;
+         DawnToast.show(
+            text,
             'success',
-            back.length ? RESTORED_TOAST_MS : undefined
+            back.length ? Math.max(RESTORED_TOAST_MS, TOAST_MS_PER_CHAR * text.length) : undefined
          );
       }
 

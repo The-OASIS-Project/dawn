@@ -1006,6 +1006,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_citation_parse.c
     src/memory/memory_db_facts.c
     src/memory/memory_db_facts_restore.c
+    src/memory/memory_db_fact_settle.c
     src/memory/memory_db_summaries.c
     src/memory/memory_db_prefs.c
     src/memory/memory_db_entities.c
@@ -1036,6 +1037,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_callback_restore.c
+    src/memory/memory_callback_forget.c
     src/memory/memory_extraction.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
