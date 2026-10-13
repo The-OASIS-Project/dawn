@@ -21,6 +21,8 @@
  * Path Utilities - Common path manipulation functions
  */
 
+#define _GNU_SOURCE /* strcasestr */
+
 #include "core/path_utils.h"
 
 #include <errno.h>
@@ -220,4 +222,42 @@ bool path_ensure_parent_dir_mode(const char *file_path, mode_t mode) {
    OLOG_INFO("Created directory: %s", dir);
    free(path_copy);
    return true;
+}
+
+/* Lexical: literal ".." components and their URL-encoded forms (see header) */
+bool path_has_traversal(const char *path) {
+   if (!path) {
+      return false;
+   }
+
+   /* Check for literal ".." as a path component (not inside filenames like "file..ext") */
+   const char *p = path;
+   while ((p = strstr(p, "..")) != NULL) {
+      /* Check if preceded by '/' or at start of string */
+      bool at_start = (p == path) || (*(p - 1) == '/');
+      /* Check if followed by '/' or null or end of string */
+      bool at_end = (p[2] == '\0') || (p[2] == '/');
+      if (at_start && at_end) {
+         return true;
+      }
+      p += 2;
+   }
+
+   /* Check for URL-encoded variants (case-insensitive) */
+   /* %2e = ".", so %2e%2e = ".." */
+   if (strcasestr(path, "%2e%2e") != NULL) {
+      return true;
+   }
+
+   /* Single encoded dot followed by literal dot or vice versa */
+   if (strcasestr(path, "%2e.") != NULL || strcasestr(path, ".%2e") != NULL) {
+      return true;
+   }
+
+   /* Double-encoded: %252e = "%2e" after first decode */
+   if (strcasestr(path, "%252e") != NULL) {
+      return true;
+   }
+
+   return false;
 }

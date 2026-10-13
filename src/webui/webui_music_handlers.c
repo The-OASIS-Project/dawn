@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "audio/music_db.h"
+#include "audio/music_open.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
 #include "core/strbuf.h"
@@ -249,7 +250,7 @@ static void music_control_locked(ws_connection_t *conn,
          const char *path = json_object_get_string(path_obj);
 
          /* Security: validate path is within music library */
-         if (!webui_music_is_path_valid(path)) {
+         if (!music_path_is_valid(path)) {
             webui_music_send_error(conn, "INVALID_PATH", "Path not in music library");
             return;
          }
@@ -505,7 +506,7 @@ static void music_control_locked(ws_connection_t *conn,
       }
       const char *path = json_object_get_string(path_obj);
 
-      if (!webui_music_is_path_valid(path)) {
+      if (!music_path_is_valid(path)) {
          webui_music_send_error(conn, "INVALID_PATH", "Path not in music library");
          return;
       }
@@ -992,7 +993,7 @@ int webui_music_queue_apply_paths(session_music_state_t *state,
    }
    for (int i = 0; i < n; i++) {
       bool found = false;
-      if (paths[i] && webui_music_is_path_valid(paths[i]) &&
+      if (paths[i] && music_path_is_valid(paths[i]) &&
           music_db_get_by_path(paths[i], &resolved[i], &found) == SUCCESS && found) {
          ok[i] = true;
       } else if (outcomes) {

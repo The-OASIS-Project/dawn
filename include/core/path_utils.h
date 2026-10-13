@@ -78,6 +78,18 @@ bool path_canonicalize(const char *path, char *canonical, size_t canonical_size)
 bool path_is_within_root(const char *path, const char *root_dir);
 
 /**
+ * @brief Whether a path holds a traversal pattern
+ *
+ * A literal ".." component, or an encoded one (%2e%2e, %2e., .%2e, %252e), for
+ * paths and URL paths alike.  A lexical check with no filesystem access: it can
+ * flag a file name that happens to contain "%2e.", and it can't tell where a
+ * symlink leads, so containment still needs path_is_within_root().
+ *
+ * @return true if a traversal pattern is present
+ */
+bool path_has_traversal(const char *path);
+
+/**
  * @brief Ensure parent directory exists for a file path
  *
  * Recursively creates all missing parent directories for the given file path.

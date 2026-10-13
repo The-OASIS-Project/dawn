@@ -680,6 +680,7 @@ set(DAWN_SOURCES
     src/audio/music_db_query.c
     src/tools/music_search.c
     src/audio/music_scanner.c
+    src/audio/music_open.c
     src/audio/music_source.c
     src/audio/plex_client.c
     src/audio/plex_db.c

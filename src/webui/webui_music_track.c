@@ -23,17 +23,15 @@
  */
 
 #include <errno.h>
-#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "audio/audio_decoder.h"
+#include "audio/music_open.h"
 #include "audio/music_source.h"
-#include "audio/plex_client.h"
 #include "audio/resampler.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -42,49 +40,19 @@
 #include "webui/webui_music_internal.h"
 
 /**
- * @brief Open a queue path for decoding
+ * @brief Open a queue path for the stream
  *
- * Every track the stream plays goes through here, so it is the one place a
- * path is checked against the library and a decoder against what the stream
- * can handle.  A plex: path is downloaded to a temp file first; the file is
- * unlinked once the decoder has it open (the decoder keeps its descriptor), so
- * nothing is left on disk.  Blocks for the whole download: call without
- * state_mutex.
+ * music_open_track() (library check, Plex download), then the formats the
+ * stream can encode.  Blocks for the whole download: call without state_mutex.
  *
- * @param path Queue path (local file or plex:/library/...)
- * @param cancel Aborts a Plex download once set (NULL = not cancellable)
- * @param unreachable Optional output: set when the Plex server couldn't be
- *        reached, so the next Plex track would fail the same way
- * @return Decoder, or NULL if the path, the download or the open failed
+ * @param cancel Aborts a Plex download once set
+ * @param unreachable Optional output: the Plex server couldn't be reached
+ * @return Decoder, or NULL if it can't be opened or streamed
  */
-static audio_decoder_t *music_open_track(const char *path,
-                                         const atomic_bool *cancel,
-                                         bool *unreachable) {
-   if (unreachable) {
-      *unreachable = false;
-   }
-   if (!webui_music_is_path_valid(path)) {
-      OLOG_WARNING("WebUI music: Refusing to open %s (not in the music library)", path);
-      return NULL;
-   }
-
-   audio_decoder_t *decoder = NULL;
-   if (music_source_from_path(path) == MUSIC_SOURCE_PLEX) {
-      char local_path[PATH_MAX];
-      const char *part_key = path + strlen(music_source_path_prefix(MUSIC_SOURCE_PLEX));
-      int rc = plex_client_download_track(part_key, cancel, local_path, sizeof(local_path));
-      if (rc != SUCCESS) {
-         OLOG_ERROR("WebUI music: Plex download failed for: %s", path);
-         if (unreachable && rc == PLEX_DOWNLOAD_UNREACHABLE) {
-            *unreachable = true;
-         }
-         return NULL;
-      }
-      decoder = audio_decoder_open(local_path);
-      unlink(local_path);
-   } else {
-      decoder = audio_decoder_open(path);
-   }
+static audio_decoder_t *stream_open_track(const char *path,
+                                          const atomic_bool *cancel,
+                                          bool *unreachable) {
+   audio_decoder_t *decoder = music_open_track(path, cancel, unreachable);
    if (!decoder) {
       return NULL;
    }
@@ -168,7 +136,7 @@ static void *prefetch_thread(void *arg) {
    snprintf(path, sizeof(path), "%s", state->prefetch_path);
    pthread_mutex_unlock(&state->state_mutex);
 
-   audio_decoder_t *decoder = music_open_track(path, &state->prefetch_cancel, NULL);
+   audio_decoder_t *decoder = stream_open_track(path, &state->prefetch_cancel, NULL);
 
    pthread_mutex_lock(&state->state_mutex);
    bool keep = decoder && !atomic_load(&state->prefetch_cancel) &&
@@ -463,7 +431,7 @@ bool webui_music_run_pending_open(session_music_state_t *state,
    bool unreachable = false;
    audio_decoder_t *decoder = prefetch_take(state, path);
    if (!decoder) {
-      decoder = music_open_track(path, &state->stop_requested, &unreachable);
+      decoder = stream_open_track(path, &state->stop_requested, &unreachable);
    }
 
    pthread_mutex_lock(&state->state_mutex);

@@ -27,6 +27,13 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - ALSA/PulseAudio output with automatic sample rate conversion
    - Used for notification sounds, music playback
 
+- **music_open.c/h**: Opening a library track, shared by every player
+   - `music_path_is_valid()`: a local path must resolve inside `[paths] music_dir`; a `plex:`
+     path must be a well-formed Plex part key (no authority, query, fragment or traversal)
+   - `music_open_track()`: the check, then a Plex download to a temp file (cancellable,
+     unlinked once open) or a local open
+   - The WebUI stream adds its own sample-rate and channel limits on top
+
 - **music_db.c/h**: Unified music metadata database
    - SQLite-based cache for artist/title/album/genre tags with source tracking
    - Multi-source support (local files + Plex) via `music_source_t` enum

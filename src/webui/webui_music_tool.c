@@ -37,6 +37,7 @@
 #include <strings.h>
 
 #include "audio/music_db.h"
+#include "audio/music_open.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
 #include "core/strbuf.h"
@@ -168,11 +169,11 @@ static int resolve_item_to_path(const char *item,
 
    music_search_result_t r;
 
-   /* Exact library path → exact lookup. webui_music_is_path_valid() accepts both
+   /* Exact library path → exact lookup. music_path_is_valid() accepts both
     * local absolute paths and validated plex: paths (the forms 'search' returns),
     * and rejects free-text names — so names fall through to the ranked search
     * below. Doubles as defense in depth (no out-of-library file). */
-   if (webui_music_is_path_valid(item)) {
+   if (music_path_is_valid(item)) {
       bool found = false;
       if (music_db_get_by_path(item, &r, &found) != SUCCESS || !found) {
          return FAILURE;

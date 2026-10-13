@@ -188,6 +188,9 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── src/auth/                   Users, settings, conversations and messages; auth_db_messages.c is the one
 │                               message insert (and the LLM replay read)
 ├── src/tts/, src/asr/, common/src/asr/   Speech in and out (shared engines in common/)
+├── src/audio/                  Capture, playback, decoders, the music library and Plex; every library track
+│                               a player opens goes through music_open_track() (music_open.c: the library
+│                               path check and the Plex download)
 └── src/mosquitto_comms.c       MQTT
 
 Layer 3 (Tools and channels) — deps: Layers 0-2

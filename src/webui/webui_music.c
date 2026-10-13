@@ -26,7 +26,6 @@
 
 #include "webui/webui_music.h"
 
-#include <ctype.h>
 #include <json-c/json.h>
 #include <libwebsockets.h>
 #include <limits.h>
@@ -315,118 +314,6 @@ bool wait_decoder_idle(session_music_state_t *state, int timeout_ms) {
    }
 
    return idle;
-}
-
-/* True if s holds a percent-encoded '.', '/' or '\\' (%2e, %2f, %5c, any case) */
-static bool has_encoded_path_char(const char *s) {
-   for (const char *p = strchr(s, '%'); p; p = strchr(p + 1, '%')) {
-      char hi = p[1];
-      char lo = (char)tolower((unsigned char)(hi ? p[2] : '\0'));
-      if ((hi == '2' && (lo == 'e' || lo == 'f')) || (hi == '5' && lo == 'c')) {
-         return true;
-      }
-   }
-   return false;
-}
-
-/**
- * @brief Validate that a file path is within the music library directory
- *
- * Security check to prevent path traversal attacks. Uses realpath() to resolve
- * symlinks and relative paths, then verifies the canonical path is within
- * the configured music library directory.
- *
- * @param path The file path to validate
- * @return true if path is safe (within music library), false otherwise
- */
-bool webui_music_is_path_valid(const char *path) {
-   if (!path || path[0] == '\0') {
-      return false;
-   }
-
-   /* Plex paths: validate prefix, source config, and Part.key format */
-   if (strncmp(path, "plex:", 5) == 0) {
-      if (!plex_client_is_configured()) {
-         OLOG_WARNING("WebUI music: Plex path rejected (Plex not configured): %s", path);
-         return false;
-      }
-      const char *part_key = path + 5;
-      /* Validate Part.key starts with expected Plex API path */
-      if (strncmp(part_key, "/library/parts/", 15) != 0 &&
-          strncmp(part_key, "/library/metadata/", 18) != 0) {
-         OLOG_WARNING("WebUI music: Invalid Plex part key: %s", part_key);
-         return false;
-      }
-      /* No authority injection */
-      if (strchr(part_key, '@') != NULL) {
-         OLOG_WARNING("WebUI music: Authority injection in Plex path: %s", path);
-         return false;
-      }
-      /* No query string or fragment injection */
-      if (strchr(part_key, '?') != NULL || strchr(part_key, '#') != NULL) {
-         OLOG_WARNING("WebUI music: Query/fragment injection in Plex path: %s", path);
-         return false;
-      }
-      /* No percent-encoded dot or slash: the server decodes them, so "%2e%2e"
-       * would walk out of /library/parts with the admin's token */
-      if (has_encoded_path_char(part_key)) {
-         OLOG_WARNING("WebUI music: Encoded traversal in Plex path: %s", path);
-         return false;
-      }
-      /* No path traversal in the Part.key */
-      if (contains_path_traversal(part_key)) {
-         OLOG_WARNING("WebUI music: Path traversal in Plex path: %s", path);
-         return false;
-      }
-      return true;
-   }
-
-   /* Local paths: existing realpath() validation */
-
-   /* Quick check for obvious traversal patterns */
-   if (contains_path_traversal(path)) {
-      OLOG_WARNING("WebUI music: Path traversal detected in: %s", path);
-      return false;
-   }
-
-   /* Check if music directory is configured */
-   if (g_config.paths.music_dir[0] == '\0') {
-      OLOG_WARNING("WebUI music: No music directory configured");
-      return false;
-   }
-
-   char resolved_path[PATH_MAX];
-   char resolved_music_dir[PATH_MAX];
-
-   /* Resolve the music library base path. music_dir_resolved has '~' expanded
-    * once at startup; realpath() does not expand a leading tilde itself. */
-   if (realpath(g_config.paths.music_dir_resolved, resolved_music_dir) == NULL) {
-      OLOG_ERROR("WebUI music: Cannot resolve music directory: %s",
-                 g_config.paths.music_dir_resolved);
-      return false;
-   }
-
-   /* Resolve the requested file path */
-   if (realpath(path, resolved_path) == NULL) {
-      /* File doesn't exist - not valid for playback */
-      OLOG_WARNING("WebUI music: Cannot resolve path: %s", path);
-      return false;
-   }
-
-   /* Ensure resolved path starts with resolved music directory */
-   size_t music_dir_len = strlen(resolved_music_dir);
-   if (strncmp(resolved_path, resolved_music_dir, music_dir_len) != 0) {
-      OLOG_WARNING("WebUI music: Path outside music library: %s", path);
-      return false;
-   }
-
-   /* Ensure it's either exact match or followed by '/' */
-   if (resolved_path[music_dir_len] != '\0' && resolved_path[music_dir_len] != '/') {
-      OLOG_WARNING("WebUI music: Path prefix mismatch: %s", path);
-      return false;
-   }
-
-   return true;
 }
 
 /**

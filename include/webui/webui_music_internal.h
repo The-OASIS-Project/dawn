@@ -490,11 +490,6 @@ int webui_music_start_playback(session_music_state_t *state, const char *path);
  */
 void webui_music_stop_streaming(session_music_state_t *state);
 
-/**
- * @brief Check if path is within music library (security validation)
- */
-bool webui_music_is_path_valid(const char *path);
-
 /* =============================================================================
  * Shared State and Helpers (defined in webui_music.c, used by handlers)
  * ============================================================================= */
