@@ -699,8 +699,9 @@ void tool_registry_write_configs(void *fp) {
 
    for (int i = 0; i < s_tool_count; i++) {
       tool_entry_t *entry = &s_tools[i];
-      if (!entry->registered || !entry->metadata.config_writer || !entry->metadata.config_section ||
-          !entry->metadata.config) {
+      /* config may be NULL (a tool keeping its state elsewhere); the writer gets
+       * it as the parser did. */
+      if (!entry->registered || !entry->metadata.config_writer || !entry->metadata.config_section) {
          continue;
       }
 

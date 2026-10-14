@@ -55,6 +55,21 @@ static void fake_write(void *fp, const void *config) {
    fprintf((FILE *)fp, "level = %d\n", ((const fake_config_t *)config)->level);
 }
 
+/* A tool that keeps its setting in module state, not behind config. */
+static int s_static_level = 1;
+
+static void static_parse(toml_table_t *table, void *config) {
+   (void)config;
+   toml_datum_t level = table ? toml_int_in(table, "level") : (toml_datum_t){ 0 };
+   if (level.ok)
+      s_static_level = (int)level.u.i;
+}
+
+static void static_write(void *fp, const void *config) {
+   (void)config;
+   fprintf((FILE *)fp, "level = %d\n", s_static_level);
+}
+
 static char *fake_callback(const char *action, char *value, int *should_respond) {
    (void)action;
    (void)value;
@@ -124,11 +139,7 @@ static void test_retired_keys_only_section_registers(void) {
 }
 
 /* What the parser read from dawn.toml, the writer writes back. */
-static void test_section_survives_a_save(void) {
-   static tool_metadata_t meta;
-   meta = fake_tool("fake_tool", fake_write);
-   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&meta));
-
+static void check_section_survives_a_save(void) {
    FILE *fp = fopen(s_in, "w");
    TEST_ASSERT_NOT_NULL(fp);
    fputs("[fake_tool]\nlevel = 7\n", fp);
@@ -152,10 +163,30 @@ static void test_section_survives_a_save(void) {
    toml_free(root);
 }
 
+static void test_section_survives_a_save(void) {
+   static tool_metadata_t meta;
+   meta = fake_tool("fake_tool", fake_write);
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&meta));
+   check_section_survives_a_save();
+}
+
+/* The same when the tool has no config pointer: its writer still runs. */
+static void test_section_survives_a_save_without_config(void) {
+   static tool_metadata_t meta;
+   meta = fake_tool("fake_tool", static_write);
+   meta.config = NULL;
+   meta.config_size = 0;
+   meta.config_parser = static_parse;
+   s_static_level = 1;
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&meta));
+   check_section_survives_a_save();
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_parser_without_writer_is_refused);
    RUN_TEST(test_retired_keys_only_section_registers);
    RUN_TEST(test_section_survives_a_save);
+   RUN_TEST(test_section_survives_a_save_without_config);
    return UNITY_END();
 }
