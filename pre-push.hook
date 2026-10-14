@@ -8,7 +8,7 @@
 # bug + 4 missing test stubs are the motivating example.
 #
 # SCOPE: fast checks only — build the CI test targets and run the `ci`-labelled
-# ctest suite.  The heavier build-config checks moved to GitHub Actions
+# ctest suite, and only when the pushed commits change source or build files.  The heavier build-config checks moved to GitHub Actions
 # (.github/workflows/ci.yml) so the hook stays quick:
 #   - Tier-1 satellite build  -> `satellite-build` job (headless, apt-only).
 #   - Server daemon link+start -> `docker-build` job (`dawn --help`).
@@ -99,9 +99,51 @@ if [ -z "$BUILD_DIR" ]; then
    exit 0
 fi
 
+# Only pushed commits that change source or build files (the same paths the
+# pre-commit hook tests for: everything the tests compile or read, including
+# the two WebUI files the shell checks in tests/CMakeLists.txt read) need the
+# build and the suite.  When git gives no pushed refs, or a range can't be
+# read, run them.  Renames are off so a move reports the path it left.
+SOURCE_RE='^(src|include|common|tests|benchmarks|cmake|third_party|dawn_satellite|models)/|^(whisper\.cpp|models\.toml|CMakePresets\.json)$|^www/js/ui/(memory_aliases\.js|settings/schema\.js)$|(^|/)CMakeLists\.txt$|\.cmake$'
+pushed_source_changes() {
+   [ -z "$PUSHED_REFS" ] && return 0
+   local zero=0000000000000000000000000000000000000000
+   local lref lsha rref rsha files
+   while read -r lref lsha rref rsha; do
+      if [ -z "$lsha" ] || [ "$lsha" = "$zero" ]; then
+         continue # deleting a ref: nothing to test
+      fi
+      if [ "$rsha" = "$zero" ]; then
+         files=$(git log -m --no-renames --format= --name-only "$lsha" --not --remotes) || return 0
+      else
+         files=$(git diff --no-renames --name-only "$rsha" "$lsha" 2>/dev/null) || return 0
+      fi
+      if printf '%s\n' "$files" | grep -qE "$SOURCE_RE"; then
+         return 0
+      fi
+   done <<< "$PUSHED_REFS"
+   return 1
+}
+
+if ! pushed_source_changes; then
+   echo -e "${GREEN}Pre-push: no source or build files in the pushed commits; skipping the test suite.${NC}"
+   exit 0
+fi
+
 BUILD_LOG=$(mktemp -t dawn-prepush-build.XXXXXX.log)
 TEST_LOG=$(mktemp -t dawn-prepush-test.XXXXXX.log)
-trap 'rm -f "$BUILD_LOG" "$TEST_LOG"' EXIT
+# The tests' scratch files on a RAM disk where there is one: SQLite's syncs to
+# disk were most of the suite's time, and no test checks durability across a
+# power loss.  Only ctest sees it; the logs above stay in the usual place.
+TEST_TMP=""
+# It needs room for the parallel suite's scratch files (one test alone writes a
+# 64 MiB blob), and a container's /dev/shm is often only 64 MiB: check first.
+TEST_TMP_MIN_KB=1048576
+SHM_FREE_KB=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }')
+if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "${SHM_FREE_KB:-0}" -ge "$TEST_TMP_MIN_KB" ] 2>/dev/null; then
+   TEST_TMP=$(mktemp -d /dev/shm/dawn-tests.XXXXXX 2>/dev/null) || TEST_TMP=""
+fi
+trap 'rm -f "$BUILD_LOG" "$TEST_LOG"; [ -n "$TEST_TMP" ] && rm -rf "$TEST_TMP"' EXIT
 
 echo -e "${BLUE}Pre-push: building tests-ci in $BUILD_DIR…${NC}"
 if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
@@ -117,7 +159,8 @@ if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
 fi
 
 echo -e "${BLUE}Pre-push: running CI test suite…${NC}"
-if ! ctest --test-dir "$BUILD_DIR" -j"$(nproc)" --output-on-failure --no-tests=error -L ci > "$TEST_LOG" 2>&1; then
+if ! TMPDIR="${TEST_TMP:-${TMPDIR:-/tmp}}" ctest --test-dir "$BUILD_DIR" -j"$(nproc)" \
+   --output-on-failure --no-tests=error -L ci > "$TEST_LOG" 2>&1; then
    echo -e "${RED}Test suite FAILED.  Failing cases:${NC}"
    # Highlight FAIL/Failed lines + tail the summary block.
    grep -E "FAIL:|\*\*\*Failed|tests failed" "$TEST_LOG" | head -20
