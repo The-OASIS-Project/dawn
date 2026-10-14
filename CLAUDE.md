@@ -23,9 +23,14 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
 - **Verify, don't assume.** Check claims against the code and against authoritative vendor
   documentation or live behavior, and reproduce a bug before calling it fixed. If you haven't
   verified something, say so plainly.
-- **Right is not maximal.** The right fix is the *least code* that fully closes a real problem.
-  Simple beats clever; a smaller design that works beats a complete one that's harder to read, test
-  and change. Least code is still the real fix, never a band-aid at the symptom.
+- **The smallest, most elegant solution is the best solution.** *"Perfection is achieved, not
+  when there is nothing more to add, but when there is nothing left to take away."*
+  (Antoine de Saint-Exupéry). The right fix is the least code that fully closes the real
+  problem as asked. Before calling work done, take things away: every piece must earn its place
+  against that problem, not against what reviews turned up along the way. A finding against code
+  you added is a reason to question the addition, not to add more. Adjacent problems you find get
+  listed for the developer, not folded in. Least code is still the real fix, never a band-aid at
+  the symptom.
 - **Real, reachable, practical.** Fix what a real user, or a real attacker against a real install,
   can hit today. Drop what needs a stack of unlikely conditions — don't fix it, and don't log it in
   TODO either: a theoretical TODO row is debt that never closes and buries the real items. Reachable
