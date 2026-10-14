@@ -1003,7 +1003,7 @@ static void *briefing_thread_func(void *arg) {
    const char *briefing_label = event->name[0] ? event->name : "scheduled";
    if (conv_created) {
       char user_intent[256];
-      snprintf(user_intent, sizeof(user_intent), "Time for the %s briefing.", briefing_label);
+      snprintf(user_intent, sizeof(user_intent), BRIEFING_USER_INTENT_FMT, briefing_label);
       conv_db_add_message(conv_id, event->user_id, "user", user_intent);
    }
 
@@ -1033,7 +1033,7 @@ static void *briefing_thread_func(void *arg) {
       json_object_array_add(history, sys_msg);
 
       char user_intent[256];
-      snprintf(user_intent, sizeof(user_intent), "Time for the %s briefing.", briefing_label);
+      snprintf(user_intent, sizeof(user_intent), BRIEFING_USER_INTENT_FMT, briefing_label);
       struct json_object *usr_msg = json_object_new_object();
       json_object_object_add(usr_msg, "role", json_object_new_string("user"));
       json_object_object_add(usr_msg, "content", json_object_new_string(user_intent));

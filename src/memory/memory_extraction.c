@@ -1562,8 +1562,14 @@ static int trigger_extraction(int user_id,
       int64_t briefing_end = 0;
       bool briefing_replied = false;
       if (conv_db_briefing_mark_extracted(conversation_id, user_id, &briefing_end,
-                                          &briefing_replied) == AUTH_DB_SUCCESS &&
-          briefing_end > 0) {
+                                          &briefing_replied) != AUTH_DB_SUCCESS) {
+         /* Fail closed: unchecked, a briefing would reach the model; memory
+          * recovery tries the conversation again later. */
+         OLOG_WARNING("memory_extraction: skipping conv %lld: briefing check failed",
+                      (long long)conversation_id);
+         return trigger_skip(user_id, have_slot, 0);
+      }
+      if (briefing_end > 0) {
          OLOG_INFO("memory_extraction: conv %lld: briefing rows through %lld not extracted%s",
                    (long long)conversation_id, (long long)briefing_end,
                    briefing_replied ? "" : " (no reply)");

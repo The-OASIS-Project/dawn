@@ -277,6 +277,19 @@ static void test_briefing_marked_extracted(void) {
    extraction_cursor(headless, &cursor, &count);
    TEST_ASSERT_EQUAL_INT64(0, cursor);
 
+   /* A user's own first message (the scheduler's line never written) is not
+    * taken for the scheduler's: left alone. */
+   int64_t typed = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_with_origin(alice_id, "b", "briefing", &typed));
+   add_row(typed, "user", "What's on my calendar today?", NULL);
+   add_row(typed, "assistant", "Two meetings.", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_briefing_mark_extracted(typed, alice_id, &end, &replied));
+   TEST_ASSERT_EQUAL_INT64(0, end);
+   extraction_cursor(typed, &cursor, &count);
+   TEST_ASSERT_EQUAL_INT64(0, cursor);
+
    /* Not a briefing, and not the caller's conversation. */
    int64_t chat = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &chat));
@@ -294,6 +307,10 @@ static void test_briefing_marked_extracted(void) {
     * the conversation existed). */
    int64_t max_id = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN, conv_db_get_max_msg_id(quiet, bob_id, &max_id));
+   /* No anonymous caller: user id 0 is not a wildcard. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN, conv_db_get_max_msg_id(quiet, 0, &max_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN,
+                         conv_db_briefing_mark_extracted(quiet, 0, &end, &replied));
    display_t shown = { 0 };
    TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN,
                          conv_db_get_messages_by_range(quiet, bob_id, 1, summary, 0, true,

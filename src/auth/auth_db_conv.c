@@ -38,6 +38,7 @@
 #include "auth/auth_db_internal.h"
 #include "llm/llm_context_text.h"
 #include "logging.h"
+#include "prompts.h"
 #include "utils/string_utils.h"
 
 /* Weak no-op fallback for the WebUI "conversation list changed, update" broadcast.
@@ -1927,7 +1928,8 @@ int conv_db_get_messages_by_range(int64_t conv_id,
    AUTH_DB_LOCK_OR_FAIL();
 
    /* Explicit ownership check — return FORBIDDEN rather than silent empty result */
-   if (conversation_owner_locked(conv_id, user_id) == 0) {
+   /* No caller is anonymous here: user_id <= 0 would be the helper's wildcard. */
+   if (user_id <= 0 || conversation_owner_locked(conv_id, user_id) == 0) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FORBIDDEN;
    }
@@ -2016,7 +2018,8 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
    AUTH_DB_LOCK_OR_FAIL();
 
    /* Ownership check */
-   if (conversation_owner_locked(conv_id, user_id) == 0) {
+   /* No caller is anonymous here: user_id <= 0 would be the helper's wildcard. */
+   if (user_id <= 0 || conversation_owner_locked(conv_id, user_id) == 0) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FORBIDDEN;
    }
@@ -2048,12 +2051,13 @@ int conv_db_briefing_mark_extracted(int64_t conv_id,
    *replied_out = false;
 
    /* The briefing is everything before the user's second message; the first
-    * row must be the scheduler's (a user row), else this isn't a briefing we
-    * can bound.  Request-context rows are never counted, the same units as
-    * conversations.message_count and the extraction cursor. */
+    * row must be the scheduler's line, else this isn't a briefing we can bound.  Request-context
+    * rows are never counted, the same units as conversations.message_count and the extraction
+    * cursor. */
    static const char *find_sql =
        "WITH v AS (SELECT id, role FROM messages WHERE conversation_id = ?1 AND kind IS NULL), "
-       "f AS (SELECT id FROM v WHERE id = (SELECT MIN(id) FROM v) AND role = 'user'), "
+       "f AS (SELECT v.id FROM v, messages m WHERE v.id = (SELECT MIN(id) FROM v) "
+       "AND v.role = 'user' AND m.id = v.id AND m.content LIKE '" BRIEFING_USER_INTENT_LIKE "'), "
        "r AS (SELECT MIN(v.id) AS id FROM v, f WHERE v.role = 'user' AND v.id > f.id), "
        "e AS (SELECT MAX(v.id) AS id FROM v, r WHERE r.id IS NULL OR v.id < r.id) "
        "SELECT e.id, (SELECT COUNT(*) FROM v WHERE v.id <= e.id), r.id IS NOT NULL "
@@ -2065,7 +2069,8 @@ int conv_db_briefing_mark_extracted(int64_t conv_id,
        "WHERE id = ?1 AND last_extracted_msg_id < ?2";
 
    AUTH_DB_LOCK_OR_FAIL();
-   if (conversation_owner_locked(conv_id, user_id) == 0) {
+   /* No caller is anonymous here: user_id <= 0 would be the helper's wildcard. */
+   if (user_id <= 0 || conversation_owner_locked(conv_id, user_id) == 0) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FORBIDDEN;
    }
