@@ -1026,6 +1026,18 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
      "WHERE r.user_id = ? AND r.object_entity_id = ? LIMIT ?",
      &s_db.stmt_memory_relation_list_by_object },
+   { "memory_relation_list_by_object_at",
+     "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
+     "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
+     "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+     "r.mention_count "
+     "FROM memory_relations r "
+     "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
+     "WHERE r.user_id = ? AND r.object_entity_id = ? "
+     "  AND (r.valid_from IS NULL OR r.valid_from <= ?) "
+     "  AND (r.valid_to IS NULL OR r.valid_to > ?) "
+     "LIMIT ?",
+     &s_db.stmt_memory_relation_list_by_object_at },
 
    /* The fact_ids of fact-linked relations touching any name in ?2's class
     * (?2's canonical and that canonical's aliases), as subject or object,

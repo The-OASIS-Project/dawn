@@ -632,6 +632,7 @@ typedef struct {
    sqlite3_stmt *stmt_memory_relation_list_by_subject;
    sqlite3_stmt *stmt_memory_relation_list_by_subject_at; /* v33 — as-of variant */
    sqlite3_stmt *stmt_memory_relation_list_by_object;
+   sqlite3_stmt *stmt_memory_relation_list_by_object_at;   /* as-of variant */
    sqlite3_stmt *stmt_memory_relation_fact_ids_for_entity; /* graph-retrieval 1A */
    sqlite3_stmt *stmt_memory_fact_ids_for_subject;         /* live facts filed under an entity */
    sqlite3_stmt *stmt_memory_entity_class_members;         /* an entity and its other names */

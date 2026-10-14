@@ -215,14 +215,12 @@ int memory_search_graph_candidates(int user_id,
  * Pipeline:
  *   1. `memory_fact_search_hybrid()` → hybrid keyword + cosine retrieval
  *      against the full corpus, top-`max` by hybrid score.
- *   2. Entity-graph candidate expansion (Phase 1A) if enabled in config:
- *      extract proper-noun seeds from @p query, walk fact-linked relations,
- *      return up to `MEMORY_GRAPH_INTERMEDIATE_CAP` entity-bounded
- *      candidates.
- *   3. Phase 2 Step 1 query-aware scoring if enabled: re-score graph
- *      candidates as `vec_weight * cosine + entity_bonus` so topically-
- *      irrelevant entity-grounded facts compete fairly with hybrid hits.
- *      Sentinel-scored facts (no embedding in cache) are dropped.
+ *   2. Entity-graph candidates if enabled in config: seeds from the
+ *      entities @p query names, fact-linked relations walked, up to
+ *      `MEMORY_GRAPH_INTERMEDIATE_CAP` entity-bounded candidates.
+ *   3. Each graph candidate scored as `vec_weight * cosine` with the query,
+ *      so topically irrelevant entity-grounded facts compete fairly with
+ *      hybrid hits.  Facts with no embedding are dropped.
  *   4. Score-based merge: union(hybrid, graph) pool → sort by score
  *      descending → truncate to @p max.  Lets a high-scoring graph
  *      candidate displace a low-scoring hybrid tail entry.

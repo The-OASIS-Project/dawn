@@ -333,6 +333,26 @@ void test_search_shows_relations_only_when_asked(void) {
    TEST_ASSERT_NULL(strstr(r, "lived_in"));
    TEST_ASSERT_NULL(strstr(r, "mentored"));
    free(r);
+
+   /* More ended incoming relations than the block's eight slots: the current
+    * one still shows (validity is filtered before the limit). */
+   for (int i = 0; i < 9; i++) {
+      char name[16];
+      snprintf(name, sizeof(name), "Old%d", i);
+      int64_t old = 0;
+      TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                            memory_db_entity_upsert(s_user, name, "person", name, NULL, &old));
+      TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                            memory_db_relation_create(s_user, old, "coached", alice, NULL, 0, 0.9f,
+                                                      978307200, 1041379200, NULL));
+   }
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_create(s_user, bob, "befriended", alice, NULL, 0, 0.9f,
+                                                   0, 0, NULL));
+   r = search("Alice::as_of::2030-01-01");
+   TEST_ASSERT_NOT_NULL(strstr(r, "befriended"));
+   TEST_ASSERT_NULL(strstr(r, "coached"));
+   free(r);
 }
 
 int main(void) {

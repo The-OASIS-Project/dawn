@@ -329,18 +329,6 @@ static int tokenize_query(const char *keywords, char tokens[][64], int max_token
    return memory_stem_tokenize_padded(keywords, tokens, cap, 2);
 }
 
-/* Keep the relations valid at @p t (valid_from/valid_to of 0 = open).  Returns
- * the new count. */
-static int keep_valid_at(memory_relation_t *rels, int n, int64_t t) {
-   int kept = 0;
-   for (int r = 0; r < n; r++) {
-      if ((rels[r].valid_from == 0 || rels[r].valid_from <= t) &&
-          (rels[r].valid_to == 0 || rels[r].valid_to > t))
-         rels[kept++] = rels[r];
-   }
-   return kept;
-}
-
 /* =============================================================================
  * Helper: Append entity graph context to search results
  *
@@ -428,9 +416,12 @@ static void append_graph_context(int user_id,
       /* Incoming relations, filtered the same way. */
       memory_relation_t in_rels[8];
       int in_count = 0;
-      memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8, &in_count);
-      if (!include_historical)
-         in_count = keep_valid_at(in_rels, in_count, as_of_ts > 0 ? as_of_ts : (int64_t)time(NULL));
+      if (include_historical) {
+         memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8, &in_count);
+      } else {
+         memory_db_relation_list_by_object_at(user_id, entity_ids[i], as_of_ts, in_rels, 8,
+                                              &in_count);
+      }
 
       if (rel_count == 0 && in_count == 0)
          continue;
@@ -505,7 +496,9 @@ static void append_source_evidence(int user_id,
       return;
    strbuf_t ev;
    strbuf_init(&ev, 1024);
-   for (int i = 0; i<count && * source_budget> 0; i++) {
+   for (int i = 0; i < count; i++) {
+      if (*source_budget <= 0)
+         break;
       append_source_excerpt_from_range(user_id, conv[i], start[i], end[i], keywords, fact_text[i],
                                        &ev, source_budget, seen);
       if (strbuf_oom(&ev))

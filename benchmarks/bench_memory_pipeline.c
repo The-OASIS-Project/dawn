@@ -801,9 +801,10 @@ static int handle_query_memory(struct json_object *cmd) {
  *
  * Diagnostic command for Phase 1A reachability profiling.  Returns ONLY
  * the entity-graph candidate set for the query — no hybrid retrieval,
- * no merge, no floor.  Same JSON shape as query_memory (results[] with
- * fact_id / score / text / conv_id / msg_start / msg_end /
- * covered_dia_ids) so the Python analysis can re-use the same parser.
+ * no merge, no floor.  query_memory's JSON shape minus `score` (graph
+ * candidates are unscored until a query rescores them): results[] with
+ * fact_id / text / conv_id / msg_start / msg_end / covered_dia_ids, so the
+ * Python analysis can re-use the same parser.
  *
  * Used to answer "of the cat-3 misses, how many are graph-reachable
  * via fact-linked relations from query proper nouns?" — the diagnostic
