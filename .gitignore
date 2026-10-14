@@ -72,4 +72,7 @@ llm_testing/quality/captures*/
 llm_testing/quality/personas/
 llm_testing/quality/*.json
 llm_testing/quality/*.log
+
+# Memory audit: samples, labels and classifications of a user's stored facts
+llm_testing/memory_audit/data/
 quality_[0-9]*.json

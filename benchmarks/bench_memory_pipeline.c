@@ -80,6 +80,7 @@
 #include "memory/memory_extraction.h"
 #include "memory/memory_fact_search.h"
 #include "memory/memory_graph_retrieval.h"
+#include "memory/memory_history_loader.h"
 #include "memory/memory_types.h"
 #include "prompts.h"
 
@@ -547,7 +548,12 @@ int bench_mp_run_smoke(const char *locomo_path, int conv_idx) {
  * ============================================================================= */
 
 static void respond_error(const char *message) {
-   fprintf(stdout, "{\"status\":\"error\",\"message\":\"%s\"}\n", message ? message : "?");
+   /* json-c escapes the message: it can quote paths and SQLite errors. */
+   struct json_object *obj = json_object_new_object();
+   json_object_object_add(obj, "status", json_object_new_string("error"));
+   json_object_object_add(obj, "message", json_object_new_string(message ? message : "?"));
+   fprintf(stdout, "%s\n", json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN));
+   json_object_put(obj);
    fflush(stdout);
 }
 
@@ -1423,6 +1429,343 @@ static int handle_snapshot_load(struct json_object *cmd) {
    return 1;
 }
 
+/* =============================================================================
+ * Stored conversations: import one from a real auth.db, extract it the way
+ * the recovery pass does.
+ *
+ * Measures what extraction stores from real conversations, so prompt variants
+ * can be compared on the same input.  The source DB is opened read-only and
+ * only the one conversation and its messages are copied: no users, tokens or
+ * other conversations reach the scratch DB.  The copy is owned by the bench
+ * user with its extraction cursor at zero, so the whole conversation is
+ * extracted.
+ * ============================================================================= */
+
+/* Columns never copied: links to rows that aren't imported (foreign keys),
+ * and stored turn blocks and summaries extraction never reads. */
+static const char *const IMPORT_SKIP[] = { "continued_from", "parent_id",      "compaction_summary",
+                                           "llm_blocks",     "llm_blocks_len", NULL };
+#define IMPORT_MAX_COLS 128
+#define IMPORT_OWNER_COL (-1)    /* src_idx marker: bind the bench user instead */
+#define IMPORT_BUSY_MS 5000      /* the source is a live daemon's WAL database */
+#define IMPORT_MIN_TEXT_CHARS 50 /* memory_recovery.c's RECOVERY_MIN_TEXT_CHARS */
+
+static bool import_skipped(const char *col) {
+   for (int i = 0; IMPORT_SKIP[i]; i++) {
+      if (strcmp(col, IMPORT_SKIP[i]) == 0)
+         return true;
+   }
+   return false;
+}
+
+/* Append "<sep><item>" to buf; false when it doesn't fit. */
+static bool import_append(char *buf, size_t size, bool first, const char *item) {
+   size_t len = strlen(buf);
+   int w = snprintf(buf + len, size - len, "%s%s", first ? "" : ",", item);
+   return w >= 0 && (size_t)w < size - len;
+}
+
+/* Copy the rows of `table` where `key_col` = key from src into the scratch DB,
+ * by column name, over the columns both schemas have.  A user_id column is
+ * written as the bench user.  Rows copied go to *copied_out.  Returns 0 on
+ * success; on failure err says why. */
+static int import_rows(sqlite3 *src,
+                       const char *table,
+                       const char *key_col,
+                       int64_t key,
+                       int *copied_out,
+                       char *err,
+                       size_t err_size) {
+   char sql[256];
+   snprintf(sql, sizeof(sql), "SELECT * FROM %s WHERE %s = ?", table, key_col);
+   sqlite3_stmt *sel = NULL;
+   if (sqlite3_prepare_v2(src, sql, -1, &sel, NULL) != SQLITE_OK) {
+      snprintf(err, err_size, "select %s: %s", table, sqlite3_errmsg(src));
+      return 1;
+   }
+   sqlite3_bind_int64(sel, 1, key);
+
+   char pragma[96];
+   snprintf(pragma, sizeof(pragma), "PRAGMA table_info(%s)", table);
+   sqlite3_stmt *info = NULL;
+   if (sqlite3_prepare_v2(s_db.db, pragma, -1, &info, NULL) != SQLITE_OK) {
+      snprintf(err, err_size, "table_info %s: %s", table, sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(sel);
+      return 1;
+   }
+   int src_idx[IMPORT_MAX_COLS];
+   int n = 0;
+   bool fits = true;
+   char cols[4096] = "", marks[2 * IMPORT_MAX_COLS + 1] = "";
+   while (fits && sqlite3_step(info) == SQLITE_ROW) {
+      const char *name = (const char *)sqlite3_column_text(info, 1);
+      if (!name || import_skipped(name))
+         continue;
+      int idx = -2;
+      if (strcmp(name, "user_id") == 0) {
+         idx = IMPORT_OWNER_COL;
+      } else {
+         for (int c = 0; c < sqlite3_column_count(sel); c++) {
+            if (strcmp(sqlite3_column_name(sel, c), name) == 0) {
+               idx = c;
+               break;
+            }
+         }
+      }
+      if (idx == -2)
+         continue;
+      fits = n < IMPORT_MAX_COLS && import_append(cols, sizeof(cols), n == 0, name) &&
+             import_append(marks, sizeof(marks), n == 0, "?");
+      if (fits)
+         src_idx[n++] = idx;
+   }
+   sqlite3_finalize(info);
+
+   char insert[sizeof(cols) + sizeof(marks) + 64];
+   int w = snprintf(insert, sizeof(insert), "INSERT INTO %s (%s) VALUES (%s)", table, cols, marks);
+   if (!fits || n == 0 || w < 0 || (size_t)w >= sizeof(insert)) {
+      snprintf(err, err_size, "%s: column list too long or empty", table);
+      sqlite3_finalize(sel);
+      return 1;
+   }
+   sqlite3_stmt *ins = NULL;
+   if (sqlite3_prepare_v2(s_db.db, insert, -1, &ins, NULL) != SQLITE_OK) {
+      snprintf(err, err_size, "insert %s: %s", table, sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(sel);
+      return 1;
+   }
+   int copied = 0, rc = 0, step;
+   while ((step = sqlite3_step(sel)) == SQLITE_ROW) {
+      sqlite3_reset(ins);
+      for (int i = 0; i < n; i++) {
+         if (src_idx[i] == IMPORT_OWNER_COL)
+            sqlite3_bind_int(ins, i + 1, BENCH_MP_USER_ID);
+         else
+            sqlite3_bind_value(ins, i + 1, sqlite3_column_value(sel, src_idx[i]));
+      }
+      if (sqlite3_step(ins) != SQLITE_DONE) {
+         snprintf(err, err_size, "insert %s: %s", table, sqlite3_errmsg(s_db.db));
+         rc = 1;
+         break;
+      }
+      copied++;
+   }
+   /* A read error ends the loop like the last row does; tell them apart. */
+   if (rc == 0 && step != SQLITE_DONE) {
+      snprintf(err, err_size, "read %s: %s", table, sqlite3_errmsg(src));
+      rc = 1;
+   }
+   sqlite3_finalize(ins);
+   sqlite3_finalize(sel);
+   *copied_out = copied;
+   return rc;
+}
+
+/* is_private (0/1, or -1 when there's no such row) and owner of conv_id in
+ * src.  Returns nonzero on a read error. */
+static int import_conv_probe(sqlite3 *src, int64_t conv_id, int *private_out, int *owner_out) {
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(src, "SELECT is_private, user_id FROM conversations WHERE id = ?", -1,
+                          &stmt, NULL) != SQLITE_OK)
+      return 1;
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   int step = sqlite3_step(stmt);
+   *private_out = step == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : -1;
+   *owner_out = step == SQLITE_ROW ? sqlite3_column_int(stmt, 1) : 0;
+   sqlite3_finalize(stmt);
+   return (step == SQLITE_ROW || step == SQLITE_DONE) ? 0 : 1;
+}
+
+/* Copy the conversation and its messages under one transaction on each side:
+ * a consistent snapshot of the source, all-or-nothing in the scratch DB. */
+static int import_conversation(sqlite3 *src,
+                               int64_t conv_id,
+                               int *msgs_out,
+                               char *err,
+                               size_t err_size) {
+   int convs = 0;
+   pthread_mutex_lock(&s_db.mutex);
+   if (sqlite3_exec(s_db.db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+      snprintf(err, err_size, "begin: %s", sqlite3_errmsg(s_db.db));
+      pthread_mutex_unlock(&s_db.mutex);
+      return 1;
+   }
+   int rc = import_rows(src, "conversations", "id", conv_id, &convs, err, err_size);
+   if (rc == 0 && convs != 1) {
+      snprintf(err, err_size, "conversation row not copied");
+      rc = 1;
+   }
+   if (rc == 0)
+      rc = import_rows(src, "messages", "conversation_id", conv_id, msgs_out, err, err_size);
+   if (rc == 0) {
+      char upd[192];
+      snprintf(upd, sizeof(upd),
+               "UPDATE conversations SET last_extracted_msg_id = 0, "
+               "last_extracted_msg_count = 0, extraction_attempts = 0 WHERE id = %" PRId64,
+               conv_id);
+      if (sqlite3_exec(s_db.db, upd, NULL, NULL, NULL) != SQLITE_OK) {
+         snprintf(err, err_size, "reset cursor: %s", sqlite3_errmsg(s_db.db));
+         rc = 1;
+      }
+   }
+   if (rc == 0 && sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+      snprintf(err, err_size, "commit: %s", sqlite3_errmsg(s_db.db));
+      rc = 1;
+   }
+   if (rc != 0)
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+   pthread_mutex_unlock(&s_db.mutex);
+   return rc;
+}
+
+static int handle_import_conversation(struct json_object *cmd) {
+   struct json_object *src_obj = NULL, *conv_obj = NULL, *owner_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "source_db", &src_obj) ||
+       !json_object_object_get_ex(cmd, "conv_id", &conv_obj) ||
+       !json_object_object_get_ex(cmd, "owner_id", &owner_obj)) {
+      respond_error("import_conversation: missing source_db/conv_id/owner_id");
+      return 1;
+   }
+   /* Only the named user's conversations are copied: a saved id list must
+    * never send another user's text to the extraction model. */
+   const int owner_id = json_object_get_int(owner_obj);
+   /* An extraction still running (one that outlived its wait) would write
+    * into the import's transaction and collide with the next trigger. */
+   if (memory_extraction_in_progress(BENCH_MP_USER_ID)) {
+      respond_error("import_conversation: an extraction is still running");
+      return 1;
+   }
+   const char *src_path = json_object_get_string(src_obj);
+   int64_t conv_id = json_object_get_int64(conv_obj);
+
+   sqlite3 *src = NULL;
+   if (sqlite3_open_v2(src_path, &src, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+      sqlite3_close(src);
+      respond_error("import_conversation: cannot open source_db read-only");
+      return 1;
+   }
+   sqlite3_busy_timeout(src, IMPORT_BUSY_MS);
+
+   char err[256] = "";
+   int is_private = -1, owner = 0, msgs = 0, rc = 1;
+   if (sqlite3_exec(src, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+      snprintf(err, sizeof(err), "source begin: %s", sqlite3_errmsg(src));
+   } else if (import_conv_probe(src, conv_id, &is_private, &owner) != 0) {
+      snprintf(err, sizeof(err), "source read: %s", sqlite3_errmsg(src));
+   } else if (is_private < 0) {
+      snprintf(err, sizeof(err), "no such conversation");
+   } else if (owner_id <= 0 || owner != owner_id) {
+      snprintf(err, sizeof(err), "conversation belongs to another user");
+   } else if (is_private) {
+      /* A private conversation is never extracted in production; nor here. */
+      snprintf(err, sizeof(err), "conversation is private");
+   } else {
+      rc = import_conversation(src, conv_id, &msgs, err, sizeof(err));
+   }
+   sqlite3_exec(src, "COMMIT", NULL, NULL, NULL);
+   sqlite3_close(src);
+
+   if (rc != 0) {
+      char msg[320];
+      snprintf(msg, sizeof(msg), "import_conversation: %s", err);
+      respond_error(msg);
+      return 1;
+   }
+   fprintf(stdout, "{\"status\":\"ok\",\"conv_id\":%" PRId64 ",\"messages\":%d}\n", conv_id, msgs);
+   fflush(stdout);
+   return 1;
+}
+
+static int count_live_facts(void) {
+   sqlite3_stmt *stmt = NULL;
+   int count = 0;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT COUNT(*) FROM memory_facts WHERE user_id = ? "
+                          "AND superseded_by IS NULL",
+                          -1, &stmt, NULL) != SQLITE_OK)
+      return 0;
+   sqlite3_bind_int(stmt, 1, BENCH_MP_USER_ID);
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      count = sqlite3_column_int(stmt, 0);
+   sqlite3_finalize(stmt);
+   return count;
+}
+
+static long monotonic_ms(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Extract an imported conversation the way memory_recovery.c does, and say
+ * whether extraction actually ran: memory_trigger_extraction returns 0 on its
+ * skip paths too, so "ran" is the extraction cursor moving. */
+static int handle_extract_stored(struct json_object *cmd) {
+   struct json_object *conv_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "conv_id", &conv_obj)) {
+      respond_error("extract_stored: missing conv_id");
+      return 1;
+   }
+   int64_t conv_id = json_object_get_int64(conv_obj);
+
+   int message_count = 0;
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT message_count FROM conversations WHERE id = ?", -1,
+                          &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(stmt, 1, conv_id);
+      if (sqlite3_step(stmt) == SQLITE_ROW)
+         message_count = sqlite3_column_int(stmt, 0);
+      sqlite3_finalize(stmt);
+   }
+
+   size_t text_len = 0;
+   struct json_object *history = memory_history_load_from_db(conv_id, BENCH_MP_USER_ID, &text_len);
+   if (!history) {
+      respond_error("extract_stored: history load failed");
+      return 1;
+   }
+   /* Recovery's gate: too little text to extract from is marked done, unasked. */
+   if (text_len < IMPORT_MIN_TEXT_CHARS) {
+      json_object_put(history);
+      fprintf(stdout,
+              "{\"status\":\"ok\",\"ran\":false,\"skip\":\"too little text\","
+              "\"text_len\":%zu}\n",
+              text_len);
+      fflush(stdout);
+      return 1;
+   }
+
+   /* A briefing's own rows are counted as extracted before the trigger runs
+    * (conv_db_briefing_mark_extracted); apply that first, so "ran" means the
+    * model was called, not that a briefing nobody answered was skipped. */
+   int64_t briefing_end = 0;
+   bool briefing_replied = false;
+   conv_db_briefing_mark_extracted(conv_id, BENCH_MP_USER_ID, &briefing_end, &briefing_replied);
+   int64_t cursor_before = 0, cursor_after = 0;
+   memory_db_get_last_extracted_msg_id(conv_id, &cursor_before);
+   int live_before = count_live_facts();
+   char session_id[MEMORY_SESSION_ID_MAX];
+   snprintf(session_id, sizeof(session_id), "reextract_%" PRId64, conv_id);
+   long t_start = monotonic_ms();
+   int rc = memory_trigger_extraction(BENCH_MP_USER_ID, conv_id, session_id, history, message_count,
+                                      0, NULL);
+   json_object_put(history);
+   if (rc == 0 && wait_for_extraction(BENCH_MP_USER_ID, BENCH_MP_TIMEOUT_SEC) != 0) {
+      respond_error("extract_stored: extraction timed out");
+      return 1;
+   }
+   memory_db_get_last_extracted_msg_id(conv_id, &cursor_after);
+   bool transient = memory_extraction_consume_last_transient(BENCH_MP_USER_ID);
+   int live_after = count_live_facts();
+   fprintf(stdout,
+           "{\"status\":\"ok\",\"ran\":%s,\"transient\":%s,\"trigger_rc\":%d,"
+           "\"text_len\":%zu,\"duration_ms\":%ld,\"live_facts_added\":%d,\"live_facts\":%d}\n",
+           cursor_after > cursor_before ? "true" : "false", transient ? "true" : "false", rc,
+           text_len, monotonic_ms() - t_start, live_after - live_before, live_after);
+   fflush(stdout);
+   return 1;
+}
+
 int bench_mp_dispatch(struct json_object *cmd) {
    struct json_object *cmd_obj = NULL;
    if (!json_object_object_get_ex(cmd, "cmd", &cmd_obj))
@@ -1452,6 +1795,10 @@ int bench_mp_dispatch(struct json_object *cmd) {
       return handle_snapshot_save(cmd);
    if (strcmp(cmd_str, "snapshot_load") == 0)
       return handle_snapshot_load(cmd);
+   if (strcmp(cmd_str, "import_conversation") == 0)
+      return handle_import_conversation(cmd);
+   if (strcmp(cmd_str, "extract_stored") == 0)
+      return handle_extract_stored(cmd);
 
    return 0;
 }
