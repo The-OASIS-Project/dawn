@@ -39,6 +39,42 @@ ignores it, and the next settings save drops it.
 
 ---
 
+## 2026-10-14 — Briefings no longer feed memory
+
+**What changed.** A scheduled briefing is a summary of outside content: news, weather, email, your
+calendar. Memory used to extract facts from it as if you had said them, so headlines, forecasts and
+other people's emails ended up stored as facts about you. Now memory reads only what you say back to a
+briefing. A briefing nobody replies to is skipped without calling the extraction model, which also
+saves that call.
+
+**What you need to do.** Nothing. Facts already learned from past briefings stay until you remove them
+(the Memory panel, or forgetting what a conversation taught).
+
+---
+
+## 2026-10-13 — Memory: settings for removed search experiments are retired
+
+**What changed.** Memory search experiments that lost in testing were removed, along with the
+settings that switched them on. The behavior you had at the defaults is now the only behavior. These
+`dawn.toml` keys are retired:
+
+- `[memory.embeddings]` `rrf_enabled`, `bm25_enabled`, `memory_text_minimal`
+- `[memory.graph_retrieval]` `entity_grounding_bonus`, `use_query_scoring`, `entity_bonus`
+- `[memory.focus_injection]` `classifier_enabled` (it never did anything)
+
+If your `dawn.toml` sets one, DAWN logs once at startup that it is retired and ignored, and the next
+settings save from the WebUI removes it from the file. Their controls are gone from the settings
+panel.
+
+Also: memory search now shows what it knows about a person's or thing's relations (where someone
+works, where they lived) when the assistant asks about a past date or for ones that have ended. Before,
+those requests were accepted but returned no relations.
+
+**What you need to do.** Nothing. If you had set any of these keys to a non-default value, your
+memory search now runs on the defaults.
+
+---
+
 ## 2026-10-12 — Music: a removed music source leaves the library; more files play
 
 **What changed.** If you clear the music folder setting, or turn Plex off, that source's tracks now

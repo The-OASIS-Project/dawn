@@ -2487,6 +2487,30 @@ int conv_db_get_messages_by_range(int64_t conv_id,
  */
 int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out);
 
+/**
+ * @brief Count a scheduled briefing as already extracted
+ *
+ * A briefing conversation (origin "briefing") opens with the scheduler's line,
+ * the tool steps it ran and the assistant's summary: DAWN's digest of outside
+ * content (news, weather, email, calendar), never something the user said.
+ * This moves the conversation's extraction cursor past those rows, forward
+ * only, so memory extraction reads just the user's replies; with no reply the
+ * conversation is marked fully extracted, so it is never sent to the model.
+ * A conversation whose first row isn't the scheduler's is left alone.
+ *
+ * @param conv_id     Conversation ID
+ * @param user_id     User ID (for ownership check)
+ * @param end_id_out  Output: id of the briefing's last row (the row before the
+ *                    user's first reply, else the last row); 0 when the
+ *                    conversation isn't a briefing
+ * @param replied_out Output: whether the user replied after the briefing
+ * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
+ */
+int conv_db_briefing_mark_extracted(int64_t conv_id,
+                                    int user_id,
+                                    int64_t *end_id_out,
+                                    bool *replied_out);
+
 /* =============================================================================
  * Summary Nodes (LCM Phase 4 — hierarchical summaries)
  * ============================================================================= */

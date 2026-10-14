@@ -842,15 +842,16 @@ int memory_db_relation_distinct_predicates(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-/* As-of variant.  When as_of_ts == 0, defaults to "currently valid".  Used by
- * the entity-recall block in memory_callback when the LLM passes as_of, and as
- * the default temporal filter for current-state queries. */
-int memory_db_relation_list_by_subject_at(int user_id,
-                                          int64_t subject_entity_id,
-                                          int64_t as_of_ts,
-                                          memory_relation_t *out,
-                                          int max,
-                                          int *count_out) {
+/* Relations of @p entity_id (the subject or the object, by @p stmt) valid at
+ * @p as_of_ts; 0 = now.  Validity is filtered in SQL, before the limit, so
+ * ended relations can't crowd out valid ones. */
+static int relation_list_valid_at(sqlite3_stmt *stmt,
+                                  int user_id,
+                                  int64_t entity_id,
+                                  int64_t as_of_ts,
+                                  memory_relation_t *out,
+                                  int max,
+                                  int *count_out) {
    if (count_out)
       *count_out = 0;
    if (!out || max <= 0)
@@ -861,10 +862,9 @@ int memory_db_relation_list_by_subject_at(int user_id,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   sqlite3_stmt *stmt = s_db.stmt_memory_relation_list_by_subject_at;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int64(stmt, 2, subject_entity_id);
+   sqlite3_bind_int64(stmt, 2, entity_id);
    sqlite3_bind_int64(stmt, 3, as_of_ts);
    sqlite3_bind_int64(stmt, 4, as_of_ts);
    sqlite3_bind_int(stmt, 5, max);
@@ -880,6 +880,29 @@ int memory_db_relation_list_by_subject_at(int user_id,
    if (count_out)
       *count_out = count;
    return MEMORY_DB_SUCCESS;
+}
+
+/* As-of variant.  When as_of_ts == 0, defaults to "currently valid".  Used by
+ * the entity-recall block in memory_callback when the LLM passes as_of, and as
+ * the default temporal filter for current-state queries. */
+int memory_db_relation_list_by_subject_at(int user_id,
+                                          int64_t subject_entity_id,
+                                          int64_t as_of_ts,
+                                          memory_relation_t *out,
+                                          int max,
+                                          int *count_out) {
+   return relation_list_valid_at(s_db.stmt_memory_relation_list_by_subject_at, user_id,
+                                 subject_entity_id, as_of_ts, out, max, count_out);
+}
+
+int memory_db_relation_list_by_object_at(int user_id,
+                                         int64_t object_entity_id,
+                                         int64_t as_of_ts,
+                                         memory_relation_t *out,
+                                         int max,
+                                         int *count_out) {
+   return relation_list_valid_at(s_db.stmt_memory_relation_list_by_object_at, user_id,
+                                 object_entity_id, as_of_ts, out, max, count_out);
 }
 
 int memory_db_relation_list_with_canonical_roots_by_user(int user_id,

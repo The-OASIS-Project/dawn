@@ -17,6 +17,7 @@ variant of that has now shipped **four times** (see [Why this guide exists](#why
 - [Worked example](#worked-example)
 - [Adding a whole new section](#adding-a-whole-new-section)
 - [When NOT to surface a setting in the WebUI](#when-not-to-surface-a-setting-in-the-webui)
+- [Retiring a setting](#retiring-a-setting)
 - [Verifying your wiring](#verifying-your-wiring)
 
 ---
@@ -233,6 +234,23 @@ still wire steps 4/5/6 so a hand-edited value round-trips, and label it clearly 
 # Parsed and round-tripped, but NOT yet enforced — reserved for Phase 3.
 # max_spawn_depth = 3                # Phase 3: job-tree depth cap.
 ```
+
+---
+
+## Retiring a setting
+
+When a setting goes away, a user's `dawn.toml` may still set it. Don't just delete the parse line, or
+the key starts warning as a typo. Instead:
+
+1. **Keep the key** in its section's `known_keys[]` (the `warn_unknown_keys()` list).
+2. **Add it to that section's retired list** passed to `note_retired_keys()` in `config_parser.c`,
+   with a few words on why. A file that sets it then logs once that it is retired and ignored.
+3. **Remove it everywhere else**: the struct field, its default, the `PARSE_*` line, clamps and
+   validation, `config_to_json()`, `config_write_toml()` (so the next settings save drops it from
+   the file), the `webui_config.c` POST handler, `schema.js` and `dawn.toml.example`.
+4. **Test it** in `tests/test_config_roundtrip.c`: the key is never written, and a file that still
+   sets it parses with one warning per key (see `test_memory_search_keys_retired`).
+5. **Add an `UPGRADING.md` entry** naming the key.
 
 ---
 

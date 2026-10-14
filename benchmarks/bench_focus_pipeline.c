@@ -811,7 +811,6 @@ static int parse_config(struct json_object *cfg) {
    fi->weight_recency = (float)json_get_double(cfg, "weight_recency", 0.3);
    fi->weight_importance = (float)json_get_double(cfg, "weight_importance", 0.2);
    fi->weight_source = (float)json_get_double(cfg, "weight_source", 1.0);
-   fi->classifier_enabled = false;
 
    /* M4: clamp untrusted fields. */
    if (validate_int_range("top_k", fi->top_k, BENCH_TOP_K_MIN, BENCH_TOP_K_MAX) != SUCCESS)

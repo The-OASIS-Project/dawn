@@ -972,41 +972,9 @@ static void *briefing_thread_func(void *arg) {
     * summarization step (which must not run as a scheduled tool). */
    scheduled_context_clear();
 
-   /* Step 2: Create conversation */
-   {
-      char title[256];
-      snprintf(title, sizeof(title), "Briefing: %s", event->name[0] ? event->name : "Scheduled");
-      int rc = conv_db_create_with_origin(event->user_id, title, "briefing", &conv_id);
-      if (rc != 0) {
-         OLOG_WARNING("scheduler: briefing %lld failed to create conversation (rc=%d), "
-                      "falling back to raw result",
-                      (long long)event->id, rc);
-         /* Fall through — announce raw tool result */
-      } else {
-         conv_created = true;
-      }
-   }
-
-   /* Step 3: Add a SHORT user-intent message to the conversation.
-    *
-    * Storing the raw tool output as a user message (old behavior) made the
-    * WebUI conversation viewer display a wall of JSON / search noise and
-    * gave the LLM zero instruction.  The raw data still flows to the LLM
-    * via the system message in Step 4; only the short intent is persisted
-    * so the user-facing conversation reads cleanly.
-    *
-    * Trade-off: subsequent user turns in this conversation won't have the
-    * raw data context — if the user asks "what was the weather again?" the
-    * LLM will likely re-call the weather tool rather than recall from the
-    * briefing.  Acceptable for the briefing use case. */
    const char *briefing_label = event->name[0] ? event->name : "scheduled";
-   if (conv_created) {
-      char user_intent[256];
-      snprintf(user_intent, sizeof(user_intent), "Time for the %s briefing.", briefing_label);
-      conv_db_add_message(conv_id, event->user_id, "user", user_intent);
-   }
 
-   /* Step 4: Call LLM with the cleaned data embedded in the system message. */
+   /* Step 2: Call LLM with the cleaned data embedded in the system message. */
    char *cleaned_data = strip_markdown_images(tool_result);
    char *system_msg_str = build_briefing_system_message(briefing_label,
                                                         event->instructions[0] ? event->instructions
@@ -1032,7 +1000,7 @@ static void *briefing_thread_func(void *arg) {
       json_object_array_add(history, sys_msg);
 
       char user_intent[256];
-      snprintf(user_intent, sizeof(user_intent), "Time for the %s briefing.", briefing_label);
+      snprintf(user_intent, sizeof(user_intent), BRIEFING_USER_INTENT_FMT, briefing_label);
       struct json_object *usr_msg = json_object_new_object();
       json_object_object_add(usr_msg, "role", json_object_new_string("user"));
       json_object_object_add(usr_msg, "content", json_object_new_string(user_intent));
@@ -1058,7 +1026,7 @@ static void *briefing_thread_func(void *arg) {
    free(system_msg_str);
    free(cleaned_data);
 
-   /* Step 5: Store assistant response */
+   /* Step 3: Store assistant response */
    {
       bool llm_ok = (llm_response && llm_response[0]);
       /* When summarization fails, do NOT fall back to the raw tool_result: it
@@ -1075,6 +1043,42 @@ static void *briefing_thread_func(void *arg) {
                   "unavailable. Try again shortly.",
                   briefing_label);
          final_text = notice;
+      }
+
+      /* Create the conversation only now, with every row it gets, so it isn't
+       * there during the summary call: a reply typed into it then would land
+       * before the summary, and memory extraction bounds a briefing at the
+       * user's first reply (conv_db_briefing_mark_extracted).
+       *
+       * Its rows: a SHORT user-intent line (the raw tool output as a user
+       * message, the old behavior, showed a wall of JSON / search noise in the
+       * WebUI), then the tool steps, then the summary.  The raw data reached
+       * the LLM through the system message above.  Trade-off: a later turn here
+       * has no raw data, so "what was the weather again?" re-calls the weather
+       * tool rather than recall it from the briefing. */
+      {
+         char title[256];
+         snprintf(title, sizeof(title), "Briefing: %s", event->name[0] ? event->name : "Scheduled");
+         int rc = conv_db_create_with_origin(event->user_id, title, "briefing", &conv_id);
+         if (rc != 0) {
+            OLOG_WARNING("scheduler: briefing %lld failed to create conversation (rc=%d); "
+                         "announcing without one",
+                         (long long)event->id, rc);
+         } else {
+            char user_intent[256];
+            snprintf(user_intent, sizeof(user_intent), BRIEFING_USER_INTENT_FMT, briefing_label);
+            /* Without its opening line memory can't tell the briefing from the
+             * user's words, so the briefing isn't stored without it. */
+            if (conv_db_add_message(conv_id, event->user_id, "user", user_intent) ==
+                AUTH_DB_SUCCESS) {
+               conv_created = true;
+            } else {
+               OLOG_WARNING("scheduler: briefing %lld: opening line not saved; "
+                            "announcing without a conversation",
+                            (long long)event->id);
+               conv_db_delete(conv_id, event->user_id);
+            }
+         }
       }
 
       if (conv_created) {
@@ -1094,7 +1098,7 @@ static void *briefing_thread_func(void *arg) {
          conv_db_add_message(conv_id, event->user_id, "assistant", final_text);
       }
 
-      /* Step 6: WebUI visual notification — fire BEFORE the TTS stream
+      /* Step 4: WebUI visual notification — fire BEFORE the TTS stream
        * starts so the popup card appears at briefing-fire time, not after
        * the audio finishes.  scheduler_send_tts_to_session now paces
        * sentence-by-sentence (long-briefing truncation fix) which means
@@ -1117,7 +1121,7 @@ static void *briefing_thread_func(void *arg) {
       }
 #endif
 
-      /* Step 7: TTS announcement.  Suppressed when deliver_to is set —
+      /* Step 5: TTS announcement.  Suppressed when deliver_to is set —
        * the user isn't on the speaker, they're on the chat surface.
        * Otherwise source-gated via briefing_should_speak (voice-
        * created briefings speak, WebUI-created stay silent unless
@@ -1144,7 +1148,7 @@ static void *briefing_thread_func(void *arg) {
       }
    }
 
-   /* Step 8: Mark as fired and schedule next */
+   /* Step 6: Mark as fired and schedule next */
    scheduler_db_update_status(event->id, SCHED_STATUS_FIRED);
    schedule_next_occurrence(event);
    scheduler_broadcast_events_changed(event->user_id);

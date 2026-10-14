@@ -373,61 +373,14 @@ void config_set_defaults(dawn_config_t *config) {
     * LoCoMo-blind (parser doesn't fire on cat-2 "what date" shape) but no
     * regression observed; complements (does not replace) soft temporal_weight. */
    config->memory.temporal_filter_enabled = true;
-   /* RRF retrieval — formally dead-letter (May 17, 2026).  Original 2026-05-15
-    * bench showed -3.7pp regression vs composite scorer.  Re-tested post Phase 1
-    * BM25 + Phase 3 specificity rules (Phase 4A of Mem0 parity program): still
-    * -0.58pp regressive.  Flag kept off-by-default; code stays behind the flag
-    * for operator override but is no longer "experimental, may re-enable" —
-    * the parallel-channel RRF design does not compose with DAWN's entity-graph
-    * backbone.  See docs/MEM0_ARCHITECTURAL_PARITY.md §Phase 4A outcome. */
-   config->memory.rrf_enabled = false;
-   /* Minimal memory_text format — graduated to default-on (May 2026) after
-    * +0.98pp leader-comparable validation on n=1525.  Re-confirmed post
-    * Phase 3 specificity (Phase 4B of Mem0 parity): -0.71pp without minimal.
-    * Cuts ~30-50% of memory_text bytes by stripping per-fact metadata +
-    * demoting source excerpts to a single global block. */
-   config->memory.memory_text_minimal = true;
-   /* BM25 keyword retrieval (FTS5 + Porter2).  Graduated to default-on
-    * (May 17, 2026) after Phase 1 Mem0 parity bench validation: +2.74pp
-    * leader-comparable on fresh LoCoMo n=1536 (BM25 OFF 0.7057 → ON 0.7331),
-    * plus stable burn-in on the dev's live deployment.  Operator override
-    * via [memory.embeddings] bm25_enabled = false to revert to the legacy
-    * LIKE + multi-token match-count path.  See NOTICE for Mem0 attribution
-    * and docs/MEM0_ARCHITECTURAL_PARITY.md §Phase 1 outcome. */
-   config->memory.bm25_enabled = true;
    config->memory.category_threshold = 0.25f;
-   /* Graph-retrieval Phase 2.b — entity-graph candidate source.  Default-on;
-    * entity_grounding_bonus 0.4 sits between the 0.30 search floor and
-    * typical strong hybrid hits; max_facts_per_query 30 bounds fan-out for
-    * high-degree entities. */
+   /* Entity-graph candidates: the facts about the entities a query names.
+    * max_facts_per_query bounds fan-out for high-degree entities. */
    config->memory.graph_retrieval.enabled = true;
-   config->memory.graph_retrieval.entity_grounding_bonus = 0.40f;
    config->memory.graph_retrieval.max_facts_per_query = 30;
-   /* Phase 2 Step 1: query-aware scoring of graph candidates.
-    * Default ON — replaces the flat entity_grounding_bonus with
-    * vec_weight * cosine(query, fact) + entity_bonus.  Toggle false
-    * for ablation. */
-   config->memory.graph_retrieval.use_query_scoring = true;
-   /* entity_bonus default 0.0 (May 14, 2026 architecture review):
-    * applied asymmetrically (only to facts arriving via the graph
-    * branch) it acted as an unearned thumb-on-the-scale that promoted
-    * entity-mentioning facts over equally-relevant facts that just
-    * didn't lexically name the seed entity.  Cat-3 ("inference")
-    * questions are exactly the case where the answer often doesn't
-    * repeat the seed, so the bonus regressed cat-3 by -10pp.  Keep
-    * the knob; default 0.0 means "use cosine alone for scoring," i.e.
-    * symmetric with hybrid candidates that share the same vec_weight
-    * scale.  Set >0 only as an experimental knob to test whether
-    * boosting graph candidates symmetrically (require Phase 1B
-    * patch first) adds value. */
-   config->memory.graph_retrieval.entity_bonus = 0.0f;
 
    /* Memory-tool search score floor: drops marginal-cosine hits before they
-    * reach the LLM.  0.30 sits at the natural kw_weight boundary — pure
-    * single-token keyword matches score exactly `kw_weight * 1.0 = 0.30`,
-    * so 0.30 is the cleanest cutoff that filters hybrid-vector-only
-    * marginal hits without dropping any legitimate keyword match.  Live-
-    * validated 2026-05-13 across three settings (0.10 / 0.20 / 0.30) on
+    * reach the LLM.  Live-validated 2026-05-13 across three settings (0.10 / 0.20 / 0.30) on
     * a no-memory query: 0.30 was the only setting that produced visible
     * filtering AND surfaced focus-block candidates the LLM could use for
     * intelligent clarifying questions.  See dawn_config.h
@@ -490,7 +443,6 @@ void config_set_defaults(dawn_config_t *config) {
     * Summaries are long, so their relevance runs lower than facts' or
     * entities'. */
    config->memory.focus_injection.summary_min_relevance = 0.22f;
-   config->memory.focus_injection.classifier_enabled = false;
    config->memory.focus_injection.summary_max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.
     * Probe Component 6 fix-rate lifted 7/11 → 11/11 across all three

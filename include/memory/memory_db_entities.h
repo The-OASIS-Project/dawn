@@ -312,6 +312,22 @@ int memory_db_relation_list_by_object(int user_id,
                                       int max,
                                       int *count_out);
 
+/**
+ * @brief Incoming relations of an entity valid at a timestamp
+ *
+ * memory_db_relation_list_by_object filtered like
+ * memory_db_relation_list_by_subject_at: valid_from <= as_of < valid_to, open
+ * ends allowed, filtered before the limit.
+ *
+ * @param as_of_ts Timestamp to evaluate validity at (0 = now)
+ */
+int memory_db_relation_list_by_object_at(int user_id,
+                                         int64_t object_entity_id,
+                                         int64_t as_of_ts,
+                                         memory_relation_t *out,
+                                         int max,
+                                         int *count_out);
+
 /** Most names (an entity and its aliases) memory_db_entity_class_members
  * returns; the by-class fact and relation lookups have no such limit. */
 #define MEMORY_ENTITY_CLASS_MAX 16

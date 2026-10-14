@@ -1587,12 +1587,6 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_double(config->memory.temporal_weight));
    json_object_object_add(memory, "temporal_filter_enabled",
                           json_object_new_boolean(config->memory.temporal_filter_enabled));
-   json_object_object_add(memory, "rrf_enabled",
-                          json_object_new_boolean(config->memory.rrf_enabled));
-   json_object_object_add(memory, "memory_text_minimal",
-                          json_object_new_boolean(config->memory.memory_text_minimal));
-   json_object_object_add(memory, "bm25_enabled",
-                          json_object_new_boolean(config->memory.bm25_enabled));
    json_object_object_add(memory, "category_threshold",
                           json_object_new_double(config->memory.category_threshold));
    json_object_object_add(memory, "search_score_floor",
@@ -1601,17 +1595,9 @@ json_object *config_to_json(const dawn_config_t *config) {
       struct json_object *graph = json_object_new_object();
       json_object_object_add(graph, "enabled",
                              json_object_new_boolean(config->memory.graph_retrieval.enabled));
-      json_object_object_add(graph, "entity_grounding_bonus",
-                             json_object_new_double(
-                                 config->memory.graph_retrieval.entity_grounding_bonus));
       json_object_object_add(graph, "max_facts_per_query",
                              json_object_new_int(
                                  config->memory.graph_retrieval.max_facts_per_query));
-      json_object_object_add(graph, "use_query_scoring",
-                             json_object_new_boolean(
-                                 config->memory.graph_retrieval.use_query_scoring));
-      json_object_object_add(graph, "entity_bonus",
-                             json_object_new_double(config->memory.graph_retrieval.entity_bonus));
       json_object_object_add(memory, "graph_retrieval", graph);
    }
    json_object_object_add(memory, "embedding_backfill_on_startup",
@@ -1652,8 +1638,6 @@ json_object *config_to_json(const dawn_config_t *config) {
                              json_object_new_double(fi->entity_min_relevance));
       json_object_object_add(focus, "summary_min_relevance",
                              json_object_new_double(fi->summary_min_relevance));
-      json_object_object_add(focus, "classifier_enabled",
-                             json_object_new_boolean(fi->classifier_enabled));
       json_object_object_add(focus, "weight_semantic", json_object_new_double(fi->weight_semantic));
       json_object_object_add(focus, "weight_recency", json_object_new_double(fi->weight_recency));
       json_object_object_add(focus, "weight_importance",
@@ -2553,9 +2537,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "temporal_weight = %.2f\n", config->memory.temporal_weight);
    fprintf(fp, "temporal_filter_enabled = %s\n",
            config->memory.temporal_filter_enabled ? "true" : "false");
-   fprintf(fp, "rrf_enabled = %s\n", config->memory.rrf_enabled ? "true" : "false");
-   fprintf(fp, "memory_text_minimal = %s\n", config->memory.memory_text_minimal ? "true" : "false");
-   fprintf(fp, "bm25_enabled = %s\n", config->memory.bm25_enabled ? "true" : "false");
    fprintf(fp, "category_threshold = %.2f\n", config->memory.category_threshold);
    fprintf(fp, "search_score_floor = %.2f\n", config->memory.search_score_floor);
    /* backfill_on_startup / model_id / recompute_* belong to the embeddings
@@ -2577,12 +2558,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
 
    fprintf(fp, "\n[memory.graph_retrieval]\n");
    fprintf(fp, "enabled = %s\n", config->memory.graph_retrieval.enabled ? "true" : "false");
-   fprintf(fp, "entity_grounding_bonus = %.2f\n",
-           config->memory.graph_retrieval.entity_grounding_bonus);
    fprintf(fp, "max_facts_per_query = %d\n", config->memory.graph_retrieval.max_facts_per_query);
-   fprintf(fp, "use_query_scoring = %s\n",
-           config->memory.graph_retrieval.use_query_scoring ? "true" : "false");
-   fprintf(fp, "entity_bonus = %.2f\n", config->memory.graph_retrieval.entity_bonus);
 
    fprintf(fp, "\n[memory.recovery]\n");
    fprintf(fp, "enabled = %s\n", config->memory.recovery_enabled ? "true" : "false");
@@ -2604,7 +2580,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "named_fact_min_relevance = %.2f\n", fi->named_fact_min_relevance);
       fprintf(fp, "entity_min_relevance = %.2f\n", fi->entity_min_relevance);
       fprintf(fp, "summary_min_relevance = %.2f\n", fi->summary_min_relevance);
-      fprintf(fp, "classifier_enabled = %s\n", fi->classifier_enabled ? "true" : "false");
       fprintf(fp, "weight_semantic = %.2f\n", fi->weight_semantic);
       fprintf(fp, "weight_recency = %.2f\n", fi->weight_recency);
       fprintf(fp, "weight_importance = %.2f\n", fi->weight_importance);

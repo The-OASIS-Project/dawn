@@ -314,32 +314,6 @@ static int append_source_excerpt_from_range(int user_id,
  * endpoint in webui_memory.c, which doesn't render the excerpt itself.) */
 
 /* =============================================================================
- * Helper: Format time difference
- * ============================================================================= */
-
-static void format_time_ago(time_t timestamp, char *buf, size_t buf_size) {
-   if (timestamp == 0) {
-      snprintf(buf, buf_size, "unknown");
-      return;
-   }
-
-   time_t now = time(NULL);
-   time_t diff = now - timestamp;
-
-   if (diff < 60) {
-      snprintf(buf, buf_size, "just now");
-   } else if (diff < 3600) {
-      snprintf(buf, buf_size, "%ld min ago", diff / 60);
-   } else if (diff < 86400) {
-      snprintf(buf, buf_size, "%ld hours ago", diff / 3600);
-   } else if (diff < 604800) {
-      snprintf(buf, buf_size, "%ld days ago", diff / 86400);
-   } else {
-      snprintf(buf, buf_size, "%ld weeks ago", diff / 604800);
-   }
-}
-
-/* =============================================================================
  * Helper: Tokenize search query into individual words
  *
  * Splits keywords on whitespace/punctuation, lowercases each token,
@@ -348,14 +322,7 @@ static void format_time_ago(time_t timestamp, char *buf, size_t buf_size) {
 
 #define MAX_SEARCH_TOKENS 8
 
-/* `multi_token_fact_search` was extracted to `src/memory/memory_fact_search.c`
- * (Phase 1c-i) so the focus-source fact adapter and the legacy recall path
- * share identical retrieval semantics.  `tokenize_query` here is now a thin
- * wrapper over the shared `memory_stem_tokenize_in_place` helper — same
- * delimiter set, min-length=2 filter, and working-buffer size as
- * memory_fact_search.c::tokenize_query.  Kept file-local for caller
- * convenience (fills the existing `char tokens[][64]` storage shape used by
- * downstream search calls). */
+/* For append_graph_context's entity fallback and the summary search. */
 
 static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
    int cap = (max_tokens > MAX_SEARCH_TOKENS) ? MAX_SEARCH_TOKENS : max_tokens;
@@ -446,12 +413,15 @@ static void append_graph_context(int user_id,
          memory_db_relation_list_by_subject_at(user_id, entity_ids[i], as_of_ts, rels, 8,
                                                &rel_count);
       }
-      /* Incoming relations: no temporal filter helper today; subject-side filter is
-       * the high-value case (e.g., "where does Alice work").  Object-side stays
-       * unfiltered for v1 — incoming recall is contextual, less likely to confuse. */
+      /* Incoming relations, filtered the same way. */
       memory_relation_t in_rels[8];
       int in_count = 0;
-      memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8, &in_count);
+      if (include_historical) {
+         memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8, &in_count);
+      } else {
+         memory_db_relation_list_by_object_at(user_id, entity_ids[i], as_of_ts, in_rels, 8,
+                                              &in_count);
+      }
 
       if (rel_count == 0 && in_count == 0)
          continue;
@@ -460,7 +430,7 @@ static void append_graph_context(int user_id,
       if (!header_written) {
          if (strbuf_len(sb) > 0)
             strbuf_append(sb, "\n");
-         strbuf_append(sb, "ENTITIES:\n");
+         strbuf_append(sb, "Entities:\n");
          header_written = true;
       }
 
@@ -503,6 +473,45 @@ static void append_graph_context(int user_id,
 /* =============================================================================
  * Action: Search
  * ============================================================================= */
+
+/* Search and recent show source excerpts for this many of their top facts, in
+ * one "Source evidence:" block at the end: bounded source overhead, and better
+ * answers on LoCoMo than an excerpt under every item. */
+#define SOURCE_TOP_FACTS 3
+
+/* The "Source evidence:" block for the captured fact provenance.  The heading
+ * is written only when an excerpt renders (a range can hold no user or
+ * assistant text). */
+static void append_source_evidence(int user_id,
+                                   const char *keywords,
+                                   const int64_t *conv,
+                                   const int64_t *start,
+                                   const int64_t *end,
+                                   const char *const *fact_text,
+                                   int count,
+                                   strbuf_t *sb,
+                                   int *source_budget,
+                                   source_dedup_set_t *seen) {
+   if (count <= 0 || *source_budget <= 0)
+      return;
+   strbuf_t ev;
+   strbuf_init(&ev, 1024);
+   for (int i = 0; i < count; i++) {
+      if (*source_budget <= 0)
+         break;
+      append_source_excerpt_from_range(user_id, conv[i], start[i], end[i], keywords, fact_text[i],
+                                       &ev, source_budget, seen);
+      if (strbuf_oom(&ev))
+         break;
+   }
+   if (strbuf_len(&ev) > 0) {
+      if (strbuf_len(sb) > 0)
+         strbuf_append(sb, "\n");
+      strbuf_append(sb, "Source evidence:\n");
+      strbuf_append(sb, strbuf_str(&ev));
+   }
+   strbuf_free(&ev);
+}
 
 /* Append the tool-result citation hint (Option B) when the signal is on — the
  * adjacency salience lever: the cite reminder sits right under the [ID:x] facts
@@ -580,28 +589,16 @@ char *memory_action_search(int user_id,
     * verbatim. */
    source_dedup_set_t seen = { 0 };
 
-   /* Minimal-format mode (v5 memory_text shape rebuild).  When enabled,
-    * strip per-fact metadata, demote source excerpts to a single global
-    * "Source evidence:" block at the end (top-3 facts), and skip the
-    * entity-graph block.  Goal: ~2K tokens vs current ~3K.  Off-by-default. */
-   const bool minimal = g_config.memory.memory_text_minimal;
-
-   /* Captured provenance for the deferred global source block (minimal mode).
-    * Only the first 3 facts contribute — globally bounded so source overhead
-    * stays roughly constant regardless of fact_count. */
-   enum {
-      MINIMAL_SOURCE_TOP_FACTS = 3
-   };
-   int64_t min_src_conv[MINIMAL_SOURCE_TOP_FACTS] = { 0 };
-   int64_t min_src_start[MINIMAL_SOURCE_TOP_FACTS] = { 0 };
-   int64_t min_src_end[MINIMAL_SOURCE_TOP_FACTS] = { 0 };
-   const char *min_src_fact_text[MINIMAL_SOURCE_TOP_FACTS] = { NULL };
-   int min_src_count = 0;
+   /* One line per fact, no per-fact metadata; excerpts for the top facts go
+    * in the Source evidence block at the end. */
+   int64_t src_conv[SOURCE_TOP_FACTS] = { 0 };
+   int64_t src_start[SOURCE_TOP_FACTS] = { 0 };
+   int64_t src_end[SOURCE_TOP_FACTS] = { 0 };
+   const char *src_fact_text[SOURCE_TOP_FACTS] = { NULL };
+   int src_count = 0;
 
    if (fact_count > 0) {
-      strbuf_append(&sb, minimal ? "Memories:\n" : "");
-      if (!minimal)
-         strbuf_appendf(&sb, "FACTS (%d):\n", fact_count);
+      strbuf_append(&sb, "Memories:\n");
 
       /* Batch-fetch fact provenance up front — one DB round-trip instead of
        * N × _fact_get_source calls.  fact_conv[i] = 0 for facts with no
@@ -670,50 +667,21 @@ char *memory_action_search(int user_id,
          }
       }
 
-      int elided = 0;
       for (int i = 0; i < fact_count; i++) {
-         if (minimal) {
-            /* Stripped per-fact line: just `- text`.  Date stays in fact_text
-             * when extraction included it (Phase 0 prompt v2). */
-            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
-                           facts[i].fact_text);
-            memory_citation_record_tool_fact_current(facts[i].id);
-            /* Capture provenance for the deferred global Source evidence block. */
-            if (with_source && fact_conv[i] > 0 && min_src_count < MINIMAL_SOURCE_TOP_FACTS) {
-               min_src_conv[min_src_count] = fact_conv[i];
-               min_src_start[min_src_count] = fact_start[i];
-               min_src_end[min_src_count] = fact_end[i];
-               min_src_fact_text[min_src_count] = facts[i].fact_text;
-               min_src_count++;
-            }
-         } else {
-            char time_str[32];
-            format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s (confidence: %.0f%%, %s)\n",
-                           (long long)facts[i].id, facts[i].fact_text, facts[i].confidence * 100,
-                           time_str);
-            memory_citation_record_tool_fact_current(facts[i].id);
-
-            if (with_source && source_budget > 0 && fact_conv[i] > 0) {
-               append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i],
-                                                keywords, facts[i].fact_text, &sb, &source_budget,
-                                                &seen);
-            } else if (with_source && source_budget <= 0) {
-               elided++;
-            }
+         /* The date stays in fact_text when extraction included it. */
+         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
+                        facts[i].fact_text);
+         memory_citation_record_tool_fact_current(facts[i].id);
+         if (with_source && fact_conv[i] > 0 && src_count < SOURCE_TOP_FACTS) {
+            src_conv[src_count] = fact_conv[i];
+            src_start[src_count] = fact_start[i];
+            src_end[src_count] = fact_end[i];
+            src_fact_text[src_count] = facts[i].fact_text;
+            src_count++;
          }
-
-         /* Update access time */
          memory_db_fact_update_access(facts[i].id, user_id);
-
-         /* Bail early if buffer max_cap was hit during source-excerpt
-          * rendering.  Otherwise we'd burn N-1 wasted iterations on no-op
-          * append_source_excerpt_from_range calls (embedded-review M4). */
          if (strbuf_oom(&sb))
             break;
-      }
-      if (elided > 0) {
-         strbuf_appendf(&sb, "[%d more source(s) elided — call context_expand for full]\n", elided);
       }
    }
 
@@ -725,32 +693,9 @@ char *memory_action_search(int user_id,
    if (pref_count > 0) {
       if (strbuf_len(&sb) > 0)
          strbuf_append(&sb, "\n");
-      strbuf_append(&sb, minimal ? "Preferences:\n" : "PREFERENCES:\n");
-
-      int64_t pref_conv[10] = { 0 }, pref_start[10] = { 0 }, pref_end[10] = { 0 };
-      if (with_source && !minimal) {
-         int64_t pref_ids[10];
-         for (int i = 0; i < pref_count; i++)
-            pref_ids[i] = prefs[i].id;
-         memory_db_prefs_get_sources(user_id, pref_ids, pref_count, pref_conv, pref_start,
-                                     pref_end);
-      }
-
-      for (int i = 0; i < pref_count; i++) {
-         if (minimal) {
-            strbuf_appendf(&sb, "- %s: %s\n", prefs[i].category, prefs[i].value);
-         } else {
-            strbuf_appendf(&sb, "- %s: %s (reinforced %d times)\n", prefs[i].category,
-                           prefs[i].value, prefs[i].reinforcement_count);
-            if (with_source && source_budget > 0 && pref_conv[i] > 0) {
-               append_source_excerpt_from_range(user_id, pref_conv[i], pref_start[i], pref_end[i],
-                                                keywords, prefs[i].value, &sb, &source_budget,
-                                                &seen);
-               if (strbuf_oom(&sb))
-                  break;
-            }
-         }
-      }
+      strbuf_append(&sb, "Preferences:\n");
+      for (int i = 0; i < pref_count; i++)
+         strbuf_appendf(&sb, "- %s: %s\n", prefs[i].category, prefs[i].value);
    }
 
    /* Search summaries */
@@ -795,68 +740,25 @@ char *memory_action_search(int user_id,
    if (summary_count > 0) {
       if (strbuf_len(&sb) > 0)
          strbuf_append(&sb, "\n");
-      if (minimal) {
-         strbuf_append(&sb, "Conversation summaries:\n");
-      } else {
-         strbuf_appendf(&sb, "CONVERSATION SUMMARIES (%d):\n", summary_count);
-      }
-
-      int64_t sum_conv[5] = { 0 }, sum_start[5] = { 0 }, sum_end[5] = { 0 };
-      if (with_source && !minimal) {
-         int64_t sum_ids[5];
-         for (int i = 0; i < summary_count; i++)
-            sum_ids[i] = summaries[i].id;
-         memory_db_summaries_get_sources(user_id, sum_ids, summary_count, sum_conv, sum_start,
-                                         sum_end);
-      }
-
-      for (int i = 0; i < summary_count; i++) {
-         if (minimal) {
-            /* Inline topics, drop time prefix (extraction's leading-date convention
-             * means dates are usually in the summary text itself). */
-            strbuf_appendf(&sb, "- %s (Topics: %s)\n", summaries[i].summary, summaries[i].topics);
-         } else {
-            char time_str[32];
-            format_time_ago(summaries[i].created_at, time_str, sizeof(time_str));
-            strbuf_appendf(&sb, "- [%s] %s\n  Topics: %s\n", time_str, summaries[i].summary,
-                           summaries[i].topics);
-            if (with_source && source_budget > 0 && sum_conv[i] > 0) {
-               append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i],
-                                                keywords, summaries[i].summary, &sb, &source_budget,
-                                                &seen);
-               if (strbuf_oom(&sb))
-                  break;
-            }
-         }
-      }
+      strbuf_append(&sb, "Conversation summaries:\n");
+      /* Topics inline, no time prefix: extraction leads a summary with its
+       * date. */
+      for (int i = 0; i < summary_count; i++)
+         strbuf_appendf(&sb, "- %s (Topics: %s)\n", summaries[i].summary, summaries[i].topics);
    }
 
-   /* Append entity graph context (with relation source-rendering when enabled).
-    * Skipped in minimal mode — graph context is a major contributor to the
-    * verbose-format token count and the v5 hypothesis is that gpt-4o-mini
-    * answers better with less context. */
-   if (!minimal) {
+   /* The top facts' evidence first, so relation excerpts below get what is
+    * left of the shared budget. */
+   if (with_source)
+      append_source_evidence(user_id, keywords, src_conv, src_start, src_end, src_fact_text,
+                             src_count, &sb, &source_budget, &seen);
+
+   /* Relations of the entities the query names, only when the caller asked
+    * about a time (as_of) or for closed ones: they cost context on every
+    * other search and add little there. */
+   if (as_of_ts > 0 || include_historical) {
       append_graph_context(user_id, keywords, as_of_ts, include_historical, &sb, with_source,
                            &source_budget, &seen);
-   }
-
-   /* Minimal mode: deferred global Source evidence block.  Emit one excerpt
-    * per captured fact provenance (top 3 facts).  Uses the same
-    * append_source_excerpt_from_range helper so dedup, top-K selection, and
-    * formatting stay consistent with the verbose path. */
-   if (minimal && with_source && min_src_count > 0 && source_budget > 0) {
-      if (strbuf_len(&sb) > 0)
-         strbuf_append(&sb, "\n");
-      strbuf_append(&sb, "Source evidence:\n");
-      for (int i = 0; i < min_src_count; i++) {
-         if (source_budget <= 0)
-            break;
-         append_source_excerpt_from_range(user_id, min_src_conv[i], min_src_start[i],
-                                          min_src_end[i], keywords, min_src_fact_text[i], &sb,
-                                          &source_budget, &seen);
-         if (strbuf_oom(&sb))
-            break;
-      }
    }
 
    /* Cite hint next to the [ID:x] facts (adjacency), only when facts were rendered. */
@@ -1411,24 +1313,15 @@ char *memory_action_recent(int user_id,
     * emits "same as above" after the first verbatim. */
    source_dedup_set_t seen = { 0 };
 
-   /* Minimal mode parity with memory_action_search.  See that function's
-    * declaration block for design rationale. */
-   const bool minimal = g_config.memory.memory_text_minimal;
-   enum {
-      MINIMAL_RECENT_SOURCE_TOP_FACTS = 3
-   };
-   int64_t min_src_conv[MINIMAL_RECENT_SOURCE_TOP_FACTS] = { 0 };
-   int64_t min_src_start[MINIMAL_RECENT_SOURCE_TOP_FACTS] = { 0 };
-   int64_t min_src_end[MINIMAL_RECENT_SOURCE_TOP_FACTS] = { 0 };
-   const char *min_src_fact_text[MINIMAL_RECENT_SOURCE_TOP_FACTS] = { NULL };
-   int min_src_count = 0;
+   /* Same compact layout as memory_action_search. */
+   int64_t src_conv[SOURCE_TOP_FACTS] = { 0 };
+   int64_t src_start[SOURCE_TOP_FACTS] = { 0 };
+   int64_t src_end[SOURCE_TOP_FACTS] = { 0 };
+   const char *src_fact_text[SOURCE_TOP_FACTS] = { NULL };
+   int src_count = 0;
 
    if (fact_count > 0) {
-      if (minimal) {
-         strbuf_append(&sb, sort_asc ? "Oldest memories:\n" : "Recent memories:\n");
-      } else {
-         strbuf_append(&sb, sort_asc ? "OLDEST FACTS:\n" : "RECENT FACTS:\n");
-      }
+      strbuf_append(&sb, sort_asc ? "Oldest memories:\n" : "Recent memories:\n");
 
       /* Batch-fetch fact provenance — memory_db_facts_get_sources chunks
        * internally in MAX_PROVENANCE_BATCH-sized (32) groups, so N > 32 is
@@ -1445,43 +1338,19 @@ char *memory_action_recent(int user_id,
                                      fact_end);
       }
 
-      int elided = 0;
       for (int i = 0; i < fact_count; i++) {
-         if (minimal) {
-            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
-                           facts[i].fact_text);
-            memory_citation_record_tool_fact_current(facts[i].id);
-            if (with_source && fact_conv[i] > 0 &&
-                min_src_count < MINIMAL_RECENT_SOURCE_TOP_FACTS) {
-               min_src_conv[min_src_count] = fact_conv[i];
-               min_src_start[min_src_count] = fact_start[i];
-               min_src_end[min_src_count] = fact_end[i];
-               min_src_fact_text[min_src_count] = facts[i].fact_text;
-               min_src_count++;
-            }
-         } else {
-            char time_str[32];
-            format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s (%s, %s)\n", (long long)facts[i].id,
-                           facts[i].fact_text, facts[i].source, time_str);
-            memory_citation_record_tool_fact_current(facts[i].id);
-            if (with_source && source_budget > 0 && fact_conv[i] > 0) {
-               /* memory_action_recent is time-windowed, not query-driven — pass
-                * NULL for the query scoring slot and use the fact_text alone
-                * to rank dialog messages within the provenance range. */
-               append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i],
-                                                NULL, facts[i].fact_text, &sb, &source_budget,
-                                                &seen);
-            } else if (with_source && source_budget <= 0) {
-               elided++;
-            }
+         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
+                        facts[i].fact_text);
+         memory_citation_record_tool_fact_current(facts[i].id);
+         if (with_source && fact_conv[i] > 0 && src_count < SOURCE_TOP_FACTS) {
+            src_conv[src_count] = fact_conv[i];
+            src_start[src_count] = fact_start[i];
+            src_end[src_count] = fact_end[i];
+            src_fact_text[src_count] = facts[i].fact_text;
+            src_count++;
          }
-         /* See memory_action_search for OOM-bail rationale (embedded M4). */
          if (strbuf_oom(&sb))
             break;
-      }
-      if (elided > 0) {
-         strbuf_appendf(&sb, "[%d more source(s) elided — call context_expand for full]\n", elided);
       }
    }
 
@@ -1500,63 +1369,18 @@ char *memory_action_recent(int user_id,
    if (summary_count > 0) {
       if (strbuf_len(&sb) > 0)
          strbuf_append(&sb, "\n");
-      if (minimal) {
-         strbuf_append(&sb, sort_asc ? "Oldest conversations:\n" : "Recent conversations:\n");
-      } else {
-         strbuf_append(&sb, sort_asc ? "OLDEST CONVERSATIONS:\n" : "RECENT CONVERSATIONS:\n");
-      }
-
-      int64_t sum_conv[MEMORY_RECENT_LIMIT_MAX] = { 0 };
-      int64_t sum_start[MEMORY_RECENT_LIMIT_MAX] = { 0 };
-      int64_t sum_end[MEMORY_RECENT_LIMIT_MAX] = { 0 };
-      if (with_source && !minimal) {
-         int64_t sum_ids[MEMORY_RECENT_LIMIT_MAX];
-         for (int i = 0; i < summary_count; i++)
-            sum_ids[i] = summaries[i].id;
-         memory_db_summaries_get_sources(user_id, sum_ids, summary_count, sum_conv, sum_start,
-                                         sum_end);
-      }
-
+      strbuf_append(&sb, sort_asc ? "Oldest conversations:\n" : "Recent conversations:\n");
       for (int i = 0; i < summary_count; i++) {
-         if (minimal) {
-            if (strbuf_appendf(&sb, "- %s (Topics: %s)\n", summaries[i].summary,
-                               summaries[i].topics) < 0)
-               break;
-         } else {
-            char time_str[32];
-            format_time_ago(summaries[i].created_at, time_str, sizeof(time_str));
-            if (strbuf_appendf(&sb, "- [%s] %s\n  Topics: %s\n", time_str, summaries[i].summary,
-                               summaries[i].topics) < 0)
-               break;
-            if (with_source && source_budget > 0 && sum_conv[i] > 0) {
-               /* Time-windowed (no query) — see fact branch above. */
-               append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i],
-                                                NULL, summaries[i].summary, &sb, &source_budget,
-                                                &seen);
-            }
-         }
-         /* Mirror memory_action_search's OOM-bail pattern (Arch review M4). */
-         if (strbuf_oom(&sb))
+         if (strbuf_appendf(&sb, "- %s (Topics: %s)\n", summaries[i].summary, summaries[i].topics) <
+             0)
             break;
       }
    }
 
-   /* Minimal mode: deferred global Source evidence block. */
-   if (minimal && with_source && min_src_count > 0 && source_budget > 0) {
-      if (strbuf_len(&sb) > 0)
-         strbuf_append(&sb, "\n");
-      strbuf_append(&sb, "Source evidence:\n");
-      for (int i = 0; i < min_src_count; i++) {
-         if (source_budget <= 0)
-            break;
-         /* Time-windowed: pass NULL keyword scoring (fact_text alone ranks). */
-         append_source_excerpt_from_range(user_id, min_src_conv[i], min_src_start[i],
-                                          min_src_end[i], NULL, min_src_fact_text[i], &sb,
-                                          &source_budget, &seen);
-         if (strbuf_oom(&sb))
-            break;
-      }
-   }
+   /* Time-windowed: no query, so fact_text alone ranks each excerpt. */
+   if (with_source)
+      append_source_evidence(user_id, NULL, src_conv, src_start, src_end, src_fact_text, src_count,
+                             &sb, &source_budget, &seen);
 
    if (fact_count == 0 && summary_count == 0) {
       strbuf_appendf(&sb, "No memories found in the past %s.", period_resolved);

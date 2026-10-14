@@ -34,6 +34,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_entities.h"
 #include "unity.h"
 
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -279,6 +280,81 @@ void test_forget_reports_already_merged(void) {
    free(r);
 }
 
+static char *search(const char *value) {
+   char buf[256];
+   snprintf(buf, sizeof(buf), "%s", value);
+   int respond = 0;
+   return memoryCallback("search", buf, &respond);
+}
+
+/* Search shows relations only when asked about a time or for closed ones, and
+ * then filters them as asked. */
+void test_search_shows_relations_only_when_asked(void) {
+   int64_t alice = 0, acme = 0, boston = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_upsert(s_user, "Alice", "person", "alice", NULL, &alice));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_upsert(s_user, "Acme", "org", "acme", NULL, &acme));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_upsert(s_user, "Boston", "place",
+                                                                    "boston", NULL, &boston));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_create(s_user, alice, "works_at", acme, NULL, 0, 0.9f,
+                                                   0, 0, NULL));
+   /* Lived in Boston in 2001-2002, closed since. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_create(s_user, alice, "lived_in", boston, NULL, 0, 0.9f,
+                                                   978307200, 1041379200, NULL));
+
+   /* Bob mentored Alice in 2001-2002: an incoming relation, filtered too. */
+   int64_t bob = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_upsert(s_user, "Bob", "person", "bob", NULL, &bob));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_create(s_user, bob, "mentored", alice, NULL, 0, 0.9f,
+                                                   978307200, 1041379200, NULL));
+
+   char *r = search("Alice");
+   TEST_ASSERT_NULL(strstr(r, "works_at"));
+   free(r);
+
+   r = search("Alice::include_historical::true");
+   TEST_ASSERT_NOT_NULL(strstr(r, "works_at: Acme"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "lived_in: Boston"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "mentored"));
+   free(r);
+
+   r = search("Alice::as_of::2001-06-01");
+   TEST_ASSERT_NOT_NULL(strstr(r, "lived_in: Boston"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "mentored"));
+   free(r);
+
+   r = search("Alice::as_of::2030-01-01");
+   TEST_ASSERT_NOT_NULL(strstr(r, "works_at: Acme"));
+   TEST_ASSERT_NULL(strstr(r, "lived_in"));
+   TEST_ASSERT_NULL(strstr(r, "mentored"));
+   free(r);
+
+   /* More ended incoming relations than the block's eight slots: the current
+    * one still shows (validity is filtered before the limit). */
+   for (int i = 0; i < 9; i++) {
+      char name[16];
+      snprintf(name, sizeof(name), "Old%d", i);
+      int64_t old = 0;
+      TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                            memory_db_entity_upsert(s_user, name, "person", name, NULL, &old));
+      TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                            memory_db_relation_create(s_user, old, "coached", alice, NULL, 0, 0.9f,
+                                                      978307200, 1041379200, NULL));
+   }
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_create(s_user, bob, "befriended", alice, NULL, 0, 0.9f,
+                                                   0, 0, NULL));
+   r = search("Alice::as_of::2030-01-01");
+   TEST_ASSERT_NOT_NULL(strstr(r, "befriended"));
+   TEST_ASSERT_NULL(strstr(r, "coached"));
+   free(r);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_remember_in_a_known_conversation_is_learned_there);
@@ -290,5 +366,6 @@ int main(void) {
    RUN_TEST(test_forget_refuses_conflicting_or_malformed_keepers);
    RUN_TEST(test_list_merged_and_restore);
    RUN_TEST(test_forget_reports_already_merged);
+   RUN_TEST(test_search_shows_relations_only_when_asked);
    return UNITY_END();
 }

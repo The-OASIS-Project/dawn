@@ -50,10 +50,8 @@
  *      (`memory_db_relation_fact_ids_for_entity()`, any name too), in turn.  Cap fan-out
  *      per query at `[memory.graph_retrieval].max_facts_per_query`; a seed
  *      that finds little passes its share on.
- *   3. Dedupe fact_ids; fetch the facts; emit as (facts, scores)
- *      parallel arrays.  Initial score = `entity_grounding_bonus`
- *      (configurable, defaults to 0.4 — above the 0.30 search floor,
- *      below typical strong hybrid hits).
+ *   3. Dedupe fact_ids and fetch the facts.  The caller scores them
+ *      against the query (memory_embeddings_rescore_against_query).
  *
  * Layer: 2 (alongside memory_fact_search.h).  Pulls memory_types,
  * memory_db_entities, memory_embeddings (named entities) for query-time
@@ -127,26 +125,20 @@ int memory_graph_extract_seed_entities(int user_id,
 
 /**
  * @brief Expand 1 hop from seed entities: the facts about each and the facts
- *        its relations came from, as (facts, scores) parallel arrays.
+ *        its relations came from.
  *
  * For each seed, memory_db_fact_ids_for_subject (any name in its class) and
  * `memory_db_relation_fact_ids_for_entity`, taken in turn within the seed's
  * share of @p max (what is left, split over the seeds still to go).  Dedupes
  * fact_ids across seeds, fetches each fact via `memory_db_fact_get`
  * (user-scoped in SQL) and drops expired and superseded ones.
- *
- * Scoring: each fact-linked candidate receives a flat
- * `entity_grounding_bonus` score (configurable via
- * `g_config.memory.graph_retrieval.entity_grounding_bonus`).  The
- * merge layer in `memory_action_search` combines these with hybrid-
- * cosine candidates and re-ranks via the existing pipeline.
+ * Unscored: the caller scores them against the query.
  *
  * @param user_id User ID (defense-in-depth)
  * @param seed_entity_ids Array of seed entity IDs from
  *                        memory_graph_extract_seed_entities
  * @param seed_count Number of seeds (0 → SUCCESS with count=0)
  * @param out_facts Caller-allocated array of size @p max
- * @param out_scores Caller-allocated parallel array of size @p max
  * @param max Total fan-out cap across all seeds
  * @param out_count Receives actual returned fact count, in [0, @p max]
  * @return SUCCESS or FAILURE
@@ -155,7 +147,6 @@ int memory_graph_expand_fact_linked(int user_id,
                                     const int64_t *seed_entity_ids,
                                     int seed_count,
                                     memory_fact_t *out_facts,
-                                    float *out_scores,
                                     int max,
                                     int *out_count);
 

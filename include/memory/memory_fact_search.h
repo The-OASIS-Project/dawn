@@ -23,17 +23,15 @@
  *        semantics.
  *
  * Pipeline:
- *   1. Tokenize the query string.
- *   2. Multi-token keyword search (with optional `since_ts` time filter)
- *      with per-fact match-count scoring.
- *   3. If embeddings are available AND a `query_embedding` was supplied,
+ *   1. BM25 keyword search (FTS5, with optional `since_ts` time filter),
+ *      scores normalized to [0, 1].
+ *   2. If embeddings are available AND a `query_embedding` was supplied,
  *      hand the keyword fact_ids + scores to
  *      `memory_embeddings_hybrid_search()` and emit the re-ranked output.
  *      Vector-only hits (those NOT in the keyword set) are fetched via
  *      `memory_db_fact_get()` (user-scoped in SQL) with a
  *      defense-in-depth `user_id` post-check.
- *   4. Otherwise emit the keyword-only ranking with match counts as the
- *      score.
+ *   3. Otherwise emit the keyword-only ranking.
  *
  * Layer: 2.  Header pulls only `memory_types.h` + libc.
  *
@@ -59,8 +57,8 @@ extern "C" {
 /**
  * @brief Run DAWN's full fact-retrieval pipeline.
  *
- * Tokenize the query → multi-token keyword search (with optional
- * `since_ts` time filter) → hybrid embedding re-rank when
+ * BM25 keyword search (with optional `since_ts` time filter) → hybrid
+ * embedding re-rank when
  * `query_embedding` is provided AND `memory_embeddings_available()` is
  * true.  Otherwise returns keyword-only results.
  *
@@ -93,7 +91,8 @@ extern "C" {
  * @param out_facts    Caller-allocated output array.
  * @param out_scores   Caller-allocated parallel score array.  Hybrid
  *                     score (cosine + keyword combination) when
- *                     re-ranked; raw keyword match count otherwise.
+ *                     re-ranked; the BM25 score in hundredths (1-100)
+ *                     otherwise.
  * @param max          Capacity of `out_facts` / `out_scores`.
  * @param out_count    Receives actual returned count, in `[0, max]`.
  *
@@ -114,8 +113,7 @@ int memory_fact_search_hybrid(int user_id,
 
 /**
  * @brief Variant of memory_fact_search_hybrid that threads a pre-computed
- *        query embedding through to memory_embeddings_hybrid_search_ex /
- *        memory_embeddings_rrf_search_ex.
+ *        query embedding through to memory_embeddings_hybrid_search_ex.
  *
  * Efficiency M3 (May 2026): callers that have already embedded the query
  * (e.g., memory_search_execute, which also feeds the embedding into the
@@ -151,9 +149,8 @@ int memory_fact_search_hybrid_ex(int user_id,
  * - `score_floor <= 0.0f` → no-op (legacy behavior — every above-near-zero
  *   hit reaches the LLM).
  * - Keyword-only fallback scores from `memory_fact_search_hybrid()` are
- *   integer match counts cast to float (always >= 1.0), so any sub-1.0
- *   floor passes them untouched — only hybrid-path marginal-cosine hits
- *   are filtered.
+ *   BM25 hundredths (1-100), so any sub-1.0 floor passes them untouched;
+ *   only hybrid-path marginal-cosine hits are filtered.
  *
  * In-place compaction preserves the descending-score order from the
  * upstream ranker.  Pure function — no allocations, no logging.
@@ -185,12 +182,12 @@ int memory_search_apply_score_floor(memory_fact_t *facts,
  * injection.  Seeds are the entities the query names (any of their names,
  * aliases included) and its capitalized words that are an entity's exact
  * name; each seed contributes the facts about it and the facts its
- * relations came from (memory_graph_expand_fact_linked).  With
- * graph_retrieval.use_query_scoring each is rescored as vec_weight * cosine
- * + entity_bonus, and facts without an embedding are dropped.  Nothing when
- * graph_retrieval is off.
+ * relations came from (memory_graph_expand_fact_linked).  Each is scored
+ * as vec_weight * cosine with the query, and facts without an embedding
+ * are dropped.  Nothing when graph_retrieval is off.
  *
- * @param query_emb   The query's embedding, or NULL (no rescoring possible)
+ * @param query_emb   The query's embedding, or NULL (nothing can be scored,
+ *                    so no candidates)
  * @param for_context For a turn's context: the user's own entity and the
  *                    assistant's are not seeds (every turn implies them)
  * @param out_facts  Caller-allocated, MEMORY_GRAPH_INTERMEDIATE_CAP entries
@@ -218,14 +215,12 @@ int memory_search_graph_candidates(int user_id,
  * Pipeline:
  *   1. `memory_fact_search_hybrid()` → hybrid keyword + cosine retrieval
  *      against the full corpus, top-`max` by hybrid score.
- *   2. Entity-graph candidate expansion (Phase 1A) if enabled in config:
- *      extract proper-noun seeds from @p query, walk fact-linked relations,
- *      return up to `MEMORY_GRAPH_INTERMEDIATE_CAP` entity-bounded
- *      candidates.
- *   3. Phase 2 Step 1 query-aware scoring if enabled: re-score graph
- *      candidates as `vec_weight * cosine + entity_bonus` so topically-
- *      irrelevant entity-grounded facts compete fairly with hybrid hits.
- *      Sentinel-scored facts (no embedding in cache) are dropped.
+ *   2. Entity-graph candidates if enabled in config: seeds from the
+ *      entities @p query names, fact-linked relations walked, up to
+ *      `MEMORY_GRAPH_INTERMEDIATE_CAP` entity-bounded candidates.
+ *   3. Each graph candidate scored as `vec_weight * cosine` with the query,
+ *      so topically irrelevant entity-grounded facts compete fairly with
+ *      hybrid hits.  Facts with no embedding are dropped.
  *   4. Score-based merge: union(hybrid, graph) pool → sort by score
  *      descending → truncate to @p max.  Lets a high-scoring graph
  *      candidate displace a low-scoring hybrid tail entry.

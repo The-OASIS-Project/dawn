@@ -611,8 +611,6 @@ typedef struct {
                                       corpus-typical level toward identical,
                                       (cos - pool_mean) / (1 - pool_mean).  Model-independent;
                                       0 disables. */
-   bool classifier_enabled;        /* RAGRoute-style source classifier;
-                                      default false (off, opt-in after probe) */
    float weight_semantic;          /* Cross-source ranker weights — Generative
                                       Agents / CrewAI three-factor formula */
    float weight_recency;
@@ -746,84 +744,25 @@ typedef struct {
     * research synthesis).  Off-by-default for A/B; flip in
     * `config_defaults.c` after bench validation. */
    bool temporal_filter_enabled;
-   /* Reciprocal Rank Fusion retrieval.  When on, hybrid search builds three
-    * independent rank lists (semantic cosine, keyword multi-token, temporal
-    * proximity when applicable) over the same candidate pool and scores
-    * each fact by RRF: score = Σ 1/(60 + rank_i).  Replaces the weighted-
-    * sum composite (kw_weight * kw + vec_weight * cosine + temporal_weight
-    * * proximity).  Empirical basis: Mem0 v2 + Hindsight TEMPR both cite
-    * RRF over parallel channels as their primary retrieval lever.
-    * Off-by-default for A/B against the existing composite. */
-   bool rrf_enabled;
-   /* Minimal-format memory_text output.  When on, memory.search emits a
-    * Mem0/ENGRAM-style compact layout:
-    *   - "Memories:" / "Preferences:" / "Conversation summaries:" headers
-    *     replace "FACTS (N):" / "PREFERENCES:" / "CONVERSATION SUMMARIES (K):"
-    *   - Per-fact [ID:M], confidence, time-ago annotations stripped
-    *   - Per-fact source excerpts demoted to a single "Source evidence:"
-    *     block at the end (top-3 excerpts, one per fact)
-    *   - ENTITIES/RELATIONS graph block omitted from the generator surface
-    *
-    * Empirical basis: ENGRAM @ 916 tokens beats Mem0 @ 7K on LongMemEval
-    * SOTA (2026 research synthesis).  Goal: cut memory_text from ~3K tokens
-    * to ~2K, reducing the LLM's "lost in the middle" surface area.
-    *
-    * Off-by-default for A/B.  Earlier v4 attempt regressed -1pp on 28-Q
-    * sample with a smaller cut (14.8% size reduction); v5 is the more
-    * aggressive shape the research synthesis recommended. */
-   bool memory_text_minimal;
-   /* BM25 keyword retrieval via SQLite FTS5 + Porter2 stemming.  When on,
-    * memory_fact_search_hybrid routes the keyword channel through
-    * memory_db_fact_search_bm25 (one FTS5 MATCH per query, BM25 ranking,
-    * sigmoid-normalized to [0, 1]) instead of the legacy tokenize +
-    * multi-LIKE + match-count path.  Phase 1 of the Mem0 Architectural
-    * Parity program (docs/MEM0_ARCHITECTURAL_PARITY.md).  Algorithm and
-    * sigmoid params adapted from Mem0 (Apache-2.0); see NOTICE.
-    * Off-by-default for A/B; flip after bench validation. */
-   bool bm25_enabled;
    /* Category backfill — cosine similarity above which a fact is assigned to a
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */
    float category_threshold;
-   /* Graph-retrieval (Phase 2.b of cat-3 work) — parallel candidate
-    * source for memory.search alongside hybrid keyword + cosine search.
-    * Extracts proper-noun entities from the query, resolves to canonical
-    * memory_entities, fans out one hop via fact-linked memory_relations,
-    * and surfaces the resulting fact_ids as additional candidates with
-    * a flat entity-grounding score.  Targets cat-3 entity-specific
+   /* Graph retrieval: a candidate source for memory.search alongside hybrid
+    * keyword + cosine search.  Resolves the entities the query names, fans
+    * out one hop (facts about each, facts its relations came from), and
+    * adds those facts as candidates scored by cosine with the query.
+    * Targets entity-specific
     * lookup queries like "What country did Jolene buy snake Seraphim?"
     * where cosine over-broadens on the noun and the gold answer sits
     * at rank 50+.  See memory_graph_retrieval.h for the pipeline. */
    struct {
       bool enabled; /* default true; disable to A/B against pure hybrid */
-      /* Per-fact score assigned to graph-anchored candidates.  Default 0.4
-       * sits above the 0.30 search_score_floor (graph candidates survive
-       * the floor by construction) and below typical strong hybrid hits
-       * (~0.5-0.7 cosine + keyword), so the merge keeps graph candidates
-       * present without dominating the ranking.  Bench-tune. */
-      float entity_grounding_bonus;
       /* Total fan-out cap across all seed entities per query.  Top-degree
        * LoCoMo entities have 50-80 incoming + outgoing relations; 30 is
        * comfortable headroom for the typical 1-3 seeds while bounded
        * against pathological multi-entity queries. */
       int max_facts_per_query;
-      /* Phase 2 Step 1 (May 14, 2026): query-aware scoring of graph
-       * candidates.  When true (default), graph candidates are re-scored
-       * against the query using cosine(query, fact) + entity_bonus.
-       * Replaces the flat entity_grounding_bonus that was disconnected
-       * from query content.  Set false to revert to flat-bonus scoring
-       * for config-toggle ablation.
-       *
-       * See docs/PHASE_2_GRAPH_RETRIEVAL_DESIGN.md §2C Step 1. */
-      bool use_query_scoring;
-      /* Small additive bonus applied to query-scored graph candidates
-       * (when use_query_scoring=true).  Distinguishes graph-rescued
-       * candidates from pure-hybrid candidates at otherwise-tied scores.
-       * Default 0.10 — small enough that hybrid relevance dominates,
-       * large enough that an entity-grounded near-tie wins.  Range
-       * [0.0, 1.0]; 0.0 reproduces pure-hybrid scoring on the graph
-       * candidate pool (no graph preference). */
-      float entity_bonus;
    } graph_retrieval;
 
    /* Memory-tool search score floor.  Drops facts whose hybrid score
@@ -831,13 +770,11 @@ typedef struct {
     * below this value before they reach the LLM.  Closes the "I don't
     * remember" gate against marginal-cosine fabrication: at 0 the LLM
     * sees every cosine hit above the embeddings layer's 0.01 near-zero
-    * cut; at 0.30 (default) hybrid-vector-only marginal hits below the
-    * natural kw_weight=0.30 boundary are dropped silently.  Only applies
+    * cut; at 0.30 (default) marginal hits are dropped silently.  Only applies
     * to the non-category branch of memory_action_search() and the per-
     * turn focus-injection fact adapter — category-filtered searches are
-    * SQL-LIKE grounded and need no floor.  0.30 = `kw_weight * 1.0` is
-    * the cleanest cutoff (preserves every legitimate single-token
-    * keyword match); drop to 0.10-0.20 if your corpus shows over-
+    * SQL-LIKE grounded and need no floor.  0.30 was chosen live (see
+    * config_defaults.c); drop to 0.10-0.20 if your corpus shows over-
     * filtering, or push higher if weak fabrications persist.
     *
     * SINGLE-KNOB DESIGN: this value gates BOTH the memory.search tool

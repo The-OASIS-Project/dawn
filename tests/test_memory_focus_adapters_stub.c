@@ -78,31 +78,9 @@ int memory_db_fact_search(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-/* v48: BM25-ranked search stub.  Mirrors the LIKE search but assigns a
- * uniform 1.0 score so tests gated on the bm25_enabled path get the
- * same fact set without depending on FTS5 + libstemmer in the unit
- * harness.  Tests that need score variation set them post-call. */
-int memory_db_fact_search_bm25(int user_id,
-                               const char *query,
-                               memory_fact_t *out_facts,
-                               float *out_scores,
-                               int max_facts,
-                               int *count_out) {
-   (void)query;
-   int n = 0;
-   for (int i = 0; i < s_mock.fact_count && n < max_facts; i++) {
-      if (s_mock.facts[i].user_id != user_id)
-         continue;
-      out_facts[n] = s_mock.facts[i];
-      if (out_scores)
-         out_scores[n] = 1.0f;
-      n++;
-   }
-   if (count_out)
-      *count_out = n;
-   return MEMORY_DB_SUCCESS;
-}
-
+/* BM25-ranked search stub.  Mirrors the LIKE search but assigns a
+ * uniform 1.0 score, so memory search gets the same fact set without
+ * depending on FTS5 + libstemmer in the unit harness. */
 int memory_db_fact_search_bm25_since(int user_id,
                                      const char *query,
                                      time_t since_ts,
@@ -121,26 +99,6 @@ int memory_db_fact_search_bm25_since(int user_id,
       if (out_scores)
          out_scores[n] = 1.0f;
       n++;
-   }
-   if (count_out)
-      *count_out = n;
-   return MEMORY_DB_SUCCESS;
-}
-
-int memory_db_fact_search_since(int user_id,
-                                const char *keywords,
-                                time_t since_ts,
-                                memory_fact_t *out_facts,
-                                int max_facts,
-                                int *count_out) {
-   (void)keywords;
-   int n = 0;
-   for (int i = 0; i < s_mock.fact_count && n < max_facts; i++) {
-      if (s_mock.facts[i].user_id != user_id)
-         continue;
-      if (s_mock.facts[i].created_at < since_ts)
-         continue;
-      out_facts[n++] = s_mock.facts[i];
    }
    if (count_out)
       *count_out = n;
@@ -561,32 +519,13 @@ bool memory_filter_check(const char *text) {
 }
 
 /* =============================================================================
- * Phase 1A graph retrieval + RRF + Phase 2 Step 1 stubs (May 2026 ships).
+ * Graph retrieval and query-rescoring stubs.
  *
  * Adapter tests don't exercise these paths — they exercise the upstream
  * adapter dispatch + focus composition.  No-op stubs return SUCCESS / 0
  * with `count_out = 0` so the linker is satisfied and any path that
  * accidentally hits these gets a quiet empty result rather than a crash.
  * ============================================================================= */
-
-int memory_embeddings_rrf_search(int user_id,
-                                 const char *query,
-                                 const int64_t *keyword_facts,
-                                 const int *keyword_scores,
-                                 int keyword_count,
-                                 int token_count,
-                                 embedding_search_result_t *out_results,
-                                 int max_results) {
-   (void)user_id;
-   (void)query;
-   (void)keyword_facts;
-   (void)keyword_scores;
-   (void)keyword_count;
-   (void)token_count;
-   (void)out_results;
-   (void)max_results;
-   return 0;
-}
 
 int memory_graph_extract_seed_entities(int user_id,
                                        const char *query,
@@ -609,17 +548,13 @@ int memory_graph_expand_fact_linked(int user_id,
                                     const int64_t *seed_entity_ids,
                                     int seed_count,
                                     memory_fact_t *out_facts,
-                                    float *out_scores,
                                     int max,
                                     int *out_count) {
    (void)user_id;
    (void)seed_entity_ids;
    int n = 0;
-   for (int i = 0; i < s_mock.graph_count && n < max && seed_count > 0; i++) {
-      out_facts[n] = s_mock.graph_facts[i];
-      out_scores[n] = 0.4f;
-      n++;
-   }
+   for (int i = 0; i < s_mock.graph_count && n < max && seed_count > 0; i++)
+      out_facts[n++] = s_mock.graph_facts[i];
    if (out_count != NULL)
       *out_count = n;
    return SUCCESS;
@@ -669,14 +604,12 @@ int memory_db_entity_update_embedding(int64_t entity_id,
 int memory_embeddings_rescore_against_query(int user_id,
                                             const float *query_emb,
                                             float query_norm,
-                                            float entity_bonus,
                                             const int64_t *fact_ids,
                                             int fact_count,
                                             float *out_scores) {
    (void)user_id;
    (void)query_emb;
    (void)query_norm;
-   (void)entity_bonus;
    if (out_scores != NULL) {
       for (int i = 0; i < fact_count; i++) {
          out_scores[i] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL;
@@ -765,22 +698,6 @@ int memory_embeddings_hybrid_search_ex(int user_id,
    (void)query_norm;
    return memory_embeddings_hybrid_search(user_id, query, keyword_facts, keyword_scores,
                                           keyword_count, token_count, out_results, max_results);
-}
-
-int memory_embeddings_rrf_search_ex(int user_id,
-                                    const char *query,
-                                    const float *query_emb,
-                                    float query_norm,
-                                    const int64_t *keyword_facts,
-                                    const int *keyword_scores,
-                                    int keyword_count,
-                                    int token_count,
-                                    embedding_search_result_t *out_results,
-                                    int max_results) {
-   (void)query_emb;
-   (void)query_norm;
-   return memory_embeddings_rrf_search(user_id, query, keyword_facts, keyword_scores, keyword_count,
-                                       token_count, out_results, max_results);
 }
 
 /* Stemmer stub: words pass through unstemmed.  memory_terms (entity name

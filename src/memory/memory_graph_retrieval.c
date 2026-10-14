@@ -28,7 +28,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
@@ -187,12 +186,7 @@ int memory_graph_extract_seed_entities(int user_id,
 
 /* Fetch fact @p fid into out_facts[*produced] unless it is already there,
  * gone, or expired.  Whether it was added. */
-static bool add_fact(int user_id,
-                     int64_t fid,
-                     float score,
-                     memory_fact_t *out_facts,
-                     float *out_scores,
-                     int *produced) {
+static bool add_fact(int user_id, int64_t fid, memory_fact_t *out_facts, int *produced) {
    if (fid <= 0)
       return false;
    for (int j = 0; j < *produced; j++) {
@@ -210,11 +204,10 @@ static bool add_fact(int user_id,
    if (memory_db_fact_expiry_hidden(fact.expires_at))
       return false;
    /* A replaced or merged fact isn't current (a relation can still point at
-    * it), and the rescore that would drop it can be off. */
+    * it). */
    if (fact.superseded_by > 0)
       return false;
    out_facts[*produced] = fact;
-   out_scores[*produced] = score;
    (*produced)++;
    return true;
 }
@@ -223,17 +216,14 @@ int memory_graph_expand_fact_linked(int user_id,
                                     const int64_t *seed_entity_ids,
                                     int seed_count,
                                     memory_fact_t *out_facts,
-                                    float *out_scores,
                                     int max,
                                     int *out_count) {
    if (out_count != NULL)
       *out_count = 0;
-   if (out_facts == NULL || out_scores == NULL || max <= 0)
+   if (out_facts == NULL || max <= 0)
       return FAILURE;
    if (seed_count <= 0 || seed_entity_ids == NULL)
       return SUCCESS;
-
-   const float bonus = g_config.memory.graph_retrieval.entity_grounding_bonus;
 
    /* Per-seed fan-out budget: what is left, shared by the seeds still to go,
     * so a seed that finds little hands its share on.  Caller passes the global
@@ -263,12 +253,10 @@ int memory_graph_expand_fact_linked(int user_id,
       /* Take the two in turn, so neither crowds out the other. */
       int taken = 0;
       for (int k = 0; (k < n_about || k < n_linked) && taken < seed_cap && produced < max; k++) {
-         if (k < n_about &&
-             add_fact(user_id, about_ids[k], bonus, out_facts, out_scores, &produced)) {
+         if (k < n_about && add_fact(user_id, about_ids[k], out_facts, &produced))
             taken++;
-         }
          if (k < n_linked && taken < seed_cap && produced < max &&
-             add_fact(user_id, linked_ids[k], bonus, out_facts, out_scores, &produced)) {
+             add_fact(user_id, linked_ids[k], out_facts, &produced)) {
             taken++;
          }
       }

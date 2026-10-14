@@ -190,19 +190,6 @@ int memory_db_summaries_get_sources(int user_id,
                                     int64_t *out_starts,
                                     int64_t *out_ends);
 
-/**
- * @brief Batch-fetch provenance for up to `n` preferences.
- *
- * Same semantics as memory_db_facts_get_sources but for `memory_preferences`.
- * Accepts any positive N (chunks internally).
- */
-int memory_db_prefs_get_sources(int user_id,
-                                const int64_t *pref_ids,
-                                int n,
-                                int64_t *out_conv_ids,
-                                int64_t *out_starts,
-                                int64_t *out_ends);
-
 /* =============================================================================
  * Per-conversation lookups (forget what was learned from a conversation)
  * ============================================================================= */

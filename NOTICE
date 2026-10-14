@@ -66,9 +66,9 @@ Changes from upstream Mem0:
     with D.A.W.N.'s entity-graph 1-hop retrieval (Phase 1A, May 2026), which
     achieves the same "cap high-degree entities from dominating" goal via a
     different mechanism (per-seed fan-out budget + dedup across seeds).
-  - Output composition includes facts + preferences + summaries + entity-graph
-    block, configurable via dawn.toml.  Mem0's facts-only collapse is one
-    optional mode (memory_text_minimal), not the default.
+  - Output composition is facts + preferences + summaries (+ entity-graph
+    relations when asked about a time or ended ones).  Mem0's facts-only
+    collapse is not adopted.
   - Memory linking (linked_memory_ids) is not adopted; cross-fact connectivity
     is provided by D.A.W.N.'s entity-graph subsystem.
 

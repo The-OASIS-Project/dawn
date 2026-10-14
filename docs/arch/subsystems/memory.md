@@ -72,7 +72,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Reversible: `memory_db_entity_alias_unlink()` clears `canonical_id` back to NULL and stamps `unlinked_at` on the audit row
 
 - **memory_db_provenance.c/h**: Phase B provenance batch readers (May 2026)
-   - Four batch source readers: `memory_db_facts_get_sources`, `_relations_get_sources`, `_summaries_get_sources`, `_prefs_get_sources`
+   - Three batch source readers: `memory_db_facts_get_sources`, `_relations_get_sources`, `_summaries_get_sources`
    - Each returns parallel `conv_id` / `msg_id_start` / `msg_id_end` arrays for any positive N, auto-chunked at 32 IDs per SQL pass
    - Privacy JOIN against `conversations.is_private` so private conversations don't leak through `with_source` retrievals
    - Provenance-extend semantics: same-conv widen / no-prov adopt / newer replace / older no-op
@@ -126,6 +126,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Embedding generation for newly created entities (skipped for existing)
    - Existing entity list fed into extraction prompt to prevent duplicate names
    - Respects conversation privacy flag
+   - Never reads a scheduled briefing: `conv_db_briefing_mark_extracted()` moves a briefing conversation's cursor past the scheduler's line, tool steps and summary (DAWN's digest of news, weather, email and calendar), forward only, so only the user's replies are extracted and a briefing nobody answered is skipped without a model call
    - One extraction per user at a time.  A request refused because the user's extraction is running or held, or every slot is busy, returns `MEMORY_EXTRACTION_BUSY`; a conversation then waits in the queue (`memory_extraction_slots.c` with `memory_extraction_queue.c`, one entry per conversation, at most 32) and runs at the next slot or hold release, read again from the database. Recovery's own requests aren't queued (it retries on its pass). Shutdown drops the queue (recovery picks those up on the next start)
    - Forgetting a conversation (`memory_forget_conversation`) or everything (`memory_forget_all`, "delete all memories") holds the user's extraction, drops the queued entries it covers, and marks those conversations extracted: what was learned so far is forgotten, and what is said from now on is extracted as usual
 
@@ -137,7 +138,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - `list_merged` / `restore` (`memory_callback_restore.c`): what was merged into a fact or replaced by a newer one, and bringing one back (`restore` is an act: refused where an outsider's text could ask, and described by the fact's text when it needs a reply code)
    - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; hard merge remains available via `dawn-admin memory entity consolidate`.
    - `save_contact`, `find_contact`, `list_contacts`, `delete_contact`: contact management
-   - `append_graph_context()`: entity graph results appended to search output
+   - `append_graph_context()`: the named entities' relations, appended to search output when `as_of` or `include_historical` is given
    - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 11 params, generated into per-provider schemas by the tool registry
 
 - **memory_filter.c/h**: Injection filter — runs at the trust boundary only (raw user input at ingestion + USER_CONTENT at retrieval); see "Security Guardrails" below
@@ -392,7 +393,7 @@ Users can export their memories for backup or transfer, and import memories from
 4. During conversation:
    - User: "Remember I'm vegetarian" → memory_remember() → immediate storage
    - User: "What do you know about me?" → hybrid_search() → keyword + semantic
-   - Search also returns entity graph context (ENTITIES section)
+   - With `as_of` or `include_historical`, search also returns the named entities' relations (`Entities:` section)
    ↓
 5. Session End (WebSocket disconnect/timeout)
    ↓

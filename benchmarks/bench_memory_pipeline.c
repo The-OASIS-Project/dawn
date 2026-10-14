@@ -801,9 +801,10 @@ static int handle_query_memory(struct json_object *cmd) {
  *
  * Diagnostic command for Phase 1A reachability profiling.  Returns ONLY
  * the entity-graph candidate set for the query — no hybrid retrieval,
- * no merge, no floor.  Same JSON shape as query_memory (results[] with
- * fact_id / score / text / conv_id / msg_start / msg_end /
- * covered_dia_ids) so the Python analysis can re-use the same parser.
+ * no merge, no floor.  query_memory's JSON shape minus `score` (graph
+ * candidates are unscored until a query rescores them): results[] with
+ * fact_id / text / conv_id / msg_start / msg_end / covered_dia_ids, so the
+ * Python analysis can re-use the same parser.
  *
  * Used to answer "of the cat-3 misses, how many are graph-reachable
  * via fact-linked relations from query proper nouns?" — the diagnostic
@@ -835,17 +836,13 @@ static int handle_query_graph_only(struct json_object *cmd) {
     * conv) this won't exceed BENCH_MP_FACT_LIST_CAP. */
    const int cap = BENCH_MP_FACT_LIST_CAP;
    memory_fact_t *gfacts = calloc((size_t)cap, sizeof(*gfacts));
-   float *gscores = calloc((size_t)cap, sizeof(*gscores));
    int gcount = 0;
-   if (!gfacts || !gscores) {
-      free(gfacts);
-      free(gscores);
+   if (!gfacts) {
       respond_error("alloc failed");
       return 1;
    }
    if (seed_count > 0) {
-      memory_graph_expand_fact_linked(BENCH_MP_USER_ID, seeds, seed_count, gfacts, gscores, cap,
-                                      &gcount);
+      memory_graph_expand_fact_linked(BENCH_MP_USER_ID, seeds, seed_count, gfacts, cap, &gcount);
    }
 
    /* Provenance lookup */
@@ -855,7 +852,6 @@ static int handle_query_graph_only(struct json_object *cmd) {
    int64_t *fact_ids = calloc((size_t)gcount, sizeof(int64_t));
    if (gcount > 0 && (!prov_convs || !prov_starts || !prov_ends || !fact_ids)) {
       free(gfacts);
-      free(gscores);
       free(prov_convs);
       free(prov_starts);
       free(prov_ends);
@@ -873,8 +869,8 @@ static int handle_query_graph_only(struct json_object *cmd) {
    for (int i = 0; i < gcount; i++) {
       struct json_object *text_str = json_object_new_string(gfacts[i].fact_text);
       const char *text_json = json_object_to_json_string(text_str);
-      fprintf(stdout, "%s{\"fact_id\":%" PRId64 ",\"score\":%.6f,\"text\":%s,", i ? "," : "",
-              gfacts[i].id, (double)gscores[i], text_json);
+      fprintf(stdout, "%s{\"fact_id\":%" PRId64 ",\"text\":%s,", i ? "," : "", gfacts[i].id,
+              text_json);
       fprintf(stdout, "\"conv_id\":%" PRId64 ",\"msg_start\":%" PRId64 ",\"msg_end\":%" PRId64 ",",
               prov_convs[i], prov_starts[i], prov_ends[i]);
       fprintf(stdout, "\"covered_dia_ids\":[");
@@ -895,7 +891,6 @@ static int handle_query_graph_only(struct json_object *cmd) {
    fflush(stdout);
 
    free(gfacts);
-   free(gscores);
    free(prov_convs);
    free(prov_starts);
    free(prov_ends);
@@ -996,17 +991,13 @@ static int handle_query_graph_two_hop(struct json_object *cmd) {
 
    const int cap = BENCH_MP_FACT_LIST_CAP;
    memory_fact_t *gfacts = calloc((size_t)cap, sizeof(*gfacts));
-   float *gscores = calloc((size_t)cap, sizeof(*gscores));
    int gcount = 0;
-   if (!gfacts || !gscores) {
-      free(gfacts);
-      free(gscores);
+   if (!gfacts) {
       respond_error("alloc failed");
       return 1;
    }
    if (expanded_n > 0) {
-      memory_graph_expand_fact_linked(BENCH_MP_USER_ID, expanded, expanded_n, gfacts, gscores, cap,
-                                      &gcount);
+      memory_graph_expand_fact_linked(BENCH_MP_USER_ID, expanded, expanded_n, gfacts, cap, &gcount);
    }
 
    /* Provenance lookup (same shape as query_graph_only) */
@@ -1016,7 +1007,6 @@ static int handle_query_graph_two_hop(struct json_object *cmd) {
    int64_t *fact_ids = calloc((size_t)gcount, sizeof(int64_t));
    if (gcount > 0 && (!prov_convs || !prov_starts || !prov_ends || !fact_ids)) {
       free(gfacts);
-      free(gscores);
       free(prov_convs);
       free(prov_starts);
       free(prov_ends);
@@ -1035,8 +1025,8 @@ static int handle_query_graph_two_hop(struct json_object *cmd) {
    for (int i = 0; i < gcount; i++) {
       struct json_object *text_str = json_object_new_string(gfacts[i].fact_text);
       const char *text_json = json_object_to_json_string(text_str);
-      fprintf(stdout, "%s{\"fact_id\":%" PRId64 ",\"score\":%.6f,\"text\":%s,", i ? "," : "",
-              gfacts[i].id, (double)gscores[i], text_json);
+      fprintf(stdout, "%s{\"fact_id\":%" PRId64 ",\"text\":%s,", i ? "," : "", gfacts[i].id,
+              text_json);
       fprintf(stdout, "\"conv_id\":%" PRId64 ",\"msg_start\":%" PRId64 ",\"msg_end\":%" PRId64 ",",
               prov_convs[i], prov_starts[i], prov_ends[i]);
       fprintf(stdout, "\"covered_dia_ids\":[");
@@ -1057,7 +1047,6 @@ static int handle_query_graph_two_hop(struct json_object *cmd) {
    fflush(stdout);
 
    free(gfacts);
-   free(gscores);
    free(prov_convs);
    free(prov_starts);
    free(prov_ends);
