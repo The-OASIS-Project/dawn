@@ -66,6 +66,12 @@ static void plan_executor_parse_config(toml_table_t *table, void *config) {
    }
 }
 
+/* Writes [plan_executor] back on a settings save, which rewrites dawn.toml. */
+static void plan_executor_write_config(void *fp, const void *config) {
+   const plan_executor_config_t *cfg = (const plan_executor_config_t *)config;
+   fprintf((FILE *)fp, "timeout_seconds = %d\n", cfg->timeout_seconds);
+}
+
 /* =============================================================================
  * Forward Declarations
  * ============================================================================= */
@@ -259,6 +265,7 @@ static const tool_metadata_t plan_executor_metadata = {
    .config = &s_config,
    .config_size = sizeof(s_config),
    .config_parser = plan_executor_parse_config,
+   .config_writer = plan_executor_write_config,
    .config_section = "plan_executor",
 
    .callback = plan_executor_callback,

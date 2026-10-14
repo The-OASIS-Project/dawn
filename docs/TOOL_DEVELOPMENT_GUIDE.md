@@ -434,7 +434,7 @@ Can be combined with bitwise OR (`|`):
 | Flag | Value | Description | Requirements |
 |------|-------|-------------|--------------|
 | `TOOL_CAP_NONE` | 0 | No special requirements | Default for safe tools |
-| `TOOL_CAP_DANGEROUS` | 1 | Could cause harm if misused | Config must have `enabled` as first field, defaulting to `false` |
+| `TOOL_CAP_DANGEROUS` | 1 | Could cause harm if misused | Never on unless listed in `[llm.tools]` `*_enabled` |
 | `TOOL_CAP_NETWORK` | 2 | Requires network access | Informational |
 | `TOOL_CAP_FILESYSTEM` | 4 | Accesses filesystem | Informational |
 | `TOOL_CAP_SECRETS` | 8 | Uses secrets.toml credentials | Must declare `secret_requirements` |
@@ -564,7 +564,6 @@ int mytool_tool_register(void);
  * ============================================================================= */
 
 typedef struct {
-   /* For TOOL_CAP_DANGEROUS tools, 'enabled' MUST be first and default false */
    bool enabled;
    char api_endpoint[256];
    int timeout_seconds;
@@ -573,7 +572,7 @@ typedef struct {
 
 /* Static config instance - set safe defaults */
 static mytool_config_t s_config = {
-   .enabled = true,           /* false for dangerous tools */
+   .enabled = true,
    .api_endpoint = "https://api.example.com",
    .timeout_seconds = 30,
    .verbose_logging = false,
@@ -619,6 +618,22 @@ static void mytool_parse_config(toml_table_t *table, void *config) {
    if (verbose.ok) {
       cfg->verbose_logging = verbose.u.b;
    }
+}
+
+/* =============================================================================
+ * Config Writer
+ *
+ * A WebUI settings save rewrites dawn.toml from memory, so every key the parser
+ * reads must be written here, or the save deletes it.  The registry refuses a
+ * tool that has a config section and parser but no writer.
+ * ============================================================================= */
+
+static void mytool_write_config(void *fp, const void *config) {
+   const mytool_config_t *cfg = (const mytool_config_t *)config;
+   fprintf((FILE *)fp, "enabled = %s\n", cfg->enabled ? "true" : "false");
+   config_write_toml_string(fp, "api_endpoint", cfg->api_endpoint); /* escapes */
+   fprintf((FILE *)fp, "timeout_seconds = %d\n", cfg->timeout_seconds);
+   fprintf((FILE *)fp, "verbose_logging = %s\n", cfg->verbose_logging ? "true" : "false");
 }
 
 /* =============================================================================
@@ -758,6 +773,7 @@ static const tool_metadata_t mytool_metadata = {
    .config = &s_config,
    .config_size = sizeof(s_config),
    .config_parser = mytool_parse_config,
+   .config_writer = mytool_write_config, /* required with a config_parser */
    .config_section = "mytool",        /* [mytool] in dawn.toml */
 
    /* Secrets - NULL if no API keys needed */
@@ -884,13 +900,16 @@ schedule is made and again when it fires.
 
 ### Dangerous Tools
 
-Tools with `TOOL_CAP_DANGEROUS` (like shutdown) must:
+A tool with `TOOL_CAP_DANGEROUS` (email, phone, document_manage, shutdown) is never
+offered to the model unless the user lists it in `[llm.tools]` `local_enabled` /
+`remote_enabled`: that list is the switch for the model, and it survives a settings
+save.  Don't add a separate `enabled` key to repeat it.  The lists don't cover paths
+that skip the model (voice commands, MQTT, the scheduler); a tool reached that way
+guards itself, as shutdown does with the global `[shutdown] enabled`.
 
-1. Have `enabled` as the **first** field in their config struct
-2. Default `enabled` to `false`
-3. Require explicit enable in `dawn.toml`
-
-The registry validates this at registration time.
+To retire a key from a tool's section, list it in `retired_keys` (NULL-terminated):
+a `dawn.toml` that still sets it gets a note at startup, and the key is ignored.
+A section left with only retired keys needs no parser or writer.
 
 ### Secret Requirements
 
@@ -994,7 +1013,6 @@ int tool_registry_register(const tool_metadata_t *metadata);
 const tool_metadata_t *tool_registry_lookup(const char *name);
 const tool_metadata_t *tool_registry_find(const char *name_or_alias);
 tool_callback_fn tool_registry_get_callback(const char *name);
-bool tool_registry_is_enabled(const char *name);
 ```
 
 ### Config Access
@@ -1007,7 +1025,6 @@ const char *tool_registry_get_config_string(const char *path);
 ```c
 void tool_registry_foreach(tool_foreach_callback_t callback, void *user_data);
 int tool_registry_count(void);
-int tool_registry_enabled_count(void);
 ```
 
 ---

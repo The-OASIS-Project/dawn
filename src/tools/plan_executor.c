@@ -980,28 +980,6 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
       return PLAN_OK; /* fail-forward */
    }
 
-   /* Runtime enabled check */
-   if (!tool_registry_is_enabled(tool_name)) {
-      if (store_name) {
-         char err_msg[256];
-         snprintf(err_msg, sizeof(err_msg), "Error: tool '%s' is disabled", tool_name);
-         plan_vars_set(ctx, store_name, err_msg);
-         plan_vars_set_success(ctx, store_name, false);
-      }
-      OLOG_WARNING("plan_executor: tool '%s' is disabled", tool_name);
-      plan_send_progress("step_error", current_index, NULL, 0, 0, 0, "tool disabled");
-      {
-         char line[128];
-         snprintf(line, sizeof(line), "[step %d] FAILED: tool '%.48s' is disabled\n", current_index,
-                  tool_name);
-         output_append(ctx, line);
-      }
-      ctx->total_tool_calls++;
-      ctx->failed_steps++;
-      ctx->call_index++;
-      return PLAN_OK; /* fail-forward */
-   }
-
    /* Notify: step_start */
    plan_send_progress("step_start", current_index, step_name, 0, 0, 0, NULL);
 

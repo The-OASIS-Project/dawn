@@ -79,7 +79,6 @@ struct json_object *tool_parse_details(const char *value, bool no_required_field
  */
 typedef struct {
    tool_metadata_t metadata; /* Copy of registered metadata */
-   bool enabled;             /* Runtime enable/disable */
    bool initialized;         /* init() has been called */
    bool registered;          /* Slot is in use */
 } tool_entry_t;
@@ -218,22 +217,19 @@ static void hash_init(void) {
  * ============================================================================= */
 
 /**
- * @brief Validate dangerous tool has proper config
+ * @brief A tool with a config section it parses must also write it back
  *
- * TOOL_CAP_DANGEROUS tools must have:
- * - A config struct
- * - A config parser
+ * A settings save rewrites dawn.toml from memory: a section with a parser and
+ * no writer is deleted from the file, and the user's values are lost at the
+ * next restart.
  */
-static bool validate_dangerous_tool(const tool_metadata_t *metadata) {
-   if (!(metadata->capabilities & TOOL_CAP_DANGEROUS)) {
-      return true; /* Not dangerous, no special requirements */
-   }
-
-   if (!metadata->config || !metadata->config_parser) {
-      OLOG_ERROR("tool_registry: Dangerous tool '%s' must have config and parser", metadata->name);
+static bool validate_config_writer(const tool_metadata_t *metadata) {
+   if (metadata->config_parser && metadata->config_section && !metadata->config_writer) {
+      OLOG_ERROR("tool_registry: Tool '%s' parses [%s] but has no config_writer; a settings "
+                 "save would delete the section",
+                 metadata->name, metadata->config_section);
       return false;
    }
-
    return true;
 }
 
@@ -457,8 +453,7 @@ int tool_registry_register(const tool_metadata_t *metadata) {
       return 1;
    }
 
-   /* Validate dangerous tool requirements */
-   if (!validate_dangerous_tool(metadata)) {
+   if (!validate_config_writer(metadata)) {
       pthread_mutex_unlock(&s_registry_mutex);
       return 1;
    }
@@ -485,11 +480,6 @@ int tool_registry_register(const tool_metadata_t *metadata) {
    entry->metadata = *metadata;
    entry->registered = true;
    entry->initialized = false;
-
-   /* Default enabled state — all tools start enabled, including dangerous ones.
-    * TOOL_CAP_DANGEROUS controls LLM confirmation behavior, not availability.
-    * Tools can be explicitly disabled via their config section. */
-   entry->enabled = true;
 
    /* Insert into name hash table */
    hash_insert(s_name_hash, HASH_BUCKETS, metadata->name, idx);
@@ -589,22 +579,6 @@ tool_callback_fn tool_registry_get_callback(const char *name) {
    return meta ? meta->callback : NULL;
 }
 
-bool tool_registry_is_enabled(const char *name) {
-   if (!name || !s_initialized) {
-      return false;
-   }
-
-   int idx = hash_lookup(s_name_hash, HASH_BUCKETS, name);
-   if (idx < 0) {
-      idx = hash_lookup(s_alias_hash, HASH_BUCKETS * 2, name);
-   }
-
-   if (idx >= 0 && s_tools[idx].registered) {
-      return s_tools[idx].enabled;
-   }
-   return false;
-}
-
 int tool_registry_validate_schedulable(const char *tool_name,
                                        const char *tool_action,
                                        const char *tool_value,
@@ -624,11 +598,6 @@ int tool_registry_validate_schedulable(const char *tool_name,
    if (!(meta->capabilities & TOOL_CAP_SCHEDULABLE)) {
       if (err_buf && err_buf_size)
          snprintf(err_buf, err_buf_size, "tool '%s' is not schedulable", tool_name);
-      return FAILURE;
-   }
-   if (!tool_registry_is_enabled(tool_name)) {
-      if (err_buf && err_buf_size)
-         snprintf(err_buf, err_buf_size, "tool '%s' is disabled", tool_name);
       return FAILURE;
    }
    /* Per-action gate: a tool may be schedulable for some actions but not others
@@ -664,6 +633,17 @@ const char *tool_registry_resolve_device(const tool_metadata_t *metadata, const 
  * Config Integration
  * ============================================================================= */
 
+/* A retired key the section still sets: noted, then ignored (the next settings
+ * save drops it, since no writer writes it). */
+static void note_retired_keys(toml_table_t *table, const char *section, const char *const *keys) {
+   if (!table || !keys)
+      return;
+   for (int i = 0; keys[i] != NULL; i++) {
+      if (toml_key_exists(table, keys[i]))
+         OLOG_WARNING("[%s] %s is retired and ignored (see UPGRADING.md)", section, keys[i]);
+   }
+}
+
 int tool_registry_parse_configs(const char *config_path) {
    if (!config_path || !s_initialized) {
       return 1;
@@ -689,27 +669,18 @@ int tool_registry_parse_configs(const char *config_path) {
 
    for (int i = 0; i < s_tool_count; i++) {
       tool_entry_t *entry = &s_tools[i];
-      if (!entry->registered || !entry->metadata.config_parser || !entry->metadata.config_section) {
+      if (!entry->registered || !entry->metadata.config_section) {
          continue;
       }
 
       /* Look up the tool's TOML section */
       toml_table_t *section = toml_table_in(root, entry->metadata.config_section);
 
-      /* Call the tool's config parser (section may be NULL if not present) */
-      entry->metadata.config_parser(section, entry->metadata.config);
+      note_retired_keys(section, entry->metadata.config_section, entry->metadata.retired_keys);
 
-      /* For dangerous tools, check if enabled field was explicitly set.
-       * Only override the default if the tool has a config section in the TOML —
-       * missing section means the user hasn't configured it, so respect the
-       * default_local/default_remote flags from tool metadata instead. */
-      if ((entry->metadata.capabilities & TOOL_CAP_DANGEROUS) && section) {
-         /* Convention: config struct's first field is 'bool enabled' for dangerous tools */
-         bool *enabled_ptr = (bool *)entry->metadata.config;
-         entry->enabled = *enabled_ptr;
-         OLOG_INFO("Dangerous tool '%s' enabled=%s (from config)", entry->metadata.name,
-                   entry->enabled ? "true" : "false");
-      }
+      /* Call the tool's config parser (section may be NULL if not present) */
+      if (entry->metadata.config_parser)
+         entry->metadata.config_parser(section, entry->metadata.config);
    }
 
    atomic_fetch_add(&s_generation, 1); /* after the change */
@@ -728,8 +699,9 @@ void tool_registry_write_configs(void *fp) {
 
    for (int i = 0; i < s_tool_count; i++) {
       tool_entry_t *entry = &s_tools[i];
-      if (!entry->registered || !entry->metadata.config_writer || !entry->metadata.config_section ||
-          !entry->metadata.config) {
+      /* config may be NULL (a tool keeping its state elsewhere); the writer gets
+       * it as the parser did. */
+      if (!entry->registered || !entry->metadata.config_writer || !entry->metadata.config_section) {
          continue;
       }
 
@@ -842,20 +814,6 @@ const tool_metadata_t *tool_registry_get_by_index(int index) {
       return NULL;
    }
    return &s_tools[index].metadata;
-}
-
-int tool_registry_enabled_count(void) {
-   int count = 0;
-   pthread_mutex_lock(&s_registry_mutex);
-
-   for (int i = 0; i < s_tool_count; i++) {
-      if (s_tools[i].registered && s_tools[i].enabled) {
-         count++;
-      }
-   }
-
-   pthread_mutex_unlock(&s_registry_mutex);
-   return count;
 }
 
 /* =============================================================================

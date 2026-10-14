@@ -94,7 +94,7 @@ Present these as a checklist with defaults. Let the user answer all at once.
    - [ ] FlareSolverr for JS-heavy sites (default: no, requires Docker)
    - [ ] Email (IMAP/SMTP + Gmail OAuth) (default: no, needs `-DDAWN_ENABLE_EMAIL_TOOL=ON`)
    - [ ] Messaging channels — Telegram / Slack / Discord / SMS (default: no, per-provider bot tokens)
-   - [ ] Phone & SMS via ECHO modem daemon (default: no, needs ECHO + `[phone] enabled`)
+   - [ ] Phone & SMS via ECHO modem daemon (default: no, needs ECHO + `"phone"` in `[llm.tools]` `local_enabled` / `remote_enabled`)
    - [ ] OpenRouter provider — one key fronts any cloud model (default: no)
    - [ ] MQTT integration (default: yes)
 
@@ -380,13 +380,13 @@ Reference: `GETTING_STARTED.md` — SearXNG section.
 3. Full per-provider bot setup: `docs/MESSAGING_CHANNELS_SETUP.md`.
 
 ### Email (if selected)
-1. Requires a build with `-DDAWN_ENABLE_EMAIL_TOOL=ON` and `[email] enabled = true` in `dawn.toml`.
+1. Requires a build with `-DDAWN_ENABLE_EMAIL_TOOL=ON`, and `"email"` in `[llm.tools]` `local_enabled` / `remote_enabled` for the model to use it.
 2. Accounts are added in the WebUI (**Settings → Email Accounts**), not the installer — app password or Google OAuth.
 3. Reference: `GETTING_STARTED.md` — Email section.
 
 ### Phone & SMS via ECHO (if selected)
 1. ECHO is a separate daemon (`~/code/The-OASIS-Project/echo`) that owns the modem; it must share DAWN's MQTT broker.
-2. Set `[phone] enabled = true` (+ `user_id`, optional `audio_device`) in `dawn.toml`.
+2. List `"phone"` in `[llm.tools]` `local_enabled` / `remote_enabled` in `dawn.toml`; `[phone]` holds its other settings (`confirm_outbound`, call audio; see `dawn.toml.example`).
 3. Reference: `docs/PHONE_SMS_DESIGN.md`. Note: two-way call audio through the browser is not yet shipped.
 
 ## Phase 10: Deploy as Systemd Service (optional)

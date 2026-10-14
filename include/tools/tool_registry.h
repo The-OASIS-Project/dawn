@@ -537,6 +537,9 @@ typedef struct {
    tool_config_parser_fn config_parser; /**< Parser for TOML section */
    tool_config_writer_fn config_writer; /**< Writer for TOML section (optional) */
    const char *config_section;          /**< TOML section name */
+   /** Keys the section no longer has (NULL-terminated, or NULL): a dawn.toml
+    *  that still sets one gets a note at startup, then the key is ignored. */
+   const char *const *retired_keys;
 
    /* Secret Requirements (security - NULL-terminated array or NULL) */
    const tool_secret_requirement_t *secret_requirements;
@@ -618,7 +621,7 @@ void tool_registry_shutdown(void);
  * - Registry is locked
  * - Registry is full
  * - Tool name already registered
- * - TOOL_CAP_DANGEROUS tool doesn't have config with enabled field
+ * - Tool has config_parser and config_section but no config_writer
  * - TOOL_CAP_SECRETS tool doesn't declare secret_requirements
  *
  * @param metadata Pointer to tool's static metadata (must remain valid)
@@ -665,17 +668,6 @@ const tool_metadata_t *tool_registry_find(const char *name_or_alias);
  * @return Callback function, or NULL if not found
  */
 tool_callback_fn tool_registry_get_callback(const char *name);
-
-/**
- * @brief Check if a tool is enabled
- *
- * For TOOL_CAP_DANGEROUS tools, checks the config enabled field.
- * For other tools, always returns true if registered.
- *
- * @param name Tool name
- * @return true if enabled, false if disabled or not found
- */
-bool tool_registry_is_enabled(const char *name);
 
 /**
  * @brief Validate a tool reference is safe to schedule / safe to fire
@@ -930,13 +922,6 @@ int tool_registry_count(void);
  * @return Tool metadata pointer, or NULL if index out of range
  */
 const tool_metadata_t *tool_registry_get_by_index(int index);
-
-/**
- * @brief Get count of enabled tools
- *
- * @return Number of enabled tools
- */
-int tool_registry_enabled_count(void);
 
 /* =============================================================================
  * Capability Queries

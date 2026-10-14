@@ -58,7 +58,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **Dual backend**: IMAP/SMTP for any provider, Gmail REST API for OAuth accounts (auto-selected per account).
 - **Two-step confirmation**: send and trash require a confirm step — the LLM drafts, then the user confirms.
 - **Contacts integration**: recipient resolution via `contacts_find()` — "email Bob" resolves to Bob's stored email.
-- **Compile-time gate**: `DAWN_ENABLE_EMAIL_TOOL=ON` in CMake; runtime gate in `[email] enabled`.
+- **Compile-time gate**: `DAWN_ENABLE_EMAIL_TOOL=ON` in CMake; the model gets the tool where `[llm.tools]` `local_enabled` / `remote_enabled` lists `email` (as for every dangerous tool).
 - **WebUI management**: account CRUD via `webui_email.c`, Google OAuth connect flow.
 
 ## Recipients

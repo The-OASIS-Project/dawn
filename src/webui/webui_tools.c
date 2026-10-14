@@ -164,7 +164,7 @@ void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload)
    tool_info_t tools[LLM_TOOLS_MAX_TOOLS];
    int count = llm_tools_get_all(tools, LLM_TOOLS_MAX_TOOLS);
 
-   pthread_rwlock_wrlock(&s_config_rwlock);
+   pthread_rwlock_wrlock(&g_config_rwlock);
 
    /* Re-snapshot the live tool flags into the persisted config, preserving the
     * model the operator chose per surface (set at load):
@@ -227,7 +227,7 @@ void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload)
    }
    config_write_toml(&g_config, config_path);
 
-   pthread_rwlock_unlock(&s_config_rwlock);
+   pthread_rwlock_unlock(&g_config_rwlock);
 
    /* Invalidate cached prompts so they rebuild with new tool enabled states.
     * This affects both native tool schemas and legacy <command> tag prompts. */

@@ -162,6 +162,18 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets);
 int config_write_toml(const dawn_config_t *config, const char *path);
 
 /**
+ * @brief Write `key = "value"` with the value escaped for TOML
+ *
+ * For a tool's config_writer: a raw fprintf of a string lets a quote or
+ * newline in the value forge keys or break the file.
+ *
+ * @param fp    Open file (FILE*, as void* to keep stdio.h out of headers)
+ * @param key   TOML key name
+ * @param value String value (NULL writes "")
+ */
+void config_write_toml_string(void *fp, const char *key, const char *value);
+
+/**
  * @brief Write secrets to TOML file
  *
  * Writes secrets to the specified path. Sets restrictive file permissions (0600).

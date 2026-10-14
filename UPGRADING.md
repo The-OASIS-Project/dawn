@@ -12,6 +12,33 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-14 — Settings saves no longer drop email, shutdown, plan or sound settings
+
+**What changed.** A settings save from the WebUI rewrites `dawn.toml`, and it was deleting sections
+it didn't write back. Fixed:
+
+- `[email] enabled = true` was deleted, so the mail panel disappeared after the next restart. That
+  key is retired: the mail panel is there whenever email is built in, and the model uses email only
+  where `[llm.tools]` `local_enabled` / `remote_enabled` lists `"email"`, as before.
+- `[shutdown]` (`enabled`, `passphrase`) was deleted, so voice shutdown turned itself off after a
+  save. It's kept now, and changes made in the settings panel take effect without a restart. The
+  passphrase is no longer shown to WebUI users who aren't admins.
+- `[plan_executor] timeout_seconds` and `[sfx] sound_path` were deleted; they're kept now.
+
+`[phone] enabled` and `[document_manage] enabled` are retired too. They never controlled whether the
+model could use those tools; `[llm.tools]` did. DAWN notes each retired key once at startup and
+ignores it, and the next settings save drops it.
+
+**What you need to do.**
+
+- If you set `[shutdown]`, `[plan_executor]` or `[sfx]` values and have saved settings since, check
+  they are still in `dawn.toml`.
+- To keep the model away from email, phone or document writes, make sure they aren't listed in
+  `[llm.tools]` `local_enabled` / `remote_enabled`. The lists don't stop the mail panel or a
+  scheduled email digest; to stop those, remove the email account or the briefing.
+
+---
+
 ## 2026-10-14 — Briefings no longer feed memory
 
 **What changed.** A scheduled briefing is a summary of outside content: news, weather, email, your

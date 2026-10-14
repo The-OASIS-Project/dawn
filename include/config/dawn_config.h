@@ -21,7 +21,7 @@
  * DAWN Configuration System - Main configuration struct definitions
  *
  * Thread Safety: Configuration is loaded at startup and may be mutated at runtime
- * via WebUI settings behind s_config_rwlock (in webui_server.c). Readers should
+ * via WebUI settings behind g_config_rwlock (config_defaults.c). Readers should
  * snapshot values into local variables when consistency across multiple fields matters.
  *
  * ADDING A FIELD OR SECTION HERE IS STEP 1 OF ~9 — see docs/CONFIGURATION_GUIDE.md.
@@ -37,6 +37,7 @@
 #ifndef DAWN_CONFIG_H
 #define DAWN_CONFIG_H
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -1232,6 +1233,10 @@ typedef struct {
  * Global Configuration Instances (read-only after initialization)
  * ============================================================================= */
 extern dawn_config_t g_config;
+
+/** Write-held while the WebUI applies and saves settings; take it for reading
+ *  to read several fields of one setting consistently. */
+extern pthread_rwlock_t g_config_rwlock;
 extern secrets_config_t g_secrets;
 
 /* =============================================================================
