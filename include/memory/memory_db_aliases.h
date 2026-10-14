@@ -134,6 +134,7 @@ typedef struct {
    bool name_substring_bonus_applied;
    bool user_self_bonus_applied;
    bool type_veto_fired;
+   bool name_veto_fired; /* different number/version, or "x's ..." of x */
 
    /* Final composite (post-veto, post-weighted-sum, post-bonuses, capped at 1.0). */
    float composite_score;

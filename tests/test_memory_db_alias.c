@@ -43,6 +43,7 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_alias_internal.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_entities.h"
 #include "memory/memory_types.h"
@@ -546,6 +547,66 @@ static void test_score_pair_type_veto(void) {
    TEST_ASSERT_EQUAL_FLOAT(0.0f, ev.composite_score);
 }
 
+/* Names that say they are different things: a differing number or version, or
+ * a description of something the other one has. */
+static void test_name_veto_rules(void) {
+   /* Different numbers or versions. */
+   TEST_ASSERT_TRUE(
+       memory_alias_internal_name_veto_fires("office light 1", "office light 2", false));
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("office light 1", "office light", false));
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("raspberry pi", "raspberry pi 5", false));
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("qwen 3.5", "qwen 3.6", false));
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("dragon con 2025", "dragon con", false));
+   /* Same numbers, other words or punctuation: no veto. */
+   TEST_ASSERT_FALSE(
+       memory_alias_internal_name_veto_fires("office light #1", "office light 1", false));
+   TEST_ASSERT_FALSE(memory_alias_internal_name_veto_fires("jetson agx orin 64gb",
+                                                           "jetson orin agx 64gb", false));
+   TEST_ASSERT_FALSE(memory_alias_internal_name_veto_fires("mark 47 armor", "mark 47", false));
+   TEST_ASSERT_FALSE(memory_alias_internal_name_veto_fires("jon", "jonathan smith", false));
+   /* A description of the other's own: veto either way round. */
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("jon's daughter", "jon", false));
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("jon smith", "jon's spouse", false));
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("jon\xE2\x80\x99s car", "jon", false));
+   TEST_ASSERT_TRUE(
+       memory_alias_internal_name_veto_fires("jon's daughter's school", "jon's daughter", false));
+   /* A brand with an apostrophe is not a description of the other name. */
+   TEST_ASSERT_FALSE(memory_alias_internal_name_veto_fires("joe's diner", "joe's", false));
+   TEST_ASSERT_FALSE(memory_alias_internal_name_veto_fires("o'brien", "o'brien pub", false));
+   /* A repeated number counts once. */
+   TEST_ASSERT_FALSE(
+       memory_alias_internal_name_veto_fires("windows 11 (win 11)", "windows 11", false));
+   /* Every number counts: a ninth differs, nine in another order don't. */
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires("lights 0 1 2 3 4 5 6 7 8",
+                                                          "lights 0 1 2 3 4 5 6 7 9", false));
+   TEST_ASSERT_FALSE(memory_alias_internal_name_veto_fires("lights 0 1 2 3 4 5 6 7 8",
+                                                           "lights 8 7 6 5 4 3 2 1 0", false));
+   /* Long identifiers are compared whole, not dropped. */
+   TEST_ASSERT_TRUE(memory_alias_internal_name_veto_fires(
+       "garage sensor 1234567890123456789012345678901a",
+       "garage sensor 1234567890123456789012345678901b", false));
+   /* Punctuation around the owner's words doesn't hide the owner. */
+   TEST_ASSERT_TRUE(
+       memory_alias_internal_name_veto_fires("jon k. smith's daughter", "jon k. smith.", false));
+   /* A self-identity seed (real name + aliases joined): its numbers belong to
+    * separate spellings, so they don't veto; possessives still do. */
+   TEST_ASSERT_FALSE(
+       memory_alias_internal_name_veto_fires("jon jonathan smith jon42", "jonathan smith", true));
+   TEST_ASSERT_TRUE(
+       memory_alias_internal_name_veto_fires("jon jonathan smith jon42", "jon's mother", true));
+}
+
+static void test_score_pair_name_veto(void) {
+   int64_t one = insert_entity_typed(g_test_user_id, "Office Light 1", "thing");
+   int64_t two = insert_entity_typed(g_test_user_id, "Office Light 2", "thing");
+
+   memory_alias_evidence_t ev;
+   int rc = memory_db_entity_score_pair(g_test_user_id, one, two, &ev);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(ev.name_veto_fired);
+   TEST_ASSERT_EQUAL_FLOAT(0.0f, ev.composite_score);
+}
+
 static void test_score_pair_thing_no_veto(void) {
    /* The `thing` carve-out: thing/person doesn't trigger the veto. */
    int64_t jon_thing = insert_entity_typed(g_test_user_id, "Jon", "thing");
@@ -627,10 +688,11 @@ static void test_consider_auto_merge_auto_merged(void) {
     * To reach 0.90 we need name_jaccard.  Use names that share a token
     * exactly: "jonathan smith" vs "jonathan k.k.".  Jaccard = 1/2 =
     * 0.50, contributing 0.30*0.50 = 0.15.  Total = 0.85 — still review band.
-    * Add a second shared token: "jonathan smith" vs "jonathan smith 2".
-    * Tokens A={jonathan, smith}, B={jonathan, smith} (the "2" is a
-    * single char, dropped).  Jaccard = 1.0.  composite = 0.30 + 0.25 + 0.10
-    *                                                    + 0.10 + 0.20 = 0.95. */
+    * Add a second shared token: "jonathan smith" vs "jonathan smith." (the
+    * same words, the period a separator; not an exact canonical match, and
+    * no number, which the name veto would refuse).  Tokens A = B =
+    * {jonathan, smith}.  Jaccard = 1.0.  composite = 0.30 + 0.25 + 0.10
+    * + 0.10 + 0.20 = 0.95. */
    int64_t self = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    mark_entity_user_self(self);
    int64_t company = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
@@ -638,7 +700,7 @@ static void test_consider_auto_merge_auto_merged(void) {
    insert_contact(g_test_user_id, self, "email", "smithfab@example.com");
 
    /* Inbound row with the same tokens + same exclusive relation + same email. */
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith.", "person");
    insert_open_relation(g_test_user_id, inbound, "works_at", company, NULL);
    insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
 
@@ -882,7 +944,7 @@ static void test_consider_auto_merge_auto_short_circuits_proposals(void) {
    int64_t weak_candidate = insert_entity_typed(g_test_user_id, "Jonathan Doe", "person");
    insert_open_relation(g_test_user_id, weak_candidate, "works_at", company, NULL);
 
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith.", "person");
    insert_open_relation(g_test_user_id, inbound, "works_at", company, NULL);
    insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
 
@@ -1898,7 +1960,7 @@ static void test_link_user_self_dry_run_no_db_writes(void) {
    int64_t company = insert_entity_typed(g_test_user_id, "Acme", "org");
    insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
 
-   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith.", "person");
    insert_open_relation(g_test_user_id, jon, "works_at", company, NULL);
 
    /* Snapshot the alias / proposal counts BEFORE the dry-run. */
@@ -1937,7 +1999,7 @@ static void test_link_user_self_commit_seeds_and_links(void) {
    mark_entity_user_self(self);
    int64_t company = insert_entity_typed(g_test_user_id, "Acme", "org");
    insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
-   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith.", "person");
    insert_open_relation(g_test_user_id, jon, "works_at", company, NULL);
 
    memory_alias_link_user_self_result_t result;
@@ -3701,6 +3763,8 @@ int main(void) {
    /* score_pair / Stage 5 */
    RUN_TEST(test_score_pair_exclusive_relation_overlap);
    RUN_TEST(test_score_pair_type_veto);
+   RUN_TEST(test_name_veto_rules);
+   RUN_TEST(test_score_pair_name_veto);
    RUN_TEST(test_score_pair_thing_no_veto);
    RUN_TEST(test_score_pair_contact_field_overlap);
    RUN_TEST(test_score_pair_user_self_bonus_via_username);
