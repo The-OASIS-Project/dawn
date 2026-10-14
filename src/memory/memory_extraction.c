@@ -1555,6 +1555,25 @@ static int trigger_extraction(int user_id,
    int last_extracted = 0;
    int64_t last_msg_id = 0;
    if (conversation_id > 0) {
+      /* A scheduled briefing is DAWN's digest of outside content (news,
+       * weather, email, calendar), not something the user said: it counts as
+       * extracted, so only the user's replies are read and a briefing nobody
+       * answered never reaches the model (the no-new-messages skip below). */
+      int64_t briefing_end = 0;
+      bool briefing_replied = false;
+      if (conv_db_briefing_mark_extracted(conversation_id, user_id, &briefing_end,
+                                          &briefing_replied) != AUTH_DB_SUCCESS) {
+         /* Fail closed: unchecked, a briefing would reach the model; memory
+          * recovery tries the conversation again later. */
+         OLOG_WARNING("memory_extraction: skipping conv %lld: briefing check failed",
+                      (long long)conversation_id);
+         return trigger_skip(user_id, have_slot, 0);
+      }
+      if (briefing_end > 0) {
+         OLOG_INFO("memory_extraction: conv %lld: briefing rows through %lld not extracted%s",
+                   (long long)conversation_id, (long long)briefing_end,
+                   briefing_replied ? "" : " (no reply)");
+      }
       memory_db_get_last_extracted(conversation_id, &last_extracted);
       memory_db_get_last_extracted_msg_id(conversation_id, &last_msg_id);
 

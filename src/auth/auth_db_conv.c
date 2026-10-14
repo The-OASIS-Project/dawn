@@ -38,6 +38,7 @@
 #include "auth/auth_db_internal.h"
 #include "llm/llm_context_text.h"
 #include "logging.h"
+#include "prompts.h"
 #include "utils/string_utils.h"
 
 /* Weak no-op fallback for the WebUI "conversation list changed, update" broadcast.
@@ -1927,15 +1928,12 @@ int conv_db_get_messages_by_range(int64_t conv_id,
    AUTH_DB_LOCK_OR_FAIL();
 
    /* Explicit ownership check — return FORBIDDEN rather than silent empty result */
-   sqlite3_reset(s_db.stmt_conv_get);
-   sqlite3_bind_int64(s_db.stmt_conv_get, 1, conv_id);
-   sqlite3_bind_int(s_db.stmt_conv_get, 2, user_id);
-   int rc = sqlite3_step(s_db.stmt_conv_get);
-   sqlite3_reset(s_db.stmt_conv_get);
-   if (rc != SQLITE_ROW) {
+   /* No caller is anonymous here: user_id <= 0 would be the helper's wildcard. */
+   if (user_id <= 0 || conversation_owner_locked(conv_id, user_id) == 0) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FORBIDDEN;
    }
+   int rc;
 
    /* Defense-in-depth: when `include_private = false` (the memory/provenance
     * default), suppress rows from private conversations in SQL itself.  Even
@@ -2020,15 +2018,12 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
    AUTH_DB_LOCK_OR_FAIL();
 
    /* Ownership check */
-   sqlite3_reset(s_db.stmt_conv_get);
-   sqlite3_bind_int64(s_db.stmt_conv_get, 1, conv_id);
-   sqlite3_bind_int(s_db.stmt_conv_get, 2, user_id);
-   int rc = sqlite3_step(s_db.stmt_conv_get);
-   sqlite3_reset(s_db.stmt_conv_get);
-   if (rc != SQLITE_ROW) {
+   /* No caller is anonymous here: user_id <= 0 would be the helper's wildcard. */
+   if (user_id <= 0 || conversation_owner_locked(conv_id, user_id) == 0) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FORBIDDEN;
    }
+   int rc;
 
    const char *sql = "SELECT " CONV_EXTRACTION_MAX_MSG_ID_SQL("?");
    sqlite3_stmt *stmt = NULL;
@@ -2043,6 +2038,83 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
    }
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_briefing_mark_extracted(int64_t conv_id,
+                                    int user_id,
+                                    int64_t *end_id_out,
+                                    bool *replied_out) {
+   if (conv_id <= 0 || !end_id_out || !replied_out)
+      return AUTH_DB_FAILURE;
+   *end_id_out = 0;
+   *replied_out = false;
+
+   /* The briefing is everything before the user's second message; the first
+    * row must be the scheduler's line, else this isn't a briefing we can bound.  Request-context
+    * rows are never counted, the same units as conversations.message_count and the extraction
+    * cursor. */
+   static const char *find_sql =
+       "WITH v AS (SELECT id, role FROM messages WHERE conversation_id = ?1 AND kind IS NULL), "
+       "f AS (SELECT v.id FROM v, messages m WHERE v.id = (SELECT MIN(id) FROM v) "
+       "AND v.role = 'user' AND m.id = v.id AND m.content LIKE '" BRIEFING_USER_INTENT_LIKE "'), "
+       "r AS (SELECT MIN(v.id) AS id FROM v, f WHERE v.role = 'user' AND v.id > f.id), "
+       "e AS (SELECT MAX(v.id) AS id FROM v, r WHERE r.id IS NULL OR v.id < r.id) "
+       "SELECT e.id, (SELECT COUNT(*) FROM v WHERE v.id <= e.id), r.id IS NOT NULL "
+       "FROM conversations c, f, e, r WHERE c.id = ?1 AND c.origin = 'briefing'";
+   /* Forward only: never undo a cursor something else (a forget) moved on. */
+   static const char *mark_sql =
+       "UPDATE conversations SET last_extracted_msg_id = MAX(last_extracted_msg_id, ?2), "
+       "last_extracted_msg_count = MAX(last_extracted_msg_count, ?3), extraction_attempts = 0 "
+       "WHERE id = ?1 AND last_extracted_msg_id < ?2";
+
+   AUTH_DB_LOCK_OR_FAIL();
+   /* No caller is anonymous here: user_id <= 0 would be the helper's wildcard. */
+   if (user_id <= 0 || conversation_owner_locked(conv_id, user_id) == 0) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FORBIDDEN;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, find_sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   int rc = sqlite3_step(stmt);
+   int64_t end = 0;
+   int rows = 0;
+   bool replied = false;
+   if (rc == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+      end = sqlite3_column_int64(stmt, 0);
+      rows = sqlite3_column_int(stmt, 1);
+      replied = sqlite3_column_int(stmt, 2) != 0;
+   }
+   sqlite3_finalize(stmt);
+   if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   if (end > 0) {
+      /* No reply: every row is the briefing, so the whole conversation. */
+      if (sqlite3_prepare_v2(s_db.db, mark_sql, -1, &stmt, NULL) != SQLITE_OK) {
+         AUTH_DB_UNLOCK();
+         return AUTH_DB_FAILURE;
+      }
+      sqlite3_bind_int64(stmt, 1, conv_id);
+      sqlite3_bind_int64(stmt, 2, end);
+      sqlite3_bind_int(stmt, 3, rows);
+      rc = sqlite3_step(stmt);
+      sqlite3_finalize(stmt);
+      if (rc != SQLITE_DONE) {
+         AUTH_DB_UNLOCK();
+         return AUTH_DB_FAILURE;
+      }
+   }
+   AUTH_DB_UNLOCK();
+   *end_id_out = end;
+   *replied_out = replied;
    return AUTH_DB_SUCCESS;
 }
 
