@@ -64,7 +64,9 @@ typedef struct {
  * Sets the music playback state.
  *
  * Set it to 1 before starting playFlacAudio(): a 0 set while the track is
- * still opening (a Plex download) cancels the open.  Setting 1 clears the saved
+ * still opening (a Plex download) cancels the open.  Only the track's starter,
+ * the music tool, sets 1; anything else that needs music stopped asks the music
+ * tool (music_tool_pause()).  Setting 1 clears the saved
  * position, so a pause before the new track plays saves none.
  *
  * @param play An integer indicating the desired playback state.
@@ -79,6 +81,18 @@ void setMusicPlay(int play);
  *         playing; 0 once it's stopped or has ended with nothing to follow.
  */
 int getMusicPlay(void);
+
+/** Picks and starts the next track (on the playback thread, after its track) */
+typedef void (*audio_playback_next_fn)(void);
+
+/**
+ * @brief Set who picks the next track when one ends naturally or won't open
+ *
+ * The music tool registers itself at startup, so this layer never calls up
+ * into it (registered rather than a weak symbol: the music tool owns the
+ * policy).  NULL (the default) means playback simply stops.
+ */
+void audio_playback_set_next_fn(audio_playback_next_fn fn);
 
 /**
  * @brief Start a new run of tracks that wouldn't open (no playback thread running)

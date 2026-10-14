@@ -513,6 +513,31 @@ static void local_replace_playlist(const Playlist *found) {
    s_paused_sample_rate = 0;
 }
 
+/*
+ * Pause halts playback but keeps the track's place for a resume.  Caller holds
+ * s_music_mutex.  Returns true if music was playing.
+ */
+static bool local_pause(void) {
+   if (s_playlist.count == 0 || !getMusicPlay()) {
+      stop_current_playback();
+      return false;
+   }
+   /* Capture current position and sample rate before stopping */
+   s_paused_position = audio_playback_get_position();
+   s_paused_sample_rate = audio_playback_get_sample_rate();
+   if (s_paused_sample_rate == 0) {
+      /* Still opening (a Plex download): keep the second it was asked to
+       * start at, as a position in 1 Hz units */
+      s_paused_position = s_start_seconds;
+      s_paused_sample_rate = 1;
+   }
+
+   stop_current_playback();
+   OLOG_INFO("Paused at position %llu samples (rate: %u Hz)", (unsigned long long)s_paused_position,
+             s_paused_sample_rate);
+   return true;
+}
+
 /* ========== Callback Implementation ========== */
 
 static char *music_tool_callback_inner(const char *action, char *value, int *should_respond);
@@ -770,24 +795,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       }
 
    } else if (strcmp(action, "pause") == 0) {
-      /* Pause halts playback but keeps track position for resume */
-      if (s_playlist.count > 0 && getMusicPlay()) {
-         /* Capture current position and sample rate before stopping */
-         s_paused_position = audio_playback_get_position();
-         s_paused_sample_rate = audio_playback_get_sample_rate();
-         if (s_paused_sample_rate == 0) {
-            /* Still opening (a Plex download): keep the second it was asked to
-             * start at, as a position in 1 Hz units */
-            s_paused_position = s_start_seconds;
-            s_paused_sample_rate = 1;
-         }
-
-         stop_current_playback();
-         OLOG_INFO("Paused at position %llu samples (rate: %u Hz)",
-                   (unsigned long long)s_paused_position, s_paused_sample_rate);
-      } else {
-         stop_current_playback();
-      }
+      local_pause();
 
       if (direct_mode) {
          *should_respond = 0;
@@ -1194,7 +1202,9 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
 
 /* ========== Auto-Advance (called from playback thread) ========== */
 
-void music_tool_auto_advance(void) {
+/* The next track after one ended naturally or wouldn't open: registered with
+ * the player (audio_playback_set_next_fn), which runs it on its playback thread */
+static void music_tool_auto_advance(void) {
    /* A stop may hold the lock while it joins this thread (it lands while the
     * last audio drains): taking the lock outright would deadlock.  Such a stop
     * has already cleared the play flag, so give way to it. */
@@ -1238,5 +1248,13 @@ void set_music_directory(const char *path) {
 }
 
 int music_tool_register(void) {
+   audio_playback_set_next_fn(music_tool_auto_advance);
    return tool_registry_register(&music_metadata);
+}
+
+bool music_tool_pause(void) {
+   pthread_mutex_lock(&s_music_mutex);
+   bool paused = local_pause();
+   pthread_mutex_unlock(&s_music_mutex);
+   return paused;
 }

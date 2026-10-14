@@ -47,9 +47,6 @@
 #include "audio/audio_utils.h"
 #include "audio/music_open.h"
 #include "logging.h"
-#ifdef DAWN_ENABLE_MUSIC_TOOL
-#include "tools/music_tool.h"
-#endif
 
 /* Maximum channels supported for playback (stereo) */
 #define PLAYBACK_MAX_CHANNELS 2
@@ -105,6 +102,13 @@ int getMusicPlay(void) {
 
 void audio_playback_reset_failed_opens(void) {
    s_failed_opens = 0;
+}
+
+/* Who picks the next track: set once at startup, read by playback threads */
+static _Atomic(audio_playback_next_fn) s_next_fn = NULL;
+
+void audio_playback_set_next_fn(audio_playback_next_fn fn) {
+   atomic_store(&s_next_fn, fn);
 }
 
 uint64_t audio_playback_get_position(void) {
@@ -333,18 +337,18 @@ cleanup:
       audio_stream_playback_close(playback_handle);
    }
 
-   /* Anything but a natural end leaves nothing playing (ducking and the phone
-    * read this).  A natural end keeps it for the next track, which this thread
-    * starts below; every other start joins this thread first. */
-   if (!song_finished_naturally) {
+   /* Anything but a natural end with a next track to start leaves nothing
+    * playing (ducking and the music tool read this).  A natural end keeps it
+    * for the next track, which this thread starts below; every other start
+    * joins this thread first. */
+   audio_playback_next_fn next = atomic_load(&s_next_fn);
+   if (!song_finished_naturally || !next) {
       setMusicPlay(0);
    }
 
    /* Auto-play next track only if song finished naturally (not manually stopped or error) */
-   if (song_finished_naturally) {
-#ifdef DAWN_ENABLE_MUSIC_TOOL
-      music_tool_auto_advance();
-#endif
+   if (song_finished_naturally && next) {
+      next();
    }
 
    /* Free the heap-allocated args (caller allocated, thread frees) */

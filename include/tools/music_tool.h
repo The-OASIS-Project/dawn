@@ -24,6 +24,7 @@
 #ifndef MUSIC_TOOL_H
 #define MUSIC_TOOL_H
 
+#include <stdbool.h>
 
 /**
  * @brief Register the music tool with the tool registry
@@ -36,15 +37,20 @@
 int music_tool_register(void);
 
 /**
- * @brief Auto-advance to next track after natural playback completion
+ * @brief Pause the local speaker's music, keeping its place for a resume
  *
- * Called by the playback thread (playFlacAudio) when a track finishes
- * naturally (not stopped by user). Advances to the next track in the
- * playlist, wrapping around at the end.
+ * For an interruption such as a phone call: nothing resumes it but the user.
+ * Without the music tool there's no local music, so nothing to pause.
  *
- * Thread-safe: called from the playback thread context.
+ * @return true if music was playing and is now paused
  */
-void music_tool_auto_advance(void);
+#ifdef DAWN_ENABLE_MUSIC_TOOL
+bool music_tool_pause(void);
+#else
+static inline bool music_tool_pause(void) {
+   return false;
+}
+#endif
 
 /**
  * @brief Set custom music directory path

@@ -38,7 +38,6 @@
 #include <string.h>
 #include <time.h>
 
-#include "audio/flac_playback.h"
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
@@ -49,6 +48,7 @@
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "messaging/messaging_engine.h"
+#include "tools/music_tool.h"
 #include "tools/phone_audio_bridge.h"
 #include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
@@ -92,10 +92,6 @@ static unsigned int s_sms_day_count = 0;
 
 /* ECHO online status */
 static bool s_echo_online = false;
-
-/* True while the audio bridge paused music for a call, so teardown restores only
- * what the call actually paused (event-thread only — no lock needed). */
-static bool s_bridge_paused_music = false;
 
 /* Call-audio config from [phone].  Set once at startup by
  * phone_service_set_audio_config (event-safe today); Phase D makes the setter
@@ -693,11 +689,10 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          OLOG_WARNING("phone_service: ignoring pcm_ready with no active call");
       } else {
          const char *port = acfg.pcm_port[0] ? acfg.pcm_port : PHONE_PCM_PORT_DEFAULT;
-         /* Pause music only if it was actually playing, so teardown can restore
-          * the exact prior state (never resume music the user had paused). */
-         s_bridge_paused_music = (getMusicPlay() != 0);
-         if (s_bridge_paused_music) {
-            setMusicPlay(0); /* keep music out of the call mix (mic would pick it up) */
+         /* Keep music out of the call mix (the mic would pick it up).  Paused,
+          * so it keeps its place; only the user resumes it. */
+         if (music_tool_pause()) {
+            OLOG_INFO("phone_service: paused music for the call");
          }
          phone_bridge_config_t bcfg = {
             .pcm_port = port,
@@ -711,10 +706,6 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          } else {
             OLOG_ERROR("phone_service: audio bridge failed to start on %s — call has no audio",
                        port);
-            if (s_bridge_paused_music) { /* start failed — don't leave music paused */
-               setMusicPlay(1);
-               s_bridge_paused_music = false;
-            }
          }
       }
    }
@@ -737,12 +728,8 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       s_active_contact[0] = '\0';
       pthread_mutex_unlock(&s_state_mutex);
 
-      /* Tear down the audio bridge and restore music only if the call paused it. */
+      /* Tear down the audio bridge (music the call paused stays paused) */
       phone_bridge_stop();
-      if (s_bridge_paused_music) {
-         setMusicPlay(1);
-         s_bridge_paused_music = false;
-      }
 
       /* Calculate duration */
       int duration = 0;
@@ -968,13 +955,9 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          s_active_contact[0] = '\0';
       }
       pthread_mutex_unlock(&s_state_mutex);
-      /* Stop any running audio bridge (safe if not running); restore music only
-       * if the call paused it. */
+      /* Stop any running audio bridge (safe if not running); music the call
+       * paused stays paused */
       phone_bridge_stop();
-      if (s_bridge_paused_music) {
-         setMusicPlay(1);
-         s_bridge_paused_music = false;
-      }
       /* Resolve the call on every surface that saw it (outside the mutex — the
        * broadcast takes per-session locks). */
       if (had_call) {
