@@ -1561,16 +1561,17 @@ static int import_rows(sqlite3 *src,
    return rc;
 }
 
-/* is_private of conv_id in src: 0/1, or -1 when there's no such row.  Returns
- * nonzero on a read error. */
-static int import_private_flag(sqlite3 *src, int64_t conv_id, int *flag_out) {
+/* is_private (0/1, or -1 when there's no such row) and owner of conv_id in
+ * src.  Returns nonzero on a read error. */
+static int import_conv_probe(sqlite3 *src, int64_t conv_id, int *private_out, int *owner_out) {
    sqlite3_stmt *stmt = NULL;
-   if (sqlite3_prepare_v2(src, "SELECT is_private FROM conversations WHERE id = ?", -1, &stmt,
-                          NULL) != SQLITE_OK)
+   if (sqlite3_prepare_v2(src, "SELECT is_private, user_id FROM conversations WHERE id = ?", -1,
+                          &stmt, NULL) != SQLITE_OK)
       return 1;
    sqlite3_bind_int64(stmt, 1, conv_id);
    int step = sqlite3_step(stmt);
-   *flag_out = step == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : -1;
+   *private_out = step == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : -1;
+   *owner_out = step == SQLITE_ROW ? sqlite3_column_int(stmt, 1) : 0;
    sqlite3_finalize(stmt);
    return (step == SQLITE_ROW || step == SQLITE_DONE) ? 0 : 1;
 }
@@ -1618,12 +1619,16 @@ static int import_conversation(sqlite3 *src,
 }
 
 static int handle_import_conversation(struct json_object *cmd) {
-   struct json_object *src_obj = NULL, *conv_obj = NULL;
+   struct json_object *src_obj = NULL, *conv_obj = NULL, *owner_obj = NULL;
    if (!json_object_object_get_ex(cmd, "source_db", &src_obj) ||
-       !json_object_object_get_ex(cmd, "conv_id", &conv_obj)) {
-      respond_error("import_conversation: missing source_db/conv_id");
+       !json_object_object_get_ex(cmd, "conv_id", &conv_obj) ||
+       !json_object_object_get_ex(cmd, "owner_id", &owner_obj)) {
+      respond_error("import_conversation: missing source_db/conv_id/owner_id");
       return 1;
    }
+   /* Only the named user's conversations are copied: a saved id list must
+    * never send another user's text to the extraction model. */
+   const int owner_id = json_object_get_int(owner_obj);
    /* An extraction still running (one that outlived its wait) would write
     * into the import's transaction and collide with the next trigger. */
    if (memory_extraction_in_progress(BENCH_MP_USER_ID)) {
@@ -1642,13 +1647,15 @@ static int handle_import_conversation(struct json_object *cmd) {
    sqlite3_busy_timeout(src, IMPORT_BUSY_MS);
 
    char err[256] = "";
-   int is_private = -1, msgs = 0, rc = 1;
+   int is_private = -1, owner = 0, msgs = 0, rc = 1;
    if (sqlite3_exec(src, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
       snprintf(err, sizeof(err), "source begin: %s", sqlite3_errmsg(src));
-   } else if (import_private_flag(src, conv_id, &is_private) != 0) {
+   } else if (import_conv_probe(src, conv_id, &is_private, &owner) != 0) {
       snprintf(err, sizeof(err), "source read: %s", sqlite3_errmsg(src));
    } else if (is_private < 0) {
       snprintf(err, sizeof(err), "no such conversation");
+   } else if (owner_id <= 0 || owner != owner_id) {
+      snprintf(err, sizeof(err), "conversation belongs to another user");
    } else if (is_private) {
       /* A private conversation is never extracted in production; nor here. */
       snprintf(err, sizeof(err), "conversation is private");
@@ -1728,6 +1735,12 @@ static int handle_extract_stored(struct json_object *cmd) {
       return 1;
    }
 
+   /* A briefing's own rows are counted as extracted before the trigger runs
+    * (conv_db_briefing_mark_extracted); apply that first, so "ran" means the
+    * model was called, not that a briefing nobody answered was skipped. */
+   int64_t briefing_end = 0;
+   bool briefing_replied = false;
+   conv_db_briefing_mark_extracted(conv_id, BENCH_MP_USER_ID, &briefing_end, &briefing_replied);
    int64_t cursor_before = 0, cursor_after = 0;
    memory_db_get_last_extracted_msg_id(conv_id, &cursor_before);
    int live_before = count_live_facts();

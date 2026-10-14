@@ -30,17 +30,15 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from . import models, reextract, rubric
+from .storage import DATA, data_path, private_open, text_sha
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
-DATA = os.path.join(HERE, "data")
 DEFAULT_DB = "/var/lib/dawn/auth.db"
 DEFAULT_SECRETS = os.path.join(ROOT, "secrets.toml")
 
 
-def _data(name):
-    os.makedirs(DATA, exist_ok=True)
-    return name if os.path.dirname(name) else os.path.join(DATA, name)
+_data = data_path
 
 
 def _read_jsonl(path):
@@ -118,10 +116,9 @@ def cmd_sample(a):
     facts = _live_facts(a.db, a.user_id)
     chosen = facts if a.all else stratified(facts, a.n, a.seed)
     path = _data(a.out)
-    with open(path, "w") as f:
+    with private_open(path) as f:
         for x in chosen:
             f.write(json.dumps(x) + "\n")
-    os.chmod(path, 0o600)
     cats = Counter(x["category"] for x in chosen)
     print(f"{len(chosen)} of {len(facts)} live facts (user {a.user_id}) -> {path}")
     print("by category: " + ", ".join(f"{k} {v}" for k, v in cats.most_common()))
@@ -135,9 +132,8 @@ def _load_labels(path):
 
 def _save_labels(path, labels):
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with private_open(tmp) as f:
         json.dump(labels, f, indent=1)
-    os.chmod(tmp, 0o600)
     os.replace(tmp, path)
 
 
@@ -212,8 +208,9 @@ def cmd_classify(a):
     out_path = _data(a.out or f"class_{re.sub(r'[^A-Za-z0-9.-]+', '_', a.model)}"
                      f"_{os.path.splitext(os.path.basename(a.set))[0]}_r{rubric.RUBRIC_VERSION}"
                      f"{'_tier' if a.prompt == 'tier' else ''}.jsonl")
-    done = {r["id"] for r in _read_jsonl(out_path) if r.get("kind")}
-    todo = [f for f in facts if f["id"] not in done]
+    # A row counts as done only for the same text: scratch databases reuse ids.
+    done = {(r["id"], r.get("sha")) for r in _read_jsonl(out_path) if r.get("kind")}
+    todo = [f for f in facts if (f["id"], text_sha(f["text"])) not in done]
     make = rubric.tier_system_prompt if a.prompt == "tier" else rubric.system_prompt
     system = make(a.assistant or _assistant_name(), a.today or time.strftime("%Y-%m-%d"))
     tiers = rubric.TIERS if a.prompt == "tier" else None
@@ -247,15 +244,15 @@ def cmd_classify(a):
                 print(f"  id {f['id']}: {type(e).__name__}: {e}", file=sys.stderr)
         return batch, got, use
 
-    with open(out_path, "a") as out, ThreadPoolExecutor(a.workers) as pool:
-        os.chmod(out_path, 0o600)
+    with private_open(out_path, "a") as out, ThreadPoolExecutor(a.workers) as pool:
         n = 0
         for batch, got, use in pool.map(run, batches):
             usage.update(use)
             for f in batch:
                 if f["id"] in got:
                     kind, reason, tier = got[f["id"]]
-                    out.write(json.dumps({"id": f["id"], "kind": kind,
+                    out.write(json.dumps({"id": f["id"], "sha": text_sha(f["text"]),
+                                          "kind": kind,
                                           "tier": tier or rubric.TIER[kind], "reason": reason,
                                           "model": a.model, "prompt": a.prompt,
                                           "rubric": rubric.RUBRIC_VERSION}) + "\n")
@@ -284,9 +281,19 @@ def kappa(pairs, credit=None):
     return 1.0 if pe == 1 else (po - pe) / (1 - pe)
 
 
-def _by_id(path):
-    """Classified rows by id; kinds from an older rubric are left out."""
-    return {r["id"]: r for r in _read_jsonl(_data(path)) if r.get("kind") in rubric.TIER}
+def _by_id(path, facts=None):
+    """Classified rows by id; kinds from an older rubric are left out.  With
+    facts, only rows made for that fact's text (the last such row wins)."""
+    out = {}
+    for r in _read_jsonl(_data(path)):
+        if r.get("kind") not in rubric.TIER:
+            continue
+        if facts is not None:
+            f = facts.get(r["id"])
+            if not f or (r.get("sha") and r["sha"] != text_sha(f["text"])):
+                continue
+        out[r["id"]] = r
+    return out
 
 
 def _tier(r):
@@ -337,7 +344,7 @@ def _pct(n, d):
 
 def cmd_report(a):
     facts = {f["id"]: f for f in _read_jsonl(_data(a.set))}
-    cls = _by_id(a.run)
+    cls = _by_id(a.run, facts)
     ids = [i for i in cls if i in facts]
     if not ids:
         raise SystemExit("no classified facts match the set")
@@ -355,7 +362,9 @@ def cmd_report(a):
         used = sum(1 for i in ks if facts[i]["access_count"] > 0)
         cited = sum(1 for i in ks if facts[i]["last_cited"])
         exp = sum(1 for i in ks if facts[i]["expires_at"])
-        print(f"{kind:18s} {rubric.TIER[kind]:9s} {len(ks):5d} {_pct(len(ks), n):>6s} "
+        kt = {_tier(cls[i]) for i in ks}  # a tier-first run can differ from the kind's
+        print(f"{kind:18s} {(kt.pop() if len(kt) == 1 else 'mixed'):9s} {len(ks):5d} "
+              f"{_pct(len(ks), n):>6s} "
               f"{_pct(used, len(ks)):>6s} "
               f"{_pct(cited, len(ks)):>6s} {_pct(exp, len(ks)):>8s}")
     for label, key in (("category", lambda i: facts[i]["category"]),
@@ -374,7 +383,7 @@ def cmd_report(a):
 
 def cmd_examples(a):
     facts = {f["id"]: f for f in _read_jsonl(_data(a.set))}
-    cls = _by_id(a.run)
+    cls = _by_id(a.run, facts)
     ids = [i for i in cls if cls[i]["kind"] == a.kind and i in facts]
     random.Random(a.seed).shuffle(ids)
     for i in ids[:a.n]:

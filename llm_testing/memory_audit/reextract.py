@@ -18,11 +18,14 @@
 
 import json
 import os
+import re
 import select
 import sqlite3
 import subprocess
 import time
 from collections import Counter, defaultdict
+
+from .storage import private_open
 
 READY_TIMEOUT_S = 60
 EXTRACT_TIMEOUT_S = 660  # the bench gives up on one extraction at 600 s
@@ -125,15 +128,24 @@ def scratch_facts(db_path):
 def run(a, data):
     """The reextract command.  data(name) -> path under data/."""
     convs_path = data(a.convs)
+    source = {"db": os.path.realpath(a.db), "user_id": a.user_id}
     if os.path.exists(convs_path):
-        convs = json.load(open(convs_path))
+        saved = json.load(open(convs_path))
+        # A list saved before it recorded its source has none to check; the
+        # bench still refuses any conversation not owned by --user-id.
+        if isinstance(saved, dict):
+            if saved.get("source") != source:
+                raise SystemExit(f"{convs_path} was picked from {saved.get('source')}, not "
+                                 f"{source}; use another --convs file")
+            convs = saved["ids"]
+        else:
+            convs = saved
         print(f"{len(convs)} conversations from {convs_path}")
     else:
         since = int(time.mktime(time.strptime(a.since, "%Y-%m-%d")))
         convs = pick_conversations(a.db, a.user_id, a.n, since, a.min_messages)
-        with open(convs_path, "w") as f:
-            json.dump(convs, f)
-        os.chmod(convs_path, 0o600)
+        with private_open(convs_path) as f:
+            json.dump({"source": source, "ids": convs}, f)
         print(f"picked {len(convs)} conversations since {a.since} -> {convs_path}")
     if not convs:
         raise SystemExit("no conversations to extract")
@@ -142,7 +154,8 @@ def run(a, data):
     ready = bench.ready
     sha = ready.get("extraction_prompt_sha256", "")[:8]
     model, effort = ready.get("extraction_model", "?"), ready.get("extraction_effort") or "off"
-    label = a.label or f"{sha}_{model}_{effort}"
+    # A filename: an OpenRouter model is a vendor/model slug.
+    label = re.sub(r"[^A-Za-z0-9.-]+", "_", a.label or f"{sha}_{model}_{effort}")
     db_out, map_out = data(f"reextract_{label}.db"), data(f"reextract_{label}.map.json")
     # What the bench reports it runs, not what was asked for.
     print(f"prompt {sha}, {ready.get('extraction_provider', '?')} {model} effort {effort} "
@@ -152,7 +165,8 @@ def run(a, data):
     t0 = time.time()
     try:
         for i, cid in enumerate(convs, 1):
-            r = bench.send({"cmd": "import_conversation", "source_db": a.db, "conv_id": cid})
+            r = bench.send({"cmd": "import_conversation", "source_db": a.db, "conv_id": cid,
+                            "owner_id": a.user_id})
             if r.get("status") != "ok" or not r.get("messages"):
                 outcome["import failed"] += 1
                 print(f"  {i}/{len(convs)} conv {cid}: import failed "
@@ -164,10 +178,10 @@ def run(a, data):
                 # the next conversation's numbers: stop rather than go on.
                 raise SystemExit(f"conv {cid}: extraction failed ({r.get('message')}); "
                                  "run stopped, nothing saved")
-            if r.get("ran"):
-                what = "extracted"
-            elif r.get("transient"):
+            if r.get("transient"):
                 what = "failed (transient)"
+            elif r.get("ran"):
+                what = "extracted"
             else:
                 what = f"skipped ({r.get('skip', 'nothing extracted')})"
             outcome[what] += 1
@@ -183,10 +197,9 @@ def run(a, data):
 
     facts = scratch_facts(db_out)
     facts_out = data(f"reextract_{label}_facts.jsonl")
-    with open(facts_out, "w") as f:
+    with private_open(facts_out) as f:
         for x in facts:
             f.write(json.dumps(x) + "\n")
-    os.chmod(facts_out, 0o600)
     per = Counter(x["conversation"] for x in facts)
     print(f"done in {time.time() - t0:.0f}s: " +
           ", ".join(f"{k} {v}" for k, v in outcome.items()))

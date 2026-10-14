@@ -3,9 +3,10 @@
 #
 # License: GPLv3, same as DAWN.
 
+import os
 import unittest
 
-from . import models, rubric
+from . import models, rubric, storage
 from .__main__ import kappa, stratified
 
 
@@ -84,6 +85,33 @@ class Rubric(unittest.TestCase):
         for k in rubric.KIND_NAMES:
             self.assertIn(k, prompt)
 
+
+
+class TestStorage(unittest.TestCase):
+    def test_paths_stay_under_data(self):
+        self.assertTrue(storage.data_path("x.jsonl").startswith(os.path.realpath(storage.DATA)))
+        with self.assertRaises(SystemExit):
+            storage.data_path("./escape.jsonl")
+        with self.assertRaises(SystemExit):
+            storage.data_path(os.path.join(storage.DATA, "..", "escape.jsonl"))
+
+    def test_private_files_are_0600(self):
+        path = storage.data_path("_test_private.tmp")
+        old = os.umask(0o022)
+        try:
+            with storage.private_open(path) as f:
+                f.write("x")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            with storage.private_open(path, "a") as f:
+                f.write("y")
+            self.assertEqual(open(path).read(), "xy")
+        finally:
+            os.umask(old)
+            os.unlink(path)
+
+    def test_fingerprint_tracks_text(self):
+        self.assertEqual(storage.text_sha("a"), storage.text_sha("a"))
+        self.assertNotEqual(storage.text_sha("a"), storage.text_sha("b"))
 
 if __name__ == "__main__":
     unittest.main()
