@@ -404,8 +404,8 @@ int memory_db_entity_consider_auto_merge(int user_id,
          break; /* sorted DESC, nothing more above threshold */
       if (scored[i].entity_id == entity_id)
          continue; /* self-link guard (cascade should already exclude) */
-      if (scored[i].evidence.type_veto_fired)
-         continue; /* type mismatch — don't propose */
+      if (scored[i].evidence.type_veto_fired || scored[i].evidence.name_veto_fired)
+         continue; /* type mismatch or names that differ — don't propose */
 
       /* Direction preference mirrors the AUTO branch — if the inbound is
        * the fuller person/pet/place form and the candidate is a leaf

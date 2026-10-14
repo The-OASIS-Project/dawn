@@ -74,6 +74,13 @@ float memory_alias_internal_directional_overlap(const char *a, const char *b);
  * ============================================================================= */
 
 bool memory_alias_internal_type_veto_fires(const char *a_type, const char *b_type);
+
+/* Names that say they are different things: different number/version tokens,
+ * or one is "<owner>'s ..." of the other.  Forces composite 0, like the type
+ * veto.  Canonical (lowercased) names expected.  @p either_is_seed: one side is
+ * the self-identity seed (real name + all aliases joined), whose numbers belong
+ * to separate spellings, so only the possessive check applies. */
+bool memory_alias_internal_name_veto_fires(const char *a, const char *b, bool either_is_seed);
 float memory_alias_internal_type_match_signal(const char *a_type, const char *b_type);
 
 /* =============================================================================

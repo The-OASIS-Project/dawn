@@ -342,12 +342,20 @@ static int stage2_reverse_substring_candidates(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-/* Stage 3: type-filter survivors in place.  Compacts the array by removing
- * candidates that fail the type-match rule (`thing` carve-out applies). */
-static void stage3_type_filter(const char *inbound_type, alias_candidate_t *cands, int *count) {
+/* Stage 3: filter survivors in place.  Compacts the array by removing
+ * candidates that fail the type-match rule (`thing` carve-out applies) or the
+ * name veto, before the Stage 4/5 caps, so vetoed siblings ("pi 4", "pi 5")
+ * can't take the slots a real match needs. */
+static void stage3_type_filter(const char *inbound_name,
+                               bool inbound_is_seed,
+                               const char *inbound_type,
+                               alias_candidate_t *cands,
+                               int *count) {
    int kept = 0;
    for (int i = 0; i < *count; i++) {
-      if (memory_alias_internal_type_veto_fires(inbound_type, cands[i].entity_type)) {
+      if (memory_alias_internal_type_veto_fires(inbound_type, cands[i].entity_type) ||
+          memory_alias_internal_name_veto_fires(inbound_name, cands[i].canonical_name,
+                                                inbound_is_seed)) {
          continue; /* drop */
       }
       if (kept != i) {
@@ -565,8 +573,8 @@ int memory_alias_internal_cascade(int user_id,
    if (cand_count == 0)
       return MEMORY_DB_SUCCESS; /* clean miss */
 
-   /* Stage 3: type filter (in-place). */
-   stage3_type_filter(entity_type, cands, &cand_count);
+   /* Stage 3: type and name veto filter (in-place). */
+   stage3_type_filter(canonical_name, use_synth_self, entity_type, cands, &cand_count);
    if (cand_count == 0)
       return MEMORY_DB_SUCCESS;
 
@@ -604,6 +612,9 @@ int memory_alias_internal_cascade(int user_id,
       ev.embedding_cosine = cands[i].embedding_cosine;
       ev.type_match = memory_alias_internal_type_match_signal(entity_type, cands[i].entity_type);
       ev.type_veto_fired = memory_alias_internal_type_veto_fires(entity_type, cands[i].entity_type);
+      ev.name_veto_fired = memory_alias_internal_name_veto_fires(canonical_name,
+                                                                 cands[i].canonical_name,
+                                                                 use_synth_self);
       ev.name_substring_bonus_applied = memory_alias_compute_name_substring(
           canonical_name, cands[i].canonical_name);
       /* In synth-self mode the inbound is the synthetic (user_self side)

@@ -220,6 +220,116 @@ bool memory_alias_internal_type_veto_fires(const char *a_type, const char *b_typ
    return strcmp(a_type, b_type) != 0;
 }
 
+/* =============================================================================
+ * Name veto: names that say they are different things
+ *
+ * Two kinds of name pair are never the same entity, however close they score:
+ *   - different numbers or versions ("office light 1" / "office light 2",
+ *     "raspberry pi" / "raspberry pi 5", "qwen" / "qwen 3.5"): the set of
+ *     tokens containing a digit differs;
+ *   - a description of something the other one has ("kris's daughter" /
+ *     "kris"): one name is "<owner>'s <more>" and every word of the owner is a
+ *     word of the other name.
+ * Proposals of exactly these shapes were most of what the operator rejected.
+ * ============================================================================= */
+
+/* Every number token a canonical name can hold (each takes a character and a
+ * separator), so the sets are compared exactly. */
+#define NAME_VETO_MAX_NUMBERS (MEMORY_ENTITY_NAME_MAX / 2)
+
+/* The distinct tokens of @p s that contain a digit, sorted; a token is a run of
+ * letters, digits and dots between digits ("3.5", "64gb", "#1" -> "1").
+ * Returns the count. */
+static int number_tokens(const char *s, char out[][MEMORY_ENTITY_NAME_MAX]) {
+   int n = 0;
+   const unsigned char *p = (const unsigned char *)s;
+   while (*p && n < NAME_VETO_MAX_NUMBERS) {
+      while (*p && !isalnum(*p))
+         p++;
+      const unsigned char *start = p;
+      bool digit = false;
+      while (*p && (isalnum(*p) || (*p == '.' && p > start && isdigit(p[-1]) && isdigit(p[1])))) {
+         digit = digit || isdigit(*p);
+         p++;
+      }
+      size_t len = (size_t)(p - start);
+      if (!digit || len == 0 || len >= MEMORY_ENTITY_NAME_MAX)
+         continue;
+      char tok[MEMORY_ENTITY_NAME_MAX];
+      memcpy(tok, start, len);
+      tok[len] = '\0';
+      /* Insert in order; a repeated number counts once. */
+      int j = 0;
+      while (j < n && strcmp(out[j], tok) < 0)
+         j++;
+      if (j < n && strcmp(out[j], tok) == 0)
+         continue;
+      memmove(out[j + 1], out[j], (size_t)(n - j) * sizeof(out[0]));
+      memcpy(out[j], tok, len + 1);
+      n++;
+   }
+   return n;
+}
+
+static bool numbers_differ(const char *a, const char *b) {
+   char na[NAME_VETO_MAX_NUMBERS + 1][MEMORY_ENTITY_NAME_MAX];
+   char nb[NAME_VETO_MAX_NUMBERS + 1][MEMORY_ENTITY_NAME_MAX];
+   int ca = number_tokens(a, na);
+   int cb = number_tokens(b, nb);
+   if (ca != cb)
+      return true;
+   for (int i = 0; i < ca; i++) {
+      if (strcmp(na[i], nb[i]) != 0)
+         return true;
+   }
+   return false;
+}
+
+/* Whether every word of @p owner (@p len bytes) is a word of @p name, with the
+ * name tokenizer's rules (punctuation separates, apostrophes stay attached, so
+ * "joe" is not a word of "joe's"). */
+static bool words_all_in(const char *owner, size_t len, const char *name) {
+   char buf[MEMORY_ENTITY_NAME_MAX];
+   if (len >= sizeof(buf))
+      return false;
+   memcpy(buf, owner, len);
+   buf[len] = '\0';
+   alias_token_set_t want, have;
+   memory_alias_internal_tokenize(buf, &want);
+   memory_alias_internal_tokenize(name, &have);
+   if (want.count == 0)
+      return false;
+   for (int i = 0; i < want.count; i++) {
+      if (!token_set_contains(&have, want.tokens[i]))
+         return false;
+   }
+   return true;
+}
+
+/* @p a is "<owner>'s <more>" (straight or curly apostrophe) and the owner's
+ * words are all words of @p b. */
+static bool describes_owner(const char *a, const char *b) {
+   static const char *const marks[] = { "'s ", "\xE2\x80\x99s " };
+   for (size_t m = 0; m < sizeof(marks) / sizeof(marks[0]); m++) {
+      /* Every "'s": "jon's daughter's school" is owned by "jon's daughter". */
+      for (const char *at = strstr(a, marks[m]); at; at = strstr(at + 1, marks[m])) {
+         if (at > a && words_all_in(a, (size_t)(at - a), b))
+            return true;
+      }
+   }
+   return false;
+}
+
+bool memory_alias_internal_name_veto_fires(const char *a, const char *b, bool either_is_seed) {
+   if (!a || !b)
+      return false;
+   /* A self-identity seed joins the real name and every alias, so its numbers
+    * belong to separate spellings: compare them only between real names. */
+   if (!either_is_seed && numbers_differ(a, b))
+      return true;
+   return describes_owner(a, b) || describes_owner(b, a);
+}
+
 static int type_specificity(const char *t) {
    /* Lower-better is irrelevant here — higher = more specific.  See §9. */
    if (!t)
@@ -249,7 +359,7 @@ void memory_alias_apply_composite(memory_alias_evidence_t *ev) {
    if (!ev)
       return;
 
-   if (ev->type_veto_fired) {
+   if (ev->type_veto_fired || ev->name_veto_fired) {
       ev->composite_score = 0.0f;
       return;
    }

@@ -63,7 +63,11 @@ void memory_alias_internal_score_pair_full(int user_id,
 
    /* Veto first — short-circuits everything else. */
    out->type_veto_fired = memory_alias_internal_type_veto_fires(src->entity_type, tgt->entity_type);
-   if (out->type_veto_fired) {
+   /* id 0 = a synthetic entity: the self-identity seed (see the contract above). */
+   out->name_veto_fired = memory_alias_internal_name_veto_fires(src->canonical_name,
+                                                                tgt->canonical_name,
+                                                                src->id <= 0 || tgt->id <= 0);
+   if (out->type_veto_fired || out->name_veto_fired) {
       memory_alias_apply_composite(out);
       return;
    }
