@@ -210,9 +210,9 @@ static const treg_param_t memory_params[] = {
    /* v33 — relation validity at a historical timestamp. */
    {
        .name = "as_of",
-       .description = "Optional ISO date (YYYY-MM-DD or YYYY) for 'search'. Returns relations "
-                      "valid at that point in time (e.g., 'who did Alice work for in 2020'). "
-                      "Defaults to now() when omitted.",
+       .description = "Optional ISO date (YYYY-MM-DD or YYYY) for 'search'. Adds the "
+                      "relations of the people and things the query names that were valid at "
+                      "that time (e.g., 'who did Alice work for in 2020').",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -220,22 +220,22 @@ static const treg_param_t memory_params[] = {
    },
    {
        .name = "include_historical",
-       .description = "Set to true to include closed relations (those with a past valid_to) "
-                      "in 'search' results. Default false returns only currently-valid "
-                      "relations.",
+       .description = "Set to true for 'search' to add the relations of the people and things "
+                      "the query names, including ended ones (a past job or home). Without "
+                      "this or as_of, search returns no relations.",
        .type = TOOL_PARAM_TYPE_BOOL,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "include_historical",
    },
-   /* v40 — source-linked recall.  Appends verbatim conversation excerpts for
-    * each fact so the caller can verify the extractor's paraphrase. */
+   /* Source-linked recall: verbatim conversation excerpts for the top facts, so
+    * the caller can verify the extractor's paraphrase. */
    {
        .name = "with_source",
-       .description = "Set to true to include verbatim source excerpts for each fact returned "
-                      "by 'search' or 'recent'.  Excerpts are omitted for legacy facts (stored "
-                      "before v40) and for facts from private conversations.  A shared 16 KB "
-                      "budget applies; excess sources are noted with a pointer to context_expand.",
+       .description = "Set to true to include verbatim source excerpts for the top few facts "
+                      "returned by 'search' or 'recent', within a shared character budget. "
+                      "Facts stored before sources were kept, and facts from private "
+                      "conversations, have none. For more, call context_expand.",
        .type = TOOL_PARAM_TYPE_BOOL,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -575,7 +575,7 @@ static const tool_metadata_t memory_metadata = {
                   "The link is reversible — the source row is preserved and can be split later. "
                   "Use 'dawn-admin memory entity consolidate' to make a soft link permanent. "
                   "Use with_source=true on 'search'/'recent' to include verbatim conversation "
-                  "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
+                  "excerpts for the top few facts. "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
    .param_count = TOOL_PARAM_COUNT(memory_params),

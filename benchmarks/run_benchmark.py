@@ -85,8 +85,6 @@ class BenchRetrieval:
       extraction_model="",
       extraction_effort="",
       search_score_floor=None,
-      graph_query_scoring=None,
-      entity_bonus=None,
    ):
       cmd = [binary_path, "--provider", provider]
       if model:
@@ -120,13 +118,6 @@ class BenchRetrieval:
          # so test against None not truthiness.
          if search_score_floor is not None:
             cmd += ["--search-score-floor", str(search_score_floor)]
-         # graph_query_scoring override for Phase 2 Step 1 ablation
-         # ("on"=Step 1 ON, default; "off"=pre-Step-1 flat bonus).
-         if graph_query_scoring is not None:
-            cmd += ["--graph-query-scoring", str(graph_query_scoring)]
-         # entity_bonus override for Phase 2 Step 1 experiments.
-         if entity_bonus is not None:
-            cmd += ["--entity-bonus", str(entity_bonus)]
 
       # text=False / no bufsize: _read_json_line reads raw bytes via os.read
       # off the stdout fd directly, doing line splitting in Python. Mixing
@@ -2723,25 +2714,6 @@ def main():
       "remember' gate against legitimate-retrieval recall.",
    )
    parser.add_argument(
-      "--graph-query-scoring",
-      type=str,
-      default=None,
-      choices=["on", "off"],
-      dest="graph_query_scoring",
-      help="Override g_config.memory.graph_retrieval.use_query_scoring for memory-pipeline "
-      "mode. 'on' (default) = Phase 2 Step 1 query-aware scoring (cosine + entity_bonus). "
-      "'off' = pre-Step-1 flat entity_grounding_bonus. Use for Phase 2 Step 1 ablation.",
-   )
-   parser.add_argument(
-      "--entity-bonus",
-      type=float,
-      default=None,
-      dest="entity_bonus",
-      help="Override g_config.memory.graph_retrieval.entity_bonus. Default 0.0 (symmetric "
-      "with hybrid). >0 values apply an asymmetric bonus to graph-branch facts; bench-tune "
-      "only — production regresses with bonus > 0 unless paired with symmetric application.",
-   )
-   parser.add_argument(
       "--now",
       type=int,
       default=None,
@@ -3073,8 +3045,6 @@ def _spawn_engine(args, extraction_provider, extraction_model):
       extraction_model=extraction_model,
       extraction_effort=args.extraction_effort if args.memory_pipeline else "",
       search_score_floor=args.search_score_floor,
-      graph_query_scoring=args.graph_query_scoring,
-      entity_bonus=args.entity_bonus,
    )
 
 

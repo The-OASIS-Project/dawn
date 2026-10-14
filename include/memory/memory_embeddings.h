@@ -264,9 +264,10 @@ int memory_embeddings_band_neighbors_scan(const int64_t *ids,
  * @param user_id User ID
  * @param query Search query text
  * @param keyword_facts Pre-searched keyword results (fact IDs)
- * @param keyword_scores Keyword scores per fact (from multi_token_fact_search)
+ * @param keyword_scores Keyword scores per fact; each over @p token_count
  * @param keyword_count Number of keyword results
- * @param token_count Number of search tokens (for score normalization)
+ * @param token_count Denominator of @p keyword_scores (BM25 is passed as
+ *                    hundredths over 100)
  * @param out_results Output: sorted hybrid results
  * @param max_results Maximum results to return
  * @return Number of results
@@ -298,9 +299,10 @@ int memory_embeddings_hybrid_search(int user_id,
  * @param query_emb Optional pre-computed query embedding (NULL → compute internally)
  * @param query_norm Optional pre-computed L2 norm (paired with @p query_emb)
  * @param keyword_facts Pre-searched keyword results (fact IDs)
- * @param keyword_scores Keyword scores per fact (from multi_token_fact_search)
+ * @param keyword_scores Keyword scores per fact; each over @p token_count
  * @param keyword_count Number of keyword results
- * @param token_count Number of search tokens (for score normalization)
+ * @param token_count Denominator of @p keyword_scores (BM25 is passed as
+ *                    hundredths over 100)
  * @param out_results Output: sorted hybrid results
  * @param max_results Maximum results to return
  * @return Number of results
@@ -316,68 +318,6 @@ int memory_embeddings_hybrid_search_ex(int user_id,
                                        embedding_search_result_t *out_results,
                                        int max_results);
 
-/**
- * @brief Reciprocal Rank Fusion search — parallel-channel alternative to
- *        `memory_embeddings_hybrid_search`.
- *
- * Builds three independent rank lists from the same candidate pool:
- *   - **Semantic**: cached embedding cosine vs. query embedding
- *   - **Keyword**: caller-supplied multi-token match scores
- *   - **Temporal**: gaussian proximity from `time_query_parse` (only when
- *     the query carries a parseable temporal expression)
- *
- * Each fact's final score is `Σ K/(K + rank_i)` (K=60) over channels in
- * which it has a non-zero raw score — canonical RRF `1/(K+rank)` scaled
- * by K so per-channel max ≈ 0.984, matching the [0, ~1] scale that
- * `search_score_floor` (default 0.30) expects.  Multi-channel hits can
- * stack above 1.0.  Facts ranked in no channel get score 0 and are
- * dropped.  Top-`max_results` returned, sorted by RRF score desc.
- *
- * Drop-in replacement for `memory_embeddings_hybrid_search` — same
- * signature; callers gate at `g_config.memory.rrf_enabled`.
- *
- * Empirical basis: Cormack/Clarke/Buettcher 2009 (k=60 canonical).
- * Mem0 v2 and Hindsight TEMPR both cite RRF over parallel channels as
- * their primary retrieval lever.
- *
- * @param user_id User ID
- * @param query Search query text
- * @param keyword_facts Pre-searched keyword results (fact IDs)
- * @param keyword_scores Keyword scores per fact (multi-token match counts)
- * @param keyword_count Number of keyword results
- * @param token_count Number of search tokens (for score normalization)
- * @param out_results Output: sorted RRF results
- * @param max_results Maximum results to return
- * @return Number of results
- */
-int memory_embeddings_rrf_search(int user_id,
-                                 const char *query,
-                                 const int64_t *keyword_facts,
-                                 const int *keyword_scores,
-                                 int keyword_count,
-                                 int token_count,
-                                 embedding_search_result_t *out_results,
-                                 int max_results);
-
-/**
- * @brief Variant of memory_embeddings_rrf_search that accepts an optional
- *        pre-computed query embedding — same contract as
- *        memory_embeddings_hybrid_search_ex.
- *
- * @param query_emb Optional pre-computed query embedding (NULL → compute internally)
- * @param query_norm Optional pre-computed L2 norm (paired with @p query_emb)
- */
-int memory_embeddings_rrf_search_ex(int user_id,
-                                    const char *query,
-                                    const float *query_emb,
-                                    float query_norm,
-                                    const int64_t *keyword_facts,
-                                    const int *keyword_scores,
-                                    int keyword_count,
-                                    int token_count,
-                                    embedding_search_result_t *out_results,
-                                    int max_results);
-
 /** Sentinel score returned by `memory_embeddings_rescore_against_query`
  * for facts that could not be scored (no embedding in the per-user cache,
  * embedding engine unavailable, query embedding failed).  Callers MUST
@@ -389,18 +329,16 @@ int memory_embeddings_rrf_search_ex(int user_id,
 #define MEMORY_EMBEDDINGS_RESCORE_SENTINEL (-1.0f)
 
 /**
- * @brief Phase 2 Step 1: re-score a caller-supplied list of facts against a
- *        pre-computed query embedding using cosine similarity + an optional
- *        additive bonus.
+ * @brief Score a caller-supplied list of facts against a pre-computed query
+ *        embedding by cosine similarity.
  *
- * Used by graph retrieval to apply query-relevance scoring to entity-bounded
- * candidate facts, replacing the legacy flat `entity_grounding_bonus` that
- * was disconnected from query content.
+ * Used by graph retrieval, so entity-grounded candidates compete with hybrid
+ * hits on the same query-relevance scale.
  *
  * Scoring formula (per fact):
  *
  *   if fact_id is in the per-user embedding cache:
- *     score = vec_weight * cosine(query_emb, fact_emb) + entity_bonus
+ *     score = vec_weight * cosine(query_emb, fact_emb)
  *   else:
  *     score = MEMORY_EMBEDDINGS_RESCORE_SENTINEL  // caller MUST drop
  *
@@ -420,9 +358,8 @@ int memory_embeddings_rrf_search_ex(int user_id,
  *
  * **Caller contract**: facts whose returned score equals
  * `MEMORY_EMBEDDINGS_RESCORE_SENTINEL` MUST be dropped from the merged
- * pool.  Earlier versions silently substituted `entity_bonus` for such
- * facts, which produced low-quality LLM-facing candidates and caused a
- * -9pp Phase 2 Step 1 regression (May 14, 2026 architecture audit).
+ * pool: a fact with no embedding has no evidence of relevance, and
+ * scoring it anyway let low-quality candidates reach the model.
  *
  * If @p query_emb is NULL or the embedding engine is unavailable, EVERY
  * fact gets the sentinel — the caller should treat this as "graph
@@ -434,7 +371,6 @@ int memory_embeddings_rrf_search_ex(int user_id,
  * @param query_emb Caller-supplied query embedding (size must be
  *                  `embedding_engine_dims()`).  NULL → all sentinels.
  * @param query_norm Pre-computed L2 norm of @p query_emb (saves recomputation).
- * @param entity_bonus Caller-supplied additive bonus (typically 0.0)
  * @param fact_ids Caller-allocated array of fact IDs to score (in)
  * @param fact_count Number of facts
  * @param out_scores Caller-allocated parallel array (out) — overwritten;
@@ -444,7 +380,6 @@ int memory_embeddings_rrf_search_ex(int user_id,
 int memory_embeddings_rescore_against_query(int user_id,
                                             const float *query_emb,
                                             float query_norm,
-                                            float entity_bonus,
                                             const int64_t *fact_ids,
                                             int fact_count,
                                             float *out_scores);

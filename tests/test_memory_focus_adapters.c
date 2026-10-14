@@ -720,12 +720,14 @@ static void test_fact_adapter_adds_named_entity_facts(void) {
    s_mock.graph_scores[1] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL; /* no embedding */
    s_mock.graph_count = 2;
    g_config.memory.graph_retrieval.enabled = true;
-   g_config.memory.graph_retrieval.use_query_scoring = true;
    g_config.memory.graph_retrieval.max_facts_per_query = 30;
    g_config.memory.search_score_floor = 0.30f;
+   /* Graph candidates need a query embedding to be scored. */
+   s_mock.embeddings_available = true;
+   s_mock.entity_dim = 1;
 
    TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
-   const float dummy[1] = { 0.0f };
+   const float dummy[1] = { 1.0f };
    focus_compose_result_t result = { 0 };
    TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "What do you know about Jordan", dummy, 1,
                                                 1700000200, 5, &result));

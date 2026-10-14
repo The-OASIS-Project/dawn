@@ -658,44 +658,10 @@ citation_reinforcement_boost = 0.05
                                   # hits from memory.search and per-turn focus
                                   # injection before they reach the LLM. Closes the
                                   # floor against fabrication from weak similarity.
-                                  # 0 disables. Default 0.30 sits at the natural
-                                  # keyword-weight boundary (kw_weight * 1.0) — every
-                                  # legitimate single-token keyword match passes;
-                                  # only hybrid-vector-only marginal hits are
-                                  # filtered. Drop to 0.10-0.20 if over-filtering,
-                                  # push higher if weak fabrications persist.
+                                  # 0 disables. Default 0.30. Drop to 0.10-0.20 if
+                                  # over-filtering, push higher if weak fabrications
+                                  # persist.
                                   # Range: 0.0-1.0.
-# bm25_enabled = true             # BM25 keyword retrieval (FTS5 + Porter2 stemming).
-                                  # When on, the keyword channel of memory.search
-                                  # uses SQLite FTS5 with bm25() ranking + Porter2
-                                  # stems, instead of the legacy SQL LIKE +
-                                  # multi-token match-count path. Catches plurals
-                                  # + verb tenses ("memories"→"memori",
-                                  # "attending"→"attend") and ranks rare-term
-                                  # matches above common-term matches. Algorithm
-                                  # + sigmoid params adapted from Mem0
-                                  # (Apache-2.0; see NOTICE). Graduated to
-                                  # default-on (May 17, 2026) after Phase 1 Mem0
-                                  # parity bench validation: +2.74pp leader-
-                                  # comparable on fresh LoCoMo n=1536. Set to
-                                  # false to revert to the legacy LIKE path.
-# rrf_enabled = false             # Reciprocal Rank Fusion (parallel-channel
-                                  # alternative to the weighted-sum composite
-                                  # scorer). FORMALLY DEAD-LETTER (May 17, 2026):
-                                  # original 2026-05-15 bench -3.7pp; re-tested
-                                  # post Phase 1 BM25 + Phase 3 specificity rules
-                                  # still -0.58pp. Code stays behind the flag for
-                                  # operator override but the design does not
-                                  # compose with DAWN's entity-graph backbone.
-                                  # Do not enable for production.
-# memory_text_minimal = true      # Compact memory_text rendering — strip per-fact
-                                  # metadata, demote source excerpts to a single
-                                  # global block. Graduated default-on (May 2026)
-                                  # after +0.98pp leader-comparable validation;
-                                  # re-confirmed post Phase 3 (Phase 4B of Mem0
-                                  # parity): -0.71pp without minimal. Cuts ~30-50%
-                                  # of memory_text bytes. Set false to restore
-                                  # verbose per-fact rendering.
 # temporal_filter_enabled = true  # Hard temporal filter on memory.search results
                                   # (parser-recognized date queries skip results
                                   # outside the resolved window). Graduated
@@ -722,26 +688,11 @@ citation_reinforcement_boost = 0.05
 # Entity-graph candidate retrieval for memory.search and per-turn context:
 # the facts about the people and things a query names (any of their names)
 # or mentions by exact name, and the facts their relations came from.
-# Query-aware scoring (May 14, 2026) re-scores them against the query.
+# Each is scored by its similarity to the query, like any other search hit.
 # enabled = true                   # Default-on.  Off also stops facts about a
                                    # named person reaching per-turn context.
-# entity_grounding_bonus = 0.40    # Legacy flat score for graph candidates when
-                                   # use_query_scoring=false.  Range [0.0, 1.0].
 # max_facts_per_query = 30         # Total fan-out cap across all seeds per query.
                                    # Range [1, 200].
-# use_query_scoring = true         # Phase 2 Step 1: re-score graph candidates
-                                   # against the query (vec_weight*cosine +
-                                   # entity_bonus) instead of using the flat
-                                   # entity_grounding_bonus.  Default true.
-                                   # Set false to revert to flat-bonus scoring
-                                   # for config-toggle ablation.
-# entity_bonus = 0.0               # Additive bonus applied to query-scored graph
-                                   # candidates on top of vec_weight*cosine.  Default
-                                   # 0.0 — the bonus was found to act as an asymmetric
-                                   # thumb-on-scale (only graph-branch facts received
-                                   # it, displacing equally-relevant hybrid hits).
-                                   # Experimental knob; set >0 to test symmetric-
-                                   # bonus designs only.  Range [0.0, 1.0].
 
 [memory.recovery]
 # Re-runs memory extraction on conversations whose last_extracted_msg_count
@@ -762,12 +713,10 @@ citation_reinforcement_boost = 0.05
                                       # Default 86400 (daily).
 
 [memory.focus_injection]
-# Per-turn dynamic context injection (Phase 1 of the dynamic context
-# injection workstream).  When enabled, the daemon retrieves
-# memory facts, entities, relations, summaries, document chunks, calendar
-# events, and recent emails relevant to each user turn and injects them
-# as a budget-bounded "current context" block in the LLM prompt.
-# Currently disabled by default — adapters land in Phase 1c/1d.
+# Per-turn context injection.  When enabled, the daemon retrieves memory
+# facts, entities, relations, summaries, document chunks and calendar
+# events relevant to each user turn and adds them to that turn as a
+# budget-bounded "context for this turn" block.  Off by default.
 # enabled = false                     # Master enable
 # focus_budget_bytes = 10240          # Byte cap on the assembled focus block (per turn).
                                       # Range: 1024 - 65536  (~4 bytes/token; exact byte budget)
@@ -814,8 +763,6 @@ citation_reinforcement_boost = 0.05
                                       # always counts.  Injection, recall and
                                       # memory search.  0 disables.
                                       # Range: 0.0 - 1.0
-# classifier_enabled = false          # RAGRoute-style source classifier
-                                      # (default off — opt-in only after probe).
 # weight_semantic = 1.0               # Generative-Agents three-factor ranker
 # weight_recency = 0.30               # weights.  Range each: 0.0 - 5.0.  Phase
 # weight_importance = 1.0             # 1j tuning (May 2026) lifted w_imp 0.2 →

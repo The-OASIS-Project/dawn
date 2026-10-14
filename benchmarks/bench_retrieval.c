@@ -919,16 +919,6 @@ static void print_usage(const char *prog) {
            "                                   floor (baseline = pre-2026-05-13 behavior);\n"
            "                                   0.30 is the natural kw_weight boundary.\n"
            "                                   Use to sweep the floor without rebuilding.\n"
-           "  --graph-query-scoring <on|off>   Override\n"
-           "                                   g_config.memory.graph_retrieval.use_query_scoring\n"
-           "                                   for memory-pipeline mode. ON (default) = Phase 2\n"
-           "                                   Step 1 query-aware scoring of graph candidates;\n"
-           "                                   OFF = pre-Step-1 flat entity_grounding_bonus.\n"
-           "  --entity-bonus <float>           Override\n"
-           "                                   g_config.memory.graph_retrieval.entity_bonus\n"
-           "                                   for memory-pipeline mode. Default 0.0 — bonus is\n"
-           "                                   asymmetric (only graph-branch facts receive it)\n"
-           "                                   so >0 values regress.  Kept as experimental knob.\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -963,8 +953,6 @@ int main(int argc, char *argv[]) {
       { "extraction-model", required_argument, 0, 'Y' },
       { "extraction-effort", required_argument, 0, 'Z' },
       { "search-score-floor", required_argument, 0, 'F' },
-      { "graph-query-scoring", required_argument, 0, 'Q' },
-      { "entity-bonus", required_argument, 0, 'E' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
@@ -980,15 +968,8 @@ int main(int argc, char *argv[]) {
     * The 0.0 override is meaningful — it represents the pre-2026-05-13
     * baseline (no floor) for ablation against the new default. */
    float search_score_floor_override = -1.0f;
-   /* graph-query-scoring override: -1 = leave g_config alone, 0 = OFF,
-    * 1 = ON.  Phase 2 Step 1 ablation knob. */
-   int graph_query_scoring_override = -1;
-   /* entity_bonus override: sentinel -1 = leave g_config alone; any
-    * non-negative value overrides g_config.memory.graph_retrieval.entity_bonus. */
-   float entity_bonus_override = -1.0f;
-
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:Z:F:Q:E:MSrh", long_options,
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:Z:F:MSrh", long_options,
                              NULL)) != -1) {
       switch (opt) {
          case 'p':
@@ -1050,26 +1031,6 @@ int main(int argc, char *argv[]) {
                return 1;
             }
             break;
-         case 'Q':
-            if (strcmp(optarg, "on") == 0 || strcmp(optarg, "true") == 0 ||
-                strcmp(optarg, "1") == 0) {
-               graph_query_scoring_override = 1;
-            } else if (strcmp(optarg, "off") == 0 || strcmp(optarg, "false") == 0 ||
-                       strcmp(optarg, "0") == 0) {
-               graph_query_scoring_override = 0;
-            } else {
-               fprintf(stderr, "bench: --graph-query-scoring must be on|off (got '%s')\n", optarg);
-               return 1;
-            }
-            break;
-         case 'E':
-            entity_bonus_override = (float)atof(optarg);
-            if (entity_bonus_override < 0.0f || entity_bonus_override > 1.0f) {
-               fprintf(stderr, "bench: --entity-bonus must be in [0.0, 1.0] (got %.4f)\n",
-                       (double)entity_bonus_override);
-               return 1;
-            }
-            break;
          case 'h':
             print_usage(argv[0]);
             return 0;
@@ -1124,20 +1085,6 @@ int main(int argc, char *argv[]) {
          g_config.memory.search_score_floor = search_score_floor_override;
          fprintf(stderr, "bench: search_score_floor override -> %.4f\n",
                  (double)search_score_floor_override);
-      }
-      /* Phase 2 Step 1 ablation: override query-aware graph scoring.
-       * --graph-query-scoring on (default) = query-cosine + entity_bonus.
-       * --graph-query-scoring off = legacy flat entity_grounding_bonus. */
-      if (graph_query_scoring_override >= 0) {
-         g_config.memory.graph_retrieval.use_query_scoring = (graph_query_scoring_override == 1);
-         fprintf(stderr, "bench: graph_query_scoring override -> %s\n",
-                 graph_query_scoring_override == 1 ? "on" : "off");
-      }
-      /* Entity bonus override.  0.0 is the safe default (symmetric with hybrid
-       * candidates).  >0 values experimentally boost graph-branch candidates. */
-      if (entity_bonus_override >= 0.0f) {
-         g_config.memory.graph_retrieval.entity_bonus = entity_bonus_override;
-         fprintf(stderr, "bench: entity_bonus override -> %.4f\n", (double)entity_bonus_override);
       }
       if (smoke) {
          if (optind + 2 != argc) {

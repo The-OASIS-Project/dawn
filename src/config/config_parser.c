@@ -173,6 +173,27 @@ static void warn_unknown_keys(toml_table_t *table,
    }
 }
 
+/* Keys that once had a meaning stay known, so an older dawn.toml that sets one
+ * gets a note instead of a typo warning; the value is ignored, and the next
+ * settings save drops it from the file.  Logs each key present, once per
+ * process (*told).  A retired key must also stay in its section's
+ * warn_unknown_keys() list (docs/CONFIGURATION_GUIDE.md, "Retiring a
+ * setting"). */
+static void note_retired_keys(toml_table_t *table,
+                              const char *section,
+                              const char *const *keys,
+                              const char *why,
+                              bool *told) {
+   if (!table || *told)
+      return;
+   for (int i = 0; keys[i] != NULL; i++) {
+      if (toml_key_exists(table, keys[i])) {
+         *told = true;
+         OLOG_WARNING("[%s] %s is retired and ignored: %s", section, keys[i], why);
+      }
+   }
+}
+
 /* =============================================================================
  * Section Parsers
  * ============================================================================= */
@@ -793,14 +814,11 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    PARSE_STRING(table, "compact_provider", config->compact_provider);
    PARSE_STRING(table, "compact_model", config->compact_model);
 
-   /* Retired: nothing wrote the log any more.  Still a known key, so an older
-    * dawn.toml that sets it gets this note once, not a typo warning. */
-   static bool s_conversation_logging_warned = false;
-   if (toml_key_exists(table, "conversation_logging") && !s_conversation_logging_warned) {
-      s_conversation_logging_warned = true;
-      OLOG_WARNING("[llm] conversation_logging is retired and ignored: conversations are kept in "
-                   "the database (see UPGRADING.md)");
-   }
+   static const char *const retired_llm_keys[] = { "conversation_logging", NULL };
+   static bool s_retired_llm_told;
+   note_retired_keys(table, "llm", retired_llm_keys,
+                     "conversations are kept in the database (see UPGRADING.md)",
+                     &s_retired_llm_told);
    PARSE_BOOL(table, "rate_limit_enabled", config->rate_limit_enabled);
    PARSE_INT(table, "rate_limit_rpm", config->rate_limit_rpm);
 
@@ -1187,16 +1205,14 @@ static void parse_vision(toml_table_t *table, vision_config_t *config) {
    PARSE_INT(table, "max_images", config->max_images);
    CONFIG_CLAMP(config->max_images, 1, 10);
 
-   /* Retired: a tool's images stay in the history (inside its result) until a
+   /* A tool's images stay in the history (inside its result) until a
     * compaction summarizes them; the model's per-request image limit
-    * (models.toml [max_request_images]) bounds them.  Still a known key, so an
-    * older dawn.toml that sets it gets this note once, not a typo warning. */
-   static bool s_capture_history_warned = false;
-   if (toml_key_exists(table, "capture_history_count") && !s_capture_history_warned) {
-      s_capture_history_warned = true;
-      OLOG_WARNING("[vision] capture_history_count is retired and ignored: tool images stay in "
-                   "the conversation until compaction (see UPGRADING.md)");
-   }
+    * (models.toml [max_request_images]) bounds them. */
+   static const char *const retired_vision_keys[] = { "capture_history_count", NULL };
+   static bool s_retired_vision_told;
+   note_retired_keys(table, "vision", retired_vision_keys,
+                     "tool images stay in the conversation until compaction (see UPGRADING.md)",
+                     &s_retired_vision_told);
 }
 
 static void parse_memory(toml_table_t *table, memory_config_t *config) {
@@ -1389,6 +1405,13 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                               NULL };
       warn_unknown_keys(embeddings, "memory.embeddings", emb_keys);
 
+      static const char *const retired_search_keys[] = { "rrf_enabled", "bm25_enabled",
+                                                         "memory_text_minimal", NULL };
+      static bool s_retired_search_told;
+      note_retired_keys(embeddings, "memory.embeddings", retired_search_keys,
+                        "only its default behavior remains (see UPGRADING.md)",
+                        &s_retired_search_told);
+
       PARSE_STRING(embeddings, "provider", config->embedding_provider);
       PARSE_STRING(embeddings, "model", config->embedding_model);
       PARSE_STRING(embeddings, "endpoint", config->embedding_endpoint);
@@ -1396,9 +1419,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(embeddings, "vector_weight", config->embedding_vector_weight);
       PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_BOOL(embeddings, "temporal_filter_enabled", config->temporal_filter_enabled);
-      PARSE_BOOL(embeddings, "rrf_enabled", config->rrf_enabled);
-      PARSE_BOOL(embeddings, "memory_text_minimal", config->memory_text_minimal);
-      PARSE_BOOL(embeddings, "bm25_enabled", config->bm25_enabled);
       PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);
       PARSE_DOUBLE(embeddings, "search_score_floor", config->search_score_floor);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);
@@ -1419,19 +1439,23 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    toml_table_t *graph = toml_table_in(table, "graph_retrieval");
    if (graph) {
       static const char *const graph_keys[] = {
-         "enabled",           "entity_grounding_bonus", "max_facts_per_query",
-         "use_query_scoring", "entity_bonus",           NULL
+         "enabled",           "max_facts_per_query", "entity_grounding_bonus",
+         "use_query_scoring", "entity_bonus",        NULL
       };
       warn_unknown_keys(graph, "memory.graph_retrieval", graph_keys);
+
+      static const char *const retired_graph_keys[] = { "entity_grounding_bonus",
+                                                        "use_query_scoring", "entity_bonus", NULL };
+      static bool s_retired_graph_told;
+      note_retired_keys(graph, "memory.graph_retrieval", retired_graph_keys,
+                        "graph candidates are always scored by their similarity to the query "
+                        "(see UPGRADING.md)",
+                        &s_retired_graph_told);
+
       PARSE_BOOL(graph, "enabled", config->graph_retrieval.enabled);
-      PARSE_DOUBLE(graph, "entity_grounding_bonus", config->graph_retrieval.entity_grounding_bonus);
       PARSE_INT(graph, "max_facts_per_query", config->graph_retrieval.max_facts_per_query);
-      PARSE_BOOL(graph, "use_query_scoring", config->graph_retrieval.use_query_scoring);
-      PARSE_DOUBLE(graph, "entity_bonus", config->graph_retrieval.entity_bonus);
    }
-   CONFIG_CLAMP(config->graph_retrieval.entity_grounding_bonus, 0.0f, 1.0f);
    CONFIG_CLAMP(config->graph_retrieval.max_facts_per_query, 1, 200);
-   CONFIG_CLAMP(config->graph_retrieval.entity_bonus, 0.0f, 1.0f);
 
    /* Parse [memory.recovery] sub-table */
    toml_table_t *recovery = toml_table_in(table, "recovery");
@@ -1474,6 +1498,12 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 NULL };
       warn_unknown_keys(focus, "memory.focus_injection", focus_keys);
 
+      static const char *const retired_focus_keys[] = { "classifier_enabled", NULL };
+      static bool s_retired_focus_told;
+      note_retired_keys(focus, "memory.focus_injection", retired_focus_keys,
+                        "the classifier it switched on was never built (see UPGRADING.md)",
+                        &s_retired_focus_told);
+
       focus_injection_config_t *fi = &config->focus_injection;
       PARSE_BOOL(focus, "enabled", fi->enabled);
       PARSE_INT(focus, "focus_budget_bytes", fi->focus_budget_bytes);
@@ -1497,7 +1527,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(focus, "named_fact_min_relevance", fi->named_fact_min_relevance);
       PARSE_DOUBLE(focus, "entity_min_relevance", fi->entity_min_relevance);
       PARSE_DOUBLE(focus, "summary_min_relevance", fi->summary_min_relevance);
-      PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);
       PARSE_DOUBLE(focus, "weight_semantic", fi->weight_semantic);
       PARSE_DOUBLE(focus, "weight_recency", fi->weight_recency);
       PARSE_DOUBLE(focus, "weight_importance", fi->weight_importance);

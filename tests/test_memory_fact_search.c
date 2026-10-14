@@ -71,7 +71,7 @@ static void test_single_token_keyword_path(void) {
    TEST_ASSERT_EQUAL_INT64(100, out[0].id);
 }
 
-static void test_multi_token_dedup_and_score(void) {
+static void test_keyword_only_scores(void) {
    seed_fact(0, 100, 1, "alpha bravo", 0.8f);
    seed_fact(1, 101, 1, "charlie delta", 0.6f);
    s_mock.fact_count = 2;
@@ -81,11 +81,10 @@ static void test_multi_token_dedup_and_score(void) {
    int n = -1;
    int rc = memory_fact_search_hybrid(1, "alpha bravo charlie", NULL, 0, 0, out, scores, 10, &n);
    TEST_ASSERT_EQUAL_INT(SUCCESS, rc);
-   /* Stub returns the same fact set per token; dedup means each fact
-    * appears once with score == #tokens that matched (each token
-    * matches all facts in stub, so score = token_count = 3). */
+   /* Without embeddings the keyword ranking is the output, its BM25 score
+    * carried as hundredths (the stub scores every hit 1.0). */
    TEST_ASSERT_EQUAL_INT(2, n);
-   TEST_ASSERT_EQUAL_FLOAT(3.0f, scores[0]);
+   TEST_ASSERT_EQUAL_FLOAT(100.0f, scores[0]);
 }
 
 static void test_hybrid_path_reorders(void) {
@@ -216,7 +215,7 @@ static void test_null_query_returns_zero(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_single_token_keyword_path);
-   RUN_TEST(test_multi_token_dedup_and_score);
+   RUN_TEST(test_keyword_only_scores);
    RUN_TEST(test_hybrid_path_reorders);
    RUN_TEST(test_since_ts_filter);
    RUN_TEST(test_user_id_scope);

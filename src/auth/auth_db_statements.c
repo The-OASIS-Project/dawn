@@ -502,10 +502,9 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * side; the caller pulls the score with sqlite3_column_double(.,10). */
    /* v48 BM25 prep statements are SOFT failures: if the FTS5 table is
     * missing (DB held at v47 because the v48 migration failed) these
-    * preps fail.  Leave the pointers NULL and let memory_db_fact_search_bm25's
-    * NULL-check fall through to the keyword-only legacy path.  Hard-
-    * failing the whole daemon on a config-gated experimental feature
-    * would be too strong — Phase 1 BM25 is opt-in via bm25_enabled. */
+    * preps fail.  Leave the pointers NULL: memory_db_fact_search_bm25_since then
+    * finds nothing, and memory search runs on embeddings alone, rather than
+    * the daemon failing to start. */
    { .name = "memory_fact_search_bm25",
      .sql = "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
             "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, "
@@ -522,9 +521,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
 
    /* v48 with `since_ts` filter — same as above but with `AND mf.created_at >= ?`
     * appended.  Used by focus-injection adapters and any time-windowed
-    * memory.search query.  Without this, those callers would silently fall
-    * back to the legacy multi-LIKE path and the BM25 A/B bench would be
-    * dishonest for the windowed-query subset. */
+    * memory.search query. */
    { .name = "memory_fact_search_bm25_since",
      .sql = "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
             "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, "
@@ -760,13 +757,6 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_memory_summary_search },
 
    /* Date-filtered memory queries (for time_range search and fixed recent) */
-   { "memory_fact_search_since",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, category FROM memory_facts "
-     "WHERE user_id = ?1 AND superseded_by IS NULL AND fact_text LIKE ?2 ESCAPE '\\' "
-     "AND created_at >= ?3 AND (expires_at IS NULL OR expires_at >= ?5) "
-     "ORDER BY confidence DESC LIMIT ?4",
-     &s_db.stmt_memory_fact_search_since },
    { "memory_summary_search_since",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
      "message_count, duration_seconds, consolidated FROM memory_summaries "
@@ -1036,6 +1026,18 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
      "WHERE r.user_id = ? AND r.object_entity_id = ? LIMIT ?",
      &s_db.stmt_memory_relation_list_by_object },
+   { "memory_relation_list_by_object_at",
+     "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
+     "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
+     "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+     "r.mention_count "
+     "FROM memory_relations r "
+     "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
+     "WHERE r.user_id = ? AND r.object_entity_id = ? "
+     "  AND (r.valid_from IS NULL OR r.valid_from <= ?) "
+     "  AND (r.valid_to IS NULL OR r.valid_to > ?) "
+     "LIMIT ?",
+     &s_db.stmt_memory_relation_list_by_object_at },
 
    /* The fact_ids of fact-linked relations touching any name in ?2's class
     * (?2's canonical and that canonical's aliases), as subject or object,

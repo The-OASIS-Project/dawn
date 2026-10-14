@@ -87,9 +87,7 @@ static void set_valid_defaults(void) {
    /* graph_retrieval.* added in Phase 1A — needs valid defaults so
     * config_validate doesn't short-circuit on these fields before
     * reaching the field the individual test is exercising. */
-   s_config.memory.graph_retrieval.entity_grounding_bonus = 0.40f;
    s_config.memory.graph_retrieval.max_facts_per_query = 30;
-   s_config.memory.graph_retrieval.entity_bonus = 0.0f;
    /* dominant_token_heuristic.* added in May 2026 reranker workstream —
     * lower bound is 0.01 (not 0.0) on both fields per the validator's
     * comment about silent-no-op-at-zero. */

@@ -166,8 +166,9 @@ static int add_graph_facts(int user_id,
                                              g_config.memory.search_score_floor);
 
    /* The named bar, measured like the injection gate.  Without a baseline (a
-    * memory too small to have one, or no embedding) there's no relevance to
-    * measure, and the named entity's facts fill free slots by score alone. */
+    * memory too small to have one) there's no relevance to measure, and the
+    * named entity's facts fill free slots by score alone.  (Without an
+    * embedding there are no graph candidates.) */
    float rel[MEMORY_GRAPH_INTERMEDIATE_CAP] = { 0 };
    bool gated = false;
    const float min_rel = g_config.memory.focus_injection.named_fact_min_relevance;
