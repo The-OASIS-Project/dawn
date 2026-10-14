@@ -187,6 +187,119 @@ static void test_display_reads_skip_kind_rows(void) {
    TEST_ASSERT_EQUAL_INT64(last_visible, max_id);
 }
 
+/* ---- a briefing counted as extracted, for memory extraction ---- */
+
+/* The conversation's extraction cursor: last row id, row count. */
+static void extraction_cursor(int64_t conv, int64_t *msg_id, int *count) {
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT last_extracted_msg_id, "
+                                            "last_extracted_msg_count FROM conversations "
+                                            "WHERE id = ?",
+                                            -1, &st, NULL));
+   sqlite3_bind_int64(st, 1, conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   *msg_id = sqlite3_column_int64(st, 0);
+   *count = sqlite3_column_int(st, 1);
+   sqlite3_finalize(st);
+}
+
+static void test_briefing_marked_extracted(void) {
+   int64_t end = 0, cursor = 0;
+   int count = 0;
+   bool replied = true;
+
+   /* No reply: the whole conversation is the briefing (context rows aside),
+    * marked extracted in the units conversations.message_count uses. */
+   int64_t quiet = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_with_origin(alice_id, "b", "briefing", &quiet));
+   add_row(quiet, "user", "Time for the morning briefing.", NULL);
+   add_row(quiet, "assistant", "", NULL);
+   add_row(quiet, "tool", "weather data", NULL);
+   const int64_t summary = add_row(quiet, "assistant", "Sunny, and a news digest.", NULL);
+   add_row(quiet, "system", "HIDDEN directive", "directive");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_briefing_mark_extracted(quiet, alice_id, &end, &replied));
+   TEST_ASSERT_EQUAL_INT64(summary, end);
+   TEST_ASSERT_FALSE(replied);
+   extraction_cursor(quiet, &cursor, &count);
+   TEST_ASSERT_EQUAL_INT64(summary, cursor);
+   TEST_ASSERT_EQUAL_INT(4, count);
+
+   /* A reply: the briefing ends just before it, and the reply stays to be
+    * extracted; a context row doesn't count as the user replying. */
+   int64_t answered = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_with_origin(alice_id, "b", "briefing", &answered));
+   add_row(answered, "user", "Time for the morning briefing.", NULL);
+   add_row(answered, "user", "HIDDEN turn context", "turn_context");
+   const int64_t answered_summary = add_row(answered, "assistant", "News digest.", NULL);
+   add_row(answered, "user", "I'm skipping that conference.", NULL);
+   add_row(answered, "assistant", "Noted.", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_briefing_mark_extracted(answered, alice_id, &end, &replied));
+   TEST_ASSERT_EQUAL_INT64(answered_summary, end);
+   TEST_ASSERT_TRUE(replied);
+   extraction_cursor(answered, &cursor, &count);
+   TEST_ASSERT_EQUAL_INT64(answered_summary, cursor);
+   TEST_ASSERT_EQUAL_INT(2, count);
+
+   /* Forward only: a cursor already past the briefing (a forget, an earlier
+    * extraction) is left where it is. */
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "UPDATE conversations SET last_extracted_msg_id = "
+                                            "?2, last_extracted_msg_count = 4 WHERE id = ?1",
+                                            -1, &st, NULL));
+   sqlite3_bind_int64(st, 1, answered);
+   sqlite3_bind_int64(st, 2, answered_summary + 2);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(st));
+   sqlite3_finalize(st);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_briefing_mark_extracted(answered, alice_id, &end, &replied));
+   extraction_cursor(answered, &cursor, &count);
+   TEST_ASSERT_EQUAL_INT64(answered_summary + 2, cursor);
+   TEST_ASSERT_EQUAL_INT(4, count);
+
+   /* No scheduler row first (its insert failed): not bounded, left alone, so
+    * the user's own words are still extracted. */
+   int64_t headless = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_with_origin(alice_id, "b", "briefing", &headless));
+   add_row(headless, "assistant", "News digest.", NULL);
+   add_row(headless, "user", "Thanks, I'll read the second one.", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_briefing_mark_extracted(headless, alice_id, &end, &replied));
+   TEST_ASSERT_EQUAL_INT64(0, end);
+   extraction_cursor(headless, &cursor, &count);
+   TEST_ASSERT_EQUAL_INT64(0, cursor);
+
+   /* Not a briefing, and not the caller's conversation. */
+   int64_t chat = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &chat));
+   add_row(chat, "user", "Hi", NULL);
+   add_row(chat, "assistant", "Hello.", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_briefing_mark_extracted(chat, alice_id, &end, &replied));
+   TEST_ASSERT_EQUAL_INT64(0, end);
+   extraction_cursor(chat, &cursor, &count);
+   TEST_ASSERT_EQUAL_INT64(0, cursor);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN,
+                         conv_db_briefing_mark_extracted(quiet, bob_id, &end, &replied));
+
+   /* The neighbouring reads check the owner too (they once checked only that
+    * the conversation existed). */
+   int64_t max_id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN, conv_db_get_max_msg_id(quiet, bob_id, &max_id));
+   display_t shown = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN,
+                         conv_db_get_messages_by_range(quiet, bob_id, 1, summary, 0, true,
+                                                       collect_display, &shown));
+}
+
 /* The rows a display read returns that carry an email_ref, and the last one. */
 typedef struct {
    int with_ref;
@@ -1556,5 +1669,6 @@ int main(void) {
    RUN_TEST(test_handles_are_stable_per_conversation);
    RUN_TEST(test_handles_check_the_owner_and_input);
    RUN_TEST(test_deleting_a_conversation_drops_its_handles);
+   RUN_TEST(test_briefing_marked_extracted);
    return UNITY_END();
 }
