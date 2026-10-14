@@ -116,11 +116,15 @@ fi
 # trigger it.  Pure docs / config / web-only commits skip the test phase so
 # fast-iteration cycles stay fast.
 
-STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+# Every path the staged changes touch, deletions and both ends of a move
+# included (a file moved out of tests/ still breaks the build).  Keep
+# SOURCE_RE in step with pre-push.hook's.
+STAGED=$(git diff --cached --name-only --no-renames)
+SOURCE_RE='^(src|include|common|tests|benchmarks|cmake|third_party|dawn_satellite|models)/|^(whisper\.cpp|models\.toml|CMakePresets\.json)$|^www/js/ui/(memory_aliases\.js|settings/schema\.js)$|(^|/)CMakeLists\.txt$|\.cmake$'
 
 SHOULD_TEST=0
 if [ -n "$STAGED" ]; then
-   if echo "$STAGED" | grep -qE '^(src|include|common|tests|benchmarks|cmake)/|(^|/)CMakeLists\.txt$|\.cmake$'; then
+   if echo "$STAGED" | grep -qE "$SOURCE_RE"; then
       SHOULD_TEST=1
    fi
 fi
@@ -150,7 +154,18 @@ fi
 
 BUILD_LOG=$(mktemp -t dawn-precommit-build.XXXXXX.log)
 TEST_LOG=$(mktemp -t dawn-precommit-test.XXXXXX.log)
-trap 'rm -f "$BUILD_LOG" "$TEST_LOG"' EXIT
+# The tests' scratch files on a RAM disk where there is one: SQLite's syncs to
+# disk were most of the suite's time, and no test checks durability across a
+# power loss.  Only ctest sees it; the logs above stay in the usual place.
+TEST_TMP=""
+# It needs room for the parallel suite's scratch files (one test alone writes a
+# 64 MiB blob), and a container's /dev/shm is often only 64 MiB: check first.
+TEST_TMP_MIN_KB=1048576
+SHM_FREE_KB=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }')
+if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "${SHM_FREE_KB:-0}" -ge "$TEST_TMP_MIN_KB" ] 2>/dev/null; then
+   TEST_TMP=$(mktemp -d /dev/shm/dawn-tests.XXXXXX 2>/dev/null) || TEST_TMP=""
+fi
+trap 'rm -f "$BUILD_LOG" "$TEST_LOG"; [ -n "$TEST_TMP" ] && rm -rf "$TEST_TMP"' EXIT
 
 # `benches` (the NO_TEST benchmark drivers) is built here rather than in GitHub
 # CI, which has no onnxruntime — otherwise nothing ever compiles them.
@@ -168,7 +183,8 @@ if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci benches > "$BUILD_LOG" 2>&1; the
 fi
 
 echo -e "${BLUE}Pre-commit: running CI test suite…${NC}"
-if ! ctest --test-dir "$BUILD_DIR" -j"$(nproc)" --output-on-failure --no-tests=error -L ci > "$TEST_LOG" 2>&1; then
+if ! TMPDIR="${TEST_TMP:-${TMPDIR:-/tmp}}" ctest --test-dir "$BUILD_DIR" -j"$(nproc)" \
+   --output-on-failure --no-tests=error -L ci > "$TEST_LOG" 2>&1; then
    echo ""
    echo -e "${RED}Test suite FAILED.  Failing cases:${NC}"
    grep -E "FAIL:|\*\*\*Failed|tests failed" "$TEST_LOG" | head -20
