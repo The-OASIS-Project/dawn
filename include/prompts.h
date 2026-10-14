@@ -80,6 +80,7 @@
  *   SCHEDULED BRIEFINGS
  *     BRIEFING_SYSTEM_PROMPT_PREFIX
  *     BRIEFING_SYSTEM_PROMPT_SECURITY
+ *     BRIEFING_USER_INTENT_FMT
  *   MESSAGING CHANNELS
  *     MESSAGING_CHAT_FORMAT_NUDGE
  *     MESSAGING_SMS_CHANNEL_HINT
@@ -1057,6 +1058,12 @@
  * The briefing summarizer's system message, assembled by
  * build_briefing_system_message() (briefing_prompt.c).
  * ============================================================================= */
+
+/* The user line that opens a briefing conversation (%s: the briefing's name).
+ * BRIEFING_USER_INTENT_LIKE matches it in SQL, so memory extraction can tell
+ * the scheduler's line from a user's message (conv_db_briefing_mark_extracted). */
+#define BRIEFING_USER_INTENT_FMT "Time for the %s briefing."
+#define BRIEFING_USER_INTENT_LIKE "Time for the % briefing."
 
 /* Default formatting/voice guidance.  Overridable by a briefing's optional
  * per-briefing instructions.  The display name and the cleaned data payload

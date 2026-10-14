@@ -12,6 +12,19 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-14 — Briefings no longer feed memory
+
+**What changed.** A scheduled briefing is a summary of outside content: news, weather, email, your
+calendar. Memory used to extract facts from it as if you had said them, so headlines, forecasts and
+other people's emails ended up stored as facts about you. Now memory reads only what you say back to a
+briefing. A briefing nobody replies to is skipped without calling the extraction model, which also
+saves that call.
+
+**What you need to do.** Nothing. Facts already learned from past briefings stay until you remove them
+(the Memory panel, or forgetting what a conversation taught).
+
+---
+
 ## 2026-10-13 — Memory: settings for removed search experiments are retired
 
 **What changed.** Memory search experiments that lost in testing were removed, along with the
