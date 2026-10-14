@@ -217,6 +217,10 @@ const char *device_type_get_name(tool_device_type_t type) {
    return def ? def->name : "unknown";
 }
 
+bool device_type_value_is_secret(tool_device_type_t type) {
+   return type == TOOL_DEVICE_TYPE_PASSPHRASE;
+}
+
 /* ========== Pattern Matching ========== */
 
 /**
@@ -308,7 +312,12 @@ static bool match_single_pattern(const char *pattern,
          i += name_len;
          p += 13;
 
-         /* After device name, require whitespace or end if more pattern follows */
+         /* After device name, require a word boundary if more pattern follows:
+          * whitespace, punctuation ("Shutdown, alpha bravo" as Whisper writes
+          * it), or the end */
+         while (*p && ispunct((unsigned char)*i)) {
+            i++;
+         }
          if (*p && !isspace((unsigned char)*i) && *i != '\0') {
             return false;
          }

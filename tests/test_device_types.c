@@ -236,6 +236,28 @@ static void test_match_passphrase_with_value(void) {
 
 /* ── Edge cases ──────────────────────────────────────────────────────────── */
 
+static void test_match_punctuation_after_device_name(void) {
+   /* Whisper writes "Shutdown, alpha bravo." (trailing punctuation is stripped
+    * by normalize_for_matching; this is the comma after the device name) */
+   const char *action = NULL;
+   char value[64] = { 0 };
+   bool ok = device_type_match_pattern(&DEVICE_TYPE_PASSPHRASE, "shutdown, alpha bravo", "shutdown",
+                                       NULL, &action, value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("alpha bravo", value);
+
+   /* A word that only starts with the device name is still no match */
+   ok = device_type_match_pattern(&DEVICE_TYPE_PASSPHRASE, "shutdowns alpha", "shutdown", NULL,
+                                  &action, value, sizeof(value));
+   TEST_ASSERT_FALSE(ok);
+}
+
+static void test_value_is_secret(void) {
+   TEST_ASSERT_TRUE(device_type_value_is_secret(TOOL_DEVICE_TYPE_PASSPHRASE));
+   TEST_ASSERT_FALSE(device_type_value_is_secret(TOOL_DEVICE_TYPE_MUSIC));
+   TEST_ASSERT_FALSE(device_type_value_is_secret(TOOL_DEVICE_TYPE_ANALOG));
+}
+
 static void test_match_null_inputs(void) {
    const char *action = NULL;
    char value[64] = "";
@@ -305,6 +327,8 @@ int main(void) {
    RUN_TEST(test_match_trigger);
    RUN_TEST(test_match_trigger_with_please);
    RUN_TEST(test_match_passphrase_with_value);
+   RUN_TEST(test_match_punctuation_after_device_name);
+   RUN_TEST(test_value_is_secret);
 
    /* Edge cases */
    RUN_TEST(test_match_null_inputs);

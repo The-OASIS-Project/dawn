@@ -2261,6 +2261,15 @@ dawn_add_unit_test(test_tool_registry
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Shutdown tool: the passphrase check's refusals (never an accepted request,
+# which would run the real shutdown)
+dawn_add_unit_test(test_shutdown_tool
+   SOURCES test_shutdown_tool.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/tools/shutdown_tool.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Round-trip symmetry gate for the [phone] audio config (parse<->write). Links
 # the dependency-light audio-config module + toml + phone_apm's pure default
 # helper (phone_apm.cpp compiles as a stub without AEC_BACKEND_WEBRTC).

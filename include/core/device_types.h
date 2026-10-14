@@ -116,4 +116,10 @@ bool device_type_match_pattern(const device_type_def_t *type,
  */
 const char *device_type_get_name(tool_device_type_t type);
 
+/**
+ * @brief Whether a device type's spoken value may be a secret (a passphrase),
+ *        kept out of the match log
+ */
+bool device_type_value_is_secret(tool_device_type_t type);
+
 #endif /* DEVICE_TYPES_H */

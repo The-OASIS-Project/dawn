@@ -516,20 +516,23 @@ static void end_local_turn(void) {
  * shortcut should give way to the LLM: a pattern can catch a sentence it doesn't
  * understand ("play a track from Plex"), so in direct_first a hard failure the
  * tool marked (nothing done, see TOOL_RESULT_ERROR_MARK) goes to the LLM, which
- * can.  Any other failure, or one in direct_only (no LLM to ask), is handled.
+ * can.  Any other failure, one in direct_only (no LLM to ask), or one for a
+ * @p secret command (the LLM never gets the passphrase, so it couldn't do
+ * better than the tool's own answer) is handled, and the tool's reply spoken.
  */
-static bool run_direct_command(const char *treg_command) {
+static bool run_direct_command(const char *treg_command, bool secret) {
    struct json_object *cmd_json = json_tokener_parse(treg_command);
    if (!cmd_json) {
-      OLOG_ERROR("TREG command unreadable: %s", treg_command);
-      return command_processing_mode != CMD_MODE_DIRECT_FIRST; /* nothing ran */
+      OLOG_ERROR("TREG command unreadable");
+      return secret || command_processing_mode != CMD_MODE_DIRECT_FIRST; /* nothing ran */
    }
    cmd_exec_result_t exec_result;
    int rc = command_execute_json(cmd_json, mosq, &exec_result);
    json_object_put(cmd_json);
 
    const char *text = exec_result.result ? exec_result.result : "";
-   bool fall_back = exec_result.tool_error && command_processing_mode == CMD_MODE_DIRECT_FIRST;
+   bool fall_back = exec_result.tool_error && !secret &&
+                    command_processing_mode == CMD_MODE_DIRECT_FIRST;
    if (fall_back) {
       OLOG_INFO("TREG command failed (%s); passing the request to the LLM", text);
       metrics_log_activity("TREG fell back to the LLM");
@@ -3861,6 +3864,25 @@ mqtt_disabled:
                s_pending_voice_command = NULL;
             }
 
+            /* Match a voice shortcut first (compile-time patterns; it only reads the
+             * registry), so a passphrase command never reaches the history as spoken.
+             * Normalized for matching (lowercase, punctuation stripped): Whisper's
+             * "Turn on the lights." -> "turn on the lights". */
+            char treg_command[MAX_COMMAND_LENGTH + MAX_WORD_LENGTH];
+            char treg_topic[MAX_WORD_LENGTH];
+            bool treg_matched = false;
+            /* A matched passphrase command (shutdown <passphrase>) stays out of the
+             * history and away from the model.  In llm_only there's no shortcut to
+             * carry it, so the model gets it, as it always has. */
+            bool treg_secret = false;
+            if (command_processing_mode != CMD_MODE_LLM_ONLY) {
+               char normalized_text[MAX_COMMAND_LENGTH];
+               normalize_for_matching(command_text, normalized_text, sizeof(normalized_text));
+               treg_matched = try_tool_registry_match(normalized_text, treg_command,
+                                                      sizeof(treg_command), treg_topic,
+                                                      sizeof(treg_topic), &treg_secret);
+            }
+
             // Add user message to conversation history first (needed for vision context),
             // as the first message of the turn it starts: the turn owns it from here
             // (rollback on interrupt, the history pin).  Skipped while busy (the
@@ -3875,7 +3897,9 @@ mqtt_disabled:
                if (s_command_unattended) {
                   session_turn_mark_background(local_session);
                }
-               session_add_turn_message(local_session, "user", command_text);
+               /* The history goes to the model and to memory extraction */
+               session_add_turn_message(local_session, "user",
+                                        treg_secret ? VOICE_PASSPHRASE_PLACEHOLDER : command_text);
             }
 
             /* Process Commands before AI if LLM command processing is disabled */
@@ -3883,17 +3907,7 @@ mqtt_disabled:
                /* Set command context so callbacks use local session (auto-cleared on scope exit) */
                SESSION_SCOPED_COMMAND_CONTEXT(local_session);
 
-               /* Normalize command_text for matching (lowercase, strip punctuation)
-                * This handles Whisper ASR output: "Turn on the lights." -> "turn on the lights"
-                * We keep original command_text for value extraction (e.g., song names) */
-               char normalized_text[MAX_COMMAND_LENGTH];
-               normalize_for_matching(command_text, normalized_text, sizeof(normalized_text));
-
-               /* Try tool_registry matching first (compile-time patterns) */
-               char treg_command[MAX_COMMAND_LENGTH + MAX_WORD_LENGTH];
-               char treg_topic[MAX_WORD_LENGTH];
-               if (try_tool_registry_match(normalized_text, treg_command, sizeof(treg_command),
-                                           treg_topic, sizeof(treg_topic))) {
+               if (treg_matched) {
                   pthread_mutex_lock(&tts_mutex);
                   if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
                      tts_playback_state = TTS_PLAYBACK_DISCARD;
@@ -3904,7 +3918,7 @@ mqtt_disabled:
                   metrics_log_activity("TREG direct match");
 
                   /* Handled, or it gives way to the LLM below */
-                  direct_command_found = run_direct_command(treg_command);
+                  direct_command_found = run_direct_command(treg_command, treg_secret);
                }
 
                /* Note: JSON-based pattern matching removed - tool_registry handles all patterns */

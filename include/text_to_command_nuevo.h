@@ -26,6 +26,7 @@
 #ifndef TEXT_TO_COMMAND_H
 #define TEXT_TO_COMMAND_H
 
+#include <stdbool.h>
 #include <stddef.h> /* For size_t */
 
 /* Buffer size constants used for command processing */
@@ -61,12 +62,15 @@ void normalize_for_matching(const char *input, char *output, size_t size);
  * @param command_size Size of out_command buffer
  * @param out_topic   Buffer to receive the MQTT topic on match (can be NULL)
  * @param topic_size  Size of out_topic buffer
+ * @param out_secret  Optional: set when the matched value is a passphrase, which
+ *                    the caller keeps out of the history
  * @return 1 if matched, 0 if no match
  */
 int try_tool_registry_match(const char *input,
                             char *out_command,
                             size_t command_size,
                             char *out_topic,
-                            size_t topic_size);
+                            size_t topic_size,
+                            bool *out_secret);
 
 #endif /* TEXT_TO_COMMAND_H */

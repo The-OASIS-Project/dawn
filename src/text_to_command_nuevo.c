@@ -77,13 +77,19 @@ void normalize_for_matching(const char *input, char *output, size_t size) {
  * @param command_size Size of out_command buffer
  * @param out_topic   Buffer to receive the MQTT topic on match (can be NULL)
  * @param topic_size  Size of out_topic buffer
+ * @param out_secret  Optional: set when the matched value is a passphrase, which
+ *                    the caller keeps out of the history
  * @return 1 if matched, 0 if no match
  */
 int try_tool_registry_match(const char *input,
                             char *out_command,
                             size_t command_size,
                             char *out_topic,
-                            size_t topic_size) {
+                            size_t topic_size,
+                            bool *out_secret) {
+   if (out_secret) {
+      *out_secret = false;
+   }
    if (!input || !out_command || command_size == 0) {
       return 0;
    }
@@ -143,8 +149,17 @@ int try_tool_registry_match(const char *input,
             safe_strncpy(out_topic, tool->topic, topic_size);
          }
 
-         OLOG_INFO("TREG MATCH: \"%s\" → tool=%s, action=%s, value=%s", input, tool->name, action,
-                   value[0] ? value : "(none)");
+         /* A passphrase isn't repeated in this line (the input line holds it) */
+         bool secret = device_type_value_is_secret(tool->device_type);
+         if (out_secret) {
+            *out_secret = secret;
+         }
+         if (secret) {
+            OLOG_INFO("TREG MATCH: tool=%s, action=%s (passphrase hidden)", tool->name, action);
+         } else {
+            OLOG_INFO("TREG MATCH: \"%s\" → tool=%s, action=%s, value=%s", input, tool->name,
+                      action, value[0] ? value : "(none)");
+         }
 
          return 1;
       }

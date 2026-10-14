@@ -124,6 +124,11 @@
 // Deliberately avoid hard word/sentence caps: convey intent, don't over-constrain.
 // Bare text (no leading separator); each injection site adds its own "\n\n".
 
+// What the conversation history holds for a spoken command that carried a
+// passphrase (shutdown <passphrase>): the model and memory extraction read the
+// history, so the spoken words never go there.
+#define VOICE_PASSPHRASE_PLACEHOLDER "(a passphrase command; the passphrase is left out)"
+
 // Spoken-output directive for satellites + local mic (reply is heard, not read).
 #define DEFAULT_VOICE_OUTPUT_DIRECTIVE                                            \
    "This conversation is spoken aloud: your reply is read to the user by "        \

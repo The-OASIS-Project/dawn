@@ -23,6 +23,7 @@
 
 #include "tools/shutdown_tool.h"
 
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +67,27 @@ static int constant_time_compare(const char *a, const char *b) {
    return result;
 }
 
+/* A spoken passphrase has no case or punctuation: compare it folded (ASCII
+ * letters and digits lowercased, UTF-8 bytes kept as they are, anything else one
+ * space, trimmed) */
+static void fold_spoken(const char *in, char *out, size_t size) {
+   size_t n = 0;
+   bool gap = false;
+   for (const char *p = in; *p && n + 1 < size; p++) {
+      unsigned char c = (unsigned char)*p;
+      if (isalnum(c) || c >= 0x80) {
+         if (gap && n > 0 && n + 2 < size) {
+            out[n++] = ' ';
+         }
+         out[n++] = c < 0x80 ? (char)tolower(c) : (char)c;
+         gap = false;
+      } else {
+         gap = true;
+      }
+   }
+   out[n] = '\0';
+}
+
 /* =============================================================================
  * Tool Callback
  * ============================================================================= */
@@ -105,9 +127,20 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
                     "Shutdown command is disabled. Enable it in settings first.");
    }
 
-   /* Security check 2: If passphrase is configured, it must match */
+   /* Security check 2: If passphrase is configured, it must match (folded: a
+    * spoken one has no case, and the voice shortcut hands it over lowercased) */
    if (passphrase[0] != '\0') {
-      if (value == NULL || constant_time_compare(value, passphrase) != 0) {
+      char want[sizeof(passphrase)];
+      char got[sizeof(passphrase)];
+      fold_spoken(passphrase, want, sizeof(want));
+      fold_spoken(value ? value : "", got, sizeof(got));
+      if (want[0] == '\0') {
+         /* Nothing left to compare: an empty match must not authorize */
+         OLOG_ERROR("Shutdown command rejected: the passphrase has no letters or digits");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Shutdown command rejected: the configured passphrase can't be spoken.");
+      }
+      if (constant_time_compare(got, want) != 0) {
          OLOG_WARNING("Shutdown command rejected: incorrect or missing passphrase");
          return strdup(TOOL_RESULT_ERROR_MARK "Shutdown command rejected: incorrect passphrase.");
       }
