@@ -42,6 +42,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
@@ -998,10 +999,12 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
          int64_t conv_id = resolve_channel_conversation_id(&ref, provider, provider_address, NULL);
          if (conv_id > 0) {
             int64_t msg_id = 0;
-            /* no-blocks: a channel post DAWN sent, not a model turn. */
-            if (conv_db_add_message_ex(conv_id, user_id, "assistant", text, &msg_id) ==
-                    AUTH_DB_SUCCESS &&
-                msg_id > 0) {
+            /* no-blocks: a channel post DAWN sent, not a model turn; unprompted, so
+             * memory extraction never reads it as the conversation's. */
+            const conv_message_row_t row = { .role = "assistant",
+                                             .content = text,
+                                             .unprompted = true };
+            if (conv_db_add_row(conv_id, user_id, &row, &msg_id) == AUTH_DB_SUCCESS && msg_id > 0) {
                webui_broadcast_conversation_messages_appended(user_id, conv_id);
             }
          }

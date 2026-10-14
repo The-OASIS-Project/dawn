@@ -35,6 +35,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_messages.h"
 #include "core/job_dispatch.h" /* job_provider_from_default */
 #include "core/job_manager.h"
 #include "core/session_manager.h"
@@ -118,9 +119,10 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id, const char
    }
 
    int64_t msg_id = 0;
-   /* no-blocks: DAWN's own completion note, not a model turn. */
-   if (conv_db_add_message_with_tools(rec.parent_id, user_id, "assistant", msg, NULL, NULL, NULL,
-                                      &msg_id) != AUTH_DB_SUCCESS) {
+   /* no-blocks: DAWN's own completion note, not a model turn; unprompted, so memory
+    * extraction leaves it out. */
+   const conv_message_row_t row = { .role = "assistant", .content = msg, .unprompted = true };
+   if (conv_db_add_row(rec.parent_id, user_id, &row, &msg_id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("research_worker: failed to post completion to parent conv %lld",
                    (long long)rec.parent_id);
       return;

@@ -1631,6 +1631,23 @@ static int trigger_extraction(int user_id,
       extraction_slot_release(user_id);
       return 0;
    }
+   /* Nothing the user said is new (only DAWN's own posts, say): mark it done
+    * rather than send the model an empty conversation. */
+   if (!memory_extraction_input_has_question(filtered)) {
+      json_object_put(filtered);
+      free(ctx);
+      if (conversation_id > 0) {
+         int64_t max_id = 0;
+         if (conv_db_get_max_msg_id(conversation_id, user_id, &max_id) == AUTH_DB_SUCCESS &&
+             max_id > 0) {
+            memory_db_set_last_extracted(conversation_id, message_count, max_id);
+         }
+      }
+      OLOG_INFO("memory_extraction: conv %lld: nothing the user said is new; skipped",
+                (long long)conversation_id);
+      extraction_slot_release(user_id);
+      return 0;
+   }
 
    /* Every caller passes a stripped history; this is the backstop, so no
     * reasoning a vendor issued for itself reaches the extraction model. */
