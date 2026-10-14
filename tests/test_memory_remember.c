@@ -305,6 +305,14 @@ void test_search_shows_relations_only_when_asked(void) {
                          memory_db_relation_create(s_user, alice, "lived_in", boston, NULL, 0, 0.9f,
                                                    978307200, 1041379200, NULL));
 
+   /* Bob mentored Alice in 2001-2002: an incoming relation, filtered too. */
+   int64_t bob = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_upsert(s_user, "Bob", "person", "bob", NULL, &bob));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_create(s_user, bob, "mentored", alice, NULL, 0, 0.9f,
+                                                   978307200, 1041379200, NULL));
+
    char *r = search("Alice");
    TEST_ASSERT_NULL(strstr(r, "works_at"));
    free(r);
@@ -312,15 +320,18 @@ void test_search_shows_relations_only_when_asked(void) {
    r = search("Alice::include_historical::true");
    TEST_ASSERT_NOT_NULL(strstr(r, "works_at: Acme"));
    TEST_ASSERT_NOT_NULL(strstr(r, "lived_in: Boston"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "mentored"));
    free(r);
 
    r = search("Alice::as_of::2001-06-01");
    TEST_ASSERT_NOT_NULL(strstr(r, "lived_in: Boston"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "mentored"));
    free(r);
 
    r = search("Alice::as_of::2030-01-01");
    TEST_ASSERT_NOT_NULL(strstr(r, "works_at: Acme"));
    TEST_ASSERT_NULL(strstr(r, "lived_in"));
+   TEST_ASSERT_NULL(strstr(r, "mentored"));
    free(r);
 }
 

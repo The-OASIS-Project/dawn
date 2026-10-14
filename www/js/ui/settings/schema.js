@@ -1162,7 +1162,7 @@
                   embedding_keyword_weight: {
                      type: 'range',
                      label: 'Keyword Match Strength',
-                     hint: 'How much exact word matching influences search results (independent of semantic strength)',
+                     hint: 'How much keyword matching (stemmed, so "memories" finds "memory") influences search results (independent of semantic strength)',
                      configPath: 'memory.embedding_keyword_weight',
                      min: 0,
                      max: 1,
@@ -1193,7 +1193,7 @@
                   search_score_floor: {
                      type: 'range',
                      label: 'Memory Search Score Floor',
-                     hint: 'Drops marginal-cosine hits from memory-tool search results before they reach the LLM. 0 disables. Default 0.30 (the natural keyword-weight boundary — preserves single-token keyword matches, filters hybrid-vector-only marginal hits). Drop to 0.10-0.20 if over-filtering, push higher if weak fabrications persist.',
+                     hint: 'Drops marginal-cosine hits from memory-tool search results before they reach the LLM. 0 disables. Default 0.30. Drop to 0.10-0.20 if over-filtering, push higher if weak fabrications persist.',
                      configPath: 'memory.search_score_floor',
                      min: 0,
                      max: 1,

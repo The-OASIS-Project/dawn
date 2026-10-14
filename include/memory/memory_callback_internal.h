@@ -56,9 +56,9 @@ char *memory_action_restore(int user_id, const char *query);
  * @param keywords Search query (NULL or empty returns an error string)
  * @param since_ts If > 0, restricts to items created on/after this timestamp
  * @param category Optional fact category filter (NULL = all)
- * @param as_of_ts For relation validity (0 = now)
- * @param include_historical Bypass relation validity filter
- * @param with_source Append verbatim source excerpts to each fact
+ * @param as_of_ts > 0: add the named entities' relations valid at that time
+ * @param include_historical Add the named entities' relations, ended ones too
+ * @param with_source Append verbatim source excerpts for the top facts
  * @param source_budget Char budget for verbatim excerpts; 0 = use default
  *                      (MEMORY_SOURCE_BUDGET_CHARS = 3072).  Bench harness
  *                      passes a non-zero override to sweep budget values
@@ -97,7 +97,7 @@ char *memory_action_search(int user_id,
  * @param before Upper-bound time period string (NULL/empty → "until now")
  * @param sort_asc True = oldest first; false = newest first
  * @param limit Max records per category (0 = defaults)
- * @param with_source Append verbatim source excerpts to each fact
+ * @param with_source Append verbatim source excerpts for the top facts
  * @param source_budget Char budget for verbatim excerpts; 0 = use default
  * @return Heap-allocated formatted string (caller frees), or NULL on alloc fail
  */

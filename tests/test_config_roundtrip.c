@@ -407,6 +407,41 @@ static void test_capture_history_count_retired(void) {
    TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
 }
 
+/* --- memory search settings retired with their experiments ---------------- */
+
+static void test_memory_search_keys_retired(void) {
+   static const char *const retired[] = { "rrf_enabled",         "bm25_enabled",
+                                          "memory_text_minimal", "entity_grounding_bonus",
+                                          "use_query_scoring",   "entity_bonus",
+                                          "classifier_enabled" };
+   const int n_retired = (int)(sizeof(retired) / sizeof(retired[0]));
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+   FILE *fp = fopen(RT_PATH, "r");
+   TEST_ASSERT_NOT_NULL(fp);
+   char line[512];
+   while (fgets(line, sizeof(line), fp)) {
+      for (int i = 0; i < n_retired; i++)
+         TEST_ASSERT_NULL_MESSAGE(strstr(line, retired[i]), "a retired key was written");
+   }
+   fclose(fp);
+
+   /* An older file that still sets them parses: one note per key, no typo
+    * warnings. */
+   fp = fopen(RT_PATH, "w");
+   TEST_ASSERT_NOT_NULL(fp);
+   fputs("[memory.embeddings]\nrrf_enabled = false\nbm25_enabled = true\n"
+         "memory_text_minimal = true\n"
+         "[memory.graph_retrieval]\nmax_facts_per_query = 25\n"
+         "entity_grounding_bonus = 0.40\nuse_query_scoring = true\nentity_bonus = 0.00\n"
+         "[memory.focus_injection]\nclassifier_enabled = false\n",
+         fp);
+   fclose(fp);
+   test_stub_reset_warnings();
+   TEST_ASSERT_EQUAL_INT(0, config_parse_file(RT_PATH, &g_read));
+   TEST_ASSERT_EQUAL_INT(25, g_read.memory.graph_retrieval.max_facts_per_query);
+   TEST_ASSERT_EQUAL_INT(n_retired, test_stub_warning_count());
+}
+
 static void test_all_writer_owned_sections_present(void) {
    /* Every section config_write_toml() emits, INCLUDING sub-tables. Parent-only
     * coverage would let an entire [llm.tools] or [memory.embeddings] writer block
@@ -579,6 +614,7 @@ int main(void) {
    RUN_TEST(test_memory_idle_timeout_bounds);
    RUN_TEST(test_use_openrouter_migrates_to_provider);
    RUN_TEST(test_capture_history_count_retired);
+   RUN_TEST(test_memory_search_keys_retired);
    RUN_TEST(test_use_openrouter_not_written);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);

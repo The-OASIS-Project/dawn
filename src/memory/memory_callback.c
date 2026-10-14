@@ -322,18 +322,23 @@ static int append_source_excerpt_from_range(int user_id,
 
 #define MAX_SEARCH_TOKENS 8
 
-/* `multi_token_fact_search` was extracted to `src/memory/memory_fact_search.c`
- * (Phase 1c-i) so the focus-source fact adapter and the legacy recall path
- * share identical retrieval semantics.  `tokenize_query` here is now a thin
- * wrapper over the shared `memory_stem_tokenize_in_place` helper — same
- * delimiter set, min-length=2 filter, and working-buffer size as
- * memory_fact_search.c::tokenize_query.  Kept file-local for caller
- * convenience (fills the existing `char tokens[][64]` storage shape used by
- * downstream search calls). */
+/* For append_graph_context's entity fallback and the summary search. */
 
 static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
    int cap = (max_tokens > MAX_SEARCH_TOKENS) ? MAX_SEARCH_TOKENS : max_tokens;
    return memory_stem_tokenize_padded(keywords, tokens, cap, 2);
+}
+
+/* Keep the relations valid at @p t (valid_from/valid_to of 0 = open).  Returns
+ * the new count. */
+static int keep_valid_at(memory_relation_t *rels, int n, int64_t t) {
+   int kept = 0;
+   for (int r = 0; r < n; r++) {
+      if ((rels[r].valid_from == 0 || rels[r].valid_from <= t) &&
+          (rels[r].valid_to == 0 || rels[r].valid_to > t))
+         rels[kept++] = rels[r];
+   }
+   return kept;
 }
 
 /* =============================================================================
@@ -420,12 +425,12 @@ static void append_graph_context(int user_id,
          memory_db_relation_list_by_subject_at(user_id, entity_ids[i], as_of_ts, rels, 8,
                                                &rel_count);
       }
-      /* Incoming relations: no temporal filter helper today; subject-side filter is
-       * the high-value case (e.g., "where does Alice work").  Object-side stays
-       * unfiltered for v1 — incoming recall is contextual, less likely to confuse. */
+      /* Incoming relations, filtered the same way. */
       memory_relation_t in_rels[8];
       int in_count = 0;
       memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8, &in_count);
+      if (!include_historical)
+         in_count = keep_valid_at(in_rels, in_count, as_of_ts > 0 ? as_of_ts : (int64_t)time(NULL));
 
       if (rel_count == 0 && in_count == 0)
          continue;
@@ -477,6 +482,43 @@ static void append_graph_context(int user_id,
 /* =============================================================================
  * Action: Search
  * ============================================================================= */
+
+/* Search and recent show source excerpts for this many of their top facts, in
+ * one "Source evidence:" block at the end: bounded source overhead, and better
+ * answers on LoCoMo than an excerpt under every item. */
+#define SOURCE_TOP_FACTS 3
+
+/* The "Source evidence:" block for the captured fact provenance.  The heading
+ * is written only when an excerpt renders (a range can hold no user or
+ * assistant text). */
+static void append_source_evidence(int user_id,
+                                   const char *keywords,
+                                   const int64_t *conv,
+                                   const int64_t *start,
+                                   const int64_t *end,
+                                   const char *const *fact_text,
+                                   int count,
+                                   strbuf_t *sb,
+                                   int *source_budget,
+                                   source_dedup_set_t *seen) {
+   if (count <= 0 || *source_budget <= 0)
+      return;
+   strbuf_t ev;
+   strbuf_init(&ev, 1024);
+   for (int i = 0; i<count && * source_budget> 0; i++) {
+      append_source_excerpt_from_range(user_id, conv[i], start[i], end[i], keywords, fact_text[i],
+                                       &ev, source_budget, seen);
+      if (strbuf_oom(&ev))
+         break;
+   }
+   if (strbuf_len(&ev) > 0) {
+      if (strbuf_len(sb) > 0)
+         strbuf_append(sb, "\n");
+      strbuf_append(sb, "Source evidence:\n");
+      strbuf_append(sb, strbuf_str(&ev));
+   }
+   strbuf_free(&ev);
+}
 
 /* Append the tool-result citation hint (Option B) when the signal is on — the
  * adjacency salience lever: the cite reminder sits right under the [ID:x] facts
@@ -554,14 +596,8 @@ char *memory_action_search(int user_id,
     * verbatim. */
    source_dedup_set_t seen = { 0 };
 
-   /* Compact layout: one line per fact, no per-fact metadata, and source
-    * excerpts in one "Source evidence:" block at the end for the top facts
-    * (about a third fewer bytes than per-item metadata and excerpts, and
-    * better answers on LoCoMo).  Only the first SOURCE_TOP_FACTS facts
-    * contribute, so source overhead stays bounded. */
-   enum {
-      SOURCE_TOP_FACTS = 3
-   };
+   /* One line per fact, no per-fact metadata; excerpts for the top facts go
+    * in the Source evidence block at the end. */
    int64_t src_conv[SOURCE_TOP_FACTS] = { 0 };
    int64_t src_start[SOURCE_TOP_FACTS] = { 0 };
    int64_t src_end[SOURCE_TOP_FACTS] = { 0 };
@@ -718,27 +754,18 @@ char *memory_action_search(int user_id,
          strbuf_appendf(&sb, "- %s (Topics: %s)\n", summaries[i].summary, summaries[i].topics);
    }
 
+   /* The top facts' evidence first, so relation excerpts below get what is
+    * left of the shared budget. */
+   if (with_source)
+      append_source_evidence(user_id, keywords, src_conv, src_start, src_end, src_fact_text,
+                             src_count, &sb, &source_budget, &seen);
+
    /* Relations of the entities the query names, only when the caller asked
     * about a time (as_of) or for closed ones: they cost context on every
     * other search and add little there. */
    if (as_of_ts > 0 || include_historical) {
       append_graph_context(user_id, keywords, as_of_ts, include_historical, &sb, with_source,
                            &source_budget, &seen);
-   }
-
-   /* One excerpt per captured fact provenance (top facts). */
-   if (with_source && src_count > 0 && source_budget > 0) {
-      if (strbuf_len(&sb) > 0)
-         strbuf_append(&sb, "\n");
-      strbuf_append(&sb, "Source evidence:\n");
-      for (int i = 0; i < src_count; i++) {
-         if (source_budget <= 0)
-            break;
-         append_source_excerpt_from_range(user_id, src_conv[i], src_start[i], src_end[i], keywords,
-                                          src_fact_text[i], &sb, &source_budget, &seen);
-         if (strbuf_oom(&sb))
-            break;
-      }
    }
 
    /* Cite hint next to the [ID:x] facts (adjacency), only when facts were rendered. */
@@ -1294,13 +1321,10 @@ char *memory_action_recent(int user_id,
    source_dedup_set_t seen = { 0 };
 
    /* Same compact layout as memory_action_search. */
-   enum {
-      RECENT_SOURCE_TOP_FACTS = 3
-   };
-   int64_t src_conv[RECENT_SOURCE_TOP_FACTS] = { 0 };
-   int64_t src_start[RECENT_SOURCE_TOP_FACTS] = { 0 };
-   int64_t src_end[RECENT_SOURCE_TOP_FACTS] = { 0 };
-   const char *src_fact_text[RECENT_SOURCE_TOP_FACTS] = { NULL };
+   int64_t src_conv[SOURCE_TOP_FACTS] = { 0 };
+   int64_t src_start[SOURCE_TOP_FACTS] = { 0 };
+   int64_t src_end[SOURCE_TOP_FACTS] = { 0 };
+   const char *src_fact_text[SOURCE_TOP_FACTS] = { NULL };
    int src_count = 0;
 
    if (fact_count > 0) {
@@ -1325,7 +1349,7 @@ char *memory_action_recent(int user_id,
          strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
                         facts[i].fact_text);
          memory_citation_record_tool_fact_current(facts[i].id);
-         if (with_source && fact_conv[i] > 0 && src_count < RECENT_SOURCE_TOP_FACTS) {
+         if (with_source && fact_conv[i] > 0 && src_count < SOURCE_TOP_FACTS) {
             src_conv[src_count] = fact_conv[i];
             src_start[src_count] = fact_start[i];
             src_end[src_count] = fact_end[i];
@@ -1360,21 +1384,10 @@ char *memory_action_recent(int user_id,
       }
    }
 
-   /* Source evidence for the top facts. */
-   if (with_source && src_count > 0 && source_budget > 0) {
-      if (strbuf_len(&sb) > 0)
-         strbuf_append(&sb, "\n");
-      strbuf_append(&sb, "Source evidence:\n");
-      for (int i = 0; i < src_count; i++) {
-         if (source_budget <= 0)
-            break;
-         /* Time-windowed: no query, so fact_text alone ranks the excerpt. */
-         append_source_excerpt_from_range(user_id, src_conv[i], src_start[i], src_end[i], NULL,
-                                          src_fact_text[i], &sb, &source_budget, &seen);
-         if (strbuf_oom(&sb))
-            break;
-      }
-   }
+   /* Time-windowed: no query, so fact_text alone ranks each excerpt. */
+   if (with_source)
+      append_source_evidence(user_id, NULL, src_conv, src_start, src_end, src_fact_text, src_count,
+                             &sb, &source_budget, &seen);
 
    if (fact_count == 0 && summary_count == 0) {
       strbuf_appendf(&sb, "No memories found in the past %s.", period_resolved);

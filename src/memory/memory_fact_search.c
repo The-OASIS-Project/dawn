@@ -16,10 +16,9 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Memory fact-search pipeline — extracted from memory_callback.c
- * (Phase 1c-i).  Single source of truth for the tokenize → multi-token
- * keyword → hybrid embedding re-rank flow used by both the legacy
- * `memoryCallback` recall path and the new focus-source fact adapter.
+ * Memory fact-search pipeline: BM25 keyword search, then a hybrid embedding
+ * re-rank, plus the entity-graph candidates.  Shared by the memory tool's
+ * search and the per-turn context fact adapter.
  */
 
 #include "memory/memory_fact_search.h"
@@ -41,6 +40,10 @@
 #include "memory/memory_types.h"
 
 #define HYBRID_FETCH_LIMIT 10
+
+/* hybrid_search takes integer keyword scores over a denominator, so a BM25
+ * score in [0, 1] is carried as hundredths. */
+#define KW_SCORE_DENOM 100
 
 /* Internal common implementation: `query_emb`/`query_norm` are optional
  * pre-computed query embedding (NULL/0 → memory_embeddings_hybrid_search_ex
@@ -69,21 +72,19 @@ static int fact_search_hybrid_impl(int user_id,
    const int work_cap = (max > HYBRID_FETCH_LIMIT) ? HYBRID_FETCH_LIMIT : max;
 
    /* 1. Keyword search: one FTS5 MATCH, BM25-ranked and sigmoid-normalized to
-    *    [0, 1].  hybrid_search takes integer match scores over a denominator,
-    *    so the score is carried as hundredths. */
+    *    [0, 1], carried as hundredths (KW_SCORE_DENOM). */
    memory_fact_t kw_facts[HYBRID_FETCH_LIMIT];
    int kw_scores[HYBRID_FETCH_LIMIT];
    int kw_count = 0;
-   const int kw_score_denom = 100;
    float bm25_scores[HYBRID_FETCH_LIMIT];
    memory_db_fact_search_bm25_since(user_id, query, since_ts, kw_facts, bm25_scores, work_cap,
                                     &kw_count);
    for (int i = 0; i < kw_count; i++) {
-      int s = (int)(bm25_scores[i] * 100.0f + 0.5f);
+      int s = (int)(bm25_scores[i] * (float)KW_SCORE_DENOM + 0.5f);
       if (s < 1)
          s = 1;
-      if (s > 100)
-         s = 100;
+      if (s > KW_SCORE_DENOM)
+         s = KW_SCORE_DENOM;
       kw_scores[i] = s;
    }
 
@@ -101,7 +102,7 @@ static int fact_search_hybrid_impl(int user_id,
       embedding_search_result_t hybrid[HYBRID_FETCH_LIMIT];
       int hybrid_count = memory_embeddings_hybrid_search_ex(user_id, query, query_emb, query_norm,
                                                             kw_ids, kw_scores, kw_count,
-                                                            kw_score_denom, hybrid, work_cap);
+                                                            KW_SCORE_DENOM, hybrid, work_cap);
       if (hybrid_count > 0) {
          int produced = 0;
          for (int h = 0; h < hybrid_count && produced < max; h++) {
@@ -214,6 +215,10 @@ int memory_search_graph_candidates(int user_id,
                                    int *out_count) {
    *out_count = 0;
    if (!g_config.memory.graph_retrieval.enabled || !query || !query[0])
+      return SUCCESS;
+   /* Without the query's embedding nothing can be scored, and every candidate
+    * would be dropped: skip the lookups. */
+   if (query_emb == NULL || query_norm < 1e-6f)
       return SUCCESS;
    int64_t seeds[MEMORY_GRAPH_MAX_SEED_CANDIDATES];
    int seed_count = 0;

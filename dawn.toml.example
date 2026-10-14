@@ -658,12 +658,9 @@ citation_reinforcement_boost = 0.05
                                   # hits from memory.search and per-turn focus
                                   # injection before they reach the LLM. Closes the
                                   # floor against fabrication from weak similarity.
-                                  # 0 disables. Default 0.30 sits at the natural
-                                  # keyword-weight boundary (kw_weight * 1.0) — every
-                                  # legitimate single-token keyword match passes;
-                                  # only hybrid-vector-only marginal hits are
-                                  # filtered. Drop to 0.10-0.20 if over-filtering,
-                                  # push higher if weak fabrications persist.
+                                  # 0 disables. Default 0.30. Drop to 0.10-0.20 if
+                                  # over-filtering, push higher if weak fabrications
+                                  # persist.
                                   # Range: 0.0-1.0.
 # temporal_filter_enabled = true  # Hard temporal filter on memory.search results
                                   # (parser-recognized date queries skip results

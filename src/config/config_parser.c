@@ -176,7 +176,9 @@ static void warn_unknown_keys(toml_table_t *table,
 /* Keys that once had a meaning stay known, so an older dawn.toml that sets one
  * gets a note instead of a typo warning; the value is ignored, and the next
  * settings save drops it from the file.  Logs each key present, once per
- * process (*told). */
+ * process (*told).  A retired key must also stay in its section's
+ * warn_unknown_keys() list (docs/CONFIGURATION_GUIDE.md, "Retiring a
+ * setting"). */
 static void note_retired_keys(toml_table_t *table,
                               const char *section,
                               const char *const *keys,
@@ -812,14 +814,11 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    PARSE_STRING(table, "compact_provider", config->compact_provider);
    PARSE_STRING(table, "compact_model", config->compact_model);
 
-   /* Retired: nothing wrote the log any more.  Still a known key, so an older
-    * dawn.toml that sets it gets this note once, not a typo warning. */
-   static bool s_conversation_logging_warned = false;
-   if (toml_key_exists(table, "conversation_logging") && !s_conversation_logging_warned) {
-      s_conversation_logging_warned = true;
-      OLOG_WARNING("[llm] conversation_logging is retired and ignored: conversations are kept in "
-                   "the database (see UPGRADING.md)");
-   }
+   static const char *const retired_llm_keys[] = { "conversation_logging", NULL };
+   static bool s_retired_llm_told;
+   note_retired_keys(table, "llm", retired_llm_keys,
+                     "conversations are kept in the database (see UPGRADING.md)",
+                     &s_retired_llm_told);
    PARSE_BOOL(table, "rate_limit_enabled", config->rate_limit_enabled);
    PARSE_INT(table, "rate_limit_rpm", config->rate_limit_rpm);
 
@@ -1206,16 +1205,14 @@ static void parse_vision(toml_table_t *table, vision_config_t *config) {
    PARSE_INT(table, "max_images", config->max_images);
    CONFIG_CLAMP(config->max_images, 1, 10);
 
-   /* Retired: a tool's images stay in the history (inside its result) until a
+   /* A tool's images stay in the history (inside its result) until a
     * compaction summarizes them; the model's per-request image limit
-    * (models.toml [max_request_images]) bounds them.  Still a known key, so an
-    * older dawn.toml that sets it gets this note once, not a typo warning. */
-   static bool s_capture_history_warned = false;
-   if (toml_key_exists(table, "capture_history_count") && !s_capture_history_warned) {
-      s_capture_history_warned = true;
-      OLOG_WARNING("[vision] capture_history_count is retired and ignored: tool images stay in "
-                   "the conversation until compaction (see UPGRADING.md)");
-   }
+    * (models.toml [max_request_images]) bounds them. */
+   static const char *const retired_vision_keys[] = { "capture_history_count", NULL };
+   static bool s_retired_vision_told;
+   note_retired_keys(table, "vision", retired_vision_keys,
+                     "tool images stay in the conversation until compaction (see UPGRADING.md)",
+                     &s_retired_vision_told);
 }
 
 static void parse_memory(toml_table_t *table, memory_config_t *config) {

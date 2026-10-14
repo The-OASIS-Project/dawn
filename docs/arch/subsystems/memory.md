@@ -72,7 +72,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Reversible: `memory_db_entity_alias_unlink()` clears `canonical_id` back to NULL and stamps `unlinked_at` on the audit row
 
 - **memory_db_provenance.c/h**: Phase B provenance batch readers (May 2026)
-   - Four batch source readers: `memory_db_facts_get_sources`, `_relations_get_sources`, `_summaries_get_sources`, `_prefs_get_sources`
+   - Three batch source readers: `memory_db_facts_get_sources`, `_relations_get_sources`, `_summaries_get_sources`
    - Each returns parallel `conv_id` / `msg_id_start` / `msg_id_end` arrays for any positive N, auto-chunked at 32 IDs per SQL pass
    - Privacy JOIN against `conversations.is_private` so private conversations don't leak through `with_source` retrievals
    - Provenance-extend semantics: same-conv widen / no-prov adopt / newer replace / older no-op
@@ -137,7 +137,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - `list_merged` / `restore` (`memory_callback_restore.c`): what was merged into a fact or replaced by a newer one, and bringing one back (`restore` is an act: refused where an outsider's text could ask, and described by the fact's text when it needs a reply code)
    - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; hard merge remains available via `dawn-admin memory entity consolidate`.
    - `save_contact`, `find_contact`, `list_contacts`, `delete_contact`: contact management
-   - `append_graph_context()`: entity graph results appended to search output
+   - `append_graph_context()`: the named entities' relations, appended to search output when `as_of` or `include_historical` is given
    - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 11 params, generated into per-provider schemas by the tool registry
 
 - **memory_filter.c/h**: Injection filter — runs at the trust boundary only (raw user input at ingestion + USER_CONTENT at retrieval); see "Security Guardrails" below
@@ -392,7 +392,7 @@ Users can export their memories for backup or transfer, and import memories from
 4. During conversation:
    - User: "Remember I'm vegetarian" → memory_remember() → immediate storage
    - User: "What do you know about me?" → hybrid_search() → keyword + semantic
-   - Search also returns entity graph context (ENTITIES section)
+   - With `as_of` or `include_historical`, search also returns the named entities' relations (`Entities:` section)
    ↓
 5. Session End (WebSocket disconnect/timeout)
    ↓

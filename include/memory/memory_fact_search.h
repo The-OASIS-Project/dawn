@@ -57,8 +57,8 @@ extern "C" {
 /**
  * @brief Run DAWN's full fact-retrieval pipeline.
  *
- * Tokenize the query → multi-token keyword search (with optional
- * `since_ts` time filter) → hybrid embedding re-rank when
+ * BM25 keyword search (with optional `since_ts` time filter) → hybrid
+ * embedding re-rank when
  * `query_embedding` is provided AND `memory_embeddings_available()` is
  * true.  Otherwise returns keyword-only results.
  *
@@ -91,7 +91,8 @@ extern "C" {
  * @param out_facts    Caller-allocated output array.
  * @param out_scores   Caller-allocated parallel score array.  Hybrid
  *                     score (cosine + keyword combination) when
- *                     re-ranked; raw keyword match count otherwise.
+ *                     re-ranked; the BM25 score in hundredths (1-100)
+ *                     otherwise.
  * @param max          Capacity of `out_facts` / `out_scores`.
  * @param out_count    Receives actual returned count, in `[0, max]`.
  *
@@ -148,9 +149,8 @@ int memory_fact_search_hybrid_ex(int user_id,
  * - `score_floor <= 0.0f` → no-op (legacy behavior — every above-near-zero
  *   hit reaches the LLM).
  * - Keyword-only fallback scores from `memory_fact_search_hybrid()` are
- *   integer match counts cast to float (always >= 1.0), so any sub-1.0
- *   floor passes them untouched — only hybrid-path marginal-cosine hits
- *   are filtered.
+ *   BM25 hundredths (1-100), so any sub-1.0 floor passes them untouched;
+ *   only hybrid-path marginal-cosine hits are filtered.
  *
  * In-place compaction preserves the descending-score order from the
  * upstream ranker.  Pure function — no allocations, no logging.

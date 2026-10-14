@@ -264,9 +264,10 @@ int memory_embeddings_band_neighbors_scan(const int64_t *ids,
  * @param user_id User ID
  * @param query Search query text
  * @param keyword_facts Pre-searched keyword results (fact IDs)
- * @param keyword_scores Keyword scores per fact (from multi_token_fact_search)
+ * @param keyword_scores Keyword scores per fact; each over @p token_count
  * @param keyword_count Number of keyword results
- * @param token_count Number of search tokens (for score normalization)
+ * @param token_count Denominator of @p keyword_scores (BM25 is passed as
+ *                    hundredths over 100)
  * @param out_results Output: sorted hybrid results
  * @param max_results Maximum results to return
  * @return Number of results
@@ -298,9 +299,10 @@ int memory_embeddings_hybrid_search(int user_id,
  * @param query_emb Optional pre-computed query embedding (NULL → compute internally)
  * @param query_norm Optional pre-computed L2 norm (paired with @p query_emb)
  * @param keyword_facts Pre-searched keyword results (fact IDs)
- * @param keyword_scores Keyword scores per fact (from multi_token_fact_search)
+ * @param keyword_scores Keyword scores per fact; each over @p token_count
  * @param keyword_count Number of keyword results
- * @param token_count Number of search tokens (for score normalization)
+ * @param token_count Denominator of @p keyword_scores (BM25 is passed as
+ *                    hundredths over 100)
  * @param out_results Output: sorted hybrid results
  * @param max_results Maximum results to return
  * @return Number of results
