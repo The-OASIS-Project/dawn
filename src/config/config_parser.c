@@ -1408,10 +1408,9 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       static const char *const retired_search_keys[] = { "rrf_enabled", "bm25_enabled",
                                                          "memory_text_minimal", NULL };
       static bool s_retired_search_told;
-      note_retired_keys(
-          embeddings, "memory.embeddings", retired_search_keys,
-          "the alternative it switched to scored lower and was removed (see UPGRADING.md)",
-          &s_retired_search_told);
+      note_retired_keys(embeddings, "memory.embeddings", retired_search_keys,
+                        "only its default behavior remains (see UPGRADING.md)",
+                        &s_retired_search_told);
 
       PARSE_STRING(embeddings, "provider", config->embedding_provider);
       PARSE_STRING(embeddings, "model", config->embedding_model);
