@@ -99,6 +99,11 @@ struct json_object *memory_extraction_build_input(int user_id,
    return NULL;
 }
 
+bool memory_extraction_input_has_question(struct json_object *input) {
+   (void)input;
+   return true;
+}
+
 struct json_object *llm_history_strip_internal(struct json_object *history) {
    (void)history;
    return NULL;

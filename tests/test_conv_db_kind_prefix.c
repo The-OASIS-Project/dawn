@@ -187,6 +187,110 @@ static void test_display_reads_skip_kind_rows(void) {
    TEST_ASSERT_EQUAL_INT64(last_visible, max_id);
 }
 
+/* ---- rows DAWN wrote on its own, left out of memory extraction ---- */
+
+static void test_unprompted_rows(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const int64_t question = add_row(conv, "user", "Hi", NULL);
+   const int64_t reply = add_row(conv, "assistant", "Hello.", NULL);
+   int64_t post = 0, user_post = 0;
+   const conv_message_row_t own_post = { .role = "assistant",
+                                         .content = "Morning briefing: rain later.",
+                                         .unprompted = true };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &own_post, &post));
+   /* Only an ordinary assistant row can be a post. */
+   const conv_message_row_t not_a_post = { .role = "user",
+                                           .content = "Thanks",
+                                           .unprompted = true };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &not_a_post, &user_post));
+
+   char ids[128];
+   snprintf(ids, sizeof(ids), "[%lld,%lld,%lld,%lld]", (long long)question, (long long)reply,
+            (long long)post, (long long)user_post);
+   int64_t found[4] = { 0 };
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_messages_unprompted(alice_id, ids, found, 4, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT64(post, found[0]);
+
+   /* Another user's lookup sees nothing. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_messages_unprompted(bob_id, ids, found, 4, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+
+   /* The post is still shown like any reply. */
+   display_t shown = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages(conv, alice_id, collect_display, &shown));
+   TEST_ASSERT_EQUAL_INT(4, shown.count);
+
+   /* The migration is idempotent; a mark goes with its conversation. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v105(s_db.db));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(conv, alice_id));
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*) FROM message_unprompted", -1,
+                                            &st, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_INT(0, sqlite3_column_int(st, 0));
+   sqlite3_finalize(st);
+}
+
+/* Earlier posts are marked on upgrade: a channel copy of a briefing (stored
+ * word for word in the briefing's own conversation) and a research note. */
+static void test_v105_marks_earlier_posts(void) {
+   int64_t briefing = 0, channel = 0, chat = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_with_origin(alice_id, "b", "briefing", &briefing));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_with_origin(alice_id, "t", "messaging:telegram", &channel));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &chat));
+   add_row(briefing, "user", "Time for the morning briefing.", NULL);
+   const int64_t own = add_row(briefing, "assistant", "Rain at noon.", NULL);
+   add_row(channel, "user", "hi", NULL);
+   const int64_t reply = add_row(channel, "assistant", "Hello.", NULL);
+   const int64_t copy = add_row(channel, "assistant", "Rain at noon.", NULL);
+   /* A briefing's tool step and a model tool call are both empty assistant
+    * rows: equal text, never a post. */
+   const conv_message_row_t step = { .role = "assistant", .content = "", .tool_calls = "[]" };
+   int64_t own_step = 0, call = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(briefing, alice_id, &step, &own_step));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(channel, alice_id, &step, &call));
+   add_row(chat, "user", "Research the best e-bikes", NULL);
+   const int64_t note = add_row(chat, "assistant", "🔍 Deep research complete — \"e-bikes\".", NULL);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v105(s_db.db));
+   char ids[192];
+   snprintf(ids, sizeof(ids), "[%lld,%lld,%lld,%lld,%lld,%lld]", (long long)own, (long long)reply,
+            (long long)copy, (long long)note, (long long)own_step, (long long)call);
+   int64_t found[6] = { 0 };
+   int count = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_messages_unprompted(alice_id, ids, found, 6, &count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_TRUE((found[0] == copy && found[1] == note) ||
+                    (found[0] == note && found[1] == copy));
+}
+
+/* The tables that point at messages: a rebuild of messages must keep them (see
+ * CONV_MESSAGES_TABLE_SQL).  A new child, or one left pointing at a renamed
+ * table, changes this list. */
+static void test_messages_fk_children(void) {
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT group_concat(name, ',') FROM (SELECT DISTINCT "
+                                            "m.name FROM sqlite_master m, "
+                                            "pragma_foreign_key_list(m.name) f WHERE m.type = "
+                                            "'table' AND f.\"table\" = 'messages' ORDER BY m.name)",
+                                            -1, &st, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("message_unprompted", (const char *)sqlite3_column_text(st, 0));
+   sqlite3_finalize(st);
+}
+
 /* ---- a briefing counted as extracted, for memory extraction ---- */
 
 /* The conversation's extraction cursor: last row id, row count. */
@@ -1687,5 +1791,8 @@ int main(void) {
    RUN_TEST(test_handles_check_the_owner_and_input);
    RUN_TEST(test_deleting_a_conversation_drops_its_handles);
    RUN_TEST(test_briefing_marked_extracted);
+   RUN_TEST(test_unprompted_rows);
+   RUN_TEST(test_v105_marks_earlier_posts);
+   RUN_TEST(test_messages_fk_children);
    return UNITY_END();
 }

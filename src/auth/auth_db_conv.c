@@ -999,6 +999,42 @@ int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_owner
    return AUTH_DB_SUCCESS;
 }
 
+int conv_db_messages_unprompted(int user_id,
+                                const char *ids_json,
+                                int64_t *ids_out,
+                                int max,
+                                int *count_out) {
+   if (!ids_json || !ids_out || max < 0 || !count_out) {
+      return AUTH_DB_FAILURE;
+   }
+   *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   /* Extraction-time only, like conv_db_messages_ownership. */
+   const char *sql = "SELECT p.message_id FROM message_unprompted p "
+                     "JOIN messages m ON m.id = p.message_id "
+                     "JOIN conversations c ON c.id = m.conversation_id "
+                     "WHERE c.user_id = ?1 AND m.kind IS NULL "
+                     "AND p.message_id IN (SELECT value FROM json_each(?2))";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_WARNING("conv_db: prepare messages_unprompted failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, ids_json, -1, SQLITE_TRANSIENT);
+   int rc;
+   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      if (*count_out < max) {
+         ids_out[(*count_out)++] = sqlite3_column_int64(stmt, 0);
+      }
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
 int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
    if (conv_id <= 0 || !anchor_out) {
       return AUTH_DB_FAILURE;

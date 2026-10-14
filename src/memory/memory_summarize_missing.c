@@ -363,6 +363,12 @@ static int process_one_conv(int user_id,
     * DAWN's injected context and a turn's reasoning left out. */
    struct json_object *input = memory_extraction_build_input(user_id, conv_id, history, 0);
    json_object_put(history);
+   if (input && !memory_extraction_input_has_question(input)) {
+      OLOG_INFO("memory_summarize_missing: conv %lld has nothing the user said, skipping",
+                (long long)conv_id);
+      json_object_put(input);
+      return FAILURE;
+   }
    history = input ? llm_history_strip_internal(input) : NULL;
    json_object_put(input);
    if (history == NULL) {

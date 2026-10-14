@@ -12,6 +12,19 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-10-15 — Briefings and research notes in a chat channel no longer feed memory
+
+**What changed.** When DAWN sends a message to Telegram, Discord, Slack or SMS (a briefing, a
+reminder, an alert, a message you asked it to send), or deep research posts its completion note into a
+conversation, DAWN saves that message in the conversation so it shows
+in the WebUI and gives your next reply context. Memory used to extract facts from it as if you had said
+them. Now DAWN marks the messages it posts on its own, and memory skips them (your replies are still
+read). Upgrading marks the ones already saved: channel copies of past briefings and past research notes.
+
+**What you need to do.** Nothing. Facts already learned from those messages stay until you remove them.
+
+---
+
 ## 2026-10-14 — Settings saves no longer drop email, shutdown, plan or sound settings
 
 **What changed.** A settings save from the WebUI rewrites `dawn.toml`, and it was deleting sections

@@ -2090,6 +2090,26 @@ typedef struct {
 int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out);
 
 /**
+ * @brief Which of a set of message rows DAWN wrote on its own
+ *
+ * An unprompted row (message_unprompted: a briefing or message delivered to a channel,
+ * a completion note) is DAWN's, not the conversation's; memory extraction
+ * leaves it out.  Only rows owned by @p user_id are reported.
+ *
+ * @param user_id   Owner the rows must belong to
+ * @param ids_json  JSON array of message ids, e.g. "[12,13,15]"
+ * @param ids_out   Receives the unprompted ids among them
+ * @param max       Capacity of @p ids_out
+ * @param count_out Number written (at most @p max)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_messages_unprompted(int user_id,
+                                const char *ids_json,
+                                int64_t *ids_out,
+                                int max,
+                                int *count_out);
+
+/**
  * Sentinel value for "no anchor recorded" on conversations.anchor_date.
  * Legacy rows pre-v42, non-conversation extraction paths, and any code path
  * that hasn't recorded an anchor all surface as this value.  Extraction code

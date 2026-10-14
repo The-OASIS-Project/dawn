@@ -56,7 +56,8 @@ class Bench:
     """One bench_retrieval --memory-pipeline process, spoken to over JSON lines."""
 
     def __init__(self, binary, run_dir, provider, model, effort, config=""):
-        cmd = [binary, "--memory-pipeline", "--extraction-provider", provider,
+        # The bench runs from run_dir: resolve a relative binary path here.
+        cmd = [os.path.abspath(binary), "--memory-pipeline", "--extraction-provider", provider,
                "--extraction-model", model]
         if effort:
             cmd += ["--extraction-effort", effort]

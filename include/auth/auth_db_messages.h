@@ -84,6 +84,12 @@ typedef struct {
                                   as the panel names it (a JSON object, at most
                                   CONV_EMAIL_REF_MAX bytes; anything else is dropped);
                                   NULL = none */
+   bool unprompted;          /**< ordinary assistant row DAWN wrote on its own, not as a
+                              reply to the user (a delivered briefing or message, a
+                              completion note): shown and replayed, never extracted.
+                              Recorded in message_unprompted; extraction finds it by row
+                              id, so a post must reach a history only from the
+                              database, never appended live without its id */
 } conv_message_row_t;
 
 /** Longest email_ref a question row holds. */

@@ -23,6 +23,7 @@
 #ifndef MEMORY_EXTRACTION_INPUT_H
 #define MEMORY_EXTRACTION_INPUT_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct json_object;
@@ -54,6 +55,14 @@ extern "C" {
  * @param last_msg_id          Extraction cursor for the conversation
  * @return New JSON array (caller owns), or NULL when refused or out of memory
  */
+/**
+ * @brief Whether an extraction input holds anything the user said
+ *
+ * Without a question there is nothing to learn (the assistant is never a
+ * source), so the caller skips the model call.
+ */
+bool memory_extraction_input_has_question(struct json_object *input);
+
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
                                                   struct json_object *conversation_history,

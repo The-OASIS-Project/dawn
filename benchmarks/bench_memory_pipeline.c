@@ -1576,6 +1576,56 @@ static int import_conv_probe(sqlite3 *src, int64_t conv_id, int *private_out, in
    return (step == SQLITE_ROW || step == SQLITE_DONE) ? 0 : 1;
 }
 
+/* Copy the marks of the conversation's rows DAWN wrote on its own
+ * (message_unprompted), so extraction leaves them out here as it does live.  A
+ * source from before the table (schema < 105) has none.  Returns 0 on
+ * success. */
+static int import_unprompted(sqlite3 *src, int64_t conv_id, char *err, size_t err_size) {
+   sqlite3_stmt *sel = NULL;
+   if (sqlite3_prepare_v2(src,
+                          "SELECT COUNT(*) FROM sqlite_master WHERE name = 'message_unprompted'",
+                          -1, &sel, NULL) != SQLITE_OK) {
+      snprintf(err, err_size, "read message_unprompted: %s", sqlite3_errmsg(src));
+      return 1;
+   }
+   const bool has_table = sqlite3_step(sel) == SQLITE_ROW && sqlite3_column_int(sel, 0) > 0;
+   sqlite3_finalize(sel);
+   if (!has_table) {
+      return 0;
+   }
+   sqlite3_stmt *ins = NULL;
+   if (sqlite3_prepare_v2(src,
+                          "SELECT p.message_id FROM message_unprompted p "
+                          "JOIN messages m ON m.id = p.message_id "
+                          "WHERE m.conversation_id = ? AND m.kind IS NULL",
+                          -1, &sel, NULL) != SQLITE_OK ||
+       sqlite3_prepare_v2(s_db.db, "INSERT INTO message_unprompted (message_id) VALUES (?)", -1,
+                          &ins, NULL) != SQLITE_OK) {
+      snprintf(err, err_size, "prepare message_unprompted copy: %s / %s", sqlite3_errmsg(src),
+               sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(sel);
+      return 1;
+   }
+   sqlite3_bind_int64(sel, 1, conv_id);
+   int rc = 0, step;
+   while ((step = sqlite3_step(sel)) == SQLITE_ROW) {
+      sqlite3_reset(ins);
+      sqlite3_bind_int64(ins, 1, sqlite3_column_int64(sel, 0));
+      if (sqlite3_step(ins) != SQLITE_DONE) {
+         snprintf(err, err_size, "insert message_unprompted: %s", sqlite3_errmsg(s_db.db));
+         rc = 1;
+         break;
+      }
+   }
+   if (rc == 0 && step != SQLITE_DONE) {
+      snprintf(err, err_size, "read message_unprompted: %s", sqlite3_errmsg(src));
+      rc = 1;
+   }
+   sqlite3_finalize(ins);
+   sqlite3_finalize(sel);
+   return rc;
+}
+
 /* Copy the conversation and its messages under one transaction on each side:
  * a consistent snapshot of the source, all-or-nothing in the scratch DB. */
 static int import_conversation(sqlite3 *src,
@@ -1597,6 +1647,8 @@ static int import_conversation(sqlite3 *src,
    }
    if (rc == 0)
       rc = import_rows(src, "messages", "conversation_id", conv_id, msgs_out, err, err_size);
+   if (rc == 0)
+      rc = import_unprompted(src, conv_id, err, err_size);
    if (rc == 0) {
       char upd[192];
       snprintf(upd, sizeof(upd),
