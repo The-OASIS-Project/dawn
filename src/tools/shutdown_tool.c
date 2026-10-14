@@ -90,11 +90,13 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
    (void)action; /* Unused */
    *should_respond = 1;
 
-   /* Snapshot: the settings panel may write these while we run. */
+   /* One consistent copy: the settings panel may be saving them now. */
+   pthread_rwlock_rdlock(&g_config_rwlock);
    const shutdown_config_t *cfg = &config_get()->shutdown;
    const bool enabled = cfg->enabled;
    char passphrase[sizeof(cfg->passphrase)];
    safe_strscpy(passphrase, cfg->passphrase);
+   pthread_rwlock_unlock(&g_config_rwlock);
 
    /* Security check 1: Must be explicitly enabled in config */
    if (!enabled) {

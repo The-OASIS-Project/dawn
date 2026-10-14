@@ -126,8 +126,6 @@ char s_www_path[256] = { 0 };
 char s_aurora_path[256] = { 0 }; /* Aurora dist root served at /aurora (empty = disabled) */
 pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* Config modification mutex - protects against concurrent config reads during writes */
-pthread_rwlock_t s_config_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 
 /* HTTP rate limiting state (s_csrf_used, s_csrf_rate, s_login_rate)
  * moved to webui_http.c */

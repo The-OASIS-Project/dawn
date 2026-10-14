@@ -1344,12 +1344,12 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
     * The write lock ensures no other threads are reading config during modification.
     * TOML write is also inside the lock to prevent concurrent reads of partial state.
     * config_write_toml() is sub-millisecond so the extended lock duration is negligible. */
-   pthread_rwlock_wrlock(&s_config_rwlock);
+   pthread_rwlock_wrlock(&g_config_rwlock);
    dawn_config_t *mutable_config = (dawn_config_t *)config_get();
    apply_config_from_json(mutable_config, payload);
    bool tools_mode_changed = (old_tools_enabled != g_config.llm.tools.enabled);
    int result = config_write_toml(mutable_config, config_path);
-   pthread_rwlock_unlock(&s_config_rwlock);
+   pthread_rwlock_unlock(&g_config_rwlock);
 
    if (result == 0) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
@@ -1440,9 +1440,9 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
 
                /* Re-save config to persist tool-owned changes.
                 * config_write_toml + tool_registry_write_configs handles it. */
-               pthread_rwlock_wrlock(&s_config_rwlock);
+               pthread_rwlock_wrlock(&g_config_rwlock);
                config_write_toml((const dawn_config_t *)config_get(), config_path);
-               pthread_rwlock_unlock(&s_config_rwlock);
+               pthread_rwlock_unlock(&g_config_rwlock);
 
                /* Send updated HA status to requesting client */
                handle_ha_status(conn);
@@ -1461,9 +1461,9 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
             webui_phone_apply_config(conn, phone_section); /* update + live-apply + echo-back */
             /* Second write persists the now-updated tool struct (the write at the
              * top of this handler ran before the tool state changed). */
-            pthread_rwlock_wrlock(&s_config_rwlock);
+            pthread_rwlock_wrlock(&g_config_rwlock);
             config_write_toml((const dawn_config_t *)config_get(), config_path);
-            pthread_rwlock_unlock(&s_config_rwlock);
+            pthread_rwlock_unlock(&g_config_rwlock);
          }
       }
 #endif

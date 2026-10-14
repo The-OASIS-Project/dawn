@@ -773,7 +773,7 @@ static const tool_metadata_t mytool_metadata = {
    .config = &s_config,
    .config_size = sizeof(s_config),
    .config_parser = mytool_parse_config,
-   .config_writer = mytool_write_config, /* required with a config_section */
+   .config_writer = mytool_write_config, /* required with a config_parser */
    .config_section = "mytool",        /* [mytool] in dawn.toml */
 
    /* Secrets - NULL if no API keys needed */
@@ -907,6 +907,10 @@ save.  Don't add a separate `enabled` key to repeat it.  The lists don't cover p
 that skip the model (voice commands, MQTT, the scheduler); a tool reached that way
 guards itself, as shutdown does with the global `[shutdown] enabled`.
 
+To retire a key from a tool's section, list it in `retired_keys` (NULL-terminated):
+a `dawn.toml` that still sets it gets a note at startup, and the key is ignored.
+A section left with only retired keys needs no parser or writer.
+
 ### Secret Requirements
 
 Tools using `TOOL_CAP_SECRETS` must declare what secrets they need:
@@ -1009,7 +1013,6 @@ int tool_registry_register(const tool_metadata_t *metadata);
 const tool_metadata_t *tool_registry_lookup(const char *name);
 const tool_metadata_t *tool_registry_find(const char *name_or_alias);
 tool_callback_fn tool_registry_get_callback(const char *name);
-bool tool_registry_is_enabled(const char *name);
 ```
 
 ### Config Access
@@ -1022,7 +1025,6 @@ const char *tool_registry_get_config_string(const char *path);
 ```c
 void tool_registry_foreach(tool_foreach_callback_t callback, void *user_data);
 int tool_registry_count(void);
-int tool_registry_enabled_count(void);
 ```
 
 ---

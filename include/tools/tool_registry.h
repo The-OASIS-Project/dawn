@@ -537,6 +537,9 @@ typedef struct {
    tool_config_parser_fn config_parser; /**< Parser for TOML section */
    tool_config_writer_fn config_writer; /**< Writer for TOML section (optional) */
    const char *config_section;          /**< TOML section name */
+   /** Keys the section no longer has (NULL-terminated, or NULL): a dawn.toml
+    *  that still sets one gets a note at startup, then the key is ignored. */
+   const char *const *retired_keys;
 
    /* Secret Requirements (security - NULL-terminated array or NULL) */
    const tool_secret_requirement_t *secret_requirements;
@@ -618,7 +621,7 @@ void tool_registry_shutdown(void);
  * - Registry is locked
  * - Registry is full
  * - Tool name already registered
- * - Tool has config, config_parser and config_section but no config_writer
+ * - Tool has config_parser and config_section but no config_writer
  * - TOOL_CAP_SECRETS tool doesn't declare secret_requirements
  *
  * @param metadata Pointer to tool's static metadata (must remain valid)
@@ -861,23 +864,6 @@ int tool_registry_parse_configs(const char *config_path);
  * @param fp Open file pointer (FILE*, passed as void* to avoid stdio.h in header)
  */
 void tool_registry_write_configs(void *fp);
-
-/**
- * @brief Note a key a tool no longer reads, if its section still sets it
- *
- * For a tool's config_parser: logs that @p key is retired and ignored, so an
- * older dawn.toml gets a note.  A tool with no config_writer loses the key on
- * the next settings save.
- *
- * @param table   The tool's section (may be NULL)
- * @param section Section name, for the log line
- * @param key     The retired key
- * @param why     A few words on what replaced it
- */
-void tool_registry_note_retired_key(toml_table_t *table,
-                                    const char *section,
-                                    const char *key,
-                                    const char *why);
 
 /**
  * @brief Get a secret value by name

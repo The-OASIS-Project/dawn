@@ -315,7 +315,7 @@ char *get_command_prompt_dup(void) {
  * Concurrency note: these return a pointer directly into g_config and are read
  * unlocked on the prompt-build path — consistent with every other g_config read
  * there (persona, llm.tools.enabled, localization, ...).  A WebUI config save
- * (handle_set_config, under s_config_rwlock wrlock) racing an in-flight turn
+ * (handle_set_config, under g_config_rwlock wrlock) racing an in-flight turn
  * could yield a torn directive for that one turn.  The buffers are fixed-size
  * (CONFIG_DESCRIPTION_MAX) and strncpy-padded, so a torn read is still a bounded,
  * NUL-terminated string (no over-read / memory unsafety) — worst case is one

@@ -418,7 +418,6 @@ extern int s_port;
 extern char s_www_path[256];
 extern char s_aurora_path[256];
 extern pthread_mutex_t s_mutex;
-extern pthread_rwlock_t s_config_rwlock;
 
 /* Response queue */
 extern ws_response_t s_response_queue[WEBUI_RESPONSE_QUEUE_SIZE];

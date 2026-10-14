@@ -53,14 +53,10 @@
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
-/* [document_manage] has no settings of its own; the parser only notes the
- * retired `enabled`. */
-static void doc_manage_parse_config(toml_table_t *table, void *config) {
-   (void)config;
-   tool_registry_note_retired_key(table, "document_manage", "enabled",
-                                  "a dangerous tool is turned on by listing it in [llm.tools] "
-                                  "local_enabled / remote_enabled (see UPGRADING.md)");
-}
+/* [document_manage] has no settings of its own.  `enabled` is retired: a
+ * dangerous tool is turned on for the model by [llm.tools] local_enabled /
+ * remote_enabled. */
+static const char *const doc_manage_retired_keys[] = { "enabled", NULL };
 
 /* =============================================================================
  * Two-step delete approval — a staged deletion per session, named by its id
@@ -459,7 +455,7 @@ static const tool_metadata_t doc_manage_metadata = {
    .capabilities = TOOL_CAP_DANGEROUS, /* mutates + deletes user data */
    .default_local = true,
    .default_remote = true,
-   .config_parser = doc_manage_parse_config,
+   .retired_keys = doc_manage_retired_keys,
    .config_section = "document_manage",
    .callback = doc_manage_callback,
    .is_available = doc_manage_is_available,

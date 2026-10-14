@@ -23,6 +23,7 @@
  * All default values match the compile-time constants in dawn.h and dawn.c
  */
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +36,10 @@
  * Global Configuration Instances
  * ============================================================================= */
 dawn_config_t g_config;
+
+/* Held for writing while the WebUI applies and saves settings; held for
+ * reading where a setting's fields must be read together. */
+pthread_rwlock_t g_config_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 secrets_config_t g_secrets;
 
 /* =============================================================================

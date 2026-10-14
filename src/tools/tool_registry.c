@@ -224,8 +224,7 @@ static void hash_init(void) {
  * next restart.
  */
 static bool validate_config_writer(const tool_metadata_t *metadata) {
-   if (metadata->config && metadata->config_parser && metadata->config_section &&
-       !metadata->config_writer) {
+   if (metadata->config_parser && metadata->config_section && !metadata->config_writer) {
       OLOG_ERROR("tool_registry: Tool '%s' parses [%s] but has no config_writer; a settings "
                  "save would delete the section",
                  metadata->name, metadata->config_section);
@@ -634,6 +633,17 @@ const char *tool_registry_resolve_device(const tool_metadata_t *metadata, const 
  * Config Integration
  * ============================================================================= */
 
+/* A retired key the section still sets: noted, then ignored (the next settings
+ * save drops it, since no writer writes it). */
+static void note_retired_keys(toml_table_t *table, const char *section, const char *const *keys) {
+   if (!table || !keys)
+      return;
+   for (int i = 0; keys[i] != NULL; i++) {
+      if (toml_key_exists(table, keys[i]))
+         OLOG_WARNING("[%s] %s is retired and ignored (see UPGRADING.md)", section, keys[i]);
+   }
+}
+
 int tool_registry_parse_configs(const char *config_path) {
    if (!config_path || !s_initialized) {
       return 1;
@@ -659,15 +669,18 @@ int tool_registry_parse_configs(const char *config_path) {
 
    for (int i = 0; i < s_tool_count; i++) {
       tool_entry_t *entry = &s_tools[i];
-      if (!entry->registered || !entry->metadata.config_parser || !entry->metadata.config_section) {
+      if (!entry->registered || !entry->metadata.config_section) {
          continue;
       }
 
       /* Look up the tool's TOML section */
       toml_table_t *section = toml_table_in(root, entry->metadata.config_section);
 
+      note_retired_keys(section, entry->metadata.config_section, entry->metadata.retired_keys);
+
       /* Call the tool's config parser (section may be NULL if not present) */
-      entry->metadata.config_parser(section, entry->metadata.config);
+      if (entry->metadata.config_parser)
+         entry->metadata.config_parser(section, entry->metadata.config);
    }
 
    atomic_fetch_add(&s_generation, 1); /* after the change */
@@ -698,15 +711,6 @@ void tool_registry_write_configs(void *fp) {
    }
 
    pthread_mutex_unlock(&s_registry_mutex);
-}
-
-void tool_registry_note_retired_key(toml_table_t *table,
-                                    const char *section,
-                                    const char *key,
-                                    const char *why) {
-   if (table && section && key && toml_key_exists(table, key)) {
-      OLOG_WARNING("[%s] %s is retired and ignored: %s", section, key, why ? why : "");
-   }
 }
 
 const char *tool_registry_get_secret(const char *tool_name, const char *secret_name) {

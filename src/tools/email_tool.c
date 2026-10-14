@@ -1293,14 +1293,9 @@ static bool email_tool_available(void) {
  * Config Parser
  * ============================================================================= */
 
-/* [email] has no settings of its own; the parser only notes the retired
- * `enabled`. */
-static void email_tool_config_parse(toml_table_t *table, void *config) {
-   (void)config;
-   tool_registry_note_retired_key(table, "email", "enabled",
-                                  "a dangerous tool is turned on by listing it in [llm.tools] "
-                                  "local_enabled / remote_enabled (see UPGRADING.md)");
-}
+/* [email] has no settings of its own.  `enabled` is retired: a dangerous tool
+ * is turned on for the model by [llm.tools] local_enabled / remote_enabled. */
+static const char *const email_retired_keys[] = { "enabled", NULL };
 
 /* =============================================================================
  * Tool Registration
@@ -1424,7 +1419,7 @@ static const tool_metadata_t email_metadata = {
    .default_local = true,
    .default_remote = true,
 
-   .config_parser = email_tool_config_parse,
+   .retired_keys = email_retired_keys,
    .config_section = "email",
 
    .is_available = email_tool_available,

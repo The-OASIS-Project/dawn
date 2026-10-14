@@ -1235,15 +1235,15 @@ static bool phone_tool_available(void) {
  * Config Parser
  * ============================================================================= */
 
+/* `enabled` is retired: a dangerous tool is turned on for the model by
+ * [llm.tools] local_enabled / remote_enabled. */
+static const char *const phone_retired_keys[] = { "enabled", NULL };
+
 static void phone_tool_config_parse(toml_table_t *table, void *config) {
    phone_tool_config_t *cfg = (phone_tool_config_t *)config;
 
    if (!table)
       return;
-
-   tool_registry_note_retired_key(table, "phone", "enabled",
-                                  "a dangerous tool is turned on by listing it in [llm.tools] "
-                                  "local_enabled / remote_enabled (see UPGRADING.md)");
 
    toml_datum_t confirm = toml_bool_in(table, "confirm_outbound");
    if (confirm.ok)
@@ -1597,6 +1597,7 @@ static const tool_metadata_t phone_metadata = {
    .config_size = sizeof(s_config),
    .config_parser = phone_tool_config_parse,
    .config_writer = phone_tool_config_write,
+   .retired_keys = phone_retired_keys,
    .config_section = "phone",
 
    .is_available = phone_tool_available,

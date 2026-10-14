@@ -99,6 +99,28 @@ static void test_parser_without_writer_is_refused(void) {
    static tool_metadata_t meta;
    meta = fake_tool("fake_tool", NULL);
    TEST_ASSERT_NOT_EQUAL(0, tool_registry_register(&meta));
+   /* Also when the parser keeps its state elsewhere (no config pointer). */
+   meta.config = NULL;
+   meta.config_size = 0;
+   TEST_ASSERT_NOT_EQUAL(0, tool_registry_register(&meta));
+}
+
+/* A section with only retired keys needs no parser or writer. */
+static void test_retired_keys_only_section_registers(void) {
+   static const char *const retired[] = { "enabled", NULL };
+   static tool_metadata_t meta;
+   meta = fake_tool("fake_tool", NULL);
+   meta.config = NULL;
+   meta.config_size = 0;
+   meta.config_parser = NULL;
+   meta.retired_keys = retired;
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&meta));
+
+   FILE *fp = fopen(s_in, "w");
+   TEST_ASSERT_NOT_NULL(fp);
+   fputs("[fake_tool]\nenabled = true\n", fp);
+   fclose(fp);
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_parse_configs(s_in));
 }
 
 /* What the parser read from dawn.toml, the writer writes back. */
@@ -133,6 +155,7 @@ static void test_section_survives_a_save(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_parser_without_writer_is_refused);
+   RUN_TEST(test_retired_keys_only_section_registers);
    RUN_TEST(test_section_survives_a_save);
    return UNITY_END();
 }
