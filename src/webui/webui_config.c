@@ -173,6 +173,14 @@ void handle_get_config(ws_connection_t *conn) {
             json_object_object_add(webui_obj, "ssl_key_path",
                                    json_object_new_string("(configured)"));
          }
+         /* Anyone who knows it can shut the daemon down by voice or MQTT. */
+         struct json_object *shutdown_obj;
+         if (config_get()->shutdown.passphrase[0] &&
+             json_object_object_get_ex(config_json, "shutdown", &shutdown_obj)) {
+            json_object_object_del(shutdown_obj, "passphrase");
+            json_object_object_add(shutdown_obj, "passphrase",
+                                   json_object_new_string("(configured)"));
+         }
       }
       json_object_object_add(payload, "config", config_json);
    }

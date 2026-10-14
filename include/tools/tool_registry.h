@@ -618,7 +618,7 @@ void tool_registry_shutdown(void);
  * - Registry is locked
  * - Registry is full
  * - Tool name already registered
- * - TOOL_CAP_DANGEROUS tool doesn't have config with enabled field
+ * - Tool has config, config_parser and config_section but no config_writer
  * - TOOL_CAP_SECRETS tool doesn't declare secret_requirements
  *
  * @param metadata Pointer to tool's static metadata (must remain valid)
@@ -665,17 +665,6 @@ const tool_metadata_t *tool_registry_find(const char *name_or_alias);
  * @return Callback function, or NULL if not found
  */
 tool_callback_fn tool_registry_get_callback(const char *name);
-
-/**
- * @brief Check if a tool is enabled
- *
- * For TOOL_CAP_DANGEROUS tools, checks the config enabled field.
- * For other tools, always returns true if registered.
- *
- * @param name Tool name
- * @return true if enabled, false if disabled or not found
- */
-bool tool_registry_is_enabled(const char *name);
 
 /**
  * @brief Validate a tool reference is safe to schedule / safe to fire
@@ -874,6 +863,23 @@ int tool_registry_parse_configs(const char *config_path);
 void tool_registry_write_configs(void *fp);
 
 /**
+ * @brief Note a key a tool no longer reads, if its section still sets it
+ *
+ * For a tool's config_parser: logs that @p key is retired and ignored, so an
+ * older dawn.toml gets a note.  A tool with no config_writer loses the key on
+ * the next settings save.
+ *
+ * @param table   The tool's section (may be NULL)
+ * @param section Section name, for the log line
+ * @param key     The retired key
+ * @param why     A few words on what replaced it
+ */
+void tool_registry_note_retired_key(toml_table_t *table,
+                                    const char *section,
+                                    const char *key,
+                                    const char *why);
+
+/**
  * @brief Get a secret value by name
  *
  * Tools use this to access secrets they declared in secret_requirements.
@@ -930,13 +936,6 @@ int tool_registry_count(void);
  * @return Tool metadata pointer, or NULL if index out of range
  */
 const tool_metadata_t *tool_registry_get_by_index(int index);
-
-/**
- * @brief Get count of enabled tools
- *
- * @return Number of enabled tools
- */
-int tool_registry_enabled_count(void);
 
 /* =============================================================================
  * Capability Queries

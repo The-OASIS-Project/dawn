@@ -482,7 +482,6 @@ Unit tests for DB layer. Follow `test_scheduler` pattern.
 
 ```toml
 [phone]
-enabled = true
 confirm_outbound = true
 pcm_port = "/dev/ttyUSB4"          # modem USB audio port (raw 16k S16LE PCM); no USB sound card
 sms_retention_days = 90

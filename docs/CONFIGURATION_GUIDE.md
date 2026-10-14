@@ -62,10 +62,11 @@ DAWN has **two** configuration mechanisms. Only one of them has this hazard.
 ### Tool-owned config — use this for anything tool-specific
 
 A tool in `src/tools/` declares `config_section` + `config_parser` + `config_writer` in its
-`tool_metadata_t`, and `tool_registry_write_configs()` writes it back **automatically**. There is no
-round-trip hazard: registering the tool wires the writer.
+`tool_metadata_t`, and `tool_registry_write_configs()` writes it back **automatically**. The registry
+refuses a tool with a config section and parser but no writer, so the section can't be dropped by a
+save; the writer must still write every key the parser reads.
 
-Examples: `[shutdown]`, `[home_assistant]`. See [TOOL_DEVELOPMENT_GUIDE.md](TOOL_DEVELOPMENT_GUIDE.md).
+Examples: `[home_assistant]`, `[phone]`. See [TOOL_DEVELOPMENT_GUIDE.md](TOOL_DEVELOPMENT_GUIDE.md).
 
 **Prefer this** when the setting belongs to one tool. It is less work and structurally safer.
 

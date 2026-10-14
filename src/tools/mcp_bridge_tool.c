@@ -68,10 +68,8 @@ static void namemap_translate_arg(struct json_object *args, const char *key) {
 }
 #endif
 
-/* One registered bridged tool. `enabled` MUST be first: it doubles as the
- * tool's config struct so dangerous-tool registry validation passes (std-H2). */
+/* One registered bridged tool. */
 typedef struct {
-   bool enabled;
    bool in_use;
    bool dangerous;
    char server_alias[TOOL_NAME_MAX];
@@ -107,14 +105,6 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
                                  const char *action,
                                  char *value,
                                  int *should_respond);
-
-/* Dangerous tools must carry a config + parser (validate_dangerous_tool); the
- * slot itself is the config (enabled-first) and this parser is a no-op because
- * bridged tools have no per-tool TOML section. */
-static void mcp_slot_noop_parser(toml_table_t *table, void *config) {
-   (void)table;
-   (void)config;
-}
 
 /* --------------------------------------------------------------------------
  * Pre-generated trampolines (one per slot; cap = MCP_BRIDGE_MAX_SLOTS = 64)
@@ -350,7 +340,6 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    int idx = s_slot_count;
    mcp_slot_t *slot = &s_slots[idx];
    memset(slot, 0, sizeof(*slot));
-   slot->enabled = true;
    slot->dangerous = dangerous;
    slot->client = client;
    snprintf(slot->server_alias, sizeof(slot->server_alias), "%s", server_alias);
@@ -384,12 +373,6 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    meta.max_result_chars = max_result_chars < MCP_BRIDGE_MAX_RESULT_CHARS
                                ? max_result_chars
                                : MCP_BRIDGE_MAX_RESULT_CHARS;
-   /* enabled-first slot serves as the config struct so dangerous-tool
-    * validation (needs config + parser) passes; no TOML section. */
-   meta.config = slot;
-   meta.config_size = sizeof(*slot);
-   meta.config_parser = mcp_slot_noop_parser;
-
    if (tool_registry_register(&meta) != SUCCESS) {
       OLOG_ERROR("MCP bridge: failed to register tool '%s'", dawn_tool_name);
       free(slot->description);

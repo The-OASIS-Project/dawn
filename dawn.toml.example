@@ -947,7 +947,6 @@ citation_reinforcement_boost = 0.05
 
 [sfx]
 # sound_path = "sound_assets/"    # Directory containing sound effect files
-                                  # Env: DAWN_SFX_SOUND_PATH
 
 # =============================================================================
 # Home Assistant (smart home control)
@@ -1148,9 +1147,7 @@ citation_reinforcement_boost = 0.05
 
 [shutdown]
 # enabled = false                 # Enable voice/command shutdown (security risk)
-                                  # Env: DAWN_SHUTDOWN_ENABLED
 # passphrase = ""                 # Required passphrase (empty = no passphrase)
-                                  # Env: DAWN_SHUTDOWN_PASSPHRASE
 
 # =============================================================================
 # Terminal UI (TUI)
@@ -1195,7 +1192,8 @@ citation_reinforcement_boost = 0.05
 # =============================================================================
 
 [phone]
-# enabled = true                    # Enable phone tool
+# Turn the phone tool on by listing "phone" in [llm.tools] local_enabled /
+# remote_enabled (a dangerous tool is never on otherwise).
 # confirm_outbound = true           # Require "confirm" before dialing or sending SMS
 # user_id = 1                       # User who owns the modem (contacts/logs scoped to this user)
 # audio_device = ""                 # USB sound card device for call audio (e.g. "hw:2,0")

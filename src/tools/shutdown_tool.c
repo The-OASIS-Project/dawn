@@ -27,33 +27,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config/dawn_config.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
-
-/* TOML parsing */
-#include "toml.h"
-
-/* =============================================================================
- * Tool Configuration
- * ============================================================================= */
-
-/**
- * @brief Shutdown tool configuration
- *
- * IMPORTANT: The 'enabled' field MUST be first for TOOL_CAP_DANGEROUS validation.
- * The registry checks this field to ensure dangerous tools default to disabled.
- */
-typedef struct {
-   bool enabled;        /**< Enable voice/command shutdown (default: false) */
-   char passphrase[64]; /**< Required passphrase, empty = no passphrase required */
-} shutdown_tool_config_t;
-
-/* Static config instance - defaults set explicitly for clarity */
-static shutdown_tool_config_t s_config = {
-   .enabled = false,    /* CRITICAL: Must default to false for security */
-   .passphrase = { 0 }, /* No passphrase by default */
-};
 
 /* =============================================================================
  * Constant-Time String Comparison (Security)
@@ -90,38 +67,6 @@ static int constant_time_compare(const char *a, const char *b) {
 }
 
 /* =============================================================================
- * Config Parser
- * ============================================================================= */
-
-/**
- * @brief Parse shutdown config from TOML
- *
- * @param table TOML table for [shutdown] section (may be NULL)
- * @param config Pointer to config struct to populate
- */
-static void shutdown_tool_parse_config(toml_table_t *table, void *config) {
-   shutdown_tool_config_t *cfg = (shutdown_tool_config_t *)config;
-
-   if (!table) {
-      /* No [shutdown] section - keep defaults */
-      return;
-   }
-
-   /* Parse enabled (boolean) */
-   toml_datum_t enabled = toml_bool_in(table, "enabled");
-   if (enabled.ok) {
-      cfg->enabled = enabled.u.b;
-   }
-
-   /* Parse passphrase (string) */
-   toml_datum_t passphrase = toml_string_in(table, "passphrase");
-   if (passphrase.ok) {
-      safe_strscpy(cfg->passphrase, passphrase.u.s);
-      free(passphrase.u.s); /* TOML library allocates string */
-   }
-}
-
-/* =============================================================================
  * Tool Callback
  * ============================================================================= */
 
@@ -129,8 +74,12 @@ static void shutdown_tool_parse_config(toml_table_t *table, void *config) {
  * @brief Shutdown command callback
  *
  * Executes system shutdown if security checks pass:
- * 1. Tool must be enabled in config
+ * 1. [shutdown] enabled in the config
  * 2. Passphrase must match (if configured)
+ *
+ * The settings live in the global config ([shutdown], g_config.shutdown), which
+ * the settings panel edits.  `enabled` is checked here because this callback is
+ * reached by voice commands and MQTT as well as the model.
  *
  * @param action Action name (unused)
  * @param value Passphrase from user (if passphrase required)
@@ -141,16 +90,22 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
    (void)action; /* Unused */
    *should_respond = 1;
 
+   /* Snapshot: the settings panel may write these while we run. */
+   const shutdown_config_t *cfg = &config_get()->shutdown;
+   const bool enabled = cfg->enabled;
+   char passphrase[sizeof(cfg->passphrase)];
+   safe_strscpy(passphrase, cfg->passphrase);
+
    /* Security check 1: Must be explicitly enabled in config */
-   if (!s_config.enabled) {
+   if (!enabled) {
       OLOG_WARNING("Shutdown command rejected: shutdown.enabled = false in config");
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Shutdown command is disabled. Enable it in settings first.");
    }
 
    /* Security check 2: If passphrase is configured, it must match */
-   if (s_config.passphrase[0] != '\0') {
-      if (value == NULL || constant_time_compare(value, s_config.passphrase) != 0) {
+   if (passphrase[0] != '\0') {
+      if (value == NULL || constant_time_compare(value, passphrase) != 0) {
          OLOG_WARNING("Shutdown command rejected: incorrect or missing passphrase");
          return strdup(TOOL_RESULT_ERROR_MARK "Shutdown command rejected: incorrect passphrase.");
       }
@@ -215,11 +170,6 @@ static const tool_metadata_t shutdown_metadata = {
    .default_local = true,
    .default_remote = false, /* Security: no remote shutdown */
 
-   /* Config */
-   .config = &s_config,
-   .config_size = sizeof(s_config),
-   .config_parser = shutdown_tool_parse_config,
-   .config_section = "shutdown",
 
    /* Secret Requirements */
    .secret_requirements = NULL, /* No secrets needed */

@@ -380,7 +380,7 @@ Reference: `GETTING_STARTED.md` — SearXNG section.
 3. Full per-provider bot setup: `docs/MESSAGING_CHANNELS_SETUP.md`.
 
 ### Email (if selected)
-1. Requires a build with `-DDAWN_ENABLE_EMAIL_TOOL=ON` and `[email] enabled = true` in `dawn.toml`.
+1. Requires a build with `-DDAWN_ENABLE_EMAIL_TOOL=ON`, and `"email"` in `[llm.tools]` `local_enabled` / `remote_enabled` for the model to use it.
 2. Accounts are added in the WebUI (**Settings → Email Accounts**), not the installer — app password or Google OAuth.
 3. Reference: `GETTING_STARTED.md` — Email section.
 

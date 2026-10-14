@@ -29,11 +29,6 @@ const tool_metadata_t *tool_registry_lookup(const char *name) {
    return NULL; /* No tools registered in test */
 }
 
-bool tool_registry_is_enabled(const char *name) {
-   (void)name;
-   return false;
-}
-
 int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    (void)call;
    if (result) {

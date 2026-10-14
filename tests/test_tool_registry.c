@@ -336,18 +336,6 @@ static void test_get_callback(void) {
    TEST_ASSERT_NULL_MESSAGE(missing, "get_callback returns NULL for unknown tool");
 }
 
-static void test_is_enabled_non_dangerous(void) {
-   tool_registry_register(&mock_tool);
-
-   bool enabled = tool_registry_is_enabled("test_tool");
-   TEST_ASSERT_TRUE_MESSAGE(enabled, "non-DANGEROUS tool is always enabled");
-}
-
-static void test_is_enabled_not_found(void) {
-   bool enabled = tool_registry_is_enabled("ghost_tool");
-   TEST_ASSERT_FALSE_MESSAGE(enabled, "is_enabled returns false for unregistered tool");
-}
-
 static void test_has_capability_true(void) {
    tool_registry_register(&mock_tool_network);
 
@@ -525,15 +513,6 @@ static void test_validate_action_gate(void) {
    rc = tool_registry_validate_schedulable("sched_gated_tool", NULL, "", err, sizeof(err));
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "NULL action rejected by the per-action gate");
 }
-
-/* Note: the "disabled" branch of validate_schedulable
- * (`!tool_registry_is_enabled(name)` between the SCHEDULABLE check and the
- * REQUIRES_VALUE check) is structurally unreachable from this test
- * harness — registered tools default to enabled=true and the registry
- * exposes no public toggle.  Unregistered tools hit the unknown-tool
- * branch in find() first.  In production it fires when an operator sets
- * `[tool.foo] enabled = false` via dawn.toml; that path is config-driven
- * and out of scope here. */
 
 static void test_validate_null_err_buf_safe(void) {
    tool_registry_register(&mock_schedulable_no_value);
@@ -784,8 +763,6 @@ int main(void) {
    RUN_TEST(test_count);
    RUN_TEST(test_get_by_index);
    RUN_TEST(test_get_callback);
-   RUN_TEST(test_is_enabled_non_dangerous);
-   RUN_TEST(test_is_enabled_not_found);
    RUN_TEST(test_has_capability_true);
    RUN_TEST(test_has_capability_false);
    RUN_TEST(test_lock_prevents_registration);

@@ -66,16 +66,6 @@
    "continue searching older mail."
 
 /* =============================================================================
- * Config (TOOL_CAP_DANGEROUS requires enabled = true as first field)
- * ============================================================================= */
-
-typedef struct {
-   bool enabled;
-} email_tool_config_t;
-
-static email_tool_config_t s_config;
-
-/* =============================================================================
  * Forward Declarations
  * ============================================================================= */
 
@@ -1296,22 +1286,20 @@ static void email_tool_cleanup(void) {
 }
 
 static bool email_tool_available(void) {
-   return s_config.enabled && email_service_available();
+   return email_service_available();
 }
 
 /* =============================================================================
  * Config Parser
  * ============================================================================= */
 
+/* [email] has no settings of its own; the parser only notes the retired
+ * `enabled`. */
 static void email_tool_config_parse(toml_table_t *table, void *config) {
-   email_tool_config_t *cfg = (email_tool_config_t *)config;
-
-   if (!table)
-      return;
-
-   toml_datum_t enabled = toml_bool_in(table, "enabled");
-   if (enabled.ok)
-      cfg->enabled = enabled.u.b;
+   (void)config;
+   tool_registry_note_retired_key(table, "email", "enabled",
+                                  "a dangerous tool is turned on by listing it in [llm.tools] "
+                                  "local_enabled / remote_enabled (see UPGRADING.md)");
 }
 
 /* =============================================================================
@@ -1436,8 +1424,6 @@ static const tool_metadata_t email_metadata = {
    .default_local = true,
    .default_remote = true,
 
-   .config = &s_config,
-   .config_size = sizeof(s_config),
    .config_parser = email_tool_config_parse,
    .config_section = "email",
 

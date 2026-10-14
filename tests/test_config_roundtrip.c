@@ -337,7 +337,7 @@ static void test_memory_idle_timeout_bounds(void) {
  * appear in its output.  A new section wired into the parser but not the writer
  * fails HERE with its own name, rather than silently eating user settings.
  *
- * Tool-owned sections ([shutdown], [home_assistant], ...) are excluded — they
+ * Tool-owned sections ([home_assistant], [phone], ...) are excluded — they
  * are emitted via tool_registry_write_configs(), which this test stubs out.
  * [api_keys] is excluded too: it is the legacy secrets spelling, superseded by
  * [secrets], and deliberately never written back. */
@@ -407,6 +407,19 @@ static void test_capture_history_count_retired(void) {
    TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
 }
 
+/* --- [shutdown] ---------------------------------------------------------- */
+
+/* The settings panel edits [shutdown] and the tool reads it from the global
+ * config, so the writer must keep it; the passphrase is free text. */
+static void test_shutdown_roundtrip(void) {
+   g_written.shutdown.enabled = true;
+   snprintf(g_written.shutdown.passphrase, sizeof(g_written.shutdown.passphrase),
+            "open \"sesame\"");
+   round_trip();
+   TEST_ASSERT_TRUE(g_read.shutdown.enabled);
+   TEST_ASSERT_EQUAL_STRING("open \"sesame\"", g_read.shutdown.passphrase);
+}
+
 static void test_all_writer_owned_sections_present(void) {
    /* Every section config_write_toml() emits, INCLUDING sub-tables. Parent-only
     * coverage would let an entire [llm.tools] or [memory.embeddings] writer block
@@ -450,6 +463,7 @@ static void test_all_writer_owned_sections_present(void) {
       "[documents]",
       "[images]",
       "[vision]",
+      "[shutdown]",
       "[debug]",
       "[paths]",
       "[url_fetcher]",
@@ -580,6 +594,7 @@ int main(void) {
    RUN_TEST(test_use_openrouter_migrates_to_provider);
    RUN_TEST(test_capture_history_count_retired);
    RUN_TEST(test_use_openrouter_not_written);
+   RUN_TEST(test_shutdown_roundtrip);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);
    RUN_TEST(test_string_values_cannot_forge_toml);

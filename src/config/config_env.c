@@ -2085,6 +2085,10 @@ static void write_toml_string(FILE *fp, const char *key, const char *value) {
    }
 }
 
+void config_write_toml_string(void *fp, const char *key, const char *value) {
+   write_toml_string((FILE *)fp, key, value ? value : "");
+}
+
 /**
  * @brief Write a TOML string key that may contain newlines.
  *
@@ -2627,6 +2631,10 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "auto_threshold = %.2f\n", config->memory.entity_merge_auto_threshold);
    fprintf(fp, "review_threshold = %.2f\n", config->memory.entity_merge_review_threshold);
 
+   fprintf(fp, "\n[shutdown]\n");
+   fprintf(fp, "enabled = %s\n", config->shutdown.enabled ? "true" : "false");
+   write_toml_string(fp, "passphrase", config->shutdown.passphrase);
+
    fprintf(fp, "\n[debug]\n");
    fprintf(fp, "mic_record = %s\n", config->debug.mic_record ? "true" : "false");
    fprintf(fp, "asr_record = %s\n", config->debug.asr_record ? "true" : "false");
@@ -2845,7 +2853,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "allowed_local_roots = []\n");
    }
 
-   /* Write tool-owned config sections (e.g. [home_assistant], [shutdown]) */
+   /* Write tool-owned config sections (e.g. [home_assistant], [phone]) */
    tool_registry_write_configs(fp);
 
    fclose(fp);

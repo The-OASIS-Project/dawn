@@ -53,28 +53,13 @@
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
-/* =============================================================================
- * Config — TOOL_CAP_DANGEROUS tools must supply a config struct + parser, and
- * the registry reads the first `bool enabled` field to honor an operator on/off
- * in the [document_manage] TOML section.  Defaults to ENABLED (the destructive
- * action — delete — is already gated behind a two-step user confirmation), so
- * the tool works out of the box; set `[document_manage] enabled = false` to
- * remove the LLM's document write/delete access.
- * ============================================================================= */
-
-typedef struct {
-   bool enabled; /**< MUST be the first field (dangerous-tool convention) */
-} document_manage_config_t;
-
-static document_manage_config_t s_config = { .enabled = true };
-
+/* [document_manage] has no settings of its own; the parser only notes the
+ * retired `enabled`. */
 static void doc_manage_parse_config(toml_table_t *table, void *config) {
-   document_manage_config_t *cfg = (document_manage_config_t *)config;
-   if (!table)
-      return; /* no [document_manage] section — keep the enabled-by-default */
-   toml_datum_t enabled = toml_bool_in(table, "enabled");
-   if (enabled.ok)
-      cfg->enabled = enabled.u.b;
+   (void)config;
+   tool_registry_note_retired_key(table, "document_manage", "enabled",
+                                  "a dangerous tool is turned on by listing it in [llm.tools] "
+                                  "local_enabled / remote_enabled (see UPGRADING.md)");
 }
 
 /* =============================================================================
@@ -474,8 +459,6 @@ static const tool_metadata_t doc_manage_metadata = {
    .capabilities = TOOL_CAP_DANGEROUS, /* mutates + deletes user data */
    .default_local = true,
    .default_remote = true,
-   .config = &s_config,
-   .config_size = sizeof(s_config),
    .config_parser = doc_manage_parse_config,
    .config_section = "document_manage",
    .callback = doc_manage_callback,

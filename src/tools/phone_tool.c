@@ -57,14 +57,12 @@
  * ============================================================================= */
 
 typedef struct {
-   bool enabled;
    bool confirm_outbound;
    bool warn_on_multi_segment;
    int delete_rate_limit_per_hour; /* confirm_delete_* per hour */
 } phone_tool_config_t;
 
 static phone_tool_config_t s_config = {
-   .enabled = true,
    .confirm_outbound = true,
    .warn_on_multi_segment = true,
    .delete_rate_limit_per_hour = 10,
@@ -1230,7 +1228,7 @@ static void phone_tool_cleanup(void) {
 }
 
 static bool phone_tool_available(void) {
-   return s_config.enabled && phone_service_available();
+   return phone_service_available();
 }
 
 /* =============================================================================
@@ -1243,9 +1241,9 @@ static void phone_tool_config_parse(toml_table_t *table, void *config) {
    if (!table)
       return;
 
-   toml_datum_t enabled = toml_bool_in(table, "enabled");
-   if (enabled.ok)
-      cfg->enabled = enabled.u.b;
+   tool_registry_note_retired_key(table, "phone", "enabled",
+                                  "a dangerous tool is turned on by listing it in [llm.tools] "
+                                  "local_enabled / remote_enabled (see UPGRADING.md)");
 
    toml_datum_t confirm = toml_bool_in(table, "confirm_outbound");
    if (confirm.ok)
@@ -1272,7 +1270,7 @@ static void phone_tool_config_parse(toml_table_t *table, void *config) {
  * save (which truncates + rewrites dawn.toml via config_write_toml) does not drop
  * this section — a tool with a parser but no writer is silently clobbered.
  *
- * Two sources (parse<->write symmetry, or a key clobbers on every save): the four
+ * Two sources (parse<->write symmetry, or a key clobbers on every save): the three
  * base keys come from @p config (the registered phone_tool_config_t, HA-style);
  * the audio block comes from the module-static s_audio via phone_audio_config_write.
  * NOTE: hand-added but unparsed [phone] keys (user_id, retention, rate_limit_*)
@@ -1281,7 +1279,6 @@ static void phone_tool_config_write(void *fp, const void *config) {
    const phone_tool_config_t *cfg = (const phone_tool_config_t *)config;
    FILE *f = (FILE *)fp;
 
-   fprintf(f, "enabled = %s\n", cfg->enabled ? "true" : "false");
    fprintf(f, "confirm_outbound = %s\n", cfg->confirm_outbound ? "true" : "false");
    fprintf(f, "warn_on_multi_segment = %s\n", cfg->warn_on_multi_segment ? "true" : "false");
    fprintf(f, "delete_rate_limit_per_hour = %d\n", cfg->delete_rate_limit_per_hour);

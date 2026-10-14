@@ -406,7 +406,7 @@ int scheduler_emit_alert(int user_id,
 /**
  * @brief Execute a scheduled task by calling its tool callback
  *
- * Validates TOOL_CAP_SCHEDULABLE and tool_registry_is_enabled() at execution time.
+ * Validates TOOL_CAP_SCHEDULABLE at execution time.
  * DANGEROUS tools are allowed — the user explicitly authorized them at scheduling time.
  *
  * @param event The task event containing tool_name, tool_action, tool_value
@@ -913,8 +913,7 @@ static void *briefing_thread_func(void *arg) {
        * New rows always go through the steps path above and DO get full
        * validation per step. */
       const tool_metadata_t *meta = tool_registry_find(event->tool_name);
-      if (!meta || !(meta->capabilities & TOOL_CAP_SCHEDULABLE) ||
-          !tool_registry_is_enabled(event->tool_name) || !meta->callback) {
+      if (!meta || !(meta->capabilities & TOOL_CAP_SCHEDULABLE) || !meta->callback) {
          OLOG_ERROR("scheduler: briefing %lld tool '%s' unavailable", (long long)event->id,
                     event->tool_name);
          goto fail;

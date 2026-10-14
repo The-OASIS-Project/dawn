@@ -2193,6 +2193,17 @@ dawn_add_unit_test(test_auth_db
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# A tool's config section survives a settings save: the registry refuses a
+# parser with no writer, and a writer writes back what the parser read.
+dawn_add_unit_test(test_tool_config_roundtrip
+   SOURCES test_tool_config_roundtrip.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/core/device_types.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_tool_registry
    SOURCES test_tool_registry.c test_tool_registry_stub.c
            ${SRC_ROOT}/src/tools/tool_registry.c

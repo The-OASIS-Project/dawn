@@ -845,16 +845,18 @@ For iCloud, Nextcloud, Radicale, and other CalDAV servers:
 
 DAWN can check, read, search, send, trash, and archive email via voice commands. It works with any IMAP/SMTP provider (Gmail, iCloud, Outlook, Fastmail, Proton Mail via Bridge, self-hosted). Supports both app password and Google OAuth 2.0 (XOAUTH2) authentication.
 
-The email tool is disabled by default (compile-time and runtime gates) because it has `TOOL_CAP_DANGEROUS` — email send is irreversible.
+The model can't use email until you opt in, because it has `TOOL_CAP_DANGEROUS` — email send is irreversible.
 
 #### Enable Email
 
 The email tool is built by default (it needs `libgmime-3.0-dev`, which the
-dependency steps above install). It is off at runtime until you turn it on in
-`dawn.toml`:
+dependency steps above install). Like every dangerous tool, the model gets it
+only where you list it in `[llm.tools]` (local = the voice mic, remote = the
+WebUI and satellites):
 ```toml
-[email]
-enabled = true
+[llm.tools]
+local_enabled = ["email"]
+remote_enabled = ["email"]
 ```
 
 #### Add an Email Account
@@ -910,11 +912,10 @@ After linking, just talk — no wake word needed. Send `/new` to reset the conve
 DAWN can place and receive cellular calls and text messages on a real phone number through the **[ECHO](https://github.com/The-OASIS-Project/echo)** daemon, a standalone modem daemon for the Waveshare SIM7600G-H (USB) that talks to DAWN over MQTT. ECHO owns the serial/AT-command traffic; DAWN provides the LLM tool, call state machine, TTS announcements, WebUI incoming-call banner, and the call/SMS log.
 
 1. Set up and run ECHO (modem wiring, SIM, and AT config) — see the [ECHO repo](https://github.com/The-OASIS-Project/echo). DAWN and ECHO must share the same MQTT broker.
-2. Enable the phone tool in `dawn.toml`:
+2. Enable the phone tool in `dawn.toml` (list it in `[llm.tools]` too, like any dangerous tool: `local_enabled` / `remote_enabled = ["phone"]`):
 
    ```toml
    [phone]
-   enabled = true
    confirm_outbound = true     # require a spoken/typed "confirm" before dialing or texting
    # pcm_port = "/dev/serial/by-id/...-if06-port0"   # modem's USB audio port for call audio
    ```

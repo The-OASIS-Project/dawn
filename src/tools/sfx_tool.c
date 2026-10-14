@@ -45,6 +45,7 @@
 #include "audio/audio_decoder.h"
 #include "audio/audio_utils.h"
 #include "audio/flac_playback.h"
+#include "config/config_env.h"
 #include "dawn.h"
 #include "logging.h"
 #include "toml.h"
@@ -548,6 +549,12 @@ static void sfx_config_parser(toml_table_t *table, void *config) {
    }
 }
 
+/* Writes [sfx] back on a settings save, which rewrites dawn.toml. */
+static void sfx_config_writer(void *fp, const void *config) {
+   const sfx_config_t *cfg = (const sfx_config_t *)config;
+   config_write_toml_string(fp, "sound_path", cfg->sound_path);
+}
+
 /* =============================================================================
  * Shutdown
  * ============================================================================= */
@@ -618,6 +625,7 @@ static const tool_metadata_t sfx_tool_metadata = {
    .config = &sfx_config,
    .config_size = sizeof(sfx_config),
    .config_parser = sfx_config_parser,
+   .config_writer = sfx_config_writer,
    .config_section = "sfx",
    .cleanup = sfx_shutdown,
    .callback = sfx_callback,

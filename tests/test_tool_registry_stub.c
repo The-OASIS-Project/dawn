@@ -113,11 +113,11 @@ void invalidate_system_instructions(void) {
 }
 
 /* ============================================================================
- * TOML stubs — toml_parse_file / toml_table_in / toml_free
+ * TOML stubs — toml_parse_file / toml_table_in / toml_key_exists / toml_free
  *
- * tool_registry_parse_configs() calls these. The test does not exercise
- * config parsing, so returning NULL / no-op is safe. Signatures match
- * tools/toml.h (included at the top of this file).
+ * tool_registry_parse_configs() and tool_registry_note_retired_key() call these. The test does not
+ * exercise config parsing, so returning NULL / no-op is safe. Signatures match tools/toml.h
+ * (included at the top of this file).
  * ============================================================================ */
 
 toml_table_t *toml_parse_file(FILE *fp, char *errbuf, int errbufsz) {
@@ -131,6 +131,12 @@ toml_table_t *toml_table_in(const toml_table_t *tab, const char *key) {
    (void)tab;
    (void)key;
    return NULL;
+}
+
+int toml_key_exists(const toml_table_t *tab, const char *key) {
+   (void)tab;
+   (void)key;
+   return 0;
 }
 
 void toml_free(toml_table_t *tab) {
