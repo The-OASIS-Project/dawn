@@ -518,7 +518,8 @@ static void end_local_turn(void) {
  * tool marked (nothing done, see TOOL_RESULT_ERROR_MARK) goes to the LLM, which
  * can.  Any other failure, one in direct_only (no LLM to ask), or one for a
  * @p secret command (the LLM never gets the passphrase, so it couldn't do
- * better than the tool's own answer) is handled, and the tool's reply spoken.
+ * better than the tool's own answer) is handled; a reply from the tool itself
+ * is spoken.
  */
 static bool run_direct_command(const char *treg_command, bool secret) {
    struct json_object *cmd_json = json_tokener_parse(treg_command);

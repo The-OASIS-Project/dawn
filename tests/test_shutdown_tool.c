@@ -17,8 +17,8 @@
  * the project author(s).
  *
  * Unit tests for the shutdown tool's passphrase check, which compares a
- * spoken passphrase folded (case, punctuation, spacing).  Only refusing paths
- * are exercised; an accepted request would run the real shutdown.
+ * spoken passphrase folded (case, punctuation, spacing).  system() is wrapped
+ * at link time (-Wl,--wrap=system), so an accepted request is only counted.
  */
 
 #include <pthread.h>
@@ -38,14 +38,25 @@
 pthread_rwlock_t g_config_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 
 static const tool_metadata_t *s_meta;
+static int s_system_calls;
+
+/* Stands in for system(): the tool's only call is the shutdown itself */
+int __wrap_system(const char *command);
+int __wrap_system(const char *command) {
+   (void)command;
+   s_system_calls++;
+   return 0;
+}
 
 static void configure(bool enabled, const char *passphrase) {
    g_config.shutdown.enabled = enabled;
    snprintf(g_config.shutdown.passphrase, sizeof(g_config.shutdown.passphrase), "%s", passphrase);
 }
 
-/* Run the callback; true when it refused (an error-marked reply) */
+/* Run the callback; true when it refused (an error-marked reply).  A refusal
+ * never runs the shutdown, and an acceptance runs it once. */
 static bool refused(const char *value) {
+   int calls_before = s_system_calls;
    char buf[128] = { 0 };
    int should_respond = 0;
    char *reply = NULL;
@@ -58,6 +69,7 @@ static bool refused(const char *value) {
    bool is_refusal = reply &&
                      strncmp(reply, TOOL_RESULT_ERROR_MARK, strlen(TOOL_RESULT_ERROR_MARK)) == 0;
    free(reply);
+   TEST_ASSERT_EQUAL_INT(is_refusal ? 0 : 1, s_system_calls - calls_before);
    return is_refusal;
 }
 
@@ -107,11 +119,59 @@ static void test_non_ascii_passphrase_refuses_wrong(void) {
    TEST_ASSERT_TRUE(refused("Пароль"));
 }
 
+static void test_spoken_passphrase_accepted(void) {
+   configure(true, "Alpha-Bravo");
+   TEST_ASSERT_FALSE(refused("alpha bravo"));
+   TEST_ASSERT_FALSE(refused("alpha, bravo"));
+   TEST_ASSERT_FALSE(refused("  ALPHA   bravo. "));
+   configure(true, "Пароль семь");
+   TEST_ASSERT_FALSE(refused("Пароль, семь"));
+}
+
+static void test_extra_words_refused_at_max_length(void) {
+   /* A passphrase filling the field: words after it must not be cut away */
+   char phrase[sizeof(g_config.shutdown.passphrase)];
+   memset(phrase, 'a', sizeof(phrase) - 1);
+   phrase[sizeof(phrase) - 1] = '\0';
+   configure(true, phrase);
+   char spoken[128];
+   snprintf(spoken, sizeof(spoken), "%s now", phrase);
+   TEST_ASSERT_TRUE(refused(spoken));
+   TEST_ASSERT_FALSE(refused(phrase));
+}
+
+static void test_no_passphrase_set(void) {
+   configure(true, "");
+   TEST_ASSERT_FALSE(refused(NULL));
+}
+
+static void test_shortcut_needs_enabled_and_passphrase(void) {
+   /* Without both there is no voice shortcut: "shut down the TV" goes to the LLM */
+   configure(false, "alpha");
+   TEST_ASSERT_FALSE(s_meta->is_available());
+   configure(true, "");
+   TEST_ASSERT_FALSE(s_meta->is_available());
+   configure(true, "alpha");
+   TEST_ASSERT_TRUE(s_meta->is_available());
+}
+
 int main(void) {
+   /* The accept tests would run a real shutdown if the wrap didn't take:
+    * prove it does first (system(NULL) unwrapped only asks for a shell) */
+   if (system(NULL) != 0 || s_system_calls != 1) { /* the real one returns nonzero */
+      fprintf(stderr, "system() isn't wrapped (-Wl,--wrap=system); not running\n");
+      return 1;
+   }
+   s_system_calls = 0;
+
    UNITY_BEGIN();
    RUN_TEST(test_disabled_refuses);
    RUN_TEST(test_wrong_passphrase_refuses);
    RUN_TEST(test_unspeakable_passphrase_refuses);
    RUN_TEST(test_non_ascii_passphrase_refuses_wrong);
+   RUN_TEST(test_spoken_passphrase_accepted);
+   RUN_TEST(test_extra_words_refused_at_max_length);
+   RUN_TEST(test_no_passphrase_set);
+   RUN_TEST(test_shortcut_needs_enabled_and_passphrase);
    return UNITY_END();
 }

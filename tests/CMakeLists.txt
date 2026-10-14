@@ -2261,14 +2261,16 @@ dawn_add_unit_test(test_tool_registry
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
-# Shutdown tool: the passphrase check's refusals (never an accepted request,
-# which would run the real shutdown)
+# Shutdown tool: the passphrase check.  system() is wrapped, so an accepted
+# request never runs the real shutdown; the wrap reaches only objects linked
+# here, so shutdown_tool.c must stay a direct source, not a shared library.
 dawn_add_unit_test(test_shutdown_tool
    SOURCES test_shutdown_tool.c test_tool_registry_stub.c
            ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/tools/shutdown_tool.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
+target_link_options(test_shutdown_tool PRIVATE -Wl,--wrap=system)
 
 # Round-trip symmetry gate for the [phone] audio config (parse<->write). Links
 # the dependency-light audio-config module + toml + phone_apm's pure default

@@ -179,13 +179,17 @@ const device_type_def_t DEVICE_TYPE_PASSPHRASE = {
    .actions = {
       {
          .name = "execute",
+         /* The generic "%device_name% %value%" last: it would also catch the
+          * phrased forms, with their words in the value.  Whisper writes
+          * "passphrase" both ways. */
          .patterns = {
-            "%device_name% %value%",
             "%device_name% with passphrase %value%",
+            "%device_name% with pass phrase %value%",
             "%device_name% authorization %value%",
             "execute %device_name% %value%",
+            "%device_name% %value%",
          },
-         .pattern_count = 4,
+         .pattern_count = 5,
       },
    },
    .action_count = 1,

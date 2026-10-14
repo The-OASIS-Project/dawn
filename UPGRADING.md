@@ -33,6 +33,20 @@ The time zone lists offer every zone, and two names that weren't real zones are 
 
 ---
 
+## 2026-10-14 — Shutdown passphrase ignores case and punctuation
+
+**What changed.** The `[shutdown]` passphrase is now compared ignoring case (for ASCII letters),
+punctuation and spacing, so "Alpha-Bravo" and "alpha bravo" are the same passphrase. This applies to
+voice, MQTT and the model alike. While shutdown is enabled with a passphrase, a spoken
+"shutdown <passphrase>" is handled on this device and never written into the conversation or sent
+to the model, and "shut down" followed by other words is answered as a wrong passphrase.
+
+**What you need to do.** Nothing, unless your passphrase relies on case or punctuation to be
+distinct; then pick one that differs in its letters or digits. A passphrase with no letters or
+digits now always refuses; set a new one.
+
+---
+
 ## 2026-10-14 — Settings saves no longer drop email, shutdown, plan or sound settings
 
 **What changed.** A settings save from the WebUI rewrites `dawn.toml`, and it was deleting sections

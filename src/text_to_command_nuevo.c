@@ -113,6 +113,11 @@ int try_tool_registry_match(const char *input,
       if (!tool) {
          continue;
       }
+      /* An unavailable tool (shutdown switched off) has no shortcut: the
+       * sentence goes on as if it didn't exist */
+      if (tool->is_available && !tool->is_available()) {
+         continue;
+      }
 
       /* Get device type definition for this tool */
       const device_type_def_t *type_def = device_type_get_def(tool->device_type);

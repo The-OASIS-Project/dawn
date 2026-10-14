@@ -236,6 +236,34 @@ static void test_match_passphrase_with_value(void) {
 
 /* ── Edge cases ──────────────────────────────────────────────────────────── */
 
+static void test_match_passphrase_phrased(void) {
+   /* "with passphrase" isn't swallowed into the value by the generic pattern */
+   const char *action = NULL;
+   char value[64] = { 0 };
+   bool ok = device_type_match_pattern(&DEVICE_TYPE_PASSPHRASE,
+                                       "shutdown with passphrase alpha bravo", "shutdown", NULL,
+                                       &action, value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("alpha bravo", value);
+
+   /* Whisper also writes it as two words */
+   ok = device_type_match_pattern(&DEVICE_TYPE_PASSPHRASE, "shutdown with pass phrase alpha bravo",
+                                  "shutdown", NULL, &action, value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("alpha bravo", value);
+}
+
+static void test_match_passphrase_two_word_alias(void) {
+   /* Whisper often writes "shutdown" as "shut down" */
+   const char *aliases[] = { "shut down", NULL };
+   const char *action = NULL;
+   char value[64] = { 0 };
+   bool ok = device_type_match_pattern(&DEVICE_TYPE_PASSPHRASE, "shut down, alpha bravo",
+                                       "shutdown", aliases, &action, value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("alpha bravo", value);
+}
+
 static void test_match_punctuation_after_device_name(void) {
    /* Whisper writes "Shutdown, alpha bravo." (trailing punctuation is stripped
     * by normalize_for_matching; this is the comma after the device name) */
@@ -327,6 +355,8 @@ int main(void) {
    RUN_TEST(test_match_trigger);
    RUN_TEST(test_match_trigger_with_please);
    RUN_TEST(test_match_passphrase_with_value);
+   RUN_TEST(test_match_passphrase_phrased);
+   RUN_TEST(test_match_passphrase_two_word_alias);
    RUN_TEST(test_match_punctuation_after_device_name);
    RUN_TEST(test_value_is_secret);
 

@@ -67,9 +67,10 @@ static int constant_time_compare(const char *a, const char *b) {
    return result;
 }
 
-/* A spoken passphrase has no case or punctuation: compare it folded (ASCII
- * letters and digits lowercased, UTF-8 bytes kept as they are, anything else one
- * space, trimmed) */
+/* A spoken passphrase has no punctuation, and ASCII letters no case: compare it
+ * folded (ASCII letters and digits lowercased, other UTF-8 bytes kept as they
+ * are, so non-ASCII letters stay case-sensitive; anything else one space,
+ * trimmed) */
 static void fold_spoken(const char *in, char *out, size_t size) {
    size_t n = 0;
    bool gap = false;
@@ -86,6 +87,17 @@ static void fold_spoken(const char *in, char *out, size_t size) {
       }
    }
    out[n] = '\0';
+}
+
+/* Whether the voice shortcut ("shut down <passphrase>") is offered: only when
+ * shutdown is enabled and a passphrase is set, since the shortcut exists to
+ * carry the passphrase.  Otherwise "shut down the TV" goes on to the LLM. */
+static bool shutdown_is_available(void) {
+   pthread_rwlock_rdlock(&g_config_rwlock);
+   const shutdown_config_t *cfg = &config_get()->shutdown;
+   const bool available = cfg->enabled && cfg->passphrase[0] != '\0';
+   pthread_rwlock_unlock(&g_config_rwlock);
+   return available;
 }
 
 /* =============================================================================
@@ -127,11 +139,11 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
                     "Shutdown command is disabled. Enable it in settings first.");
    }
 
-   /* Security check 2: If passphrase is configured, it must match (folded: a
-    * spoken one has no case, and the voice shortcut hands it over lowercased) */
+   /* Security check 2: If passphrase is configured, it must match (folded: the
+    * voice shortcut hands it over lowercased, with Whisper's punctuation) */
    if (passphrase[0] != '\0') {
       char want[sizeof(passphrase)];
-      char got[sizeof(passphrase)];
+      char got[sizeof(passphrase) + 1]; /* longer than any passphrase: extra words differ */
       fold_spoken(passphrase, want, sizeof(want));
       fold_spoken(value ? value : "", got, sizeof(got));
       if (want[0] == '\0') {
@@ -183,8 +195,9 @@ static const tool_metadata_t shutdown_metadata = {
    /* Kind of action: act (the default): stops the daemon. */
    .device_string = "shutdown",
    .topic = "dawn",
-   .aliases = { NULL },
-   .alias_count = 0,
+   /* Whisper often writes "shut down" as two words */
+   .aliases = { "shut down" },
+   .alias_count = 1,
 
    /* LLM Tool Schema */
    .description = "Initiate system shutdown. Requires explicit config enable "
@@ -214,6 +227,7 @@ static const tool_metadata_t shutdown_metadata = {
    .cleanup = NULL, /* No cleanup needed */
 
    /* Callback */
+   .is_available = shutdown_is_available,
    .callback = shutdown_tool_callback,
 };
 
