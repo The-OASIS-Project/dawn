@@ -55,6 +55,7 @@
 /* session_manager.h has multiple inline definitions for these depending on
  * #ifdef gating; bench links against the non-inline-fallback path which
  * leaves the symbols undefined.  Define them as no-ops with sane returns. */
+#include "core/prefix_message.h"
 #include "core/session_manager.h"
 
 /* Test hooks (tests/test_memory_remember.c sets them); the bench leaves them at
@@ -62,17 +63,6 @@
 session_t *g_stub_command_context = NULL;
 int g_stub_defer_result = 1; /* FAILURE */
 int64_t g_stub_defer_conv = 0;
-
-/* A queued extraction re-reads its conversation (memory_extraction.c); the
- * bench never queues one. */
-struct json_object *memory_history_load_from_db(int64_t conv_id, int user_id, size_t *len) {
-   (void)conv_id;
-   (void)user_id;
-   if (len) {
-      *len = 0;
-   }
-   return NULL;
-}
 
 /* No live conversations here: nothing to withdraw a forgotten memory from. */
 int session_withdraw_forgotten(int user_id, bool memory_bodies) {
@@ -97,6 +87,19 @@ void session_prefix_inline_tools_rejected(session_t *session) {
 void session_withdraw_forgotten_async(int user_id, bool memory_bodies) {
    (void)user_id;
    (void)memory_bodies;
+}
+
+/* The history loader's continue-a-conversation half needs these; the bench
+ * only loads a conversation for extraction, which never replays a prefix. */
+struct json_object *prefix_message_stored(int64_t conv_id, int user_id) {
+   (void)conv_id;
+   (void)user_id;
+   return NULL;
+}
+bool prefix_message_install(struct json_object *history, struct json_object *prefix) {
+   (void)history;
+   (void)prefix;
+   return false;
 }
 
 session_t *session_get_command_context(void) {
