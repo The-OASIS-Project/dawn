@@ -172,13 +172,33 @@
       requestListAccounts();
    }
 
+   /* Accounts whose sync this tab asked for and is waiting on. */
+   const pendingSyncs = new Set();
+
    function handleSyncAccountResponse(payload) {
-      clearLoadingButtons();
       if (!payload.success) {
+         /* Only this account's request failed; another may still be syncing. */
+         if (payload.id !== undefined) {
+            pendingSyncs.delete(String(payload.id));
+            clearLoadingButton(payload.id);
+         } else {
+            clearLoadingButtons();
+         }
          showToast('Sync failed: ' + (payload.error || 'Unknown'), 'error');
          return;
       }
+      if (payload.queued) return; /* calendar_sync_done reports it */
+      clearLoadingButtons();
       showToast('Calendar synced successfully', 'success');
+      requestListAccounts();
+   }
+
+   function handleSyncDone(payload) {
+      if (pendingSyncs.delete(String(payload.id))) {
+         clearLoadingButton(payload.id);
+         if (payload.success) showToast('Calendar synced successfully', 'success');
+         else showToast('Sync failed: check the calendar server', 'error');
+      }
       requestListAccounts();
    }
 
@@ -303,6 +323,8 @@
       `
          )
          .join('');
+      /* A redraw keeps the Sync button busy for syncs still running. */
+      pendingSyncs.forEach((id) => setButtonLoading(id, 'Sync'));
    }
 
    function renderCalendars(calendars) {
@@ -412,8 +434,21 @@
    }
 
    function syncAccount(id) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) {
+         showToast('Not connected; try again when the connection is back', 'error');
+         return;
+      }
       setButtonLoading(id, 'Sync');
+      /* Before the request: its calendar_sync_done can beat the reply. */
+      pendingSyncs.add(String(id));
       requestSyncAccount(id);
+   }
+
+   /* The connection dropped: a sync's calendar_sync_done may never arrive,
+    * so nothing is waited on (the next list shows how each account stands). */
+   function clearPendingSyncs() {
+      pendingSyncs.clear();
+      clearLoadingButtons();
    }
 
    function expandCalendars(accountId) {
@@ -631,6 +666,15 @@
             btn.classList.add('loading');
             btn.textContent = label + '...';
          }
+      });
+   }
+
+   function clearLoadingButton(accountId) {
+      const card = document.querySelector('[data-account-id="' + accountId + '"]');
+      if (!card) return;
+      card.querySelectorAll('.calendar-account-actions button.loading').forEach((btn) => {
+         btn.classList.remove('loading');
+         btn.textContent = btn.textContent.replace('...', '');
       });
    }
 
@@ -1192,6 +1236,8 @@
       handleRemoveAccountResponse: handleRemoveAccountResponse,
       handleTestAccountResponse: handleTestAccountResponse,
       handleSyncAccountResponse: handleSyncAccountResponse,
+      handleSyncDone: handleSyncDone,
+      clearPendingSyncs: clearPendingSyncs,
       handleListCalendarsResponse: handleListCalendarsResponse,
       handleToggleCalendarResponse: handleToggleCalendarResponse,
       handleToggleReadOnlyResponse: handleToggleReadOnlyResponse,

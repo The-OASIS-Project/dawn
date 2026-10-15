@@ -45,6 +45,7 @@ typedef enum {
    CALDAV_ERR_NO_CALENDARS,       /**< Discovery found no calendar collections */
    CALDAV_ERR_ALLOC,              /**< Memory allocation failure */
    CALDAV_ERR_SYNC_TOKEN_INVALID, /**< RFC 6578 sync-token rejected (stale/expired) — re-baseline */
+   CALDAV_ERR_TOO_SLOW,           /**< Events took too long to read (hostile or broken iCalendar) */
 } caldav_error_t;
 
 /* ============================================================================
@@ -72,6 +73,14 @@ typedef struct {
  * Event Types
  * ============================================================================ */
 
+/** An event slower than this to read or expand counts against its calendar's
+ *  budget; a real one takes a few ms (an Outlook zone from 1601, ~15 ms). */
+#define CALDAV_SLOW_EVENT_MS 100
+
+/** Time slow events may take in one calendar's sync before it stops: the rest
+ *  keeps its cached copy, and the next sync tries again. */
+#define CALDAV_SLOW_BUDGET_MS 10000
+
 /** A single fetched event from the server */
 typedef struct {
    char uid[256];          /**< iCalendar UID */
@@ -85,6 +94,7 @@ typedef struct {
    char dtstart_date[16];  /**< All-day: "2026-03-10" */
    char dtend_date[16];    /**< All-day: "2026-03-11" (exclusive) */
    char rrule[256];        /**< Recurrence rule string, or empty */
+   char tzid[64];          /**< IANA zone a timed event repeats in, or empty for UTC */
    char *raw_ical;         /**< Full iCalendar data (heap-allocated) */
    int duration_sec;       /**< Duration in seconds (for recurring) */
    char href[512];         /**< Resource path on server */

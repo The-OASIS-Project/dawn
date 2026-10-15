@@ -26,46 +26,48 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <json-c/json.h>
 #include <pthread.h>
+#include <sodium.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <time.h>
-
-#include "utils/string_utils.h"
-
-#ifdef HAVE_LIBICAL
-#include <libical/ical.h>
-#endif
-
-#include <json-c/json.h>
-#include <sodium.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/crypto_store.h"
 #include "core/iso8601.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
 #include "tools/calendar_pick.h"
 #include "tools/calendar_query_window.h"
+#include "tools/calendar_rrule.h"
 #include "tools/email_db.h"
 #include "tools/oauth_client.h"
+#include "utils/string_utils.h"
 
 /* Weak no-op fallback for the WebUI "calendar changed, refetch" broadcast,
  * compiled ONLY when WebUI is OFF (calendar_service.c is gated on the calendar
  * tool, not on ENABLE_WEBUI, so it builds in the local/ci presets). When WebUI
  * is on, the strong override in src/webui/webui_broadcasts.c is linked instead.
- * sync_now calls this unconditionally, so a definition must exist in every
+ * sync_account calls these unconditionally, so a definition must exist in every
  * build. Mirrors scheduler_broadcast_events_changed (src/core/scheduler.c). */
 #ifndef ENABLE_WEBUI
 void calendar_broadcast_events_changed(int user_id) __attribute__((weak));
 void calendar_broadcast_events_changed(int user_id) {
    (void)user_id;
+}
+void calendar_broadcast_sync_done(int user_id, int64_t account_id, bool ok) __attribute__((weak));
+void calendar_broadcast_sync_done(int user_id, int64_t account_id, bool ok) {
+   (void)user_id;
+   (void)account_id;
+   (void)ok;
 }
 #endif
 
@@ -73,16 +75,27 @@ void calendar_broadcast_events_changed(int user_id) {
  * State
  * ============================================================================= */
 
+/* Accounts a sync was asked for (by a user, or a new account), waiting for
+ * the sync thread: every sync runs there, one at a time. */
+#define CALENDAR_MAX_SYNC_REQUESTS 16
+
+/* Seconds before the sync thread asks again for accounts it couldn't read. */
+#define CALENDAR_DB_RETRY_SEC 5
+
 static struct {
    bool initialized;
    calendar_config_t config;
    pthread_t sync_thread;
    atomic_bool sync_running;
    pthread_mutex_t mutex;
+   pthread_cond_t wake; /* a sync was asked for, or shutdown */
+   int64_t requested[CALENDAR_MAX_SYNC_REQUESTS];
+   int requested_count;
 } s_cal = {
    .initialized = false,
    .sync_running = ATOMIC_VAR_INIT(false),
    .mutex = PTHREAD_MUTEX_INITIALIZER,
+   .wake = PTHREAD_COND_INITIALIZER,
 };
 
 /* =============================================================================
@@ -90,6 +103,7 @@ static struct {
  * ============================================================================= */
 
 static void *sync_thread_func(void *arg);
+static int sync_account(int64_t account_id);
 
 /* =============================================================================
  * Password encryption — delegates to shared crypto_store module
@@ -209,6 +223,14 @@ int calendar_service_init(const calendar_config_t *config) {
    s_cal.config = *config;
    s_cal.initialized = true;
 
+   /* Wait on the monotonic clock: a wall-clock step back mustn't stall syncs. */
+   pthread_condattr_t attr;
+   pthread_condattr_init(&attr);
+   pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+   pthread_cond_destroy(&s_cal.wake);
+   pthread_cond_init(&s_cal.wake, &attr);
+   pthread_condattr_destroy(&attr);
+
    /* Start background sync thread */
    atomic_store(&s_cal.sync_running, true);
    if (pthread_create(&s_cal.sync_thread, NULL, sync_thread_func, NULL) != 0) {
@@ -232,10 +254,12 @@ void calendar_service_shutdown(void) {
    }
    atomic_store(&s_cal.sync_running, false);
    s_cal.initialized = false;
+   s_cal.requested_count = 0;
+   pthread_cond_broadcast(&s_cal.wake);
    pthread_t thread = s_cal.sync_thread;
    pthread_mutex_unlock(&s_cal.mutex);
 
-   /* Wait for sync thread to exit (max ~sync_interval seconds) */
+   /* Wait for the sync thread to exit (after any sync it is in) */
    pthread_join(thread, NULL);
 
    OLOG_INFO("calendar: service shut down");
@@ -312,9 +336,9 @@ int calendar_service_add_account(int user_id,
    OLOG_INFO("calendar: added %s account '%s' (id=%lld)", is_oauth ? "OAuth" : "basic", name,
              (long long)id);
 
-   /* Discover calendars and run initial sync */
+   /* Discover calendars and ask for the initial sync */
    if (calendar_service_test_connection(id) == 0) {
-      calendar_service_sync_now(id);
+      calendar_service_request_sync(id);
    } else {
       OLOG_WARNING("calendar: initial discovery failed for '%s', calendars will be discovered on "
                    "next test",
@@ -490,7 +514,7 @@ int calendar_service_test_connection(int64_t account_id) {
          continue;
 
       /* Don't store ctag at discovery time — leave it empty so the first
-       * sync_now() sees a mismatch and actually fetches events. */
+       * sync_account() sees a mismatch and actually fetches events. */
       calendar_calendar_t cal = { 0 };
       cal.account_id = account_id;
       snprintf(cal.caldav_path, sizeof(cal.caldav_path), "%s", ci->path);
@@ -519,104 +543,99 @@ int calendar_service_test_connection(int64_t account_id) {
  * ============================================================================= */
 
 /** Insert a single base occurrence from a caldav event (non-recurring or fallback) */
-static void insert_base_occurrence(int64_t event_id, const caldav_event_t *ce) {
-   calendar_occurrence_t occ = { 0 };
-   occ.event_id = event_id;
-   occ.dtstart = ce->dtstart;
-   occ.dtend = ce->dtend;
-   occ.all_day = ce->all_day;
-   snprintf(occ.dtstart_date, sizeof(occ.dtstart_date), "%s", ce->dtstart_date);
-   snprintf(occ.dtend_date, sizeof(occ.dtend_date), "%s", ce->dtend_date);
-   snprintf(occ.summary, sizeof(occ.summary), "%s", ce->summary);
-   snprintf(occ.location, sizeof(occ.location), "%s", ce->location);
-   calendar_db_occurrence_insert(&occ, NULL);
+/* An event's own start as its one occurrence. */
+static void base_occurrence(int64_t event_id,
+                            const caldav_event_t *ce,
+                            calendar_occurrence_t *occ) {
+   memset(occ, 0, sizeof(*occ));
+   occ->event_id = event_id;
+   occ->dtstart = ce->dtstart;
+   occ->dtend = ce->dtend;
+   occ->all_day = ce->all_day;
+   snprintf(occ->dtstart_date, sizeof(occ->dtstart_date), "%s", ce->dtstart_date);
+   snprintf(occ->dtend_date, sizeof(occ->dtend_date), "%s", ce->dtend_date);
+   snprintf(occ->summary, sizeof(occ->summary), "%s", ce->summary);
+   snprintf(occ->location, sizeof(occ->location), "%s", ce->location);
 }
 
-#ifdef HAVE_LIBICAL
-/**
- * Expand a recurring event into occurrences within the cache window.
- * Uses libical's icalrecur_iterator for RFC 5545 recurrence rules.
- */
-static void expand_rrule(int64_t event_id,
-                         const caldav_event_t *ce,
-                         time_t range_start,
-                         time_t range_end) {
-   /* Parse the RRULE string */
-   struct icalrecurrencetype recur = icalrecurrencetype_from_string(ce->rrule);
-   if (recur.freq == ICAL_NO_RECURRENCE) {
-      OLOG_WARNING("calendar: invalid RRULE '%s' for event '%s'", ce->rrule, ce->uid);
+typedef struct {
+   int64_t event_id;
+   const caldav_event_t *ce;
+   int duration;
+   calendar_occurrence_t *occ; /* CALENDAR_RRULE_MAX_OCCURRENCES */
+   int n;
+} expand_ctx_t;
+
+/* One occurrence of a recurring event (calendar_rrule_expand's emit). */
+static void collect_occurrence(time_t start, void *ctx) {
+   expand_ctx_t *x = ctx;
+   if (x->n >= CALENDAR_RRULE_MAX_OCCURRENCES)
       return;
+   calendar_occurrence_t *occ = &x->occ[x->n++];
+   base_occurrence(x->event_id, x->ce, occ);
+   occ->dtstart = start;
+   occ->dtend = start + x->duration;
+   if (x->ce->all_day) {
+      struct tm occ_tm;
+      gmtime_r(&occ->dtstart, &occ_tm);
+      iso8601_format_date(occ_tm.tm_year + 1900, occ_tm.tm_mon + 1, occ_tm.tm_mday,
+                          occ->dtstart_date, sizeof(occ->dtstart_date));
+      struct tm end_tm;
+      gmtime_r(&occ->dtend, &end_tm);
+      iso8601_format_date(end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday, occ->dtend_date,
+                          sizeof(occ->dtend_date));
    }
+}
 
-   /* Build start time for iterator */
-   struct icaltimetype dtstart = icaltime_null_time();
-   if (ce->all_day) {
-      dtstart = icaltime_from_string(ce->dtstart_date[0] ? ce->dtstart_date : "19700101");
-      dtstart.is_date = 1;
-   } else {
-      struct tm st;
-      gmtime_r(&ce->dtstart, &st);
-      dtstart.year = st.tm_year + 1900;
-      dtstart.month = st.tm_mon + 1;
-      dtstart.day = st.tm_mday;
-      dtstart.hour = st.tm_hour;
-      dtstart.minute = st.tm_min;
-      dtstart.second = st.tm_sec;
-      dtstart.is_date = 0;
-      dtstart.zone = icaltimezone_get_utc_timezone();
-   }
+static long ms_since(const struct timespec *t0) {
+   struct timespec t1;
+   clock_gettime(CLOCK_MONOTONIC, &t1);
+   return (long)(t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000;
+}
 
-   int duration = ce->duration_sec > 0 ? ce->duration_sec : (int)(ce->dtend - ce->dtstart);
-   if (duration <= 0)
-      duration = 3600; /* fallback 1 hour */
-
-   icalrecur_iterator *iter = icalrecur_iterator_new(recur, dtstart);
-   if (!iter)
-      return;
-
-   int max_occurrences = 500; /* Safety limit */
-   int count = 0;
-
-   for (struct icaltimetype next = icalrecur_iterator_next(iter);
-        !icaltime_is_null_time(next) && count < max_occurrences;
-        next = icalrecur_iterator_next(iter)) {
-      time_t occ_start = icaltime_as_timet_with_zone(next, icaltimezone_get_utc_timezone());
-      time_t occ_end = occ_start + duration;
-
-      /* Skip occurrences outside our cache window */
-      if (occ_end < range_start)
-         continue;
-      if (occ_start > range_end)
-         break;
-
-      calendar_occurrence_t occ = { 0 };
-      occ.event_id = event_id;
-      occ.dtstart = occ_start;
-      occ.dtend = occ_end;
-      occ.all_day = ce->all_day;
-      snprintf(occ.summary, sizeof(occ.summary), "%s", ce->summary);
-      snprintf(occ.location, sizeof(occ.location), "%s", ce->location);
-
-      if (ce->all_day) {
-         struct tm occ_tm;
-         gmtime_r(&occ_start, &occ_tm);
-         iso8601_format_date(occ_tm.tm_year + 1900, occ_tm.tm_mon + 1, occ_tm.tm_mday,
-                             occ.dtstart_date, sizeof(occ.dtstart_date));
-         time_t end_t = occ_start + duration;
-         struct tm end_tm;
-         gmtime_r(&end_t, &end_tm);
-         iso8601_format_date(end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
-                             occ.dtend_date, sizeof(occ.dtend_date));
+/* Store an event with its occurrences within the cache window (its series,
+ * or, with no rule or one refused, its own start once), in one transaction.
+ * @p ms_out gets the ms libical took.  Returns SUCCESS, or FAILURE when they
+ * couldn't be written (the cache is then as it was). */
+static int store_event(const calendar_event_t *evt,
+                       const caldav_event_t *ce,
+                       time_t range_start,
+                       time_t range_end,
+                       long *ms_out) {
+   calendar_occurrence_t one;
+   expand_ctx_t x = { .event_id = 0, .ce = ce, .occ = &one, .n = 0 };
+   long ms = 0;
+   if (ce->rrule[0])
+      x.occ = calloc(CALENDAR_RRULE_MAX_OCCURRENCES, sizeof(*x.occ));
+   if (ce->rrule[0] && x.occ) {
+      x.duration = ce->duration_sec > 0 ? ce->duration_sec : (int)(ce->dtend - ce->dtstart);
+      if (x.duration <= 0)
+         x.duration = 3600; /* fallback 1 hour */
+      int count = 0;
+      struct timespec t0;
+      clock_gettime(CLOCK_MONOTONIC, &t0);
+      const int rc = calendar_rrule_expand(ce->rrule, ce->dtstart, ce->tzid, ce->all_day,
+                                           ce->dtstart_date, x.duration, range_start, range_end,
+                                           collect_occurrence, &x, &count);
+      ms = ms_since(&t0);
+      if (rc != SUCCESS) {
+         OLOG_WARNING("calendar: RRULE '%s' of event '%s' unreadable or refused; shown once",
+                      ce->rrule, ce->uid);
+         x.n = 0;
       }
-
-      calendar_db_occurrence_insert(&occ, NULL);
-      count++;
+   } else if (ce->rrule[0]) {
+      x.occ = &one; /* out of memory: shown once */
    }
-
-   icalrecur_iterator_free(iter);
-   OLOG_INFO("calendar: expanded RRULE for '%s': %d occurrences", ce->summary, count);
+   if (x.n == 0) {
+      base_occurrence(0, ce, x.occ);
+      x.n = 1;
+   }
+   const int rc = calendar_db_event_store(evt, x.occ, x.n, NULL);
+   if (x.occ != &one)
+      free(x.occ);
+   *ms_out = ms;
+   return rc;
 }
-#endif /* HAVE_LIBICAL */
 
 /**
  * RFC 6578 sync-collection reconcile for one calendar.
@@ -731,7 +750,29 @@ static void sync_collection_reconcile(const calendar_calendar_t *cal, const cald
    caldav_sync_result_free(&sr);
 }
 
-int calendar_service_sync_now(int64_t account_id) {
+int calendar_service_request_sync(int64_t account_id) {
+   int rc = FAILURE;
+   pthread_mutex_lock(&s_cal.mutex);
+   if (s_cal.initialized) {
+      rc = SUCCESS;
+      bool queued = false;
+      for (int i = 0; i < s_cal.requested_count; i++)
+         queued = queued || s_cal.requested[i] == account_id;
+      if (!queued) {
+         if (s_cal.requested_count < CALENDAR_MAX_SYNC_REQUESTS)
+            s_cal.requested[s_cal.requested_count++] = account_id;
+         else
+            rc = FAILURE;
+      }
+      pthread_cond_signal(&s_cal.wake);
+   }
+   pthread_mutex_unlock(&s_cal.mutex);
+   return rc;
+}
+
+/* Sync one account's calendars (on the sync thread only).  0 when every
+ * active calendar was checked and, if changed, fully stored. */
+static int sync_account(int64_t account_id) {
    calendar_account_t acct;
    if (calendar_db_account_get(account_id, &acct) != 0)
       return 1;
@@ -771,6 +812,7 @@ int calendar_service_sync_now(int64_t account_id) {
    }
 
    int synced = 0;
+   int failed = 0; /* active calendars left unchecked, unfetched or half-stored */
    for (int i = 0; i < cal_count; i++) {
       if (!cals[i].is_active)
          continue;
@@ -780,6 +822,7 @@ int calendar_service_sync_now(int64_t account_id) {
       caldav_error_t err = caldav_get_ctag(cals[i].caldav_path, &auth, new_ctag, sizeof(new_ctag));
       if (err != CALDAV_OK) {
          OLOG_WARNING("calendar: ctag check failed for '%s'", cals[i].display_name);
+         failed++;
          continue;
       }
 
@@ -801,11 +844,17 @@ int calendar_service_sync_now(int64_t account_id) {
       if (err != CALDAV_OK) {
          OLOG_WARNING("calendar: fetch failed for '%s': %s", cals[i].display_name,
                       caldav_strerror(err));
+         failed++;
          continue;
       }
 
-      /* Upsert events and expand occurrences */
-      for (int j = 0; j < events.count; j++) {
+      /* Upsert events and expand occurrences.  Expansion is bounded per
+       * event; slow ones also count against a budget, past which the
+       * calendar is left as cached (not pruned, ctag kept) for the next sync. */
+      long slow_ms = 0;
+      bool budget_spent = false;
+      bool store_failed = false;
+      for (int j = 0; j < events.count && !budget_spent && !store_failed; j++) {
          caldav_event_t *ce = &events.events[j];
 
          calendar_event_t evt = { 0 };
@@ -826,25 +875,32 @@ int calendar_service_sync_now(int64_t account_id) {
          evt.raw_ical = ce->raw_ical;
          evt.last_synced = now;
 
-         int64_t event_id = 0;
-         if (calendar_db_event_upsert(&evt, &event_id) != 0)
-            continue;
-
-         /* Delete old occurrences and re-expand */
-         calendar_db_occurrence_delete_for_event(event_id);
-
-         if (ce->rrule[0]) {
-#ifdef HAVE_LIBICAL
-            expand_rrule(event_id, ce, range_start, range_end);
-#else
-            insert_base_occurrence(event_id, ce);
-#endif
-         } else {
-            insert_base_occurrence(event_id, ce);
+         /* The event and its occurrences, together (libical's work timed).
+          * One that can't be stored leaves the calendar to be fetched again. */
+         long ms = 0;
+         if (store_event(&evt, ce, range_start, range_end, &ms) != SUCCESS) {
+            OLOG_WARNING("calendar: storing event '%s' failed", ce->uid);
+            store_failed = true;
+         }
+         if (ms > CALDAV_SLOW_EVENT_MS) {
+            OLOG_WARNING("calendar: expanding '%s' took %ld ms", ce->uid, ms);
+            slow_ms += ms;
+            budget_spent = slow_ms > CALDAV_SLOW_BUDGET_MS;
          }
       }
 
       caldav_event_list_free(&events);
+      if (store_failed) {
+         failed++; /* not reconciled, ctag kept: fetched again next sync */
+         continue;
+      }
+      if (budget_spent) {
+         OLOG_WARNING("calendar: stopped expanding '%s' after %ld ms of slow events; the rest "
+                      "keeps its cached copy",
+                      cals[i].display_name, slow_ms);
+         failed++;
+         continue;
+      }
 
       /* In-window deletion reconcile, keyed on OCCURRENCE overlap. The fetch above
        * re-stamped last_synced=now on every event the server still returns in-window;
@@ -894,7 +950,7 @@ int calendar_service_sync_now(int64_t account_id) {
    if (synced > 0)
       calendar_broadcast_events_changed(acct.user_id);
 
-   return 0;
+   return failed > 0 ? 1 : 0;
 }
 
 /* =============================================================================
@@ -1584,45 +1640,78 @@ int calendar_service_get_access_summary(int user_id,
  * Background Sync Thread
  * ============================================================================= */
 
+/* Seconds on the monotonic clock. */
+static time_t mono_now(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return ts.tv_sec;
+}
+
+/* Wait until a sync is asked for, @p deadline (mono_now() seconds) passes, or
+ * shutdown; take the waiting requests into @p ids.  Returns how many. */
+static int wait_for_work(time_t deadline, int64_t *ids) {
+   pthread_mutex_lock(&s_cal.mutex);
+   while (atomic_load(&s_cal.sync_running) && s_cal.requested_count == 0 && mono_now() < deadline) {
+      struct timespec until = { .tv_sec = deadline, .tv_nsec = 0 };
+      pthread_cond_timedwait(&s_cal.wake, &s_cal.mutex, &until);
+   }
+   const int n = s_cal.requested_count;
+   memcpy(ids, s_cal.requested, (size_t)n * sizeof(ids[0]));
+   s_cal.requested_count = 0;
+   pthread_mutex_unlock(&s_cal.mutex);
+   return n;
+}
+
+/* Run the syncs asked for, telling each account's owner how it went. */
+static void sync_requested(const int64_t *ids, int n) {
+   for (int i = 0; i < n && atomic_load(&s_cal.sync_running); i++) {
+      calendar_account_t acct;
+      if (calendar_db_account_get(ids[i], &acct) != 0)
+         continue;
+      const bool ok = sync_account(ids[i]) == 0;
+      calendar_broadcast_sync_done(acct.user_id, ids[i], ok);
+   }
+}
+
 static void *sync_thread_func(void *arg) {
    (void)arg;
    OLOG_INFO("calendar: sync thread started");
 
-   bool first_run = true;
-
+   time_t next_periodic = 0; /* sync at startup */
    while (atomic_load(&s_cal.sync_running)) {
-      /* Skip sleep on first run — sync immediately at startup */
-      if (!first_run) {
-         for (int i = 0; i < s_cal.config.sync_interval_sec && atomic_load(&s_cal.sync_running);
-              i++) {
-            struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
-            nanosleep(&ts, NULL);
-         }
-
-         if (!atomic_load(&s_cal.sync_running))
-            break;
-      }
-      first_run = false;
+      int64_t ids[CALENDAR_MAX_SYNC_REQUESTS];
+      const int n = wait_for_work(next_periodic, ids);
+      if (!atomic_load(&s_cal.sync_running))
+         break;
+      sync_requested(ids, n);
+      if (mono_now() < next_periodic)
+         continue;
 
       /* Sync all enabled accounts that are due */
       calendar_account_t accounts[CALENDAR_MAX_ACCOUNTS];
       int acct_count = 0;
-      calendar_db_account_list_enabled(accounts, CALENDAR_MAX_ACCOUNTS, &acct_count);
+      if (calendar_db_account_list_enabled(accounts, CALENDAR_MAX_ACCOUNTS, &acct_count) != 0) {
+         /* The database isn't open yet (this thread starts with the tools,
+          * before it): try again shortly, not a whole interval later. */
+         next_periodic = mono_now() + CALENDAR_DB_RETRY_SEC;
+         continue;
+      }
 
       time_t now = time(NULL);
       int synced = 0;
-      for (int i = 0; i < acct_count; i++) {
+      for (int i = 0; i < acct_count && atomic_load(&s_cal.sync_running); i++) {
          int interval = accounts[i].sync_interval_sec > 0 ? accounts[i].sync_interval_sec
                                                           : s_cal.config.sync_interval_sec;
          if (now - accounts[i].last_sync < interval)
             continue;
 
-         if (calendar_service_sync_now(accounts[i].id) == 0)
+         if (sync_account(accounts[i].id) == 0)
             synced++;
       }
 
       if (synced > 0)
          OLOG_INFO("calendar: background sync completed %d/%d accounts", synced, acct_count);
+      next_periodic = mono_now() + s_cal.config.sync_interval_sec;
    }
 
    OLOG_INFO("calendar: sync thread exiting");

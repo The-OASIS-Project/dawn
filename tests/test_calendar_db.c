@@ -25,6 +25,9 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#define AUTH_DB_INTERNAL_ALLOWED
+#include "auth/auth_db_internal.h"
+#include "dawn_error.h"
 #include "tools/calendar_db.h"
 #include "unity.h"
 
@@ -272,6 +275,53 @@ static void test_event_upsert_update(void) {
    TEST_ASSERT_EQUAL_STRING("etag2", out.etag);
 }
 
+/* An event and its occurrences are stored as one: storing again replaces
+ * the occurrences with the new set. */
+static void test_event_store(void) {
+   calendar_account_t a = make_account(1, "Acct", "https://x.com");
+   int64_t acct_id = 0;
+   calendar_db_account_create(&a, &acct_id);
+   calendar_calendar_t c = make_calendar(acct_id, "/cal/c", "Cal");
+   int64_t cal_id = 0;
+   calendar_db_calendar_create(&c, &cal_id);
+   calendar_event_t e = make_event(cal_id, "uid-rep@example.com", "Standup");
+
+   calendar_occurrence_t occ[3];
+   memset(occ, 0, sizeof(occ));
+   for (int i = 0; i < 3; i++) {
+      occ[i].dtstart = 1790812800 + i * 86400;
+      occ[i].dtend = occ[i].dtstart + 3600;
+   }
+   int64_t id1 = 0;
+   int64_t id2 = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, calendar_db_event_store(&e, occ, 3, &id1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, calendar_db_event_store(&e, occ + 1, 2, &id2));
+   TEST_ASSERT_TRUE(id2 > 0);
+   TEST_ASSERT_EQUAL_INT64(id2, occ[1].event_id);
+
+   calendar_occurrence_t out[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(0, calendar_db_occurrences_in_range(&cal_id, 1, 1790812800 - 86400,
+                                                             1790812800 + 10 * 86400, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT64(1790812800 + 86400, (int64_t)out[0].dtstart);
+}
+
+static void test_v105_forgets_ctags(void) {
+   calendar_account_t a = make_account(1, "Acct", "https://x.com");
+   int64_t acct_id = 0;
+   calendar_db_account_create(&a, &acct_id);
+   calendar_calendar_t c = make_calendar(acct_id, "/cal/c", "Cal");
+   int64_t cal_id = 0;
+   calendar_db_calendar_create(&c, &cal_id);
+   calendar_db_calendar_update_ctag(cal_id, "ctag-1");
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v105(s_db.db));
+   calendar_calendar_t out;
+   TEST_ASSERT_EQUAL_INT(0, calendar_db_calendar_get(cal_id, &out));
+   TEST_ASSERT_EQUAL_STRING("", out.ctag);
+}
+
 static void test_event_delete(void) {
    calendar_account_t a = make_account(1, "Acct", "https://x.com");
    int64_t acct_id = 0;
@@ -337,6 +387,8 @@ int main(void) {
    RUN_TEST(test_event_upsert_create);
    RUN_TEST(test_event_upsert_update);
    RUN_TEST(test_event_delete);
+   RUN_TEST(test_event_store);
+   RUN_TEST(test_v105_forgets_ctags);
 
    /* Account flags */
    RUN_TEST(test_account_set_read_only);

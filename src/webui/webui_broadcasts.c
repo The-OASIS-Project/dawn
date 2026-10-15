@@ -1799,6 +1799,22 @@ void calendar_broadcast_events_changed(int user_id) {
    }
 }
 
+/* Strong override of calendar_service.c's weak no-op: a sync the user (or a
+ * new account) asked for ended. */
+void calendar_broadcast_sync_done(int user_id, int64_t account_id, bool ok) {
+   if (user_id <= 0)
+      return;
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("calendar_sync_done"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "id", json_object_new_int64(account_id));
+   json_object_object_add(payload, "success", json_object_new_boolean(ok));
+   json_object_object_add(root, "payload", payload);
+   const int sent = broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+   OLOG_INFO("WebUI: Broadcast calendar_sync_done (user=%d account=%lld ok=%d) to %d client(s)",
+             user_id, (long long)account_id, ok, sent);
+}
+
 /* Strong override of the messaging engine's weak no-op: tell the user's
  * browsers their channel list changed so the settings panel re-reads it. */
 void webui_broadcast_messaging_channels_changed(int user_id,

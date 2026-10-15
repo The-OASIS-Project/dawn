@@ -91,17 +91,30 @@ int calendar_service_remove_account(int64_t account_id);
  */
 int calendar_service_test_connection(int64_t account_id);
 
-/** Trigger an immediate sync for an account */
-int calendar_service_sync_now(int64_t account_id);
+/**
+ * @brief Ask for an account to be synced now.  Every sync runs on the
+ *        calendar's sync thread, one at a time; this returns at once, and the
+ *        owner's WebUI sessions get calendar_broadcast_sync_done when it ends.
+ * @return SUCCESS, or FAILURE when the service isn't running or too many
+ *         syncs are waiting
+ */
+int calendar_service_request_sync(int64_t account_id);
 
 /**
  * Notify a user's WebUI sessions that their calendar data changed (refetch nudge).
- * Signal-only (no event data). Called change-gated from calendar_service_sync_now.
+ * Signal-only (no event data). Called change-gated after each account sync.
  * Layer-3→Layer-4 hook: strong override in src/webui/webui_broadcasts.c; a weak
  * no-op fallback in calendar_service.c keeps WebUI-off builds linking.
  * @param user_id Owner whose browser sessions receive the refetch nudge.
  */
 void calendar_broadcast_events_changed(int user_id);
+
+/**
+ * Tell a user's WebUI sessions that a sync they (or a new account) asked for
+ * ended, and whether it worked.  Same hook pattern as
+ * calendar_broadcast_events_changed.
+ */
+void calendar_broadcast_sync_done(int user_id, int64_t account_id, bool ok);
 
 /* ============================================================================
  * Query Operations (used by calendar_tool.c)

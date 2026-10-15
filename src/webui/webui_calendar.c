@@ -306,13 +306,19 @@ void handle_calendar_sync_account(ws_connection_t *conn, json_object *payload) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
          json_object_object_add(resp_payload, "error",
                                 json_object_new_string("Account not found or access denied"));
+         json_object_object_add(resp_payload, "id", json_object_new_int64(account_id));
       } else {
-         int rc = calendar_service_sync_now(account_id);
-         if (rc != 0) {
+         /* Queued for the sync thread: this is the WebSocket thread, and a sync
+          * waits on the server.  calendar_sync_done reports how it went. */
+         if (calendar_service_request_sync(account_id) != SUCCESS) {
             json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-            json_object_object_add(resp_payload, "error", json_object_new_string("Sync failed"));
+            json_object_object_add(resp_payload, "error",
+                                   json_object_new_string("Sync could not start"));
+            json_object_object_add(resp_payload, "id", json_object_new_int64(account_id));
          } else {
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+            json_object_object_add(resp_payload, "queued", json_object_new_boolean(1));
+            json_object_object_add(resp_payload, "id", json_object_new_int64(account_id));
          }
       }
    }
