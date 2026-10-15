@@ -78,8 +78,10 @@ responses) should get a fuzz harness in `tests/fuzz/`.
   commits.
 - One logical change per commit. The message says what changed and why, in plain language a reader
   without your context can follow.
-- A change that affects someone updating an existing install (a changed default, a manual migration
-  step, a user-visible behavior change) gets a dated entry at the top of [UPGRADING.md](UPGRADING.md).
+- A change that asks something of someone updating an existing install (a manual step, a changed
+  default they may rely on, a removed setting, a new dependency, a one-time cost that could look like
+  a fault) gets a dated entry at the top of [UPGRADING.md](UPGRADING.md). Fixes and new features that
+  need nothing from them don't.
 - By contributing you agree to license your contribution under GPLv3 or later (the header in every
   source file says so too).
 

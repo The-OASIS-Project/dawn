@@ -2,13 +2,13 @@
 
 Notes for anyone updating an existing DAWN install to a newer version.
 
-**Newest entries on top.** Each entry is dated by its implementation date and is
-included **only when an upgrade needs your attention** — a changed default, a
-manual migration step, or a behavior change that affects you. A version with no
-entry here upgraded cleanly with nothing for you to do.
+**Newest entries on top.** An entry is here only when an upgrade asks something of
+you: a step to take, a setting to change or remove, a default you may rely on that
+changed, or something that will look wrong if you don't know to expect it (a long
+first start, a one-time rescan). Fixes and new features aren't listed: they need
+nothing from you. A version with no entry upgraded cleanly.
 
-This is not a full changelog (see git history for that) — it is the short list of
-"things a human upgrading should read," in plain language.
+This is not a changelog: git history and the pull requests cover everything else.
 
 ---
 
@@ -39,19 +39,6 @@ ignores it, and the next settings save drops it.
 
 ---
 
-## 2026-10-14 — Briefings no longer feed memory
-
-**What changed.** A scheduled briefing is a summary of outside content: news, weather, email, your
-calendar. Memory used to extract facts from it as if you had said them, so headlines, forecasts and
-other people's emails ended up stored as facts about you. Now memory reads only what you say back to a
-briefing. A briefing nobody replies to is skipped without calling the extraction model, which also
-saves that call.
-
-**What you need to do.** Nothing. Facts already learned from past briefings stay until you remove them
-(the Memory panel, or forgetting what a conversation taught).
-
----
-
 ## 2026-10-13 — Memory: settings for removed search experiments are retired
 
 **What changed.** Memory search experiments that lost in testing were removed, along with the
@@ -72,81 +59,6 @@ those requests were accepted but returned no relations.
 
 **What you need to do.** Nothing. If you had set any of these keys to a non-default value, your
 memory search now runs on the defaults.
-
----
-
-## 2026-10-12 — Music: a removed music source leaves the library; more files play
-
-**What changed.** If you clear the music folder setting, or turn Plex off, that source's tracks now
-leave the music library on the next scan. Before, they stayed listed but couldn't be played, and local
-copies hid the Plex copies of the same songs. Setting the source again brings its tracks back: Plex
-re-syncs in seconds, but the first scan of a local folder reads every file and can take several
-minutes.
-
-Also new: surround (5.1/7.1) FLAC and Ogg files play, downmixed to stereo; Plex tracks advance on
-their own at the end of a track; a track that can't be played during auto-advance is skipped (playback
-stops after five in a row, or if the Plex server can't be reached); and the end of each track, the
-queue's last seconds and pause/resume no longer lose about two seconds of audio in the browser.
-
-**What you need to do.** Nothing. Reload any open browser tabs after upgrading so they pick up the new
-player.
-
----
-
-## 2026-10-11 — Memory keeps a second email, phone, car, job, school or home
-
-**What changed.**
-- **Several of one kind are kept.** Memory used to treat email address, phone number, vehicle, employer,
-  school and home as one-per-person: learning a second email address replaced the first, and the first
-  dropped out of recall. Now a person can have several of each. A new value replaces an old one only
-  when you say so ("my new number is ...", "I moved to ...", "I left Acme for ..."). Spouse, birthplace,
-  birthday, favorite color, favorite food and main language still hold one value at a time.
-- **Restoring.** A memory merged into another, or replaced by a newer one, can be brought back: ask DAWN
-  ("what did you merge into that?", "bring that back"), use **Duplicates & old values** in the Memory panel, or
-  `dawn-admin memory superseded --user <name>` and `dawn-admin memory restore --user <name> --fact-id
-  <id>`. A restored duplicate takes back what it said. A merged duplicate is kept for `prune_superseded_days` (30 by default) after the merge; an
-  older value a newer one replaced is kept as long as the newer one is.
-- **Forgetting is "what was learned so far".** Forgetting a memory (in the Memory panel, or by asking
-  DAWN) now also removes the duplicates merged into it and what it said about relationships and contact
-  details (before, both came back). If it had replaced an older value ("I moved to Denver" after
-  "Atlanta"), the older one is current again, and DAWN says so: forget it too if it is wrong as well,
-  or to erase it. Forgetting a conversation does the same, and its confirm screen says how many older
-  values will come back. Forgetting a conversation's memories, or deleting all of them, also stops
-  DAWN from learning them again from those conversations later; what you say from then on is
-  remembered as usual.
-- **Cleanup takes history with it.** When nightly cleanup removes a memory (stale, low confidence or
-  expired), the duplicates merged into it and the older values it replaced go with it.
-- The database moves to schema v104 on start (columns and an index added), with no manual step. A
-  memory replaced before this version counts as merged (forgetting what replaced it deletes it too, as
-  before), unless the database shows it was a newer value: one whose relationship or contact detail the
-  newer memory closed counts as replaced.
-
-**What you need to do.** Nothing. Memories an earlier version replaced aren't brought back on their own:
-many were duplicates. What a memory forgotten on an earlier version said about a relationship or contact
-detail can still come up: a relationship to someone or something goes when you delete their card in the
-Memory panel; a contact detail of yours stays until you tell DAWN a new one. If one you want is missing, find it with `dawn-admin memory superseded --user
-<name> --grep <text>` (or the Memory panel's **Duplicates & old values**) and restore it.
-
----
-
-## 2026-10-11 — Memories about a person you name are found by any of their names
-
-**What changed.** When a question names someone ("What do you know about Sam?"), memory search now
-finds the facts stored about that person under any of their names (an alias such as "Sam" for "Samantha
-Lee"), not only the facts linked through their relations. Facts that were replaced by newer ones no
-longer come back from this path.
-
-If you turned on per-turn context (`[memory.focus_injection] enabled`), those facts now reach the
-conversation too: before, a loosely worded question about someone often brought none. A new setting,
-`named_fact_min_relevance` (default `0.20`; Settings → Memory → Per-Turn Context Injection, advanced,
-"Named memory relevance floor"), sets how related to the question such a fact must be. It is lower than
-the bar for other facts because the person was named. Naming the assistant or yourself ("Friday, what's
-2 plus 2?") no longer brings in what is stored about either; facts about you still come in when they
-match what you asked.
-
-**What you need to do.** Nothing. Raise `named_fact_min_relevance` if a passing mention of someone
-("remind Sam to buy milk") brings in too many of their facts; lower it if questions about a person miss
-ones you expected.
 
 ---
 
@@ -317,93 +229,19 @@ WebUI settings panel drops it.
 
 ---
 
-## 2026-10-05 — Friday doesn't learn from text messages
+## 2026-10-05 — Scheduled unlocks and garage/gate opens no longer run
 
-**What changed.**
-- **Your SMS conversation is private.** Anyone can put your number on a text, so
-  nothing said by text is learned into memory. A new SMS link gets a private
-  conversation, and an existing one becomes private when the next text arrives
-  (and again if it's ever made public). You still see it in the WebUI, marked
-  private; Friday still reads her memory there. "Remember …" by text still
-  works, after the reply code. Being private, it's also not searched from your
-  other conversations, and an LLM switch asked for by text lasts for that reply
-  only. Telegram, Discord and Slack, which vouch for who sent each message, are
-  unchanged.
-- **A WebUI conversation you mark private before typing (or speaking) is created
-  private,** so nothing from its first turn is learned either. Research started
-  from a private conversation stays out of memory too (its report is still saved
-  as a note).
+**What changed.** Unlocking, and opening anything that opens a door (a garage-door or gate cover, or a
+switch, scene, script or automation whose name says garage, gate, door or unlock), now shows a preview
+and waits for your "yes". So an unlock can no longer be scheduled, and a scheduled open of a garage door
+or gate is refused when it fires. Scheduled blinds and awnings still open.
 
-**What you need to do.** Nothing. What earlier texts already taught stays in
-memory; review it in the Memory panel if you want it gone.
+Calls, texts and emails to a contact matched only by part of a name, by a sound-alike, or by a name
+DAWN read rather than heard from you now always come as a preview, even with
+`[phone] confirm_outbound = false`.
 
----
-
-## 2026-10-05 — Friday asks before acting when she isn't sure
-
-**What changed.**
-
-**Home Assistant and calendar**
-- **Two devices that match equally ask which.** "Turn on the lamp" with a desk
-  lamp and a floor lamp now lists both instead of switching on whichever came
-  first.
-- **Unlocking and opening ask first.** Unlock, open, and anything that opens a
-  door (a garage-door or gate cover, or a switch, scene, script or automation
-  whose name says garage, gate, door or unlock) shows a preview and waits for
-  your "yes". Lock, close and turning things off act right away. Blinds and
-  awnings don't ask. Because it needs your yes at the time, unlock can no
-  longer be scheduled, and a scheduled open of a garage door or gate is refused
-  when it fires (scheduled blinds still open).
-- **Those devices also need their name.** Friday acts on them only when what you
-  said is the device's name or part of it ("front door", "garage"); a looser
-  match, such as "garage side door" for "Garage Main Door", is offered back to
-  you.
-- **Adding an event to a named calendar never lands elsewhere.** A calendar name
-  that matches nothing, or more than one writable calendar, gets the list of
-  your writable calendars instead of going to the first one. Every new event
-  says which calendar it went to.
-- **Calendars that share a name are listed with their account** ("Home
-  (iCloud)", "Home (Google)"). Saying that label picks one, both for adding
-  and for reading; the plain name reads all of them. Two writable calendars
-  with the same name get a question instead of the first one. A read-only
-  calendar with the same name as a writable one doesn't count.
-
-**Calling, texting and emailing someone**
-- **A name that's only part of a contact's asks first.** "Call Chris" with a
-  Christine in your contacts used to call Christine; now Friday shows who she
-  found ("Christine Lee, for 'Chris'") and asks. The whole name, or a whole
-  word of it ("call Lee"), goes through as before.
-- **By voice, names that sound alike ask first.** With both a Cris and a Chris
-  in your contacts, a spoken "call Chris" asks which one.
-- **A recipient you didn't name asks first.** If Friday picks up a name or an
-  address from something she read (an email, a web page) rather than from you,
-  the call, text or email draft says so and waits for your yes.
-- **"My wife", "mom" and other names not in your contacts** are looked up in
-  Friday's memory of you, and the preview asks you to confirm the person she
-  found.
-- These always come as a preview you answer with "yes", even with
-  `[phone] confirm_outbound = false`.
-- **An email's "to" must be one address.** A list of addresses is refused
-  rather than sent to all of them.
-- If you set your own `[asr] disambiguation_hint`, it keeps your wording; the
-  built-in one now also says to pass names as heard.
-
-**Sending and trashing email**
-- **The assistant can no longer prepare an email and confirm it in the same
-  reply.** It drafts, reads it back, and sends only if your very next message
-  says yes. If the conversation moves on first, it prepares the email again.
-  Trash works the same way. Voice is unchanged: it asks, you say yes.
-- **A confirm counts only in the session where the draft was made**: the same
-  browser tab, device or channel. A draft prepared in the WebUI can't be
-  confirmed from a satellite, or from another tab.
-- **Background jobs, re-engaged background turns, scheduled tasks and MQTT
-  messages can't send, trash or archive email.** The assistant says what it
-  would do and leaves it to you.
-- **The read-back now ends with a fixed line**, "Sending to <address>, from
-  <account>, subject: ...". The assistant is asked to say it as written, so you
-  hear where the mail really goes.
-
-**What you need to do.** Nothing.
+**What you need to do.** If you had scheduled an unlock or a garage/gate open, ask for it when you want
+it, or schedule it as a Home Assistant automation instead.
 
 ---
 
@@ -908,66 +746,6 @@ tracks refresh on the normal sync.
 
 ---
 
-## 2026-09-17 — `system_status` gains a `network` view (requires a STAT upgrade)
-
-**What changed.** The `system_status` tool can now report network status — your
-interfaces, primary uplink (lowest-metric default route), gateway reachability,
-and the cellular link — via a new `network` action (also folded into `all`). Ask
-things like "what's my network status?".
-
-**What (if anything) to do.** This depends on new telemetry from the **STAT**
-sensor service: DAWN only shows network data if STAT is publishing its `Network`
-message type. **Upgrade STAT to a build that emits `Network` telemetry** (dated
-2026-09-17 or later). Until you do, the `network` action simply reports "No
-network telemetry from STAT" and the rest of `system_status` is unaffected —
-nothing breaks, the new view is just empty. No DAWN config change is required
-(same `[stat]` topic).
-
----
-
-## 2026-09-17 — New optional "stocks" tool (Charles Schwab)
-
-**What changed.** DAWN gains an opt-in **stocks** tool for live quotes and
-read-only Schwab portfolio access. It's off unless you configure it, so this is
-purely additive — nothing changes for existing installs that don't want it.
-
-**What (if anything) to do.** Only if you want it:
-1. Add `[secrets.schwab]` `client_id` / `client_secret` (and optionally
-   `redirect_url`) to `secrets.toml`.
-2. Run `dawn-admin schwab auth` on the host to link your account.
-
-Note the Schwab refresh token expires every **7 days**, so you re-run
-`dawn-admin schwab auth` about weekly. Full instructions:
-[docs/SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md). Trading is not included (read-only).
-
----
-
-## 2026-09-16 — WebUI reconnect hardening + optional "Always on" per-browser mode
-
-**What changed.**
-- The WebUI now runs an app-level heartbeat and detects a *half-open* socket (one
-  that looks "Connected" but the server has stopped answering) instead of sitting
-  silently dead — a real cause of "it says connected but nothing saves." It
-  reconnects indefinitely (no more giving up after a few tries), recovers on tab
-  focus/network-online, and re-syncs the conversation list on reconnect. A briefly
-  shaky link shows an amber "Unstable…" state.
-- New per-browser opt-in **"Always on (this browser)"** in the user menu (beside
-  "Alarm sounds"). When you enable it (after accepting a security prompt), that
-  browser stays signed in for as long as it's open — its login session is renewed
-  while it actively heartbeats, up to a **30-day** absolute cap — instead of
-  expiring at 24h. **Enable it only on a device you personally trust:** anyone with
-  access to that browser stays logged in as you until you turn it off or sign out.
-- The auth database migrates automatically to **schema v85** (adds one column). No
-  action needed; the daemon logs `migrated schema from v84 to v85` on first start.
-
-**What you need to do.** Nothing required. Restart the daemon to pick up the schema
-migration and the keepalive support; hard-refresh open WebUI tabs to load the new
-client. "Always on" is off by default. If you don't enable it, login-expiry behavior
-is unchanged (you'll simply see a non-navigating "signed out" state instead of an
-abrupt redirect that could lose an in-progress message).
-
----
-
 ## 2026-09-13 — Email: sending now requires you to choose the account
 
 **What changed.** The assistant's `email` `send` action now **requires** an explicit
@@ -982,72 +760,6 @@ account and reads it back before sending, and is instructed to reply from the ac
 the original message was addressed to. **If you created a scheduled/automated task
 that sends email**, make sure it specifies an `account`; a `send` with no account now
 returns an error instead of guessing.
-
----
-
-## 2026-09-11 — Optional: serve the Aurora UI from DAWN at /aurora
-
-**New opt-in; nothing changes unless you turn it on.** If you don't run Aurora,
-skip this — the default is off and your install is unaffected.
-
-**What changed.** DAWN's WebUI server can now serve the Aurora front-end from its
-own origin under `/aurora/`, sharing one login, cookie, and API/WebSocket with the
-main WebUI — no separate port, host, or CORS setup. It is gated by a new `[webui]`
-setting, `aurora_path`, which is empty (disabled) by default.
-
-**What to do (only if you want Aurora).** Build Aurora (`npm run build`), then in
-`dawn.toml`:
-
-    [webui]
-    aurora_path = "/absolute/path/to/aurora/dist"
-
-Point it at the built `dist/` directory (not the repo root), using an absolute
-path, and restart DAWN. When enabled, an Aurora link appears in the WebUI header
-and `/aurora/` serves the app behind the same login. Leaving `aurora_path` empty
-keeps the WebUI-only behavior. DAWN validates the path at startup and disables the
-feature (with a log warning) if it does not exist or has no `index.html`.
-
----
-
-## 2026-09-10 — IMAP accounts now show unread & replied state in digests
-
-**Only affects non-Gmail (IMAP) email accounts.** Gmail accounts were already
-covered; nothing to do either way.
-
-**What changed.** Email digests and briefings now read the `\Seen` and `\Answered`
-flags directly from IMAP servers, so IMAP messages get accurate **unread** markers and
-**replied** indicators — previously these were populated for Gmail accounts only and an
-IMAP inbox would report "0 unread." Message receive times also now come from the
-server's INTERNALDATE (with correct timezone handling), so the digest's 24-hour window
-is accurate for IMAP mail regardless of the sender's timezone. No configuration change;
-the improvement is automatic the next time a digest runs.
-
----
-
-## 2026-09-10 — Briefings can carry summarization instructions
-
-**Optional, opt-in — nothing to do unless you want it.** Existing briefings are
-unchanged and keep summarizing exactly as before.
-
-**What changed.** A briefing can now carry a free-text **instructions** field that
-steers *how* its collected data is summarized — what to emphasize, how to structure
-it, length, and tone. For example: "Lead with anything time-sensitive, keep it under
-five bullets, skip the pleasantries." A briefing with no instructions uses the same
-default format it always has.
-
-**How to use it.** Two ways: ask your assistant — "make my morning briefing punchier
-and lead with unread email," or "drop the closing line from the market briefing" — or
-edit it in the WebUI: open the **Scheduler** panel, expand a briefing, and use the
-**Edit** button in its "Summarization instructions" section. Either way the
-instructions **replace** the previous ones wholesale rather than appending (an empty
-save clears them back to the default), so read them back first if you mean to amend.
-
-**Schema.** The auth database migrates to v84 automatically on first launch (adds one
-nullable column to `scheduled_events`). No manual step; the upgrade is transparent.
-
-**Safety note.** Briefing instructions can shape the *format* but cannot override the
-rule that the data a briefing collects is data, never instructions — a summarization
-prompt can't be steered into treating an email's contents as commands.
 
 ---
 
