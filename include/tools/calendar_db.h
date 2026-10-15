@@ -172,6 +172,17 @@ int calendar_db_active_calendars_for_user(int user_id,
  * ============================================================================ */
 
 int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out);
+
+/**
+ * Insert or replace @p event and its occurrences (@p occ[0..@p n), whose
+ * event_id this sets) in one transaction: a failure leaves the cached event
+ * and occurrences as they were.
+ * @return SUCCESS (with @p id_out), or FAILURE (nothing changed)
+ */
+int calendar_db_event_store(const calendar_event_t *event,
+                            calendar_occurrence_t *occ,
+                            int n,
+                            int64_t *id_out);
 int calendar_db_event_get_by_uid(const char *uid, calendar_event_t *out);
 int calendar_db_event_delete(int64_t id);
 int calendar_db_event_delete_by_calendar(int64_t calendar_id);
@@ -215,6 +226,7 @@ int calendar_db_event_prune_not_in_hrefs(int64_t calendar_id,
 
 int calendar_db_occurrence_insert(const calendar_occurrence_t *occ, int64_t *id_out);
 int calendar_db_occurrence_delete_for_event(int64_t event_id);
+
 
 /**
  * Each event's occurrence nearest to @p now within [range_start, range_end),

@@ -28,13 +28,16 @@ SOURCES[caldav]="src/tools/caldav_client.c $COMMON"
 LIBS[caldav]="libxml-2.0 libical libcurl"
 CFLAGS_EXTRA[caldav]="-DDAWN_ENABLE_CALENDAR_TOOL -DHAVE_LIBICAL"
 MAXLEN[caldav]=131072
+SOURCES[calendar_rrule]="src/tools/calendar_rrule.c $COMMON"
+LIBS[calendar_rrule]="libical"
+MAXLEN[calendar_rrule]=4096
 SOURCES[tts_text]="common/src/tts/tts_preprocessing.cpp common/src/tts/number_to_words.c"
 LINK[tts_text]="-lstdc++"
 MAXLEN[tts_text]=16384
 
 harnesses=("$@")
 if [ ${#harnesses[@]} -eq 0 ]; then
-   harnesses=(email_mime html neutralize tts_text caldav)
+   harnesses=(email_mime html neutralize tts_text caldav calendar_rrule)
 fi
 
 failed=()

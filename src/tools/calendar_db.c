@@ -532,9 +532,10 @@ int calendar_db_active_calendars_for_user(int user_id,
  * Event CRUD
  * ============================================================================= */
 
-int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out) {
-   AUTH_DB_LOCK_OR_FAIL();
+static int occurrence_insert_locked(const calendar_occurrence_t *occ, int64_t *id_out);
 
+/* Insert or replace an event (the auth_db lock held). */
+static int event_upsert_locked(const calendar_event_t *event, int64_t *id_out) {
    sqlite3_stmt *st = s_db.stmt_cal_evt_upsert;
    sqlite3_reset(st);
    sqlite3_bind_int64(st, 1, event->calendar_id);
@@ -566,8 +567,35 @@ int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out) {
       OLOG_ERROR("calendar_db: event upsert failed: %s", sqlite3_errmsg(s_db.db));
    }
    sqlite3_reset(st);
+   return result;
+}
 
+int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
+   const int result = event_upsert_locked(event, id_out);
    AUTH_DB_UNLOCK();
+   return result;
+}
+
+int calendar_db_event_store(const calendar_event_t *event,
+                            calendar_occurrence_t *occ,
+                            int n,
+                            int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
+   int64_t id = 0;
+   const bool began = auth_db_txn_begin_locked("calendar_db: event") == SUCCESS;
+   int result = began ? event_upsert_locked(event, &id) : FAILURE;
+   /* The upsert replaced the row, taking its occurrences (cascade). */
+   for (int i = 0; i < n && result == SUCCESS; i++) {
+      occ[i].event_id = id;
+      result = occurrence_insert_locked(&occ[i], NULL);
+   }
+   /* Commits, or rolls back (also when the commit fails). */
+   if (began)
+      result = auth_db_txn_end_locked(result, "calendar_db: event");
+   AUTH_DB_UNLOCK();
+   if (result == SUCCESS && id_out)
+      *id_out = id;
    return result;
 }
 
@@ -725,9 +753,8 @@ int calendar_db_event_prune_not_in_hrefs(int64_t calendar_id,
  * Occurrence CRUD
  * ============================================================================= */
 
-int calendar_db_occurrence_insert(const calendar_occurrence_t *occ, int64_t *id_out) {
-   AUTH_DB_LOCK_OR_FAIL();
-
+/* Insert one occurrence (the auth_db lock held). */
+static int occurrence_insert_locked(const calendar_occurrence_t *occ, int64_t *id_out) {
    sqlite3_stmt *st = s_db.stmt_cal_occ_insert;
    sqlite3_reset(st);
    sqlite3_bind_int64(st, 1, occ->event_id);
@@ -751,7 +778,12 @@ int calendar_db_occurrence_insert(const calendar_occurrence_t *occ, int64_t *id_
       OLOG_ERROR("calendar_db: occurrence insert failed: %s", sqlite3_errmsg(s_db.db));
    }
    sqlite3_reset(st);
+   return result;
+}
 
+int calendar_db_occurrence_insert(const calendar_occurrence_t *occ, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
+   const int result = occurrence_insert_locked(occ, id_out);
    AUTH_DB_UNLOCK();
    return result;
 }

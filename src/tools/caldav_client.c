@@ -26,6 +26,7 @@
 
 #include "tools/caldav_client.h"
 
+#include <ctype.h>
 #include <curl/curl.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
@@ -705,6 +706,322 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
    return err;
 }
 
+#ifdef HAVE_LIBICAL
+/* Most RRULEs a zone of a name libical doesn't know may have (all its blocks
+ * together).  Outlook and Exchange send two. */
+#define CALDAV_TZ_MAX_RULES 16
+
+/* Earliest year a repeating block may start: Windows zones start in 1601. */
+#define CALDAV_TZ_MIN_START_YEAR 1600
+
+/* Most VTIMEZONEs one event may carry: libical's own bookkeeping of them is
+ * quadratic, and a real event names two or three zones. */
+#define CALDAV_MAX_VTIMEZONES 16
+
+/* Zone names already warned about in one fetch, so a hostile calendar logs
+ * each once, not once per event per sync. */
+typedef struct {
+   char names[8][64];
+   int count;
+} tz_warned_t;
+
+static void warn_zone_once(tz_warned_t *warned, const char *tzid, const char *why) {
+   const char *name = tzid ? tzid : "?";
+   for (int i = 0; i < warned->count; i++) {
+      if (strncmp(warned->names[i], name, sizeof(warned->names[i]) - 1) == 0)
+         return;
+   }
+   if (warned->count < (int)(sizeof(warned->names) / sizeof(warned->names[0])))
+      snprintf(warned->names[warned->count++], sizeof(warned->names[0]), "%s", name);
+   OLOG_WARNING("caldav: ignoring time zone '%.64s' (%s); its events are read as UTC", name, why);
+}
+
+/* Whether libical may look @p tzid up: it opens the zone file by name, so
+ * "../" would reach any file, such as one of the daemon's own pipes. */
+static bool tzid_is_safe(const char *tzid) {
+   return tzid && !strstr(tzid, "..");
+}
+
+/* Entries in a libical BY* list (ICAL_RECURRENCE_ARRAY_MAX ends it). */
+static int by_count(const short *list, int size) {
+   int n = 0;
+   while (n < size && list[n] != ICAL_RECURRENCE_ARRAY_MAX)
+      n++;
+   return n;
+}
+
+/* Whether the days of the month in @p r are seven in a row, all counted from
+ * the start or all from the end (the older "BYMONTHDAY=8,...,14;BYDAY=SU"). */
+static bool week_of_month_days(const struct icalrecurrencetype *r, int n_mday, int days) {
+   if (n_mday != 7)
+      return false;
+   int lo = r->by_month_day[0];
+   int hi = lo;
+   for (int k = 0; k < n_mday; k++) {
+      const int d = r->by_month_day[k];
+      if (d == 0 || abs(d) > days || (d > 0) != (lo > 0))
+         return false;
+      lo = d < lo ? d : lo;
+      hi = d > hi ? d : hi;
+      for (int j = 0; j < k; j++) {
+         if (r->by_month_day[j] == d)
+            return false;
+      }
+   }
+   return hi - lo == 6;
+}
+
+/* Whether a time zone rule names one real date a year, the way real zones
+ * do, so libical never searches for a date that doesn't exist: in one month,
+ * a weekday by position ("second Sunday", "last Sunday", also written with
+ * BYSETPOS), one day of the month, or seven days in a row with a weekday.
+ * Interval 1 only (a two-year interval from the wrong year never matches),
+ * at most one hour, minute and second, and no non-Gregorian RSCALE (libical's
+ * search for one can never end). */
+static bool zone_rule_is_bounded(const struct icalrecurrencetype *r) {
+   static const int month_days[12] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+   if (r->rscale || r->freq != ICAL_YEARLY_RECURRENCE || r->interval > 1 ||
+       by_count(r->by_month, ICAL_BY_MONTH_SIZE) != 1 || r->by_month[0] < 1 ||
+       r->by_month[0] > 12 || by_count(r->by_year_day, ICAL_BY_YEARDAY_SIZE) != 0 ||
+       by_count(r->by_week_no, ICAL_BY_WEEKNO_SIZE) != 0 ||
+       by_count(r->by_hour, ICAL_BY_HOUR_SIZE) > 1 ||
+       by_count(r->by_minute, ICAL_BY_MINUTE_SIZE) > 1 ||
+       by_count(r->by_second, ICAL_BY_SECOND_SIZE) > 1)
+      return false;
+   const int days = month_days[r->by_month[0] - 1];
+   const int n_day = by_count(r->by_day, ICAL_BY_DAY_SIZE);
+   const int n_mday = by_count(r->by_month_day, ICAL_BY_MONTHDAY_SIZE);
+   const int n_setpos = by_count(r->by_set_pos, ICAL_BY_SETPOS_SIZE);
+   const int pos = n_day == 1 ? icalrecurrencetype_day_position(r->by_day[0]) : 0;
+   if (n_day > 1 || abs(pos) > 5)
+      return false;
+
+   if (n_mday == 0) {
+      if (n_setpos == 0)
+         return n_day == 1 && pos != 0;
+      return n_day == 1 && pos == 0 && n_setpos == 1 && r->by_set_pos[0] != 0 &&
+             abs(r->by_set_pos[0]) <= 5;
+   }
+   if (n_setpos != 0)
+      return false;
+   if (n_day == 0)
+      return n_mday == 1 && r->by_month_day[0] != 0 && abs(r->by_month_day[0]) <= days;
+   return pos == 0 && week_of_month_days(r, n_mday, days);
+}
+
+/* Whether libical can resolve times against @p vtz with bounded work: it
+ * expands every RRULE of every block from the block's start to the year asked
+ * for, so a rule changing more than once a year (a fuzz input's FREQ=HOURLY
+ * took ~20 s per event), one that never matches, an early start or many rules
+ * stall the sync.  Real zones change at most twice a year. */
+static bool timezone_is_bounded(icalcomponent *vtz) {
+   int rules = 0;
+   for (icalcomponent *obs = icalcomponent_get_first_component(vtz, ICAL_ANY_COMPONENT); obs;
+        obs = icalcomponent_get_next_component(vtz, ICAL_ANY_COMPONENT)) {
+      icalproperty *p = icalcomponent_get_first_property(obs, ICAL_RRULE_PROPERTY);
+      if (!p)
+         continue; /* single changes (DTSTART/RDATE): cheap */
+      /* The property's own value: the component form would resolve a TZID. */
+      icalproperty *start = icalcomponent_get_first_property(obs, ICAL_DTSTART_PROPERTY);
+      if (!start || icalproperty_get_dtstart(start).year < CALDAV_TZ_MIN_START_YEAR)
+         return false;
+      for (; p; p = icalcomponent_get_next_property(obs, ICAL_RRULE_PROPERTY)) {
+         struct icalrecurrencetype r = icalproperty_get_rrule(p);
+         if (++rules > CALDAV_TZ_MAX_RULES || !zone_rule_is_bounded(&r))
+            return false;
+      }
+   }
+   return true;
+}
+
+/* Whether to set aside the calendar's own definition of @p vtz: always when
+ * libical has a zone of that name (its copy is the one used then: the same
+ * rules, without trusting the server's), and otherwise when it isn't bounded
+ * or its name isn't safe to look up (an event in it is then read as UTC). */
+static bool timezone_set_aside(icalcomponent *vtz, tz_warned_t *warned) {
+   icalproperty *id = icalcomponent_get_first_property(vtz, ICAL_TZID_PROPERTY);
+   const char *tzid = id ? icalproperty_get_tzid(id) : NULL;
+   if (!tzid_is_safe(tzid)) {
+      warn_zone_once(warned, tzid, "unsafe name");
+      return true;
+   }
+   if (icaltimezone_get_builtin_timezone(tzid))
+      return true;
+   if (timezone_is_bounded(vtz))
+      return false;
+   warn_zone_once(warned, tzid, "not a real zone's rules");
+   return true;
+}
+
+/* Set aside the time zones in @p parent (its direct VTIMEZONE children, the
+ * only ones libical looks up for a component under it). */
+static void set_aside_timezones(icalcomponent *parent, tz_warned_t *warned) {
+   icalcomponent *vtz = icalcomponent_get_first_component(parent, ICAL_VTIMEZONE_COMPONENT);
+   while (vtz) {
+      icalcomponent *next = icalcomponent_get_next_component(parent, ICAL_VTIMEZONE_COMPONENT);
+      if (timezone_set_aside(vtz, warned)) {
+         icalcomponent_remove_component(parent, vtz);
+         icalcomponent_free(vtz);
+      }
+      vtz = next;
+   }
+}
+
+/* Drop a TZID that isn't safe to look up from the event's start and end, so
+ * libical's own fallback (a zone file of that name) never opens it either. */
+static void strip_unsafe_tzids(icalcomponent *vevent, tz_warned_t *warned) {
+   const icalproperty_kind kinds[] = { ICAL_DTSTART_PROPERTY, ICAL_DTEND_PROPERTY };
+   for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+      icalproperty *p = icalcomponent_get_first_property(vevent, kinds[k]);
+      icalparameter *param = p ? icalproperty_get_first_parameter(p, ICAL_TZID_PARAMETER) : NULL;
+      if (param && !tzid_is_safe(icalparameter_get_tzid(param))) {
+         warn_zone_once(warned, icalparameter_get_tzid(param), "unsafe name");
+         icalproperty_remove_parameter_by_kind(p, ICAL_TZID_PARAMETER);
+      }
+   }
+}
+
+/* Case-insensitive match of @p word at @p p, reading through folded lines
+ * (a line break followed by a space or tab, which iCalendar unfolds). */
+static bool matches_unfolded(const char *p, const char *word) {
+   for (; *word; word++) {
+      while ((p[0] == '\r' && p[1] == '\n' && (p[2] == ' ' || p[2] == '\t')) ||
+             (p[0] == '\n' && (p[1] == ' ' || p[1] == '\t')))
+         p += p[0] == '\r' ? 3 : 2;
+      if (toupper((unsigned char)*p) != *word)
+         return false;
+      p++;
+   }
+   return true;
+}
+
+/* Whether @p ical begins more than CALDAV_MAX_VTIMEZONES time zones, counted
+ * before parsing (libical's handling of each is linear in their number). */
+static bool too_many_vtimezones(const char *ical) {
+   int count = 0;
+   for (const char *p = ical; *p; p++) {
+      const bool line_start = p == ical || (p[-1] == '\n' && *p != ' ' && *p != '\t');
+      if (line_start && matches_unfolded(p, "BEGIN:VTIMEZONE") && ++count > CALDAV_MAX_VTIMEZONES)
+         return true;
+   }
+   return false;
+}
+
+/* The event a resource is about: its series (the VEVENT without a
+ * RECURRENCE-ID), which a server may list after a changed occurrence. */
+static icalcomponent *master_event(icalcomponent *comp) {
+   icalcomponent *first = icalcomponent_get_first_component(comp, ICAL_VEVENT_COMPONENT);
+   for (icalcomponent *v = first; v;
+        v = icalcomponent_get_next_component(comp, ICAL_VEVENT_COMPONENT)) {
+      if (!icalcomponent_get_first_property(v, ICAL_RECURRENCEID_PROPERTY))
+         return v;
+   }
+   return first;
+}
+
+/* An all-day date's fields, and its midnight (UTC) as an epoch. */
+static time_t date_epoch(icaltimetype t, char *date, size_t date_len) {
+   snprintf(date, date_len, "%04d-%02d-%02d", t.year, t.month, t.day);
+   struct tm tm_date = { 0 };
+   tm_date.tm_year = t.year - 1900;
+   tm_date.tm_mon = t.month - 1;
+   tm_date.tm_mday = t.day;
+   return timegm(&tm_date);
+}
+
+/* A timed value as an epoch: converted to UTC components, then timegm(),
+ * which (unlike mktime()) the process-wide TZ doesn't affect. */
+static time_t time_epoch(icaltimetype t) {
+   icaltimetype utc = icaltime_convert_to_zone(t, icaltimezone_get_utc_timezone());
+   struct tm tm_utc = { 0 };
+   tm_utc.tm_year = utc.year - 1900;
+   tm_utc.tm_mon = utc.month - 1;
+   tm_utc.tm_mday = utc.day;
+   tm_utc.tm_hour = utc.hour;
+   tm_utc.tm_min = utc.minute;
+   tm_utc.tm_sec = utc.second;
+   return timegm(&tm_utc);
+}
+
+/* Fill @p evt from one resource's iCalendar text.  False when it holds no
+ * event DAWN can read (then it is skipped). */
+static bool read_ical_event(const char *ical_data, caldav_event_t *evt, tz_warned_t *warned) {
+   if (too_many_vtimezones(ical_data)) {
+      OLOG_WARNING("caldav: skipping '%s': more than %d time zones", evt->href,
+                   CALDAV_MAX_VTIMEZONES);
+      return false;
+   }
+   icalcomponent *comp = icalparser_parse_string(ical_data);
+   if (!comp)
+      return false;
+   icalcomponent *vevent = master_event(comp);
+   if (!vevent) {
+      icalcomponent_free(comp);
+      return false;
+   }
+   /* Before any time is read: libical resolves a TZID through the event's own
+    * VTIMEZONEs, then the calendar's, then a zone file of that name. */
+   set_aside_timezones(vevent, warned);
+   set_aside_timezones(comp, warned);
+   strip_unsafe_tzids(vevent, warned);
+
+   const char *uid = icalcomponent_get_uid(vevent);
+   if (uid)
+      snprintf(evt->uid, sizeof(evt->uid), "%s", uid);
+   const char *summary = icalcomponent_get_summary(vevent);
+   if (summary)
+      snprintf(evt->summary, sizeof(evt->summary), "%s", summary);
+   const char *desc = icalcomponent_get_description(vevent);
+   if (desc)
+      snprintf(evt->description, sizeof(evt->description), "%s", desc);
+   const char *loc = icalcomponent_get_location(vevent);
+   if (loc)
+      snprintf(evt->location, sizeof(evt->location), "%s", loc);
+
+   icaltimetype dtstart = icalcomponent_get_dtstart(vevent);
+   if (!icaltime_is_null_time(dtstart)) {
+      if (dtstart.is_date) {
+         evt->all_day = true;
+         evt->dtstart = date_epoch(dtstart, evt->dtstart_date, sizeof(evt->dtstart_date));
+      } else {
+         evt->dtstart = time_epoch(dtstart);
+         /* The zone it repeats in, when libical has it built in. */
+         icaltimezone *zone = (icaltimezone *)dtstart.zone;
+         const char *name = zone ? icaltimezone_get_location(zone) : NULL;
+         if (name && tzid_is_safe(name) && icaltimezone_get_builtin_timezone(name))
+            snprintf(evt->tzid, sizeof(evt->tzid), "%s", name);
+      }
+   }
+   icaltimetype dtend = icalcomponent_get_dtend(vevent);
+   if (!icaltime_is_null_time(dtend)) {
+      evt->dtend = dtend.is_date ? date_epoch(dtend, evt->dtend_date, sizeof(evt->dtend_date))
+                                 : time_epoch(dtend);
+   }
+   if (evt->dtstart && evt->dtend)
+      evt->duration_sec = (int)(evt->dtend - evt->dtstart);
+
+   icalproperty *rrprop = icalcomponent_get_first_property(vevent, ICAL_RRULE_PROPERTY);
+   if (rrprop) {
+      struct icalrecurrencetype rrule = icalproperty_get_rrule(rrprop);
+      const char *rrstr = icalrecurrencetype_as_string(&rrule);
+      /* A cut rule would change meaning (a lost COUNT or UNTIL never ends). */
+      if (rrstr &&
+          (size_t)snprintf(evt->rrule, sizeof(evt->rrule), "%s", rrstr) >= sizeof(evt->rrule)) {
+         OLOG_WARNING("caldav: '%s' has a recurrence rule too long to keep; shown once", evt->href);
+         evt->rrule[0] = '\0';
+      }
+   }
+   icalcomponent_free(comp);
+   return true;
+}
+
+static long elapsed_ms(const struct timespec *since) {
+   struct timespec now;
+   clock_gettime(CLOCK_MONOTONIC, &now);
+   return (long)(now.tv_sec - since->tv_sec) * 1000 + (now.tv_nsec - since->tv_nsec) / 1000000;
+}
+#endif
+
 caldav_error_t caldav_parse_events(const char *xml,
                                    size_t len,
                                    const char *calendar_url,
@@ -745,6 +1062,11 @@ caldav_error_t caldav_parse_events(const char *xml,
    }
 
    int count = 0;
+   bool budget_spent = false;
+#ifdef HAVE_LIBICAL
+   tz_warned_t warned = { 0 };
+   long slow_ms = 0;
+#endif
    for (int i = 0; i < responses->nodesetval->nodeNr && count < cap; i++) {
       xmlNodePtr resp_node = responses->nodesetval->nodeTab[i];
       caldav_event_t *evt = &events[count];
@@ -785,99 +1107,25 @@ caldav_error_t caldav_parse_events(const char *xml,
       evt->raw_ical = ical_data;
 
 #ifdef HAVE_LIBICAL
-      /* Parse iCalendar with libical */
-      icalcomponent *comp = icalparser_parse_string(ical_data);
-      if (comp) {
-         icalcomponent *vevent = icalcomponent_get_first_component(comp, ICAL_VEVENT_COMPONENT);
-         if (vevent) {
-            /* UID */
-            const char *uid = icalcomponent_get_uid(vevent);
-            if (uid)
-               snprintf(evt->uid, sizeof(evt->uid), "%s", uid);
-
-            /* Summary */
-            const char *summary = icalcomponent_get_summary(vevent);
-            if (summary)
-               snprintf(evt->summary, sizeof(evt->summary), "%s", summary);
-
-            /* Description */
-            const char *desc = icalcomponent_get_description(vevent);
-            if (desc)
-               snprintf(evt->description, sizeof(evt->description), "%s", desc);
-
-            /* Location */
-            const char *loc = icalcomponent_get_location(vevent);
-            if (loc)
-               snprintf(evt->location, sizeof(evt->location), "%s", loc);
-
-            /* DTSTART — convert to UTC epoch for consistent storage.
-             * We use icaltime_convert_to_zone() to get UTC components, then
-             * timegm() to produce a correct epoch. This avoids mktime() which
-             * is affected by the process-wide TZ setting. */
-            icaltimezone *utc_zone = icaltimezone_get_utc_timezone();
-            icaltimetype dtstart = icalcomponent_get_dtstart(vevent);
-            if (!icaltime_is_null_time(dtstart)) {
-               if (dtstart.is_date) {
-                  evt->all_day = true;
-                  snprintf(evt->dtstart_date, sizeof(evt->dtstart_date), "%04d-%02d-%02d",
-                           dtstart.year, dtstart.month, dtstart.day);
-                  struct tm tm_date = { 0 };
-                  tm_date.tm_year = dtstart.year - 1900;
-                  tm_date.tm_mon = dtstart.month - 1;
-                  tm_date.tm_mday = dtstart.day;
-                  evt->dtstart = timegm(&tm_date);
-               } else {
-                  icaltimetype utc_dt = icaltime_convert_to_zone(dtstart, utc_zone);
-                  struct tm utc_tm = { 0 };
-                  utc_tm.tm_year = utc_dt.year - 1900;
-                  utc_tm.tm_mon = utc_dt.month - 1;
-                  utc_tm.tm_mday = utc_dt.day;
-                  utc_tm.tm_hour = utc_dt.hour;
-                  utc_tm.tm_min = utc_dt.minute;
-                  utc_tm.tm_sec = utc_dt.second;
-                  evt->dtstart = timegm(&utc_tm);
-               }
-            }
-
-            /* DTEND */
-            icaltimetype dtend = icalcomponent_get_dtend(vevent);
-            if (!icaltime_is_null_time(dtend)) {
-               if (dtend.is_date) {
-                  snprintf(evt->dtend_date, sizeof(evt->dtend_date), "%04d-%02d-%02d", dtend.year,
-                           dtend.month, dtend.day);
-                  struct tm tm_date = { 0 };
-                  tm_date.tm_year = dtend.year - 1900;
-                  tm_date.tm_mon = dtend.month - 1;
-                  tm_date.tm_mday = dtend.day;
-                  evt->dtend = timegm(&tm_date);
-               } else {
-                  icaltimetype utc_dt = icaltime_convert_to_zone(dtend, utc_zone);
-                  struct tm utc_tm = { 0 };
-                  utc_tm.tm_year = utc_dt.year - 1900;
-                  utc_tm.tm_mon = utc_dt.month - 1;
-                  utc_tm.tm_mday = utc_dt.day;
-                  utc_tm.tm_hour = utc_dt.hour;
-                  utc_tm.tm_min = utc_dt.minute;
-                  utc_tm.tm_sec = utc_dt.second;
-                  evt->dtend = timegm(&utc_tm);
-               }
-            }
-
-            /* Duration */
-            if (evt->dtstart && evt->dtend) {
-               evt->duration_sec = (int)(evt->dtend - evt->dtstart);
-            }
-
-            /* RRULE */
-            icalproperty *rrprop = icalcomponent_get_first_property(vevent, ICAL_RRULE_PROPERTY);
-            if (rrprop) {
-               struct icalrecurrencetype rrule = icalproperty_get_rrule(rrprop);
-               char *rrstr = icalrecurrencetype_as_string(&rrule);
-               if (rrstr)
-                  snprintf(evt->rrule, sizeof(evt->rrule), "%s", rrstr);
-            }
+      struct timespec t0;
+      clock_gettime(CLOCK_MONOTONIC, &t0);
+      const bool readable = read_ical_event(ical_data, evt, &warned);
+      const long ms = elapsed_ms(&t0);
+      if (ms > CALDAV_SLOW_EVENT_MS) {
+         OLOG_WARNING("caldav: '%s' took %ld ms to read", evt->href, ms);
+         slow_ms += ms;
+         if (slow_ms > CALDAV_SLOW_BUDGET_MS) {
+            OLOG_WARNING("caldav: stopping: slow events took %ld ms; keeping the cached copy",
+                         slow_ms);
+            count++; /* evt owns ical_data now */
+            budget_spent = true;
+            break;
          }
-         icalcomponent_free(comp);
+      }
+      if (!readable) {
+         free(ical_data);
+         evt->raw_ical = NULL;
+         continue;
       }
 #endif /* HAVE_LIBICAL */
 
@@ -890,6 +1138,10 @@ caldav_error_t caldav_parse_events(const char *xml,
 
    result->events = events;
    result->count = count;
+   if (budget_spent) {
+      caldav_event_list_free(result);
+      return CALDAV_ERR_TOO_SLOW;
+   }
    return CALDAV_OK;
 }
 
@@ -1392,6 +1644,8 @@ const char *caldav_strerror(caldav_error_t err) {
          return "memory allocation failure";
       case CALDAV_ERR_SYNC_TOKEN_INVALID:
          return "sync-token invalid/expired (re-baseline)";
+      case CALDAV_ERR_TOO_SLOW:
+         return "events too slow to read (cached copy kept)";
    }
    return "unknown error";
 }

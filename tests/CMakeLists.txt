@@ -140,6 +140,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v102.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v103.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v104.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v105.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -1621,6 +1622,15 @@ if(LIBXML2_FOUND AND LIBICAL_FOUND)
       LABEL   ci)
    target_include_directories(test_caldav_parse PRIVATE ${LIBXML2_INCLUDE_DIRS})
    target_compile_definitions(test_caldav_parse PRIVATE DAWN_ENABLE_CALENDAR_TOOL)
+endif()
+
+# A recurring event's occurrences in a window, with bounded work.
+if(LIBICAL_FOUND)
+   dawn_add_unit_test(test_calendar_rrule
+      SOURCES test_calendar_rrule.c
+              ${SRC_ROOT}/src/tools/calendar_rrule.c
+      LIBS    dawn_common unity ${LIBICAL_LIBRARIES}
+      LABEL   ci)
 endif()
 
 # The URL fetcher's private-address block (IP literals only, no network).

@@ -1054,6 +1054,10 @@
                if (typeof DawnCalendarAccounts !== 'undefined')
                   DawnCalendarAccounts.handleSyncAccountResponse(msg.payload);
                break;
+            case 'calendar_sync_done':
+               if (typeof DawnCalendarAccounts !== 'undefined')
+                  DawnCalendarAccounts.handleSyncDone(msg.payload);
+               break;
             case 'calendar_list_calendars_response':
                if (typeof DawnCalendarAccounts !== 'undefined')
                   DawnCalendarAccounts.handleListCalendarsResponse(msg.payload);
@@ -1576,6 +1580,10 @@
          // Background turns are aborted server-side on disconnect — drop stale dots.
          if (typeof DawnHistory !== 'undefined' && DawnHistory.clearGenerating) {
             DawnHistory.clearGenerating();
+         }
+         // A calendar sync's completion can't arrive now: stop waiting on it.
+         if (typeof DawnCalendarAccounts !== 'undefined') {
+            DawnCalendarAccounts.clearPendingSyncs();
          }
       }
       DawnElements.connectionStatus.className = status;

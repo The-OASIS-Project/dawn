@@ -2529,6 +2529,15 @@ carries no event content, so no PII on the wire.
 { "type": "calendar_events_changed" }
 ```
 
+#### `calendar_sync_done`
+A sync the user asked for (`calendar_sync_account`, or adding an account) ended. Every
+calendar sync runs on the server's sync thread, so `calendar_sync_account_response`
+returns at once with `queued: true` and this follows when the sync ends, to the owner's
+**browser** sessions. Older clients ignore it.
+```json
+{ "type": "calendar_sync_done", "payload": { "id": 3, "success": true } }
+```
+
 #### `conversation_list_changed`
 The user's conversation list changed — a conversation was **created** or its
 last-activity was **bumped** — from any interface (a second browser tab, a messaging
