@@ -29,6 +29,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "tools/calendar_ical.h"
+
 /* ============================================================================
  * Error Codes
  * ============================================================================ */
@@ -46,6 +48,8 @@ typedef enum {
    CALDAV_ERR_ALLOC,              /**< Memory allocation failure */
    CALDAV_ERR_SYNC_TOKEN_INVALID, /**< RFC 6578 sync-token rejected (stale/expired) — re-baseline */
    CALDAV_ERR_TOO_SLOW,           /**< Events took too long to read (hostile or broken iCalendar) */
+   CALDAV_ERR_RATE_LIMITED,       /**< 429, or 503 with Retry-After: too many requests for now */
+   CALDAV_ERR_REJECTED,           /**< Another 4xx: the server refused this request as sent */
 } caldav_error_t;
 
 /* ============================================================================
@@ -81,24 +85,6 @@ typedef struct {
  *  keeps its cached copy, and the next sync tries again. */
 #define CALDAV_SLOW_BUDGET_MS 10000
 
-/** A single fetched event from the server */
-typedef struct {
-   char uid[256];          /**< iCalendar UID */
-   char etag[128];         /**< Server ETag */
-   char summary[512];      /**< Event title */
-   char description[1024]; /**< Event description */
-   char location[256];     /**< Event location */
-   time_t dtstart;         /**< Start time (epoch) */
-   time_t dtend;           /**< End time (epoch) */
-   bool all_day;           /**< True for VALUE=DATE events */
-   char dtstart_date[16];  /**< All-day: "2026-03-10" */
-   char dtend_date[16];    /**< All-day: "2026-03-11" (exclusive) */
-   char rrule[256];        /**< Recurrence rule string, or empty */
-   char tzid[64];          /**< IANA zone a timed event repeats in, or empty for UTC */
-   char *raw_ical;         /**< Full iCalendar data (heap-allocated) */
-   int duration_sec;       /**< Duration in seconds (for recurring) */
-   char href[512];         /**< Resource path on server */
-} caldav_event_t;
 
 /** Array of fetched events */
 typedef struct {
@@ -162,6 +148,28 @@ caldav_error_t caldav_discover(const char *base_url,
 /** Free discovery result internals */
 void caldav_discovery_free(caldav_discovery_result_t *result);
 
+/** Most addresses kept for one account, and the longest one. */
+#define CALDAV_MAX_USER_ADDRESSES 8
+#define CALDAV_USER_ADDRESS_LEN 256
+
+/**
+ * The addresses invitations name this account by (RFC 6638
+ * calendar-user-address-set on its principal), "mailto:" removed: a login of
+ * "alice" is invited as "alice@example.com", and may have aliases.
+ */
+caldav_error_t caldav_get_user_addresses(const char *principal_url,
+                                         const caldav_auth_t *auth,
+                                         char (*addrs)[CALDAV_USER_ADDRESS_LEN],
+                                         int max,
+                                         int *count);
+
+/** The PROPFIND response half of caldav_get_user_addresses (testable). */
+caldav_error_t caldav_parse_user_addresses(const char *xml,
+                                           size_t len,
+                                           char (*addrs)[CALDAV_USER_ADDRESS_LEN],
+                                           int max,
+                                           int *count);
+
 /**
  * Get the current ctag for a calendar (PROPFIND for change detection).
  * @param ctag_out  Buffer for ctag string (at least 128 bytes)
@@ -183,6 +191,7 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
 
 /** Free event list internals */
 void caldav_event_list_free(caldav_event_list_t *list);
+
 
 /**
  * The events in a calendar-query REPORT response (a multistatus document):
@@ -243,13 +252,16 @@ void caldav_sync_result_free(caldav_sync_result_t *result);
  * @param ical_data  Complete iCalendar string (BEGIN:VCALENDAR...END:VCALENDAR)
  * @param uid        Event UID (used to construct resource path)
  * @param etag_out   Buffer for returned ETag (at least 128 bytes), may be NULL
+ * @param href_out   Receives the resource's URL (may be NULL)
  */
 caldav_error_t caldav_create_event(const char *calendar_url,
                                    const caldav_auth_t *auth,
                                    const char *uid,
                                    const char *ical_data,
                                    char *etag_out,
-                                   size_t etag_len);
+                                   size_t etag_len,
+                                   char *href_out,
+                                   size_t href_len);
 
 /**
  * Update an existing event (PUT with If-Match: etag).
@@ -264,6 +276,27 @@ caldav_error_t caldav_update_event(const char *href,
                                    const char *ical_data,
                                    char *etag_out,
                                    size_t etag_len);
+
+/**
+ * Read one event resource with its ETag, in one request (a calendar-multiget
+ * REPORT on its calendar: a plain GET may not carry the ETag).
+ * @param calendar_url The calendar the event is in
+ * @param href         The event's URL
+ * @param ical_out     Receives the iCalendar text (free())
+ * @param etag_out     Receives the ETag exactly as the server sent it
+ */
+caldav_error_t caldav_get_event(const char *calendar_url,
+                                const char *href,
+                                const caldav_auth_t *auth,
+                                char **ical_out,
+                                char *etag_out,
+                                size_t etag_len);
+
+/**
+ * Seconds the server asked to wait in its last Retry-After on this thread,
+ * when the last call returned CALDAV_ERR_RATE_LIMITED (0 if it didn't say).
+ */
+int caldav_last_retry_after(void);
 
 /**
  * Delete an event (DELETE with If-Match: etag).

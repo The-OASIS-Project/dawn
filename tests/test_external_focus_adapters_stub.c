@@ -483,9 +483,16 @@ int calendar_db_event_upsert(const calendar_event_t *e, int64_t *o) {
    (void)o;
    abort();
 }
-int calendar_db_event_get_by_uid(const char *u, calendar_event_t *o) {
+int calendar_db_event_find(int user_id,
+                           const char *u,
+                           int64_t calendar_id,
+                           calendar_event_t *o,
+                           int *matches_out) {
+   (void)user_id;
    (void)u;
+   (void)calendar_id;
    (void)o;
+   (void)matches_out;
    abort();
 }
 int calendar_db_event_delete(int64_t id) {

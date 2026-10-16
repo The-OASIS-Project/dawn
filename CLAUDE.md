@@ -221,9 +221,9 @@ Trigger phrases: "code review", "review my changes", "run the agents", "run the 
    - **Big three** (code review / run the big three): `architecture-reviewer`, `embedded-efficiency-reviewer`, `security-auditor` — **plus `correctness-reviewer` in every set** (the general-logic lens; it also checks non-literal format strings such as prompt templates, which `-Wformat` can't).
    - **All four** (run all four): above + `ui-design-architect` (when UI changes present).
    - **All five / all six** (full review / run all five / run all six): above + `coding-standards-auditor` — mandatory for large refactors, new modules, or pre-release audits.
-3. Synthesize into one table with severity and action. Triage on **reachability**, not the label (see the prime directive): **fix** what's reachable in practice, any severity, with the least code; **drop** what isn't — no TODO row — and say so in one line. Pre-existing issues the same way: fixed because they're real and reachable, not because they were found.
+3. Synthesize into one table with severity and action. Triage on **reachability**, not the label (see the prime directive): **fix** what's reachable in practice, any severity, with the least code; **drop** what isn't — no TODO row — and say so in one line. Pre-existing issues the same way: fixed because they're real and reachable, not because they were found. When two reviewers disagree on a behavior, settle it with a test or a live check, not by picking one.
 4. Apply the fixes; re-verify format and tests.
-5. **One full review round per commit.** Post-review fixes get a self-check, or **one targeted reviewer** when they're substantial (a rewrite, new logic) — code written *after* the agent pass was seen by no reviewer, which is how the reconnect-state bug on the music branch reached the PR and was caught only by the bots. Never re-run the full set for polish.
+5. **One full review round per commit.** Code written *after* the last agent pass gets **one targeted reviewer** on that delta before the PR, however small: no reviewer has seen it otherwise. The reconnect-state bug on the music branch, and an out-of-bounds read in a calendar fix-of-a-fix, both reached the PR this way and were caught only by the bots. Never re-run the full set for polish.
 
 ## Benchmark Methodology — `recall_reach` ≠ leader entailment
 

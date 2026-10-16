@@ -64,7 +64,7 @@ static void test_events_fields(void) {
 
    const caldav_event_t *e = &list.events[0];
    TEST_ASSERT_EQUAL_STRING("https://cal.example.com/dav/home/a1.ics", e->href);
-   TEST_ASSERT_EQUAL_STRING("etag-1", e->etag); /* quotes stripped */
+   TEST_ASSERT_EQUAL_STRING("\"etag-1\"", e->etag); /* as sent: it goes back in If-Match */
    TEST_ASSERT_EQUAL_STRING("a1@example.com", e->uid);
    TEST_ASSERT_EQUAL_STRING("Weekly sync", e->summary);
    TEST_ASSERT_EQUAL_STRING("Agenda: notes, decisions", e->description);
@@ -384,6 +384,26 @@ static void test_series_master_and_zone(void) {
    caldav_event_list_free(&list);
 }
 
+/* The account's own addresses: hrefs of calendar-user-address-set, "mailto:"
+ * removed, non-mailto ids kept as they are. */
+static void test_user_addresses(void) {
+   static const char *xml =
+       "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\" "
+       "xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/p/alice/</d:href>"
+       "<d:propstat><d:prop><c:calendar-user-address-set>"
+       "<d:href>mailto:alice@example.com</d:href><d:href> MAILTO:a@example.com </d:href>"
+       "<d:href>/p/alice/</d:href></c:calendar-user-address-set></d:prop>"
+       "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
+   char addrs[CALDAV_MAX_USER_ADDRESSES][CALDAV_USER_ADDRESS_LEN];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(CALDAV_OK, caldav_parse_user_addresses(xml, strlen(xml), addrs,
+                                                                CALDAV_MAX_USER_ADDRESSES, &n));
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_STRING("alice@example.com", addrs[0]);
+   TEST_ASSERT_EQUAL_STRING("a@example.com", addrs[1]);
+   TEST_ASSERT_EQUAL_STRING("/p/alice/", addrs[2]);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_events_fields);
@@ -395,5 +415,6 @@ int main(void) {
    RUN_TEST(test_series_master_and_zone);
    RUN_TEST(test_sync_page);
    RUN_TEST(test_sync_page_truncated);
+   RUN_TEST(test_user_addresses);
    return UNITY_END();
 }

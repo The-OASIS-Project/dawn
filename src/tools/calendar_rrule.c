@@ -21,11 +21,15 @@
 
 #include "tools/calendar_rrule.h"
 
+#include <ctype.h>
 #include <libical/ical.h>
 #include <limits.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "dawn_error.h"
 #include "logging.h"
@@ -213,15 +217,139 @@ static time_t wall_seconds(struct icaltimetype t) {
    return timegm(&tm);
 }
 
-/* The zone a timed event repeats in: @p tzid when libical has it built in,
- * else UTC.  A name with ".." is never looked up (libical opens the zone file
- * by name). */
+/* tzdata's own list of old zone names ("L <current> <old>" lines): read once,
+ * so an old name resolves whether the system installs it as a link, a copy,
+ * or not at all (newer systems ship old names only in an optional package). */
+#define CALENDAR_RRULE_TZDATA_ZI "/usr/share/zoneinfo/tzdata.zi"
+
+/* Most old names kept (tzdata has a few hundred). */
+#define CALENDAR_RRULE_MAX_LINKS 1024
+
+static struct {
+   pthread_once_t once;
+   char (*names)[2][64]; /* [i][0] old, [i][1] current */
+   int count;
+} s_links = { .once = PTHREAD_ONCE_INIT };
+
+static void load_links(void) {
+   FILE *f = fopen(CALENDAR_RRULE_TZDATA_ZI, "r");
+   if (!f)
+      return;
+   s_links.names = calloc(CALENDAR_RRULE_MAX_LINKS, sizeof(*s_links.names));
+   char line[256];
+   while (s_links.names && s_links.count < CALENDAR_RRULE_MAX_LINKS &&
+          fgets(line, sizeof(line), f)) {
+      char current[64], old[64];
+      if (sscanf(line, "L %63s %63s", current, old) == 2) {
+         memcpy(s_links.names[s_links.count][0], old, sizeof(old));
+         memcpy(s_links.names[s_links.count][1], current, sizeof(current));
+         s_links.count++;
+      }
+   }
+   fclose(f);
+}
+
+/* The current name tzdata gives old name @p tzid, or NULL. */
+static const char *current_name(const char *tzid) {
+   pthread_once(&s_links.once, load_links);
+   for (int i = 0; i < s_links.count; i++) {
+      if (strcmp(s_links.names[i][0], tzid) == 0)
+         return s_links.names[i][1];
+   }
+   return NULL;
+}
+
+/* libical's own zone named @p location, or NULL; never loads a zone it
+ * doesn't list (for one it doesn't, libical opens a file of that name and
+ * keeps it, so endless aliases would grow the daemon). */
+static icaltimezone *listed_zone(const char *location) {
+   if (strcmp(location, "UTC") == 0)
+      return icaltimezone_get_utc_timezone();
+   icalarray *zones = icaltimezone_get_builtin_timezones();
+   for (size_t i = 0; zones && i < zones->num_elements; i++) {
+      icaltimezone *z = icalarray_element_at(zones, i);
+      const char *name = icaltimezone_get_location(z);
+      if (name && strcmp(name, location) == 0)
+         return icaltimezone_get_builtin_timezone(location);
+   }
+   return NULL;
+}
+
+/* Whether @p name is a spelling of UTC. */
+static bool utc_name(const char *name) {
+   static const char *const names[] = { "UTC",       "GMT",           "UCT",      "Zulu",
+                                        "Universal", "Greenwich",     "Etc/UTC",  "Etc/GMT",
+                                        "Etc/UCT",   "Etc/Universal", "Etc/Zulu", "Etc/Greenwich" };
+   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+      if (strcmp(name, names[i]) == 0)
+         return true;
+   }
+   return false;
+}
+
+/* The system's zone name, read once.  A set TZ is the zone (as for the C
+ * library, which then ignores /etc/localtime): its name when one is
+ * listed, else none.  Otherwise the zone file /etc/localtime links to, else
+ * /etc/timezone. */
+static char s_system_tzid[64];
+static pthread_once_t s_system_once = PTHREAD_ONCE_INIT;
+
+static void read_system_tzid(void) {
+   const char *tz = getenv("TZ");
+   if (tz) {
+      if (*tz == ':')
+         tz++;
+      const char *path = strstr(tz, "zoneinfo/");
+      if (path)
+         tz = path + strlen("zoneinfo/");
+      if (calendar_rrule_zone(tz))
+         snprintf(s_system_tzid, sizeof(s_system_tzid), "%s", tz);
+      return;
+   }
+   char link[256];
+   const ssize_t n = readlink("/etc/localtime", link, sizeof(link) - 1);
+   if (n > 0) {
+      link[n] = '\0';
+      const char *name = strstr(link, "zoneinfo/");
+      if (name) {
+         snprintf(s_system_tzid, sizeof(s_system_tzid), "%s", name + strlen("zoneinfo/"));
+         return;
+      }
+   }
+   FILE *f = fopen("/etc/timezone", "r");
+   if (f) {
+      if (fgets(s_system_tzid, sizeof(s_system_tzid), f))
+         s_system_tzid[strcspn(s_system_tzid, " \t\r\n")] = '\0';
+      fclose(f);
+   }
+}
+
+const char *calendar_rrule_user_tzid(const char *configured) {
+   if (configured && configured[0])
+      return configured;
+   pthread_once(&s_system_once, read_system_tzid);
+   return s_system_tzid;
+}
+
+icaltimezone *calendar_rrule_zone(const char *tzid) {
+   if (!tzid || !tzid[0])
+      return NULL;
+   if (utc_name(tzid))
+      return icaltimezone_get_utc_timezone();
+   icaltimezone *zone = listed_zone(tzid);
+   if (zone)
+      return zone;
+   /* An old name ("Europe/Kiev", "US/Eastern"): tzdata names its current one. */
+   const char *current = current_name(tzid);
+   if (!current)
+      return NULL;
+   return utc_name(current) ? icaltimezone_get_utc_timezone() : listed_zone(current);
+}
+
+/* The zone a timed event repeats in: @p tzid's, else UTC. */
 static icaltimezone *repeat_zone(const char *tzid) {
-   icaltimezone *utc = icaltimezone_get_utc_timezone();
-   if (!tzid || !tzid[0] || strstr(tzid, ".."))
-      return utc;
-   icaltimezone *zone = icaltimezone_get_builtin_timezone(tzid);
-   return zone ? zone : utc;
+   icaltimezone *zone = calendar_rrule_zone(tzid);
+   return zone ? zone : icaltimezone_get_utc_timezone();
 }
 
 /* calendar_rrule_expand for a parsed rule (@p recur is changed: UNTIL). */
