@@ -29,6 +29,7 @@
 
 #include "config/dawn_config.h"
 #include "tools/calendar_db.h"
+#include "tools/calendar_ical.h"
 
 /* ============================================================================
  * Return codes (0 = success).  Mutating operations (add_account / add / update /
@@ -40,7 +41,20 @@
 #define CALENDAR_RC_FAILURE 1   /* generic — network, CalDAV, or unmapped */
 #define CALENDAR_RC_DUPLICATE 2 /* add_account: an account with this identity already exists */
 #define CALENDAR_RC_READONLY 3  /* target calendar/account is read-only (add / update / delete) */
-#define CALENDAR_RC_NOT_FOUND 4 /* add: no single writable calendar has that name */
+#define CALENDAR_RC_NOT_FOUND                                                            \
+   4                                  /* add: no single writable calendar has that name; \
+                                       * update / delete: no such event (or the server lost it) */
+#define CALENDAR_RC_AMBIGUOUS 5       /* that UID is in more than one calendar: name one */
+#define CALENDAR_RC_NOT_SYNCED 6      /* cached without its server path yet: after a sync */
+#define CALENDAR_RC_RATE_LIMITED 7    /* the server wants fewer requests for now */
+#define CALENDAR_RC_REJECTED 8        /* the server refused the change as sent */
+#define CALENDAR_RC_CONFLICT 9        /* changed elsewhere while being written, twice */
+#define CALENDAR_RC_BAD_RULE 10       /* the repeat rule is invalid or never occurs */
+#define CALENDAR_RC_NOT_OCCURRENCE 11 /* not an instance of that event */
+#define CALENDAR_RC_GUEST 12          /* someone else organizes it: reminders only */
+#define CALENDAR_RC_ZONE 13           /* its times are in a zone DAWN can't resolve */
+#define CALENDAR_RC_BAD_TIME 14       /* the end isn't after the start, or a bad reminder */
+#define CALENDAR_RC_UNREADABLE 15     /* part of the event can't be read, so it isn't rewritten */
 
 /* ============================================================================
  * Lifecycle
@@ -163,56 +177,42 @@ int calendar_service_search(int user_id,
  * ============================================================================ */
 
 /**
- * Create a new event. Writes to CalDAV server first, then caches.
- * @param user_id       Authenticated user
- * @param summary       Event title (required)
- * @param start         Start time (epoch)
- * @param end           End time (epoch, 0 = use default duration)
- * @param location      Location (may be NULL)
- * @param description   Description (may be NULL)
- * @param all_day       True for all-day event
+ * Create a new event on the server, then cache it.
+ * @param event         The event (its uid is generated here; a timed one with no
+ *                      end lasts the configured default)
  * @param calendar_name Target calendar: matched without case, or the one writable
  *                      calendar whose name contains it (NULL = first writable)
- * @param rrule         Recurrence rule (NULL = non-recurring)
- * @param tz_name       User timezone for iCalendar DTSTART TZID
  * @param uid_out       Buffer for created UID (at least 256 bytes)
  * @param calendar_out  Receives the calendar's label (calendar_pick_label; may be NULL)
- * @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
- *         CALENDAR_RC_READONLY if the target calendar/account is read-only,
- *         CALENDAR_RC_NOT_FOUND if no single writable calendar has that name
+ * @return CALENDAR_RC_OK, or READONLY / NOT_FOUND (no such writable calendar),
+ *         BAD_RULE / BAD_TIME, RATE_LIMITED / REJECTED (from the server), FAILURE
  */
 int calendar_service_add(int user_id,
-                         const char *summary,
-                         time_t start,
-                         time_t end,
-                         const char *location,
-                         const char *description,
-                         bool all_day,
+                         const calendar_ical_new_t *event,
                          const char *calendar_name,
-                         const char *rrule,
-                         const char *tz_name,
                          char *uid_out,
                          size_t uid_out_len,
                          char *calendar_out,
                          size_t calendar_out_len);
 
 /**
- * Update an existing event by UID. Write-through to server.
- * @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
- *         CALENDAR_RC_READONLY if the event's account is read-only
+ * Change an event (or, with change->occurrence, one instance of it) on its
+ * server: read fresh, changed only as asked, written back if unchanged since.
+ * @param calendar_name Narrows the UID to that calendar (NULL = any)
+ * @return CALENDAR_RC_OK or one of the codes above saying why not
  */
 int calendar_service_update(int user_id,
                             const char *uid,
-                            const char *summary,
-                            time_t start,
-                            time_t end,
-                            const char *location,
-                            const char *description);
+                            const char *calendar_name,
+                            const calendar_ical_change_t *change);
 
-/** Delete an event by UID. Write-through to server.
- *  @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
- *          CALENDAR_RC_READONLY if the event's account is read-only */
-int calendar_service_delete(int user_id, const char *uid);
+/** Delete an event, every instance of it, on its server.
+ *  @return CALENDAR_RC_OK or one of the codes above saying why not */
+int calendar_service_delete(int user_id, const char *uid, const char *calendar_name);
+
+/** Seconds the server asked to wait after a CALENDAR_RC_RATE_LIMITED on this
+ *  thread (0 if it didn't say). */
+int calendar_service_retry_after(void);
 
 /* ============================================================================
  * Access Summary (for LLM tool read-only awareness)

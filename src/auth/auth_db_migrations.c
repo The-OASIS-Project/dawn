@@ -3461,13 +3461,15 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
-   /* v105: calendars fetched and re-expanded once (no schema change). */
-   bool v105_ok = (current_version >= 105);
-   if (current_version < 105) {
-      if (auth_db_migrations_v105(s_db.db) == AUTH_DB_SUCCESS) {
-         v105_ok = true;
+   /* v105 and v106: calendars fetched and stored again once (no schema change):
+    * repeats in the event's own zone (v105), then cancelled and moved instances
+    * applied (v106).  One refetch covers both. */
+   bool v106_ok = (current_version >= 106);
+   if (current_version < 106) {
+      if (auth_db_migrations_calendar_refetch(s_db.db) == AUTH_DB_SUCCESS) {
+         v106_ok = true;
       } else {
-         OLOG_ERROR("auth_db: v105 migration (calendar re-fetch) failed");
+         OLOG_ERROR("auth_db: v106 migration (calendar re-fetch) failed");
       }
    }
 
@@ -3497,7 +3499,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
                               v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
                               v97_ok && v98_ok && v99_ok && v100_ok && v101_ok && v102_ok &&
-                              v103_ok && v104_ok && v105_ok;
+                              v103_ok && v104_ok && v106_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

@@ -30,6 +30,7 @@
 #include <pthread.h>
 #include <sodium.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
+#include "tools/calendar_ical.h"
 #include "tools/calendar_pick.h"
 #include "tools/calendar_query_window.h"
 #include "tools/calendar_rrule.h"
@@ -539,10 +541,9 @@ int calendar_service_test_connection(int64_t account_id) {
 }
 
 /* =============================================================================
- * RRULE Expansion Helper
+ * Storing an event and its occurrences
  * ============================================================================= */
 
-/** Insert a single base occurrence from a caldav event (non-recurring or fallback) */
 /* An event's own start as its one occurrence. */
 static void base_occurrence(int64_t event_id,
                             const caldav_event_t *ce,
@@ -562,28 +563,71 @@ typedef struct {
    int64_t event_id;
    const caldav_event_t *ce;
    int duration;
-   calendar_occurrence_t *occ; /* CALENDAR_RRULE_MAX_OCCURRENCES */
+   calendar_occurrence_t *occ; /* cap entries */
+   int cap;
    int n;
 } expand_ctx_t;
+
+/* Whether @p start (an instance of @p ce's rule) is cancelled or moved: then
+ * it isn't stored as a plain instance.  An all-day series compares dates. */
+static bool instance_excepted(const caldav_event_t *ce, time_t start) {
+   const time_t key = ce->all_day ? start - (start % 86400) : start;
+   for (int i = 0; i < ce->exdate_count; i++) {
+      if (ce->exdates[i] == key)
+         return true;
+   }
+   for (int i = 0; i < ce->override_count; i++) {
+      if (ce->overrides[i].original == key)
+         return true;
+   }
+   return false;
+}
+
+static void format_occurrence_dates(calendar_occurrence_t *occ) {
+   struct tm occ_tm;
+   gmtime_r(&occ->dtstart, &occ_tm);
+   iso8601_format_date(occ_tm.tm_year + 1900, occ_tm.tm_mon + 1, occ_tm.tm_mday, occ->dtstart_date,
+                       sizeof(occ->dtstart_date));
+   struct tm end_tm;
+   gmtime_r(&occ->dtend, &end_tm);
+   iso8601_format_date(end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday, occ->dtend_date,
+                       sizeof(occ->dtend_date));
+}
 
 /* One occurrence of a recurring event (calendar_rrule_expand's emit). */
 static void collect_occurrence(time_t start, void *ctx) {
    expand_ctx_t *x = ctx;
-   if (x->n >= CALENDAR_RRULE_MAX_OCCURRENCES)
+   if (x->n >= x->cap || instance_excepted(x->ce, start))
       return;
    calendar_occurrence_t *occ = &x->occ[x->n++];
    base_occurrence(x->event_id, x->ce, occ);
    occ->dtstart = start;
    occ->dtend = start + x->duration;
-   if (x->ce->all_day) {
-      struct tm occ_tm;
-      gmtime_r(&occ->dtstart, &occ_tm);
-      iso8601_format_date(occ_tm.tm_year + 1900, occ_tm.tm_mon + 1, occ_tm.tm_mday,
-                          occ->dtstart_date, sizeof(occ->dtstart_date));
-      struct tm end_tm;
-      gmtime_r(&occ->dtend, &end_tm);
-      iso8601_format_date(end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday, occ->dtend_date,
-                          sizeof(occ->dtend_date));
+   if (x->ce->all_day)
+      format_occurrence_dates(occ);
+   calendar_ical_instance_key(start, x->ce->all_day, occ->recurrence_id,
+                              sizeof(occ->recurrence_id));
+}
+
+/* The series' moved instances that fall in the window, at their new times
+ * (whether or not their original time is in it). */
+static void collect_overrides(expand_ctx_t *x, time_t range_start, time_t range_end) {
+   for (int i = 0; i < x->ce->override_count && x->n < x->cap; i++) {
+      const caldav_override_t *o = &x->ce->overrides[i];
+      if (o->cancelled || o->dtend < range_start || o->dtstart > range_end)
+         continue;
+      calendar_occurrence_t *occ = &x->occ[x->n++];
+      memset(occ, 0, sizeof(*occ));
+      occ->dtstart = o->dtstart;
+      occ->dtend = o->dtend;
+      occ->all_day = o->all_day;
+      snprintf(occ->dtstart_date, sizeof(occ->dtstart_date), "%s", o->dtstart_date);
+      snprintf(occ->dtend_date, sizeof(occ->dtend_date), "%s", o->dtend_date);
+      snprintf(occ->summary, sizeof(occ->summary), "%s", o->summary);
+      snprintf(occ->location, sizeof(occ->location), "%s", o->location);
+      occ->is_override = true;
+      calendar_ical_instance_key(o->original, x->ce->all_day, occ->recurrence_id,
+                                 sizeof(occ->recurrence_id));
    }
 }
 
@@ -593,24 +637,28 @@ static long ms_since(const struct timespec *t0) {
    return (long)(t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000;
 }
 
-/* Store an event with its occurrences within the cache window (its series,
- * or, with no rule or one refused, its own start once), in one transaction.
- * @p ms_out gets the ms libical took.  Returns SUCCESS, or FAILURE when they
- * couldn't be written (the cache is then as it was). */
+/* Store an event with its occurrences within the cache window, in one
+ * transaction: a series' instances (less the cancelled and moved ones) and
+ * its moved instances at their new times, or, with no rule or one refused,
+ * its own start once.  @p ms_out gets the ms libical took.  Returns SUCCESS,
+ * or FAILURE when they couldn't be written (the cache is then as it was). */
 static int store_event(const calendar_event_t *evt,
                        const caldav_event_t *ce,
                        time_t range_start,
                        time_t range_end,
                        long *ms_out) {
    calendar_occurrence_t one;
-   expand_ctx_t x = { .event_id = 0, .ce = ce, .occ = &one, .n = 0 };
+   expand_ctx_t x = { .event_id = 0, .ce = ce, .occ = &one, .cap = 1, .n = 0 };
    long ms = 0;
-   if (ce->rrule[0])
-      x.occ = calloc(CALENDAR_RRULE_MAX_OCCURRENCES, sizeof(*x.occ));
+   bool expanded = false;
+   if (ce->rrule[0]) {
+      x.cap = CALENDAR_RRULE_MAX_OCCURRENCES + ce->override_count;
+      x.occ = calloc((size_t)x.cap, sizeof(*x.occ));
+   }
    if (ce->rrule[0] && x.occ) {
       x.duration = ce->duration_sec > 0 ? ce->duration_sec : (int)(ce->dtend - ce->dtstart);
       if (x.duration <= 0)
-         x.duration = 3600; /* fallback 1 hour */
+         x.duration = ce->all_day ? 86400 : 3600;
       int count = 0;
       struct timespec t0;
       clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -618,15 +666,19 @@ static int store_event(const calendar_event_t *evt,
                                            ce->dtstart_date, x.duration, range_start, range_end,
                                            collect_occurrence, &x, &count);
       ms = ms_since(&t0);
-      if (rc != SUCCESS) {
+      if (rc == SUCCESS) {
+         expanded = true;
+         collect_overrides(&x, range_start, range_end);
+      } else {
          OLOG_WARNING("calendar: RRULE '%s' of event '%s' unreadable or refused; shown once",
                       ce->rrule, ce->uid);
          x.n = 0;
       }
    } else if (ce->rrule[0]) {
       x.occ = &one; /* out of memory: shown once */
+      x.cap = 1;
    }
-   if (x.n == 0) {
+   if (!expanded) {
       base_occurrence(0, ce, x.occ);
       x.n = 1;
    }
@@ -635,6 +687,36 @@ static int store_event(const calendar_event_t *evt,
       free(x.occ);
    *ms_out = ms;
    return rc;
+}
+
+/* The cache row for a fetched event. */
+static void event_from_fetched(const caldav_event_t *ce,
+                               int64_t calendar_id,
+                               time_t now,
+                               calendar_event_t *evt) {
+   memset(evt, 0, sizeof(*evt));
+   evt->calendar_id = calendar_id;
+   snprintf(evt->uid, sizeof(evt->uid), "%s", ce->uid);
+   snprintf(evt->etag, sizeof(evt->etag), "%s", ce->etag);
+   snprintf(evt->href, sizeof(evt->href), "%s", ce->href);
+   snprintf(evt->summary, sizeof(evt->summary), "%s", ce->summary);
+   snprintf(evt->description, sizeof(evt->description), "%s", ce->description);
+   snprintf(evt->location, sizeof(evt->location), "%s", ce->location);
+   evt->dtstart = ce->dtstart;
+   evt->dtend = ce->dtend;
+   evt->duration_sec = ce->duration_sec;
+   evt->all_day = ce->all_day;
+   snprintf(evt->dtstart_date, sizeof(evt->dtstart_date), "%s", ce->dtstart_date);
+   snprintf(evt->dtend_date, sizeof(evt->dtend_date), "%s", ce->dtend_date);
+   snprintf(evt->rrule, sizeof(evt->rrule), "%s", ce->rrule);
+   evt->raw_ical = ce->raw_ical;
+   evt->last_synced = now;
+}
+
+/* The window events are cached for. */
+static void cache_window(time_t now, time_t *start, time_t *end) {
+   *start = now - (s_cal.config.cache_past_days * 86400);
+   *end = now + (s_cal.config.cache_future_days * 86400);
 }
 
 /**
@@ -795,8 +877,8 @@ static int sync_account(int64_t account_id) {
    }
 
    time_t now = time(NULL);
-   time_t range_start = now - (s_cal.config.cache_past_days * 86400);
-   time_t range_end = now + (s_cal.config.cache_future_days * 86400);
+   time_t range_start, range_end;
+   cache_window(now, &range_start, &range_end);
 
    /* Date-string form of the window, for the sentinel's all-day occurrence overlap. */
    char range_start_date[16] = { 0 };
@@ -857,23 +939,8 @@ static int sync_account(int64_t account_id) {
       for (int j = 0; j < events.count && !budget_spent && !store_failed; j++) {
          caldav_event_t *ce = &events.events[j];
 
-         calendar_event_t evt = { 0 };
-         evt.calendar_id = cals[i].id;
-         snprintf(evt.uid, sizeof(evt.uid), "%s", ce->uid);
-         snprintf(evt.etag, sizeof(evt.etag), "%s", ce->etag);
-         snprintf(evt.href, sizeof(evt.href), "%s", ce->href);
-         snprintf(evt.summary, sizeof(evt.summary), "%s", ce->summary);
-         snprintf(evt.description, sizeof(evt.description), "%s", ce->description);
-         snprintf(evt.location, sizeof(evt.location), "%s", ce->location);
-         evt.dtstart = ce->dtstart;
-         evt.dtend = ce->dtend;
-         evt.duration_sec = ce->duration_sec;
-         evt.all_day = ce->all_day;
-         snprintf(evt.dtstart_date, sizeof(evt.dtstart_date), "%s", ce->dtstart_date);
-         snprintf(evt.dtend_date, sizeof(evt.dtend_date), "%s", ce->dtend_date);
-         snprintf(evt.rrule, sizeof(evt.rrule), "%s", ce->rrule);
-         evt.raw_ical = ce->raw_ical;
-         evt.last_synced = now;
+         calendar_event_t evt;
+         event_from_fetched(ce, cals[i].id, now, &evt);
 
          /* The event and its occurrences, together (libical's work timed).
           * One that can't be stored leaves the calendar to be fetched again. */
@@ -1138,69 +1205,97 @@ int calendar_service_search(int user_id,
  * iCalendar Input Sanitization
  * ============================================================================= */
 
-/**
- * Sanitize a string for use as an iCalendar TEXT property value (RFC 5545 §3.3.11).
- * Strips CR/LF (prevents property injection) and escapes backslash, semicolon,
- * and comma as required by the spec. Modifies in-place; buffer must have room
- * for potential expansion (each special char becomes 2 chars).
- */
-static void sanitize_ical_value(char *s) {
-   if (!s || !s[0])
-      return;
-
-   /* First pass: strip CR/LF in-place */
-   char *dst = s;
-   for (const char *src = s; *src; src++) {
-      if (*src != '\r' && *src != '\n')
-         *dst++ = *src;
-   }
-   *dst = '\0';
-
-   /* Second pass: escape \, ;, and , per RFC 5545.
-    * Work on a temporary copy since escaping expands the string. */
-   size_t len = strlen(s);
-   if (len == 0)
-      return;
-   char tmp[2048];
-   size_t j = 0;
-   for (size_t i = 0; i < len && j < sizeof(tmp) - 2; i++) {
-      if (s[i] == '\\' || s[i] == ';' || s[i] == ',') {
-         tmp[j++] = '\\';
-      }
-      tmp[j++] = s[i];
-   }
-   tmp[j] = '\0';
-
-   /* Copy back — caller buffers are at least 256 bytes */
-   memcpy(s, tmp, j);
-   s[j] = '\0';
-}
-
-/** Sanitize a string into a stack buffer (caller provides buf). Returns buf. */
-static const char *ical_safe(const char *input, char *buf, size_t buf_len) {
-   if (!input || !input[0]) {
-      buf[0] = '\0';
-      return buf;
-   }
-   snprintf(buf, buf_len, "%s", input);
-   sanitize_ical_value(buf);
-   return buf;
-}
-
 /* =============================================================================
  * Mutation Operations
  * ============================================================================= */
 
+/* One write at a time per account: the model calls tools in parallel, and a
+ * server throttling per user refuses a burst.  Held across the read and the
+ * write (and their retry) only; accounts share a slot when their ids collide,
+ * which only serializes them. */
+#define CALENDAR_WRITE_LOCKS CALENDAR_MAX_ACCOUNTS
+static pthread_mutex_t s_write_mutex[CALENDAR_WRITE_LOCKS] = { [0 ... CALENDAR_WRITE_LOCKS -
+                                                                1] = PTHREAD_MUTEX_INITIALIZER };
+
+static pthread_mutex_t *write_lock(int64_t account_id) {
+   return &s_write_mutex[(uint64_t)account_id % CALENDAR_WRITE_LOCKS];
+}
+
+/* The address an account's calendars name it by (an event's ORGANIZER). */
+static const char *account_address(const calendar_account_t *acct) {
+   if (acct->username[0])
+      return acct->username;
+   if (acct->oauth_account_key[0])
+      return acct->oauth_account_key;
+   return acct->name;
+}
+
+static int rc_from_caldav(caldav_error_t err) {
+   switch (err) {
+      case CALDAV_OK:
+         return CALENDAR_RC_OK;
+      case CALDAV_ERR_NOT_FOUND:
+         return CALENDAR_RC_NOT_FOUND;
+      case CALDAV_ERR_RATE_LIMITED:
+         return CALENDAR_RC_RATE_LIMITED;
+      case CALDAV_ERR_CONFLICT:
+         return CALENDAR_RC_CONFLICT;
+      case CALDAV_ERR_FORBIDDEN:
+      case CALDAV_ERR_REJECTED:
+         return CALENDAR_RC_REJECTED;
+      default:
+         return CALENDAR_RC_FAILURE;
+   }
+}
+
+static int rc_from_ical(calendar_ical_rc_t rc) {
+   switch (rc) {
+      case CALENDAR_ICAL_OK:
+         return CALENDAR_RC_OK;
+      case CALENDAR_ICAL_ERR_BAD_RULE:
+         return CALENDAR_RC_BAD_RULE;
+      case CALENDAR_ICAL_ERR_NOT_OCCURRENCE:
+         return CALENDAR_RC_NOT_OCCURRENCE;
+      case CALENDAR_ICAL_ERR_GUEST:
+         return CALENDAR_RC_GUEST;
+      case CALENDAR_ICAL_ERR_ZONE:
+         return CALENDAR_RC_ZONE;
+      case CALENDAR_ICAL_ERR_BAD_TIME:
+         return CALENDAR_RC_BAD_TIME;
+      case CALENDAR_ICAL_ERR_UNREADABLE:
+         return CALENDAR_RC_UNREADABLE;
+      default:
+         return CALENDAR_RC_FAILURE;
+   }
+}
+
+/* Cache the event DAWN just wrote, at @p href in calendar @p calendar_id, as
+ * read back from the text it wrote; the next sync (the write moved the
+ * calendar's ctag) replaces it with the server's own copy. */
+static void cache_written(int64_t calendar_id, const char *href, const char *etag, char *ical) {
+   caldav_event_t ce = { 0 };
+   const size_t href_len = strlen(href);
+   if (href_len >= sizeof(ce.href))
+      return; /* the next sync brings it */
+   memcpy(ce.href, href, href_len + 1);
+   snprintf(ce.etag, sizeof(ce.etag), "%s", etag);
+   if (calendar_ical_read(ical, &ce, NULL)) {
+      const time_t now = time(NULL);
+      time_t range_start, range_end;
+      cache_window(now, &range_start, &range_end);
+      calendar_event_t row;
+      event_from_fetched(&ce, calendar_id, now, &row);
+      row.raw_ical = ical;
+      long ms = 0;
+      if (store_event(&row, &ce, range_start, range_end, &ms) != SUCCESS)
+         OLOG_WARNING("calendar: caching '%s' after the write failed", ce.uid);
+   }
+   caldav_event_free(&ce);
+}
+
 int calendar_service_add(int user_id,
-                         const char *summary,
-                         time_t start,
-                         time_t end,
-                         const char *location,
-                         const char *description,
-                         bool all_day,
+                         const calendar_ical_new_t *event,
                          const char *calendar_name,
-                         const char *rrule,
-                         const char *tz_name,
                          char *uid_out,
                          size_t uid_out_len,
                          char *calendar_out,
@@ -1225,12 +1320,6 @@ int calendar_service_add(int user_id,
    if (calendar_db_account_get(cals[target].account_id, &acct) != 0)
       return CALENDAR_RC_FAILURE;
 
-   char password[384];
-   char token[OAUTH_TOKEN_BUF_SIZE];
-   caldav_auth_t auth;
-   if (build_auth_for_account(&acct, &auth, password, sizeof(password), token, sizeof(token)) != 0)
-      return CALENDAR_RC_FAILURE;
-
    /* Generate UID with random component for unpredictability */
    char uid[256];
    unsigned char uid_rand[8];
@@ -1239,367 +1328,228 @@ int calendar_service_add(int user_id,
             (long)time(NULL), uid_rand[0], uid_rand[1], uid_rand[2], uid_rand[3], uid_rand[4],
             uid_rand[5], uid_rand[6], uid_rand[7], user_id);
 
-   /* Default end time */
-   if (end == 0)
-      end = start + (s_cal.config.default_event_duration_min * 60);
+   calendar_ical_new_t n = *event;
+   n.uid = uid;
+   if (!n.all_day && n.end == 0)
+      n.end = n.start + (s_cal.config.default_event_duration_min * 60);
+   char *ical = NULL;
+   const calendar_ical_rc_t built = calendar_ical_build(&n, &ical);
+   if (built != CALENDAR_ICAL_OK)
+      return rc_from_ical(built);
 
-   /* Build iCalendar */
-   char ical[8192];
-   int pos = 0;
-   pos += snprintf(ical + pos, sizeof(ical) - pos,
-                   "BEGIN:VCALENDAR\r\n"
-                   "VERSION:2.0\r\n"
-                   "PRODID:-//DAWN//OASIS//EN\r\n"
-                   "BEGIN:VEVENT\r\n"
-                   "UID:%s\r\n",
-                   uid);
-
-   if (all_day) {
-      struct tm st;
-      gmtime_r(&start, &st);
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTSTART;VALUE=DATE:%04d%02d%02d\r\n",
-                      st.tm_year + 1900, st.tm_mon + 1, st.tm_mday);
-      struct tm et;
-      gmtime_r(&end, &et);
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTEND;VALUE=DATE:%04d%02d%02d\r\n",
-                      et.tm_year + 1900, et.tm_mon + 1, et.tm_mday);
-   } else {
-      struct tm st;
-      gmtime_r(&start, &st);
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTSTART:%04d%02d%02dT%02d%02d%02dZ\r\n",
-                      st.tm_year + 1900, st.tm_mon + 1, st.tm_mday, st.tm_hour, st.tm_min,
-                      st.tm_sec);
-      struct tm et;
-      gmtime_r(&end, &et);
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTEND:%04d%02d%02dT%02d%02d%02dZ\r\n",
-                      et.tm_year + 1900, et.tm_mon + 1, et.tm_mday, et.tm_hour, et.tm_min,
-                      et.tm_sec);
+   char password[384];
+   char token[OAUTH_TOKEN_BUF_SIZE];
+   caldav_auth_t auth;
+   if (build_auth_for_account(&acct, &auth, password, sizeof(password), token, sizeof(token)) !=
+       0) {
+      free(ical);
+      return CALENDAR_RC_FAILURE;
    }
 
-   /* Sanitize text fields against CRLF injection */
-   char safe_summary[512], safe_loc[256], safe_desc[1024], safe_rrule[256];
-   pos += snprintf(ical + pos, sizeof(ical) - pos, "SUMMARY:%s\r\n",
-                   ical_safe(summary, safe_summary, sizeof(safe_summary)));
-
-   if (location && location[0])
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "LOCATION:%s\r\n",
-                      ical_safe(location, safe_loc, sizeof(safe_loc)));
-   if (description && description[0])
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DESCRIPTION:%s\r\n",
-                      ical_safe(description, safe_desc, sizeof(safe_desc)));
-   if (rrule && rrule[0])
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "RRULE:%s\r\n",
-                      ical_safe(rrule, safe_rrule, sizeof(safe_rrule)));
-
-   time_t now = time(NULL);
-   struct tm nt;
-   gmtime_r(&now, &nt);
-   pos += snprintf(ical + pos, sizeof(ical) - pos, "DTSTAMP:%04d%02d%02dT%02d%02d%02dZ\r\n",
-                   nt.tm_year + 1900, nt.tm_mon + 1, nt.tm_mday, nt.tm_hour, nt.tm_min, nt.tm_sec);
-
-   snprintf(ical + pos, sizeof(ical) - pos,
-            "END:VEVENT\r\n"
-            "END:VCALENDAR\r\n");
-
-   /* PUT to server */
-   char etag[128] = { 0 };
+   char etag[128] = "";
+   char href[1024] = "";
+   pthread_mutex_lock(write_lock(acct.id));
    caldav_error_t err = caldav_create_event(cals[target].caldav_path, &auth, uid, ical, etag,
-                                            sizeof(etag));
+                                            sizeof(etag), href, sizeof(href));
+   if (err == CALDAV_OK)
+      cache_written(cals[target].id, href, etag, ical);
+   pthread_mutex_unlock(write_lock(acct.id));
    sodium_memzero(password, sizeof(password));
    sodium_memzero(token, sizeof(token));
    if (err != CALDAV_OK) {
       OLOG_ERROR("calendar: create event failed: %s", caldav_strerror(err));
-      return CALENDAR_RC_FAILURE;
+      free(ical);
+      /* A 412 here means the UID is taken, not a change in flight. */
+      return err == CALDAV_ERR_CONFLICT ? CALENDAR_RC_REJECTED : rc_from_caldav(err);
    }
-
-   /* Cache locally */
-   calendar_event_t evt = { 0 };
-   evt.calendar_id = cals[target].id;
-   snprintf(evt.uid, sizeof(evt.uid), "%s", uid);
-   snprintf(evt.etag, sizeof(evt.etag), "%s", etag);
-   /* Mirror the resource path caldav_create_event PUT to (calendar_url + uid + ".ics")
-    * so the row carries a non-empty href immediately; the next full fetch overwrites it
-    * with the server's canonical href. The Phase-3 prune gates on last_synced, so an
-    * exact match here is not safety-critical — this only sharpens incremental mapping. */
-   {
-      size_t cl = strlen(cals[target].caldav_path);
-      const char *sep = (cl > 0 && cals[target].caldav_path[cl - 1] == '/') ? "" : "/";
-      /* Deliberate: a pathological path/uid truncates this provisional href (the next
-       * full sync overwrites it with the server's canonical href), never overflows. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-      snprintf(evt.href, sizeof(evt.href), "%s%s%s.ics", cals[target].caldav_path, sep, uid);
-#pragma GCC diagnostic pop
-   }
-   safe_strscpy(evt.summary, summary);
-   if (description)
-      snprintf(evt.description, sizeof(evt.description), "%s", description);
-   if (location)
-      snprintf(evt.location, sizeof(evt.location), "%s", location);
-   evt.dtstart = start;
-   evt.dtend = end;
-   evt.all_day = all_day;
-   if (all_day) {
-      struct tm ds;
-      gmtime_r(&start, &ds);
-      iso8601_format_date(ds.tm_year + 1900, ds.tm_mon + 1, ds.tm_mday, evt.dtstart_date,
-                          sizeof(evt.dtstart_date));
-      struct tm de;
-      gmtime_r(&end, &de);
-      iso8601_format_date(de.tm_year + 1900, de.tm_mon + 1, de.tm_mday, evt.dtend_date,
-                          sizeof(evt.dtend_date));
-   }
-   if (rrule)
-      snprintf(evt.rrule, sizeof(evt.rrule), "%s", rrule);
-   evt.raw_ical = (char *)ical; /* temp pointer, copied by upsert */
-   evt.last_synced = now;
-
-   int64_t event_id = 0;
-   if (calendar_db_event_upsert(&evt, &event_id) == 0) {
-      calendar_occurrence_t occ = { 0 };
-      occ.event_id = event_id;
-      occ.dtstart = start;
-      occ.dtend = end;
-      occ.all_day = all_day;
-      snprintf(occ.dtstart_date, sizeof(occ.dtstart_date), "%s", evt.dtstart_date);
-      snprintf(occ.dtend_date, sizeof(occ.dtend_date), "%s", evt.dtend_date);
-      snprintf(occ.summary, sizeof(occ.summary), "%s", summary);
-      if (location)
-         snprintf(occ.location, sizeof(occ.location), "%s", location);
-      int64_t occ_id = 0;
-      calendar_db_occurrence_insert(&occ, &occ_id);
-      OLOG_INFO("calendar: cached event_id=%lld occ_id=%lld cal_id=%lld all_day=%d "
-                "dtstart=%lld dtend=%lld dtstart_date='%s' dtend_date='%s'",
-                (long long)event_id, (long long)occ_id, (long long)evt.calendar_id, all_day,
-                (long long)start, (long long)end, evt.dtstart_date, evt.dtend_date);
-   } else {
-      OLOG_ERROR("calendar: event upsert failed, no occurrence cached");
-   }
+   free(ical);
 
    if (uid_out && uid_out_len > 0)
       snprintf(uid_out, uid_out_len, "%s", uid);
-
-   OLOG_INFO("calendar: created event '%s' (uid=%s)", summary, uid);
+   OLOG_INFO("calendar: created event '%s' (uid=%s)", event->summary, uid);
    return CALENDAR_RC_OK;
+}
+
+/* Whether @p href is on the same server (scheme, host and port) as the
+ * calendar at @p path: an href comes from the server, and the account's
+ * credentials go wherever it points. */
+static bool same_origin(const char *href, const char *path) {
+   const char *h = strstr(href, "://");
+   const char *p = strstr(path, "://");
+   if (!h || !p)
+      return false;
+   const size_t hlen = (size_t)(h + 3 - href) + strcspn(h + 3, "/");
+   const size_t plen = (size_t)(p + 3 - path) + strcspn(p + 3, "/");
+   return hlen == plen && strncasecmp(href, path, hlen) == 0;
+}
+
+/* The event a write is for: its cached row (which calendar, which href) and
+ * its account.  @p calendar_name narrows it to the calendars it names; without
+ * one, a UID cached in two calendars (an invitation seen in both) is
+ * ambiguous. */
+static int find_target(int user_id,
+                       const char *uid,
+                       const char *calendar_name,
+                       calendar_event_t *evt,
+                       calendar_calendar_t *cal,
+                       calendar_account_t *acct) {
+   int matches = 0;
+   if (calendar_name) {
+      int64_t ids[32];
+      const int n = get_user_calendar_ids(user_id, calendar_name, ids, 32);
+      for (int i = 0; i < n; i++) {
+         calendar_event_t e = { 0 };
+         int m = 0;
+         if (calendar_db_event_find(user_id, uid, ids[i], &e, &m) == 0) {
+            if (matches++ == 0)
+               *evt = e;
+            else
+               free(e.raw_ical);
+         }
+      }
+   } else {
+      calendar_db_event_find(user_id, uid, 0, evt, &matches);
+   }
+   if (matches == 0)
+      return CALENDAR_RC_NOT_FOUND;
+   free(evt->raw_ical); /* the server's copy is read fresh */
+   evt->raw_ical = NULL;
+   if (matches > 1)
+      return CALENDAR_RC_AMBIGUOUS;
+   if (calendar_db_calendar_get(evt->calendar_id, cal) != 0 ||
+       calendar_db_account_get(cal->account_id, acct) != 0)
+      return CALENDAR_RC_FAILURE;
+   if (acct->read_only) {
+      OLOG_WARNING("calendar: account '%s' is read-only, cannot modify event", acct->name);
+      return CALENDAR_RC_READONLY;
+   }
+   if (!evt->href[0])
+      return CALENDAR_RC_NOT_SYNCED;
+   if (!same_origin(evt->href, cal->caldav_path)) {
+      OLOG_WARNING("calendar: event '%s' is at another server than its calendar; not writing", uid);
+      return CALENDAR_RC_REJECTED;
+   }
+   return CALENDAR_RC_OK;
+}
+
+/* Change (@p c) or delete (@p c NULL) an event on its server: read it fresh,
+ * apply the change to that copy, and write it back only if nobody changed it
+ * since (If-Match), once more if somebody had.  @p written receives the text
+ * written on a change. */
+static int read_and_write(const calendar_event_t *evt,
+                          const char *cal_path,
+                          const caldav_auth_t *auth,
+                          const calendar_ical_change_t *c,
+                          char **written,
+                          char *etag_out,
+                          size_t etag_len) {
+   int rc = CALENDAR_RC_OK;
+   caldav_error_t err = CALDAV_OK;
+   for (int attempt = 0; attempt < 2; attempt++) {
+      char *ical = NULL;
+      char etag[128] = "";
+      err = caldav_get_event(cal_path, evt->href, auth, &ical, etag, sizeof(etag));
+      if (err != CALDAV_OK)
+         break;
+      if (!calendar_ical_has_uid(ical, evt->uid)) {
+         /* The server answered with another event than the one asked for. */
+         OLOG_WARNING("calendar: '%s' came back as another event; not writing", evt->href);
+         free(ical);
+         return CALENDAR_RC_REJECTED;
+      }
+      if (!etag[0]) {
+         /* Without one the write can't be conditional: it would overwrite
+          * whatever changed since the read. */
+         OLOG_WARNING("calendar: '%s' came without an ETag; not writing", evt->href);
+         free(ical);
+         return CALENDAR_RC_REJECTED;
+      }
+      if (c) {
+         char *edited = NULL;
+         const calendar_ical_rc_t ir = calendar_ical_edit(ical, c, &edited);
+         free(ical);
+         if (ir != CALENDAR_ICAL_OK)
+            return rc_from_ical(ir);
+         err = caldav_update_event(evt->href, auth, etag, edited, etag_out, etag_len);
+         free(*written);
+         *written = edited;
+      } else {
+         free(ical);
+         err = caldav_delete_event(evt->href, auth, etag);
+      }
+      if (err != CALDAV_ERR_CONFLICT)
+         break; /* else changed elsewhere between the read and the write: again */
+   }
+   if (err != CALDAV_OK) {
+      OLOG_ERROR("calendar: %s of '%s' failed: %s", c ? "update" : "delete", evt->uid,
+                 caldav_strerror(err));
+      rc = (!c && err == CALDAV_ERR_NOT_FOUND) ? CALENDAR_RC_OK /* already gone */
+                                               : rc_from_caldav(err);
+   }
+   return rc;
+}
+
+static int write_event(int user_id,
+                       const char *uid,
+                       const char *calendar_name,
+                       const calendar_ical_change_t *c) {
+   calendar_event_t evt = { 0 };
+   calendar_calendar_t cal = { 0 };
+   calendar_account_t acct = { 0 };
+   int rc = find_target(user_id, uid, calendar_name, &evt, &cal, &acct);
+   if (rc != CALENDAR_RC_OK)
+      return rc;
+   char password[384];
+   char token[OAUTH_TOKEN_BUF_SIZE];
+   caldav_auth_t auth;
+   if (build_auth_for_account(&acct, &auth, password, sizeof(password), token, sizeof(token)) != 0)
+      return CALENDAR_RC_FAILURE;
+
+   calendar_ical_change_t change = CALENDAR_ICAL_CHANGE_INIT;
+   if (c) {
+      change = *c;
+      change.account = account_address(&acct);
+      change.user_tzid = g_config.localization.timezone;
+   }
+   char *written = NULL;
+   char etag[128] = "";
+   /* The cache is updated before the lock is let go, so a second write to the
+    * same event can't have its result cached under this one's. */
+   pthread_mutex_lock(write_lock(acct.id));
+   rc = read_and_write(&evt, cal.caldav_path, &auth, c ? &change : NULL, &written, etag,
+                       sizeof(etag));
+   if (rc == CALENDAR_RC_OK && c) {
+      cache_written(evt.calendar_id, evt.href, etag, written);
+   } else if (rc == CALENDAR_RC_OK) {
+      calendar_db_occurrence_delete_for_event(evt.id);
+      calendar_db_event_delete(evt.id);
+   }
+   pthread_mutex_unlock(write_lock(acct.id));
+   sodium_memzero(password, sizeof(password));
+   sodium_memzero(token, sizeof(token));
+   free(written);
+
+   if (rc == CALENDAR_RC_OK) {
+      OLOG_INFO("calendar: %s event '%s'", c ? "updated" : "deleted", uid);
+      calendar_broadcast_events_changed(user_id);
+   }
+   return rc;
 }
 
 int calendar_service_update(int user_id,
                             const char *uid,
-                            const char *summary,
-                            time_t start,
-                            time_t end,
-                            const char *location,
-                            const char *description) {
-   /* Look up event by UID with user access check */
-   calendar_event_t evt = { 0 };
-   evt.calendar_id = user_id; /* overloaded for get_by_uid */
-   if (calendar_db_event_get_by_uid(uid, &evt) != 0) {
-      OLOG_ERROR("calendar: event '%s' not found for user %d", uid, user_id);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   /* Get calendar and account for auth */
-   calendar_calendar_t cal = { 0 };
-   if (calendar_db_calendar_get(evt.calendar_id, &cal) != 0) {
-      free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   calendar_account_t acct = { 0 };
-   if (calendar_db_account_get(cal.account_id, &acct) != 0) {
-      free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   if (acct.read_only) {
-      OLOG_WARNING("calendar: account '%s' is read-only, cannot modify event", acct.name);
-      if (evt.raw_ical)
-         free(evt.raw_ical);
-      return CALENDAR_RC_READONLY;
-   }
-
-   char password[384];
-   char token_buf[2048];
-   caldav_auth_t auth;
-   if (build_auth_for_account(&acct, &auth, password, sizeof(password), token_buf,
-                              sizeof(token_buf)) != 0) {
-      free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   /* Update fields and sanitize against CRLF injection */
-   if (summary)
-      safe_strscpy(evt.summary, summary);
-   if (start > 0)
-      evt.dtstart = start;
-   if (end > 0)
-      evt.dtend = end;
-   if (location)
-      snprintf(evt.location, sizeof(evt.location), "%s", location);
-   if (description)
-      snprintf(evt.description, sizeof(evt.description), "%s", description);
-   /* Update date strings for all-day events */
-   if (evt.all_day) {
-      struct tm ds;
-      gmtime_r(&evt.dtstart, &ds);
-      iso8601_format_date(ds.tm_year + 1900, ds.tm_mon + 1, ds.tm_mday, evt.dtstart_date,
-                          sizeof(evt.dtstart_date));
-      struct tm de;
-      gmtime_r(&evt.dtend, &de);
-      iso8601_format_date(de.tm_year + 1900, de.tm_mon + 1, de.tm_mday, evt.dtend_date,
-                          sizeof(evt.dtend_date));
-   }
-   sanitize_ical_value(evt.summary);
-   sanitize_ical_value(evt.location);
-   sanitize_ical_value(evt.description);
-
-   /* Build updated iCal (simplified — full impl would modify raw_ical) */
-   char ical[8192];
-   int pos = 0;
-   pos += snprintf(ical + pos, sizeof(ical) - pos,
-                   "BEGIN:VCALENDAR\r\n"
-                   "VERSION:2.0\r\n"
-                   "PRODID:-//DAWN//OASIS//EN\r\n"
-                   "BEGIN:VEVENT\r\n"
-                   "UID:%s\r\n",
-                   evt.uid);
-
-   struct tm st;
-   gmtime_r(&evt.dtstart, &st);
-   if (evt.all_day) {
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTSTART;VALUE=DATE:%04d%02d%02d\r\n",
-                      st.tm_year + 1900, st.tm_mon + 1, st.tm_mday);
-   } else {
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTSTART:%04d%02d%02dT%02d%02d%02dZ\r\n",
-                      st.tm_year + 1900, st.tm_mon + 1, st.tm_mday, st.tm_hour, st.tm_min,
-                      st.tm_sec);
-   }
-   struct tm et;
-   gmtime_r(&evt.dtend, &et);
-   if (evt.all_day) {
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTEND;VALUE=DATE:%04d%02d%02d\r\n",
-                      et.tm_year + 1900, et.tm_mon + 1, et.tm_mday);
-   } else {
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DTEND:%04d%02d%02dT%02d%02d%02dZ\r\n",
-                      et.tm_year + 1900, et.tm_mon + 1, et.tm_mday, et.tm_hour, et.tm_min,
-                      et.tm_sec);
-   }
-
-   pos += snprintf(ical + pos, sizeof(ical) - pos, "SUMMARY:%s\r\n", evt.summary);
-   if (evt.location[0])
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "LOCATION:%s\r\n", evt.location);
-   if (evt.description[0])
-      pos += snprintf(ical + pos, sizeof(ical) - pos, "DESCRIPTION:%s\r\n", evt.description);
-
-   time_t now = time(NULL);
-   struct tm nt;
-   gmtime_r(&now, &nt);
-   pos += snprintf(ical + pos, sizeof(ical) - pos, "DTSTAMP:%04d%02d%02dT%02d%02d%02dZ\r\n",
-                   nt.tm_year + 1900, nt.tm_mon + 1, nt.tm_mday, nt.tm_hour, nt.tm_min, nt.tm_sec);
-
-   snprintf(ical + pos, sizeof(ical) - pos,
-            "END:VEVENT\r\n"
-            "END:VCALENDAR\r\n");
-
-   /* Build href from calendar path + uid */
-   char href[1024];
-   snprintf(href, sizeof(href), "%s%s.ics", cal.caldav_path, evt.uid);
-   char new_etag[128] = { 0 };
-   caldav_error_t err = caldav_update_event(href, &auth, evt.etag, ical, new_etag,
-                                            sizeof(new_etag));
-   sodium_memzero(password, sizeof(password));
-   sodium_memzero(token_buf, sizeof(token_buf));
-   if (err != CALDAV_OK) {
-      OLOG_ERROR("calendar: update event failed: %s", caldav_strerror(err));
-      if (evt.raw_ical)
-         free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   /* Update cache */
-   snprintf(evt.etag, sizeof(evt.etag), "%s", new_etag);
-   snprintf(evt.href, sizeof(evt.href), "%s", href); /* keep href in step with the PUT target */
-   free(evt.raw_ical);
-   evt.raw_ical = (char *)ical; /* temp pointer, copied by upsert */
-   evt.last_synced = now;
-   int64_t event_id = 0;
-   int upsert_rc = calendar_db_event_upsert(&evt, &event_id);
-   evt.raw_ical = NULL; /* stack buffer, do not free */
-
-   if (upsert_rc == 0) {
-      calendar_db_occurrence_delete_for_event(event_id);
-      calendar_occurrence_t occ = { 0 };
-      occ.event_id = event_id;
-      occ.dtstart = evt.dtstart;
-      occ.dtend = evt.dtend;
-      occ.all_day = evt.all_day;
-      snprintf(occ.dtstart_date, sizeof(occ.dtstart_date), "%s", evt.dtstart_date);
-      snprintf(occ.dtend_date, sizeof(occ.dtend_date), "%s", evt.dtend_date);
-      snprintf(occ.summary, sizeof(occ.summary), "%s", evt.summary);
-      snprintf(occ.location, sizeof(occ.location), "%s", evt.location);
-      calendar_db_occurrence_insert(&occ, NULL);
-   }
-
-   OLOG_INFO("calendar: updated event '%s'", evt.summary);
-   return CALENDAR_RC_OK;
+                            const char *calendar_name,
+                            const calendar_ical_change_t *change) {
+   return write_event(user_id, uid, calendar_name, change);
 }
 
-int calendar_service_delete(int user_id, const char *uid) {
-   calendar_event_t evt = { 0 };
-   evt.calendar_id = user_id; /* overloaded */
-   if (calendar_db_event_get_by_uid(uid, &evt) != 0) {
-      OLOG_ERROR("calendar: event '%s' not found", uid);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   calendar_calendar_t cal;
-   if (calendar_db_calendar_get(evt.calendar_id, &cal) != 0) {
-      free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   calendar_account_t acct;
-   if (calendar_db_account_get(cal.account_id, &acct) != 0) {
-      free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   if (acct.read_only) {
-      OLOG_WARNING("calendar: account '%s' is read-only, cannot delete event", acct.name);
-      free(evt.raw_ical);
-      return CALENDAR_RC_READONLY;
-   }
-
-   char password[384];
-   char token_buf[2048];
-   caldav_auth_t auth;
-   if (build_auth_for_account(&acct, &auth, password, sizeof(password), token_buf,
-                              sizeof(token_buf)) != 0) {
-      free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   char href[1024];
-   snprintf(href, sizeof(href), "%s%s.ics", cal.caldav_path, evt.uid);
-
-   caldav_error_t err = caldav_delete_event(href, &auth, evt.etag);
-   sodium_memzero(password, sizeof(password));
-   sodium_memzero(token_buf, sizeof(token_buf));
-   if (err != CALDAV_OK && err != CALDAV_ERR_NOT_FOUND) {
-      OLOG_ERROR("calendar: delete event failed: %s", caldav_strerror(err));
-      free(evt.raw_ical);
-      return CALENDAR_RC_FAILURE;
-   }
-
-   /* Remove from cache */
-   calendar_db_occurrence_delete_for_event(evt.id);
-   calendar_db_event_delete(evt.id);
-
-   free(evt.raw_ical);
-   OLOG_INFO("calendar: deleted event '%s'", uid);
-   return CALENDAR_RC_OK;
+int calendar_service_delete(int user_id, const char *uid, const char *calendar_name) {
+   return write_event(user_id, uid, calendar_name, NULL);
 }
 
+int calendar_service_retry_after(void) {
+   return caldav_last_retry_after();
+}
 /* =============================================================================
  * Access Summary
  * ============================================================================= */

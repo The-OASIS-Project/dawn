@@ -64,7 +64,7 @@ static void test_events_fields(void) {
 
    const caldav_event_t *e = &list.events[0];
    TEST_ASSERT_EQUAL_STRING("https://cal.example.com/dav/home/a1.ics", e->href);
-   TEST_ASSERT_EQUAL_STRING("etag-1", e->etag); /* quotes stripped */
+   TEST_ASSERT_EQUAL_STRING("\"etag-1\"", e->etag); /* as sent: it goes back in If-Match */
    TEST_ASSERT_EQUAL_STRING("a1@example.com", e->uid);
    TEST_ASSERT_EQUAL_STRING("Weekly sync", e->summary);
    TEST_ASSERT_EQUAL_STRING("Agenda: notes, decisions", e->description);

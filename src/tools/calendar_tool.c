@@ -112,6 +112,25 @@ static char *check_oauth_revoked(void) {
    return msg;
 }
 
+/* An instance's key as the model passes it back in 'occurrence': its
+ * original start, a date for an all-day event, else local time with its UTC
+ * offset (exact in the hour a daylight-saving change repeats). */
+static void format_occurrence_key(const char *recurrence_id, char *out, size_t out_len) {
+   const time_t t = calendar_ical_instance_key_time(recurrence_id);
+   if (strlen(recurrence_id) == 8) {
+      snprintf(out, out_len, "%.4s-%.2s-%.2s", recurrence_id, recurrence_id + 4, recurrence_id + 6);
+      return;
+   }
+   struct tm tm;
+   localtime_r(&t, &tm);
+   const long off = tm.tm_gmtoff / 60;
+   const unsigned hours = (unsigned)(labs(off) / 60) % 100;
+   const unsigned minutes = (unsigned)(labs(off) % 60);
+   char base[24];
+   strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tm);
+   snprintf(out, out_len, "%.19s%c%02u:%02u", base, off < 0 ? '-' : '+', hours, minutes);
+}
+
 /* Append a single occurrence line to the strbuf.  Returns 0 on success or
  * STRBUF_E_OOM if the buffer cap was reached (caller should bail). */
 static int format_occurrence_sb(const calendar_occurrence_t *occ, strbuf_t *sb) {
@@ -146,6 +165,11 @@ static int format_occurrence_sb(const calendar_occurrence_t *occ, strbuf_t *sb) 
 
    if (occ->event_uid[0])
       rc = strbuf_appendf(sb, " [UID: %s]", occ->event_uid);
+   if (rc >= 0 && occ->recurrence_id[0]) {
+      char key[40];
+      format_occurrence_key(occ->recurrence_id, key, sizeof(key));
+      rc = strbuf_appendf(sb, " [repeats; occurrence: %s]", key);
+   }
    return (rc < 0) ? STRBUF_E_OOM : 0;
 }
 
@@ -360,6 +384,123 @@ static char *handle_search(struct json_object *details, int user_id) {
    return finalize_calendar_response(&sb);
 }
 
+/* A time argument: @p epoch_out as iso8601_parse reads it (local without an
+ * offset), and @p date_out its date when it starts with one ("" otherwise),
+ * for an all-day event.  False when it can't be read. */
+static bool parse_when(const char *text, time_t *epoch_out, char *date_out, size_t date_len) {
+   date_out[0] = '\0';
+   const time_t t = iso8601_parse(text);
+   if (t == (time_t)-1)
+      return false;
+   *epoch_out = t;
+   if (strlen(text) >= 10 && text[4] == '-' && text[7] == '-')
+      snprintf(date_out, date_len, "%.10s", text);
+   return true;
+}
+
+/* The day after "YYYY-MM-DD", into @p out. */
+static void next_day(const char *date, char *out, size_t out_len) {
+   const time_t t = (time_t)iso8601_parse_date_utc(date) + 86400;
+   struct tm tm;
+   gmtime_r(&t, &tm);
+   iso8601_format_date(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, out, out_len);
+}
+
+/* An instance's start as shown with "occurrence:" (a date for an all-day
+ * event, else a local time with its UTC offset), read back: midnight UTC of
+ * the date, or the instant.  0 when it can't be read. */
+static time_t parse_occurrence(const char *text) {
+   if (!text)
+      return 0;
+   if (strlen(text) == 10)
+      return (time_t)iso8601_parse_date_utc(text);
+   const time_t t = iso8601_parse(text);
+   return t == (time_t)-1 ? 0 : t;
+}
+
+/* "reminder_minutes": minutes before the start, or -1 when not given. */
+static int json_get_reminder(struct json_object *obj) {
+   struct json_object *val = NULL;
+   if (!json_object_object_get_ex(obj, "reminder_minutes", &val) || !val ||
+       json_object_is_type(val, json_type_null))
+      return -1;
+   const int n = json_object_get_int(val);
+   return n < 0 ? CALENDAR_ICAL_MAX_REMINDER_MIN + 1 : n; /* refused below */
+}
+
+/* What to tell the model when a change didn't go through. */
+static char *write_error(int rc, const char *verb) {
+   char *revoked = rc == CALENDAR_RC_FAILURE ? check_oauth_revoked() : NULL;
+   if (revoked)
+      return revoked;
+   char *msg = malloc(512);
+   if (!msg)
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: out of memory.");
+   const char *why;
+   switch (rc) {
+      case CALENDAR_RC_READONLY:
+         why = "the event's account is read-only: the user has restricted it from AI changes.";
+         break;
+      case CALENDAR_RC_NOT_FOUND:
+         why = "no event with that UID on the user's calendars (re-run 'range' or 'search' "
+               "for current UIDs), or no single writable calendar has that name.";
+         break;
+      case CALENDAR_RC_AMBIGUOUS:
+         why = "that UID is on more than one calendar; pass 'calendar' to say which.";
+         break;
+      case CALENDAR_RC_NOT_SYNCED:
+         why = "the event hasn't been synced from its server yet; try after the next sync.";
+         break;
+      case CALENDAR_RC_RATE_LIMITED: {
+         const int wait = calendar_service_retry_after();
+         snprintf(msg, 512,
+                  TOOL_RESULT_ERROR_MARK "Error: could not %s the event: the calendar server "
+                                         "is limiting requests; try again in %d seconds.",
+                  verb, wait > 0 ? wait : 30);
+         return msg;
+      }
+      case CALENDAR_RC_REJECTED:
+         why = "the calendar server refused this change. Don't retry the same change; tell the "
+               "user.";
+         break;
+      case CALENDAR_RC_CONFLICT:
+         why = "the event kept changing on the server while being written; read it again "
+               "before retrying.";
+         break;
+      case CALENDAR_RC_BAD_RULE:
+         why = "the repeat rule is invalid, never occurs, uses COUNT with UNTIL, or is more "
+               "frequent than hourly; or the change moves a series to another day without its "
+               "new rule, or past its own end ('rrule' applies to the whole series, not one "
+               "occurrence).";
+         break;
+      case CALENDAR_RC_NOT_OCCURRENCE:
+         why = "that event doesn't repeat at that time; 'occurrence' must be the value shown "
+               "after 'occurrence:' on one of its rows.";
+         break;
+      case CALENDAR_RC_GUEST:
+         why = "the user is a guest on this event (someone else organizes it), so only its "
+               "reminder can be changed here.";
+         break;
+      case CALENDAR_RC_ZONE:
+         why = "the event's times are in a time zone DAWN can't resolve, so its times, repeat "
+               "rule and single occurrences can't be changed safely here (the whole series' "
+               "title, notes and reminder can).";
+         break;
+      case CALENDAR_RC_BAD_TIME:
+         why = "the end must be after the start, and reminder_minutes between 0 and 40320.";
+         break;
+      case CALENDAR_RC_UNREADABLE:
+         why = "part of the event's data can't be read, so it isn't rewritten (that part "
+               "would be lost). The user can change it in their calendar app.";
+         break;
+      default:
+         why = "the calendar server couldn't be reached or failed; retry once.";
+         break;
+   }
+   snprintf(msg, 512, TOOL_RESULT_ERROR_MARK "Error: could not %s the event: %s", verb, why);
+   return msg;
+}
+
 static char *handle_add(struct json_object *details, int user_id) {
    const char *summary = json_get_str(details, "summary");
    if (!summary || !summary[0])
@@ -369,34 +510,37 @@ static char *handle_add(struct json_object *details, int user_id) {
    if (!start_str)
       return strdup("Error: 'start' datetime is required (ISO 8601)");
 
-   time_t start = iso8601_parse(start_str);
-   if (start == (time_t)-1)
+   calendar_ical_new_t n = { .summary = summary,
+                             .location = json_get_str(details, "location"),
+                             .description = json_get_str(details, "description"),
+                             .all_day = json_get_bool(details, "all_day", false),
+                             .tzid = g_config.localization.timezone,
+                             .rrule = json_get_str(details, "rrule"),
+                             .reminder_minutes = json_get_reminder(details) };
+   char start_date[16], end_date[16];
+   if (!parse_when(start_str, &n.start, start_date, sizeof(start_date)) ||
+       (n.all_day && !start_date[0]))
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
                     "'2026-05-27T14:00:00' (local time), '2026-05-27T14:00:00Z' (UTC), or "
                     "'2026-05-27' (date only).");
-
-   time_t end = 0;
    const char *end_str = json_get_str(details, "end");
-   if (end_str) {
-      end = iso8601_parse(end_str);
-      if (end == (time_t)-1)
-         return strdup(TOOL_RESULT_ERROR_MARK
-                       "Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
-                       "'2026-05-27T15:00:00' (local time) or '2026-05-27T15:00:00Z' (UTC).");
+   end_date[0] = '\0';
+   if (end_str && !parse_when(end_str, &n.end, end_date, sizeof(end_date)))
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
+                    "'2026-05-27T15:00:00' (local time) or '2026-05-27T15:00:00Z' (UTC).");
+   if (n.all_day) {
+      if (!end_date[0])
+         next_day(start_date, end_date, sizeof(end_date));
+      n.start_date = start_date;
+      n.end_date = end_date;
    }
-
-   const char *location = json_get_str(details, "location");
-   const char *description = json_get_str(details, "description");
-   bool all_day = json_get_bool(details, "all_day", false);
    const char *calendar_name = json_get_str(details, "calendar");
-   const char *rrule = json_get_str(details, "rrule");
-   const char *tz = g_config.localization.timezone;
 
    char cal_used[CALENDAR_PICK_LABEL_MAX] = ""; /* a label, whole */
    char uid[256] = { 0 };
-   int rc = calendar_service_add(user_id, summary, start, end, location, description, all_day,
-                                 calendar_name, rrule, tz, uid, sizeof(uid), cal_used,
+   int rc = calendar_service_add(user_id, &n, calendar_name, uid, sizeof(uid), cal_used,
                                  sizeof(cal_used));
    if (rc == CALENDAR_RC_NOT_FOUND) {
       /* Never a guess: the calendar named, or the user picks. */
@@ -411,31 +555,22 @@ static char *handle_add(struct json_object *details, int user_id) {
                calendar_name ? calendar_name : "", writable[0] ? writable : "(none)");
       return msg;
    }
-   if (rc == CALENDAR_RC_READONLY)
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: the target calendar belongs to a read-only account. "
-                    "The user has restricted this account from AI modifications. "
-                    "Try specifying a different writable calendar.");
-   if (rc != CALENDAR_RC_OK) {
-      char *revoked = check_oauth_revoked();
-      if (revoked)
-         return revoked;
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: failed to create event on calendar server. Either no "
-                    "calendars are synced yet for any account (run action='calendars' to "
-                    "confirm) or the CalDAV server rejected the request — retry once.");
-   }
+   if (rc != CALENDAR_RC_OK)
+      return write_error(rc, "create");
 
-   char *buf = malloc(512);
+   char *buf = malloc(640);
    if (!buf)
       return strdup("Event created successfully.");
 
-   struct tm st;
-   localtime_r(&start, &st);
    char time_str[80];
-   if (all_day) {
+   if (n.all_day) {
+      struct tm st;
+      const time_t day = (time_t)iso8601_parse_date_utc(start_date);
+      gmtime_r(&day, &st);
       strftime(time_str, sizeof(time_str), "%A, %B %d, %Y", &st);
    } else {
+      struct tm st;
+      localtime_r(&n.start, &st);
       char t_str[16];
       format_time_speech(&st, t_str, sizeof(t_str));
       char date_str[48];
@@ -443,11 +578,55 @@ static char *handle_add(struct json_object *details, int user_id) {
       snprintf(time_str, sizeof(time_str), "%s at %s", date_str, t_str);
    }
 
-   int pos = snprintf(buf, 512, "Event created on the '%s' calendar: '%s' on %s.%s%s", cal_used,
-                      summary, time_str, location ? " Location: " : "", location ? location : "");
-   if (uid[0] && pos >= 0 && pos < 512)
-      snprintf(buf + pos, 512 - (size_t)pos, "\nUID: %s", uid);
+   int pos = snprintf(buf, 640, "Event created on the '%s' calendar: '%s' on %s.%s%s%s%s", cal_used,
+                      summary, time_str, n.location ? " Location: " : "",
+                      n.location ? n.location : "", n.rrule && n.rrule[0] ? " Repeats: " : "",
+                      n.rrule && n.rrule[0] ? n.rrule : "");
+   if (uid[0] && pos >= 0 && pos < 640)
+      snprintf(buf + pos, 640 - (size_t)pos, "\nUID: %s", uid);
    return buf;
+}
+
+/* A change to an event from @p details.  Returns an error message, or NULL. */
+static char *read_change(struct json_object *details,
+                         calendar_ical_change_t *c,
+                         char *start_date,
+                         char *end_date,
+                         size_t date_len) {
+   /* "" is a field left alone (models fill the ones they don't mean). */
+   c->summary = json_get_str(details, "summary");
+   c->location = json_get_str(details, "location");
+   c->description = json_get_str(details, "description");
+   c->rrule = json_get_str(details, "rrule");
+   if (c->rrule && !c->rrule[0])
+      c->rrule = NULL; /* "" is a field left alone, not "stop repeating" */
+   c->reminder_minutes = json_get_reminder(details);
+   c->remove_reminders = json_get_bool(details, "remove_reminders", false);
+   const char *start = json_get_str(details, "start");
+   const char *end = json_get_str(details, "end");
+   if (start && !start[0])
+      start = NULL;
+   if (end && !end[0])
+      end = NULL;
+   if (start) {
+      if (!parse_when(start, &c->start, start_date, date_len))
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid 'start' (use ISO 8601).");
+      c->set_start = true;
+      c->start_date = start_date;
+   }
+   if (end) {
+      if (!parse_when(end, &c->end, end_date, date_len))
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid 'end' (use ISO 8601).");
+      c->set_end = true;
+      c->end_date = end_date;
+   }
+   struct json_object *occ = NULL;
+   if (json_object_object_get_ex(details, "occurrence", &occ) &&
+       !(c->occurrence = parse_occurrence(json_object_get_string(occ))))
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: invalid 'occurrence': pass the value shown after 'occurrence:' "
+                    "on the event's row.");
+   return NULL;
 }
 
 static char *handle_update(struct json_object *details, int user_id) {
@@ -455,54 +634,59 @@ static char *handle_update(struct json_object *details, int user_id) {
    if (!uid || !uid[0])
       return strdup("Error: 'uid' of the event to update is required");
 
-   const char *summary = json_get_str(details, "summary");
-   const char *start_str = json_get_str(details, "start");
-   const char *end_str = json_get_str(details, "end");
-   const char *location = json_get_str(details, "location");
-   const char *description = json_get_str(details, "description");
-
-   time_t start = start_str ? iso8601_parse(start_str) : 0;
-   time_t end = end_str ? iso8601_parse(end_str) : 0;
-
-   int rc = calendar_service_update(user_id, uid, summary, start, end, location, description);
-   if (rc == CALENDAR_RC_READONLY)
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: the event belongs to a read-only account. "
-                    "The user has restricted this account from AI modifications.");
-   if (rc != CALENDAR_RC_OK) {
-      char *revoked = check_oauth_revoked();
-      if (revoked)
-         return revoked;
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: failed to update event. Either the UID does not exist on any "
-                    "writable calendar (re-run 'today'/'range'/'search' to get current "
-                    "UIDs) or the CalDAV server rejected the change. Retry once.");
-   }
-
-   return strdup("Event updated successfully.");
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   char start_date[16], end_date[16];
+   char *err = read_change(details, &c, start_date, end_date, sizeof(start_date));
+   if (err)
+      return err;
+   const int rc = calendar_service_update(user_id, uid, json_get_str(details, "calendar"), &c);
+   if (rc != CALENDAR_RC_OK)
+      return write_error(rc, "update");
+   char *msg = malloc(640);
+   if (!msg)
+      return strdup("Event updated.");
+   int n = snprintf(msg, 640,
+                    "%s:", c.occurrence ? "That occurrence was updated" : "Event updated");
+   if (c.summary && c.summary[0])
+      n += snprintf(msg + n, 640 - n, " titled '%.200s';", c.summary);
+   if (c.set_start || c.set_end)
+      n += snprintf(msg + n, 640 - n, " moved;");
+   if (c.rrule)
+      n += snprintf(msg + n, 640 - n, " repeats %.200s;", c.rrule);
+   if (c.remove_reminders)
+      n += snprintf(msg + n, 640 - n, " reminders removed;");
+   else if (c.reminder_minutes >= 0)
+      n += snprintf(msg + n, 640 - n, " reminder %d min before;", c.reminder_minutes);
+   if ((c.location && c.location[0]) || (c.description && c.description[0]))
+      n += snprintf(msg + n, 640 - n, " details changed;");
+   snprintf(msg + n, 640 - n, " nothing else about it changed%s.",
+            c.occurrence ? " (the rest of the series is as it was)" : "");
+   return msg;
 }
 
 static char *handle_delete(struct json_object *details, int user_id) {
    const char *uid = json_get_str(details, "uid");
    if (!uid || !uid[0])
       return strdup("Error: 'uid' of the event to delete is required");
-
-   int rc = calendar_service_delete(user_id, uid);
-   if (rc == CALENDAR_RC_READONLY)
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: the event belongs to a read-only account. "
-                    "The user has restricted this account from AI modifications.");
-   if (rc != CALENDAR_RC_OK) {
-      char *revoked = check_oauth_revoked();
-      if (revoked)
-         return revoked;
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: failed to delete event. Either the UID does not exist on any "
-                    "writable calendar (re-run 'today'/'range'/'search' to get current "
-                    "UIDs) or the CalDAV server rejected the request.");
+   const char *calendar_name = json_get_str(details, "calendar");
+   struct json_object *occ = NULL;
+   if (json_object_object_get_ex(details, "occurrence", &occ)) {
+      /* Present at all, it asks for one occurrence: never the whole series. */
+      calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+      c.cancel = true;
+      if (!(c.occurrence = parse_occurrence(json_object_get_string(occ))))
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: invalid 'occurrence': pass the value shown after "
+                       "'occurrence:' on the event's row.");
+      const int rc = calendar_service_update(user_id, uid, calendar_name, &c);
+      if (rc != CALENDAR_RC_OK)
+         return write_error(rc, "cancel that occurrence of");
+      return strdup("That occurrence was cancelled; the rest of the series is unchanged.");
    }
-
-   return strdup("Event deleted successfully.");
+   const int rc = calendar_service_delete(user_id, uid, calendar_name);
+   if (rc != CALENDAR_RC_OK)
+      return write_error(rc, "delete");
+   return strdup("Event deleted (every occurrence, if it repeated).");
 }
 
 /* =============================================================================
@@ -610,11 +794,19 @@ static const treg_param_t calendar_params[] = {
            "For 'add': {summary (required), start (ISO 8601, required), end (ISO 8601, "
            "optional), location (optional), description (optional), all_day (bool, "
            "optional), calendar?, rrule (RFC 5545 recurrence, optional — e.g. "
-           "'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10')}.\n"
+           "'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10'), reminder_minutes (optional, minutes "
+           "before the start)}.\n"
            "For 'update': {uid (required, from previous query — emitted as '[UID: ...]' on "
-           "each result row), summary, start, end, location, description — only specified "
-           "fields are changed}.\n"
-           "For 'delete': {uid (required)}.\n"
+           "each result row), calendar?, summary, start, end, location, description, rrule "
+           "(replaces the repeat rule; to end a series, give its rule with an UNTIL), "
+           "reminder_minutes, remove_reminders (bool), occurrence — only the fields given "
+           "are changed}.  Without 'occurrence', a repeating event's whole series changes; "
+           "with it (the value after 'occurrence:' on a row marked [repeats]), only that one "
+           "instance does.  Moving a series' start to another day needs its new rrule too.\n"
+           "For 'delete': {uid (required), calendar?, occurrence?}.  Without 'occurrence' it "
+           "deletes the event, every occurrence of a repeating one; with it, it cancels only "
+           "that occurrence.\n"
+           "  Rows list only occurrences in the cached window.\n"
            "  calendar?: the calendar DISPLAY NAME as returned by action='calendars' (e.g. "
            "'Family', 'Work'). NOT an account name and NOT an arbitrary guess; if "
            "uncertain, run action='calendars' first to enumerate. Omit to search across all "

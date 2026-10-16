@@ -36,13 +36,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "core/curl_buffer.h"
 #include "logging.h"
-
-#ifdef HAVE_LIBICAL
-#include <libical/ical.h>
-#endif
+#include "tools/calendar_ical.h"
 
 /* ============================================================================
  * Constants
@@ -72,30 +70,50 @@
  * reject the response.
  * ============================================================================ */
 
-/** Capture ETag from response headers */
+/** What a response's headers say about the resource. */
 typedef struct {
-   char etag[128];
-} etag_capture_t;
+   char etag[128];  /**< ETag exactly as sent (quotes and W/ kept: it goes back in If-Match) */
+   int retry_after; /**< Seconds from Retry-After, or 0 */
+} response_headers_t;
 
-static size_t header_etag_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
+/* Value of header @p name in the line @p buf (@p total bytes), trimmed, or NULL. */
+static const char *header_value(const char *buf, size_t total, const char *name, size_t *len_out) {
+   const size_t nlen = strlen(name);
+   if (total <= nlen || strncasecmp(buf, name, nlen) != 0)
+      return NULL;
+   const char *val = buf + nlen;
+   size_t vlen = total - nlen;
+   while (vlen > 0 && (*val == ' ' || *val == '\t')) {
+      val++;
+      vlen--;
+   }
+   while (vlen > 0 && (val[vlen - 1] == '\r' || val[vlen - 1] == '\n' || val[vlen - 1] == ' '))
+      vlen--;
+   *len_out = vlen;
+   return val;
+}
+
+static size_t header_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
    size_t total = size * nmemb;
-   etag_capture_t *cap = userdata;
-
-   /* Look for "ETag:" header (case-insensitive) */
-   if (total > 5 && strncasecmp(buf, "ETag:", 5) == 0) {
-      const char *val = buf + 5;
-      while (*val == ' ' || *val == '\t')
-         val++;
-      /* Strip surrounding quotes and trailing whitespace */
-      size_t vlen = total - (size_t)(val - buf);
-      while (vlen > 0 && (val[vlen - 1] == '\r' || val[vlen - 1] == '\n' || val[vlen - 1] == ' '))
-         vlen--;
-      if (vlen >= 2 && val[0] == '"' && val[vlen - 1] == '"') {
-         val++;
-         vlen -= 2;
+   response_headers_t *hdr = userdata;
+   size_t vlen = 0;
+   const char *val = header_value(buf, total, "ETag:", &vlen);
+   if (val && vlen > 0 && vlen < sizeof(hdr->etag)) {
+      snprintf(hdr->etag, sizeof(hdr->etag), "%.*s", (int)vlen, val);
+      return total;
+   }
+   val = header_value(buf, total, "Retry-After:", &vlen);
+   if (val && vlen > 0 && vlen < 64) {
+      char v[64];
+      snprintf(v, sizeof(v), "%.*s", (int)vlen, val);
+      long secs = 0;
+      if (isdigit((unsigned char)v[0])) {
+         secs = strtol(v, NULL, 10);
+      } else {
+         const time_t when = curl_getdate(v, NULL); /* an HTTP date */
+         secs = when > 0 ? (long)(when - time(NULL)) : 0;
       }
-      if (vlen > 0 && vlen < sizeof(cap->etag))
-         snprintf(cap->etag, sizeof(cap->etag), "%.*s", (int)vlen, val);
+      hdr->retry_after = secs > 0 ? (secs > INT_MAX ? INT_MAX : (int)secs) : 0;
    }
    return total;
 }
@@ -131,6 +149,23 @@ static CURL *caldav_curl_init(const caldav_auth_t *auth, curl_buffer_t *resp) {
    return curl;
 }
 
+/* Retry-After of the last rate-limited response on this thread. */
+static __thread int s_retry_after;
+
+static caldav_error_t http_status_to_error(long status);
+
+/* The error a response's status means, noting how long a rate-limited one
+ * (429, or 503 with Retry-After) asked to wait. */
+static caldav_error_t response_error(long status, const response_headers_t *hdr) {
+   caldav_error_t err = http_status_to_error(status);
+   s_retry_after = 0;
+   if (err == CALDAV_ERR_RATE_LIMITED || (status == 503 && hdr->retry_after > 0)) {
+      err = CALDAV_ERR_RATE_LIMITED;
+      s_retry_after = hdr->retry_after;
+   }
+   return err;
+}
+
 static caldav_error_t http_status_to_error(long status) {
    if (status >= 200 && status <= 207)
       return CALDAV_OK;
@@ -142,6 +177,10 @@ static caldav_error_t http_status_to_error(long status) {
       return CALDAV_ERR_NOT_FOUND;
    if (status == 412)
       return CALDAV_ERR_CONFLICT;
+   if (status == 429)
+      return CALDAV_ERR_RATE_LIMITED;
+   if (status >= 400 && status < 500)
+      return CALDAV_ERR_REJECTED;
    if (status >= 500)
       return CALDAV_ERR_SERVER;
    return CALDAV_ERR_NETWORK;
@@ -626,32 +665,19 @@ caldav_error_t caldav_get_ctag(const char *calendar_url,
  * Public: caldav_fetch_events (REPORT with calendar-query)
  * ============================================================================ */
 
-caldav_error_t caldav_fetch_events(const char *calendar_url,
-                                   const caldav_auth_t *auth,
-                                   time_t range_start,
-                                   time_t range_end,
-                                   caldav_event_list_t *result) {
-   result->events = NULL;
-   result->count = 0;
+/* A REPORT on @p calendar_url asking for events' ETags and data (@p xml),
+ * read into @p result. */
+static caldav_error_t parse_events(const char *xml,
+                                   size_t len,
+                                   const char *calendar_url,
+                                   bool read,
+                                   caldav_event_list_t *result);
 
-   /* Build time-range filter */
-   struct tm ts, te;
-   gmtime_r(&range_start, &ts);
-   gmtime_r(&range_end, &te);
-
-   char xml[1024];
-   snprintf(xml, sizeof(xml),
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-            "<c:calendar-query xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
-            "<d:prop><d:getetag/><c:calendar-data/></d:prop>"
-            "<c:filter><c:comp-filter name=\"VCALENDAR\">"
-            "<c:comp-filter name=\"VEVENT\">"
-            "<c:time-range start=\"%04d%02d%02dT000000Z\" end=\"%04d%02d%02dT000000Z\"/>"
-            "</c:comp-filter></c:comp-filter></c:filter>"
-            "</c:calendar-query>",
-            ts.tm_year + 1900, ts.tm_mon + 1, ts.tm_mday, te.tm_year + 1900, te.tm_mon + 1,
-            te.tm_mday);
-
+static caldav_error_t report_events(const char *calendar_url,
+                                    const caldav_auth_t *auth,
+                                    const char *xml,
+                                    bool read,
+                                    caldav_event_list_t *result) {
    curl_buffer_t resp;
    curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
 
@@ -661,7 +687,9 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
       return CALDAV_ERR_NETWORK;
    }
 
-   /* REPORT method */
+   response_headers_t hdr = { 0 };
+   curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+   curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hdr);
    curl_buffer_reset(&resp);
    curl_easy_setopt(curl, CURLOPT_URL, calendar_url);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "REPORT");
@@ -695,324 +723,44 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
    curl_easy_cleanup(curl);
 
-   caldav_error_t err = http_status_to_error(status);
+   caldav_error_t err = response_error(status, &hdr);
    if (err != CALDAV_OK) {
       curl_buffer_free(&resp);
       return err;
    }
 
-   err = caldav_parse_events(resp.data, resp.size, calendar_url, result);
+   err = parse_events(resp.data, resp.size, calendar_url, read, result);
    curl_buffer_free(&resp);
    return err;
 }
 
-#ifdef HAVE_LIBICAL
-/* Most RRULEs a zone of a name libical doesn't know may have (all its blocks
- * together).  Outlook and Exchange send two. */
-#define CALDAV_TZ_MAX_RULES 16
+caldav_error_t caldav_fetch_events(const char *calendar_url,
+                                   const caldav_auth_t *auth,
+                                   time_t range_start,
+                                   time_t range_end,
+                                   caldav_event_list_t *result) {
+   result->events = NULL;
+   result->count = 0;
 
-/* Earliest year a repeating block may start: Windows zones start in 1601. */
-#define CALDAV_TZ_MIN_START_YEAR 1600
+   /* Build time-range filter */
+   struct tm ts, te;
+   gmtime_r(&range_start, &ts);
+   gmtime_r(&range_end, &te);
 
-/* Most VTIMEZONEs one event may carry: libical's own bookkeeping of them is
- * quadratic, and a real event names two or three zones. */
-#define CALDAV_MAX_VTIMEZONES 16
+   char xml[1024];
+   snprintf(xml, sizeof(xml),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<c:calendar-query xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
+            "<d:prop><d:getetag/><c:calendar-data/></d:prop>"
+            "<c:filter><c:comp-filter name=\"VCALENDAR\">"
+            "<c:comp-filter name=\"VEVENT\">"
+            "<c:time-range start=\"%04d%02d%02dT000000Z\" end=\"%04d%02d%02dT000000Z\"/>"
+            "</c:comp-filter></c:comp-filter></c:filter>"
+            "</c:calendar-query>",
+            ts.tm_year + 1900, ts.tm_mon + 1, ts.tm_mday, te.tm_year + 1900, te.tm_mon + 1,
+            te.tm_mday);
 
-/* Zone names already warned about in one fetch, so a hostile calendar logs
- * each once, not once per event per sync. */
-typedef struct {
-   char names[8][64];
-   int count;
-} tz_warned_t;
-
-static void warn_zone_once(tz_warned_t *warned, const char *tzid, const char *why) {
-   const char *name = tzid ? tzid : "?";
-   for (int i = 0; i < warned->count; i++) {
-      if (strncmp(warned->names[i], name, sizeof(warned->names[i]) - 1) == 0)
-         return;
-   }
-   if (warned->count < (int)(sizeof(warned->names) / sizeof(warned->names[0])))
-      snprintf(warned->names[warned->count++], sizeof(warned->names[0]), "%s", name);
-   OLOG_WARNING("caldav: ignoring time zone '%.64s' (%s); its events are read as UTC", name, why);
-}
-
-/* Whether libical may look @p tzid up: it opens the zone file by name, so
- * "../" would reach any file, such as one of the daemon's own pipes. */
-static bool tzid_is_safe(const char *tzid) {
-   return tzid && !strstr(tzid, "..");
-}
-
-/* Entries in a libical BY* list (ICAL_RECURRENCE_ARRAY_MAX ends it). */
-static int by_count(const short *list, int size) {
-   int n = 0;
-   while (n < size && list[n] != ICAL_RECURRENCE_ARRAY_MAX)
-      n++;
-   return n;
-}
-
-/* Whether the days of the month in @p r are seven in a row, all counted from
- * the start or all from the end (the older "BYMONTHDAY=8,...,14;BYDAY=SU"). */
-static bool week_of_month_days(const struct icalrecurrencetype *r, int n_mday, int days) {
-   if (n_mday != 7)
-      return false;
-   int lo = r->by_month_day[0];
-   int hi = lo;
-   for (int k = 0; k < n_mday; k++) {
-      const int d = r->by_month_day[k];
-      if (d == 0 || abs(d) > days || (d > 0) != (lo > 0))
-         return false;
-      lo = d < lo ? d : lo;
-      hi = d > hi ? d : hi;
-      for (int j = 0; j < k; j++) {
-         if (r->by_month_day[j] == d)
-            return false;
-      }
-   }
-   return hi - lo == 6;
-}
-
-/* Whether a time zone rule names one real date a year, the way real zones
- * do, so libical never searches for a date that doesn't exist: in one month,
- * a weekday by position ("second Sunday", "last Sunday", also written with
- * BYSETPOS), one day of the month, or seven days in a row with a weekday.
- * Interval 1 only (a two-year interval from the wrong year never matches),
- * at most one hour, minute and second, and no non-Gregorian RSCALE (libical's
- * search for one can never end). */
-static bool zone_rule_is_bounded(const struct icalrecurrencetype *r) {
-   static const int month_days[12] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-   if (r->rscale || r->freq != ICAL_YEARLY_RECURRENCE || r->interval > 1 ||
-       by_count(r->by_month, ICAL_BY_MONTH_SIZE) != 1 || r->by_month[0] < 1 ||
-       r->by_month[0] > 12 || by_count(r->by_year_day, ICAL_BY_YEARDAY_SIZE) != 0 ||
-       by_count(r->by_week_no, ICAL_BY_WEEKNO_SIZE) != 0 ||
-       by_count(r->by_hour, ICAL_BY_HOUR_SIZE) > 1 ||
-       by_count(r->by_minute, ICAL_BY_MINUTE_SIZE) > 1 ||
-       by_count(r->by_second, ICAL_BY_SECOND_SIZE) > 1)
-      return false;
-   const int days = month_days[r->by_month[0] - 1];
-   const int n_day = by_count(r->by_day, ICAL_BY_DAY_SIZE);
-   const int n_mday = by_count(r->by_month_day, ICAL_BY_MONTHDAY_SIZE);
-   const int n_setpos = by_count(r->by_set_pos, ICAL_BY_SETPOS_SIZE);
-   const int pos = n_day == 1 ? icalrecurrencetype_day_position(r->by_day[0]) : 0;
-   if (n_day > 1 || abs(pos) > 5)
-      return false;
-
-   if (n_mday == 0) {
-      if (n_setpos == 0)
-         return n_day == 1 && pos != 0;
-      return n_day == 1 && pos == 0 && n_setpos == 1 && r->by_set_pos[0] != 0 &&
-             abs(r->by_set_pos[0]) <= 5;
-   }
-   if (n_setpos != 0)
-      return false;
-   if (n_day == 0)
-      return n_mday == 1 && r->by_month_day[0] != 0 && abs(r->by_month_day[0]) <= days;
-   return pos == 0 && week_of_month_days(r, n_mday, days);
-}
-
-/* Whether libical can resolve times against @p vtz with bounded work: it
- * expands every RRULE of every block from the block's start to the year asked
- * for, so a rule changing more than once a year (a fuzz input's FREQ=HOURLY
- * took ~20 s per event), one that never matches, an early start or many rules
- * stall the sync.  Real zones change at most twice a year. */
-static bool timezone_is_bounded(icalcomponent *vtz) {
-   int rules = 0;
-   for (icalcomponent *obs = icalcomponent_get_first_component(vtz, ICAL_ANY_COMPONENT); obs;
-        obs = icalcomponent_get_next_component(vtz, ICAL_ANY_COMPONENT)) {
-      icalproperty *p = icalcomponent_get_first_property(obs, ICAL_RRULE_PROPERTY);
-      if (!p)
-         continue; /* single changes (DTSTART/RDATE): cheap */
-      /* The property's own value: the component form would resolve a TZID. */
-      icalproperty *start = icalcomponent_get_first_property(obs, ICAL_DTSTART_PROPERTY);
-      if (!start || icalproperty_get_dtstart(start).year < CALDAV_TZ_MIN_START_YEAR)
-         return false;
-      for (; p; p = icalcomponent_get_next_property(obs, ICAL_RRULE_PROPERTY)) {
-         struct icalrecurrencetype r = icalproperty_get_rrule(p);
-         if (++rules > CALDAV_TZ_MAX_RULES || !zone_rule_is_bounded(&r))
-            return false;
-      }
-   }
-   return true;
-}
-
-/* Whether to set aside the calendar's own definition of @p vtz: always when
- * libical has a zone of that name (its copy is the one used then: the same
- * rules, without trusting the server's), and otherwise when it isn't bounded
- * or its name isn't safe to look up (an event in it is then read as UTC). */
-static bool timezone_set_aside(icalcomponent *vtz, tz_warned_t *warned) {
-   icalproperty *id = icalcomponent_get_first_property(vtz, ICAL_TZID_PROPERTY);
-   const char *tzid = id ? icalproperty_get_tzid(id) : NULL;
-   if (!tzid_is_safe(tzid)) {
-      warn_zone_once(warned, tzid, "unsafe name");
-      return true;
-   }
-   if (icaltimezone_get_builtin_timezone(tzid))
-      return true;
-   if (timezone_is_bounded(vtz))
-      return false;
-   warn_zone_once(warned, tzid, "not a real zone's rules");
-   return true;
-}
-
-/* Set aside the time zones in @p parent (its direct VTIMEZONE children, the
- * only ones libical looks up for a component under it). */
-static void set_aside_timezones(icalcomponent *parent, tz_warned_t *warned) {
-   icalcomponent *vtz = icalcomponent_get_first_component(parent, ICAL_VTIMEZONE_COMPONENT);
-   while (vtz) {
-      icalcomponent *next = icalcomponent_get_next_component(parent, ICAL_VTIMEZONE_COMPONENT);
-      if (timezone_set_aside(vtz, warned)) {
-         icalcomponent_remove_component(parent, vtz);
-         icalcomponent_free(vtz);
-      }
-      vtz = next;
-   }
-}
-
-/* Drop a TZID that isn't safe to look up from the event's start and end, so
- * libical's own fallback (a zone file of that name) never opens it either. */
-static void strip_unsafe_tzids(icalcomponent *vevent, tz_warned_t *warned) {
-   const icalproperty_kind kinds[] = { ICAL_DTSTART_PROPERTY, ICAL_DTEND_PROPERTY };
-   for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
-      icalproperty *p = icalcomponent_get_first_property(vevent, kinds[k]);
-      icalparameter *param = p ? icalproperty_get_first_parameter(p, ICAL_TZID_PARAMETER) : NULL;
-      if (param && !tzid_is_safe(icalparameter_get_tzid(param))) {
-         warn_zone_once(warned, icalparameter_get_tzid(param), "unsafe name");
-         icalproperty_remove_parameter_by_kind(p, ICAL_TZID_PARAMETER);
-      }
-   }
-}
-
-/* Case-insensitive match of @p word at @p p, reading through folded lines
- * (a line break followed by a space or tab, which iCalendar unfolds). */
-static bool matches_unfolded(const char *p, const char *word) {
-   for (; *word; word++) {
-      while ((p[0] == '\r' && p[1] == '\n' && (p[2] == ' ' || p[2] == '\t')) ||
-             (p[0] == '\n' && (p[1] == ' ' || p[1] == '\t')))
-         p += p[0] == '\r' ? 3 : 2;
-      if (toupper((unsigned char)*p) != *word)
-         return false;
-      p++;
-   }
-   return true;
-}
-
-/* Whether @p ical begins more than CALDAV_MAX_VTIMEZONES time zones, counted
- * before parsing (libical's handling of each is linear in their number). */
-static bool too_many_vtimezones(const char *ical) {
-   int count = 0;
-   for (const char *p = ical; *p; p++) {
-      const bool line_start = p == ical || (p[-1] == '\n' && *p != ' ' && *p != '\t');
-      if (line_start && matches_unfolded(p, "BEGIN:VTIMEZONE") && ++count > CALDAV_MAX_VTIMEZONES)
-         return true;
-   }
-   return false;
-}
-
-/* The event a resource is about: its series (the VEVENT without a
- * RECURRENCE-ID), which a server may list after a changed occurrence. */
-static icalcomponent *master_event(icalcomponent *comp) {
-   icalcomponent *first = icalcomponent_get_first_component(comp, ICAL_VEVENT_COMPONENT);
-   for (icalcomponent *v = first; v;
-        v = icalcomponent_get_next_component(comp, ICAL_VEVENT_COMPONENT)) {
-      if (!icalcomponent_get_first_property(v, ICAL_RECURRENCEID_PROPERTY))
-         return v;
-   }
-   return first;
-}
-
-/* An all-day date's fields, and its midnight (UTC) as an epoch. */
-static time_t date_epoch(icaltimetype t, char *date, size_t date_len) {
-   snprintf(date, date_len, "%04d-%02d-%02d", t.year, t.month, t.day);
-   struct tm tm_date = { 0 };
-   tm_date.tm_year = t.year - 1900;
-   tm_date.tm_mon = t.month - 1;
-   tm_date.tm_mday = t.day;
-   return timegm(&tm_date);
-}
-
-/* A timed value as an epoch: converted to UTC components, then timegm(),
- * which (unlike mktime()) the process-wide TZ doesn't affect. */
-static time_t time_epoch(icaltimetype t) {
-   icaltimetype utc = icaltime_convert_to_zone(t, icaltimezone_get_utc_timezone());
-   struct tm tm_utc = { 0 };
-   tm_utc.tm_year = utc.year - 1900;
-   tm_utc.tm_mon = utc.month - 1;
-   tm_utc.tm_mday = utc.day;
-   tm_utc.tm_hour = utc.hour;
-   tm_utc.tm_min = utc.minute;
-   tm_utc.tm_sec = utc.second;
-   return timegm(&tm_utc);
-}
-
-/* Fill @p evt from one resource's iCalendar text.  False when it holds no
- * event DAWN can read (then it is skipped). */
-static bool read_ical_event(const char *ical_data, caldav_event_t *evt, tz_warned_t *warned) {
-   if (too_many_vtimezones(ical_data)) {
-      OLOG_WARNING("caldav: skipping '%s': more than %d time zones", evt->href,
-                   CALDAV_MAX_VTIMEZONES);
-      return false;
-   }
-   icalcomponent *comp = icalparser_parse_string(ical_data);
-   if (!comp)
-      return false;
-   icalcomponent *vevent = master_event(comp);
-   if (!vevent) {
-      icalcomponent_free(comp);
-      return false;
-   }
-   /* Before any time is read: libical resolves a TZID through the event's own
-    * VTIMEZONEs, then the calendar's, then a zone file of that name. */
-   set_aside_timezones(vevent, warned);
-   set_aside_timezones(comp, warned);
-   strip_unsafe_tzids(vevent, warned);
-
-   const char *uid = icalcomponent_get_uid(vevent);
-   if (uid)
-      snprintf(evt->uid, sizeof(evt->uid), "%s", uid);
-   const char *summary = icalcomponent_get_summary(vevent);
-   if (summary)
-      snprintf(evt->summary, sizeof(evt->summary), "%s", summary);
-   const char *desc = icalcomponent_get_description(vevent);
-   if (desc)
-      snprintf(evt->description, sizeof(evt->description), "%s", desc);
-   const char *loc = icalcomponent_get_location(vevent);
-   if (loc)
-      snprintf(evt->location, sizeof(evt->location), "%s", loc);
-
-   icaltimetype dtstart = icalcomponent_get_dtstart(vevent);
-   if (!icaltime_is_null_time(dtstart)) {
-      if (dtstart.is_date) {
-         evt->all_day = true;
-         evt->dtstart = date_epoch(dtstart, evt->dtstart_date, sizeof(evt->dtstart_date));
-      } else {
-         evt->dtstart = time_epoch(dtstart);
-         /* The zone it repeats in, when libical has it built in. */
-         icaltimezone *zone = (icaltimezone *)dtstart.zone;
-         const char *name = zone ? icaltimezone_get_location(zone) : NULL;
-         if (name && tzid_is_safe(name) && icaltimezone_get_builtin_timezone(name))
-            snprintf(evt->tzid, sizeof(evt->tzid), "%s", name);
-      }
-   }
-   icaltimetype dtend = icalcomponent_get_dtend(vevent);
-   if (!icaltime_is_null_time(dtend)) {
-      evt->dtend = dtend.is_date ? date_epoch(dtend, evt->dtend_date, sizeof(evt->dtend_date))
-                                 : time_epoch(dtend);
-   }
-   if (evt->dtstart && evt->dtend)
-      evt->duration_sec = (int)(evt->dtend - evt->dtstart);
-
-   icalproperty *rrprop = icalcomponent_get_first_property(vevent, ICAL_RRULE_PROPERTY);
-   if (rrprop) {
-      struct icalrecurrencetype rrule = icalproperty_get_rrule(rrprop);
-      const char *rrstr = icalrecurrencetype_as_string(&rrule);
-      /* A cut rule would change meaning (a lost COUNT or UNTIL never ends). */
-      if (rrstr &&
-          (size_t)snprintf(evt->rrule, sizeof(evt->rrule), "%s", rrstr) >= sizeof(evt->rrule)) {
-         OLOG_WARNING("caldav: '%s' has a recurrence rule too long to keep; shown once", evt->href);
-         evt->rrule[0] = '\0';
-      }
-   }
-   icalcomponent_free(comp);
-   return true;
+   return report_events(calendar_url, auth, xml, true, result);
 }
 
 static long elapsed_ms(const struct timespec *since) {
@@ -1020,11 +768,14 @@ static long elapsed_ms(const struct timespec *since) {
    clock_gettime(CLOCK_MONOTONIC, &now);
    return (long)(now.tv_sec - since->tv_sec) * 1000 + (now.tv_nsec - since->tv_nsec) / 1000000;
 }
-#endif
 
-caldav_error_t caldav_parse_events(const char *xml,
+/* caldav_parse_events, and with @p read false only the text and ETag of each
+ * (for an edit, which reads the text itself: an event the reader skips is
+ * still there to refuse, not gone). */
+static caldav_error_t parse_events(const char *xml,
                                    size_t len,
                                    const char *calendar_url,
+                                   bool read,
                                    caldav_event_list_t *result) {
    result->events = NULL;
    result->count = 0;
@@ -1063,10 +814,8 @@ caldav_error_t caldav_parse_events(const char *xml,
 
    int count = 0;
    bool budget_spent = false;
-#ifdef HAVE_LIBICAL
-   tz_warned_t warned = { 0 };
+   calendar_ical_warned_t warned = { 0 };
    long slow_ms = 0;
-#endif
    for (int i = 0; i < responses->nodesetval->nodeNr && count < cap; i++) {
       xmlNodePtr resp_node = responses->nodesetval->nodeTab[i];
       caldav_event_t *evt = &events[count];
@@ -1079,12 +828,6 @@ caldav_error_t caldav_parse_events(const char *xml,
 
       /* etag */
       xpath_text(ctx, resp_node, ".//d:getetag", evt->etag, sizeof(evt->etag));
-      /* Strip quotes from etag */
-      size_t elen = strlen(evt->etag);
-      if (elen >= 2 && evt->etag[0] == '"' && evt->etag[elen - 1] == '"') {
-         memmove(evt->etag, evt->etag + 1, elen - 2);
-         evt->etag[elen - 2] = '\0';
-      }
 
       /* calendar-data (raw iCalendar) */
       char *ical_data = NULL;
@@ -1105,11 +848,14 @@ caldav_error_t caldav_parse_events(const char *xml,
          continue;
 
       evt->raw_ical = ical_data;
+      if (!read) {
+         count++;
+         continue;
+      }
 
-#ifdef HAVE_LIBICAL
       struct timespec t0;
       clock_gettime(CLOCK_MONOTONIC, &t0);
-      const bool readable = read_ical_event(ical_data, evt, &warned);
+      const bool readable = calendar_ical_read(ical_data, evt, &warned);
       const long ms = elapsed_ms(&t0);
       if (ms > CALDAV_SLOW_EVENT_MS) {
          OLOG_WARNING("caldav: '%s' took %ld ms to read", evt->href, ms);
@@ -1123,11 +869,9 @@ caldav_error_t caldav_parse_events(const char *xml,
          }
       }
       if (!readable) {
-         free(ical_data);
-         evt->raw_ical = NULL;
+         caldav_event_free(evt);
          continue;
       }
-#endif /* HAVE_LIBICAL */
 
       count++;
    }
@@ -1145,11 +889,17 @@ caldav_error_t caldav_parse_events(const char *xml,
    return CALDAV_OK;
 }
 
+caldav_error_t caldav_parse_events(const char *xml,
+                                   size_t len,
+                                   const char *calendar_url,
+                                   caldav_event_list_t *result) {
+   return parse_events(xml, len, calendar_url, true, result);
+}
+
 void caldav_event_list_free(caldav_event_list_t *list) {
    if (list->events) {
-      for (int i = 0; i < list->count; i++) {
-         free(list->events[i].raw_ical);
-      }
+      for (int i = 0; i < list->count; i++)
+         caldav_event_free(&list->events[i]);
       free(list->events);
       list->events = NULL;
    }
@@ -1449,72 +1199,194 @@ void caldav_sync_result_free(caldav_sync_result_t *result) {
 }
 
 /* ============================================================================
- * Public: caldav_create_event (PUT with If-None-Match: *)
+ * Event resources: GET, PUT, DELETE
  * ============================================================================ */
 
-caldav_error_t caldav_create_event(const char *calendar_url,
-                                   const caldav_auth_t *auth,
-                                   const char *uid,
-                                   const char *ical_data,
-                                   char *etag_out,
-                                   size_t etag_len) {
+int caldav_last_retry_after(void) {
+   return s_retry_after;
+}
+
+/* Log a failed response: its method, URL, status and the start of its body
+ * (servers put the reason there, such as a CalDAV precondition). */
+static void log_failure(const char *method,
+                        const char *url,
+                        long status,
+                        const curl_buffer_t *resp) {
+   char body[201];
+   size_t n = 0;
+   for (size_t i = 0; resp->data && i < resp->size && n < sizeof(body) - 1; i++) {
+      const unsigned char ch = (unsigned char)resp->data[i];
+      body[n++] = (ch < 0x20 || ch == 0x7f) ? ' ' : (char)ch;
+   }
+   body[n] = '\0';
+   OLOG_WARNING("caldav: %s %s: HTTP %ld: %s", method, url, status, body);
+}
+
+/* One request on an event resource: PUT (@p body sent) or DELETE.
+ * @p if_match is sent as it came. */
+static caldav_error_t resource_request(const char *method,
+                                       const char *url,
+                                       const caldav_auth_t *auth,
+                                       const char *body,
+                                       const char *if_match,
+                                       bool if_none_match,
+                                       char *etag_out,
+                                       size_t etag_len) {
    if (etag_out && etag_len > 0)
       etag_out[0] = '\0';
-
-   /* Build resource URL: calendar_url + uid + ".ics" */
-   char url[1024];
-   size_t cal_len = strlen(calendar_url);
-   const char *sep = (cal_len > 0 && calendar_url[cal_len - 1] == '/') ? "" : "/";
-   snprintf(url, sizeof(url), "%s%s%s.ics", calendar_url, sep, uid);
+   s_retry_after = 0;
 
    curl_buffer_t resp;
    curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
-
    CURL *curl = caldav_curl_init(auth, &resp);
    if (!curl) {
       curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
-   etag_capture_t etag_cap = { { 0 } };
-   curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_etag_cb);
-   curl_easy_setopt(curl, CURLOPT_HEADERDATA, &etag_cap);
-
+   response_headers_t hdr = { 0 };
+   curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+   curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hdr);
    curl_easy_setopt(curl, CURLOPT_URL, url);
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
-   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, ical_data);
-   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(ical_data));
-
    struct curl_slist *headers = NULL;
-   headers = curl_slist_append(headers, "Content-Type: text/calendar; charset=utf-8");
-   headers = curl_slist_append(headers, "If-None-Match: *");
-   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+   if (body) {
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+      headers = curl_slist_append(headers, "Content-Type: text/calendar; charset=utf-8");
+   }
+   if (if_match && if_match[0]) {
+      char line[sizeof(hdr.etag) + 16];
+      snprintf(line, sizeof(line), "If-Match: %s", if_match);
+      headers = curl_slist_append(headers, line);
+   }
+   if (if_none_match)
+      headers = curl_slist_append(headers, "If-None-Match: *");
+   if (headers)
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
    CURLcode cres = curl_easy_perform(curl);
    curl_slist_free_all(headers);
-
    if (cres != CURLE_OK) {
-      OLOG_ERROR("caldav: PUT create %s failed: %s", url, curl_easy_strerror(cres));
+      OLOG_ERROR("caldav: %s %s failed: %s", method, url, curl_easy_strerror(cres));
       curl_easy_cleanup(curl);
       curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
-
    long status = 0;
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-
-   /* Capture ETag from response headers */
-   if (etag_out && etag_len > 0 && etag_cap.etag[0])
-      snprintf(etag_out, etag_len, "%s", etag_cap.etag);
-
    curl_easy_cleanup(curl);
+
+   caldav_error_t err = response_error(status, &hdr);
+   if (err != CALDAV_OK)
+      log_failure(method, url, status, &resp);
+   if (err == CALDAV_OK && etag_out && etag_len > 0 && hdr.etag[0])
+      snprintf(etag_out, etag_len, "%s", hdr.etag);
    curl_buffer_free(&resp);
-   return http_status_to_error(status);
+   return err;
 }
 
-/* ============================================================================
- * Public: caldav_update_event (PUT with If-Match: etag)
- * ============================================================================ */
+caldav_error_t caldav_create_event(const char *calendar_url,
+                                   const caldav_auth_t *auth,
+                                   const char *uid,
+                                   const char *ical_data,
+                                   char *etag_out,
+                                   size_t etag_len,
+                                   char *href_out,
+                                   size_t href_len) {
+   /* Resource URL: calendar_url + uid + ".ics" */
+   char url[1024];
+   size_t cal_len = strlen(calendar_url);
+   const char *sep = (cal_len > 0 && calendar_url[cal_len - 1] == '/') ? "" : "/";
+   /* The UID as a path segment, percent-encoded ("@" as "%40", the way servers
+    * list it, so the href stored now matches the one a sync reports). */
+   char name[768];
+   size_t n = 0;
+   for (const unsigned char *p = (const unsigned char *)uid; *p && n + 4 < sizeof(name); p++) {
+      if (isalnum(*p) || *p == '-' || *p == '.' || *p == '_' || *p == '~')
+         name[n++] = (char)*p;
+      else
+         n += (size_t)snprintf(name + n, sizeof(name) - n, "%%%02X", *p);
+   }
+   name[n] = '\0';
+   if ((size_t)snprintf(url, sizeof(url), "%s%s%s.ics", calendar_url, sep, name) >= sizeof(url))
+      return CALDAV_ERR_REJECTED;
+   if (href_out && href_len > 0)
+      snprintf(href_out, href_len, "%s", url);
+   return resource_request("PUT", url, auth, ical_data, NULL, true, etag_out, etag_len);
+}
+
+caldav_error_t caldav_get_event(const char *calendar_url,
+                                const char *href,
+                                const caldav_auth_t *auth,
+                                char **ical_out,
+                                char *etag_out,
+                                size_t etag_len) {
+   *ical_out = NULL;
+   if (etag_out && etag_len > 0)
+      etag_out[0] = '\0';
+   /* A calendar-multiget (RFC 4791, every server has it) returns the data and
+    * its ETag together; a plain GET may not carry the ETag (Google's doesn't). */
+   const char *scheme = strstr(href, "://");
+   const char *path = scheme ? strchr(scheme + 3, '/') : NULL;
+   if (!path)
+      return CALDAV_ERR_REJECTED;
+   char escaped[1536];
+   size_t n = 0;
+   const char *p = path;
+   for (; *p && n + 6 < sizeof(escaped); p++) {
+      const char *ent = *p == '&' ? "&amp;" : *p == '<' ? "&lt;" : *p == '>' ? "&gt;" : NULL;
+      if (ent) {
+         memcpy(escaped + n, ent, strlen(ent));
+         n += strlen(ent);
+      } else {
+         escaped[n++] = *p;
+      }
+   }
+   escaped[n] = '\0';
+   if (*p)
+      return CALDAV_ERR_REJECTED; /* cut short, it would name another resource */
+   char xml[2048];
+   snprintf(xml, sizeof(xml),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<c:calendar-multiget xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
+            "<d:prop><d:getetag/><c:calendar-data/></d:prop><d:href>%s</d:href>"
+            "</c:calendar-multiget>",
+            escaped);
+
+   caldav_event_list_t list = { 0 };
+   caldav_error_t err = report_events(calendar_url, auth, xml, false, &list);
+   if (err == CALDAV_OK) {
+      err = CALDAV_ERR_NOT_FOUND;
+      for (int i = 0; i < list.count; i++) {
+         /* One asked for: the one answer (a server may spell the href
+          * differently, such as "%40" for "@"), or the one that matches. */
+         if (!list.events[i].raw_ical || (list.count > 1 && strcmp(list.events[i].href, href) != 0))
+            continue;
+         *ical_out = list.events[i].raw_ical;
+         list.events[i].raw_ical = NULL;
+         /* An ETag with control characters (it goes into a header) or cut
+          * short (it would never match) is no ETag: the write is refused. */
+         char *etag = list.events[i].etag;
+         /* XML around it may be pretty-printed: trim that whitespace. */
+         while (*etag == ' ' || *etag == '\t' || *etag == '\r' || *etag == '\n')
+            etag++;
+         size_t elen = strlen(etag);
+         while (elen > 0 && (etag[elen - 1] == ' ' || etag[elen - 1] == '\t' ||
+                             etag[elen - 1] == '\r' || etag[elen - 1] == '\n'))
+            etag[--elen] = '\0';
+         bool usable = strlen(list.events[i].etag) + 1 < sizeof(list.events[i].etag);
+         for (const char *q = etag; *q && usable; q++)
+            usable = (unsigned char)*q >= 0x20 && *q != 0x7f;
+         if (etag_out && etag_len > 0 && usable)
+            snprintf(etag_out, etag_len, "%s", etag);
+         err = CALDAV_OK;
+         break;
+      }
+   }
+   caldav_event_list_free(&list);
+   return err;
+}
 
 caldav_error_t caldav_update_event(const char *href,
                                    const caldav_auth_t *auth,
@@ -1522,100 +1394,12 @@ caldav_error_t caldav_update_event(const char *href,
                                    const char *ical_data,
                                    char *etag_out,
                                    size_t etag_len) {
-   if (etag_out && etag_len > 0)
-      etag_out[0] = '\0';
-
-   curl_buffer_t resp;
-   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
-
-   CURL *curl = caldav_curl_init(auth, &resp);
-   if (!curl) {
-      curl_buffer_free(&resp);
-      return CALDAV_ERR_NETWORK;
-   }
-
-   etag_capture_t etag_cap = { { 0 } };
-   curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_etag_cb);
-   curl_easy_setopt(curl, CURLOPT_HEADERDATA, &etag_cap);
-
-   curl_easy_setopt(curl, CURLOPT_URL, href);
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
-   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, ical_data);
-   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(ical_data));
-
-   struct curl_slist *headers = NULL;
-   headers = curl_slist_append(headers, "Content-Type: text/calendar; charset=utf-8");
-   if (etag && etag[0]) {
-      char if_match[256];
-      snprintf(if_match, sizeof(if_match), "If-Match: \"%s\"", etag);
-      headers = curl_slist_append(headers, if_match);
-   }
-   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-   CURLcode cres = curl_easy_perform(curl);
-   curl_slist_free_all(headers);
-
-   if (cres != CURLE_OK) {
-      OLOG_ERROR("caldav: PUT update %s failed: %s", href, curl_easy_strerror(cres));
-      curl_easy_cleanup(curl);
-      curl_buffer_free(&resp);
-      return CALDAV_ERR_NETWORK;
-   }
-
-   long status = 0;
-   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-
-   /* Capture new ETag from response */
-   if (etag_out && etag_len > 0 && etag_cap.etag[0])
-      snprintf(etag_out, etag_len, "%s", etag_cap.etag);
-
-   curl_easy_cleanup(curl);
-   curl_buffer_free(&resp);
-   return http_status_to_error(status);
+   return resource_request("PUT", href, auth, ical_data, etag, false, etag_out, etag_len);
 }
-
-/* ============================================================================
- * Public: caldav_delete_event (DELETE with If-Match: etag)
- * ============================================================================ */
 
 caldav_error_t caldav_delete_event(const char *href, const caldav_auth_t *auth, const char *etag) {
-   curl_buffer_t resp;
-   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
-
-   CURL *curl = caldav_curl_init(auth, &resp);
-   if (!curl) {
-      curl_buffer_free(&resp);
-      return CALDAV_ERR_NETWORK;
-   }
-
-   curl_easy_setopt(curl, CURLOPT_URL, href);
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
-
-   struct curl_slist *headers = NULL;
-   if (etag && etag[0]) {
-      char if_match[256];
-      snprintf(if_match, sizeof(if_match), "If-Match: \"%s\"", etag);
-      headers = curl_slist_append(headers, if_match);
-      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-   }
-
-   CURLcode cres = curl_easy_perform(curl);
-   curl_slist_free_all(headers);
-
-   if (cres != CURLE_OK) {
-      OLOG_ERROR("caldav: DELETE %s failed: %s", href, curl_easy_strerror(cres));
-      curl_easy_cleanup(curl);
-      curl_buffer_free(&resp);
-      return CALDAV_ERR_NETWORK;
-   }
-
-   long status = 0;
-   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-   curl_easy_cleanup(curl);
-   curl_buffer_free(&resp);
-   return http_status_to_error(status);
+   return resource_request("DELETE", href, auth, NULL, etag, false, NULL, 0);
 }
-
 /* ============================================================================
  * Public: caldav_strerror
  * ============================================================================ */
@@ -1646,6 +1430,10 @@ const char *caldav_strerror(caldav_error_t err) {
          return "sync-token invalid/expired (re-baseline)";
       case CALDAV_ERR_TOO_SLOW:
          return "events too slow to read (cached copy kept)";
+      case CALDAV_ERR_RATE_LIMITED:
+         return "rate limited (429)";
+      case CALDAV_ERR_REJECTED:
+         return "request rejected (4xx)";
    }
    return "unknown error";
 }

@@ -140,7 +140,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v102.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v103.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v104.c
-    ${SRC_ROOT}/src/auth/auth_db_migrations_v105.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_calendar.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -1618,6 +1618,8 @@ if(LIBXML2_FOUND AND LIBICAL_FOUND)
    dawn_add_unit_test(test_caldav_parse
       SOURCES test_caldav_parse.c
               ${SRC_ROOT}/src/tools/caldav_client.c
+              ${SRC_ROOT}/src/tools/calendar_ical.c
+              ${SRC_ROOT}/src/tools/calendar_rrule.c
       LIBS    dawn_common unity ${LIBXML2_LIBRARIES} ${LIBICAL_LIBRARIES} ${CURL_LIBRARIES}
       LABEL   ci)
    target_include_directories(test_caldav_parse PRIVATE ${LIBXML2_INCLUDE_DIRS})
@@ -1628,6 +1630,14 @@ endif()
 if(LIBICAL_FOUND)
    dawn_add_unit_test(test_calendar_rrule
       SOURCES test_calendar_rrule.c
+              ${SRC_ROOT}/src/tools/calendar_rrule.c
+      LIBS    dawn_common unity ${LIBICAL_LIBRARIES}
+      LABEL   ci)
+
+   # Reading, building and editing events in place (no server).
+   dawn_add_unit_test(test_calendar_ical
+      SOURCES test_calendar_ical.c
+              ${SRC_ROOT}/src/tools/calendar_ical.c
               ${SRC_ROOT}/src/tools/calendar_rrule.c
       LIBS    dawn_common unity ${LIBICAL_LIBRARIES}
       LABEL   ci)

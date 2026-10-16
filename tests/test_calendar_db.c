@@ -21,6 +21,7 @@
  * Unit tests for calendar_db CRUD operations.
  */
 
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -248,6 +249,38 @@ static void test_event_upsert_create(void) {
    TEST_ASSERT_TRUE(evt_id > 0);
 }
 
+/* An invitation can sit in two of the user's calendars: finding it by UID
+ * says so, and a calendar narrows it to one. */
+static void test_event_find_in_two_calendars(void) {
+   calendar_account_t a = make_account(1, "Acct", "https://x.com");
+   int64_t acct_id = 0;
+   calendar_db_account_create(&a, &acct_id);
+   calendar_calendar_t c1 = make_calendar(acct_id, "/cal/one", "One");
+   calendar_calendar_t c2 = make_calendar(acct_id, "/cal/two", "Two");
+   int64_t id1 = 0, id2 = 0;
+   calendar_db_calendar_create(&c1, &id1);
+   calendar_db_calendar_create(&c2, &id2);
+   calendar_event_t e1 = make_event(id1, "invite@example.com", "In one");
+   calendar_event_t e2 = make_event(id2, "invite@example.com", "In two");
+   int64_t ev = 0;
+   calendar_db_event_upsert(&e1, &ev);
+   calendar_db_event_upsert(&e2, &ev);
+
+   calendar_event_t out = { 0 };
+   int matches = 0;
+   TEST_ASSERT_EQUAL_INT(0, calendar_db_event_find(1, "invite@example.com", 0, &out, &matches));
+   TEST_ASSERT_EQUAL_INT(2, matches);
+   free(out.raw_ical);
+   memset(&out, 0, sizeof(out));
+   TEST_ASSERT_EQUAL_INT(0, calendar_db_event_find(1, "invite@example.com", id2, &out, &matches));
+   TEST_ASSERT_EQUAL_INT(1, matches);
+   TEST_ASSERT_EQUAL_STRING("In two", out.summary);
+   free(out.raw_ical);
+   /* Another user's UID is not found. */
+   TEST_ASSERT_NOT_EQUAL_INT(0, calendar_db_event_find(2, "invite@example.com", 0, &out, &matches));
+   TEST_ASSERT_EQUAL_INT(0, matches);
+}
+
 static void test_event_upsert_update(void) {
    calendar_account_t a = make_account(1, "Acct", "https://x.com");
    int64_t acct_id = 0;
@@ -269,10 +302,12 @@ static void test_event_upsert_update(void) {
    /* INSERT OR REPLACE replaces the row — verify via UID lookup */
    calendar_event_t out;
    memset(&out, 0, sizeof(out));
-   out.calendar_id = 1; /* user_id overload for get_by_uid */
-   TEST_ASSERT_EQUAL_INT(0, calendar_db_event_get_by_uid("uid-upd@example.com", &out));
+   int matches = 0;
+   TEST_ASSERT_EQUAL_INT(0, calendar_db_event_find(1, "uid-upd@example.com", 0, &out, &matches));
+   TEST_ASSERT_EQUAL_INT(1, matches);
    TEST_ASSERT_EQUAL_STRING("Updated", out.summary);
    TEST_ASSERT_EQUAL_STRING("etag2", out.etag);
+   free(out.raw_ical);
 }
 
 /* An event and its occurrences are stored as one: storing again replaces
@@ -307,7 +342,7 @@ static void test_event_store(void) {
    TEST_ASSERT_EQUAL_INT64(1790812800 + 86400, (int64_t)out[0].dtstart);
 }
 
-static void test_v105_forgets_ctags(void) {
+static void test_refetch_forgets_ctags(void) {
    calendar_account_t a = make_account(1, "Acct", "https://x.com");
    int64_t acct_id = 0;
    calendar_db_account_create(&a, &acct_id);
@@ -316,7 +351,7 @@ static void test_v105_forgets_ctags(void) {
    calendar_db_calendar_create(&c, &cal_id);
    calendar_db_calendar_update_ctag(cal_id, "ctag-1");
 
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v105(s_db.db));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_calendar_refetch(s_db.db));
    calendar_calendar_t out;
    TEST_ASSERT_EQUAL_INT(0, calendar_db_calendar_get(cal_id, &out));
    TEST_ASSERT_EQUAL_STRING("", out.ctag);
@@ -386,9 +421,10 @@ int main(void) {
    /* Events */
    RUN_TEST(test_event_upsert_create);
    RUN_TEST(test_event_upsert_update);
+   RUN_TEST(test_event_find_in_two_calendars);
    RUN_TEST(test_event_delete);
    RUN_TEST(test_event_store);
-   RUN_TEST(test_v105_forgets_ctags);
+   RUN_TEST(test_refetch_forgets_ctags);
 
    /* Account flags */
    RUN_TEST(test_account_set_read_only);

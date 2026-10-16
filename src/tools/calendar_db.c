@@ -599,22 +599,26 @@ int calendar_db_event_store(const calendar_event_t *event,
    return result;
 }
 
-int calendar_db_event_get_by_uid(const char *uid, calendar_event_t *out) {
-   /* This query requires user_id — but the header says uid only.
-    * We use a version that joins through to accounts for access control.
-    * Caller must set out->calendar_id to user_id before calling (overloaded). */
+int calendar_db_event_find(int user_id,
+                           const char *uid,
+                           int64_t calendar_id,
+                           calendar_event_t *out,
+                           int *matches_out) {
+   *matches_out = 0;
    AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_evt_get_by_uid;
    sqlite3_reset(st);
    sqlite3_bind_text(st, 1, uid, -1, SQLITE_STATIC);
-   /* Bind user_id from the calendar_id field (overloaded for this call) */
-   sqlite3_bind_int64(st, 2, out->calendar_id);
+   sqlite3_bind_int64(st, 2, user_id);
+   sqlite3_bind_int64(st, 3, calendar_id);
 
    int result = 1;
-   if (sqlite3_step(st) == SQLITE_ROW) {
-      row_to_event(st, out);
-      result = 0;
+   while (sqlite3_step(st) == SQLITE_ROW) {
+      if ((*matches_out)++ == 0) {
+         row_to_event(st, out);
+         result = 0;
+      }
    }
    sqlite3_reset(st);
 

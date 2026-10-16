@@ -1360,7 +1360,8 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "FROM calendar_events e "
      "JOIN calendar_calendars c ON e.calendar_id = c.id "
      "JOIN calendar_accounts a ON c.account_id = a.id "
-     "WHERE e.uid = ? AND a.user_id = ? LIMIT 1",
+     "WHERE e.uid = ?1 AND a.user_id = ?2 AND (?3 = 0 OR e.calendar_id = ?3) "
+     "ORDER BY e.id LIMIT 2",
      &s_db.stmt_cal_evt_get_by_uid },
    { "cal_evt_delete", "DELETE FROM calendar_events WHERE id = ?", &s_db.stmt_cal_evt_delete },
    { "cal_evt_delete_by_cal", "DELETE FROM calendar_events WHERE calendar_id = ?",

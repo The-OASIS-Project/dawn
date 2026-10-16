@@ -16,10 +16,14 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Schema migration v105: forget each calendar's stored ctag, so the next sync
- * fetches every calendar once and re-expands its recurring events (they now
- * repeat in the event's own time zone; cached ones were expanded in UTC and
- * sit an hour off after a daylight-saving change).  No schema change.
+ * Calendar refetch, a migration step with no schema change: forget each
+ * calendar's stored ctag, so the next sync fetches every calendar once and
+ * stores its events again.  Used when the way events are cached changes:
+ *   v105: recurring events repeat in the event's own time zone (cached ones
+ *         were expanded in UTC and sit an hour off after a daylight-saving
+ *         change);
+ *   v106: a series' cancelled dates (EXDATE) and moved instances are applied,
+ *         each instance carries its key, and every event gets its server path.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -30,10 +34,10 @@
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 
-int auth_db_migrations_v105(sqlite3 *db) {
+int auth_db_migrations_calendar_refetch(sqlite3 *db) {
    char *err = NULL;
    if (sqlite3_exec(db, "UPDATE calendar_calendars SET ctag = ''", NULL, NULL, &err) != SQLITE_OK) {
-      OLOG_ERROR("auth_db: v105 calendar refresh failed: %s", err ? err : "unknown");
+      OLOG_ERROR("auth_db: calendar refetch failed: %s", err ? err : "unknown");
       sqlite3_free(err);
       return AUTH_DB_FAILURE;
    }

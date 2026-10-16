@@ -183,7 +183,17 @@ int calendar_db_event_store(const calendar_event_t *event,
                             calendar_occurrence_t *occ,
                             int n,
                             int64_t *id_out);
-int calendar_db_event_get_by_uid(const char *uid, calendar_event_t *out);
+/**
+ * A cached event of @p user_id by UID, in calendar @p calendar_id (0 = any).
+ * @param out          The first match (its raw_ical is heap: free())
+ * @param matches_out  1, or 2 when more than one calendar has it
+ * @return 0 when found
+ */
+int calendar_db_event_find(int user_id,
+                           const char *uid,
+                           int64_t calendar_id,
+                           calendar_event_t *out,
+                           int *matches_out);
 int calendar_db_event_delete(int64_t id);
 int calendar_db_event_delete_by_calendar(int64_t calendar_id);
 
