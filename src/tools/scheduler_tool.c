@@ -40,6 +40,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/tz.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -268,8 +269,8 @@ static char *handle_create(struct json_object *details,
       event.duration_sec = duration_min * 60;
    } else if (fire_at_str) {
       /* Absolute time via ISO 8601 */
-      time_t fire_time = iso8601_parse(fire_at_str);
-      if (fire_time <= 0) {
+      time_t fire_time;
+      if (!tz_parse(fire_at_str, tz_daemon(), &fire_time) || fire_time <= 0) {
          snprintf(result, sizeof(result),
                   TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);
@@ -960,8 +961,8 @@ static char *handle_update(struct json_object *details, int user_id) {
 
    const char *fire_at_str = json_get_string(details, "fire_at");
    if (fire_at_str) {
-      time_t fire_time = iso8601_parse(fire_at_str);
-      if (fire_time <= 0) {
+      time_t fire_time;
+      if (!tz_parse(fire_at_str, tz_daemon(), &fire_time) || fire_time <= 0) {
          snprintf(result, sizeof(result),
                   TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);

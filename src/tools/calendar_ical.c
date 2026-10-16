@@ -33,6 +33,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "core/tz.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/calendar_rrule.h"
@@ -164,7 +165,7 @@ static bool timezone_set_aside(icalcomponent *vtz, calendar_ical_warned_t *warne
    const char *tzid = id ? icalproperty_get_tzid(id) : NULL;
    if (!tzid)
       return true;
-   if (calendar_rrule_zone(tzid))
+   if (tz_lookup(tzid))
       return true;
    if (timezone_is_bounded(vtz))
       return false;
@@ -207,15 +208,9 @@ static bool defines_zone(icalcomponent *root, icalcomponent *vevent, const char 
    return false;
 }
 
-/* The name libical lists for the zone @p zone ("UTC" for UTC). */
-static const char *zone_location(icaltimezone *zone) {
-   const char *name = zone == icaltimezone_get_utc_timezone() ? NULL
-                                                              : icaltimezone_get_location(zone);
-   return name ? name : "UTC";
-}
 
 /* Check every TZID on the dates of @p vevent: one naming neither a zone
- * calendar_rrule_zone resolves nor one the calendar defines is dropped (libical
+ * tz_lookup resolves nor one the calendar defines is dropped (libical
  * would look the name up as a zone file).  With @p rewrite, one naming a zone
  * by an old name is renamed to the current one, so libical resolves it among
  * its own.  Returns whether one was unknown. */
@@ -231,10 +226,10 @@ static bool check_tzids(icalcomponent *root,
          const char *tzid = param ? icalparameter_get_tzid(param) : NULL;
          if (!param)
             continue;
-         icaltimezone *zone = tzid ? calendar_rrule_zone(tzid) : NULL;
+         icaltimezone *zone = tzid ? tz_lookup(tzid) : NULL;
          if (zone) {
-            if (rewrite && strcmp(zone_location(zone), tzid) != 0)
-               icalparameter_set_tzid(param, zone_location(zone));
+            if (rewrite && strcmp(tz_name(zone), tzid) != 0)
+               icalparameter_set_tzid(param, tz_name(zone));
          } else if (!tzid || !defines_zone(root, vevent, tzid)) {
             warn_zone_once(warned, tzid, "unknown zone");
             icalproperty_remove_parameter_by_kind(p, ICAL_TZID_PARAMETER);
@@ -301,9 +296,12 @@ static time_t date_epoch(icaltimetype t, char *date, size_t date_len) {
    return timegm(&tm_date);
 }
 
-/* A timed value as an epoch: converted to UTC components, then timegm(),
- * which (unlike mktime()) the process-wide TZ doesn't affect. */
+/* A timed value as an epoch: in its zone by tz_from_wall's rule (the one the
+ * expansion uses), else as UTC components through timegm(), which (unlike
+ * mktime()) the process-wide TZ doesn't affect. */
 static time_t time_epoch(icaltimetype t) {
+   if (t.zone && t.zone != icaltimezone_get_utc_timezone())
+      return tz_from_wall(t.zone, calendar_rrule_wall(&t));
    icaltimetype utc = icaltime_convert_to_zone(t, icaltimezone_get_utc_timezone());
    struct tm tm_utc = { 0 };
    tm_utc.tm_year = utc.year - 1900;
@@ -328,7 +326,7 @@ static icaltimezone *read_zone(icalcomponent *root, icalproperty *p) {
    const char *tzid = param ? icalparameter_get_tzid(param) : NULL;
    if (!tzid)
       return NULL;
-   icaltimezone *zone = calendar_rrule_zone(tzid);
+   icaltimezone *zone = tz_lookup(tzid);
    return zone ? zone : icalcomponent_get_timezone(root, tzid);
 }
 
@@ -342,7 +340,7 @@ static time_t value_epoch(icalcomponent *root, icalproperty *p, icaltimetype t, 
    if (!icaltime_is_utc(t)) {
       icaltimezone *zone = read_zone(root, p);
       if (zone)
-         t = icaltime_set_timezone(&t, zone);
+         return tz_from_wall(zone, calendar_rrule_wall(&t)); /* the expansion's rule */
    }
    return time_epoch(t);
 }
@@ -486,10 +484,17 @@ bool calendar_ical_read(const char *ical, caldav_event_t *evt, calendar_ical_war
       } else {
          evt->dtstart = time_epoch(dtstart);
          /* The zone it repeats in, when libical has it built in. */
-         icaltimezone *zone = (icaltimezone *)dtstart.zone;
-         const char *name = zone ? icaltimezone_get_location(zone) : NULL;
-         if (name && calendar_rrule_zone(name))
-            snprintf(evt->tzid, sizeof(evt->tzid), "%s", name);
+         icalproperty *p = icalcomponent_get_first_property(vevent, ICAL_DTSTART_PROPERTY);
+         icalparameter *param = p ? icalproperty_get_first_parameter(p, ICAL_TZID_PARAMETER) : NULL;
+         const tz_t *zone = param ? tz_lookup(icalparameter_get_tzid(param)) : NULL;
+         /* A zone the calendar defines under another name ("/mozilla.org/.../
+          * America/New_York") names its IANA zone in X-LIC-LOCATION.  Its
+          * strings are the calendar's, not libical's built-in ones (those are
+          * replaced on load), so reading them here is safe. */
+         if (!zone && dtstart.zone && dtstart.zone != icaltimezone_get_utc_timezone())
+            zone = tz_lookup(icaltimezone_get_location((icaltimezone *)dtstart.zone));
+         if (zone && zone != icaltimezone_get_utc_timezone())
+            snprintf(evt->tzid, sizeof(evt->tzid), "%s", tz_name(zone));
       }
    }
    icaltimetype dtend = icalcomponent_get_dtend(vevent);
@@ -570,11 +575,11 @@ typedef struct {
 
 static when_t zoned_or_utc(const char *tzid) {
    when_t w = { .kind = WHEN_UTC };
-   icaltimezone *zone = calendar_rrule_zone(tzid);
+   icaltimezone *zone = tz_lookup(tzid);
    if (zone && zone != icaltimezone_get_utc_timezone()) {
       w.kind = WHEN_ZONED;
       w.zone = zone;
-      snprintf(w.tzid, sizeof(w.tzid), "%s", zone_location(zone));
+      snprintf(w.tzid, sizeof(w.tzid), "%s", tz_name(zone));
    }
    return w;
 }
@@ -624,7 +629,7 @@ static when_t when_of(icalproperty *p) {
       w.kind = WHEN_UTC;
    } else {
       icalparameter *param = icalproperty_get_first_parameter(p, ICAL_TZID_PARAMETER);
-      icaltimezone *zone = param ? calendar_rrule_zone(icalparameter_get_tzid(param)) : NULL;
+      icaltimezone *zone = param ? tz_lookup(icalparameter_get_tzid(param)) : NULL;
       if (zone) {
          w.kind = WHEN_ZONED;
          w.zone = zone;
@@ -642,7 +647,7 @@ static time_t instant_of(icalproperty *p, const when_t *w) {
       case WHEN_DATE:
          return date_epoch(t, date, sizeof(date));
       case WHEN_ZONED:
-         return icaltime_as_timet_with_zone(t, w->zone);
+         return tz_from_wall(w->zone, calendar_rrule_wall(&t));
       default:
          return icaltime_as_timet(t);
    }
@@ -670,32 +675,11 @@ static void put_instant(icalproperty *p, time_t instant, const when_t *w) {
  * adding a day or an hour lands on the same local time across a
  * daylight-saving change. */
 static time_t wall_of(time_t instant, const when_t *w) {
-   if (w->kind != WHEN_ZONED)
-      return instant;
-   const icaltimetype t = icaltime_from_timet_with_zone(instant, 0, w->zone);
-   struct tm tm = { 0 };
-   tm.tm_year = t.year - 1900;
-   tm.tm_mon = t.month - 1;
-   tm.tm_mday = t.day;
-   tm.tm_hour = t.hour;
-   tm.tm_min = t.minute;
-   tm.tm_sec = t.second;
-   return timegm(&tm);
+   return w->kind == WHEN_ZONED ? tz_wall(w->zone, instant) : instant;
 }
 
 static time_t from_wall(time_t wall, const when_t *w) {
-   if (w->kind != WHEN_ZONED)
-      return wall;
-   struct tm tm;
-   gmtime_r(&wall, &tm);
-   icaltimetype t = icaltime_null_time();
-   t.year = tm.tm_year + 1900;
-   t.month = tm.tm_mon + 1;
-   t.day = tm.tm_mday;
-   t.hour = tm.tm_hour;
-   t.minute = tm.tm_min;
-   t.second = tm.tm_sec;
-   return icaltime_as_timet_with_zone(t, w->zone);
+   return w->kind == WHEN_ZONED ? tz_from_wall(w->zone, wall) : wall;
 }
 
 /* A "YYYY-MM-DD" date's midnight UTC, or 0. */
@@ -894,7 +878,7 @@ static icalproperty *checked_rule(const char *text, const anchor_t *a) {
          }
          local.zone = NULL;
          const time_t until = a->w.kind == WHEN_ZONED
-                                  ? icaltime_as_timet_with_zone(local, a->w.zone)
+                                  ? tz_from_wall(a->w.zone, calendar_rrule_wall(&local))
                                   : icaltime_as_timet(local);
          r.until = icaltime_from_timet_with_zone(until, 0, icaltimezone_get_utc_timezone());
       }
@@ -1230,11 +1214,11 @@ static member_t is_instance(edit_t *e, time_t occ) {
       icalparameter *param = icalproperty_get_first_parameter(p, ICAL_TZID_PARAMETER);
       if (param)
          tzid = icalparameter_get_tzid(param);
-      icaltimezone *zone = tzid ? calendar_rrule_zone(tzid) : NULL;
+      icaltimezone *zone = tzid ? tz_lookup(tzid) : NULL;
       char date[16];
       const time_t at = t.is_date            ? date_epoch(t, date, sizeof(date))
                         : icaltime_is_utc(t) ? icaltime_as_timet(t)
-                        : zone               ? icaltime_as_timet_with_zone(t, zone)
+                        : zone               ? tz_from_wall(zone, calendar_rrule_wall(&t))
                                              : (time_t)-1;
       if (at == (time_t)-1)
          unknown = true;
@@ -1486,7 +1470,7 @@ static calendar_ical_change_t series_times(const edit_t *e, const calendar_ical_
    /* Days and times of day as the user reads them: in their zone, else the
     * event's own. */
    const when_t user = zoned_or_utc(c->user_tzid);
-   const when_t *w = calendar_rrule_zone(c->user_tzid) ? &user : &e->a.w;
+   const when_t *w = tz_lookup(c->user_tzid) ? &user : &e->a.w;
    if (c->set_start && !c->rrule) {
       const time_t wall = wall_of(c->start, w);
       const time_t day = day_of(wall_of(e->a.start, w));

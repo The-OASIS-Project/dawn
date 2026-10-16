@@ -43,6 +43,7 @@
 #include "core/crypto_store.h"
 #include "core/iso8601.h"
 #include "core/path_utils.h"
+#include "core/tz.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
@@ -1582,7 +1583,7 @@ static int write_event(int user_id,
       for (int i = 0; i < change.account_count; i++)
          address_list[i] = addresses[i];
       change.accounts = address_list;
-      change.user_tzid = calendar_rrule_user_tzid(g_config.localization.timezone);
+      change.user_tzid = tz_name(tz_daemon());
    }
    char *written = NULL;
    char etag[128] = "";

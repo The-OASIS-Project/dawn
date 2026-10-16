@@ -417,7 +417,7 @@ typedef struct {
    char persona_description[AUTH_PERSONA_DESC_MAX]; /**< Custom AI persona */
    char persona_mode[AUTH_PERSONA_MODE_MAX];        /**< "append" (default) or "replace" */
    char location[AUTH_LOCATION_MAX];                /**< User's location */
-   char timezone[AUTH_TIMEZONE_MAX];                /**< Timezone (e.g., "America/New_York") */
+   char timezone[AUTH_TIMEZONE_MAX];                /**< IANA zone, or "" for the server's */
    char units[AUTH_UNITS_MAX];                      /**< "metric" or "imperial" */
    char theme[AUTH_THEME_MAX];                      /**< UI color theme */
 } auth_user_settings_t;
@@ -445,16 +445,6 @@ int auth_db_get_user_settings(int user_id, auth_user_settings_t *settings_out);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
 int auth_db_set_user_settings(int user_id, const auth_user_settings_t *settings);
-
-/**
- * @brief Initialize default settings for a new user
- *
- * Called automatically when a user is created.
- *
- * @param user_id User ID
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
- */
-int auth_db_init_user_settings(int user_id);
 
 /* =============================================================================
  * User identity fields (v44)

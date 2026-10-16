@@ -133,7 +133,7 @@ static const char *SCHEMA_SQL =
     "   persona_description TEXT,"
     "   persona_mode TEXT DEFAULT 'append',"
     "   location TEXT,"
-    "   timezone TEXT DEFAULT 'UTC',"
+    "   timezone TEXT DEFAULT '',"
     "   units TEXT DEFAULT 'metric',"
     "   tts_voice_model TEXT,"
     "   tts_length_scale REAL DEFAULT 1.0,"

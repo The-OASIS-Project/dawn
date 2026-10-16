@@ -27,6 +27,7 @@
 #include <time.h>
 
 #include "tools/calendar_ical.h"
+#include "tools/calendar_rrule.h"
 #include "unity.h"
 
 /* America/New_York, as Google sends it. */
@@ -151,6 +152,17 @@ static char *edit(const char *ical, const calendar_ical_change_t *c, calendar_ic
    return u;
 }
 
+/* Records up to three occurrence starts into @p ctx (a time_t[3]). */
+static void collect(time_t start, void *ctx) {
+   time_t *starts = ctx;
+   for (int i = 0; i < 3; i++) {
+      if (!starts[i]) {
+         starts[i] = start;
+         return;
+      }
+   }
+}
+
 static void read_event(const char *ical, caldav_event_t *evt) {
    memset(evt, 0, sizeof(*evt));
    TEST_ASSERT_TRUE(calendar_ical_read(ical, evt, NULL));
@@ -163,6 +175,60 @@ void tearDown(void) {
 }
 
 /* ---- reading ---- */
+
+/* A start a daylight-saving change skips or repeats is read by the rule
+ * cancelled dates and the expansion use, so they keep naming each other: a
+ * skipped 02:30 is 03:30 EDT, a repeated 01:30 the earlier (EDT) one. */
+static void test_read_start_in_dst_change(void) {
+   static const char *gap = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:g@x\r\n"
+                            "DTSTART;TZID=America/New_York:20260308T023000\r\n"
+                            "DTEND;TZID=America/New_York:20260308T033000\r\n"
+                            "RRULE:FREQ=WEEKLY;COUNT=3\r\n"
+                            "EXDATE;TZID=America/New_York:20260308T023000\r\nSUMMARY:a\r\n"
+                            "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   caldav_event_t evt;
+   read_event(gap, &evt);
+   TEST_ASSERT_EQUAL_INT64(1772955000 /* Mar 8 07:30 UTC */, (int64_t)evt.dtstart);
+   TEST_ASSERT_EQUAL_INT(1, evt.exdate_count);
+   TEST_ASSERT_EQUAL_INT64((int64_t)evt.dtstart, (int64_t)evt.exdates[0]);
+   int n = 0;
+   time_t starts[3] = { 0 };
+   TEST_ASSERT_EQUAL_INT(0, calendar_rrule_expand(evt.rrule, evt.dtstart, evt.tzid, false, "", 3600,
+                                                  evt.dtstart, evt.dtstart + 86400, collect, starts,
+                                                  &n));
+   TEST_ASSERT_EQUAL_INT64((int64_t)evt.dtstart, (int64_t)starts[0]);
+   caldav_event_free(&evt);
+
+   static const char *twice = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:t@x\r\n"
+                              "DTSTART;TZID=America/New_York:20261101T013000\r\n"
+                              "DTEND;TZID=America/New_York:20261101T020000\r\n"
+                              "SUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   read_event(twice, &evt);
+   TEST_ASSERT_EQUAL_INT64(1793511000 /* Nov 1 05:30 UTC: 01:30 EDT */, (int64_t)evt.dtstart);
+   caldav_event_free(&evt);
+}
+
+/* A zone the calendar defines under its own name, with its IANA zone in
+ * X-LIC-LOCATION (older Thunderbird), repeats in that zone. */
+static void test_read_x_lic_location_zone(void) {
+   static const char *ical =
+       "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"
+       "BEGIN:VTIMEZONE\r\nTZID:/mozilla.org/20050126_1/America/New_York\r\n"
+       "X-LIC-LOCATION:America/New_York\r\n"
+       "BEGIN:STANDARD\r\nTZOFFSETFROM:-0400\r\nTZOFFSETTO:-0500\r\nTZNAME:EST\r\n"
+       "DTSTART:19701101T020000\r\nRRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU\r\nEND:STANDARD\r\n"
+       "BEGIN:DAYLIGHT\r\nTZOFFSETFROM:-0500\r\nTZOFFSETTO:-0400\r\nTZNAME:EDT\r\n"
+       "DTSTART:19700308T020000\r\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU\r\nEND:DAYLIGHT\r\n"
+       "END:VTIMEZONE\r\n"
+       "BEGIN:VEVENT\r\nUID:m@x\r\n"
+       "DTSTART;TZID=/mozilla.org/20050126_1/America/New_York:20261005T090000\r\n"
+       "DTEND;TZID=/mozilla.org/20050126_1/America/New_York:20261005T100000\r\n"
+       "RRULE:FREQ=WEEKLY\r\nSUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   caldav_event_t evt;
+   read_event(ical, &evt);
+   TEST_ASSERT_EQUAL_STRING("America/New_York", evt.tzid);
+   caldav_event_free(&evt);
+}
 
 static void test_read_cancelled_dates(void) {
    caldav_event_t e;
@@ -1229,6 +1295,8 @@ static void test_instance_keys(void) {
 
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_read_start_in_dst_change);
+   RUN_TEST(test_read_x_lic_location_zone);
    RUN_TEST(test_read_cancelled_dates);
    RUN_TEST(test_read_moved_and_cancelled_instances);
    RUN_TEST(test_read_unsafe_tzid_on_exdate);

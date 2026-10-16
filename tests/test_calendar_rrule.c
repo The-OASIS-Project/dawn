@@ -265,6 +265,19 @@ static void test_hourly_phase_across_dst(void) {
    TEST_ASSERT_EQUAL_INT64(1796090400, (int64_t)s.first); /* Nov 30 21:00 EST */
 }
 
+/* A weekly 02:30 in New York on the morning clocks skip 02:00-03:00 (Mar 8,
+ * 2026) happens at 03:30 EDT (07:30 UTC), as RFC 5545 says; not 01:30. */
+static void test_skipped_time_moves_forward(void) {
+   seen_t s = { 0 };
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, calendar_rrule_expand("FREQ=WEEKLY", 1772350200 /* Mar 1 02:30 EST */,
+                                      "America/New_York", false, "", 3600, 1772841600 /* Mar 7 */,
+                                      1773014400 /* Mar 9 */, record, &s, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(1772955000 /* Mar 8 07:30 UTC */, (int64_t)s.first);
+}
+
 /* A huge duration doesn't move where an open rule starts. */
 static void test_huge_duration_bounded(void) {
    seen_t s = { 0 };
@@ -319,6 +332,7 @@ int main(void) {
    RUN_TEST(test_mixed_alternatives_kept);
    RUN_TEST(test_setpos_counts_seconds);
    RUN_TEST(test_hourly_phase_across_dst);
+   RUN_TEST(test_skipped_time_moves_forward);
    RUN_TEST(test_huge_duration_bounded);
    RUN_TEST(test_occurrence_cap);
    RUN_TEST(test_all_day_yearly);

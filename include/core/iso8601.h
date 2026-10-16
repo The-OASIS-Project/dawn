@@ -27,6 +27,7 @@
 #ifndef ISO8601_H
 #define ISO8601_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -34,25 +35,31 @@
 extern "C" {
 #endif
 
+/** The fields of an ISO 8601 time, as written (no zone applied). */
+typedef struct {
+   int year, month, day; /**< unset for a time alone */
+   int hour, min, sec;
+   bool time_only;  /**< "HH:MM" alone */
+   bool has_offset; /**< "Z" or an offset was given */
+   int offset_sec;  /**< east of UTC, when has_offset */
+} iso8601_fields_t;
+
 /**
- * @brief Parse an ISO 8601 timestamp into a Unix timestamp.
+ * @brief Read an ISO 8601 time's fields, checked for range (years 1-9999;
+ *        Feb 30 and hour 24 are errors, not rolled over).
  *
  * Accepted formats:
- *   - "2026-02-19"                  (date only — midnight local)
- *   - "2026-02-19T15:30:00"         (no timezone — interpreted as local)
- *   - "2026-02-19T15:30:00Z"        (UTC)
- *   - "2026-02-19T15:30:00-05:00"   (explicit offset)
- *   - "15:30" or "07:00"            (time only — today, or tomorrow if past)
+ *   - "2026-02-19"                    (date only; time fields 0)
+ *   - "2026-02-19T15:30[:00[.123]]"   ('T' or a space; fractional seconds skipped)
+ *   - "...Z", "...-05:00", "...+0530" (an offset)
+ *   - "15:30"                         (a time alone)
  *
- * Thread-safe: relies on the process-wide TZ set once at startup from
- * g_config.localization.timezone.  Explicit timezone offsets are parsed
- * arithmetically.
+ * Converting the fields to an instant takes a zone: see tz_parse() in
+ * core/tz.h.
  *
- * @param iso_str Input string.  May be NULL (returns -1).
- * @return Unix timestamp on success, or (time_t)-1 on parse error.
- *         The -1 sentinel mirrors mktime()'s contract.
+ * @return true when @p text is such a time.
  */
-time_t iso8601_parse(const char *iso_str);
+bool iso8601_fields(const char *text, iso8601_fields_t *out);
 
 /**
  * @brief Parse a date-only ISO 8601 string as midnight UTC.
@@ -61,8 +68,8 @@ time_t iso8601_parse(const char *iso_str);
  *   - "YYYY-MM-DD"  — midnight UTC of that date
  *   - "YYYY"        — January 1 midnight UTC of that year
  *
- * Distinct from iso8601_parse() in three ways:
- *   - UTC interpretation only (no local-TZ ambiguity)
+ * Distinct from tz_parse() in three ways:
+ *   - UTC interpretation only (no zone involved)
  *   - Date-only input (no time-of-day, no offsets)
  *   - Returns 0 on parse failure / NULL input — callers treat 0 as
  *     "no bound" (e.g., open-ended valid_to in bitemporal relations)

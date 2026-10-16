@@ -313,15 +313,10 @@ else()
 endif()
 
 # libical: CalDAV calendar event parsing (RFC 5545 iCalendar)
-pkg_check_modules(LIBICAL libical)
-if(LIBICAL_FOUND)
-    include_directories(${LIBICAL_INCLUDE_DIRS})
-    add_definitions(-DHAVE_LIBICAL)
-    message(STATUS "libical: Found (${LIBICAL_VERSION})")
-else()
-    message(WARNING "libical not found - CalDAV calendar integration disabled")
-    message(WARNING "Install with: sudo apt install libical-dev")
-endif()
+# libical: time zones for every user-facing clock time, and CalDAV iCalendar
+pkg_check_modules(LIBICAL REQUIRED libical)
+include_directories(${LIBICAL_INCLUDE_DIRS})
+message(STATUS "libical: Found (${LIBICAL_VERSION})")
 
 # Tool subsystem - compile-time tool configuration
 # Provides options to enable/disable individual tools
@@ -713,6 +708,7 @@ set(DAWN_SOURCES
     src/core/time_query_parser.c
     src/core/market_hours.c
     src/core/iso8601.c
+    src/core/tz.c
     src/core/str_fuzzy.c
     src/core/scheduled_context.c
     third_party/tomlc99/toml.c
@@ -978,6 +974,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v103.c
     src/auth/auth_db_migrations_v104.c
     src/auth/auth_db_migrations_calendar.c
+    src/auth/auth_db_migrations_v107.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
@@ -1306,10 +1303,12 @@ if(LIBZIP_FOUND AND LIBXML2_FOUND)
     message(STATUS "Linking libzip + libxml2 (DOCX extraction)")
 endif()
 
-# Conditionally link CalDAV dependencies (libical + libxml2)
+target_link_libraries(dawn ${LIBICAL_LIBRARIES})
+
+# Conditionally link CalDAV dependencies (libxml2)
 if(DAWN_ENABLE_CALENDAR_TOOL)
-    target_link_libraries(dawn ${LIBICAL_LIBRARIES} ${LIBXML2_LIBRARIES})
-    message(STATUS "Linking libical + libxml2 (CalDAV calendar)")
+    target_link_libraries(dawn ${LIBXML2_LIBRARIES})
+    message(STATUS "Linking libxml2 (CalDAV calendar)")
 endif()
 
 # GMime + GLib/GObject: the email tool's message reader

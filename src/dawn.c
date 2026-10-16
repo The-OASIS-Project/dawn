@@ -70,6 +70,7 @@
 #include "core/embedding_engine.h"
 #include "core/endpointer.h"
 #include "core/prompt_builder.h"
+#include "core/tz.h"
 #ifdef ENABLE_WEBUI
 #include "core/job_manager.h" /* jobs run only with the WebUI (their delivery) */
 #include "core/job_reinvoke.h"
@@ -1801,6 +1802,7 @@ int main(int argc, char *argv[]) {
       tzset();
       OLOG_INFO("Timezone set to %s", g_config.localization.timezone);
    }
+   tz_daemon_init(g_config.localization.timezone);
 
    // Step 3: Load secrets file (search default locations)
    config_load_secrets_from_search(&g_secrets);

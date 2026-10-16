@@ -35,6 +35,7 @@
 #include "core/iso8601.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/tz.h"
 #include "logging.h"
 #include "tools/calendar_pick.h"
 #include "tools/calendar_rrule.h"
@@ -294,8 +295,8 @@ static char *handle_range(struct json_object *details, int user_id) {
       return strdup("Error: 'start' is required for range query (ISO 8601 datetime)");
    }
 
-   time_t start = iso8601_parse(start_str);
-   if (start == (time_t)-1)
+   time_t start;
+   if (!tz_parse(start_str, tz_daemon(), &start))
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
                     "'2026-05-27T14:00:00' (local time), '2026-05-27T14:00:00Z' (UTC), or "
@@ -303,8 +304,7 @@ static char *handle_range(struct json_object *details, int user_id) {
 
    time_t end;
    if (end_str) {
-      end = iso8601_parse(end_str);
-      if (end == (time_t)-1)
+      if (!tz_parse(end_str, tz_daemon(), &end))
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
                        "'2026-05-27T15:00:00' (local time) or '2026-05-27T15:00:00Z' (UTC).");
@@ -410,15 +410,15 @@ static bool real_date(const char *text) {
    return d >= 1 && d <= (m == 2 && !leap ? 28 : days[m - 1]);
 }
 
-/* A time argument: @p epoch_out as iso8601_parse reads it (local without an
+/* A time argument: @p epoch_out as tz_parse reads it (in the zone without an
  * offset), and @p date_out its date when it starts with one ("" otherwise),
  * for an all-day event.  False when it can't be read. */
 static bool parse_when(const char *text, time_t *epoch_out, char *date_out, size_t date_len) {
    date_out[0] = '\0';
    if (strlen(text) >= 10 && text[4] == '-' && text[7] == '-' && !real_date(text))
       return false;
-   const time_t t = iso8601_parse(text);
-   if (t == (time_t)-1)
+   time_t t;
+   if (!tz_parse(text, tz_daemon(), &t))
       return false;
    *epoch_out = t;
    if (strlen(text) >= 10 && text[4] == '-' && text[7] == '-')
@@ -442,8 +442,8 @@ static time_t parse_occurrence(const char *text) {
       return 0;
    if (strlen(text) == 10)
       return (time_t)iso8601_parse_date_utc(text);
-   const time_t t = iso8601_parse(text);
-   return t == (time_t)-1 ? 0 : t;
+   time_t t;
+   return tz_parse(text, tz_daemon(), &t) ? t : 0;
 }
 
 /* "reminder_minutes": minutes before the start; -1 when not given, null, "",
@@ -561,7 +561,7 @@ static char *handle_add(struct json_object *details, int user_id) {
                              .location = json_get_str(details, "location"),
                              .description = json_get_str(details, "description"),
                              .all_day = json_get_bool(details, "all_day", false),
-                             .tzid = calendar_rrule_user_tzid(g_config.localization.timezone),
+                             .tzid = tz_name(tz_daemon()),
                              .rrule = json_get_str(details, "rrule"),
                              .reminder_minutes = json_get_reminder(details) };
    char start_date[16], end_date[16];

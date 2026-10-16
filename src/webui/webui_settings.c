@@ -30,6 +30,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "core/tz.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
 #include "logging.h"
@@ -67,6 +68,8 @@ void handle_get_my_settings(ws_connection_t *conn) {
                              json_object_new_string(settings.persona_mode));
       json_object_object_add(resp_payload, "location", json_object_new_string(settings.location));
       json_object_object_add(resp_payload, "timezone", json_object_new_string(settings.timezone));
+      json_object_object_add(resp_payload, "server_timezone",
+                             json_object_new_string(tz_name(tz_daemon())));
       json_object_object_add(resp_payload, "units", json_object_new_string(settings.units));
       json_object_object_add(resp_payload, "theme", json_object_new_string(settings.theme));
 
@@ -126,7 +129,24 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    }
 
    if (json_object_object_get_ex(payload, "timezone", &field_obj)) {
-      safe_strscpy(settings.timezone, json_object_get_string(field_obj));
+      /* "" is the server's zone; anything else must be a zone (stored by its
+       * current name: "Asia/Calcutta" is kept as "Asia/Kolkata"). */
+      const char *tz = json_object_get_string(field_obj);
+      const tz_t *zone = tz && tz[0] ? tz_lookup(tz) : NULL;
+      if (tz && !tz[0]) {
+         settings.timezone[0] = '\0';
+      } else if (zone) {
+         safe_strscpy(settings.timezone, tz_name(zone));
+      } else {
+         /* Nothing is saved: the user hears why, not "saved". */
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+         json_object_object_add(resp_payload, "error",
+                                json_object_new_string("That time zone isn't one DAWN knows"));
+         json_object_object_add(response, "payload", resp_payload);
+         send_json_response(conn, response);
+         json_object_put(response);
+         return;
+      }
    }
 
    if (json_object_object_get_ex(payload, "units", &field_obj)) {
