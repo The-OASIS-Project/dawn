@@ -310,28 +310,153 @@ static void test_empty_rule_refused(void) {
    TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_BAD_RULE, rc);
 }
 
-/* A rule on weekdays doesn't follow its start to another day: moving the
- * series there needs the new rule too. */
-static void test_move_to_another_weekday(void) {
+/* On a repeating series, a start names a time of day: its date (often
+ * today's) isn't a new first date, so the series and its cancelled dates stay
+ * on their days.  A new rule with the start moves the days. */
+static void test_series_start_is_time_of_day(void) {
    calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
    c.set_start = true;
-   c.start = utc(2026, 10, 7, 21, 30); /* Wednesday 17:30; the series is Tue-Thu */
+   c.start = utc(2026, 10, 15, 22, 30); /* "today" at 18:30 New York */
    calendar_ical_rc_t rc;
-   TEST_ASSERT_NULL(edit(PRE, &c, &rc));
-   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_BAD_RULE, rc);
-
-   c.rrule = "FREQ=WEEKLY;BYDAY=WE,TH,FR;UNTIL=20261017T035959Z";
    char *out = edit(PRE, &c, &rc);
    TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=America/New_York:20261001T183000"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "EXDATE;TZID=America/New_York:20261006T183000"));
+   free(out);
+
+   c.start = utc(2026, 10, 7, 21, 30); /* Wednesday, with its new rule */
+   c.rrule = "FREQ=WEEKLY;BYDAY=WE,TH,FR;UNTIL=20261017T035959Z";
+   out = edit(PRE, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=America/New_York:20261007T173000"));
    TEST_ASSERT_NOT_NULL(strstr(out, "BYDAY=WE,TH,FR"));
    free(out);
 }
 
-/* Moving a series past its own UNTIL would leave nothing: refused. */
+/* A new end on a series is a time of day: with a new rule and today's date it
+ * still ends the same day (not two weeks later); a multi-day event keeps its
+ * days. */
+static void test_series_end_is_time_of_day(void) {
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.rrule = "FREQ=WEEKLY;BYDAY=TU,WE,TH;UNTIL=20261016T035959Z";
+   c.set_end = true;
+   c.end = utc(2026, 10, 15, 23, 0); /* "today" at 19:00 New York */
+   calendar_ical_rc_t rc;
+   char *out = edit(PRE, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND;TZID=America/New_York:20261001T190000"));
+   free(out);
+
+   static const char *weekend = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:w@x\r\n"
+                                "DTSTART:20261016T220000Z\r\nDTEND:20261018T220000Z\r\n"
+                                "RRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:a\r\n"
+                                "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t e = CALENDAR_ICAL_CHANGE_INIT;
+   e.set_end = true;
+   e.end = utc(2026, 10, 18, 23, 0);
+   e.user_tzid = "UTC"; /* keep it in UTC for an exact check */
+   out = edit(weekend, &e, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND:20261018T230000Z"));
+   free(out);
+}
+
+/* An event crossing midnight by its hours moved to an evening ends that
+ * evening (its length had no whole day); one more than a day long keeps it. */
+static void test_series_overnight_moves(void) {
+   static const char *late = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:n@x\r\n"
+                             "DTSTART:20261016T230000Z\r\nDTEND:20261017T010000Z\r\n"
+                             "RRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:a\r\n"
+                             "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = c.set_end = true;
+   c.start = utc(2026, 10, 15, 20, 0);
+   c.end = utc(2026, 10, 15, 22, 0);
+   c.user_tzid = "UTC";
+   calendar_ical_rc_t rc;
+   char *out = edit(late, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART:20261016T200000Z"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND:20261016T220000Z"));
+   free(out);
+
+   static const char *long_night = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
+                                   "UID:l@x\r\nDTSTART:20261016T220000Z\r\n"
+                                   "DTEND:20261018T010000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\n"
+                                   "SUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t d = CALENDAR_ICAL_CHANGE_INIT;
+   d.set_start = d.set_end = true;
+   d.start = utc(2026, 10, 15, 22, 30);
+   d.end = utc(2026, 10, 15, 1, 0);
+   d.user_tzid = "UTC";
+   out = edit(long_night, &d, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART:20261016T223000Z"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND:20261018T010000Z"));
+   free(out);
+}
+
+/* A new time of day keeps the series on the day the user sees it: a UTC
+ * series at 6 pm New York moved to 8:30 pm (past UTC midnight) stays on its
+ * Friday; one written in London moved to 9 pm New York lands on the London
+ * day that is that Friday evening in New York. */
+static void test_series_time_on_users_day(void) {
+   static const char *utc_series = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
+                                   "UID:u@x\r\nDTSTART:20261016T220000Z\r\n"
+                                   "DTEND:20261016T230000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\n"
+                                   "SUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = c.set_end = true;
+   c.start = utc(2026, 10, 17, 0, 30);
+   c.end = utc(2026, 10, 17, 1, 30);
+   c.user_tzid = "America/New_York";
+   calendar_ical_rc_t rc;
+   char *out = edit(utc_series, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=America/New_York:20261016T203000"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND;TZID=America/New_York:20261016T213000"));
+   free(out);
+
+   static const char *london = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:l@x\r\n"
+                               "DTSTART;TZID=Europe/London:20261016T100000\r\n"
+                               "DTEND;TZID=Europe/London:20261016T110000\r\n"
+                               "RRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:a\r\n"
+                               "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t d = CALENDAR_ICAL_CHANGE_INIT;
+   d.set_start = d.set_end = true;
+   d.start = utc(2026, 10, 1, 1, 0); /* 9 pm New York, another date */
+   d.end = utc(2026, 10, 1, 2, 0);
+   d.user_tzid = "America/New_York";
+   out = edit(london, &d, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=Europe/London:20261017T020000"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND;TZID=Europe/London:20261017T030000"));
+   free(out);
+}
+
+/* "Make it 2 pm" on a series still written in UTC means 2 pm local, all year:
+ * the series moves to the user's zone first. */
+static void test_utc_series_time_is_local(void) {
+   static const char *ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u@x\r\n"
+                             "DTSTART:20260706T140000Z\r\nDTEND:20260706T150000Z\r\n"
+                             "RRULE:FREQ=WEEKLY\r\nSUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = true;
+   c.start = utc(2026, 10, 15, 18, 0); /* 14:00 New York */
+   c.user_tzid = "America/New_York";
+   calendar_ical_rc_t rc;
+   char *out = edit(ical, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=America/New_York:20260706T140000"));
+   free(out);
+}
+
+/* A new first date past the new rule's own end would leave nothing: refused. */
 static void test_move_past_end_refused(void) {
    calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
    c.set_start = true;
-   c.start = utc(2026, 11, 2, 22, 30); /* a Monday after the UNTIL, same weekday set */
+   c.start = utc(2026, 11, 2, 22, 30);
+   c.rrule = "FREQ=WEEKLY;BYDAY=MO;UNTIL=20261101";
    calendar_ical_rc_t rc;
    TEST_ASSERT_NULL(edit(TECH, &c, &rc));
    TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_BAD_RULE, rc);
@@ -438,6 +563,9 @@ static void test_all_day_retitled_instance_moves(void) {
    c.set_start = true;
    c.start_date = "2026-10-20";
    calendar_ical_rc_t rc;
+   TEST_ASSERT_NULL(edit(ical, &c, &rc)); /* an all-day series' days are its rule */
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_BAD_RULE, rc);
+   c.rrule = "FREQ=WEEKLY;COUNT=4";
    char *out = edit(ical, &c, &rc);
    TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
    TEST_ASSERT_NOT_NULL(strstr(out, "RECURRENCE-ID;VALUE=DATE:20261027"));
@@ -560,6 +688,52 @@ static void test_many_unknown_zones(void) {
       caldav_event_free(&e);
    }
    TEST_ASSERT_EQUAL_INT(9, warned.count);
+}
+
+/* A moved instance is dropped only when the new rule provably lacks it: kept
+ * when its date is an extra date (RDATE), or when the rule can't be expanded
+ * far enough to tell. */
+static void test_rule_change_keeps_unproven_overrides(void) {
+   static const char *rdate =
+       "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:rd@x\r\n"
+       "DTSTART:20261019T090000Z\r\nRRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4\r\n"
+       "RDATE:20261021T090000Z\r\nSUMMARY:a\r\nEND:VEVENT\r\n"
+       "BEGIN:VEVENT\r\nUID:rd@x\r\nRECURRENCE-ID:20261021T090000Z\r\n"
+       "DTSTART:20261021T110000Z\r\nSUMMARY:moved\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.rrule = "FREQ=WEEKLY;BYDAY=MO;COUNT=8";
+   calendar_ical_rc_t rc;
+   char *out = edit(rdate, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_EQUAL_INT(2, count_of(out, "BEGIN:VEVENT"));
+   free(out);
+
+   static const char *old_count =
+       "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:oc@x\r\n"
+       "DTSTART:19900101T090000Z\r\nRRULE:FREQ=DAILY;COUNT=20000\r\nSUMMARY:a\r\nEND:VEVENT\r\n"
+       "BEGIN:VEVENT\r\nUID:oc@x\r\nRECURRENCE-ID:20261019T090000Z\r\n"
+       "DTSTART:20261019T100000Z\r\nSUMMARY:moved\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   c.rrule = "FREQ=DAILY;COUNT=19000";
+   out = edit(old_count, &c, &rc); /* 2026 is past the expansion's step cap */
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_EQUAL_INT(2, count_of(out, "BEGIN:VEVENT"));
+   free(out);
+}
+
+/* An extra date that can't be compared (a period) doesn't make the rule's own
+ * instances uneditable. */
+static void test_period_rdate_does_not_block(void) {
+   static const char *ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:p@x\r\n"
+                             "DTSTART:20261019T090000Z\r\nRRULE:FREQ=DAILY;COUNT=5\r\n"
+                             "RDATE;VALUE=PERIOD:20261030T090000Z/PT1H\r\nSUMMARY:a\r\n"
+                             "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.occurrence = utc(2026, 10, 20, 9, 0);
+   c.cancel = true;
+   calendar_ical_rc_t rc;
+   char *out = edit(ical, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   free(out);
 }
 
 static void test_zone_alias_not_looked_up(void) {
@@ -716,13 +890,21 @@ static void test_not_an_instance(void) {
 
 /* ---- refusals ---- */
 
+/* Point @p c at one account address. */
+static void set_account(calendar_ical_change_t *c, const char **slot, const char *address) {
+   *slot = address;
+   c->accounts = slot;
+   c->account_count = 1;
+}
+
 static void test_guest_copy_reminder_only(void) {
+   const char *slot = NULL;
    static const char *ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:g@x\r\n"
                              "DTSTART:20261019T213000Z\r\nSUMMARY:Their meeting\r\n"
                              "ORGANIZER;CN=Other:mailto:other@example.com\r\n"
                              "ATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
    calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
-   c.account = "me@example.com";
+   set_account(&c, &slot, "me@example.com");
    c.summary = "Mine now";
    calendar_ical_rc_t rc;
    TEST_ASSERT_NULL(edit(ical, &c, &rc));
@@ -730,7 +912,7 @@ static void test_guest_copy_reminder_only(void) {
 
    /* A reminder with the other fields left "" is still just a reminder. */
    calendar_ical_change_t blank = CALENDAR_ICAL_CHANGE_INIT;
-   blank.account = "me@example.com";
+   set_account(&blank, &slot, "me@example.com");
    blank.summary = "";
    blank.reminder_minutes = 10;
    char *b = edit(ical, &blank, &rc);
@@ -738,24 +920,46 @@ static void test_guest_copy_reminder_only(void) {
    free(b);
 
    calendar_ical_change_t r = CALENDAR_ICAL_CHANGE_INIT;
-   r.account = "Me@Example.com";
+   set_account(&r, &slot, "Me@Example.com");
    r.reminder_minutes = 15;
    char *out = edit(ical, &r, &rc);
    TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
    free(out);
 
    /* The organizer's own copy is theirs to change. */
-   c.account = "other@example.com";
+   set_account(&c, &slot, "other@example.com");
    out = edit(ical, &c, &rc);
    TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
    free(out);
 
    /* Another organizer without the account among the attendees (a shared
     * calendar's own event) isn't a guest copy. */
-   c.account = "third@example.com";
+   set_account(&c, &slot, "third@example.com");
    out = edit(ical, &c, &rc);
    TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
    free(out);
+}
+
+/* A login isn't an invitation address: with the account's address set, a
+ * username-login account still recognizes its copy of someone's invitation. */
+static void test_guest_by_address_set(void) {
+   static const char *ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a@x\r\n"
+                             "DTSTART:20261019T213000Z\r\nSUMMARY:Their meeting\r\n"
+                             "ORGANIZER:mailto:bob@example.com\r\n"
+                             "ATTENDEE:mailto:alice@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   static const char *const login_only[] = { "alice" };
+   static const char *const with_set[] = { "alice", "alice@example.com", "a@example.com" };
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.summary = "Mine now";
+   c.accounts = login_only;
+   c.account_count = 1;
+   calendar_ical_rc_t rc;
+   char *out = edit(ical, &c, &rc); /* the login alone can't tell */
+   free(out);
+   c.accounts = with_set;
+   c.account_count = 3;
+   TEST_ASSERT_NULL(edit(ical, &c, &rc));
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_GUEST, rc);
 }
 
 static void test_unknown_zone_times_refused(void) {
@@ -864,7 +1068,11 @@ int main(void) {
    RUN_TEST(test_move_series_shifts_exceptions);
    RUN_TEST(test_rule_on_utc_event_reanchors);
    RUN_TEST(test_empty_rule_refused);
-   RUN_TEST(test_move_to_another_weekday);
+   RUN_TEST(test_series_start_is_time_of_day);
+   RUN_TEST(test_series_end_is_time_of_day);
+   RUN_TEST(test_series_overnight_moves);
+   RUN_TEST(test_series_time_on_users_day);
+   RUN_TEST(test_utc_series_time_is_local);
    RUN_TEST(test_move_past_end_refused);
    RUN_TEST(test_retitled_instance_moves_with_series);
    RUN_TEST(test_reanchor_moves_exceptions);
@@ -874,6 +1082,8 @@ int main(void) {
    RUN_TEST(test_impossible_date_refused);
    RUN_TEST(test_range_override_refused);
    RUN_TEST(test_many_unknown_zones);
+   RUN_TEST(test_rule_change_keeps_unproven_overrides);
+   RUN_TEST(test_period_rdate_does_not_block);
    RUN_TEST(test_empty_values);
    RUN_TEST(test_has_uid);
    RUN_TEST(test_utc_and_old_zone_names);
@@ -887,6 +1097,7 @@ int main(void) {
    RUN_TEST(test_cancel_one_instance);
    RUN_TEST(test_not_an_instance);
    RUN_TEST(test_guest_copy_reminder_only);
+   RUN_TEST(test_guest_by_address_set);
    RUN_TEST(test_unknown_zone_times_refused);
    RUN_TEST(test_text_without_control_characters);
    RUN_TEST(test_build_timed_in_zone);

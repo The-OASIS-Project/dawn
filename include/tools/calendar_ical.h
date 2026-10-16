@@ -153,10 +153,11 @@ typedef struct {
    const char *rrule;    /**< the series' new rule (to end it, one with UNTIL); NULL = unchanged */
    int reminder_minutes; /**< -1 = unchanged */
    bool remove_reminders;
-   time_t occurrence;     /**< 0 = the series; else the instance's original start
-                           *   (all-day: midnight UTC of its date) */
-   bool cancel;           /**< with @p occurrence: cancel that instance */
-   const char *account;   /**< set by calendar_service: the account's address */
+   time_t occurrence;           /**< 0 = the series; else the instance's original start
+                                 *   (all-day: midnight UTC of its date) */
+   bool cancel;                 /**< with @p occurrence: cancel that instance */
+   const char *const *accounts; /**< set by calendar_service: the account's addresses */
+   int account_count;
    const char *user_tzid; /**< set by calendar_service: zone a UTC event moves to with a rule */
 } calendar_ical_change_t;
 
@@ -172,8 +173,14 @@ typedef struct {
  * is the user's copy of someone else's invitation and the change isn't a
  * reminder, when a change to its times meets a zone DAWN can't resolve, and
  * when its start moves to another day under a rule pinned to days (weekdays,
- * dates) without a new rule.  Moving a series moves its cancelled and moved
- * instances with it.
+ * dates) without a new rule, and when it is an override governing a range of
+ * instances.  On a repeating timed series, start changes its time of day
+ * (its date is ignored unless a new rule is given) and end its time of day,
+ * keeping the event as many whole days long; an all-day series' dates change
+ * only with a new rule.  Moving a series moves its
+ * cancelled and moved instances with it; a new title, place or notes reaches
+ * moved instances that still had the old one; a new rule drops the moved
+ * instances it no longer has.
  *
  * @param out Receives the text (free()), or NULL on failure
  */

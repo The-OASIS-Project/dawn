@@ -37,6 +37,7 @@
 #include "core/strbuf.h"
 #include "logging.h"
 #include "tools/calendar_pick.h"
+#include "tools/calendar_rrule.h"
 #include "tools/calendar_service.h"
 #include "tools/oauth_client.h"
 #include "tools/tool_registry.h"
@@ -70,11 +71,22 @@ static const char *json_get_str(struct json_object *obj, const char *key) {
    return s && s[0] ? s : NULL;
 }
 
+/* @p key as a bool: true/false, 1/0, or the strings "true"/"false" (json-c
+ * reads any other non-empty string, "false" included, as true); else @p def. */
 static bool json_get_bool(struct json_object *obj, const char *key, bool def) {
    struct json_object *val = NULL;
-   if (!json_object_object_get_ex(obj, key, &val))
+   if (!json_object_object_get_ex(obj, key, &val) || !val)
       return def;
-   return json_object_get_boolean(val);
+   if (json_object_is_type(val, json_type_boolean) || json_object_is_type(val, json_type_int))
+      return json_object_get_boolean(val);
+   if (json_object_is_type(val, json_type_string)) {
+      const char *s = json_object_get_string(val);
+      if (strcasecmp(s, "true") == 0)
+         return true;
+      if (strcasecmp(s, "false") == 0)
+         return false;
+   }
+   return def;
 }
 
 /* =============================================================================
@@ -434,15 +446,32 @@ static time_t parse_occurrence(const char *text) {
    return t == (time_t)-1 ? 0 : t;
 }
 
-/* "reminder_minutes": minutes before the start, or -1 when not given. */
+/* "reminder_minutes": minutes before the start; -1 when not given, null, "",
+ * false or "none"/"off"/"no"; a value past the maximum (refused later) when
+ * it isn't a whole number. */
 static int json_get_reminder(struct json_object *obj) {
    struct json_object *val = NULL;
    if (!json_object_object_get_ex(obj, "reminder_minutes", &val) || !val ||
        json_object_is_type(val, json_type_null) ||
-       (json_object_is_type(val, json_type_string) && !json_object_get_string(val)[0]))
+       (json_object_is_type(val, json_type_boolean) && !json_object_get_boolean(val)))
       return -1;
-   const int n = json_object_get_int(val);
-   return n < 0 ? CALENDAR_ICAL_MAX_REMINDER_MIN + 1 : n; /* refused below */
+   long n = -1;
+   if (json_object_is_type(val, json_type_int)) {
+      n = (long)json_object_get_int64(val);
+   } else if (json_object_is_type(val, json_type_double)) {
+      const double d = json_object_get_double(val);
+      n = d >= 0 && d <= CALENDAR_ICAL_MAX_REMINDER_MIN && d == (double)(long)d ? (long)d : -1;
+   } else if (json_object_is_type(val, json_type_string)) {
+      const char *s = json_object_get_string(val);
+      if (!s[0] || strcasecmp(s, "none") == 0 || strcasecmp(s, "off") == 0 ||
+          strcasecmp(s, "no") == 0 || strcasecmp(s, "false") == 0 || strcasecmp(s, "null") == 0)
+         return -1;
+      char *endp = NULL;
+      n = strtol(s, &endp, 10);
+      if (endp == s || *endp)
+         n = -1;
+   }
+   return n < 0 || n > CALENDAR_ICAL_MAX_REMINDER_MIN ? CALENDAR_ICAL_MAX_REMINDER_MIN + 1 : (int)n;
 }
 
 /* What to tell the model when a change didn't go through. */
@@ -486,13 +515,14 @@ static char *write_error(int rc, const char *verb) {
          break;
       case CALENDAR_RC_BAD_RULE:
          why = "the repeat rule is invalid, never occurs, uses COUNT with UNTIL, or is more "
-               "frequent than hourly; or the change moves a series to another day without its "
-               "new rule, or past its own end ('rrule' applies to the whole series, not one "
-               "occurrence).";
+               "frequent than hourly; or the change moves a series to other days without its "
+               "new rule (an all-day series' dates, or a start under a rule pinned to "
+               "weekdays or dates), or past its own end ('rrule' applies to the whole series, "
+               "not one occurrence).";
          break;
       case CALENDAR_RC_NOT_OCCURRENCE:
-         why = "that event doesn't repeat at that time; 'occurrence' must be the value shown "
-               "after 'occurrence:' on one of its rows.";
+         why = "that event doesn't repeat at that time, or that can't be confirmed; "
+               "'occurrence' must be the value shown after 'occurrence:' on one of its rows.";
          break;
       case CALENDAR_RC_GUEST:
          why = "the user is a guest on this event (someone else organizes it), so only its "
@@ -531,7 +561,7 @@ static char *handle_add(struct json_object *details, int user_id) {
                              .location = json_get_str(details, "location"),
                              .description = json_get_str(details, "description"),
                              .all_day = json_get_bool(details, "all_day", false),
-                             .tzid = g_config.localization.timezone,
+                             .tzid = calendar_rrule_user_tzid(g_config.localization.timezone),
                              .rrule = json_get_str(details, "rrule"),
                              .reminder_minutes = json_get_reminder(details) };
    char start_date[16], end_date[16];
@@ -663,13 +693,16 @@ static char *handle_update(struct json_object *details, int user_id) {
    if (c.set_start || c.set_end)
       n += snprintf(msg + n, 640 - n, " moved;");
    if (c.rrule)
-      n += snprintf(msg + n, 640 - n, " repeats %.200s;", c.rrule);
+      n += snprintf(msg + n, 640 - n,
+                    " repeats %.200s (moved occurrences outside it may be removed);", c.rrule);
    if (c.remove_reminders)
       n += snprintf(msg + n, 640 - n, " reminders removed;");
    else if (c.reminder_minutes >= 0)
       n += snprintf(msg + n, 640 - n, " reminder %d min before;", c.reminder_minutes);
    if ((c.location && c.location[0]) || (c.description && c.description[0]))
       n += snprintf(msg + n, 640 - n, " details changed;");
+   if (!c.occurrence && !c.rrule && (c.set_start || c.set_end))
+      n += snprintf(msg + n, 640 - n, " (for a repeating event, its time of day);");
    snprintf(msg + n, 640 - n, " nothing else about it changed%s.",
             c.occurrence ? " (the rest of the series is as it was)" : "");
    return msg;
@@ -813,7 +846,9 @@ static const treg_param_t calendar_params[] = {
            "reminder_minutes, remove_reminders (bool), occurrence — only the fields given "
            "are changed}.  Without 'occurrence', a repeating event's whole series changes; "
            "with it (the value after 'occurrence:' on a row marked [repeats]), only that one "
-           "instance does.  Moving a series' start to another day needs its new rrule too.\n"
+           "instance does.  On a repeating series, start/end change its time of day (an end "
+           "keeps the event's length in days); to change its days, give its new rrule, with "
+           "the new first date in start.\n"
            "For 'delete': {uid (required), calendar?, occurrence?}.  Without 'occurrence' it "
            "deletes the event, every occurrence of a repeating one; with it, it cancels only "
            "that occurrence.\n"

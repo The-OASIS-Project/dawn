@@ -1221,13 +1221,74 @@ static pthread_mutex_t *write_lock(int64_t account_id) {
    return &s_write_mutex[(uint64_t)account_id % CALENDAR_WRITE_LOCKS];
 }
 
-/* The address an account's calendars name it by (an event's ORGANIZER). */
-static const char *account_address(const calendar_account_t *acct) {
-   if (acct->username[0])
-      return acct->username;
-   if (acct->oauth_account_key[0])
-      return acct->oauth_account_key;
-   return acct->name;
+/* The addresses each account is invited by (RFC 6638), read once per account
+ * and principal (an account edited to another principal is read again); an
+ * account whose server doesn't answer is asked again on its next write. */
+static struct {
+   pthread_mutex_t mutex;
+   struct {
+      int64_t account_id;
+      char principal[sizeof(((calendar_account_t *)0)->principal_url)];
+      int count;
+      char addrs[CALDAV_MAX_USER_ADDRESSES][CALDAV_USER_ADDRESS_LEN];
+   } slots[CALENDAR_MAX_ACCOUNTS];
+   int used;
+} s_addresses = { .mutex = PTHREAD_MUTEX_INITIALIZER };
+
+/* The addresses invitations may name @p acct by, into @p out: its login (an
+ * email for OAuth and most accounts) and the server's address set, which
+ * covers a username login ("alice" invited as alice@example.com) and aliases.
+ * Returns how many. */
+static int account_addresses(const calendar_account_t *acct,
+                             const caldav_auth_t *auth,
+                             char (*out)[CALDAV_USER_ADDRESS_LEN],
+                             int max) {
+   const char *login = acct->username[0]            ? acct->username
+                       : acct->oauth_account_key[0] ? acct->oauth_account_key
+                                                    : acct->name;
+   int n = 0;
+   snprintf(out[n++], CALDAV_USER_ADDRESS_LEN, "%s", login);
+
+   pthread_mutex_lock(&s_addresses.mutex);
+   int slot = -1;
+   for (int i = 0; i < s_addresses.used && slot < 0; i++) {
+      if (s_addresses.slots[i].account_id == acct->id &&
+          strcmp(s_addresses.slots[i].principal, acct->principal_url) == 0)
+         slot = i;
+   }
+   if (slot >= 0) {
+      for (int i = 0; i < s_addresses.slots[slot].count && n < max; i++)
+         memcpy(out[n++], s_addresses.slots[slot].addrs[i], CALDAV_USER_ADDRESS_LEN);
+   }
+   pthread_mutex_unlock(&s_addresses.mutex);
+   if (slot >= 0 || !acct->principal_url[0])
+      return n;
+
+   char found[CALDAV_MAX_USER_ADDRESSES][CALDAV_USER_ADDRESS_LEN];
+   int count = 0;
+   if (caldav_get_user_addresses(acct->principal_url, auth, found, CALDAV_MAX_USER_ADDRESSES,
+                                 &count) != CALDAV_OK)
+      return n;
+   pthread_mutex_lock(&s_addresses.mutex);
+   /* The account's slot (another write may have filled it meanwhile, or it
+    * holds an old principal's addresses), else a new one. */
+   for (int i = 0; i < s_addresses.used && slot < 0; i++) {
+      if (s_addresses.slots[i].account_id == acct->id)
+         slot = i;
+   }
+   if (slot < 0 && s_addresses.used < CALENDAR_MAX_ACCOUNTS)
+      slot = s_addresses.used++;
+   if (slot >= 0) {
+      s_addresses.slots[slot].account_id = acct->id;
+      snprintf(s_addresses.slots[slot].principal, sizeof(s_addresses.slots[slot].principal), "%s",
+               acct->principal_url);
+      s_addresses.slots[slot].count = count;
+      memcpy(s_addresses.slots[slot].addrs, found, sizeof(found));
+   }
+   pthread_mutex_unlock(&s_addresses.mutex);
+   for (int i = 0; i < count && n < max; i++)
+      memcpy(out[n++], found[i], CALDAV_USER_ADDRESS_LEN);
+   return n;
 }
 
 static int rc_from_caldav(caldav_error_t err) {
@@ -1506,10 +1567,22 @@ static int write_event(int user_id,
       return CALENDAR_RC_FAILURE;
 
    calendar_ical_change_t change = CALENDAR_ICAL_CHANGE_INIT;
+   char addresses[CALDAV_MAX_USER_ADDRESSES + 1][CALDAV_USER_ADDRESS_LEN];
+   const char *address_list[CALDAV_MAX_USER_ADDRESSES + 1];
    if (c) {
       change = *c;
-      change.account = account_address(&acct);
-      change.user_tzid = g_config.localization.timezone;
+      /* Only a change beyond reminders needs to know whose event it is. */
+      const bool beyond_reminders = (c->summary && c->summary[0]) ||
+                                    (c->location && c->location[0]) ||
+                                    (c->description && c->description[0]) || c->set_start ||
+                                    c->set_end || c->rrule || c->occurrence || c->cancel;
+      if (beyond_reminders)
+         change.account_count = account_addresses(&acct, &auth, addresses,
+                                                  CALDAV_MAX_USER_ADDRESSES + 1);
+      for (int i = 0; i < change.account_count; i++)
+         address_list[i] = addresses[i];
+      change.accounts = address_list;
+      change.user_tzid = calendar_rrule_user_tzid(g_config.localization.timezone);
    }
    char *written = NULL;
    char etag[128] = "";
@@ -1522,8 +1595,7 @@ static int write_event(int user_id,
       cache_written(evt.calendar_id, evt.href, etag, written);
    } else if (rc == CALENDAR_RC_OK) {
       /* By href, not row id: a write just before this one replaced the row. */
-      int gone = 0;
-      calendar_db_event_delete_by_href(evt.calendar_id, evt.href, &gone);
+      calendar_db_event_delete_by_href(evt.calendar_id, evt.href, NULL);
    }
    pthread_mutex_unlock(write_lock(acct.id));
    sodium_memzero(password, sizeof(password));

@@ -50,7 +50,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
    calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
    c.user_tzid = "America/New_York";
-   c.account = "me@example.com";
+   static const char *const me[] = { "me@example.com" };
+   c.accounts = me;
+   c.account_count = 1;
    switch (op % 6) {
       case 0:
          c.summary = "renamed";

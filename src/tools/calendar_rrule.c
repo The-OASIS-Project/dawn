@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "dawn_error.h"
 #include "logging.h"
@@ -284,6 +285,50 @@ static bool utc_name(const char *name) {
          return true;
    }
    return false;
+}
+
+/* The system's zone name, read once.  A set TZ is the zone (as for the C
+ * library, which then ignores /etc/localtime): its name when one is
+ * listed, else none.  Otherwise the zone file /etc/localtime links to, else
+ * /etc/timezone. */
+static char s_system_tzid[64];
+static pthread_once_t s_system_once = PTHREAD_ONCE_INIT;
+
+static void read_system_tzid(void) {
+   const char *tz = getenv("TZ");
+   if (tz) {
+      if (*tz == ':')
+         tz++;
+      const char *path = strstr(tz, "zoneinfo/");
+      if (path)
+         tz = path + strlen("zoneinfo/");
+      if (calendar_rrule_zone(tz))
+         snprintf(s_system_tzid, sizeof(s_system_tzid), "%s", tz);
+      return;
+   }
+   char link[256];
+   const ssize_t n = readlink("/etc/localtime", link, sizeof(link) - 1);
+   if (n > 0) {
+      link[n] = '\0';
+      const char *name = strstr(link, "zoneinfo/");
+      if (name) {
+         snprintf(s_system_tzid, sizeof(s_system_tzid), "%s", name + strlen("zoneinfo/"));
+         return;
+      }
+   }
+   FILE *f = fopen("/etc/timezone", "r");
+   if (f) {
+      if (fgets(s_system_tzid, sizeof(s_system_tzid), f))
+         s_system_tzid[strcspn(s_system_tzid, " \t\r\n")] = '\0';
+      fclose(f);
+   }
+}
+
+const char *calendar_rrule_user_tzid(const char *configured) {
+   if (configured && configured[0])
+      return configured;
+   pthread_once(&s_system_once, read_system_tzid);
+   return s_system_tzid;
 }
 
 icaltimezone *calendar_rrule_zone(const char *tzid) {

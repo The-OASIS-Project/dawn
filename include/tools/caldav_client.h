@@ -148,6 +148,28 @@ caldav_error_t caldav_discover(const char *base_url,
 /** Free discovery result internals */
 void caldav_discovery_free(caldav_discovery_result_t *result);
 
+/** Most addresses kept for one account, and the longest one. */
+#define CALDAV_MAX_USER_ADDRESSES 8
+#define CALDAV_USER_ADDRESS_LEN 256
+
+/**
+ * The addresses invitations name this account by (RFC 6638
+ * calendar-user-address-set on its principal), "mailto:" removed: a login of
+ * "alice" is invited as "alice@example.com", and may have aliases.
+ */
+caldav_error_t caldav_get_user_addresses(const char *principal_url,
+                                         const caldav_auth_t *auth,
+                                         char (*addrs)[CALDAV_USER_ADDRESS_LEN],
+                                         int max,
+                                         int *count);
+
+/** The PROPFIND response half of caldav_get_user_addresses (testable). */
+caldav_error_t caldav_parse_user_addresses(const char *xml,
+                                           size_t len,
+                                           char (*addrs)[CALDAV_USER_ADDRESS_LEN],
+                                           int max,
+                                           int *count);
+
 /**
  * Get the current ctag for a calendar (PROPFIND for change detection).
  * @param ctag_out  Buffer for ctag string (at least 128 bytes)

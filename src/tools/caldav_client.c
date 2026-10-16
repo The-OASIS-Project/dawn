@@ -547,6 +547,82 @@ static caldav_error_t discover_collections(CURL *curl,
 }
 
 /* ============================================================================
+ * The account's own addresses (RFC 6638 calendar-user-address-set)
+ * ============================================================================ */
+
+static const char *PROPFIND_ADDRESSES_XML =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    "<d:propfind xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
+    "<d:prop><c:calendar-user-address-set/></d:prop>"
+    "</d:propfind>";
+
+caldav_error_t caldav_parse_user_addresses(const char *xml,
+                                           size_t len,
+                                           char (*addrs)[CALDAV_USER_ADDRESS_LEN],
+                                           int max,
+                                           int *count) {
+   *count = 0;
+   if (len > INT_MAX)
+      return CALDAV_ERR_PARSE;
+   xmlDocPtr doc = xmlReadMemory(xml, (int)len, NULL, NULL, CALDAV_XML_FLAGS);
+   if (!doc)
+      return CALDAV_ERR_PARSE;
+   xmlXPathContextPtr ctx = xmlXPathNewContext(doc);
+   if (!ctx) {
+      xmlFreeDoc(doc);
+      return CALDAV_ERR_ALLOC;
+   }
+   register_namespaces(ctx);
+   xmlXPathObjectPtr hrefs = xmlXPathEvalExpression(
+       (const xmlChar *)"//c:calendar-user-address-set/d:href", ctx);
+   for (int i = 0; hrefs && hrefs->nodesetval && i < hrefs->nodesetval->nodeNr && *count < max;
+        i++) {
+      xmlChar *content = xmlNodeGetContent(hrefs->nodesetval->nodeTab[i]);
+      if (!content)
+         continue;
+      const char *a = (const char *)content;
+      while (*a == ' ' || *a == '\t' || *a == '\r' || *a == '\n')
+         a++;
+      if (strncasecmp(a, "mailto:", 7) == 0)
+         a += 7;
+      size_t n = strlen(a);
+      while (n > 0 && (a[n - 1] == ' ' || a[n - 1] == '\t' || a[n - 1] == '\r' || a[n - 1] == '\n'))
+         n--;
+      if (n > 0 && n < CALDAV_USER_ADDRESS_LEN) {
+         memcpy(addrs[*count], a, n);
+         addrs[*count][n] = '\0';
+         (*count)++;
+      }
+      xmlFree(content);
+   }
+   xmlXPathFreeObject(hrefs);
+   xmlXPathFreeContext(ctx);
+   xmlFreeDoc(doc);
+   return CALDAV_OK;
+}
+
+caldav_error_t caldav_get_user_addresses(const char *principal_url,
+                                         const caldav_auth_t *auth,
+                                         char (*addrs)[CALDAV_USER_ADDRESS_LEN],
+                                         int max,
+                                         int *count) {
+   *count = 0;
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
+   CURL *curl = caldav_curl_init(auth, &resp);
+   if (!curl) {
+      curl_buffer_free(&resp);
+      return CALDAV_ERR_NETWORK;
+   }
+   caldav_error_t err = do_propfind(curl, principal_url, "0", PROPFIND_ADDRESSES_XML, &resp);
+   if (err == CALDAV_OK)
+      err = caldav_parse_user_addresses(resp.data, resp.size, addrs, max, count);
+   curl_easy_cleanup(curl);
+   curl_buffer_free(&resp);
+   return err;
+}
+
+/* ============================================================================
  * Public: caldav_discover — 3-step RFC-compliant discovery
  * ============================================================================ */
 

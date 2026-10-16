@@ -46,6 +46,13 @@ struct _icaltimezone;
  */
 struct _icaltimezone *calendar_rrule_zone(const char *tzid);
 
+/**
+ * @brief The zone the user's times are read in: @p configured
+ *        ([localization] timezone) when set, else the system's zone name
+ *        (TZ, then /etc/localtime, then /etc/timezone), else "".
+ */
+const char *calendar_rrule_user_tzid(const char *configured);
+
 /** Receives one occurrence's start (UTC) and the caller's @p ctx. */
 typedef void (*calendar_rrule_emit_fn)(time_t start, void *ctx);
 
