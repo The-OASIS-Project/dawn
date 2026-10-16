@@ -21,6 +21,7 @@
  */
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -470,6 +471,97 @@ static void test_has_uid(void) {
    TEST_ASSERT_FALSE(calendar_ical_has_uid("not ical", "tech-series@example.com"));
 }
 
+/* Ending a series sooner drops the moved instances past its new end. */
+static void test_shorter_rule_drops_later_overrides(void) {
+   calendar_ical_change_t m = CALENDAR_ICAL_CHANGE_INIT;
+   m.occurrence = utc(2026, 10, 22, 21, 30);
+   m.set_start = true;
+   m.start = utc(2026, 10, 22, 23, 0);
+   calendar_ical_rc_t rc;
+   char *moved = edit(TECH, &m, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.rrule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH;UNTIL=20261020";
+   char *out = edit(moved, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_EQUAL_INT(1, count_of(out, "BEGIN:VEVENT"));
+   free(out);
+   free(moved);
+}
+
+/* A series' new title reaches a moved instance that still had the old one,
+ * not one given its own. */
+static void test_rename_reaches_moved_instances(void) {
+   calendar_ical_change_t m = CALENDAR_ICAL_CHANGE_INIT;
+   m.occurrence = utc(2026, 10, 20, 21, 30);
+   m.set_start = true;
+   m.start = utc(2026, 10, 20, 23, 0);
+   calendar_ical_rc_t rc;
+   char *one = edit(TECH, &m, &rc);
+   calendar_ical_change_t own = CALENDAR_ICAL_CHANGE_INIT;
+   own.occurrence = utc(2026, 10, 21, 21, 30);
+   own.summary = "Its own title";
+   char *two = edit(one, &own, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.summary = "Renamed";
+   char *out = edit(two, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_EQUAL_INT(2, count_of(out, "SUMMARY:Renamed"));
+   TEST_ASSERT_EQUAL_INT(1, count_of(out, "SUMMARY:Its own title"));
+   free(out);
+   free(two);
+   free(one);
+}
+
+/* A date that doesn't exist is refused, not rolled into the next month. */
+static void test_impossible_date_refused(void) {
+   static const char *all_day = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:d@x\r\n"
+                                "DTSTART;VALUE=DATE:20261120\r\nDTEND;VALUE=DATE:20261121\r\n"
+                                "SUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = true;
+   c.start_date = "2026-11-31";
+   calendar_ical_rc_t rc;
+   TEST_ASSERT_NULL(edit(all_day, &c, &rc));
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_BAD_TIME, rc);
+}
+
+/* An override governing a range of instances isn't edited as one. */
+static void test_range_override_refused(void) {
+   static const char *ical =
+       "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\n"
+       "DTSTART:20261019T090000Z\r\nRRULE:FREQ=DAILY;COUNT=5\r\nSUMMARY:a\r\nEND:VEVENT\r\n"
+       "BEGIN:VEVENT\r\nUID:r@x\r\nRECURRENCE-ID;RANGE=THISANDFUTURE:20261021T090000Z\r\n"
+       "DTSTART:20261021T100000Z\r\nSUMMARY:b\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.occurrence = utc(2026, 10, 21, 9, 0);
+   c.cancel = true;
+   calendar_ical_rc_t rc;
+   TEST_ASSERT_NULL(edit(ical, &c, &rc));
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_UNREADABLE, rc);
+}
+
+/* Many unknown zones in one response: warned about up to a point, safely. */
+static void test_many_unknown_zones(void) {
+   calendar_ical_warned_t warned = { 0 };
+   for (int i = 0; i < 12; i++) {
+      char ical[512];
+      snprintf(ical, sizeof(ical),
+               "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:z%d@x\r\n"
+               "DTSTART;TZID=Nowhere/Zone%d:20261019T090000\r\nSUMMARY:a\r\n"
+               "END:VEVENT\r\nEND:VCALENDAR\r\n",
+               i, i);
+      caldav_event_t e;
+      memset(&e, 0, sizeof(e));
+      TEST_ASSERT_TRUE(calendar_ical_read(ical, &e, &warned));
+      caldav_event_free(&e);
+   }
+   TEST_ASSERT_EQUAL_INT(9, warned.count);
+}
+
 static void test_zone_alias_not_looked_up(void) {
    static const char *ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:z@x\r\n"
                              "DTSTART;TZID=America//New_York:20261019T173000\r\n"
@@ -777,6 +869,11 @@ int main(void) {
    RUN_TEST(test_retitled_instance_moves_with_series);
    RUN_TEST(test_reanchor_moves_exceptions);
    RUN_TEST(test_zone_alias_not_looked_up);
+   RUN_TEST(test_shorter_rule_drops_later_overrides);
+   RUN_TEST(test_rename_reaches_moved_instances);
+   RUN_TEST(test_impossible_date_refused);
+   RUN_TEST(test_range_override_refused);
+   RUN_TEST(test_many_unknown_zones);
    RUN_TEST(test_empty_values);
    RUN_TEST(test_has_uid);
    RUN_TEST(test_utc_and_old_zone_names);

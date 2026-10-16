@@ -60,11 +60,14 @@ static bool calendar_tool_available(void);
  * JSON Helpers
  * ============================================================================= */
 
+/* @p key's string, or NULL when absent, null or "" (a model fills fields it
+ * means to leave alone with ""). */
 static const char *json_get_str(struct json_object *obj, const char *key) {
    struct json_object *val = NULL;
    if (!json_object_object_get_ex(obj, key, &val))
       return NULL;
-   return json_object_get_string(val);
+   const char *s = json_object_get_string(val);
+   return s && s[0] ? s : NULL;
 }
 
 static bool json_get_bool(struct json_object *obj, const char *key, bool def) {
@@ -384,11 +387,24 @@ static char *handle_search(struct json_object *details, int user_id) {
    return finalize_calendar_response(&sb);
 }
 
+/* Whether @p text starts with a date that exists ("2026-11-31" doesn't: it
+ * would roll into December 1st and name another day). */
+static bool real_date(const char *text) {
+   int y = 0, m = 0, d = 0;
+   if (strlen(text) < 10 || sscanf(text, "%4d-%2d-%2d", &y, &m, &d) != 3 || m < 1 || m > 12)
+      return false;
+   static const int days[] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+   const bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+   return d >= 1 && d <= (m == 2 && !leap ? 28 : days[m - 1]);
+}
+
 /* A time argument: @p epoch_out as iso8601_parse reads it (local without an
  * offset), and @p date_out its date when it starts with one ("" otherwise),
  * for an all-day event.  False when it can't be read. */
 static bool parse_when(const char *text, time_t *epoch_out, char *date_out, size_t date_len) {
    date_out[0] = '\0';
+   if (strlen(text) >= 10 && text[4] == '-' && text[7] == '-' && !real_date(text))
+      return false;
    const time_t t = iso8601_parse(text);
    if (t == (time_t)-1)
       return false;
@@ -410,7 +426,7 @@ static void next_day(const char *date, char *out, size_t out_len) {
  * event, else a local time with its UTC offset), read back: midnight UTC of
  * the date, or the instant.  0 when it can't be read. */
 static time_t parse_occurrence(const char *text) {
-   if (!text)
+   if (!text || !real_date(text))
       return 0;
    if (strlen(text) == 10)
       return (time_t)iso8601_parse_date_utc(text);
@@ -422,7 +438,8 @@ static time_t parse_occurrence(const char *text) {
 static int json_get_reminder(struct json_object *obj) {
    struct json_object *val = NULL;
    if (!json_object_object_get_ex(obj, "reminder_minutes", &val) || !val ||
-       json_object_is_type(val, json_type_null))
+       json_object_is_type(val, json_type_null) ||
+       (json_object_is_type(val, json_type_string) && !json_object_get_string(val)[0]))
       return -1;
    const int n = json_object_get_int(val);
    return n < 0 ? CALENDAR_ICAL_MAX_REMINDER_MIN + 1 : n; /* refused below */
@@ -598,16 +615,10 @@ static char *read_change(struct json_object *details,
    c->location = json_get_str(details, "location");
    c->description = json_get_str(details, "description");
    c->rrule = json_get_str(details, "rrule");
-   if (c->rrule && !c->rrule[0])
-      c->rrule = NULL; /* "" is a field left alone, not "stop repeating" */
    c->reminder_minutes = json_get_reminder(details);
    c->remove_reminders = json_get_bool(details, "remove_reminders", false);
    const char *start = json_get_str(details, "start");
    const char *end = json_get_str(details, "end");
-   if (start && !start[0])
-      start = NULL;
-   if (end && !end[0])
-      end = NULL;
    if (start) {
       if (!parse_when(start, &c->start, start_date, date_len))
          return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid 'start' (use ISO 8601).");
@@ -620,9 +631,9 @@ static char *read_change(struct json_object *details,
       c->set_end = true;
       c->end_date = end_date;
    }
-   struct json_object *occ = NULL;
-   if (json_object_object_get_ex(details, "occurrence", &occ) &&
-       !(c->occurrence = parse_occurrence(json_object_get_string(occ))))
+   /* null or "" leaves it unset (a whole-series edit); delete is stricter. */
+   const char *occ = json_get_str(details, "occurrence");
+   if (occ && !(c->occurrence = parse_occurrence(occ)))
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: invalid 'occurrence': pass the value shown after 'occurrence:' "
                     "on the event's row.");

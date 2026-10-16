@@ -1521,8 +1521,9 @@ static int write_event(int user_id,
    if (rc == CALENDAR_RC_OK && c) {
       cache_written(evt.calendar_id, evt.href, etag, written);
    } else if (rc == CALENDAR_RC_OK) {
-      calendar_db_occurrence_delete_for_event(evt.id);
-      calendar_db_event_delete(evt.id);
+      /* By href, not row id: a write just before this one replaced the row. */
+      int gone = 0;
+      calendar_db_event_delete_by_href(evt.calendar_id, evt.href, &gone);
    }
    pthread_mutex_unlock(write_lock(acct.id));
    sodium_memzero(password, sizeof(password));

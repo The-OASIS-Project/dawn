@@ -47,15 +47,13 @@
 
 static void warn_zone_once(calendar_ical_warned_t *warned, const char *tzid, const char *why) {
    const char *name = tzid ? tzid : "?";
-   if (!warned)
-      return;
+   const int cap = (int)(sizeof(warned->names) / sizeof(warned->names[0]));
+   if (!warned || warned->count > cap)
+      return; /* (or already said further ones are not logged) */
    for (int i = 0; i < warned->count; i++) {
       if (strncmp(warned->names[i], name, sizeof(warned->names[i]) - 1) == 0)
          return;
    }
-   const int cap = (int)(sizeof(warned->names) / sizeof(warned->names[0]));
-   if (warned->count > cap)
-      return; /* already said further ones are not logged */
    if (warned->count == cap) {
       warned->count++;
       OLOG_WARNING("caldav: more unusable time zones in this calendar; not logging them");
@@ -707,7 +705,9 @@ static time_t date_string_epoch(const char *date) {
        d < 1 || d > 31)
       return 0;
    struct tm tm = { .tm_year = y - 1900, .tm_mon = m - 1, .tm_mday = d };
-   return timegm(&tm);
+   const time_t t = timegm(&tm);
+   /* A date that doesn't exist (November 31st) would roll into the next. */
+   return tm.tm_mday == d && tm.tm_mon == m - 1 ? t : 0;
 }
 
 /* Add the VTIMEZONE @p w names to @p root unless one of that name is there:
@@ -1247,6 +1247,11 @@ static calendar_ical_rc_t edit_occurrence(edit_t *e, const calendar_ical_change_
    icalcomponent *ov = find_override(e, c->occurrence);
    if (!ov && !is_instance(e, c->occurrence))
       return CALENDAR_ICAL_ERR_NOT_OCCURRENCE;
+   /* An override with RANGE=THISANDFUTURE governs every later instance too;
+    * editing it as one would change or lose those. */
+   icalproperty *rid = ov ? icalcomponent_get_first_property(ov, ICAL_RECURRENCEID_PROPERTY) : NULL;
+   if (rid && icalproperty_get_first_parameter(rid, ICAL_RANGE_PARAMETER))
+      return CALENDAR_ICAL_ERR_UNREADABLE;
 
    bool listed = false;
    for (icalproperty *p = icalcomponent_get_first_property(e->master, ICAL_EXDATE_PROPERTY);
@@ -1314,12 +1319,71 @@ static calendar_ical_rc_t set_rule(edit_t *e, const char *text, const char *user
       return CALENDAR_ICAL_ERR_BAD_RULE;
    remove_properties(e->master, ICAL_RRULE_PROPERTY);
    icalcomponent_add_property(e->master, rule);
+   /* Moved instances the new rule no longer has (it ends sooner) go with it. */
+   const char *uid = icalcomponent_get_uid(e->master);
+   icalcomponent *v = icalcomponent_get_first_component(e->root, ICAL_VEVENT_COMPONENT);
+   while (v) {
+      icalcomponent *next = icalcomponent_get_next_component(e->root, ICAL_VEVENT_COMPONENT);
+      icalproperty *rid = icalcomponent_get_first_property(v, ICAL_RECURRENCEID_PROPERTY);
+      const char *vuid = icalcomponent_get_uid(v);
+      if (v != e->master && rid && vuid && uid && strcmp(vuid, uid) == 0) {
+         const when_t w = when_of(rid);
+         if (w.kind != WHEN_UNKNOWN && !is_instance(e, instant_of(rid, &w))) {
+            icalcomponent_remove_component(e->root, v);
+            icalcomponent_free(v);
+         }
+      }
+      v = next;
+   }
    return CALENDAR_ICAL_OK;
 }
 
 /* Change the series itself. */
+/* A moved instance copied the series' text when it was moved: where it still
+ * has the series' old value of @p kind, it takes the new one too (a value it
+ * was given of its own stays). */
+static calendar_ical_rc_t follow_text(edit_t *e,
+                                      icalproperty_kind kind,
+                                      const char *old,
+                                      const char *now) {
+   if (!now || !now[0])
+      return CALENDAR_ICAL_OK;
+   const char *uid = icalcomponent_get_uid(e->master);
+   for (icalcomponent *v = icalcomponent_get_first_component(e->root, ICAL_VEVENT_COMPONENT); v;
+        v = icalcomponent_get_next_component(e->root, ICAL_VEVENT_COMPONENT)) {
+      const char *vuid = icalcomponent_get_uid(v);
+      if (v == e->master || !vuid || !uid || strcmp(vuid, uid) != 0)
+         continue;
+      icalproperty *p = icalcomponent_get_first_property(v, kind);
+      const char *have = p ? icalproperty_get_value_as_string(p) : NULL;
+      if ((!have && !old) || (have && old && strcmp(have, old) == 0)) {
+         const calendar_ical_rc_t rc = set_text(v, kind, now);
+         if (rc != CALENDAR_ICAL_OK)
+            return rc;
+      }
+   }
+   return CALENDAR_ICAL_OK;
+}
+
+/* @p v's @p kind text as written (escaped), copied, or NULL. */
+static char *text_of(icalcomponent *v, icalproperty_kind kind) {
+   icalproperty *p = icalcomponent_get_first_property(v, kind);
+   const char *t = p ? icalproperty_get_value_as_string(p) : NULL;
+   return t ? strdup(t) : NULL;
+}
+
 static calendar_ical_rc_t edit_series(edit_t *e, const calendar_ical_change_t *c) {
+   const icalproperty_kind kinds[] = { ICAL_SUMMARY_PROPERTY, ICAL_LOCATION_PROPERTY,
+                                       ICAL_DESCRIPTION_PROPERTY };
+   const char *const news[] = { c->summary, c->location, c->description };
+   char *olds[3];
+   for (int k = 0; k < 3; k++)
+      olds[k] = text_of(e->master, kinds[k]);
    calendar_ical_rc_t rc = apply_text(e->master, c);
+   for (int k = 0; k < 3 && rc == CALENDAR_ICAL_OK; k++)
+      rc = follow_text(e, kinds[k], olds[k], news[k]);
+   for (int k = 0; k < 3; k++)
+      free(olds[k]);
    const bool timing = c->set_start || c->set_end || c->rrule;
    if (rc == CALENDAR_ICAL_OK && (c->set_start || c->set_end)) {
       const bool repeats = icalcomponent_get_first_property(e->master, ICAL_RRULE_PROPERTY);
