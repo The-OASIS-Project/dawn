@@ -1077,6 +1077,7 @@ static calendar_ical_rc_t change_times(icalcomponent *v,
 typedef struct {
    bool to_time_of_day;
    time_t delta;
+   when_t from; /* to_time_of_day: the zone the series was written in */
 } remap_t;
 
 /* The midnight starting the day of wall-clock reading @p wall. */
@@ -1087,11 +1088,12 @@ static time_t day_of(time_t wall) {
 static time_t remap(const edit_t *e, const remap_t *m, time_t inst) {
    if (!m->to_time_of_day)
       return from_wall(wall_of(inst, &e->a.w) + m->delta, &e->a.w);
-   /* The exception's date at the series start's offset (the old series kept
-    * one offset all year), so a DST change near midnight can't move it a day. */
-   const time_t start = wall_of(e->a.start, &e->a.w);
-   const time_t day = day_of(inst + (start - e->a.start));
-   return from_wall(day + (start - day_of(start)), &e->a.w);
+   /* The exception is as many days after the series start as it was in the
+    * zone the series was written in (which keeps each instance on its day
+    * across both zones' daylight-saving changes), at the new zone's time of
+    * day. */
+   const time_t days = day_of(wall_of(inst, &m->from)) - day_of(wall_of(e->a.start, &m->from));
+   return from_wall(wall_of(e->a.start, &e->a.w) + days, &e->a.w);
 }
 
 /* Move the series' cancelled dates and its moved instances' RECURRENCE-IDs as
@@ -1338,15 +1340,18 @@ static calendar_ical_rc_t edit_occurrence(edit_t *e, const calendar_ical_change_
    return rc;
 }
 
-/* Move a timed series written in UTC to @p user_tzid (when libical has it), so
- * it repeats at the same local time across daylight-saving changes; the
- * instances it cancels or moves follow, on their own dates. */
-static calendar_ical_rc_t anchor_in_user_zone(edit_t *e, const char *user_tzid) {
-   if (e->a.all_day || e->a.w.kind != WHEN_UTC)
+/* Move a timed series written in UTC (or, with @p any_zone, in any zone but
+ * the user's) to @p user_tzid when libical has it, so it repeats at the same
+ * local time across daylight-saving changes and a rule's days are read as the
+ * user's days; the instances it cancels or moves follow, on their own dates. */
+static calendar_ical_rc_t anchor_in_user_zone(edit_t *e, const char *user_tzid, bool any_zone) {
+   if (e->a.all_day || (e->a.w.kind != WHEN_UTC && !any_zone))
       return CALENDAR_ICAL_OK;
    const when_t zoned = zoned_or_utc(user_tzid);
-   if (zoned.kind != WHEN_ZONED)
+   if (zoned.kind != WHEN_ZONED ||
+       (e->a.w.kind == WHEN_ZONED && strcmp(e->a.w.tzid, zoned.tzid) == 0))
       return CALENDAR_ICAL_OK;
+   const remap_t m = { .to_time_of_day = true, .from = e->a.w };
    e->a.w = zoned;
    put_instant(icalcomponent_get_first_property(e->master, ICAL_DTSTART_PROPERTY), e->a.start,
                &e->a.w);
@@ -1354,7 +1359,6 @@ static calendar_ical_rc_t anchor_in_user_zone(edit_t *e, const char *user_tzid) 
    if (end)
       put_instant(end, e->a.end, &e->a.w);
    ensure_vtimezone(e->root, &e->a.w);
-   const remap_t m = { .to_time_of_day = true };
    return remap_exceptions(e, &m);
 }
 
@@ -1362,7 +1366,7 @@ static calendar_ical_rc_t anchor_in_user_zone(edit_t *e, const char *user_tzid) 
  * @p user_tzid first, so it repeats at the same local time across a
  * daylight-saving change. */
 static calendar_ical_rc_t set_rule(edit_t *e, const char *text, const char *user_tzid) {
-   const calendar_ical_rc_t anchored = anchor_in_user_zone(e, user_tzid);
+   const calendar_ical_rc_t anchored = anchor_in_user_zone(e, user_tzid, false);
    if (anchored != CALENDAR_ICAL_OK)
       return anchored;
    icalproperty *rule = checked_rule(text, &e->a);
@@ -1476,8 +1480,9 @@ static calendar_ical_rc_t edit_series(edit_t *e, const calendar_ical_change_t *c
             rc = CALENDAR_ICAL_ERR_BAD_RULE; /* its days are its rule */
       } else {
          /* A time of day is local: a series still written in UTC moves to
-          * the user's zone first. */
-         rc = anchor_in_user_zone(e, c->user_tzid);
+          * the user's zone first, and one in another zone does too when it
+          * gets a new rule (whose days are the user's). */
+         rc = anchor_in_user_zone(e, c->user_tzid, c->rrule != NULL);
          moved = series_times(e, c);
          c = &moved;
       }

@@ -434,6 +434,73 @@ static void test_series_time_on_users_day(void) {
    free(out);
 }
 
+/* A London series pinned to Fridays moved to 9 pm New York: without a new
+ * rule it would leave its Friday (refused); with one it moves to New York,
+ * so BYDAY=FR means the user's Fridays.  A new rule alone keeps its zone. */
+static void test_other_zone_series_new_rule(void) {
+   static const char *london = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f@x\r\n"
+                               "DTSTART;TZID=Europe/London:20261016T100000\r\n"
+                               "DTEND;TZID=Europe/London:20261016T110000\r\n"
+                               "RRULE:FREQ=WEEKLY;BYDAY=FR;COUNT=4\r\n"
+                               "EXDATE;TZID=Europe/London:20261030T100000\r\nSUMMARY:a\r\n"
+                               "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = c.set_end = true;
+   c.start = utc(2026, 10, 17, 1, 0); /* Friday 9 pm New York */
+   c.end = utc(2026, 10, 17, 2, 0);
+   c.user_tzid = "America/New_York";
+   calendar_ical_rc_t rc;
+   TEST_ASSERT_NULL(edit(london, &c, &rc));
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_BAD_RULE, rc);
+
+   c.rrule = "FREQ=WEEKLY;BYDAY=FR;COUNT=4";
+   char *out = edit(london, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=America/New_York:20261016T210000"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND;TZID=America/New_York:20261016T220000"));
+   /* London is off summer time a week before New York: the cancelled
+    * Friday is still that Friday's instance. */
+   TEST_ASSERT_NOT_NULL(strstr(out, "EXDATE;TZID=America/New_York:20261030T210000"));
+   free(out);
+
+   calendar_ical_change_t d = CALENDAR_ICAL_CHANGE_INIT;
+   d.rrule = "FREQ=WEEKLY;BYDAY=FR;UNTIL=20261031T000000Z";
+   d.user_tzid = "America/New_York";
+   out = edit(london, &d, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=Europe/London:20261016T100000"));
+   free(out);
+}
+
+/* A London series at 23:30 New York in summer, moved with a new rule: its
+ * winter cancelled date and moved instance keep their days (an hour's
+ * offset change must not carry them across midnight). */
+static void test_other_zone_exceptions_keep_days(void) {
+   static const char *late = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:k@x\r\n"
+                             "DTSTART;TZID=Europe/London:20260703T043000\r\n"
+                             "DTEND;TZID=Europe/London:20260703T053000\r\n"
+                             "RRULE:FREQ=WEEKLY;BYDAY=FR\r\n"
+                             "EXDATE;TZID=Europe/London:20261204T043000\r\nSUMMARY:a\r\n"
+                             "END:VEVENT\r\nBEGIN:VEVENT\r\nUID:k@x\r\n"
+                             "RECURRENCE-ID;TZID=Europe/London:20261211T043000\r\n"
+                             "DTSTART;TZID=Europe/London:20261211T063000\r\n"
+                             "DTEND;TZID=Europe/London:20261211T073000\r\nSUMMARY:a\r\n"
+                             "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = c.set_end = true;
+   c.start = utc(2026, 7, 3, 3, 0); /* Thursday 11 pm New York */
+   c.end = utc(2026, 7, 3, 4, 0);
+   c.rrule = "FREQ=WEEKLY;BYDAY=TH";
+   c.user_tzid = "America/New_York";
+   calendar_ical_rc_t rc;
+   char *out = edit(late, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=America/New_York:20260702T230000"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "EXDATE;TZID=America/New_York:20261203T230000"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "RECURRENCE-ID;TZID=America/New_York:20261210T230000"));
+   free(out);
+}
+
 /* "Make it 2 pm" on a series still written in UTC means 2 pm local, all year:
  * the series moves to the user's zone first. */
 static void test_utc_series_time_is_local(void) {
@@ -1072,6 +1139,8 @@ int main(void) {
    RUN_TEST(test_series_end_is_time_of_day);
    RUN_TEST(test_series_overnight_moves);
    RUN_TEST(test_series_time_on_users_day);
+   RUN_TEST(test_other_zone_series_new_rule);
+   RUN_TEST(test_other_zone_exceptions_keep_days);
    RUN_TEST(test_utc_series_time_is_local);
    RUN_TEST(test_move_past_end_refused);
    RUN_TEST(test_retitled_instance_moves_with_series);
