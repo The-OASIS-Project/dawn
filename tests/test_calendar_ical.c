@@ -501,6 +501,108 @@ static void test_other_zone_exceptions_keep_days(void) {
    free(out);
 }
 
+/* A UTC series on Mondays at 01:00Z is Sunday evening in New York.  Moved
+ * an hour earlier without a new rule it stays in UTC, so BYDAY=MO keeps
+ * meaning the days it held; a move to another UTC day needs the new rule. */
+static void test_utc_pinned_rule_not_reanchored(void) {
+   static const char *sun = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:s@x\r\n"
+                            "DTSTART:20261019T010000Z\r\nDTEND:20261019T020000Z\r\n"
+                            "RRULE:FREQ=WEEKLY;BYDAY=MO\r\nSUMMARY:a\r\n"
+                            "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = true;
+   c.start = utc(2026, 10, 19, 0, 0); /* Sunday 8 pm New York */
+   c.user_tzid = "America/New_York";
+   calendar_ical_rc_t rc;
+   char *out = edit(sun, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART:20261019T000000Z"));
+   TEST_ASSERT_NULL(strstr(out, "TZID=America/New_York"));
+   free(out);
+
+   c.start = utc(2026, 10, 18, 23, 0); /* 7 pm: Sunday in UTC too */
+   TEST_ASSERT_NULL(edit(sun, &c, &rc));
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_ERR_BAD_RULE, rc);
+}
+
+/* A daytime UTC series on Mondays is Monday in New York too: moved without
+ * a new rule it still goes to New York, so it keeps its local time all year. */
+static void test_utc_daytime_pinned_reanchored(void) {
+   static const char *mon = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m@x\r\n"
+                            "DTSTART:20261019T140000Z\r\nDTEND:20261019T150000Z\r\n"
+                            "RRULE:FREQ=WEEKLY;BYDAY=MO\r\nSUMMARY:a\r\n"
+                            "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_start = true;
+   c.start = utc(2026, 10, 19, 15, 0); /* 11 am New York */
+   c.user_tzid = "America/New_York";
+   calendar_ical_rc_t rc;
+   char *out = edit(mon, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART;TZID=America/New_York:20261019T110000"));
+   free(out);
+
+   /* Started in summer, ending in winter at its last meeting's time: that
+    * meeting is an hour later in UTC once local, so the end follows. */
+   static const char *until = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:n@x\r\n"
+                              "DTSTART:20270607T140000Z\r\nDTEND:20270607T150000Z\r\n"
+                              "RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20271213T140000Z\r\n"
+                              "SUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   c.start = utc(2027, 6, 7, 15, 0);
+   out = edit(until, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "UNTIL=20271213T160000Z"));
+   free(out);
+}
+
+/* A longer series: an instance only retitled (a full copy of its times)
+ * takes the new end; one moved to its own time keeps its length. */
+static void test_new_length_reaches_retitled_instances(void) {
+   static const char *ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\n"
+                             "DTSTART:20261005T090000Z\r\nDTEND:20261005T100000Z\r\n"
+                             "RRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:a\r\nEND:VEVENT\r\n"
+                             "BEGIN:VEVENT\r\nUID:r@x\r\nRECURRENCE-ID:20261012T090000Z\r\n"
+                             "DTSTART:20261012T090000Z\r\nDTEND:20261012T100000Z\r\n"
+                             "SUMMARY:b\r\nEND:VEVENT\r\n"
+                             "BEGIN:VEVENT\r\nUID:r@x\r\nRECURRENCE-ID:20261026T090000Z\r\n"
+                             "DTSTART:20261026T090000Z\r\nDURATION:PT1H\r\n"
+                             "SUMMARY:c\r\nEND:VEVENT\r\n"
+                             "BEGIN:VEVENT\r\nUID:r@x\r\nRECURRENCE-ID:20261019T090000Z\r\n"
+                             "DTSTART:20261019T130000Z\r\nDTEND:20261019T140000Z\r\n"
+                             "SUMMARY:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.set_end = true;
+   c.end = utc(2026, 10, 5, 11, 0);
+   c.user_tzid = "UTC";
+   calendar_ical_rc_t rc;
+   char *out = edit(ical, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND:20261005T110000Z"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND:20261012T110000Z"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTEND:20261019T140000Z"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "DURATION:PT2H"));
+   free(out);
+}
+
+/* A UTC series with an extra date stays in UTC under a new rule, so the
+ * cancelled extra date still names it. */
+static void test_rdate_series_not_reanchored(void) {
+   static const char *ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:d@x\r\n"
+                             "DTSTART:20260706T140000Z\r\nDTEND:20260706T150000Z\r\n"
+                             "RRULE:FREQ=WEEKLY;COUNT=20\r\nRDATE:20261215T140000Z\r\n"
+                             "EXDATE:20261215T140000Z\r\nSUMMARY:a\r\n"
+                             "END:VEVENT\r\nEND:VCALENDAR\r\n";
+   calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
+   c.rrule = "FREQ=WEEKLY;COUNT=40";
+   c.user_tzid = "America/New_York";
+   calendar_ical_rc_t rc;
+   char *out = edit(ical, &c, &rc);
+   TEST_ASSERT_EQUAL_INT(CALENDAR_ICAL_OK, rc);
+   TEST_ASSERT_NOT_NULL(strstr(out, "DTSTART:20260706T140000Z"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "EXDATE:20261215T140000Z"));
+   free(out);
+}
+
 /* "Make it 2 pm" on a series still written in UTC means 2 pm local, all year:
  * the series moves to the user's zone first. */
 static void test_utc_series_time_is_local(void) {
@@ -1141,6 +1243,10 @@ int main(void) {
    RUN_TEST(test_series_time_on_users_day);
    RUN_TEST(test_other_zone_series_new_rule);
    RUN_TEST(test_other_zone_exceptions_keep_days);
+   RUN_TEST(test_utc_pinned_rule_not_reanchored);
+   RUN_TEST(test_utc_daytime_pinned_reanchored);
+   RUN_TEST(test_new_length_reaches_retitled_instances);
+   RUN_TEST(test_rdate_series_not_reanchored);
    RUN_TEST(test_utc_series_time_is_local);
    RUN_TEST(test_move_past_end_refused);
    RUN_TEST(test_retitled_instance_moves_with_series);

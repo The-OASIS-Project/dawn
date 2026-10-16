@@ -178,11 +178,12 @@ typedef struct {
  * (its date is ignored unless a new rule is given) and end its time of day,
  * keeping the event as many whole days long, both read in the user's zone;
  * given with a new rule, they first move a series written in another zone to
- * the user's, so the rule's days are the user's.  An all-day series' dates
- * change only with a new rule.  Moving a series moves its
- * cancelled and moved instances with it; a new title, place or notes reaches
- * moved instances that still had the old one; a new rule drops the moved
- * instances it no longer has.
+ * the user's, so the rule's days are the user's (a series written in UTC
+ * moves too, unless it keeps a rule naming hours, or days its start falls
+ * on differently in the user's zone, or has extra dates).  A new length reaches instances edited
+ * only for their text.  An all-day series' dates change only with a new rule.  Moving a series
+ * moves its cancelled and moved instances with it; a new title, place or notes reaches moved
+ * instances that still had the old one; a new rule drops the moved instances it no longer has.
  *
  * @param out Receives the text (free()), or NULL on failure
  */

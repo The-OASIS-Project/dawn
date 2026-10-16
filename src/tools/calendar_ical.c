@@ -1077,7 +1077,9 @@ static calendar_ical_rc_t change_times(icalcomponent *v,
 typedef struct {
    bool to_time_of_day;
    time_t delta;
-   when_t from; /* to_time_of_day: the zone the series was written in */
+   when_t from;             /* to_time_of_day: the zone the series was written in */
+   bool relength;           /* an instance unmoved and as long as the series was (old_len) */
+   time_t old_len, new_len; /* takes the series' new length */
 } remap_t;
 
 /* The midnight starting the day of wall-clock reading @p wall. */
@@ -1124,11 +1126,15 @@ static calendar_ical_rc_t remap_exceptions(edit_t *e, const remap_t *m) {
       if (oa.w.kind != WHEN_UNKNOWN && oa.start == was) {
          if (oa.end_unknown)
             return CALENDAR_ICAL_ERR_ZONE;
-         const time_t len = oa.end - oa.start;
+         const time_t own = oa.end - oa.start;
+         const time_t len = m->relength && own == m->old_len ? m->new_len : own;
          put_instant(icalcomponent_get_first_property(v, ICAL_DTSTART_PROPERTY), now, &e->a.w);
          icalproperty *end = icalcomponent_get_first_property(v, ICAL_DTEND_PROPERTY);
+         icalproperty *dur = icalcomponent_get_first_property(v, ICAL_DURATION_PROPERTY);
          if (end)
             put_instant(end, now + len, &e->a.w);
+         else if (dur && len != own)
+            icalproperty_set_duration(dur, icaldurationtype_from_int((int)len));
       }
    }
    return CALENDAR_ICAL_OK;
@@ -1340,17 +1346,58 @@ static calendar_ical_rc_t edit_occurrence(edit_t *e, const calendar_ical_change_
    return rc;
 }
 
+/* The series' rule when it ends at a time (UNTIL), with that time. */
+static icalproperty *rule_until(icalcomponent *master, time_t *until) {
+   icalproperty *rr = icalcomponent_get_first_property(master, ICAL_RRULE_PROPERTY);
+   if (!rr)
+      return NULL;
+   const struct icalrecurrencetype r = icalproperty_get_rrule(rr);
+   if (icaltime_is_null_time(r.until) || r.until.is_date)
+      return NULL;
+   *until = icaltime_as_timet_with_zone(r.until, icaltimezone_get_utc_timezone());
+   return rr;
+}
+
+/* Move a kept rule's end @p shift later (never earlier), so instances moved
+ * later keep their last one. */
+static void until_later(icalproperty *rr, time_t until, time_t shift) {
+   if (shift <= 0)
+      return;
+   struct icalrecurrencetype r = icalproperty_get_rrule(rr);
+   r.until = icaltime_from_timet_with_zone(until + shift, 0, icaltimezone_get_utc_timezone());
+   icalproperty_set_rrule(rr, r);
+}
+
 /* Move a timed series written in UTC (or, with @p any_zone, in any zone but
  * the user's) to @p user_tzid when libical has it, so it repeats at the same
  * local time across daylight-saving changes and a rule's days are read as the
- * user's days; the instances it cancels or moves follow, on their own dates. */
-static calendar_ical_rc_t anchor_in_user_zone(edit_t *e, const char *user_tzid, bool any_zone) {
-   if (e->a.all_day || (e->a.w.kind != WHEN_UTC && !any_zone))
+ * user's days; the instances it cancels or moves follow, on their own dates.
+ * A series stays where it is when the move would change what it holds: a
+ * rule it keeps (@p keeps_rule) naming hours, or naming days that fall
+ * differently in the new zone; extra dates (RDATE), which don't follow. */
+static calendar_ical_rc_t anchor_in_user_zone(edit_t *e,
+                                              const char *user_tzid,
+                                              bool any_zone,
+                                              bool keeps_rule) {
+   if (e->a.all_day || (e->a.w.kind != WHEN_UTC && !any_zone) ||
+       icalcomponent_get_first_property(e->master, ICAL_RDATE_PROPERTY))
       return CALENDAR_ICAL_OK;
    const when_t zoned = zoned_or_utc(user_tzid);
    if (zoned.kind != WHEN_ZONED ||
        (e->a.w.kind == WHEN_ZONED && strcmp(e->a.w.tzid, zoned.tzid) == 0))
       return CALENDAR_ICAL_OK;
+   /* A rule naming days reads the same where the start is on the same day. */
+   if (keeps_rule && (rule_pins_times(e->master) ||
+                      (rule_pins_days(e->master) && day_of(wall_of(e->a.start, &zoned)) !=
+                                                        day_of(wall_of(e->a.start, &e->a.w)))))
+      return CALENDAR_ICAL_OK;
+   /* An instance in another season than the start moves by the change in
+    * the zone's offset. */
+   time_t until;
+   icalproperty *rr = e->a.w.kind == WHEN_UTC ? rule_until(e->master, &until) : NULL;
+   if (rr)
+      until_later(rr, until,
+                  (wall_of(e->a.start, &zoned) - e->a.start) - (wall_of(until, &zoned) - until));
    const remap_t m = { .to_time_of_day = true, .from = e->a.w };
    e->a.w = zoned;
    put_instant(icalcomponent_get_first_property(e->master, ICAL_DTSTART_PROPERTY), e->a.start,
@@ -1366,7 +1413,7 @@ static calendar_ical_rc_t anchor_in_user_zone(edit_t *e, const char *user_tzid, 
  * @p user_tzid first, so it repeats at the same local time across a
  * daylight-saving change. */
 static calendar_ical_rc_t set_rule(edit_t *e, const char *text, const char *user_tzid) {
-   const calendar_ical_rc_t anchored = anchor_in_user_zone(e, user_tzid, false);
+   const calendar_ical_rc_t anchored = anchor_in_user_zone(e, user_tzid, false, false);
    if (anchored != CALENDAR_ICAL_OK)
       return anchored;
    icalproperty *rule = checked_rule(text, &e->a);
@@ -1482,13 +1529,14 @@ static calendar_ical_rc_t edit_series(edit_t *e, const calendar_ical_change_t *c
          /* A time of day is local: a series still written in UTC moves to
           * the user's zone first, and one in another zone does too when it
           * gets a new rule (whose days are the user's). */
-         rc = anchor_in_user_zone(e, c->user_tzid, c->rrule != NULL);
+         rc = anchor_in_user_zone(e, c->user_tzid, c->rrule != NULL, c->rrule == NULL);
          moved = series_times(e, c);
          c = &moved;
       }
    }
    if (rc == CALENDAR_ICAL_OK && (c->set_start || c->set_end)) {
       const time_t old_wall = wall_of(e->a.start, &e->a.w);
+      const time_t old_len = e->a.end - e->a.start;
       rc = change_times(e->master, &e->a, c);
       const time_t delta = wall_of(e->a.start, &e->a.w) - old_wall;
       if (rc == CALENDAR_ICAL_OK && repeats && delta != 0) {
@@ -1499,7 +1547,19 @@ static calendar_ical_rc_t edit_series(edit_t *e, const calendar_ical_change_t *c
               (rule_pins_times(e->master) || (new_day && rule_pins_days(e->master)))) ||
              icalcomponent_get_first_property(e->master, ICAL_RDATE_PROPERTY))
             return CALENDAR_ICAL_ERR_BAD_RULE;
-         const remap_t m = { .delta = delta };
+         time_t until;
+         icalproperty *rr = c->rrule ? NULL : rule_until(e->master, &until);
+         if (rr)
+            until_later(rr, until, delta);
+      }
+      const time_t new_len = e->a.end - e->a.start;
+      if (rc == CALENDAR_ICAL_OK && repeats && (delta != 0 || new_len != old_len)) {
+         /* Instances follow the series' start, and one edited only for its
+          * title or reminder (a full copy) takes its new length too. */
+         const remap_t m = { .delta = delta,
+                             .relength = true,
+                             .old_len = old_len,
+                             .new_len = new_len };
          rc = remap_exceptions(e, &m);
       }
       if (rc == CALENDAR_ICAL_OK && repeats && !c->rrule && !current_rule_occurs(e))
