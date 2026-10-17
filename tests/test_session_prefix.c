@@ -192,10 +192,6 @@ int session_effective_user_id(session_t *session) {
    (void)session;
    return 1;
 }
-tz_t *user_tz(int user_id) {
-   (void)user_id;
-   return NULL; /* UTC */
-}
 char *session_take_new_notices_locked(session_t *session, int viewer_user_id, const tz_t *zone) {
    (void)session;
    (void)viewer_user_id;

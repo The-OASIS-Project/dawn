@@ -44,6 +44,7 @@
 #include "core/iso8601.h"
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
+#include "core/user_tz.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
@@ -1167,6 +1168,21 @@ void memory_extraction_build_fallback(session_t *session, memory_extraction_fall
  * Extraction Thread
  * ============================================================================= */
 
+void memory_extraction_anchor_line(int user_id, int64_t conversation_id, char *out, size_t out_sz) {
+   out[0] = '\0';
+   int64_t anchor_ts = ANCHOR_DATE_NONE;
+   if (conversation_id <= 0 ||
+       conv_db_get_anchor_date(conversation_id, &anchor_ts) != AUTH_DB_SUCCESS ||
+       anchor_ts == ANCHOR_DATE_NONE)
+      return;
+   /* The user's date: "yesterday" is theirs, not UTC's. */
+   struct tm tm_local;
+   tz_local(user_tz(user_id), (time_t)anchor_ts, &tm_local);
+   char date_buf[16]; /* "YYYY-MM-DD\0" needs 11; 16 is conventional. */
+   if (strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_local) != 0)
+      snprintf(out, out_sz, "Conversation anchor: %s\n\n", date_buf);
+}
+
 static void *extraction_thread(void *arg) {
    extraction_context_t *ctx = (extraction_context_t *)arg;
 
@@ -1175,24 +1191,9 @@ static void *extraction_thread(void *arg) {
    /* Build existing profile */
    char *existing_profile = build_existing_profile(ctx->user_id);
 
-   /* Build conversation anchor line (v42).  Empty when no anchor recorded so legacy
-    * conversations and non-conversation extractions (conv_id == 0) continue to work
-    * as before.  Buffer sizing: "Conversation anchor: " (21) + "YYYY-MM-DD" (10) +
-    * "\n\n" (2) + NUL (1) = 34 bytes — 64 leaves slack for any future prefix change. */
-   char anchor_line[64] = "";
-   if (ctx->conversation_id > 0) {
-      int64_t anchor_ts = ANCHOR_DATE_NONE;
-      if (conv_db_get_anchor_date(ctx->conversation_id, &anchor_ts) == AUTH_DB_SUCCESS &&
-          anchor_ts != ANCHOR_DATE_NONE) {
-         struct tm tm_utc;
-         time_t ts = (time_t)anchor_ts;
-         if (gmtime_r(&ts, &tm_utc)) {
-            char date_buf[16]; /* "YYYY-MM-DD\0" needs 11; 16 is conventional. */
-            strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
-            snprintf(anchor_line, sizeof(anchor_line), "Conversation anchor: %s\n\n", date_buf);
-         }
-      }
-   }
+   char anchor_line[MEMORY_EXTRACTION_ANCHOR_LINE_LEN];
+   memory_extraction_anchor_line(ctx->user_id, ctx->conversation_id, anchor_line,
+                                 sizeof(anchor_line));
 
    /* Resolve config first — pure stack work + pointer copies, no heap.  Bailing
     * here on misconfiguration skips the prompt malloc and json_object tree

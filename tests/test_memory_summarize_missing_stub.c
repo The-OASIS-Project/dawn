@@ -104,16 +104,17 @@ struct json_object *llm_history_strip_internal(struct json_object *history) {
    return NULL;
 }
 
-/* Conversation DB stubs.  conv_db_get_anchor_date returns NOT_FOUND-ish so
- * the worker would build no anchor line; conv_db_get_max_msg_id likewise
- * returns 0.  Neither is reached in the count-only tests. */
-int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
-   (void)conv_id;
-   if (anchor_out)
-      *anchor_out = 0;
-   return AUTH_DB_FAILURE;
+/* No anchor line (memory_extraction.c isn't linked); not reached in the
+ * count-only tests. */
+void memory_extraction_anchor_line(int user_id, int64_t conversation_id, char *out, size_t out_sz) {
+   (void)user_id;
+   (void)conversation_id;
+   (void)out_sz;
+   out[0] = '\0';
 }
 
+/* Conversation DB stubs.  conv_db_get_max_msg_id returns 0; not reached in
+ * the count-only tests. */
 int conv_db_get_created_at(int64_t conv_id, int64_t *created_at_out) {
    (void)conv_id;
    if (created_at_out)

@@ -148,6 +148,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
     ${SRC_ROOT}/src/core/tz.c
+    ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
@@ -2240,7 +2241,6 @@ dawn_add_unit_test(test_calendar_db
 dawn_add_unit_test(test_auth_db
    SOURCES test_auth_db.c
            ${AUTH_DB_SOURCES}
-           ${SRC_ROOT}/src/core/user_tz.c
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 

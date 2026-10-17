@@ -202,28 +202,6 @@ static int worker_list_missing(int user_id,
  * Per-conversation summary work
  * ============================================================================= */
 
-/* Build the anchor-date prefix string for the prompt.  Mirrors the live
- * extractor's logic so backfilled summaries resolve relative phrases
- * ("yesterday", "last month") against the conversation's own logical
- * "now". */
-static void build_anchor_line(int64_t conv_id, char *out, size_t out_sz) {
-   out[0] = '\0';
-   if (conv_id <= 0)
-      return;
-   int64_t anchor_ts = ANCHOR_DATE_NONE;
-   if (conv_db_get_anchor_date(conv_id, &anchor_ts) != AUTH_DB_SUCCESS)
-      return;
-   if (anchor_ts == ANCHOR_DATE_NONE)
-      return;
-   struct tm tm_utc;
-   time_t ts = (time_t)anchor_ts;
-   if (!gmtime_r(&ts, &tm_utc))
-      return;
-   char date_buf[16];
-   strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
-   snprintf(out, out_sz, "Conversation anchor: %s\n\n", date_buf);
-}
-
 /* Parse the summary + title + topics out of an LLM JSON response and
  * persist them.  Skips fact/preference/entity/relation arrays even if
  * the LLM returned them — that's the whole point of summary-only.
@@ -379,8 +357,8 @@ static int process_one_conv(int user_id,
       return FAILURE;
    }
 
-   char anchor_line[64] = "";
-   build_anchor_line(conv_id, anchor_line, sizeof(anchor_line));
+   char anchor_line[MEMORY_EXTRACTION_ANCHOR_LINE_LEN];
+   memory_extraction_anchor_line(user_id, conv_id, anchor_line, sizeof(anchor_line));
 
    /* The canonical extraction prompt takes four %s args: anchor, conversation,
     * existing profile, expiry block.  The profile is empty and the expiry
