@@ -1732,7 +1732,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             json_object_object_get_ex(payload, "snooze_minutes", &snooze_obj);
             int snooze_min = snooze_obj ? json_object_get_int(snooze_obj) : 0;
             int rc = scheduler_snooze(event_id, snooze_min);
-            if (rc != 0)
+            if (rc != SUCCESS && rc != SCHEDULER_SNOOZE_LIMIT)
                send_error_impl(conn->wsi, "NOT_FOUND", "No ringing event to snooze");
             else
                scheduler_broadcast_events_changed(ev.user_id);

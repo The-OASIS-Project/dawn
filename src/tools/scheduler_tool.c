@@ -1194,14 +1194,46 @@ static char *handle_update(struct json_object *details, int user_id) {
    return out ? out : strdup("Updated event.");
 }
 
-static char *handle_snooze(struct json_object *details) {
+/* The caller's own event ringing now (the latest fired), or 0: what a
+ * dismiss or snooze with no id means first, so one user's "dismiss" doesn't
+ * end another's alarm that happens to be playing. */
+static int64_t own_ringing(int user_id) {
+   return user_id > 0 ? scheduler_db_latest_ringing(user_id) : 0;
+}
+
+/* Whether the caller may dismiss or snooze @p event_id: with no id, the event
+ * ringing now; an explicit id must be that one (any device may silence it)
+ * or one of the caller's own (a guest has none).  Refused the same way as
+ * "nothing ringing", so it says nothing about another user's events. */
+static bool may_silence(int64_t event_id, int user_id) {
+   if (event_id <= 0)
+      return true;
+   sched_event_t ringing;
+   sched_event_t ev;
+   const bool is_ringing = scheduler_get_ringing(&ringing) == SUCCESS && ringing.id == event_id;
+   const bool is_own = user_id > 0 && scheduler_db_get(event_id, &ev) == 0 && ev.user_id == user_id;
+   return is_ringing || is_own;
+}
+
+static char *handle_snooze(struct json_object *details, int user_id) {
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
+   if (event_id <= 0)
+      event_id = own_ringing(user_id); /* else whatever rings (0) */
    int snooze_min = json_get_int(details, "snooze_minutes", 0);
 
    if (snooze_min < 0 || snooze_min > MAX_SNOOZE_MINUTES)
       snooze_min = 0;
+   if (!may_silence(event_id, user_id))
+      return strdup("No alarm is currently ringing to snooze.");
 
    int result = scheduler_snooze(event_id, snooze_min);
+   if (result == SCHEDULER_SNOOZE_LIMIT) {
+      char buf[128];
+      snprintf(buf, sizeof(buf),
+               "It had been snoozed the most times allowed (%d), so it was dismissed instead.",
+               g_config.scheduler.max_snooze_count);
+      return strdup(buf);
+   }
    if (result == 0) {
       int actual_min = snooze_min > 0 ? snooze_min : g_config.scheduler.default_snooze_minutes;
       char buf[128];
@@ -1215,20 +1247,10 @@ static char *handle_snooze(struct json_object *details) {
 
 static char *handle_dismiss(struct json_object *details, int user_id) {
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
-
-   /* An explicit id must be the alarm ringing now (any device may silence it)
-    * or one of the caller's own (a guest has none).  Refused the same way as
-    * "nothing ringing", so it says nothing about another user's events. */
-   if (event_id > 0) {
-      sched_event_t ringing;
-      sched_event_t ev;
-      const bool is_ringing = scheduler_get_ringing(&ringing) == SUCCESS && ringing.id == event_id;
-      const bool is_own = user_id > 0 && scheduler_db_get(event_id, &ev) == 0 &&
-                          ev.user_id == user_id;
-      if (!is_ringing && !is_own) {
-         return strdup("No alarm is currently ringing to dismiss.");
-      }
-   }
+   if (event_id <= 0)
+      event_id = own_ringing(user_id); /* else whatever rings (0) */
+   if (!may_silence(event_id, user_id))
+      return strdup("No alarm is currently ringing to dismiss.");
 
    int result = scheduler_dismiss(event_id);
    if (result == 0)
@@ -1308,7 +1330,7 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    } else if (strcmp(action, "update") == 0) {
       result = handle_update(details, user_id);
    } else if (strcmp(action, "snooze") == 0) {
-      result = handle_snooze(details);
+      result = handle_snooze(details, user_id);
    } else if (strcmp(action, "dismiss") == 0) {
       result = handle_dismiss(details, user_id);
    } else {

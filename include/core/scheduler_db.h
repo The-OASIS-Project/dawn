@@ -275,10 +275,12 @@ int scheduler_db_update_status(int64_t id, sched_status_t status);
 int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t fired_at);
 
 /**
- * @brief Update fire_at for snooze (also updates snoozed_until and snooze_count)
+ * @brief Snooze a ringing event: fire_at, snoozed_until and snooze_count
+ *        (only from status 'ringing', so two snoozes of one ring can't both
+ *        count)
  * @param id Event ID
  * @param new_fire_at New fire time
- * @return SUCCESS or FAILURE
+ * @return SUCCESS, or FAILURE when it isn't ringing (already handled)
  */
 int scheduler_db_snooze(int64_t id, time_t new_fire_at);
 
@@ -295,6 +297,16 @@ int scheduler_db_cancel(int64_t id);
  * @return SUCCESS if dismissed, FAILURE if already handled
  */
 int scheduler_db_dismiss(int64_t id);
+
+/**
+ * @brief End one firing of a ringing event as @p status (optimistic: only if
+ *        it is still ringing from the firing at @p fired_at)
+ * @param id       Event ID
+ * @param fired_at When this firing rang (the row's fired_at)
+ * @param status   SCHED_STATUS_DISMISSED or SCHED_STATUS_TIMED_OUT
+ * @return SUCCESS if ended, FAILURE if already handled (or ringing again)
+ */
+int scheduler_db_end_ring(int64_t id, time_t fired_at, sched_status_t status);
 
 /**
  * @brief Mark a missed event as acknowledged (status='missed' → 'dismissed')
@@ -386,6 +398,13 @@ int scheduler_db_count_total_events(int *count_out);
  * @return Number of events found
  */
 int scheduler_db_get_ringing(sched_event_t *events, int max_count);
+
+/**
+ * @brief The id of @p user_id's timer, alarm or reminder that fired last and
+ *        is still ringing (a running task or briefing is 'ringing' too)
+ * @return The event id, or 0 when none (or on error)
+ */
+int64_t scheduler_db_latest_ringing(int user_id);
 
 /**
  * @brief Get active timers for a specific satellite UUID

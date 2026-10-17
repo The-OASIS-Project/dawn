@@ -438,7 +438,7 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
 
    const char *sql = "UPDATE scheduled_events SET status = 'snoozed', fire_at = ?, "
                      "snoozed_until = ?, snooze_count = snooze_count + 1 "
-                     "WHERE id = ? AND status IN ('ringing', 'pending', 'snoozed')";
+                     "WHERE id = ? AND status = 'ringing'";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
@@ -512,11 +512,14 @@ int scheduler_db_clear_missed(int64_t id, int user_id) {
    return result;
 }
 
-int scheduler_db_dismiss(int64_t id) {
+/* A ringing event ends as @p status; FAILURE when it wasn't ringing (someone
+ * else ended it first).  @p fired_at, when not 0, names the firing that must
+ * still be ringing. */
+static int end_ringing(int64_t id, time_t fired_at, sched_status_t status) {
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
-   const char *sql = "UPDATE scheduled_events SET status = 'dismissed', fired_at = ? "
-                     "WHERE id = ? AND status = 'ringing'";
+   const char *sql = "UPDATE scheduled_events SET status = ?, fired_at = ? "
+                     "WHERE id = ? AND status = 'ringing' AND (?4 = 0 OR fired_at = ?4)";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
@@ -524,8 +527,10 @@ int scheduler_db_dismiss(int64_t id) {
       return FAILURE;
    }
 
-   sqlite3_bind_int64(stmt, 1, (int64_t)time(NULL));
-   sqlite3_bind_int64(stmt, 2, id);
+   sqlite3_bind_text(stmt, 1, sched_status_to_str(status), -1, SQLITE_STATIC);
+   sqlite3_bind_int64(stmt, 2, (int64_t)time(NULL));
+   sqlite3_bind_int64(stmt, 3, id);
+   sqlite3_bind_int64(stmt, 4, (int64_t)fired_at);
 
    rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
@@ -534,6 +539,14 @@ int scheduler_db_dismiss(int64_t id) {
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
    return result;
+}
+
+int scheduler_db_dismiss(int64_t id) {
+   return end_ringing(id, 0, SCHED_STATUS_DISMISSED);
+}
+
+int scheduler_db_end_ring(int64_t id, time_t fired_at, sched_status_t status) {
+   return end_ringing(id, fired_at, status);
 }
 
 /* =============================================================================
@@ -762,6 +775,25 @@ int scheduler_db_get_ringing(sched_event_t *events, int max_count) {
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
    return count;
+}
+
+int64_t scheduler_db_latest_ringing(int user_id) {
+   AUTH_DB_LOCK_OR_RETURN(0);
+
+   /* A running task or briefing is 'ringing' too; it isn't one to silence. */
+   const char *sql = "SELECT id FROM scheduled_events WHERE user_id = ? AND status = 'ringing' "
+                     "AND event_type IN ('timer', 'alarm', 'reminder') "
+                     "ORDER BY fired_at DESC LIMIT 1";
+   sqlite3_stmt *stmt = NULL;
+   int64_t id = 0;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(stmt, 1, user_id);
+      if (sqlite3_step(stmt) == SQLITE_ROW)
+         id = sqlite3_column_int64(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return id;
 }
 
 int scheduler_db_get_active_by_uuid(const char *uuid, sched_event_t *events, int max_count) {
