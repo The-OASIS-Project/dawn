@@ -25,7 +25,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Dependencies (CUDA devel image for nvcc + toolkit)
 # -----------------------------------------------------------------------------
-FROM nvidia/cuda:12.6.3-devel-ubuntu22.04@sha256:d49bb8a4ff97fb5fe477947a3f02aa8c0a53eae77e11f00ec28618a0bcaa2ad1 AS dawn-deps
+FROM nvidia/cuda:13.4.2-devel-ubuntu22.04@sha256:fd174bc3ff824df1d20df0c52eda9a2fd11ecd6718c73506032654c5cbe968da AS dawn-deps
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -137,7 +137,7 @@ RUN cmake --install build-server --prefix /opt/dawn
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime (CUDA runtime — no toolkit/nvcc)
 # -----------------------------------------------------------------------------
-FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04@sha256:63a18dd805367dacfb077aeced8384ab2fb569598ec5f5f5220c3f90a5c23650 AS dawn-runtime
+FROM nvidia/cuda:13.4.2-runtime-ubuntu22.04@sha256:8054877041592f9dd593ddf27535fa2fe68b4cbb5c39db11f7e9a425d52afa6b AS dawn-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
