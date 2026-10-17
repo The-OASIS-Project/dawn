@@ -729,8 +729,15 @@
 
       // Per-user My Settings
       if (myNeedSave) {
-         DawnMySettings.onSaveComplete(function (success) {
-            if (!success) saveHadError = true;
+         DawnMySettings.onSaveComplete(function (success, error) {
+            if (!success) {
+               saveHadError = true;
+               // Say why when the server did ("That time zone isn't one DAWN
+               // knows"): retrying wouldn't help.
+               if (error && typeof DawnToast !== 'undefined') {
+                  DawnToast.show('Failed to save your settings: ' + error, 'error');
+               }
+            }
             pendingSaves--;
             checkAllSavesComplete();
          });

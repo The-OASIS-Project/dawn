@@ -101,6 +101,7 @@
       return formDirty;
    }
 
+   // cb(success, error): error is the server's reason when it refused.
    function onSaveComplete(cb) {
       saveCompleteCb = cb;
    }
@@ -242,7 +243,7 @@
          // Orchestrated by the unified panel Save: report into its shared
          // counter and stay silent so it can show a single toast (mirrors the
          // deliberately-silent DawnTools completion path).
-         cb(!!payload.success);
+         cb(!!payload.success, payload.error);
          return;
       }
 
