@@ -250,7 +250,6 @@ static void test_wall_round_trip(void) {
    TEST_ASSERT_EQUAL_INT(15, tm.tm_hour);
    TEST_ASSERT_EQUAL_INT(3, tm.tm_wday); /* Wednesday */
    TEST_ASSERT_EQUAL_INT(-4 * 3600, (int)tm.tm_gmtoff);
-   TEST_ASSERT_EQUAL_INT(1, tm.tm_isdst);
    TEST_ASSERT_EQUAL_INT64(t, tz_mktime(ny, &tm));
 }
 

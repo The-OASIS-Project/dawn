@@ -81,8 +81,9 @@ time_t tz_wall(const tz_t *zone, time_t instant);
 time_t tz_from_wall(const tz_t *zone, time_t wall);
 
 /**
- * @brief @p instant in @p zone as a struct tm: every field, tm_gmtoff
- *        included; tm_zone is not set (print the zone's name instead).
+ * @brief @p instant in @p zone as a struct tm: the date and time fields and
+ *        tm_gmtoff; tm_isdst is -1 (unknown) and tm_zone is not set (print
+ *        the zone's name instead).
  */
 void tz_local(const tz_t *zone, time_t instant, struct tm *out);
 

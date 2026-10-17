@@ -353,12 +353,7 @@ void tz_local(const tz_t *zone, time_t instant, struct tm *out) {
    gmtime_r(&wall, out);
    out->tm_gmtoff = (long)(wall - instant);
    out->tm_zone = NULL;
-   int is_daylight = 0;
-   if (zone && zone != icaltimezone_get_utc_timezone()) {
-      icaltimetype t = icaltime_from_timet_with_zone(instant, 0, (tz_t *)zone);
-      icaltimezone_get_utc_offset((tz_t *)zone, &t, &is_daylight);
-   }
-   out->tm_isdst = is_daylight;
+   out->tm_isdst = -1; /* nothing reads it; finding it costs a second conversion */
 }
 
 time_t tz_mktime(const tz_t *zone, const struct tm *tm) {
