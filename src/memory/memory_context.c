@@ -62,7 +62,7 @@
 #define MEMORY_CONTEXT_MAX_BYTES (16 * 1024)
 #define MEMORY_CONTEXT_INIT_BYTES 4096
 
-char *memory_build_context(int user_id, int token_budget) {
+char *memory_build_context(int user_id, const tz_t *zone, int token_budget) {
    /* token_budget is no longer enforced — the section moved into the
     * cached stable prefix where per-turn token cost isn't the
     * bottleneck.  Parameter kept for API stability and operator
@@ -142,10 +142,8 @@ char *memory_build_context(int user_id, int token_budget) {
 
          char time_str[16] = "undated";
          struct tm tm_storage;
-         const time_t written = summaries[i].created_at;
-         if (localtime_r(&written, &tm_storage) != NULL) {
-            strftime(time_str, sizeof(time_str), "%Y-%m-%d", &tm_storage);
-         }
+         tz_local(zone, summaries[i].created_at, &tm_storage);
+         strftime(time_str, sizeof(time_str), "%Y-%m-%d", &tm_storage);
 
          char *summary = llm_context_neutralize(summaries[i].summary);
          if (!summary)

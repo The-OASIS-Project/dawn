@@ -36,6 +36,7 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/tz.h"
+#include "core/user_tz.h"
 #include "logging.h"
 #include "tools/calendar_pick.h"
 #include "tools/calendar_rrule.h"
@@ -129,16 +130,19 @@ static char *check_oauth_revoked(void) {
 }
 
 /* An instance's key as the model passes it back in 'occurrence': its
- * original start, a date for an all-day event, else local time with its UTC
- * offset (exact in the hour a daylight-saving change repeats). */
-static void format_occurrence_key(const char *recurrence_id, char *out, size_t out_len) {
+ * original start, a date for an all-day event, else the time in @p zone with
+ * its UTC offset (exact in the hour a daylight-saving change repeats). */
+static void format_occurrence_key(const tz_t *zone,
+                                  const char *recurrence_id,
+                                  char *out,
+                                  size_t out_len) {
    const time_t t = calendar_ical_instance_key_time(recurrence_id);
    if (strlen(recurrence_id) == 8) {
       snprintf(out, out_len, "%.4s-%.2s-%.2s", recurrence_id, recurrence_id + 4, recurrence_id + 6);
       return;
    }
    struct tm tm;
-   localtime_r(&t, &tm);
+   tz_local(zone, t, &tm);
    const long off = tm.tm_gmtoff / 60;
    const unsigned hours = (unsigned)(labs(off) / 60) % 100;
    const unsigned minutes = (unsigned)(labs(off) % 60);
@@ -147,17 +151,18 @@ static void format_occurrence_key(const char *recurrence_id, char *out, size_t o
    snprintf(out, out_len, "%.19s%c%02u:%02u", base, off < 0 ? '-' : '+', hours, minutes);
 }
 
-/* Append a single occurrence line to the strbuf.  Returns 0 on success or
- * STRBUF_E_OOM if the buffer cap was reached (caller should bail). */
-static int format_occurrence_sb(const calendar_occurrence_t *occ, strbuf_t *sb) {
+/* Append a single occurrence line, its times in @p zone, to the strbuf.
+ * Returns 0 on success or STRBUF_E_OOM if the buffer cap was reached (caller
+ * should bail). */
+static int format_occurrence_sb(const tz_t *zone, const calendar_occurrence_t *occ, strbuf_t *sb) {
    int rc;
    if (occ->all_day) {
       rc = strbuf_appendf(sb, "- %s (all day: %s)%s%s", occ->summary, occ->dtstart_date,
                           occ->location[0] ? " @ " : "", occ->location);
    } else {
       struct tm start_tm, end_tm;
-      localtime_r(&occ->dtstart, &start_tm);
-      localtime_r(&occ->dtend, &end_tm);
+      tz_local(zone, occ->dtstart, &start_tm);
+      tz_local(zone, occ->dtend, &end_tm);
 
       char start_str[32], end_str[32];
       format_time_speech(&start_tm, start_str, sizeof(start_str));
@@ -183,7 +188,7 @@ static int format_occurrence_sb(const calendar_occurrence_t *occ, strbuf_t *sb) 
       rc = strbuf_appendf(sb, " [UID: %s]", occ->event_uid);
    if (rc >= 0 && occ->recurrence_id[0]) {
       char key[40];
-      format_occurrence_key(occ->recurrence_id, key, sizeof(key));
+      format_occurrence_key(zone, occ->recurrence_id, key, sizeof(key));
       rc = strbuf_appendf(sb, " [repeats; occurrence: %s]", key);
    }
    return (rc < 0) ? STRBUF_E_OOM : 0;
@@ -255,12 +260,11 @@ static char *handle_calendars(int user_id) {
    return finalize_calendar_response(&sb);
 }
 
-static char *handle_today(struct json_object *details, int user_id) {
-   const char *tz = g_config.localization.timezone;
+static char *handle_today(struct json_object *details, int user_id, const tz_t *zone) {
    const char *calendar_name = json_get_str(details, "calendar");
 
    calendar_occurrence_t events[MAX_EVENTS];
-   int count = calendar_service_today(user_id, tz, calendar_name, events, MAX_EVENTS);
+   int count = calendar_service_today(user_id, zone, calendar_name, events, MAX_EVENTS);
 
    strbuf_t sb;
    strbuf_init(&sb, 2048);
@@ -276,7 +280,7 @@ static char *handle_today(struct json_object *details, int user_id) {
    } else {
       strbuf_appendf(&sb, "Today's events (%d):\n", count);
       for (int i = 0; i < count; i++) {
-         if (format_occurrence_sb(&events[i], &sb) != 0)
+         if (format_occurrence_sb(zone, &events[i], &sb) != 0)
             break;
          if (strbuf_append(&sb, "\n") < 0)
             break;
@@ -286,7 +290,7 @@ static char *handle_today(struct json_object *details, int user_id) {
    return finalize_calendar_response(&sb);
 }
 
-static char *handle_range(struct json_object *details, int user_id) {
+static char *handle_range(struct json_object *details, int user_id, const tz_t *zone) {
    const char *start_str = json_get_str(details, "start");
    const char *end_str = json_get_str(details, "end");
    const char *calendar_name = json_get_str(details, "calendar");
@@ -296,7 +300,7 @@ static char *handle_range(struct json_object *details, int user_id) {
    }
 
    time_t start;
-   if (!tz_parse(start_str, tz_daemon(), &start))
+   if (!tz_parse(start_str, zone, &start))
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
                     "'2026-05-27T14:00:00' (local time), '2026-05-27T14:00:00Z' (UTC), or "
@@ -304,7 +308,7 @@ static char *handle_range(struct json_object *details, int user_id) {
 
    time_t end;
    if (end_str) {
-      if (!tz_parse(end_str, tz_daemon(), &end))
+      if (!tz_parse(end_str, zone, &end))
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
                        "'2026-05-27T15:00:00' (local time) or '2026-05-27T15:00:00Z' (UTC).");
@@ -313,7 +317,7 @@ static char *handle_range(struct json_object *details, int user_id) {
    }
 
    calendar_occurrence_t events[MAX_EVENTS];
-   int count = calendar_service_range(user_id, start, end, calendar_name, events, MAX_EVENTS);
+   int count = calendar_service_range(user_id, zone, start, end, calendar_name, events, MAX_EVENTS);
 
    strbuf_t sb;
    strbuf_init(&sb, 2048);
@@ -329,7 +333,7 @@ static char *handle_range(struct json_object *details, int user_id) {
    } else {
       strbuf_appendf(&sb, "Events in range (%d):\n", count);
       for (int i = 0; i < count; i++) {
-         if (format_occurrence_sb(&events[i], &sb) != 0)
+         if (format_occurrence_sb(zone, &events[i], &sb) != 0)
             break;
          if (strbuf_append(&sb, "\n") < 0)
             break;
@@ -339,7 +343,7 @@ static char *handle_range(struct json_object *details, int user_id) {
    return finalize_calendar_response(&sb);
 }
 
-static char *handle_next(struct json_object *details, int user_id) {
+static char *handle_next(struct json_object *details, int user_id, const tz_t *zone) {
    const char *calendar_name = json_get_str(details, "calendar");
 
    calendar_occurrence_t occ;
@@ -360,12 +364,12 @@ static char *handle_next(struct json_object *details, int user_id) {
    strbuf_t sb;
    strbuf_init(&sb, 1024);
    strbuf_append(&sb, "Next event:\n");
-   format_occurrence_sb(&occ, &sb);
+   format_occurrence_sb(zone, &occ, &sb);
    append_access_summary_sb(&sb, user_id);
    return finalize_calendar_response(&sb);
 }
 
-static char *handle_search(struct json_object *details, int user_id) {
+static char *handle_search(struct json_object *details, int user_id, const tz_t *zone) {
    const char *query = json_get_str(details, "query");
    if (!query || !query[0])
       return strdup("Error: 'query' text is required for search");
@@ -389,7 +393,7 @@ static char *handle_search(struct json_object *details, int user_id) {
    } else {
       strbuf_appendf(&sb, "Search results for '%s' (%d):\n", query, count);
       for (int i = 0; i < count; i++) {
-         if (format_occurrence_sb(&events[i], &sb) != 0)
+         if (format_occurrence_sb(zone, &events[i], &sb) != 0)
             break;
          if (strbuf_append(&sb, "\n") < 0)
             break;
@@ -410,15 +414,19 @@ static bool real_date(const char *text) {
    return d >= 1 && d <= (m == 2 && !leap ? 28 : days[m - 1]);
 }
 
-/* A time argument: @p epoch_out as tz_parse reads it (in the zone without an
+/* A time argument: @p epoch_out as tz_parse reads it (in @p zone without an
  * offset), and @p date_out its date when it starts with one ("" otherwise),
  * for an all-day event.  False when it can't be read. */
-static bool parse_when(const char *text, time_t *epoch_out, char *date_out, size_t date_len) {
+static bool parse_when(const tz_t *zone,
+                       const char *text,
+                       time_t *epoch_out,
+                       char *date_out,
+                       size_t date_len) {
    date_out[0] = '\0';
    if (strlen(text) >= 10 && text[4] == '-' && text[7] == '-' && !real_date(text))
       return false;
    time_t t;
-   if (!tz_parse(text, tz_daemon(), &t))
+   if (!tz_parse(text, zone, &t))
       return false;
    *epoch_out = t;
    if (strlen(text) >= 10 && text[4] == '-' && text[7] == '-')
@@ -437,13 +445,13 @@ static void next_day(const char *date, char *out, size_t out_len) {
 /* An instance's start as shown with "occurrence:" (a date for an all-day
  * event, else a local time with its UTC offset), read back: midnight UTC of
  * the date, or the instant.  0 when it can't be read. */
-static time_t parse_occurrence(const char *text) {
+static time_t parse_occurrence(const tz_t *zone, const char *text) {
    if (!text || !real_date(text))
       return 0;
    if (strlen(text) == 10)
       return (time_t)iso8601_parse_date_utc(text);
    time_t t;
-   return tz_parse(text, tz_daemon(), &t) ? t : 0;
+   return tz_parse(text, zone, &t) ? t : 0;
 }
 
 /* "reminder_minutes": minutes before the start; -1 when not given, null, "",
@@ -548,7 +556,7 @@ static char *write_error(int rc, const char *verb) {
    return msg;
 }
 
-static char *handle_add(struct json_object *details, int user_id) {
+static char *handle_add(struct json_object *details, int user_id, const tz_t *zone) {
    const char *summary = json_get_str(details, "summary");
    if (!summary || !summary[0])
       return strdup("Error: 'summary' (event title) is required");
@@ -561,11 +569,11 @@ static char *handle_add(struct json_object *details, int user_id) {
                              .location = json_get_str(details, "location"),
                              .description = json_get_str(details, "description"),
                              .all_day = json_get_bool(details, "all_day", false),
-                             .tzid = tz_name(tz_daemon()),
+                             .tzid = tz_name(zone),
                              .rrule = json_get_str(details, "rrule"),
                              .reminder_minutes = json_get_reminder(details) };
    char start_date[16], end_date[16];
-   if (!parse_when(start_str, &n.start, start_date, sizeof(start_date)) ||
+   if (!parse_when(zone, start_str, &n.start, start_date, sizeof(start_date)) ||
        (n.all_day && !start_date[0]))
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
@@ -573,7 +581,7 @@ static char *handle_add(struct json_object *details, int user_id) {
                     "'2026-05-27' (date only).");
    const char *end_str = json_get_str(details, "end");
    end_date[0] = '\0';
-   if (end_str && !parse_when(end_str, &n.end, end_date, sizeof(end_date)))
+   if (end_str && !parse_when(zone, end_str, &n.end, end_date, sizeof(end_date)))
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
                     "'2026-05-27T15:00:00' (local time) or '2026-05-27T15:00:00Z' (UTC).");
@@ -617,7 +625,7 @@ static char *handle_add(struct json_object *details, int user_id) {
       strftime(time_str, sizeof(time_str), "%A, %B %d, %Y", &st);
    } else {
       struct tm st;
-      localtime_r(&n.start, &st);
+      tz_local(zone, n.start, &st);
       char t_str[16];
       format_time_speech(&st, t_str, sizeof(t_str));
       char date_str[48];
@@ -634,8 +642,10 @@ static char *handle_add(struct json_object *details, int user_id) {
    return buf;
 }
 
-/* A change to an event from @p details.  Returns an error message, or NULL. */
-static char *read_change(struct json_object *details,
+/* A change to an event from @p details, its times read in @p zone.  Returns
+ * an error message, or NULL. */
+static char *read_change(const tz_t *zone,
+                         struct json_object *details,
                          calendar_ical_change_t *c,
                          char *start_date,
                          char *end_date,
@@ -647,37 +657,38 @@ static char *read_change(struct json_object *details,
    c->rrule = json_get_str(details, "rrule");
    c->reminder_minutes = json_get_reminder(details);
    c->remove_reminders = json_get_bool(details, "remove_reminders", false);
+   c->user_tzid = tz_name(zone);
    const char *start = json_get_str(details, "start");
    const char *end = json_get_str(details, "end");
    if (start) {
-      if (!parse_when(start, &c->start, start_date, date_len))
+      if (!parse_when(zone, start, &c->start, start_date, date_len))
          return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid 'start' (use ISO 8601).");
       c->set_start = true;
       c->start_date = start_date;
    }
    if (end) {
-      if (!parse_when(end, &c->end, end_date, date_len))
+      if (!parse_when(zone, end, &c->end, end_date, date_len))
          return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid 'end' (use ISO 8601).");
       c->set_end = true;
       c->end_date = end_date;
    }
    /* null or "" leaves it unset (a whole-series edit); delete is stricter. */
    const char *occ = json_get_str(details, "occurrence");
-   if (occ && !(c->occurrence = parse_occurrence(occ)))
+   if (occ && !(c->occurrence = parse_occurrence(zone, occ)))
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: invalid 'occurrence': pass the value shown after 'occurrence:' "
                     "on the event's row.");
    return NULL;
 }
 
-static char *handle_update(struct json_object *details, int user_id) {
+static char *handle_update(struct json_object *details, int user_id, const tz_t *zone) {
    const char *uid = json_get_str(details, "uid");
    if (!uid || !uid[0])
       return strdup("Error: 'uid' of the event to update is required");
 
    calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
    char start_date[16], end_date[16];
-   char *err = read_change(details, &c, start_date, end_date, sizeof(start_date));
+   char *err = read_change(zone, details, &c, start_date, end_date, sizeof(start_date));
    if (err)
       return err;
    const int rc = calendar_service_update(user_id, uid, json_get_str(details, "calendar"), &c);
@@ -708,7 +719,7 @@ static char *handle_update(struct json_object *details, int user_id) {
    return msg;
 }
 
-static char *handle_delete(struct json_object *details, int user_id) {
+static char *handle_delete(struct json_object *details, int user_id, const tz_t *zone) {
    const char *uid = json_get_str(details, "uid");
    if (!uid || !uid[0])
       return strdup("Error: 'uid' of the event to delete is required");
@@ -718,7 +729,8 @@ static char *handle_delete(struct json_object *details, int user_id) {
       /* Present at all, it asks for one occurrence: never the whole series. */
       calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
       c.cancel = true;
-      if (!(c.occurrence = parse_occurrence(json_object_get_string(occ))))
+      c.user_tzid = tz_name(zone);
+      if (!(c.occurrence = parse_occurrence(zone, json_object_get_string(occ))))
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: invalid 'occurrence': pass the value shown after "
                        "'occurrence:' on the event's row.");
@@ -757,24 +769,26 @@ static char *calendar_tool_callback(const char *action, char *value, int *should
       return strdup(TOOL_GUEST_REFUSAL);
    }
 
+   /* The user's zone: times read, windows and output all in it. */
+   const tz_t *zone = user_tz(user_id);
    char *result = NULL;
 
    if (strcmp(action, "calendars") == 0) {
       result = handle_calendars(user_id);
    } else if (strcmp(action, "today") == 0) {
-      result = handle_today(details, user_id);
+      result = handle_today(details, user_id, zone);
    } else if (strcmp(action, "range") == 0) {
-      result = handle_range(details, user_id);
+      result = handle_range(details, user_id, zone);
    } else if (strcmp(action, "next") == 0) {
-      result = handle_next(details, user_id);
+      result = handle_next(details, user_id, zone);
    } else if (strcmp(action, "search") == 0) {
-      result = handle_search(details, user_id);
+      result = handle_search(details, user_id, zone);
    } else if (strcmp(action, "add") == 0) {
-      result = handle_add(details, user_id);
+      result = handle_add(details, user_id, zone);
    } else if (strcmp(action, "update") == 0) {
-      result = handle_update(details, user_id);
+      result = handle_update(details, user_id, zone);
    } else if (strcmp(action, "delete") == 0) {
-      result = handle_delete(details, user_id);
+      result = handle_delete(details, user_id, zone);
    } else {
       char buf[256];
       snprintf(buf, sizeof(buf),

@@ -581,7 +581,7 @@ char *session_render_notices_locked(session_t *session, int viewer_user_id) {
    return out;
 }
 
-char *session_take_new_notices_locked(session_t *session, int viewer_user_id) {
+char *session_take_new_notices_locked(session_t *session, int viewer_user_id, const tz_t *zone) {
    notices_expire_locked(session);
    const char *header = session_notices_header();
    size_t cap = strlen(header) + 1;
@@ -605,9 +605,8 @@ char *session_take_new_notices_locked(session_t *session, int viewer_user_id) {
       }
       char when[8] = "--:--";
       struct tm tm_storage;
-      if (localtime_r(&n->at, &tm_storage) != NULL) {
-         strftime(when, sizeof(when), "%H:%M", &tm_storage);
-      }
+      tz_local(zone, n->at, &tm_storage);
+      strftime(when, sizeof(when), "%H:%M", &tm_storage);
       len += (size_t)snprintf(out + len, cap - len, "\n- (%s) %s", when, n->text);
       n->sent = true;
       n->told_by = session->turn_active ? session->turn_owner_token : 0;

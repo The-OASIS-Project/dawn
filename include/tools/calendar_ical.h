@@ -158,7 +158,7 @@ typedef struct {
    bool cancel;                 /**< with @p occurrence: cancel that instance */
    const char *const *accounts; /**< set by calendar_service: the account's addresses */
    int account_count;
-   const char *user_tzid; /**< set by calendar_service: zone a UTC event moves to with a rule */
+   const char *user_tzid; /**< the user's zone (set by the caller): times of day are theirs */
 } calendar_ical_change_t;
 
 /** A change with nothing set. */

@@ -28,6 +28,7 @@
 #include <stdbool.h>
 
 #include "config/dawn_config.h"
+#include "core/tz.h"
 #include "tools/calendar_db.h"
 #include "tools/calendar_ical.h"
 
@@ -135,25 +136,27 @@ void calendar_broadcast_sync_done(int user_id, int64_t account_id, bool ok);
  * ============================================================================ */
 
 /**
- * Get events for today in the user's timezone.
+ * Get today's events: midnight to midnight in @p zone.
  * @param user_id        Authenticated user
- * @param tz_name        IANA timezone name (e.g., "America/New_York")
+ * @param zone           The user's zone
  * @param calendar_name  Filter by calendar name (case-insensitive), NULL for all
  * @param out            Output array
  * @param max_count      Array capacity
  * @return Number of occurrences found (0 if none or on error)
  */
 int calendar_service_today(int user_id,
-                           const char *tz_name,
+                           const tz_t *zone,
                            const char *calendar_name,
                            calendar_occurrence_t *out,
                            int max_count);
 
 /**
- * Get events in a date/time range.
+ * Get events in the range [@p start, @p end), all-day ones by their dates in
+ * @p zone (the user's).
  * @param calendar_name  Filter by calendar name (case-insensitive), NULL for all
  */
 int calendar_service_range(int user_id,
+                           const tz_t *zone,
                            time_t start,
                            time_t end,
                            const char *calendar_name,

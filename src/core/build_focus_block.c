@@ -176,14 +176,17 @@ static char *followup_embed_text(session_t *session, const char *turn_text) {
    return text;
 }
 
-/* " YYYY-MM-DD" (local time) for an item's timestamp, or "" without one: the
- * model can tell an old item from a current one (see the context rules). */
-static void item_date(time_t ts, char *buf, size_t size) {
+/* " YYYY-MM-DD" (in @p zone, the user's) for an item's timestamp, or ""
+ * without one: the model can tell an old item from a current one (see the
+ * context rules). */
+static void item_date(const tz_t *zone, time_t ts, char *buf, size_t size) {
    struct tm tm_storage;
    buf[0] = '\0';
-   if (ts > 0 && localtime_r(&ts, &tm_storage) != NULL &&
-       strftime(buf, size, " %Y-%m-%d", &tm_storage) == 0) {
-      buf[0] = '\0';
+   if (ts > 0) {
+      tz_local(zone, ts, &tm_storage);
+      if (strftime(buf, size, " %Y-%m-%d", &tm_storage) == 0) {
+         buf[0] = '\0';
+      }
    }
 }
 
@@ -320,7 +323,7 @@ int build_focus_block(session_t *session,
       if (c->item_id != NULL) {
          safe_strscpy(it->item_id, c->item_id);
       }
-      item_date(c->item_timestamp, it->date, sizeof(it->date));
+      item_date(out->zone, c->item_timestamp, it->date, sizeof(it->date));
       it->text = text;
       it->score = result->score_breakdowns != NULL ? result->score_breakdowns[i].final_score
                                                    : FOCUS_SCORE_NA;

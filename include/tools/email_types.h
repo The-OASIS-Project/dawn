@@ -105,7 +105,7 @@ typedef struct {
    char from_name[64];
    char from_addr[256];
    char subject[256];
-   char date_str[32];
+   char date_str[32]; /* the Date header as sent (Gmail), for a row without date */
    time_t date;
    char preview[512];
    bool unread;                 /* Gmail UNREAD label / IMAP \Seen-absent — populated on both

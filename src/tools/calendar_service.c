@@ -43,7 +43,6 @@
 #include "core/crypto_store.h"
 #include "core/iso8601.h"
 #include "core/path_utils.h"
-#include "core/tz.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
@@ -1051,63 +1050,19 @@ static int get_user_calendar_ids(int user_id,
 }
 
 int calendar_service_today(int user_id,
-                           const char *tz_name,
+                           const tz_t *zone,
                            const char *calendar_name,
                            calendar_occurrence_t *out,
                            int max_count) {
-   int64_t cal_ids[32];
-   int cal_count = get_user_calendar_ids(user_id, calendar_name, cal_ids, 32);
-   if (cal_count <= 0)
-      return 0;
-
-   /* Compute today's boundaries in user timezone using tm_gmtoff.
-    * Avoids process-global setenv("TZ") which races with other threads. */
-   time_t now = time(NULL);
-   struct tm local_tm;
-   localtime_r(&now, &local_tm);
-   long gmtoff = local_tm.tm_gmtoff; /* System timezone offset (GNU extension) */
-
-   /* If caller specified a different timezone, we use the system offset as a
-    * reasonable approximation. For exact IANA timezone support, libical or ICU
-    * would be needed. The system timezone matches dawn.toml [general].timezone
-    * in the common deployment case (single-user embedded device). */
-   (void)tz_name;
-
-   /* Day boundaries: midnight to 23:59:59 in local time */
-   time_t local_now = now + gmtoff;
-   time_t local_midnight = local_now - (local_now % 86400);
-   time_t day_start = local_midnight - gmtoff;
-   time_t day_end = day_start + 86399;
-
-   /* Query timed events */
-   OLOG_INFO("calendar: today query user=%d cal_count=%d day_start=%lld day_end=%lld", user_id,
-             cal_count, (long long)day_start, (long long)day_end);
-   int count = 0;
-   calendar_db_occurrences_in_range(cal_ids, cal_count, day_start, day_end, out, max_count, &count);
-   OLOG_INFO("calendar: today timed results=%d", count);
-
-   /* Query all-day events for today's date */
-   char date_str[16];
-   iso8601_format_date(local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday, date_str,
-                       sizeof(date_str));
-
-   /* Next day for exclusive end */
-   char next_date[16];
-   struct tm next_tm = local_tm;
-   next_tm.tm_mday += 1;
-   mktime(&next_tm); /* normalize */
-   iso8601_format_date(next_tm.tm_year + 1900, next_tm.tm_mon + 1, next_tm.tm_mday, next_date,
-                       sizeof(next_date));
-
-   if (count < max_count) {
-      int allday = 0;
-      calendar_db_allday_occurrences_in_range(cal_ids, cal_count, date_str, next_date, out + count,
-                                              max_count - count, &allday);
-      if (allday > 0)
-         count += allday;
-   }
-
-   return count;
+   struct tm day;
+   tz_local(zone, time(NULL), &day);
+   day.tm_hour = 0;
+   day.tm_min = 0;
+   day.tm_sec = 0;
+   const time_t start = tz_mktime(zone, &day);
+   day.tm_mday += 1;
+   return calendar_service_range(user_id, zone, start, tz_mktime(zone, &day), calendar_name, out,
+                                 max_count);
 }
 
 /* Sort merged timed + all-day occurrences by start time (soonest first), with
@@ -1127,6 +1082,7 @@ static int occ_cmp_dtstart(const void *a, const void *b) {
 }
 
 int calendar_service_range(int user_id,
+                           const tz_t *zone,
                            time_t start,
                            time_t end,
                            const char *calendar_name,
@@ -1149,7 +1105,7 @@ int calendar_service_range(int user_id,
     * The window is [start, end), like the timed query. */
    char start_date[CALENDAR_DATE_LEN];
    char end_date[CALENDAR_DATE_LEN];
-   calendar_window_dates(start, end, start_date, end_date);
+   calendar_window_dates(zone, start, end, start_date, end_date);
 
    calendar_occurrence_t *allday = malloc((size_t)max_count * sizeof(*allday));
    int allday_count = 0;
@@ -1583,7 +1539,6 @@ static int write_event(int user_id,
       for (int i = 0; i < change.account_count; i++)
          address_list[i] = addresses[i];
       change.accounts = address_list;
-      change.user_tzid = tz_name(tz_daemon());
    }
    char *written = NULL;
    char etag[128] = "";

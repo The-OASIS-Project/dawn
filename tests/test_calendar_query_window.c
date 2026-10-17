@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "core/tz.h"
 #include "tools/calendar_query_window.h"
 #include "unity.h"
 
@@ -31,10 +32,12 @@ static const time_t NOW = 1790769600;
 static const time_t DAY = 86400;
 /* Midnight starting that Wednesday. */
 static const time_t WED = 1790769600 - 12 * 3600;
+static const tz_t *s_utc;
 
 void setUp(void) {
    setenv("TZ", "UTC", 1);
    tzset();
+   s_utc = tz_lookup("UTC");
 }
 
 void tearDown(void) {
@@ -42,7 +45,7 @@ void tearDown(void) {
 
 static calendar_window_t win(const char *q) {
    calendar_window_t w;
-   calendar_query_window(q, NULL, NOW, &w);
+   calendar_query_window(q, NULL, s_utc, NOW, &w);
    return w;
 }
 
@@ -86,7 +89,7 @@ static void test_weeks_and_weekends(void) {
 
    /* On a Sunday, last weekend is the one before this one. */
    calendar_window_t s;
-   calendar_query_window("last weekend", NULL, NOW + 4 * DAY, &s);
+   calendar_query_window("last weekend", NULL, s_utc, NOW + 4 * DAY, &s);
    TEST_ASSERT_EQUAL_INT64(WED - 4 * DAY, s.start);
 }
 
@@ -151,10 +154,10 @@ static void test_months(void) {
 static void test_window_dates(void) {
    char s[CALENDAR_DATE_LEN];
    char e[CALENDAR_DATE_LEN];
-   calendar_window_dates(WED, WED + DAY, s, e); /* one day, ending at midnight */
+   calendar_window_dates(s_utc, WED, WED + DAY, s, e); /* one day, ending at midnight */
    TEST_ASSERT_EQUAL_STRING("2026-09-30", s);
    TEST_ASSERT_EQUAL_STRING("2026-10-01", e);
-   calendar_window_dates(NOW, NOW + 3 * DAY, s, e); /* ends mid-Saturday */
+   calendar_window_dates(s_utc, NOW, NOW + 3 * DAY, s, e); /* ends mid-Saturday */
    TEST_ASSERT_EQUAL_STRING("2026-09-30", s);
    TEST_ASSERT_EQUAL_STRING("2026-10-04", e);
 }
@@ -163,16 +166,36 @@ static void test_window_dates(void) {
  * placed as one. */
 static void test_assistant_named_after_a_weekday(void) {
    calendar_window_t w;
-   calendar_query_window("friday, how does the memory system work", "Friday", NOW, &w);
+   calendar_query_window("friday, how does the memory system work", "Friday", s_utc, NOW, &w);
    TEST_ASSERT_FALSE(w.asks);
-   calendar_query_window("friday, anything on friday?", "Friday", NOW, &w);
+   calendar_query_window("friday, anything on friday?", "Friday", s_utc, NOW, &w);
    TEST_ASSERT_TRUE(w.asks);
    TEST_ASSERT_EQUAL_INT64(WED + 2 * DAY, w.start);
-   calendar_query_window("what do I have next friday", "friday", NOW, &w);
+   calendar_query_window("what do I have next friday", "friday", s_utc, NOW, &w);
    TEST_ASSERT_TRUE(w.asks);
    /* Other weekdays stay bare-word days. */
-   calendar_query_window("friday, anything monday?", "friday", NOW, &w);
+   calendar_query_window("friday, anything monday?", "friday", s_utc, NOW, &w);
    TEST_ASSERT_EQUAL_INT64(WED + 5 * DAY, w.start);
+}
+
+/* Days are the user's, not the process's (TZ is UTC here): in Los Angeles,
+ * Wednesday 05:00, "today" is that day's midnight there, and the day clocks
+ * go back is 25 hours long. */
+static void test_user_zone(void) {
+   const tz_t *la = tz_lookup("America/Los_Angeles");
+   calendar_window_t w;
+   calendar_query_window("what's on today?", NULL, la, NOW, &w);
+   TEST_ASSERT_EQUAL_INT64(1790751600, w.start); /* 2026-09-30 00:00 PDT */
+   TEST_ASSERT_EQUAL_INT64(1790751600 + DAY, w.end);
+   calendar_query_window("anything tomorrow", NULL, la, 1793448000, &w); /* Oct 31 */
+   TEST_ASSERT_EQUAL_INT64(1793516400, w.start);                         /* Nov 1 PDT */
+   TEST_ASSERT_EQUAL_INT64(1793606400, w.end);                           /* Nov 2 PST */
+
+   char s[CALENDAR_DATE_LEN];
+   char e[CALENDAR_DATE_LEN];
+   calendar_window_dates(la, 1790751600, 1790751600 + DAY, s, e);
+   TEST_ASSERT_EQUAL_STRING("2026-09-30", s);
+   TEST_ASSERT_EQUAL_STRING("2026-10-01", e);
 }
 
 static void test_upcoming_schedule_and_past(void) {
@@ -207,6 +230,7 @@ int main(void) {
    RUN_TEST(test_months);
    RUN_TEST(test_assistant_named_after_a_weekday);
    RUN_TEST(test_window_dates);
+   RUN_TEST(test_user_zone);
    RUN_TEST(test_upcoming_schedule_and_past);
    RUN_TEST(test_unrelated_messages_ask_nothing);
    return UNITY_END();

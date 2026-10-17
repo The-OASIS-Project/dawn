@@ -44,8 +44,11 @@
 #include "core/missed_notifications_db.h"
 #include "core/scheduled_context.h"
 #include "core/scheduler_db.h"
+#include "core/scheduler_recur.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/tz.h"
+#include "core/user_tz.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
@@ -177,7 +180,7 @@ static void generate_announcement_text(const sched_event_t *event, char *buf, si
          break;
       case SCHED_EVENT_ALARM: {
          struct tm tm_info;
-         localtime_r(&event->fire_at, &tm_info);
+         tz_local(user_tz(event->user_id), event->fire_at, &tm_info);
          char time_str[16];
          strftime(time_str, sizeof(time_str), "%I:%M %p", &tm_info);
          snprintf(buf, buf_size, "It's %s. Your alarm is going off.", time_str);
@@ -1406,110 +1409,25 @@ static void start_alarm_sound(const sched_event_t *event) {
  * ============================================================================= */
 
 /**
- * @brief Check if a day-of-week matches a recurrence pattern
+ * @brief Calculate next fire time for a recurring event, in its owner's zone
+ *        (see sched_next_occurrence)
  *
- * @param wday Day of week (0=Sun, 1=Mon, ..., 6=Sat)
- * @param recurrence Recurrence type
- * @param recurrence_days CSV of day names for SCHED_RECUR_CUSTOM (e.g., "mon,wed,fri")
- * @return true if this day matches the pattern
- */
-static bool day_matches_recurrence(int wday,
-                                   sched_recurrence_t recurrence,
-                                   const char *recurrence_days) {
-   switch (recurrence) {
-      case SCHED_RECUR_DAILY:
-         return true;
-      case SCHED_RECUR_WEEKDAYS:
-         return (wday >= 1 && wday <= 5);
-      case SCHED_RECUR_WEEKENDS:
-         return (wday == 0 || wday == 6);
-      case SCHED_RECUR_WEEKLY:
-         return true; /* Same weekday as original */
-      case SCHED_RECUR_CUSTOM: {
-         if (!recurrence_days || !recurrence_days[0])
-            return false;
-         static const char *day_names[] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
-         const char *needle = day_names[wday];
-         /* Search for day name in CSV */
-         const char *p = recurrence_days;
-         while (*p) {
-            while (*p == ' ' || *p == ',')
-               p++;
-            if (strncasecmp(p, needle, 3) == 0) {
-               char next = p[3];
-               if (next == '\0' || next == ',' || next == ' ')
-                  return true;
-            }
-            while (*p && *p != ',')
-               p++;
-         }
-         return false;
-      }
-      default:
-         return false;
-   }
-}
-
-/**
- * @brief Calculate next fire time for a recurring event
+ * Reads the owner's settings: never called while holding the auth_db lock.
  *
- * Uses mktime() with tm_isdst = -1 for DST-aware calculation.
- *
- * @param event The event that just fired
+ * @param event The event that just fired (or is being cancelled)
  * @return Next fire time, or 0 if no next occurrence (shouldn't happen for recurring)
  */
 static time_t calculate_next_recurrence(const sched_event_t *event) {
    if (event->recurrence == SCHED_RECUR_ONCE)
       return 0;
-
-   /* Parse original_time (HH:MM) for the alarm time-of-day.
-    * original_time is always in the user's local timezone (any offset suffix
-    * from ISO 8601 input is intentionally ignored by sscanf). */
-   int hour = 0, minute = 0;
-   if (!event->original_time[0] || sscanf(event->original_time, "%d:%d", &hour, &minute) != 2 ||
-       hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-      /* None stored, or not HH:MM: the time it was set to fire at */
-      struct tm tm_fire;
-      localtime_r(&event->fire_at, &tm_fire);
-      hour = tm_fire.tm_hour;
-      minute = tm_fire.tm_min;
-   }
-
-   /* Start from tomorrow */
-   time_t now = time(NULL);
-   struct tm tm_next;
-   localtime_r(&now, &tm_next);
-   tm_next.tm_hour = hour;
-   tm_next.tm_min = minute;
-   tm_next.tm_sec = 0;
-   tm_next.tm_isdst = -1; /* Let mktime() handle DST */
-
-   /* For weekly recurrence, advance exactly 7 days */
-   if (event->recurrence == SCHED_RECUR_WEEKLY) {
-      tm_next.tm_mday += 7;
-      return mktime(&tm_next);
-   }
-
-   /* For daily/weekdays/weekends/custom, find next matching day */
-   for (int days = 1; days <= 8; days++) {
-      tm_next.tm_mday++;
-      time_t candidate = mktime(&tm_next);
-      if (candidate <= 0)
-         continue;
-
-      /* Re-read after mktime (normalizes the date) */
-      localtime_r(&candidate, &tm_next);
-      tm_next.tm_hour = hour;
-      tm_next.tm_min = minute;
-      tm_next.tm_sec = 0;
-      tm_next.tm_isdst = -1;
-
-      if (day_matches_recurrence(tm_next.tm_wday, event->recurrence, event->recurrence_days))
-         return mktime(&tm_next);
-   }
-
-   OLOG_WARNING("scheduler: could not find next recurrence for event %lld", (long long)event->id);
-   return 0;
+   const time_t next = sched_next_occurrence(
+       user_tz(event->user_id), event->fire_at, event->original_time, event->recurrence,
+       event->recurrence_days, event->snooze_count > 0 || event->status == SCHED_STATUS_SNOOZED,
+       time(NULL));
+   if (next == 0)
+      OLOG_WARNING("scheduler: could not find next recurrence for event %lld",
+                   (long long)event->id);
+   return next;
 }
 
 /* Pure builder for the next-occurrence row.  Shared by schedule_next_occurrence

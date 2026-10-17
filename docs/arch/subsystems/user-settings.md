@@ -19,5 +19,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Theme selection syncs immediately
 
 - **build_user_prompt()**: System prompt personalization
-   - Injects user preferences (persona, location, timezone, units) into LLM system prompt at session start
+   - Injects user preferences (persona, location, units) into LLM system prompt at session start
    - Each session is personalized to the authenticated user
+- **user_tz()** (`src/core/user_tz.c`): the user's time zone, else the server's
+   - Named in each turn's `[system_time]` line; the date, time, calendar and scheduler tools read and
+     write clock times in it

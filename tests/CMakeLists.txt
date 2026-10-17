@@ -77,6 +77,10 @@ function(dawn_add_unit_test NAME)
    if("${SRC_ROOT}/src/core/hash_util.c" IN_LIST T_SOURCES)
       target_link_libraries(${NAME} PRIVATE OpenSSL::Crypto)
    endif()
+   # tz.c needs libical (the auth-DB chain brings it in for migration v108).
+   if("${SRC_ROOT}/src/core/tz.c" IN_LIST T_SOURCES)
+      target_link_libraries(${NAME} PRIVATE ${LIBICAL_LIBRARIES})
+   endif()
    if(T_INCLUDES)
       target_include_directories(${NAME} PRIVATE ${T_INCLUDES})
    endif()
@@ -142,6 +146,9 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v104.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_calendar.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
+    ${SRC_ROOT}/src/core/tz.c
+    ${SRC_ROOT}/src/core/iso8601.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -508,6 +515,15 @@ dawn_add_unit_test(test_scheduler
    LIBS    dawn_common unity sqlite3 pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# When a repeating scheduled event fires next, on its owner's clock.
+dawn_add_unit_test(test_scheduler_recur
+   SOURCES test_scheduler_recur.c
+           ${SRC_ROOT}/src/core/scheduler_recur.c
+           ${SRC_ROOT}/src/core/tz.c
+           ${SRC_ROOT}/src/core/iso8601.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_briefing_prompt
    SOURCES test_briefing_prompt.c
            ${SRC_ROOT}/src/core/briefing_prompt.c
@@ -788,6 +804,8 @@ dawn_add_unit_test(test_session_history
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/core/hash_util.c
+           ${SRC_ROOT}/src/core/tz.c
+           ${SRC_ROOT}/src/core/iso8601.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -1030,6 +1048,7 @@ dawn_add_unit_test(test_document_db
 dawn_add_unit_test(test_calendar_query_window
    SOURCES test_calendar_query_window.c
            ${SRC_ROOT}/src/tools/calendar_query_window.c
+           ${SRC_ROOT}/src/core/tz.c
            ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/memory/memory_terms.c
@@ -1380,6 +1399,8 @@ dawn_add_unit_test(test_prompt_builder
            ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/core/build_focus_block.c
+           ${SRC_ROOT}/src/core/tz.c
+           ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/core/strbuf.c
@@ -1416,6 +1437,8 @@ dawn_add_unit_test(test_focus_probe
            ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/build_focus_block.c
+           ${SRC_ROOT}/src/core/tz.c
+           ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
    LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
@@ -1436,6 +1459,7 @@ dawn_add_unit_test(test_external_focus_adapters
            ${SRC_ROOT}/src/tools/calendar_focus_adapter.c
            ${SRC_ROOT}/src/tools/calendar_query_window.c
            ${SRC_ROOT}/src/core/iso8601.c
+           ${SRC_ROOT}/src/core/tz.c
            ${SRC_ROOT}/src/tools/external_focus_adapters_init.c
            ${SRC_ROOT}/src/core/focus/focus_source.c
            ${SRC_ROOT}/src/core/focus/focus_recency.c
@@ -2216,6 +2240,7 @@ dawn_add_unit_test(test_calendar_db
 dawn_add_unit_test(test_auth_db
    SOURCES test_auth_db.c
            ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/core/user_tz.c
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -2575,7 +2600,6 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_history_rows.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/sse_parser.c
-           ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/core/ocp_helpers.c
            ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/config/config_parser.c
@@ -2695,7 +2719,6 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/llm/llm_history_rows.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
            ${SRC_ROOT}/src/llm/sse_parser.c
-           ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/core/ocp_helpers.c
            ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/config/config_parser.c
@@ -2741,6 +2764,8 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/core/focus/focus_incremental.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/build_focus_block.c
+           ${SRC_ROOT}/src/core/tz.c
+           ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
    LIBS    dawn_common pthread m stemmer

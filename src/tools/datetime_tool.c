@@ -28,6 +28,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/tz.h"
+#include "core/user_tz.h"
 #include "dawn.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
@@ -109,9 +111,9 @@ static char *date_tool_callback(const char *action, char *value, int *should_res
    *should_respond = 1;
 
    time(&current_time);
-   struct tm tm_storage;
-   struct tm *time_info = localtime_r(&current_time, &tm_storage);
-   strftime(buffer, sizeof(buffer), "%A, %B %d, %Y", time_info);
+   struct tm time_info;
+   tz_local(user_tz(tool_get_current_user_id()), current_time, &time_info);
+   strftime(buffer, sizeof(buffer), "%A, %B %d, %Y", &time_info);
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       /* Direct mode: use TTS with personality */
@@ -164,9 +166,10 @@ static char *time_tool_callback(const char *action, char *value, int *should_res
    *should_respond = 1;
 
    time(&current_time);
-   struct tm tm_storage;
-   struct tm *time_info = localtime_r(&current_time, &tm_storage);
-   strftime(buffer, sizeof(buffer), "%I:%M:%S %p %Z", time_info);
+   const tz_t *zone = user_tz(tool_get_current_user_id());
+   struct tm time_info;
+   tz_local(zone, current_time, &time_info);
+   strftime(buffer, sizeof(buffer), "%I:%M:%S %p", &time_info);
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       /* Direct mode: use TTS with personality */
@@ -204,13 +207,13 @@ static char *time_tool_callback(const char *action, char *value, int *should_res
       return NULL;
    } else {
       /* AI modes: return raw data */
-      result = malloc(96);
+      result = malloc(160);
       if (!result) {
          OLOG_ERROR("time_tool: malloc failed");
          *should_respond = 0;
          return NULL;
       }
-      snprintf(result, 96, "The time is %s", buffer);
+      snprintf(result, 160, "The time is %s (%s)", buffer, tz_name(zone));
       return result;
    }
 }

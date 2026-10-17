@@ -93,14 +93,13 @@ char *prompt_sections_join(const composed_prompt_t *cp) {
    return out;
 }
 
-char *prompt_turn_head(time_t now) {
-   struct tm tm_storage;
-   const struct tm *tm_info = localtime_r(&now, &tm_storage);
+char *prompt_turn_head(const struct tm *tm_info, const char *zone) {
    char human[64];
    char iso_local[32];
    char iso_offset[8];
    char line[512];
-   if (tm_info == NULL || strftime(human, sizeof(human), "%A, %Y-%m-%d %H:%M %Z", tm_info) == 0 ||
+   if (tm_info == NULL || zone == NULL ||
+       strftime(human, sizeof(human), "%A, %Y-%m-%d %H:%M", tm_info) == 0 ||
        strftime(iso_local, sizeof(iso_local), "%Y-%m-%dT%H:%M:%S", tm_info) == 0 ||
        strftime(iso_offset, sizeof(iso_offset), "%z", tm_info) == 0) {
       snprintf(line, sizeof(line),
@@ -114,11 +113,12 @@ char *prompt_turn_head(time_t now) {
                iso_offset[1], iso_offset[2], iso_offset[3], iso_offset[4]);
    }
    snprintf(line, sizeof(line),
-            PROMPT_TIME_LINE " Current time: %s (ISO: %s%s).  This timestamp is fresh as of this "
-                             "turn; use it for relative-time computations and tool args like "
-                             "`fire_at`.  The `time` tool is only needed for sub-second "
-                             "precision.\n",
-            human, iso_local, iso_offset_colon);
+            PROMPT_TIME_LINE
+            " Current time: %s %s (ISO: %s%s).  This timestamp is fresh as of this "
+            "turn; use it for relative-time computations and tool args like "
+            "`fire_at`.  The `time` tool is only needed for sub-second "
+            "precision.\n",
+            human, zone, iso_local, iso_offset_colon);
    return strdup(line);
 }
 

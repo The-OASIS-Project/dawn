@@ -39,6 +39,7 @@
 #include <time.h>
 
 #include "core/strbuf.h"
+#include "core/user_tz.h"
 #include "logging.h"
 #include "tools/email_db.h"
 #include "tools/email_digest_internal.h"
@@ -106,8 +107,13 @@ static digest_section_t message_section(const email_summary_t *m) {
    return SEC_OTHER;
 }
 
-/* Emit one message row.  *enn is the running display counter (E-NN). */
-static void emit_row(strbuf_t *sb, const email_summary_t *m, int *enn, bool show_category) {
+/* Emit one message row, dated in @p zone.  *enn is the running display
+ * counter (E-NN). */
+static void emit_row(strbuf_t *sb,
+                     const tz_t *zone,
+                     const email_summary_t *m,
+                     int *enn,
+                     bool show_category) {
    char acct[300];
    format_acct_label(m, acct, sizeof(acct));
 
@@ -117,7 +123,9 @@ static void emit_row(strbuf_t *sb, const email_summary_t *m, int *enn, bool show
    /* strftime returns 0 (and leaves ts indeterminate) if the result won't fit —
     * reachable via a crafted far-future Date: header — so gate every use of ts on
     * its success and fall back rather than %s-printing an uninitialized buffer. */
-   if (!(d > 0 && localtime_r(&d, &tmv) && strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tmv)))
+   if (d > 0)
+      tz_local(zone, d, &tmv);
+   if (!(d > 0 && strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tmv)))
       snprintf(ts, sizeof(ts), "(no date)");
 
    char from[2 * sizeof(m->from_name) + sizeof(m->from_addr) + 8];
@@ -133,6 +141,7 @@ static void emit_row(strbuf_t *sb, const email_summary_t *m, int *enn, bool show
 
 /* Emit a titled section over the messages in [0,n) matching `want`. */
 static void emit_section(strbuf_t *sb,
+                         const tz_t *zone,
                          const email_summary_t *msgs,
                          int n,
                          digest_section_t want,
@@ -148,7 +157,7 @@ static void emit_section(strbuf_t *sb,
    strbuf_appendf(sb, "\n### %s (%d)\n", title, count);
    for (int i = 0; i < n; i++) {
       if (message_section(&msgs[i]) == want)
-         emit_row(sb, &msgs[i], enn, want == SEC_OTHER);
+         emit_row(sb, zone, &msgs[i], enn, want == SEC_OTHER);
    }
 }
 
@@ -365,6 +374,7 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
     * renders [replied] for EMAIL_REPLIED_YES and stays silent for NO/UNKNOWN
     * (never asserts "not replied" on a skipped/failed lookup). */
    email_service_fill_reply_states(user_id, merged, shown);
+   const tz_t *zone = user_tz(user_id);
 
    char wlabel[16];
    format_window(window_sec, wlabel, sizeof(wlabel));
@@ -380,9 +390,10 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
       strbuf_appendf(&sb, "\nNo messages in the last %s.\n", wlabel);
 
    int enn = 1;
-   emit_section(&sb, merged, shown, SEC_IMPORTANT, "Important", &enn);
-   emit_section(&sb, merged, shown, SEC_PRIMARY, "Primary", &enn);
-   emit_section(&sb, merged, shown, SEC_OTHER, "Updates / Promotions / Social / Forums", &enn);
+   emit_section(&sb, zone, merged, shown, SEC_IMPORTANT, "Important", &enn);
+   emit_section(&sb, zone, merged, shown, SEC_PRIMARY, "Primary", &enn);
+   emit_section(&sb, zone, merged, shown, SEC_OTHER, "Updates / Promotions / Social / Forums",
+                &enn);
 
    if (omitted > 0)
       strbuf_appendf(&sb, "\n(+%d more in window, not shown — raise max or narrow the window.)\n",

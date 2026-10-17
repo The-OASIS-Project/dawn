@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <time.h>
 
+#include "core/tz.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -66,11 +68,13 @@ typedef struct {
  * @param assistant_name The assistant's name, or NULL.  When it is a weekday
  *                       ("Friday"), that word counts as a day only where placed
  *                       as one ("on friday"), not when it addresses the assistant.
+ * @param zone           The user's zone: days, weeks and months are its.
  * @param now            The reference time.
  * @param out            The window.
  */
 void calendar_query_window(const char *query,
                            const char *assistant_name,
+                           const tz_t *zone,
                            time_t now,
                            calendar_window_t *out);
 
@@ -81,16 +85,21 @@ void calendar_query_window(const char *query,
  * @brief All-day date bounds for the time window [@p start, @p end)
  *
  * All-day occurrences are stored by date, not time, so a window pull of them
- * needs local dates: @p start_date is @p start's local date and @p end_date
- * (exclusive) the day after the local date of the window's last second.  A
- * window ending at midnight doesn't reach into the next day.
+ * needs dates in @p zone: @p start_date is @p start's date there and
+ * @p end_date (exclusive) the day after the date of the window's last second.
+ * A window ending at midnight doesn't reach into the next day.
  *
+ * @param zone        The user's zone.
  * @param start       Window start.
  * @param end         Window end (exclusive); must be after @p start.
  * @param start_date  [out] YYYY-MM-DD, CALENDAR_DATE_LEN bytes.
  * @param end_date    [out] YYYY-MM-DD, CALENDAR_DATE_LEN bytes.
  */
-void calendar_window_dates(time_t start, time_t end, char *start_date, char *end_date);
+void calendar_window_dates(const tz_t *zone,
+                           time_t start,
+                           time_t end,
+                           char *start_date,
+                           char *end_date);
 
 #ifdef __cplusplus
 }

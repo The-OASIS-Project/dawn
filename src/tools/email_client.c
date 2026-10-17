@@ -462,15 +462,6 @@ static int batch_fetch_headers(CURL *curl,
       /* FLAGS -> unread/replied, INTERNALDATE -> date (server receive time). */
       apply_fetch_metadata(seg, s);
 
-      /* date_str is the human-readable date the recent/search formatter prints
-       * (the digest sorts/filters on the epoch instead).  Derive it from the
-       * reliable INTERNALDATE epoch rather than the sender's Date header. */
-      if (s->date > 0) {
-         struct tm tmv;
-         if (localtime_r(&s->date, &tmv))
-            strftime(s->date_str, sizeof(s->date_str), "%a, %d %b %Y %H:%M", &tmv);
-      }
-
       /* ENVELOPE -> subject + first From (RAW envelope strings are RFC 2047-
        * encoded; decode them with the same word decoder the header path uses).
        * A message whose ENVELOPE contains an IMAP literal ({N}) in a string

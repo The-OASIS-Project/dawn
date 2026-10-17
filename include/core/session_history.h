@@ -31,6 +31,7 @@
 
 #include "core/session_manager.h" /* session_t (no-op when included from it) */
 #include "core/turn_origin.h"
+#include "core/tz.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -88,13 +89,14 @@ char *session_render_notices_locked(session_t *session, int viewer_user_id);
  * @brief The device events the session's history hasn't been told of yet
  *
  * For a turn's context: unexpired events, the household's and
- * @p viewer_user_id's, oldest first with the time each happened (a turn
- * context is kept as it was sent, so "3 min ago" would go stale).  Marks them
+ * @p viewer_user_id's, oldest first with the time each happened on
+ * @p zone's clock (a turn context is kept as it was sent, so "3 min ago"
+ * would go stale).  Marks them
  * told: each reaches a history once.  Caller holds history_mutex.
  *
  * @return Allocated text, or NULL when there are none (or out of memory).
  */
-char *session_take_new_notices_locked(session_t *session, int viewer_user_id);
+char *session_take_new_notices_locked(session_t *session, int viewer_user_id, const tz_t *zone);
 
 /**
  * @brief Add a message the caller built (it has a "role") as the running

@@ -31,6 +31,8 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "core/tz.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -96,6 +98,8 @@ typedef struct {
     *  sections joined (prompt_sections_join).  A conversation already running
     *  keeps its own; a change reaches it as an appended instruction change. */
    char *stable_prefix;
+   /** The user's zone (user_tz): the turn's clock times and dates are its. */
+   const tz_t *zone;
    /** The head of this turn's context: the [system_time] line.  The turn's
     *  context is sent in front of its question: head, the retrieved items
     *  the conversation doesn't show yet, then tail. */
@@ -163,9 +167,10 @@ int prompt_sections_add(composed_prompt_t *cp,
 char *prompt_sections_join(const composed_prompt_t *cp);
 
 /**
- * @brief The head of a turn's context: its PROMPT_TIME_LINE line for @p now
- *        (local time, human-readable and ISO 8601, with the nudge that makes
- *        the model trust it over a `time` tool call)
+ * @brief The head of a turn's context: its PROMPT_TIME_LINE line for the
+ *        local time @p tm_info in @p zone (human-readable with the zone's
+ *        name, and ISO 8601 with its offset from tm_gmtoff), with the nudge
+ *        that makes the model trust it over a `time` tool call
  *
  * Never empty: when the time can't be formatted the line still opens with
  * PROMPT_TIME_LINE and says so, so a turn context's first line is always its
@@ -174,7 +179,8 @@ char *prompt_sections_join(const composed_prompt_t *cp);
  * @return Heap text ending in a newline (caller frees), or NULL on allocation
  *         failure
  */
-char *prompt_turn_head(time_t now);
+struct tm;
+char *prompt_turn_head(const struct tm *tm_info, const char *zone);
 
 /** The pieces of a block DAWN frames, at most. */
 #define PROMPT_FRAMED_PIECES 5

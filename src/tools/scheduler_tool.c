@@ -41,6 +41,7 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/tz.h"
+#include "core/user_tz.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -215,6 +216,7 @@ static char *handle_create(struct json_object *details,
                            const char *source_location,
                            sched_source_type_t source_client_type) {
    char result[RESULT_BUF_SIZE];
+   const tz_t *zone = user_tz(user_id); /* the user's clock, for this call */
 
    const char *type_str = json_get_string(details, "type");
    if (!type_str) {
@@ -270,7 +272,7 @@ static char *handle_create(struct json_object *details,
    } else if (fire_at_str) {
       /* Absolute time via ISO 8601 */
       time_t fire_time;
-      if (!tz_parse(fire_at_str, tz_daemon(), &fire_time) || fire_time <= 0) {
+      if (!tz_parse(fire_at_str, zone, &fire_time) || fire_time <= 0) {
          snprintf(result, sizeof(result),
                   TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);
@@ -292,14 +294,12 @@ static char *handle_create(struct json_object *details,
 
       event.fire_at = fire_time;
 
-      /* Store original time for recurring alarms */
-      const char *time_only = strchr(fire_at_str, 'T');
-      if (time_only) {
-         time_only++; /* Skip 'T' */
-         safe_strscpy(event.original_time, time_only);
-      } else if (strlen(fire_at_str) <= 5) {
-         safe_strscpy(event.original_time, fire_at_str);
-      }
+      /* The time of day it repeats at, on the owner's clock (whatever offset
+       * the text carried): the recurrence engine reads it. */
+      struct tm fire_tm;
+      tz_local(zone, fire_time, &fire_tm);
+      snprintf(event.original_time, sizeof(event.original_time), "%02d:%02d", fire_tm.tm_hour,
+               fire_tm.tm_min);
    } else {
       /* Neither provided */
       if (type == SCHED_EVENT_TIMER) {
@@ -547,8 +547,8 @@ static char *handle_create(struct json_object *details,
    /* Format response with current time + fire time so the LLM can relay accurately */
    time_t now = time(NULL);
    struct tm now_tm, fire_tm;
-   localtime_r(&now, &now_tm);
-   localtime_r(&event.fire_at, &fire_tm);
+   tz_local(zone, now, &now_tm);
+   tz_local(zone, event.fire_at, &fire_tm);
 
    char now_str[64], fire_str[64];
    strftime(now_str, sizeof(now_str), "%I:%M %p", &now_tm);
@@ -593,6 +593,7 @@ static char *handle_list(struct json_object *details, int user_id) {
          return strdup("No active events of that type.");
       return strdup("No active timers, alarms, or reminders.");
    }
+   const tz_t *zone = user_tz(user_id); /* times shown on the user's clock */
 
    /* Batch-load briefing steps for ALL events at once — one auth_db mutex
     * acquisition instead of `count` separate ones (was N+1; on the panel
@@ -644,7 +645,7 @@ static char *handle_list(struct json_object *details, int user_id) {
             break;
       } else {
          struct tm fire_tm;
-         localtime_r(&e->fire_at, &fire_tm);
+         tz_local(zone, e->fire_at, &fire_tm);
          char time_str[32];
          strftime(time_str, sizeof(time_str), "%I:%M %p %b %d", &fire_tm);
          if (strbuf_appendf(&sb, "- [id=%lld] [%s] %s: %s", (long long)e->id, type, e->name,
@@ -799,7 +800,7 @@ static char *handle_query(struct json_object *details, int user_id) {
       }
    } else {
       struct tm fire_tm;
-      localtime_r(&event.fire_at, &fire_tm);
+      tz_local(user_tz(user_id), event.fire_at, &fire_tm);
       char time_str[32];
       strftime(time_str, sizeof(time_str), "%I:%M %p on %b %d", &fire_tm);
       int written = snprintf(result, sizeof(result), "%s '%s' [id=%lld] is set for %s. Status: %s.",
@@ -913,6 +914,7 @@ static char *steps_update_error(int rc, const char *event_name) {
  * uses `new_name` so the lookup key and the new value don't collide. */
 static char *handle_update(struct json_object *details, int user_id) {
    char result[RESULT_BUF_SIZE];
+   const tz_t *zone = user_tz(user_id); /* the user's clock, for this call */
 
    /* Resolve the target event by id (preferred) or name — mirrors handle_cancel. */
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
@@ -962,7 +964,7 @@ static char *handle_update(struct json_object *details, int user_id) {
    const char *fire_at_str = json_get_string(details, "fire_at");
    if (fire_at_str) {
       time_t fire_time;
-      if (!tz_parse(fire_at_str, tz_daemon(), &fire_time) || fire_time <= 0) {
+      if (!tz_parse(fire_at_str, zone, &fire_time) || fire_time <= 0) {
          snprintf(result, sizeof(result),
                   TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);
@@ -979,11 +981,11 @@ static char *handle_update(struct json_object *details, int user_id) {
       }
       fields.fire_at = fire_time;
       mask |= SCHED_FIELD_FIRE_AT;
-      /* Derive original_time (HH:MM local) from the new fire_at so a recurring
-       * event's time-of-day follows the edit — the recurrence engine reads
-       * original_time, not fire_at (see calculate_next_recurrence). */
+      /* Derive original_time (HH:MM on the owner's clock) from the new fire_at
+       * so a recurring event's time-of-day follows the edit — the recurrence
+       * engine reads original_time, not fire_at (see calculate_next_recurrence). */
       struct tm fire_tm;
-      localtime_r(&fire_time, &fire_tm);
+      tz_local(zone, fire_time, &fire_tm);
       snprintf(fields.original_time, SCHED_ORIGINAL_TIME_MAX, "%02d:%02d", fire_tm.tm_hour,
                fire_tm.tm_min);
       mask |= SCHED_FIELD_ORIGINAL_TIME;
@@ -1165,7 +1167,7 @@ static char *handle_update(struct json_object *details, int user_id) {
    strbuf_t sb;
    strbuf_init(&sb, 256);
    struct tm fire_tm;
-   localtime_r(&updated.fire_at, &fire_tm);
+   tz_local(zone, updated.fire_at, &fire_tm);
    char time_str[48];
    strftime(time_str, sizeof(time_str), "%I:%M %p on %b %d", &fire_tm);
    strbuf_appendf(&sb, "Updated %s '%s' (fires %s", sched_event_type_to_str(updated.event_type),
