@@ -32,26 +32,13 @@ extern "C" {
 /** Most occurrences one event yields. */
 #define CALENDAR_RRULE_MAX_OCCURRENCES 500
 
-struct _icaltimezone;
+struct icaltimetype;
 
 /**
- * @brief The zone @p tzid names: one libical lists, UTC by any spelling, or
- *        an old name tzdata's own list (tzdata.zi) gives a listed current
- *        name ("Europe/Kiev" to "Europe/Kyiv").  NULL for any other name.
- *
- * Asked before libical looks a name up: for a name it doesn't list, libical
- * opens a zone file of that name and keeps it, so a server sending endless
- * aliases ("America//New_York", "posix/...") would grow the daemon without
- * bound.  Nothing is loaded here but a zone libical lists.
+ * @brief @p t's local date and time as seconds (its fields read as UTC): the
+ *        clock reading tz_from_wall() converts, and an hourly rule steps on.
  */
-struct _icaltimezone *calendar_rrule_zone(const char *tzid);
-
-/**
- * @brief The zone the user's times are read in: @p configured
- *        ([localization] timezone) when set, else the system's zone name
- *        (TZ, then /etc/localtime, then /etc/timezone), else "".
- */
-const char *calendar_rrule_user_tzid(const char *configured);
+time_t calendar_rrule_wall(const struct icaltimetype *t);
 
 /** Receives one occurrence's start (UTC) and the caller's @p ctx. */
 typedef void (*calendar_rrule_emit_fn)(time_t start, void *ctx);

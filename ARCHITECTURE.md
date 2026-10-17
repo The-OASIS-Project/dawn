@@ -164,6 +164,9 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 │                               else's text, checked at registration and at build time
 ├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
 │                               dedup, reply codes, text-input dispatch, prompt sections, input queue
+├── src/core/tz.c               Clock times in a named zone (libical), never the process's TZ.  tz_lookup only
+│                               returns zones libical lists (it never makes libical load a name, which appends to
+│                               a list other threads read); only tz_daemon_init, at startup, loads other names
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
 │                               session, on the next turn, and never in a turn carrying an email the user
 │                               attached

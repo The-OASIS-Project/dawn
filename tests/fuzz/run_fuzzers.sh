@@ -14,6 +14,7 @@ CLANG="${CLANG:-$(command -v clang-20 || command -v clang || echo clang)}"
 OUT="${OUT:-${TMPDIR:-/tmp}/dawn_fuzz}"
 
 COMMON="common/src/utils/string_utils.c common/src/logging.c"
+TZ_SRC="src/core/tz.c src/core/iso8601.c"
 declare -A SOURCES LIBS LINK CFLAGS_EXTRA MAXLEN
 SOURCES[email_mime]="src/tools/email_mime.c src/tools/email_display.c src/tools/gmail_parts.c
                      src/tools/html_parser.c src/tools/html_hidden.c src/tools/html_hidden_css.c
@@ -24,14 +25,14 @@ SOURCES[html]="src/tools/html_parser.c src/tools/html_hidden.c src/tools/html_hi
 MAXLEN[html]=262144
 SOURCES[neutralize]="src/llm/llm_context_text.c"
 MAXLEN[neutralize]=65536
-SOURCES[caldav]="src/tools/caldav_client.c src/tools/calendar_ical.c src/tools/calendar_rrule.c $COMMON"
+SOURCES[caldav]="src/tools/caldav_client.c src/tools/calendar_ical.c src/tools/calendar_rrule.c $TZ_SRC $COMMON"
 LIBS[caldav]="libxml-2.0 libical libcurl"
-CFLAGS_EXTRA[caldav]="-DDAWN_ENABLE_CALENDAR_TOOL -DHAVE_LIBICAL"
+CFLAGS_EXTRA[caldav]="-DDAWN_ENABLE_CALENDAR_TOOL"
 MAXLEN[caldav]=131072
-SOURCES[calendar_ical]="src/tools/calendar_ical.c src/tools/calendar_rrule.c $COMMON"
+SOURCES[calendar_ical]="src/tools/calendar_ical.c src/tools/calendar_rrule.c $TZ_SRC $COMMON"
 LIBS[calendar_ical]="libical"
 MAXLEN[calendar_ical]=65536
-SOURCES[calendar_rrule]="src/tools/calendar_rrule.c $COMMON"
+SOURCES[calendar_rrule]="src/tools/calendar_rrule.c $TZ_SRC $COMMON"
 LIBS[calendar_rrule]="libical"
 MAXLEN[calendar_rrule]=4096
 SOURCES[tts_text]="common/src/tts/tts_preprocessing.cpp common/src/tts/number_to_words.c"

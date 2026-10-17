@@ -38,6 +38,7 @@
 
 #include "core/curl_buffer.h"
 #include "core/iso8601.h"
+#include "core/tz.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "messaging/messaging_discord_internal.h"
@@ -286,8 +287,8 @@ static bool dc_append_message(struct json_object *msg, struct json_object *out_a
    if (json_object_object_get_ex(msg, "timestamp", &ts_obj) && ts_obj) {
       const char *ts_str = json_object_get_string(ts_obj);
       if (ts_str) {
-         time_t t = iso8601_parse(ts_str);
-         if (t != (time_t)-1) {
+         time_t t;
+         if (tz_parse(ts_str, tz_lookup("UTC"), &t)) {
             ts = (int64_t)t;
          }
       }

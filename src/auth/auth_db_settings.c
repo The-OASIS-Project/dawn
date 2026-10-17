@@ -47,7 +47,6 @@ int auth_db_get_user_settings(int user_id, auth_user_settings_t *settings_out) {
    /* Initialize with defaults */
    memset(settings_out, 0, sizeof(*settings_out));
    safe_strscpy(settings_out->persona_mode, "append");
-   safe_strscpy(settings_out->timezone, "UTC");
    safe_strscpy(settings_out->units, "metric");
    safe_strscpy(settings_out->theme, "cyan");
 
@@ -129,14 +128,6 @@ int auth_db_set_user_settings(int user_id, const auth_user_settings_t *settings)
    }
 
    return AUTH_DB_SUCCESS;
-}
-
-int auth_db_init_user_settings(int user_id) {
-   auth_user_settings_t defaults;
-   memset(&defaults, 0, sizeof(defaults));
-   safe_strscpy(defaults.timezone, "UTC");
-   safe_strscpy(defaults.units, "metric");
-   return auth_db_set_user_settings(user_id, &defaults);
 }
 
 /* =============================================================================

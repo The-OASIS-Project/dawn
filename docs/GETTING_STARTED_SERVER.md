@@ -132,7 +132,7 @@ sudo apt install libmupdf-dev libfreetype-dev libharfbuzz-dev libzip-dev libxml2
 # MuPDF transitive dependencies (static linking)
 sudo apt install libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev
 
-# Calendar (CalDAV)
+# Time zones and the calendar (required)
 sudo apt install libical-dev
 
 # Email (reading messages; required unless built with -DDAWN_ENABLE_EMAIL_TOOL=OFF)

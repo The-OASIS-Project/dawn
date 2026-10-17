@@ -141,6 +141,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v103.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v104.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_calendar.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -1610,16 +1611,19 @@ dawn_add_unit_test(test_responses_input
 dawn_add_unit_test(test_iso8601
    SOURCES test_iso8601.c
            ${SRC_ROOT}/src/core/iso8601.c
-   LIBS    unity
+           ${SRC_ROOT}/src/core/tz.c
+   LIBS    dawn_common unity ${LIBICAL_LIBRARIES} pthread
    LABEL   ci)
 
 # Reading CalDAV responses (multistatus XML, iCalendar via libical), no server.
-if(LIBXML2_FOUND AND LIBICAL_FOUND)
+if(LIBXML2_FOUND)
    dawn_add_unit_test(test_caldav_parse
       SOURCES test_caldav_parse.c
               ${SRC_ROOT}/src/tools/caldav_client.c
               ${SRC_ROOT}/src/tools/calendar_ical.c
               ${SRC_ROOT}/src/tools/calendar_rrule.c
+              ${SRC_ROOT}/src/core/tz.c
+              ${SRC_ROOT}/src/core/iso8601.c
       LIBS    dawn_common unity ${LIBXML2_LIBRARIES} ${LIBICAL_LIBRARIES} ${CURL_LIBRARIES}
       LABEL   ci)
    target_include_directories(test_caldav_parse PRIVATE ${LIBXML2_INCLUDE_DIRS})
@@ -1627,21 +1631,23 @@ if(LIBXML2_FOUND AND LIBICAL_FOUND)
 endif()
 
 # A recurring event's occurrences in a window, with bounded work.
-if(LIBICAL_FOUND)
-   dawn_add_unit_test(test_calendar_rrule
-      SOURCES test_calendar_rrule.c
-              ${SRC_ROOT}/src/tools/calendar_rrule.c
-      LIBS    dawn_common unity ${LIBICAL_LIBRARIES}
-      LABEL   ci)
+dawn_add_unit_test(test_calendar_rrule
+   SOURCES test_calendar_rrule.c
+           ${SRC_ROOT}/src/tools/calendar_rrule.c
+           ${SRC_ROOT}/src/core/tz.c
+           ${SRC_ROOT}/src/core/iso8601.c
+   LIBS    dawn_common unity ${LIBICAL_LIBRARIES}
+   LABEL   ci)
 
-   # Reading, building and editing events in place (no server).
-   dawn_add_unit_test(test_calendar_ical
-      SOURCES test_calendar_ical.c
-              ${SRC_ROOT}/src/tools/calendar_ical.c
-              ${SRC_ROOT}/src/tools/calendar_rrule.c
-      LIBS    dawn_common unity ${LIBICAL_LIBRARIES}
-      LABEL   ci)
-endif()
+# Reading, building and editing events in place (no server).
+dawn_add_unit_test(test_calendar_ical
+   SOURCES test_calendar_ical.c
+           ${SRC_ROOT}/src/tools/calendar_ical.c
+           ${SRC_ROOT}/src/tools/calendar_rrule.c
+           ${SRC_ROOT}/src/core/tz.c
+           ${SRC_ROOT}/src/core/iso8601.c
+   LIBS    dawn_common unity ${LIBICAL_LIBRARIES}
+   LABEL   ci)
 
 # The URL fetcher's private-address block (IP literals only, no network).
 dawn_add_unit_test(test_url_whitelist

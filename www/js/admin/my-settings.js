@@ -77,12 +77,14 @@
    // panel Save (config.js) AFTER it has registered onSaveComplete and counted
    // this save in its multi-save total, so it always sends when called.
    function saveMySettings() {
+      const myTimezone = document.getElementById('my-timezone');
       const settings = {
          persona_description: document.getElementById('my-persona')?.value || '',
          persona_mode:
             document.querySelector('input[name="persona_mode"]:checked')?.value || 'append',
          location: document.getElementById('my-location')?.value || '',
-         timezone: document.getElementById('my-timezone')?.value || 'UTC',
+         // Not sent until the list is filled, so a save can't clear the zone
+         timezone: myTimezone?.options.length ? myTimezone.value : undefined,
          units: document.querySelector('input[name="units"]:checked')?.value || 'metric',
          theme: document.querySelector('.theme-btn.active')?.dataset.theme || 'cyan',
          // v44 identity fields
@@ -99,6 +101,7 @@
       return formDirty;
    }
 
+   // cb(success, error): error is the server's reason when it refused.
    function onSaveComplete(cb) {
       saveCompleteCb = cb;
    }
@@ -174,7 +177,11 @@
          updatePersonaPreview();
       }
       if (location) location.value = payload.location || '';
-      if (timezone) timezone.value = payload.timezone || 'UTC';
+      window.DawnTimezones.fill(
+         timezone,
+         payload.timezone,
+         `Same as server (${payload.server_timezone || 'UTC'})`
+      );
       if (realName) realName.value = payload.real_name || '';
       if (aliases) aliases.value = payload.identity_aliases || '';
       if (preferredAddr) preferredAddr.value = payload.preferred_address || '';
@@ -236,7 +243,7 @@
          // Orchestrated by the unified panel Save: report into its shared
          // counter and stay silent so it can show a single toast (mirrors the
          // deliberately-silent DawnTools completion path).
-         cb(!!payload.success);
+         cb(!!payload.success, payload.error);
          return;
       }
 

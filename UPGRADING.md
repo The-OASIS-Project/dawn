@@ -12,6 +12,27 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-16 — libical is required; "UTC" in My Settings now means the server's zone
+
+**What changed.** DAWN now reads clock times in a named time zone through libical, so building
+from source needs `libical-dev` even with the calendar turned off. (The installer, the Docker
+images and CI already include it.)
+
+The time zone in My Settings used to default to "UTC" for everyone who never chose one. Those
+settings are now "Same as server", the zone in Settings → Localization (`[localization] timezone`).
+The time zone lists offer every zone, and two names that weren't real zones are corrected
+(`America/Honolulu` → `Pacific/Honolulu`, `Asia/Mumbai` → `Asia/Kolkata`).
+
+**What you need to do.**
+
+- Building from source: `sudo apt install libical-dev` if you don't have it.
+- If you deliberately chose UTC in My Settings, choose it again.
+- If DAWN logs `Timezone '...' isn't a zone name DAWN can use` or `doesn't match this system's
+  clock settings` at startup, set `[localization] timezone` to your zone (for example
+  `America/New_York`).
+
+---
+
 ## 2026-10-14 — Settings saves no longer drop email, shutdown, plan or sound settings
 
 **What changed.** A settings save from the WebUI rewrites `dawn.toml`, and it was deleting sections

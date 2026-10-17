@@ -100,46 +100,10 @@
                hint: 'Default location for weather and local queries',
             },
             timezone: {
-               type: 'select',
+               type: 'timezone',
                label: 'Timezone',
-               hint: 'IANA timezone for time-related responses',
-               options: [
-                  { value: '', label: '(System default)' },
-                  // Sorted by UTC offset (west to east)
-                  { value: 'America/Honolulu', label: '(UTC-10:00) America/Honolulu' },
-                  { value: 'America/Anchorage', label: '(UTC-09:00) America/Anchorage' },
-                  { value: 'America/Los_Angeles', label: '(UTC-08:00) America/Los_Angeles' },
-                  { value: 'America/Vancouver', label: '(UTC-08:00) America/Vancouver' },
-                  { value: 'America/Denver', label: '(UTC-07:00) America/Denver' },
-                  { value: 'America/Phoenix', label: '(UTC-07:00) America/Phoenix' },
-                  { value: 'America/Chicago', label: '(UTC-06:00) America/Chicago' },
-                  { value: 'America/Mexico_City', label: '(UTC-06:00) America/Mexico_City' },
-                  { value: 'America/New_York', label: '(UTC-05:00) America/New_York' },
-                  { value: 'America/Toronto', label: '(UTC-05:00) America/Toronto' },
-                  { value: 'America/Sao_Paulo', label: '(UTC-03:00) America/Sao_Paulo' },
-                  { value: 'America/Buenos_Aires', label: '(UTC-03:00) America/Buenos_Aires' },
-                  { value: 'UTC', label: '(UTC+00:00) UTC' },
-                  { value: 'Europe/London', label: '(UTC+00:00) Europe/London' },
-                  { value: 'Europe/Paris', label: '(UTC+01:00) Europe/Paris' },
-                  { value: 'Europe/Berlin', label: '(UTC+01:00) Europe/Berlin' },
-                  { value: 'Europe/Rome', label: '(UTC+01:00) Europe/Rome' },
-                  { value: 'Europe/Madrid', label: '(UTC+01:00) Europe/Madrid' },
-                  { value: 'Europe/Amsterdam', label: '(UTC+01:00) Europe/Amsterdam' },
-                  { value: 'Europe/Moscow', label: '(UTC+03:00) Europe/Moscow' },
-                  { value: 'Asia/Dubai', label: '(UTC+04:00) Asia/Dubai' },
-                  { value: 'Asia/Mumbai', label: '(UTC+05:30) Asia/Mumbai' },
-                  { value: 'Asia/Bangkok', label: '(UTC+07:00) Asia/Bangkok' },
-                  { value: 'Asia/Shanghai', label: '(UTC+08:00) Asia/Shanghai' },
-                  { value: 'Asia/Hong_Kong', label: '(UTC+08:00) Asia/Hong_Kong' },
-                  { value: 'Asia/Singapore', label: '(UTC+08:00) Asia/Singapore' },
-                  { value: 'Australia/Perth', label: '(UTC+08:00) Australia/Perth' },
-                  { value: 'Asia/Tokyo', label: '(UTC+09:00) Asia/Tokyo' },
-                  { value: 'Asia/Seoul', label: '(UTC+09:00) Asia/Seoul' },
-                  { value: 'Australia/Sydney', label: '(UTC+10:00) Australia/Sydney' },
-                  { value: 'Australia/Melbourne', label: '(UTC+10:00) Australia/Melbourne' },
-                  { value: 'Pacific/Auckland', label: '(UTC+12:00) Pacific/Auckland' },
-                  { value: 'Pacific/Fiji', label: '(UTC+12:00) Pacific/Fiji' },
-               ],
+               hint: "Zone for clock times when a user hasn't chosen their own",
+               restart: true,
             },
             units: {
                type: 'select',
@@ -3090,6 +3054,10 @@
                .join('');
             inputHtml = `<select id="${inputId}" data-key="${fullKey}">${options}</select>`;
             break;
+         case 'timezone':
+            // Options filled after render (DawnTimezones), keeping the current value
+            inputHtml = `<select id="${inputId}" data-key="${fullKey}" data-type="timezone"></select>`;
+            break;
          case 'dynamic_select':
             // Dynamic select that gets options from server (e.g., model lists, user lists)
             // Supports both plain strings and {value, label} objects
@@ -3242,6 +3210,10 @@
          }
       }
 
+      if (def.type === 'timezone' && input) {
+         window.DawnTimezones.fill(input, value, '(System default)');
+      }
+
       // Special handling for range inputs - update display value
       if (def.type === 'range' && input) {
          // Stash displayValue callback for updateSettingsValues() fast path
@@ -3367,6 +3339,8 @@
             input.value = Array.isArray(value) ? value.join('\n') : value || '';
          } else if (input.dataset.type === 'model_default_select') {
             input.value = parseInt(value, 10) || 0;
+         } else if (input.dataset.type === 'timezone') {
+            window.DawnTimezones.fill(input, value, '(System default)');
          } else if (input.type === 'number' || input.type === 'range') {
             // Skip if config has no value — preserve the schema default from initial render
             if (value == null) return;

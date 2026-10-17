@@ -898,7 +898,31 @@ static void test_user_settings_defaults(void) {
    /* Default settings from schema */
    TEST_ASSERT_EQUAL_STRING("", settings.persona_description);
    TEST_ASSERT_EQUAL_STRING("", settings.location);
-   TEST_ASSERT_EQUAL_STRING("UTC", settings.timezone);
+   TEST_ASSERT_EQUAL_STRING("", settings.timezone); /* the server's zone */
+}
+
+/* v107: the old 'UTC' default becomes unset (the server's zone); two names
+ * the settings list offered that aren't zones become the ones they meant; a
+ * real choice is kept. */
+static void test_v107_timezone_settings(void) {
+   static const char *const before[] = { "UTC", "Asia/Mumbai", "America/Honolulu", "Europe/Paris" };
+   static const char *const after[] = { "", "Asia/Kolkata", "Pacific/Honolulu", "Europe/Paris" };
+   int ids[4];
+   for (int i = 0; i < 4; i++) {
+      char name[32];
+      snprintf(name, sizeof(name), "tz_user_%d", i);
+      ids[i] = create_and_get_id(name, "hash", false);
+      auth_user_settings_t settings;
+      memset(&settings, 0, sizeof(settings));
+      safe_strscpy(settings.timezone, before[i]);
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(ids[i], &settings));
+   }
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v107(s_db.db));
+   for (int i = 0; i < 4; i++) {
+      auth_user_settings_t settings;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(ids[i], &settings));
+      TEST_ASSERT_EQUAL_STRING(after[i], settings.timezone);
+   }
 }
 
 static void test_user_settings_set_and_get(void) {
@@ -1380,6 +1404,7 @@ int main(void) {
 
    /* User Settings */
    RUN_TEST(test_user_settings_defaults);
+   RUN_TEST(test_v107_timezone_settings);
    RUN_TEST(test_user_settings_set_and_get);
 
    /* v43 schema (entity-merge / user-identity-dedup) */

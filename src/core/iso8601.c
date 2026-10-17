@@ -91,85 +91,47 @@ static bool parse_tz_offset(const char *suffix, int *offset_sec) {
    return false;
 }
 
-time_t iso8601_parse(const char *iso_str) {
-   if (!iso_str || !iso_str[0])
-      return -1;
+bool iso8601_fields(const char *text, iso8601_fields_t *out) {
+   if (!text || !text[0] || !out)
+      return false;
+   memset(out, 0, sizeof(*out));
 
-   struct tm tm_info;
-   memset(&tm_info, 0, sizeof(tm_info));
-   tm_info.tm_isdst = -1; /* Let mktime determine DST */
-
-   /* Time-only format (HH:MM) — assume today, or tomorrow if already past */
-   if (strlen(iso_str) <= 5 && strchr(iso_str, ':')) {
-      int hour = 0, min = 0;
-      if (sscanf(iso_str, "%d:%d", &hour, &min) != 2)
-         return -1;
-      if (hour < 0 || hour > 23 || min < 0 || min > 59)
-         return -1;
-
-      time_t now = time(NULL);
-      localtime_r(&now, &tm_info);
-      tm_info.tm_hour = hour;
-      tm_info.tm_min = min;
-      tm_info.tm_sec = 0;
-
-      time_t result = mktime(&tm_info);
-      if (result <= now)
-         result += 86400;
-      return result;
+   /* A time alone (HH:MM) */
+   if (strlen(text) <= 5 && strchr(text, ':')) {
+      if (sscanf(text, "%d:%d", &out->hour, &out->min) != 2 || out->hour < 0 || out->hour > 23 ||
+          out->min < 0 || out->min > 59)
+         return false;
+      out->time_only = true;
+      return true;
    }
 
-   /* Full ISO 8601; a space between date and time is accepted as well as 'T' */
-   int year, month, day, hour = 0, min = 0, sec = 0;
-   int parsed = sscanf(iso_str, "%d-%d-%d%*1[T ]%d:%d:%d", &year, &month, &day, &hour, &min, &sec);
+   /* A date, with a time after a 'T' or a space */
+   int parsed = sscanf(text, "%d-%d-%d%*1[T ]%d:%d:%d", &out->year, &out->month, &out->day,
+                       &out->hour, &out->min, &out->sec);
    if (parsed < 3)
-      return -1;
-   /* Out of range is an error, not something for mktime to roll over (Feb 31 isn't Mar 3) */
+      return false;
+   /* Out of range is an error, not something to roll over (Feb 31 isn't Mar 3) */
    static const int days_in[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-   if (month < 1 || month > 12)
-      return -1;
-   const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-   const int last_day = days_in[month - 1] + (month == 2 && leap);
-   if (day < 1 || day > last_day || hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 ||
-       sec > 60)
-      return -1;
+   if (out->year < 1 || out->year > 9999 || out->month < 1 || out->month > 12)
+      return false;
+   const bool leap = (out->year % 4 == 0 && out->year % 100 != 0) || out->year % 400 == 0;
+   const int last_day = days_in[out->month - 1] + (out->month == 2 && leap);
+   if (out->day < 1 || out->day > last_day || out->hour < 0 || out->hour > 23 || out->min < 0 ||
+       out->min > 59 || out->sec < 0 || out->sec > 60)
+      return false;
 
-   tm_info.tm_year = year - 1900;
-   tm_info.tm_mon = month - 1;
-   tm_info.tm_mday = day;
-   tm_info.tm_hour = hour;
-   tm_info.tm_min = min;
-   tm_info.tm_sec = sec;
-
-   /* Find timezone suffix after the time portion */
-   const char *tz_start = iso_str;
-   const char *t_pos = strpbrk(iso_str, "T ");
-   if (t_pos) {
-      tz_start = t_pos + 1;
-      /* Skip past HH:MM:SS digits */
-      while (*tz_start && (*tz_start == ':' || (*tz_start >= '0' && *tz_start <= '9')))
-         tz_start++;
-   } else {
-      tz_start = iso_str + strlen(iso_str); /* No T, no timezone */
-   }
-
-   int tz_offset_sec = 0;
-   if (parse_tz_offset(tz_start, &tz_offset_sec)) {
-      /* Timezone-aware: mktime assumes local, so adjust by the difference
-       * between the local offset and the input's explicit offset. */
-      time_t local_result = mktime(&tm_info);
-      if (local_result == (time_t)-1)
-         return -1;
-
-      struct tm local_tm;
-      localtime_r(&local_result, &local_tm);
-      long local_offset = local_tm.tm_gmtoff; /* seconds east of UTC */
-
-      return local_result + (local_offset - tz_offset_sec);
-   }
-
-   /* No timezone suffix: interpret as local time (uses process TZ) */
-   return mktime(&tm_info);
+   /* The offset follows the time's digits and any fractional seconds */
+   const char *t_pos = strpbrk(text, "T ");
+   if (!t_pos)
+      return true;
+   const char *tz_start = t_pos + 1;
+   while (*tz_start == ':' || isdigit((unsigned char)*tz_start))
+      tz_start++;
+   if (*tz_start == '.')
+      for (tz_start++; isdigit((unsigned char)*tz_start); tz_start++)
+         ;
+   out->has_offset = parse_tz_offset(tz_start, &out->offset_sec);
+   return true;
 }
 
 int64_t iso8601_parse_date_utc(const char *iso_str) {
