@@ -350,6 +350,60 @@ static void test_dismiss_optimistic(void) {
    TEST_ASSERT_NOT_EQUAL(0, rc);
 }
 
+/* A ringing event ends once: the ring's own ending and a user's dismiss can't
+ * both win (each schedules the next occurrence when it does), and a ring's
+ * ending can't end a later firing of the same row. */
+static void test_end_ring_optimistic(void) {
+   sched_event_t ev = make_event();
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_end_ring(id, 1000, SCHED_STATUS_TIMED_OUT));
+
+   scheduler_db_update_status_fired(id, SCHED_STATUS_RINGING, 1000);
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_end_ring(id, 1000, SCHED_STATUS_TIMED_OUT));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_TIMED_OUT, got.status);
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_dismiss(id));
+
+   scheduler_db_update_status_fired(id, SCHED_STATUS_RINGING, 2000);
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_dismiss(id));
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_end_ring(id, 2000, SCHED_STATUS_TIMED_OUT));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_DISMISSED, got.status);
+
+   /* The firing at 3000 rings; the one at 2000's ending leaves it be. */
+   scheduler_db_update_status_fired(id, SCHED_STATUS_RINGING, 3000);
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_end_ring(id, 2000, SCHED_STATUS_DISMISSED));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_RINGING, got.status);
+}
+
+/* The latest of a user's ringing timers, alarms and reminders, not another
+ * user's or a running briefing. */
+static void test_latest_ringing(void) {
+   sched_event_t ev = make_event();
+   int64_t a = 0, b = 0, other = 0;
+   scheduler_db_insert(&ev, &a);
+   scheduler_db_insert(&ev, &b);
+   ev.user_id = ev.user_id + 1;
+   scheduler_db_insert(&ev, &other);
+   TEST_ASSERT_EQUAL_INT64(0, scheduler_db_latest_ringing(ev.user_id - 1));
+   scheduler_db_update_status_fired(a, SCHED_STATUS_RINGING, 1000);
+   scheduler_db_update_status_fired(b, SCHED_STATUS_RINGING, 2000);
+   scheduler_db_update_status_fired(other, SCHED_STATUS_RINGING, 3000);
+   TEST_ASSERT_EQUAL_INT64(b, scheduler_db_latest_ringing(ev.user_id - 1));
+   TEST_ASSERT_EQUAL_INT64(other, scheduler_db_latest_ringing(ev.user_id));
+
+   /* A briefing running ("ringing") after the alarm isn't what to silence. */
+   int64_t briefing = 0;
+   ev.user_id = ev.user_id - 1;
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   scheduler_db_insert(&ev, &briefing);
+   scheduler_db_update_status_fired(briefing, SCHED_STATUS_RINGING, 4000);
+   TEST_ASSERT_EQUAL_INT64(b, scheduler_db_latest_ringing(ev.user_id));
+}
+
 /* ============================================================================
  * Test: Snooze
  * ============================================================================ */
@@ -371,7 +425,10 @@ static void test_snooze(void) {
    TEST_ASSERT_EQUAL_INT64(new_fire, got.fire_at);
    TEST_ASSERT_EQUAL_INT(1, got.snooze_count);
 
+   /* One snooze per ring: a second at the same time (another device) fails. */
    time_t new_fire2 = time(NULL) + 1200;
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_snooze(id, new_fire2));
+   scheduler_db_update_status(id, SCHED_STATUS_RINGING); /* it rings again */
    rc = scheduler_db_snooze(id, new_fire2);
    TEST_ASSERT_EQUAL_INT(0, rc);
 
@@ -1548,6 +1605,8 @@ int main(void) {
    RUN_TEST(test_update_status_fired);
    RUN_TEST(test_cancel_optimistic);
    RUN_TEST(test_dismiss_optimistic);
+   RUN_TEST(test_end_ring_optimistic);
+   RUN_TEST(test_latest_ringing);
    RUN_TEST(test_snooze);
    RUN_TEST(test_due_events);
    RUN_TEST(test_list_user_events);

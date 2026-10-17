@@ -44,8 +44,11 @@
 #include "core/missed_notifications_db.h"
 #include "core/scheduled_context.h"
 #include "core/scheduler_db.h"
+#include "core/scheduler_recur.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/tz.h"
+#include "core/user_tz.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
@@ -142,9 +145,14 @@ static atomic_bool alarm_ringing = false;
 static sched_event_t ringing_event;
 static pthread_mutex_t ringing_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* Alarm sound state */
-static atomic_bool alarm_sound_playing = false;
-static atomic_bool alarm_sound_stop = false;
+/* The local speaker's one sound: the ring playing it is the one whose
+ * generation is current; a new audible ring, a stop of the owner, or shutdown
+ * moves the generation on.  The owner's event id is kept under
+ * ringing_mutex.  sound_threads counts audible threads still alive (shutdown
+ * waits for them before freeing the PCM buffers). */
+static atomic_uint sound_gen = 0;
+static atomic_int sound_threads = 0;
+static int64_t sound_owner_id = 0;
 
 /* Alarm chime PCM buffers (generated at init via common lib) */
 static dawn_chime_buf_t chime_buf;
@@ -177,7 +185,7 @@ static void generate_announcement_text(const sched_event_t *event, char *buf, si
          break;
       case SCHED_EVENT_ALARM: {
          struct tm tm_info;
-         localtime_r(&event->fire_at, &tm_info);
+         tz_local(user_tz(event->user_id), event->fire_at, &tm_info);
          char time_str[16];
          strftime(time_str, sizeof(time_str), "%I:%M %p", &tm_info);
          snprintf(buf, buf_size, "It's %s. Your alarm is going off.", time_str);
@@ -1226,15 +1234,45 @@ static void start_briefing_thread(const sched_event_t *event) {
  * Alarm Sound Playback (separate thread)
  * ============================================================================= */
 
+/* Whether the ring holding generation @p mine has lost the speaker. */
+static bool sound_stopped(unsigned mine) {
+   return atomic_load(&sound_gen) != mine;
+}
+
+/* Stops whatever the speaker plays (shutdown). */
+static void stop_any_sound(void) {
+   atomic_fetch_add(&sound_gen, 1);
+}
+
+/* The event a dismiss or snooze with no id means: the one the speaker is
+ * playing, else the last one fired, else none (0).  Caller holds
+ * ringing_mutex. */
+static int64_t ringing_target_locked(void) {
+   if (sound_owner_id > 0)
+      return sound_owner_id;
+   return alarm_ringing ? ringing_event.id : 0;
+}
+
+/* Stops the speaker's sound if event @p id's ring is the one playing it. */
+static void stop_sound_of(int64_t id) {
+   pthread_mutex_lock(&ringing_mutex);
+   if (id > 0 && id == sound_owner_id) {
+      atomic_fetch_add(&sound_gen, 1);
+      sound_owner_id = 0;
+   }
+   pthread_mutex_unlock(&ringing_mutex);
+}
+
 /** Write volume-scaled PCM to playback stream; returns false if stopped early */
 static bool write_scaled_pcm(audio_stream_playback_handle_t *pb,
                              const int16_t *src,
                              size_t samples,
-                             float vol_scale) {
+                             float vol_scale,
+                             unsigned mine) {
    int16_t scaled_buf[1024];
    size_t remaining = samples;
    size_t offset = 0;
-   while (remaining > 0 && !alarm_sound_stop) {
+   while (remaining > 0 && !sound_stopped(mine)) {
       size_t chunk = remaining > 1024 ? 1024 : remaining;
       for (size_t j = 0; j < chunk; j++)
          scaled_buf[j] = (int16_t)(src[offset + j] * vol_scale);
@@ -1242,23 +1280,28 @@ static bool write_scaled_pcm(audio_stream_playback_handle_t *pb,
       offset += chunk;
       remaining -= chunk;
    }
-   return !alarm_sound_stop;
+   return !sound_stopped(mine);
 }
 
-static void *alarm_sound_thread(void *arg) {
-   sched_event_t *event = (sched_event_t *)arg;
-   bool is_alarm = (event->event_type == SCHED_EVENT_ALARM);
+/* A ring: the fired event, and whether the local speaker plays it (it plays
+ * only its owner's events; anyone else's rings silently, their client shows
+ * it), with the sound generation it holds when it does. */
+typedef struct {
+   sched_event_t event;
+   bool audible;
+   unsigned gen;
+} ring_t;
 
+/* Plays a chime (or, for an alarm, the tone until @p timeout_sec) on the local
+ * speaker while the ring holds generation @p mine (start_alarm_sound claimed
+ * it); stops early when it loses it (its own dismiss or snooze, a newer
+ * audible ring, shutdown). */
+static void play_ring(bool is_alarm, int timeout_sec, unsigned mine) {
    /* Wait for TTS to complete */
    tts_wait_for_completion(5000);
-
-   alarm_sound_playing = true;
-   alarm_sound_stop = false;
-
-   int timeout_sec = g_config.scheduler.alarm_timeout_sec;
-   if (timeout_sec > 300)
-      timeout_sec = 300;
    time_t sound_start = time(NULL);
+   if (sound_stopped(mine))
+      return;
 
    /* Open playback stream for alarm audio */
    audio_stream_params_t params;
@@ -1281,14 +1324,14 @@ static void *alarm_sound_thread(void *arg) {
    /* Play chime/tone */
    if (is_alarm && alarm_tone_buf.pcm && pb) {
       /* Looping alarm tone until dismissed or timeout */
-      while (!alarm_sound_stop && (time(NULL) - sound_start) < timeout_sec) {
-         if (!write_scaled_pcm(pb, alarm_tone_buf.pcm, alarm_tone_buf.samples, vol_scale))
+      while (!sound_stopped(mine) && (time(NULL) - sound_start) < timeout_sec) {
+         if (!write_scaled_pcm(pb, alarm_tone_buf.pcm, alarm_tone_buf.samples, vol_scale, mine))
             break;
          /* Gap between repetitions */
          size_t gap_samples = (DAWN_CHIME_SAMPLE_RATE * ALARM_GAP_MS) / 1000;
          int16_t silence[512];
          memset(silence, 0, sizeof(silence));
-         while (gap_samples > 0 && !alarm_sound_stop) {
+         while (gap_samples > 0 && !sound_stopped(mine)) {
             size_t chunk = gap_samples > 512 ? 512 : gap_samples;
             audio_stream_playback_write(pb, silence, chunk);
             gap_samples -= chunk;
@@ -1296,12 +1339,12 @@ static void *alarm_sound_thread(void *arg) {
       }
    } else if (chime_buf.pcm && pb) {
       /* Single chime for timers/reminders */
-      write_scaled_pcm(pb, chime_buf.pcm, chime_buf.samples, vol_scale);
+      write_scaled_pcm(pb, chime_buf.pcm, chime_buf.samples, vol_scale, mine);
    } else if (!pb) {
       /* Fallback: sleep for approximate duration if audio backend unavailable */
       OLOG_WARNING("scheduler: audio playback unavailable, sleeping for chime duration");
       if (is_alarm) {
-         while (!alarm_sound_stop && (time(NULL) - sound_start) < timeout_sec)
+         while (!sound_stopped(mine) && (time(NULL) - sound_start) < timeout_sec)
             usleep(500000);
       } else {
          usleep((unsigned int)(chime_buf.samples * 1000000 / DAWN_CHIME_SAMPLE_RATE));
@@ -1309,94 +1352,145 @@ static void *alarm_sound_thread(void *arg) {
    }
 
    if (pb) {
-      if (!alarm_sound_stop)
+      if (!sound_stopped(mine))
          audio_stream_playback_drain(pb);
       else
          audio_stream_playback_drop(pb);
       audio_stream_playback_close(pb);
    }
+}
 
-   alarm_sound_playing = false;
-
-   /* For non-alarm types (timer, reminder), auto-dismiss after chime */
-   if (!is_alarm && !alarm_sound_stop) {
-      scheduler_db_update_status(event->id, SCHED_STATUS_DISMISSED);
-      pthread_mutex_lock(&ringing_mutex);
-      if (ringing_event.id == event->id) {
-         alarm_ringing = false;
-         memset(&ringing_event, 0, sizeof(ringing_event));
-      }
-      pthread_mutex_unlock(&ringing_mutex);
-      OLOG_INFO("scheduler: auto-dismissed %s %lld after chime",
-                event->event_type == SCHED_EVENT_TIMER ? "timer" : "reminder",
-                (long long)event->id);
+/* Ends @p event's ring as @p status ("Auto-dismissed" or "Alarm timed out"),
+ * unless someone ended this firing of it first (a user's dismiss or snooze
+ * writes the row before stopping the sound); a repeating event then gets its
+ * next occurrence. */
+static void end_ring(const sched_event_t *event, sched_status_t status, const char *what) {
+   const bool ended = scheduler_db_end_ring(event->id, event->fired_at, status) == SUCCESS;
+   pthread_mutex_lock(&ringing_mutex);
+   if (ringing_event.id == event->id && ringing_event.fired_at == event->fired_at) {
+      alarm_ringing = false;
+      memset(&ringing_event, 0, sizeof(ringing_event));
+   }
+   pthread_mutex_unlock(&ringing_mutex);
+   if (!ended)
+      return;
+   OLOG_INFO("scheduler: %s %s %lld", what, sched_event_type_to_str(event->event_type),
+             (long long)event->id);
 
 #ifdef ENABLE_WEBUI
-      sched_event_t updated;
-      if (scheduler_db_get(event->id, &updated) == 0) {
-         scheduler_broadcast_notification(&updated, "Auto-dismissed");
-         scheduler_broadcast_events_changed(updated.user_id);
-      }
-#endif
+   sched_event_t updated;
+   if (scheduler_db_get(event->id, &updated) == 0) {
+      scheduler_broadcast_notification(&updated, what);
+      scheduler_broadcast_events_changed(updated.user_id);
    }
+#endif
 
-   /* If alarm timed out, mark as timed_out */
-   if (is_alarm && !alarm_sound_stop) {
-      scheduler_db_update_status(event->id, SCHED_STATUS_TIMED_OUT);
+   schedule_next_occurrence(event);
+}
+
+static void *alarm_sound_thread(void *arg) {
+   ring_t *ring = (ring_t *)arg;
+   const sched_event_t *event = &ring->event;
+   const bool is_alarm = (event->event_type == SCHED_EVENT_ALARM);
+
+   int timeout_sec = g_config.scheduler.alarm_timeout_sec;
+   if (timeout_sec > 300)
+      timeout_sec = 300;
+   const time_t start = time(NULL);
+
+   if (ring->audible) {
+      play_ring(is_alarm, timeout_sec, ring->gen);
       pthread_mutex_lock(&ringing_mutex);
-      if (ringing_event.id == event->id) {
-         alarm_ringing = false;
-         memset(&ringing_event, 0, sizeof(ringing_event));
-      }
+      if (atomic_load(&sound_gen) == ring->gen)
+         sound_owner_id = 0; /* finished playing on its own */
       pthread_mutex_unlock(&ringing_mutex);
-      OLOG_INFO("scheduler: alarm %lld timed out after %ds", (long long)event->id, timeout_sec);
-
-#ifdef ENABLE_WEBUI
-      /* Notify WebUI of timeout */
-      sched_event_t updated;
-      if (scheduler_db_get(event->id, &updated) == 0) {
-         scheduler_broadcast_notification(&updated, "Alarm timed out");
-         scheduler_broadcast_events_changed(updated.user_id);
-      }
-#endif
-
-      /* Schedule next occurrence for recurring alarms */
-      schedule_next_occurrence(event);
+      atomic_fetch_sub(&sound_threads, 1);
    }
 
-   free(event);
+   /* An alarm rings its full time, heard or not: one stopped early (by a
+    * newer ring, or because someone ended it) waits out the rest silently, so
+    * it ends when it would have.  A timer or reminder ends with its chime. */
+   if (is_alarm) {
+      while (!scheduler_shutdown_flag && time(NULL) - start < timeout_sec)
+         usleep(500000);
+   }
+
+   /* Ends it unless someone ended this firing first (their dismiss or snooze
+    * writes the row before stopping the sound).  At shutdown the row is left
+    * as it is. */
+   if (!scheduler_shutdown_flag) {
+      if (is_alarm)
+         end_ring(event, SCHED_STATUS_TIMED_OUT, "Alarm timed out");
+      else
+         end_ring(event, SCHED_STATUS_DISMISSED, "Auto-dismissed");
+   }
+
+   free(ring);
    return NULL;
 }
 
+/* Whether @p event's firing has already ended (a dismiss or snooze during its
+ * announcement).  An unreadable row counts as still ringing: better a ring
+ * than silence. */
+static bool firing_ended(const sched_event_t *event) {
+   sched_event_t row;
+   return scheduler_db_get(event->id, &row) == 0 &&
+          (row.status != SCHED_STATUS_RINGING || row.fired_at != event->fired_at);
+}
+
+/* Rings @p event on its own thread, which also ends it. */
 static void start_alarm_sound(const sched_event_t *event) {
-   /* Respect the local pseudo-satellite assignment — if this daemon's speaker
-    * isn't owned by this event's user (or is disabled), don't fire the chime.
-    * The user's WebUI/satellite handles the alert. */
-   if (!satellite_local_speaker_plays_for_user(event->user_id)) {
+   ring_t *ring = malloc(sizeof(*ring));
+   if (!ring)
       return;
-   }
+   ring->event = *event;
+   ring->audible = satellite_local_speaker_plays_for_user(event->user_id);
+   ring->gen = 0;
 
-   /* Only one alarm sound at a time */
-   if (alarm_sound_playing) {
-      alarm_sound_stop = true;
-      /* Wait for previous sound thread to finish (up to 2s) */
-      for (int i = 0; i < 40 && alarm_sound_playing; i++)
-         usleep(50000);
-   }
+   if (ring->audible) {
+      /* Ended during its announcement: ring no more, and leave whatever plays
+       * alone (whoever ended it scheduled what comes next). */
+      if (firing_ended(event)) {
+         free(ring);
+         return;
+      }
+      /* Take the speaker: whatever played stops (it sees its generation gone). */
+      pthread_mutex_lock(&ringing_mutex);
+      ring->gen = atomic_fetch_add(&sound_gen, 1) + 1;
+      sound_owner_id = event->id;
+      pthread_mutex_unlock(&ringing_mutex);
 
-   sched_event_t *event_copy = malloc(sizeof(sched_event_t));
-   if (!event_copy)
-      return;
-   memcpy(event_copy, event, sizeof(sched_event_t));
+      /* Ended between that check and the claim (its dismiss found no sound
+       * to stop): give the speaker back.  One after the claim finds this ring
+       * owning the speaker and stops it. */
+      if (firing_ended(event)) {
+         pthread_mutex_lock(&ringing_mutex);
+         if (sound_owner_id == event->id && atomic_load(&sound_gen) == ring->gen) {
+            atomic_fetch_add(&sound_gen, 1);
+            sound_owner_id = 0;
+         }
+         pthread_mutex_unlock(&ringing_mutex);
+         free(ring);
+         return;
+      }
+      atomic_fetch_add(&sound_threads, 1);
+   }
 
    pthread_t sound_tid;
    pthread_attr_t attr;
    pthread_attr_init(&attr);
    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-   if (pthread_create(&sound_tid, &attr, alarm_sound_thread, event_copy) != 0) {
+   if (pthread_create(&sound_tid, &attr, alarm_sound_thread, ring) != 0) {
       OLOG_ERROR("scheduler: failed to create alarm sound thread");
-      free(event_copy);
+      if (ring->audible) {
+         pthread_mutex_lock(&ringing_mutex);
+         if (atomic_load(&sound_gen) == ring->gen)
+            sound_owner_id = 0;
+         pthread_mutex_unlock(&ringing_mutex);
+         atomic_fetch_sub(&sound_threads, 1);
+      }
+      free(ring);
    }
    pthread_attr_destroy(&attr);
 }
@@ -1406,110 +1500,25 @@ static void start_alarm_sound(const sched_event_t *event) {
  * ============================================================================= */
 
 /**
- * @brief Check if a day-of-week matches a recurrence pattern
+ * @brief Calculate next fire time for a recurring event, in its owner's zone
+ *        (see sched_next_occurrence)
  *
- * @param wday Day of week (0=Sun, 1=Mon, ..., 6=Sat)
- * @param recurrence Recurrence type
- * @param recurrence_days CSV of day names for SCHED_RECUR_CUSTOM (e.g., "mon,wed,fri")
- * @return true if this day matches the pattern
- */
-static bool day_matches_recurrence(int wday,
-                                   sched_recurrence_t recurrence,
-                                   const char *recurrence_days) {
-   switch (recurrence) {
-      case SCHED_RECUR_DAILY:
-         return true;
-      case SCHED_RECUR_WEEKDAYS:
-         return (wday >= 1 && wday <= 5);
-      case SCHED_RECUR_WEEKENDS:
-         return (wday == 0 || wday == 6);
-      case SCHED_RECUR_WEEKLY:
-         return true; /* Same weekday as original */
-      case SCHED_RECUR_CUSTOM: {
-         if (!recurrence_days || !recurrence_days[0])
-            return false;
-         static const char *day_names[] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
-         const char *needle = day_names[wday];
-         /* Search for day name in CSV */
-         const char *p = recurrence_days;
-         while (*p) {
-            while (*p == ' ' || *p == ',')
-               p++;
-            if (strncasecmp(p, needle, 3) == 0) {
-               char next = p[3];
-               if (next == '\0' || next == ',' || next == ' ')
-                  return true;
-            }
-            while (*p && *p != ',')
-               p++;
-         }
-         return false;
-      }
-      default:
-         return false;
-   }
-}
-
-/**
- * @brief Calculate next fire time for a recurring event
+ * Reads the owner's settings: never called while holding the auth_db lock.
  *
- * Uses mktime() with tm_isdst = -1 for DST-aware calculation.
- *
- * @param event The event that just fired
+ * @param event The event that just fired (or is being cancelled)
  * @return Next fire time, or 0 if no next occurrence (shouldn't happen for recurring)
  */
 static time_t calculate_next_recurrence(const sched_event_t *event) {
    if (event->recurrence == SCHED_RECUR_ONCE)
       return 0;
-
-   /* Parse original_time (HH:MM) for the alarm time-of-day.
-    * original_time is always in the user's local timezone (any offset suffix
-    * from ISO 8601 input is intentionally ignored by sscanf). */
-   int hour = 0, minute = 0;
-   if (!event->original_time[0] || sscanf(event->original_time, "%d:%d", &hour, &minute) != 2 ||
-       hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-      /* None stored, or not HH:MM: the time it was set to fire at */
-      struct tm tm_fire;
-      localtime_r(&event->fire_at, &tm_fire);
-      hour = tm_fire.tm_hour;
-      minute = tm_fire.tm_min;
-   }
-
-   /* Start from tomorrow */
-   time_t now = time(NULL);
-   struct tm tm_next;
-   localtime_r(&now, &tm_next);
-   tm_next.tm_hour = hour;
-   tm_next.tm_min = minute;
-   tm_next.tm_sec = 0;
-   tm_next.tm_isdst = -1; /* Let mktime() handle DST */
-
-   /* For weekly recurrence, advance exactly 7 days */
-   if (event->recurrence == SCHED_RECUR_WEEKLY) {
-      tm_next.tm_mday += 7;
-      return mktime(&tm_next);
-   }
-
-   /* For daily/weekdays/weekends/custom, find next matching day */
-   for (int days = 1; days <= 8; days++) {
-      tm_next.tm_mday++;
-      time_t candidate = mktime(&tm_next);
-      if (candidate <= 0)
-         continue;
-
-      /* Re-read after mktime (normalizes the date) */
-      localtime_r(&candidate, &tm_next);
-      tm_next.tm_hour = hour;
-      tm_next.tm_min = minute;
-      tm_next.tm_sec = 0;
-      tm_next.tm_isdst = -1;
-
-      if (day_matches_recurrence(tm_next.tm_wday, event->recurrence, event->recurrence_days))
-         return mktime(&tm_next);
-   }
-
-   OLOG_WARNING("scheduler: could not find next recurrence for event %lld", (long long)event->id);
-   return 0;
+   const time_t next = sched_next_occurrence(
+       user_tz(event->user_id), event->fire_at, event->original_time, event->recurrence,
+       event->recurrence_days, event->snooze_count > 0 || event->status == SCHED_STATUS_SNOOZED,
+       time(NULL));
+   if (next == 0)
+      OLOG_WARNING("scheduler: could not find next recurrence for event %lld",
+                   (long long)event->id);
+   return next;
 }
 
 /* Pure builder for the next-occurrence row.  Shared by schedule_next_occurrence
@@ -1714,6 +1723,7 @@ static void recover_missed_events(void) {
                } else {
                   OLOG_INFO("scheduler: skipped missed task '%s' (policy: skip)", e->name);
                }
+               schedule_next_occurrence(e);
             }
             break;
          }
@@ -1859,7 +1869,7 @@ void scheduler_shutdown(void) {
    OLOG_INFO("scheduler: shutting down");
 
    scheduler_shutdown_flag = true;
-   alarm_sound_stop = true;
+   stop_any_sound();
 
    /* Wake the scheduler thread */
    pthread_mutex_lock(&scheduler_mutex);
@@ -1871,12 +1881,15 @@ void scheduler_shutdown(void) {
    scheduler_running = false;
 
    /* Wait for alarm sound thread to finish before freeing PCM buffers */
-   for (int i = 0; i < 60 && alarm_sound_playing; i++)
-      usleep(50000); /* Up to 3s for sound to stop */
+   for (int i = 0; i < 160 && atomic_load(&sound_threads) > 0; i++)
+      usleep(50000); /* Up to 8s: a thread may still be in its 5s TTS wait */
 
-   /* Free PCM buffers */
-   dawn_chime_free(&chime_buf);
-   dawn_chime_free(&alarm_tone_buf);
+   /* Free PCM buffers, unless a sound thread is stuck in the audio device
+    * (it still reads them; the process is exiting) */
+   if (atomic_load(&sound_threads) == 0) {
+      dawn_chime_free(&chime_buf);
+      dawn_chime_free(&alarm_tone_buf);
+   }
 
    pthread_cond_destroy(&scheduler_cond);
 
@@ -1987,30 +2000,23 @@ int scheduler_dismiss(int64_t event_id) {
     * SCHED_STATUS_RINGING rows accumulate for offline users and routinely
     * get dismissed via dismiss_missed — we must NOT silence a different
     * user's actively-ringing alarm in the process. */
-   bool matches_current = false;
-   int64_t id = event_id;
-   if (alarm_ringing) {
-      int64_t current_id = ringing_event.id;
-      if (id <= 0)
-         id = current_id; /* Null event_id means "whatever is ringing" */
-      matches_current = (id == current_id);
-      if (matches_current) {
-         alarm_ringing = false;
-         memset(&ringing_event, 0, sizeof(ringing_event));
-      }
+   const int64_t id = event_id > 0 ? event_id : ringing_target_locked();
+   const bool matches_current = alarm_ringing && id == ringing_event.id;
+   if (matches_current) {
+      alarm_ringing = false;
+      memset(&ringing_event, 0, sizeof(ringing_event));
    }
    pthread_mutex_unlock(&ringing_mutex);
 
    if (id <= 0)
       return FAILURE; /* Nothing ringing and no explicit target. */
 
-   /* Only stop the alarm sound when the target matches the current one. */
-   if (matches_current)
-      scheduler_stop_alarm_sound();
-
    /* Dismiss in DB regardless — this covers stale RINGING rows from missed
-    * notifications that are no longer the active alarm. */
+    * notifications that are no longer the active alarm.  Before the sound
+    * stops: a stopped timer or reminder ends its own row if still ringing. */
    int result = scheduler_db_dismiss(id);
+
+   stop_sound_of(id);
    if (result == 0) {
       OLOG_INFO("scheduler: dismissed event %lld%s", (long long)id,
                 matches_current ? "" : " (DB-only, not the active alarm)");
@@ -2032,47 +2038,31 @@ int scheduler_dismiss(int64_t event_id) {
 
 int scheduler_snooze(int64_t event_id, int snooze_minutes) {
    pthread_mutex_lock(&ringing_mutex);
-
-   if (!alarm_ringing) {
-      pthread_mutex_unlock(&ringing_mutex);
-      return FAILURE;
-   }
-
-   int64_t id = (event_id > 0) ? event_id : ringing_event.id;
-   /* Refuse to snooze a non-active alarm — snooze only makes sense for the
-    * currently-ringing event, and touching the global state would silence
-    * another user's alarm. */
-   if (id != ringing_event.id) {
-      pthread_mutex_unlock(&ringing_mutex);
-      return FAILURE;
-   }
-   int max_snooze = g_config.scheduler.max_snooze_count;
-   int current_snooze = ringing_event.snooze_count;
-
-   /* Clear ringing state while holding lock */
-   alarm_ringing = false;
-   memset(&ringing_event, 0, sizeof(ringing_event));
+   const int64_t id = event_id > 0 ? event_id : ringing_target_locked();
    pthread_mutex_unlock(&ringing_mutex);
+
+   /* Snooze only makes sense for an event ringing now (the caller checks
+    * whose it may be). */
+   sched_event_t row;
+   if (id <= 0 || scheduler_db_get(id, &row) != 0 || row.status != SCHED_STATUS_RINGING)
+      return FAILURE;
+   /* A running task or briefing is 'ringing' while it works: moving its
+    * fire_at would start it again. */
+   if (row.event_type != SCHED_EVENT_TIMER && row.event_type != SCHED_EVENT_ALARM &&
+       row.event_type != SCHED_EVENT_REMINDER)
+      return FAILURE;
+   int max_snooze = g_config.scheduler.max_snooze_count;
+   int current_snooze = row.snooze_count;
 
    /* Check max snooze count */
    if (current_snooze >= max_snooze) {
       OLOG_WARNING("scheduler: max snooze count (%d) reached for event %lld", max_snooze,
                    (long long)id);
-      /* Already cleared ringing state, just dismiss in DB */
-      scheduler_stop_alarm_sound();
-      scheduler_db_dismiss(id);
-      OLOG_INFO("scheduler: dismissed event %lld (max snooze reached)", (long long)id);
-
-#ifdef ENABLE_WEBUI
-      sched_event_t updated;
-      if (scheduler_db_get(id, &updated) == 0)
-         scheduler_broadcast_notification(&updated, "Dismissed (max snooze reached)");
-#endif
-      return 0;
+      /* Dismiss as the user would (a repeating event gets its next
+       * occurrence; its sound stops). */
+      const int rc = scheduler_dismiss(id);
+      return rc == SUCCESS ? SCHEDULER_SNOOZE_LIMIT : rc;
    }
-
-   /* Stop alarm sound */
-   scheduler_stop_alarm_sound();
 
    if (snooze_minutes <= 0)
       snooze_minutes = g_config.scheduler.default_snooze_minutes;
@@ -2081,6 +2071,17 @@ int scheduler_snooze(int64_t event_id, int snooze_minutes) {
 
    time_t new_fire = time(NULL) + snooze_minutes * 60;
    int result = scheduler_db_snooze(id, new_fire);
+   /* Only after the snooze is written: a stopped ring ends its own row if it
+    * is still ringing. */
+   if (result == 0) {
+      pthread_mutex_lock(&ringing_mutex);
+      if (alarm_ringing && ringing_event.id == id) {
+         alarm_ringing = false;
+         memset(&ringing_event, 0, sizeof(ringing_event));
+      }
+      pthread_mutex_unlock(&ringing_mutex);
+      stop_sound_of(id);
+   }
 
    if (result == 0) {
       /* Wake scheduler to recalculate next fire time */
@@ -2099,8 +2100,4 @@ int scheduler_snooze(int64_t event_id, int snooze_minutes) {
    }
 
    return result;
-}
-
-void scheduler_stop_alarm_sound(void) {
-   alarm_sound_stop = true;
 }

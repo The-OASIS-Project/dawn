@@ -133,9 +133,14 @@ int scheduler_dismiss(int64_t event_id);
  * @brief Snooze the currently ringing alarm
  * @param event_id Event ID to snooze (0 = snooze whatever is ringing)
  * @param snooze_minutes Minutes to snooze (0 = use default from config)
- * @return SUCCESS or FAILURE if nothing to snooze
+ * @return SUCCESS, SCHEDULER_SNOOZE_LIMIT when it had been snoozed the most
+ *         times allowed and was dismissed instead, or FAILURE if nothing to
+ *         snooze
  */
 int scheduler_snooze(int64_t event_id, int snooze_minutes);
+
+/** scheduler_snooze(): the snooze limit was reached, so it was dismissed. */
+#define SCHEDULER_SNOOZE_LIMIT 2
 
 /**
  * @brief Cancel a single occurrence of an event, keeping the recurrence chain
@@ -211,17 +216,6 @@ void scheduler_send_tts_to_session(session_t *session, const char *text);
  * to SUCCESS/FAILURE deliberately — the scheduler is not a messaging module and
  * should not carry MESSAGING_* into its callers. */
 int scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text);
-
-/* =============================================================================
- * Alarm Sound
- * ============================================================================= */
-
-/**
- * @brief Stop the currently playing alarm sound
- *
- * Called from dismiss/snooze handlers to immediately stop the sound.
- */
-void scheduler_stop_alarm_sound(void);
 
 #ifdef __cplusplus
 }

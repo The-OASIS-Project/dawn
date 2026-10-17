@@ -45,6 +45,7 @@
 #include "core/memory_filter.h" /* memory_filter_check_injection_commands (critic gap gate) */
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
+#include "core/user_tz.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_command_parser.h"
 #include "logging.h"
@@ -853,18 +854,16 @@ const char *research_run_execute(struct session *s,
    char *evidence = NULL;
    research_render_report(run_id, run0->brief, &evidence);
 
-   /* Research date (local, YYYY-MM-DD) from the run's creation time — stamped
-    * deterministically into the report and handed to synthesis so time-sensitive
-    * findings read as "as of <date>", not as a timeless snapshot. localtime_r for
-    * thread safety (this runs on the detached research worker). */
+   /* Research date (the owner's, YYYY-MM-DD) from the run's creation time —
+    * stamped deterministically into the report and handed to synthesis so
+    * time-sensitive findings read as "as of <date>", not as a timeless snapshot. */
    char research_date[16];
    research_date[0] = '\0';
    {
-      time_t created = run0->created_at;
       struct tm tmv;
-      if (localtime_r(&created, &tmv) != NULL) {
-         strftime(research_date, sizeof(research_date), "%Y-%m-%d", &tmv);
-      }
+      tz_local(user_tz(run0->user_id), run0->created_at, &tmv);
+      if (strftime(research_date, sizeof(research_date), "%Y-%m-%d", &tmv) == 0)
+         research_date[0] = '\0';
    }
 
    /* Answer: a written synthesis of the evidence (exec summary + a direct answer to

@@ -30,6 +30,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/user_tz.h"
 #include "logging.h"
 #include "tools/calendar_db.h"
 #include "tools/calendar_service.h"
@@ -748,8 +749,8 @@ void handle_calendar_upcoming_events(ws_connection_t *conn, json_object *payload
       return;
    }
 
-   int count = calendar_service_range(conn->auth_user_id, start, end, cal_name, occ,
-                                      CAL_UPCOMING_MAX);
+   int count = calendar_service_range(conn->auth_user_id, user_tz(conn->auth_user_id), start, end,
+                                      cal_name, occ, CAL_UPCOMING_MAX);
 
    json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    json_object_object_add(resp_payload, "start", json_object_new_int64((int64_t)start));

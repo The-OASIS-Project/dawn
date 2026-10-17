@@ -62,6 +62,22 @@ typedef struct {
 struct session;
 void memory_extraction_build_fallback(struct session *session, memory_extraction_fallback_t *fb);
 
+/** Room for memory_extraction_anchor_line()'s line ("Conversation anchor:
+ *  YYYY-MM-DD" and two newlines, 34 bytes) with slack. */
+#define MEMORY_EXTRACTION_ANCHOR_LINE_LEN 64
+
+/**
+ * @brief The prompt's "Conversation anchor: YYYY-MM-DD" line: the
+ *        conversation's logical now (conversations.anchor_date) as a date in
+ *        @p user_id's zone, so the model resolves "yesterday" and "last
+ *        month" against it.
+ *
+ * Empty when the conversation has no anchor (or @p conversation_id isn't
+ * positive).  @p out_sz must be at least 1.
+ * Reads the database: never call it holding the auth_db lock.
+ */
+void memory_extraction_anchor_line(int user_id, int64_t conversation_id, char *out, size_t out_sz);
+
 /**
  * @brief Trigger memory extraction for a session
  *

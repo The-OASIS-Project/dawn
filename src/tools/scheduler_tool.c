@@ -41,6 +41,7 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/tz.h"
+#include "core/user_tz.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -215,6 +216,7 @@ static char *handle_create(struct json_object *details,
                            const char *source_location,
                            sched_source_type_t source_client_type) {
    char result[RESULT_BUF_SIZE];
+   const tz_t *zone = user_tz(user_id); /* the user's clock, for this call */
 
    const char *type_str = json_get_string(details, "type");
    if (!type_str) {
@@ -270,7 +272,7 @@ static char *handle_create(struct json_object *details,
    } else if (fire_at_str) {
       /* Absolute time via ISO 8601 */
       time_t fire_time;
-      if (!tz_parse(fire_at_str, tz_daemon(), &fire_time) || fire_time <= 0) {
+      if (!tz_parse(fire_at_str, zone, &fire_time) || fire_time <= 0) {
          snprintf(result, sizeof(result),
                   TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);
@@ -292,14 +294,12 @@ static char *handle_create(struct json_object *details,
 
       event.fire_at = fire_time;
 
-      /* Store original time for recurring alarms */
-      const char *time_only = strchr(fire_at_str, 'T');
-      if (time_only) {
-         time_only++; /* Skip 'T' */
-         safe_strscpy(event.original_time, time_only);
-      } else if (strlen(fire_at_str) <= 5) {
-         safe_strscpy(event.original_time, fire_at_str);
-      }
+      /* The time of day it repeats at, on the owner's clock (whatever offset
+       * the text carried): the recurrence engine reads it. */
+      struct tm fire_tm;
+      tz_local(zone, fire_time, &fire_tm);
+      snprintf(event.original_time, sizeof(event.original_time), "%02d:%02d", fire_tm.tm_hour,
+               fire_tm.tm_min);
    } else {
       /* Neither provided */
       if (type == SCHED_EVENT_TIMER) {
@@ -547,8 +547,8 @@ static char *handle_create(struct json_object *details,
    /* Format response with current time + fire time so the LLM can relay accurately */
    time_t now = time(NULL);
    struct tm now_tm, fire_tm;
-   localtime_r(&now, &now_tm);
-   localtime_r(&event.fire_at, &fire_tm);
+   tz_local(zone, now, &now_tm);
+   tz_local(zone, event.fire_at, &fire_tm);
 
    char now_str[64], fire_str[64];
    strftime(now_str, sizeof(now_str), "%I:%M %p", &now_tm);
@@ -593,6 +593,7 @@ static char *handle_list(struct json_object *details, int user_id) {
          return strdup("No active events of that type.");
       return strdup("No active timers, alarms, or reminders.");
    }
+   const tz_t *zone = user_tz(user_id); /* times shown on the user's clock */
 
    /* Batch-load briefing steps for ALL events at once — one auth_db mutex
     * acquisition instead of `count` separate ones (was N+1; on the panel
@@ -644,7 +645,7 @@ static char *handle_list(struct json_object *details, int user_id) {
             break;
       } else {
          struct tm fire_tm;
-         localtime_r(&e->fire_at, &fire_tm);
+         tz_local(zone, e->fire_at, &fire_tm);
          char time_str[32];
          strftime(time_str, sizeof(time_str), "%I:%M %p %b %d", &fire_tm);
          if (strbuf_appendf(&sb, "- [id=%lld] [%s] %s: %s", (long long)e->id, type, e->name,
@@ -799,7 +800,7 @@ static char *handle_query(struct json_object *details, int user_id) {
       }
    } else {
       struct tm fire_tm;
-      localtime_r(&event.fire_at, &fire_tm);
+      tz_local(user_tz(user_id), event.fire_at, &fire_tm);
       char time_str[32];
       strftime(time_str, sizeof(time_str), "%I:%M %p on %b %d", &fire_tm);
       int written = snprintf(result, sizeof(result), "%s '%s' [id=%lld] is set for %s. Status: %s.",
@@ -913,6 +914,7 @@ static char *steps_update_error(int rc, const char *event_name) {
  * uses `new_name` so the lookup key and the new value don't collide. */
 static char *handle_update(struct json_object *details, int user_id) {
    char result[RESULT_BUF_SIZE];
+   const tz_t *zone = user_tz(user_id); /* the user's clock, for this call */
 
    /* Resolve the target event by id (preferred) or name — mirrors handle_cancel. */
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
@@ -962,7 +964,7 @@ static char *handle_update(struct json_object *details, int user_id) {
    const char *fire_at_str = json_get_string(details, "fire_at");
    if (fire_at_str) {
       time_t fire_time;
-      if (!tz_parse(fire_at_str, tz_daemon(), &fire_time) || fire_time <= 0) {
+      if (!tz_parse(fire_at_str, zone, &fire_time) || fire_time <= 0) {
          snprintf(result, sizeof(result),
                   TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);
@@ -979,11 +981,11 @@ static char *handle_update(struct json_object *details, int user_id) {
       }
       fields.fire_at = fire_time;
       mask |= SCHED_FIELD_FIRE_AT;
-      /* Derive original_time (HH:MM local) from the new fire_at so a recurring
-       * event's time-of-day follows the edit — the recurrence engine reads
-       * original_time, not fire_at (see calculate_next_recurrence). */
+      /* Derive original_time (HH:MM on the owner's clock) from the new fire_at
+       * so a recurring event's time-of-day follows the edit — the recurrence
+       * engine reads original_time, not fire_at (see calculate_next_recurrence). */
       struct tm fire_tm;
-      localtime_r(&fire_time, &fire_tm);
+      tz_local(zone, fire_time, &fire_tm);
       snprintf(fields.original_time, SCHED_ORIGINAL_TIME_MAX, "%02d:%02d", fire_tm.tm_hour,
                fire_tm.tm_min);
       mask |= SCHED_FIELD_ORIGINAL_TIME;
@@ -1165,7 +1167,7 @@ static char *handle_update(struct json_object *details, int user_id) {
    strbuf_t sb;
    strbuf_init(&sb, 256);
    struct tm fire_tm;
-   localtime_r(&updated.fire_at, &fire_tm);
+   tz_local(zone, updated.fire_at, &fire_tm);
    char time_str[48];
    strftime(time_str, sizeof(time_str), "%I:%M %p on %b %d", &fire_tm);
    strbuf_appendf(&sb, "Updated %s '%s' (fires %s", sched_event_type_to_str(updated.event_type),
@@ -1192,14 +1194,46 @@ static char *handle_update(struct json_object *details, int user_id) {
    return out ? out : strdup("Updated event.");
 }
 
-static char *handle_snooze(struct json_object *details) {
+/* The caller's own event ringing now (the latest fired), or 0: what a
+ * dismiss or snooze with no id means first, so one user's "dismiss" doesn't
+ * end another's alarm that happens to be playing. */
+static int64_t own_ringing(int user_id) {
+   return user_id > 0 ? scheduler_db_latest_ringing(user_id) : 0;
+}
+
+/* Whether the caller may dismiss or snooze @p event_id: with no id, the event
+ * ringing now; an explicit id must be that one (any device may silence it)
+ * or one of the caller's own (a guest has none).  Refused the same way as
+ * "nothing ringing", so it says nothing about another user's events. */
+static bool may_silence(int64_t event_id, int user_id) {
+   if (event_id <= 0)
+      return true;
+   sched_event_t ringing;
+   sched_event_t ev;
+   const bool is_ringing = scheduler_get_ringing(&ringing) == SUCCESS && ringing.id == event_id;
+   const bool is_own = user_id > 0 && scheduler_db_get(event_id, &ev) == 0 && ev.user_id == user_id;
+   return is_ringing || is_own;
+}
+
+static char *handle_snooze(struct json_object *details, int user_id) {
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
+   if (event_id <= 0)
+      event_id = own_ringing(user_id); /* else whatever rings (0) */
    int snooze_min = json_get_int(details, "snooze_minutes", 0);
 
    if (snooze_min < 0 || snooze_min > MAX_SNOOZE_MINUTES)
       snooze_min = 0;
+   if (!may_silence(event_id, user_id))
+      return strdup("No alarm is currently ringing to snooze.");
 
    int result = scheduler_snooze(event_id, snooze_min);
+   if (result == SCHEDULER_SNOOZE_LIMIT) {
+      char buf[128];
+      snprintf(buf, sizeof(buf),
+               "It had been snoozed the most times allowed (%d), so it was dismissed instead.",
+               g_config.scheduler.max_snooze_count);
+      return strdup(buf);
+   }
    if (result == 0) {
       int actual_min = snooze_min > 0 ? snooze_min : g_config.scheduler.default_snooze_minutes;
       char buf[128];
@@ -1213,20 +1247,10 @@ static char *handle_snooze(struct json_object *details) {
 
 static char *handle_dismiss(struct json_object *details, int user_id) {
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
-
-   /* An explicit id must be the alarm ringing now (any device may silence it)
-    * or one of the caller's own (a guest has none).  Refused the same way as
-    * "nothing ringing", so it says nothing about another user's events. */
-   if (event_id > 0) {
-      sched_event_t ringing;
-      sched_event_t ev;
-      const bool is_ringing = scheduler_get_ringing(&ringing) == SUCCESS && ringing.id == event_id;
-      const bool is_own = user_id > 0 && scheduler_db_get(event_id, &ev) == 0 &&
-                          ev.user_id == user_id;
-      if (!is_ringing && !is_own) {
-         return strdup("No alarm is currently ringing to dismiss.");
-      }
-   }
+   if (event_id <= 0)
+      event_id = own_ringing(user_id); /* else whatever rings (0) */
+   if (!may_silence(event_id, user_id))
+      return strdup("No alarm is currently ringing to dismiss.");
 
    int result = scheduler_dismiss(event_id);
    if (result == 0)
@@ -1306,7 +1330,7 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    } else if (strcmp(action, "update") == 0) {
       result = handle_update(details, user_id);
    } else if (strcmp(action, "snooze") == 0) {
-      result = handle_snooze(details);
+      result = handle_snooze(details, user_id);
    } else if (strcmp(action, "dismiss") == 0) {
       result = handle_dismiss(details, user_id);
    } else {

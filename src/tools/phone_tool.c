@@ -36,6 +36,7 @@
 #include "core/tool_call_challenge.h"
 #include "core/tool_call_policy.h"
 #include "core/turn_origin.h"
+#include "core/user_tz.h"
 #include "logging.h"
 #include "toml.h"
 #include "tools/phone_audio_config.h"
@@ -628,10 +629,10 @@ static char *handle_read_sms(int user_id) {
  *      take_pending), checks the hourly rate limit, executes DELETE.
  * ============================================================================= */
 
-/* Convert timestamp → compact yyyy-mm-dd string for previews. */
-static void format_short_date(time_t t, char *out, size_t out_size) {
+/* Convert timestamp → compact yyyy-mm-dd string, in @p zone, for previews. */
+static void format_short_date(const tz_t *zone, time_t t, char *out, size_t out_size) {
    struct tm tm_buf;
-   localtime_r(&t, &tm_buf);
+   tz_local(zone, t, &tm_buf);
    strftime(out, out_size, "%Y-%m-%d", &tm_buf);
 }
 
@@ -682,7 +683,7 @@ static char *handle_delete_sms(struct json_object *details,
          memcpy(preview, match.body, blen + 1);
       }
       char date[32];
-      format_short_date(match.timestamp, date, sizeof(date));
+      format_short_date(user_tz(user_id), match.timestamp, date, sizeof(date));
       const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
       const char *name = match.contact_name[0] ? match.contact_name : match.number;
 
@@ -762,7 +763,7 @@ static char *handle_delete_sms(struct json_object *details,
    }
 
    char cutoff_date[32];
-   format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
+   format_short_date(user_tz(user_id), cutoff, cutoff_date, sizeof(cutoff_date));
    snprintf(buf, sizeof(buf),
             "About to delete %d SMS record(s) older than %d days (before %s). "
             "Say 'confirm' to delete.",
@@ -891,7 +892,7 @@ static char *handle_delete_call(struct json_object *details,
       }
 
       char date[32];
-      format_short_date(match.timestamp, date, sizeof(date));
+      format_short_date(user_tz(user_id), match.timestamp, date, sizeof(date));
       const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
       const char *name = match.contact_name[0] ? match.contact_name : match.number;
 
@@ -934,7 +935,7 @@ static char *handle_delete_call(struct json_object *details,
    }
 
    char cutoff_date[32];
-   format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
+   format_short_date(user_tz(user_id), cutoff, cutoff_date, sizeof(cutoff_date));
    snprintf(buf, sizeof(buf),
             "About to delete %d call record(s) older than %d days (before %s). "
             "Say 'confirm' to delete.",
@@ -1424,6 +1425,7 @@ static int describe_pending(struct json_object *details,
       return FAILURE;
    }
    const int user_id = tool_get_current_user_id();
+   const tz_t *zone = user_tz(user_id);
    int n = -1;
    pthread_mutex_lock(&s_phone_tool_mutex);
    pending_slot_t *slot = NULL;
@@ -1454,7 +1456,7 @@ static int describe_pending(struct json_object *details,
                n = snprintf(out, out_len, "delete %d %s records with %s", p->preview_count, what,
                             p->number);
             } else {
-               format_short_date(p->cutoff, date, sizeof(date));
+               format_short_date(zone, p->cutoff, date, sizeof(date));
                n = snprintf(out, out_len, "delete %d %s records from before %s", p->preview_count,
                             what, date);
             }

@@ -42,6 +42,7 @@
 
 #include "config/dawn_config.h"
 #include "core/memory_filter.h"
+#include "core/user_tz.h"
 #include "dawn_error.h"
 #include "memory/memory_embeddings.h"
 #include "test_external_focus_adapters_mocks.h"
@@ -53,6 +54,13 @@
 dawn_config_t g_config;
 
 ext_mock_state_t s_ext_mock;
+
+/* The user's zone: the one the test names in TZ, so each case sets its day. */
+tz_t *user_tz(int user_id) {
+   (void)user_id;
+   tz_t *zone = tz_lookup(getenv("TZ"));
+   return zone ? zone : tz_daemon();
+}
 
 void ext_mock_reset(void) {
    /* Free fixture-owned chunk-embedding allocations from any

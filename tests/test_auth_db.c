@@ -32,6 +32,8 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "core/tz.h"
+#include "core/user_tz.h"
 #include "unity.h"
 #include "utils/string_utils.h"
 
@@ -925,6 +927,95 @@ static void test_v107_timezone_settings(void) {
    }
 }
 
+/* A user's zone: their own setting, else the daemon's (also for a guest, an
+ * unset setting, or text that isn't a zone). */
+static void test_user_tz(void) {
+   const int chose = create_and_get_id("tz_chose", "hash", false);
+   const int unset = create_and_get_id("tz_unset", "hash", false);
+   const int junk = create_and_get_id("tz_junk", "hash", false);
+   auth_user_settings_t settings;
+   memset(&settings, 0, sizeof(settings));
+   safe_strscpy(settings.timezone, "America/Los_Angeles");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(chose, &settings));
+   safe_strscpy(settings.timezone, "somewhere nice");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(junk, &settings));
+   tz_daemon_init("America/Chicago");
+   TEST_ASSERT_EQUAL_STRING("America/Los_Angeles", tz_name(user_tz(chose)));
+   TEST_ASSERT_EQUAL_STRING("America/Chicago", tz_name(user_tz(unset)));
+   TEST_ASSERT_EQUAL_STRING("America/Chicago", tz_name(user_tz(junk)));
+   TEST_ASSERT_EQUAL_STRING("America/Chicago", tz_name(user_tz(0)));
+}
+
+/* v108: a repeating event's time of day moves from the daemon's clock to its
+ * owner's, at the moment it fires today (a snoozed row by its occurrence, not
+ * the snooze); an owner on the daemon's zone, and a one-time event, stay.
+ * When the owner's clock puts it on the day before, named days move with it,
+ * also for a row with no stored time (fire_at's time is used). */
+static void test_v108_scheduled_times(void) {
+   const int la = create_and_get_id("sched_la", "hash", false);
+   const int unset = create_and_get_id("sched_unset", "hash", false);
+   auth_user_settings_t settings;
+   memset(&settings, 0, sizeof(settings));
+   safe_strscpy(settings.timezone, "America/Los_Angeles");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(la, &settings));
+   tz_daemon_init("America/Chicago");
+   char sql[2048];
+   /* Oct 17 2026, Chicago (-5): 07:00 is 12:00Z; 07:09 (a snooze) 12:09Z;
+    * Oct 18 00:10 is 05:10Z.  Los Angeles is -7. */
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO scheduled_events (id, user_id, status, name, fire_at, created_at, "
+            "recurrence, recurrence_days, original_time) VALUES "
+            "(9001, %d, 'pending', 'a', 1792238400, 0, 'daily', NULL, '07:00'),"
+            "(9002, %d, 'snoozed', 'b', 1792238940, 0, 'daily', NULL, '07:00'),"
+            "(9003, %d, 'pending', 'c', 1792238400, 0, 'daily', NULL, '07:00'),"
+            "(9004, %d, 'pending', 'd', 1792300200, 0, 'weekdays', NULL, '00:10'),"
+            "(9005, %d, 'pending', 'e', 1792238400, 0, 'once', NULL, '07:00'),"
+            "(9006, %d, 'ringing', 'f', 1792238400, 0, 'daily', NULL, '07:00'),"
+            "(9007, %d, 'pending', 'g', 1792238400, 0, 'daily', NULL, '07:00:00-07:00'),"
+            "(9008, %d, 'pending', 'h', 1792238400, 0, 'daily', NULL, '07:00Z'),"
+            "(9009, %d, 'pending', 'i', 1792238400, 0, 'daily', NULL, ''),"
+            "(9010, %d, 'pending', 'j', 1792300200, 0, 'custom', 'Mon, wed', '00:10'),"
+            "(9011, %d, 'pending', 'k', 1792300200, 0, 'daily', NULL, '00:10'),"
+            "(9012, %d, 'pending', 'l', 1792300200, 0, 'weekdays', NULL, '')",
+            la, la, unset, la, la, la, la, la, la, la, la, la);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   /* An upgrade: the fresh database ran v108 (no rows) when it was made. */
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(s_db.db, "DELETE FROM migration_marks WHERE name = 'v108'",
+                                      NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v108(s_db.db));
+
+   /* A second run (another migration failed, so the version wasn't raised)
+    * changes nothing. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v108(s_db.db));
+
+   /* An offset literal was read as HH:MM on the daemon's clock, so it converts
+    * like any other; an empty one stays (fire_at's time is used). */
+   static const struct {
+      const char *time, *recurrence, *days;
+   } want[] = {
+      { "05:00", "daily", "" }, { "05:00", "daily", "" },
+      { "07:00", "daily", "" }, { "22:10", "custom", "sun,mon,tue,wed,thu" },
+      { "07:00", "once", "" },  { "05:00", "daily", "" },
+      { "05:00", "daily", "" }, { "05:00", "daily", "" },
+      { "", "daily", "" },      { "22:10", "custom", "sun,tue" },
+      { "22:10", "daily", "" }, { "", "custom", "sun,mon,tue,wed,thu" },
+   };
+   for (int i = 0; i < (int)(sizeof(want) / sizeof(want[0])); i++) {
+      sqlite3_stmt *st = NULL;
+      sqlite3_prepare_v2(s_db.db,
+                         "SELECT original_time, recurrence, COALESCE(recurrence_days, '') "
+                         "FROM scheduled_events WHERE id = ?",
+                         -1, &st, NULL);
+      sqlite3_bind_int(st, 1, 9001 + i);
+      TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+      TEST_ASSERT_EQUAL_STRING(want[i].time, (const char *)sqlite3_column_text(st, 0));
+      TEST_ASSERT_EQUAL_STRING(want[i].recurrence, (const char *)sqlite3_column_text(st, 1));
+      TEST_ASSERT_EQUAL_STRING(want[i].days, (const char *)sqlite3_column_text(st, 2));
+      sqlite3_finalize(st);
+   }
+}
+
 static void test_user_settings_set_and_get(void) {
    int user_id = create_and_get_id("settings_user2", "hash", false);
 
@@ -1405,6 +1496,8 @@ int main(void) {
    /* User Settings */
    RUN_TEST(test_user_settings_defaults);
    RUN_TEST(test_v107_timezone_settings);
+   RUN_TEST(test_user_tz);
+   RUN_TEST(test_v108_scheduled_times);
    RUN_TEST(test_user_settings_set_and_get);
 
    /* v43 schema (entity-merge / user-identity-dedup) */

@@ -192,9 +192,10 @@ int session_effective_user_id(session_t *session) {
    (void)session;
    return 1;
 }
-char *session_take_new_notices_locked(session_t *session, int viewer_user_id) {
+char *session_take_new_notices_locked(session_t *session, int viewer_user_id, const tz_t *zone) {
    (void)session;
    (void)viewer_user_id;
+   (void)zone;
    char *out = s_notice ? strdup(s_notice) : NULL;
    s_notice = NULL; /* told once */
    return out;
@@ -1536,7 +1537,10 @@ static void test_the_real_head_and_frame_read_back(void) {
       add("user", t ? "Q2" : "Q1");
       composed_prompt_t cp = focused("", "The dog is Ash.");
       free(cp.context_head);
-      cp.context_head = prompt_turn_head(time(NULL));
+      const time_t now = time(NULL);
+      struct tm local;
+      gmtime_r(&now, &local);
+      cp.context_head = prompt_turn_head(&local, "UTC");
       session_prefix_apply_turn(s, &cp, NULL);
       composed_prompt_free(&cp);
       add("assistant", "A");

@@ -40,6 +40,7 @@
 #include "core/session_focus.h"
 #include "core/session_history.h"
 #include "core/session_manager.h"
+#include "core/user_tz.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
@@ -584,6 +585,8 @@ void session_prefix_apply_turn(session_t *session,
       return;
    }
    const int viewer = session_effective_user_id(session);
+   /* Notice times in the viewer's zone, read before the lock. */
+   const tz_t *zone = cp && cp->zone ? cp->zone : user_tz(viewer);
    pthread_mutex_lock(&session->history_mutex);
    bool pinned_live = false;
    struct json_object **slot = target_locked(session, &pinned_live);
@@ -777,7 +780,7 @@ void session_prefix_apply_turn(session_t *session,
    /* In front of the question: what DAWN knows (when it changed), then the
     * turn's context. */
    struct json_object *question = question_locked(session, hist);
-   char *notices = session_take_new_notices_locked(session, viewer);
+   char *notices = session_take_new_notices_locked(session, viewer, zone);
    /* The retrieved items this history doesn't show yet (after the compaction
     * and withdrawals above: what they removed is no longer shown). */
    session_focus_turn_t focus = { 0 };

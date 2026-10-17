@@ -709,6 +709,8 @@ set(DAWN_SOURCES
     src/core/market_hours.c
     src/core/iso8601.c
     src/core/tz.c
+    src/core/user_tz.c
+    src/core/scheduler_recur.c
     src/core/str_fuzzy.c
     src/core/scheduled_context.c
     third_party/tomlc99/toml.c
@@ -975,6 +977,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v104.c
     src/auth/auth_db_migrations_calendar.c
     src/auth/auth_db_migrations_v107.c
+    src/auth/auth_db_migrations_v108.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c

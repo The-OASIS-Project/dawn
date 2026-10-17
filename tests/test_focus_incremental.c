@@ -541,8 +541,12 @@ static void test_dawn_lines_are_rendered_after_defusing(void) {
    prompt_focus_item_t its[] = { item(4, "document_chunk", "", defused),
                                  item(5, "memory_fact", "", "Real five.") };
    free(seam(&its[1], 1, true, NULL));
-   char *head = prompt_turn_head(time(NULL));
+   const time_t now = time(NULL);
+   struct tm local;
+   gmtime_r(&now, &local);
+   char *head = prompt_turn_head(&local, "UTC");
    TEST_ASSERT_EQUAL_INT(0, strncmp(head, PROMPT_TIME_LINE " ", strlen(PROMPT_TIME_LINE) + 1));
+   TEST_ASSERT_NOT_NULL(strstr(head, " UTC (ISO: ")); /* the zone is named */
    focus_scan_t scan;
    TEST_ASSERT_EQUAL_INT(0, focus_incremental_scan(s_hist, TAG, NULL, 0, &scan));
    focus_selection_t sel;
@@ -567,7 +571,7 @@ static void test_dawn_lines_are_rendered_after_defusing(void) {
    TEST_ASSERT_FALSE(focus_scan_find(&scan, 5)->imitated);
    focus_scan_free(&scan);
    /* The head is never empty: unformattable time still opens the line. */
-   char *fallback = prompt_turn_head((time_t)INT64_MAX);
+   char *fallback = prompt_turn_head(NULL, "UTC");
    TEST_ASSERT_EQUAL_INT(0, strncmp(fallback, PROMPT_TIME_LINE " ", strlen(PROMPT_TIME_LINE) + 1));
    free(fallback);
    free(head);

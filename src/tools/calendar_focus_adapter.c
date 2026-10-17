@@ -104,6 +104,8 @@
 #include "config/dawn_config.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
+#include "core/tz.h"
+#include "core/user_tz.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_terms.h"
@@ -164,26 +166,21 @@
  * we never heap-allocate during the DB walk; only the final
  * `focus_candidate_t` array is heap-allocated. */
 
-/* When an occurrence starts, locally.  An all-day one is its date's local
- * midnight (its stored dtstart is the date's UTC midnight). */
-static time_t occ_local_start(const calendar_occurrence_t *occ) {
+/* When an occurrence starts.  An all-day one is its date's midnight in
+ * @p zone (its stored dtstart is the date's UTC midnight). */
+static time_t occ_local_start(const tz_t *zone, const calendar_occurrence_t *occ) {
    int y = 0;
    int m = 0;
    int d = 0;
    if (occ->all_day && sscanf(occ->dtstart_date, "%4d-%2d-%2d", &y, &m, &d) == 3) {
-      struct tm tm = { .tm_year = y - 1900, .tm_mon = m - 1, .tm_mday = d, .tm_isdst = -1 };
-      const time_t t = mktime(&tm);
-      if (t != (time_t)-1)
-         return t;
+      struct tm tm = { .tm_year = y - 1900, .tm_mon = m - 1, .tm_mday = d };
+      return tz_mktime(zone, &tm);
    }
    return occ->dtstart;
 }
 
-static bool same_local_day(time_t a, time_t b) {
-   struct tm ta, tb;
-   if (localtime_r(&a, &ta) == NULL || localtime_r(&b, &tb) == NULL)
-      return false;
-   return ta.tm_year == tb.tm_year && ta.tm_yday == tb.tm_yday;
+static bool same_local_day(const tz_t *zone, time_t a, time_t b) {
+   return tz_wall(zone, a) / 86400 == tz_wall(zone, b) / 86400;
 }
 
 /* 0.5 ** (age / half) with source-specific half-life — same exponential
@@ -204,19 +201,21 @@ static double calendar_recency_decay(time_t event_ts, time_t now) {
    return decay;
 }
 
-static int format_event_text(const calendar_occurrence_t *occ, char *out, size_t outlen) {
-   /* Render localtime (matches DAWN's user-facing convention; CalDAV
-    * dtstart is stored as epoch seconds in the DB, timezone-agnostic). */
+static int format_event_text(const tz_t *zone,
+                             const calendar_occurrence_t *occ,
+                             char *out,
+                             size_t outlen) {
+   /* Render in the user's zone (CalDAV dtstart is stored as epoch seconds in
+    * the DB, timezone-agnostic). */
    const char *summary = (occ->summary[0] != '\0') ? occ->summary : "(untitled event)";
    int n;
    if (occ->all_day && occ->dtstart_date[0] != '\0') {
       /* All-day events are dates, not times: dtstart is the date's UTC
-       * midnight, which localtime would show as the evening before. */
+       * midnight, which a zone west of UTC would show as the evening before. */
       n = snprintf(out, outlen, "[%s all day] %s", occ->dtstart_date, summary);
    } else {
       struct tm tm;
-      if (localtime_r(&occ->dtstart, &tm) == NULL)
-         return FAILURE;
+      tz_local(zone, occ->dtstart, &tm);
       n = snprintf(out, outlen, "[%04d-%02d-%02d %02d:%02d] %s", tm.tm_year + 1900, tm.tm_mon + 1,
                    tm.tm_mday, tm.tm_hour, tm.tm_min, summary);
    }
@@ -409,6 +408,9 @@ static int calendar_adapter_query(int user_id,
    int rc = SUCCESS;
    int produced = 0;
 
+   /* The user's days, for windows and display. */
+   const tz_t *zone = user_tz(user_id);
+
    /* Step 1: enumerate accounts (user-scoped at SQL). */
    calendar_account_t accounts[CALENDAR_MAX_ACCOUNTS];
    int account_count = 0;
@@ -461,7 +463,7 @@ static int calendar_adapter_query(int user_id,
     * schedule).  An unrelated message gets no ambient list of the coming
     * week: reminders are the scheduler's job. */
    calendar_window_t win;
-   calendar_query_window(query_text, g_config.general.ai_name, now, &win);
+   calendar_query_window(query_text, g_config.general.ai_name, zone, now, &win);
    if (win.asks) {
       /* Timed events, then all-day ones (a separate, date-keyed query), each
        * up to MAX_OCCURRENCES_PER_PULL. */
@@ -476,7 +478,7 @@ static int calendar_adapter_query(int user_id,
       }
       char start_date[CALENDAR_DATE_LEN];
       char end_date[CALENDAR_DATE_LEN];
-      calendar_window_dates(win.start, win.end, start_date, end_date);
+      calendar_window_dates(zone, win.start, win.end, start_date, end_date);
       int allday_count = 0;
       if (calendar_db_allday_occurrences_in_range(calendar_ids, total_calendars, start_date,
                                                   end_date, range_buf + range_count,
@@ -551,7 +553,7 @@ static int calendar_adapter_query(int user_id,
       const calendar_occurrence_t *occ = &merged[i];
 
       char rendered[FOCUS_TEXT_MAX_BYTES + 64];
-      if (format_event_text(occ, rendered, sizeof(rendered)) != SUCCESS) {
+      if (format_event_text(zone, occ, rendered, sizeof(rendered)) != SUCCESS) {
          /* Render failure is non-fatal: skip this occurrence and let
           * the rest of `kept` proceed.  `produced` will lag `kept` but
           * the SUCCESS path returns `produced` as the count, so the
@@ -581,14 +583,14 @@ static int calendar_adapter_query(int user_id,
                                  ? CALENDAR_NAMED_BASE_SEMANTIC +
                                        CALENDAR_NAMED_SPAN_SEMANTIC * named_score[i]
                                  : FOCUS_SCORE_NA;
-      const time_t starts = occ_local_start(occ);
+      const time_t starts = occ_local_start(zone, occ);
       const float recency = (float)calendar_recency_decay(starts, now);
 
       float importance = CALENDAR_DEFAULT_IMPORTANCE;
       const time_t delta = starts - now;
       if (delta > 0 && delta < 86400)
          importance += CALENDAR_IMMINENT_BOOST;
-      if (same_local_day(starts, now))
+      if (same_local_day(zone, starts, now))
          importance += CALENDAR_TODAY_BOOST;
       if (importance > 1.0f)
          importance = 1.0f;

@@ -26,6 +26,8 @@
 
 #include <stddef.h>
 
+#include "core/tz.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -51,6 +53,7 @@ extern "C" {
  * per-turn token cost).
  *
  * @param user_id User ID to build context for.
+ * @param zone    The user's zone: summaries are dated in it.
  * @param token_budget Deprecated — kept for API stability only.  Ignored
  *                     internally; size is bounded by the per-item caps.
  * @return Heap-allocated NUL-terminated string on success (caller must
@@ -58,7 +61,7 @@ extern "C" {
  *         or on allocation failure.  Empty user → NULL (callers can
  *         skip the prompt-augmentation branch cheaply).
  */
-char *memory_build_context(int user_id, int token_budget);
+char *memory_build_context(int user_id, const tz_t *zone, int token_budget);
 
 #ifdef __cplusplus
 }

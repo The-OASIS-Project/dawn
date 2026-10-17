@@ -40,6 +40,8 @@
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/text_filter.h"
+#include "core/tz.h"
+#include "core/user_tz.h"
 #include "dawn_error.h"
 #include "llm/llm_claude_betas.h"
 #include "llm/llm_command_parser.h"
@@ -152,8 +154,9 @@ static char *build_identity_block(int user_id) {
    return strdup(block);
 }
 
-/* The user's own context: location, timezone and units, and (append mode)
- * their persona traits.  Empty when they set none. */
+/* The user's own context: location and units, and (append mode) their
+ * persona traits.  Empty when they set none.  (Their zone is in each turn's
+ * time line.) */
 static void user_context_text(const auth_user_settings_t *settings,
                               bool replace_persona,
                               char *buf,
@@ -163,17 +166,14 @@ static void user_context_text(const auth_user_settings_t *settings,
    buf[0] = '\0';
    const bool has_persona = !replace_persona && settings->persona_description[0] != '\0';
    const bool has_location = settings->location[0] != '\0';
-   const bool has_timezone = settings->timezone[0] != '\0';
    const bool has_units = settings->units[0] != '\0';
-   if (!has_persona && !has_location && !has_timezone && !has_units)
+   if (!has_persona && !has_location && !has_units)
       return;
    BUF_PRINTF(buf, off, rem, replace_persona ? "## User Info\n" : "## User Context\n");
    if (has_persona)
       BUF_PRINTF(buf, off, rem, "Additional persona traits: %s\n", settings->persona_description);
    if (has_location)
       BUF_PRINTF(buf, off, rem, "Location: %s\n", settings->location);
-   if (has_timezone)
-      BUF_PRINTF(buf, off, rem, "Timezone: %s\n", settings->timezone);
    if (has_units)
       BUF_PRINTF(buf, off, rem, "Preferred units: %s\n", settings->units);
 }
@@ -189,7 +189,7 @@ static void user_context_text(const auth_user_settings_t *settings,
  *   - rules: the base prompt's rules
  *   - tool_defaults: the configured location / units / timezone, for a guest
  *     only (a user's own settings are their user_context)
- *   - user_context: the user's location / timezone / units / persona traits
+ *   - user_context: the user's location / units / persona traits
  *   - user_identity: who the user is (real name, how to address them, aliases)
  *   - memory_rules, citation_rules: when memory is on for the user
  *   - tool_discipline, recall_routing, background_deliveries, context_rules
@@ -227,8 +227,7 @@ static int build_stable_sections(int user_id, composed_prompt_t *out) {
    command_prompt_parts_free(&base);
 
    if (have_settings) {
-      char context[AUTH_PERSONA_DESC_MAX + AUTH_LOCATION_MAX + AUTH_TIMEZONE_MAX + AUTH_UNITS_MAX +
-                   128];
+      char context[AUTH_PERSONA_DESC_MAX + AUTH_LOCATION_MAX + AUTH_UNITS_MAX + 128];
       user_context_text(&settings, replace_persona, context, sizeof(context));
       err |= prompt_sections_add(out, "user_context", "the user's context", context);
    }
@@ -514,6 +513,9 @@ int dawn_build_prompt(session_t *session,
     * on either SUCCESS or FAILURE return. */
    memset(out, 0, sizeof(*out));
    out->built_at = (int64_t)time(NULL);
+   /* The user's zone: the model computes "tomorrow at 7" from the turn's
+    * time line, and the tools read and say times in the same zone. */
+   out->zone = user_tz(user_id);
    /* Before memory is read: a withdrawal from here on counts as after it. */
    if (conv_db_withdraw_seq(&out->built_seq) != AUTH_DB_SUCCESS) {
       out->built_seq = 0; /* every withdrawal on record counts as after it */
@@ -530,7 +532,8 @@ int dawn_build_prompt(session_t *session,
 
    /* What DAWN knows about the user (NULL when nothing, or memory is off). */
    if (user_id > 0 && g_config.memory.enabled)
-      out->memory_body = memory_build_context(user_id, g_config.memory.context_budget_tokens);
+      out->memory_body = memory_build_context(user_id, out->zone,
+                                              g_config.memory.context_budget_tokens);
 
    /* The surface's standing directions; none (the conversation's stay in
     * force) for a turn run from none of its surfaces. */
@@ -551,7 +554,9 @@ int dawn_build_prompt(session_t *session,
     * with the conversation's tag, at the seam): the time, the retrieved
     * items the conversation doesn't show yet (chosen at the seam), then
     * per-turn notes.  Earlier turns' contexts stay as they were sent. */
-   out->context_head = prompt_turn_head(time(NULL));
+   struct tm local;
+   tz_local(out->zone, time(NULL), &local);
+   out->context_head = prompt_turn_head(&local, tz_name(out->zone));
    if (out->context_head == NULL) {
       composed_prompt_free(out);
       return FAILURE;

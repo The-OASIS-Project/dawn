@@ -73,7 +73,8 @@ struct session;
  *                       prompt (the panel's turn); 0 when not known
  * @param user_turn_text Raw user message text
  * @param[in,out] out    The turn's prompt; its focus fields are set, and
- *                       freed with it (composed_prompt_free)
+ *                       freed with it (composed_prompt_free).  Items are
+ *                       dated in out->zone, which the caller sets first
  * @return SUCCESS or FAILURE.  See contract above.
  */
 int build_focus_block(struct session *session,

@@ -36,6 +36,7 @@
 #include "core/session_history.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/user_tz.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "toml.h"
@@ -174,11 +175,12 @@ static int append_bounded(char *buf, int pos, const char *text) {
 }
 
 /* A listing's rows (recent and search), from @p pos in a RESULT_BUF_SIZE
- * buffer.  The sender's name is quoted, so it can't pass for an address.  A row
- * that doesn't fit whole ends the listing (senders control most of a row) and
- * sets @p cut: the page token would skip the rows left out, so the caller drops it. */
+ * buffer, each dated in @p zone (the user's).  The sender's name is quoted, so it can't pass for an
+ * address.  A row that doesn't fit whole ends the listing (senders control most of a row) and sets
+ * @p cut: the page token would skip the rows left out, so the caller drops it. */
 static int append_summary_rows(char *buf,
                                int pos,
+                               const tz_t *zone,
                                const email_summary_t *emails,
                                int count,
                                bool *cut) {
@@ -195,13 +197,22 @@ static int append_summary_rows(char *buf,
          snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
       char from[EMAIL_FROM_MAX];
       email_display_mailbox(emails[i].from_name, emails[i].from_addr, from, sizeof(from));
+      char date[sizeof(emails[i].date_str)];
+      struct tm tm;
+      if (emails[i].date > 0) {
+         tz_local(zone, emails[i].date, &tm);
+         if (strftime(date, sizeof(date), "%a, %d %b %Y %H:%M", &tm) == 0)
+            date[0] = '\0';
+      } else {
+         snprintf(date, sizeof(date), "%s", emails[i].date_str); /* the header as sent */
+      }
       char row[EMAIL_ROW_MAX];
       snprintf(row, sizeof(row),
                "\n%d. From: %s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
                "%s]\n",
                i + 1, from, emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
-               emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
-               emails[i].date_str, emails[i].message_id);
+               emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel, date,
+               emails[i].message_id);
       /* Keep room for the page token and the note on unreachable accounts. */
       if ((size_t)pos + strlen(row) + EMAIL_LISTING_TAIL_ROOM >= RESULT_BUF_SIZE) {
          char note[160];
@@ -404,7 +415,7 @@ static char *handle_recent(struct json_object *details, int user_id) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No recent emails found.");
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Recent emails (%d):\n", out_count);
-      pos = append_summary_rows(buf, pos, emails, out_count, &cut);
+      pos = append_summary_rows(buf, pos, user_tz(user_id), emails, out_count, &cut);
    }
 
    if (next_page_token[0] && !cut)
@@ -607,7 +618,7 @@ static char *handle_search(struct json_object *details, int user_id) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No emails matching your search criteria.");
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Search results (%d):\n", out_count);
-      pos = append_summary_rows(buf, pos, emails, out_count, &cut);
+      pos = append_summary_rows(buf, pos, user_tz(user_id), emails, out_count, &cut);
    }
 
    if (next_page_token[0] && !cut)

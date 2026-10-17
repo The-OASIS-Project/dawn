@@ -29,6 +29,7 @@
 
 #include "core/iso8601.h"
 #include "core/time_query_parser.h"
+#include "core/tz.h"
 #include "dawn_error.h"
 #include "memory/memory_terms.h"
 
@@ -73,28 +74,27 @@ static int find(const words_t *ws, const char *word) {
    return -1;
 }
 
-/* Local midnight of @p t moved by @p days (DST-safe: mktime normalizes). */
-static time_t day_start(time_t t, int days) {
+/* Midnight in @p zone of @p t's day moved by @p days. */
+static time_t day_start(const tz_t *zone, time_t t, int days) {
    struct tm tm;
-   localtime_r(&t, &tm);
+   tz_local(zone, t, &tm);
    tm.tm_mday += days;
    tm.tm_hour = 0;
    tm.tm_min = 0;
    tm.tm_sec = 0;
-   tm.tm_isdst = -1;
-   return mktime(&tm);
+   return tz_mktime(zone, &tm);
 }
 
-static int weekday_of(time_t t) {
+static int weekday_of(const tz_t *zone, time_t t) {
    struct tm tm;
-   localtime_r(&t, &tm);
+   tz_local(zone, t, &tm);
    return tm.tm_wday; /* 0 = Sunday */
 }
 
-static void set_days(calendar_window_t *out, time_t now, int from_day, int days) {
+static void set_days(calendar_window_t *out, const tz_t *zone, time_t now, int from_day, int days) {
    out->asks = true;
-   out->start = day_start(now, from_day);
-   out->end = day_start(now, from_day + days);
+   out->start = day_start(zone, now, from_day);
+   out->end = day_start(zone, now, from_day + days);
 }
 
 static const char *const WEEKDAYS[] = { "sunday",   "monday", "tuesday", "wednesday",
@@ -117,21 +117,21 @@ static const struct {
 };
 #define MONTHS_COUNT (int)(sizeof(MONTHS) / sizeof(MONTHS[0]))
 
-static bool day_words(const words_t *ws, time_t now, calendar_window_t *out) {
+static bool day_words(const words_t *ws, const tz_t *zone, time_t now, calendar_window_t *out) {
    if (find(ws, "yesterday") >= 0) {
-      set_days(out, now, -1, 1);
+      set_days(out, zone, now, -1, 1);
    } else if (find(ws, "today") >= 0 || find(ws, "tonight") >= 0) {
-      set_days(out, now, 0, 1);
+      set_days(out, zone, now, 0, 1);
    } else if (find(ws, "tomorrow") >= 0) {
-      set_days(out, now, 1, 1);
+      set_days(out, zone, now, 1, 1);
    } else {
       return false;
    }
    return true;
 }
 
-static bool week_words(const words_t *ws, time_t now, calendar_window_t *out) {
-   const int wday = weekday_of(now);
+static bool week_words(const words_t *ws, const tz_t *zone, time_t now, calendar_window_t *out) {
+   const int wday = weekday_of(zone, now);
    const int weekend = find(ws, "weekend");
    if (weekend >= 0) {
       /* The coming Saturday; on a weekend day, this one. */
@@ -141,7 +141,7 @@ static bool week_words(const words_t *ws, time_t now, calendar_window_t *out) {
       } else if (is(ws, weekend - 1, "last")) {
          to_sat -= 7;
       }
-      set_days(out, now, to_sat, 2);
+      set_days(out, zone, now, to_sat, 2);
       return true;
    }
    const int week = find(ws, "week");
@@ -150,13 +150,13 @@ static bool week_words(const words_t *ws, time_t now, calendar_window_t *out) {
    }
    const int to_monday = (wday == 0) ? 1 : 8 - wday;
    if (is(ws, week - 1, "next")) {
-      set_days(out, now, to_monday, 7);
+      set_days(out, zone, now, to_monday, 7);
       return true;
    }
    if (is(ws, week - 1, "this")) {
       out->asks = true;
       out->start = now;
-      out->end = day_start(now, to_monday);
+      out->end = day_start(zone, now, to_monday);
       return true;
    }
    return false; /* "last week": time_query_parse */
@@ -180,9 +180,10 @@ static bool placed_after(const words_t *ws, int i) {
 
 static bool weekday_words(const words_t *ws,
                           const char *assistant_name,
+                          const tz_t *zone,
                           time_t now,
                           calendar_window_t *out) {
-   const int wday = weekday_of(now);
+   const int wday = weekday_of(zone, now);
    for (int i = 0; i < ws->n; i++) {
       int d = 0;
       while (d < 7 && strcmp(ws->w[i], WEEKDAYS[d]) != 0) {
@@ -198,12 +199,12 @@ static bool weekday_words(const words_t *ws,
       }
       int ahead = (d - wday + 7) % 7;
       if (is(ws, i - 1, "last")) {
-         set_days(out, now, ahead == 0 ? -7 : ahead - 7, 1);
+         set_days(out, zone, now, ahead == 0 ? -7 : ahead - 7, 1);
       } else {
          if (is(ws, i - 1, "next") && ahead == 0) {
             ahead = 7;
          }
-         set_days(out, now, ahead, 1);
+         set_days(out, zone, now, ahead, 1);
       }
       return true;
    }
@@ -246,9 +247,9 @@ static bool month_word_at(const words_t *ws, int i, int m) {
           (i + 1 < ws->n && isdigit((unsigned char)ws->w[i + 1][0]));
 }
 
-static bool month_words(const words_t *ws, time_t now, calendar_window_t *out) {
+static bool month_words(const words_t *ws, const tz_t *zone, time_t now, calendar_window_t *out) {
    struct tm tm;
-   localtime_r(&now, &tm);
+   tz_local(zone, now, &tm);
    for (int i = 0; i < ws->n; i++) {
       for (int m = 0; m < MONTHS_COUNT; m++) {
          if (!month_word_at(ws, i, m)) {
@@ -274,11 +275,11 @@ static bool month_words(const words_t *ws, time_t now, calendar_window_t *out) {
          } else if (month < tm.tm_mon) {
             year++; /* a month already past, named on its own: the coming one */
          }
-         struct tm first = { .tm_year = year, .tm_mon = month, .tm_mday = 1, .tm_isdst = -1 };
-         struct tm next = { .tm_year = year, .tm_mon = month + 1, .tm_mday = 1, .tm_isdst = -1 };
+         struct tm first = { .tm_year = year, .tm_mon = month, .tm_mday = 1 };
+         struct tm next = { .tm_year = year, .tm_mon = month + 1, .tm_mday = 1 };
          out->asks = true;
-         out->start = mktime(&first);
-         out->end = mktime(&next);
+         out->start = tz_mktime(zone, &first);
+         out->end = tz_mktime(zone, &next);
          return true;
       }
    }
@@ -318,6 +319,7 @@ static bool schedule_words(const words_t *ws) {
 
 void calendar_query_window(const char *query,
                            const char *assistant_name,
+                           const tz_t *zone,
                            time_t now,
                            calendar_window_t *out) {
    memset(out, 0, sizeof(*out));
@@ -329,8 +331,8 @@ void calendar_query_window(const char *query,
       return;
    }
    split_words(query, ws);
-   if (day_words(ws, now, out) || week_words(ws, now, out) ||
-       weekday_words(ws, assistant_name, now, out) || month_words(ws, now, out)) {
+   if (day_words(ws, zone, now, out) || week_words(ws, zone, now, out) ||
+       weekday_words(ws, assistant_name, zone, now, out) || month_words(ws, zone, now, out)) {
       free(ws);
       return;
    }
@@ -356,15 +358,17 @@ void calendar_query_window(const char *query,
    free(ws);
 }
 
-void calendar_window_dates(time_t start, time_t end, char *start_date, char *end_date) {
+void calendar_window_dates(const tz_t *zone,
+                           time_t start,
+                           time_t end,
+                           char *start_date,
+                           char *end_date) {
    struct tm tm;
-   localtime_r(&start, &tm);
+   tz_local(zone, start, &tm);
    iso8601_format_date(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, start_date, CALENDAR_DATE_LEN);
    const time_t last = (end > start) ? end - 1 : start;
-   localtime_r(&last, &tm);
-   tm.tm_mday += 1;
-   tm.tm_hour = 12; /* away from a DST edge while normalizing */
-   tm.tm_isdst = -1;
-   mktime(&tm);
+   /* The day after the last second's date: whole days on its wall clock. */
+   const time_t next = tz_wall(zone, last) + 86400;
+   gmtime_r(&next, &tm);
    iso8601_format_date(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, end_date, CALENDAR_DATE_LEN);
 }
