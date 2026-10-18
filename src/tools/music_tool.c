@@ -86,7 +86,7 @@ static bool s_auto_advancing = false;
 typedef struct {
    char filenames[MAX_PLAYLIST_LENGTH][MAX_FILENAME_LENGTH];
    char display_names[MAX_PLAYLIST_LENGTH]
-                     [MAX_FILENAME_LENGTH]; /**< "Artist - Title" or filename */
+                     [MAX_FILENAME_LENGTH]; /**< "Title by Artist", the title, or empty */
    int count;
 } Playlist;
 
@@ -301,6 +301,22 @@ static const char *extract_filename(const char *path) {
    return filename ? filename + 1 : path;
 }
 
+/* A track's name as it is spoken: "Title by Artist", or the title alone, or
+ * empty when it has no tags (its filename is used then) */
+static void set_track_name(char *out, size_t size, const music_search_result_t *r) {
+   if (r->title[0] && r->artist[0]) {
+      snprintf(out, size, "%.200s by %.200s", r->title, r->artist); /* fits any reply */
+   } else {
+      snprintf(out, size, "%s", r->title);
+   }
+}
+
+/* A playlist track's name for replies: its tagged name, else its filename */
+static const char *track_name(int i) {
+   return s_playlist.display_names[i][0] ? s_playlist.display_names[i]
+                                         : extract_filename(s_playlist.filenames[i]);
+}
+
 /**
  * @brief Stop current playback and wait for thread to finish
  *
@@ -397,10 +413,10 @@ static char *start_playback(bool report_result) {
       return NULL;
    }
 
-   const char *filename = extract_filename(s_playlist.filenames[s_current_track]);
+   const char *track = track_name(s_current_track);
    char *result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
    if (result) {
-      snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Playing: %s", filename);
+      snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Playing %s", track);
    }
    return result;
 }
@@ -445,7 +461,8 @@ static int search_music_database(const char *query, Playlist *playlist) {
    for (int i = 0; i < count && playlist->count < MAX_PLAYLIST_LENGTH; i++) {
       safe_strscpy(playlist->filenames[playlist->count], results[i].path);
 
-      safe_strscpy(playlist->display_names[playlist->count], results[i].display_name);
+      set_track_name(playlist->display_names[playlist->count],
+                     sizeof(playlist->display_names[playlist->count]), &results[i]);
 
       playlist->count++;
    }
@@ -495,7 +512,7 @@ static int local_fill_playlist_from_items(const char *items_json, Playlist *out)
       music_search_result_t r;
       if (local_resolve_item(item, &r)) {
          snprintf(out->filenames[out->count], MAX_FILENAME_LENGTH, "%s", r.path);
-         snprintf(out->display_names[out->count], MAX_FILENAME_LENGTH, "%s", r.display_name);
+         set_track_name(out->display_names[out->count], MAX_FILENAME_LENGTH, &r);
          out->count++;
       }
    }
@@ -682,12 +699,16 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
 
          start_playback(false);
-         const char *filename = extract_filename(s_playlist.filenames[s_current_track]);
+         const char *track = track_name(s_current_track);
          size_t rsz = 2 * MAX_FILENAME_LENGTH + 64;
          result = malloc(rsz);
          if (result) {
-            snprintf(result, rsz, "Now playing: %s (track 1 of %d matching '%s')", filename,
-                     s_playlist.count, base);
+            if (s_playlist.count > 1) {
+               snprintf(result, rsz, "Now playing %s, with %d more queued", track,
+                        s_playlist.count - 1);
+            } else {
+               snprintf(result, rsz, "Now playing %s", track);
+            }
          }
          return result;
       } else {
@@ -746,10 +767,10 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
 
          start_playback(false);
-         const char *filename = extract_filename(s_playlist.filenames[s_current_track]);
+         const char *track = track_name(s_current_track);
          result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
          if (result) {
-            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Playing next track: %s", filename);
+            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Playing %s", track);
          }
          return result;
       } else {
@@ -780,10 +801,10 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
 
          start_playback(false);
-         const char *filename = extract_filename(s_playlist.filenames[s_current_track]);
+         const char *track = track_name(s_current_track);
          result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
          if (result) {
-            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Playing previous track: %s", filename);
+            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Playing %s", track);
          }
          return result;
       } else {
@@ -827,14 +848,14 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
 
          start_playback_at(start_seconds);
-         const char *filename = extract_filename(s_playlist.filenames[s_current_track]);
+         const char *track = track_name(s_current_track);
          result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
          if (result) {
             if (start_seconds > 0) {
-               snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Resuming %s from %u:%02u", filename,
+               snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Resuming %s from %u:%02u", track,
                         start_seconds / 60, start_seconds % 60);
             } else {
-               snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Resuming: %s", filename);
+               snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Resuming %s", track);
             }
          }
          return result;
@@ -856,7 +877,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          return strdup("Playlist is empty");
       }
 
-      /* Build playlist string: "1. Artist - Title\n2. Artist - Title\n..." */
+      /* Build playlist string: "1. Title by Artist\n2. Title by Artist\n..." */
       size_t buf_size = s_playlist.count * 256 + 64;
       result = malloc(buf_size);
       if (!result) {
@@ -865,10 +886,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
 
       int offset = snprintf(result, buf_size, "Playlist (%d tracks):\n", s_playlist.count);
       for (int i = 0; i < s_playlist.count && offset < (int)buf_size - 128; i++) {
-         /* Use display name (Artist - Title) if available, else filename */
-         const char *display = s_playlist.display_names[i][0]
-                                   ? s_playlist.display_names[i]
-                                   : extract_filename(s_playlist.filenames[i]);
+         const char *display = track_name(i);
          const char *marker = (i == s_current_track) ? " [playing]" : "";
          offset += snprintf(result + offset, buf_size - offset, "%d. %s%s\n", i + 1, display,
                             marker);
@@ -926,11 +944,10 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       }
 
       start_playback(false);
-      const char *filename = extract_filename(s_playlist.filenames[s_current_track]);
+      const char *track = track_name(s_current_track);
       result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
       if (result) {
-         snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Now playing track %d: %s", track_num,
-                  filename);
+         snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Now playing track %d, %s", track_num, track);
       }
       return result;
 
