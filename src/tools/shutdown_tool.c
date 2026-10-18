@@ -142,8 +142,8 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
    /* Security check 2: If passphrase is configured, it must match (folded: the
     * voice shortcut hands it over lowercased, with Whisper's punctuation) */
    if (passphrase[0] != '\0') {
-      char want[sizeof(passphrase)];
-      char got[sizeof(passphrase) + 1]; /* longer than any passphrase: extra words differ */
+      char want[sizeof(passphrase)] = { 0 };
+      char got[sizeof(passphrase) + 1] = { 0 }; /* longer than any passphrase: extra words differ */
       fold_spoken(passphrase, want, sizeof(want));
       fold_spoken(value ? value : "", got, sizeof(got));
       if (want[0] == '\0') {

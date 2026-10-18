@@ -37,9 +37,12 @@ The time zone lists offer every zone, and two names that weren't real zones are 
 
 **What changed.** The `[shutdown]` passphrase is now compared ignoring case (for ASCII letters),
 punctuation and spacing, so "Alpha-Bravo" and "alpha bravo" are the same passphrase. This applies to
-voice, MQTT and the model alike. While shutdown is enabled with a passphrase, a spoken
-"shutdown <passphrase>" is handled on this device and never written into the conversation or sent
-to the model, and "shut down" followed by other words is answered as a wrong passphrase.
+voice, MQTT and the model alike. While shutdown is enabled with a passphrase, "shutdown
+<passphrase>" spoken to the local microphone is handled on this device and never written into the
+conversation or sent to the model, and "shut down" followed by other words is answered as a wrong
+passphrase. That holds only for the local microphone in the `direct_first` and `direct_only`
+command modes: in `llm_only`, and through WebUI voice or a satellite, what you say goes to the
+model, passphrase included.
 
 **What you need to do.** Nothing, unless your passphrase relies on case or punctuation to be
 distinct; then pick one that differs in its letters or digits. A passphrase with no letters or

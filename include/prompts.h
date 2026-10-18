@@ -129,8 +129,8 @@
 // history, so the spoken words never go there.
 #define VOICE_PASSPHRASE_PLACEHOLDER "(a passphrase command; the passphrase is left out)"
 
-// The history's reply to a spoken command a voice shortcut handled, when its tool
-// gave no text.  Without a reply the model reads the command as still to do.
+// The history's reply to a spoken command a voice shortcut handled.  Without a
+// reply the model reads the command as still to do.
 #define VOICE_SHORTCUT_DONE "Done."
 #define VOICE_SHORTCUT_FAILED "That command didn't run."
 

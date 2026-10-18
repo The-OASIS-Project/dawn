@@ -301,11 +301,26 @@ static const char *extract_filename(const char *path) {
    return filename ? filename + 1 : path;
 }
 
+/* Bytes of @p s to keep so it is at most @p max bytes, ending on a whole
+ * UTF-8 character */
+static int utf8_prefix_len(const char *s, size_t max) {
+   size_t n = strlen(s);
+   if (n <= max) {
+      return (int)n;
+   }
+   while (max > 0 && ((unsigned char)s[max] & 0xC0) == 0x80) {
+      max--; /* s[max] continues a character: cut before that character */
+   }
+   return (int)max;
+}
+
 /* A track's name as it is spoken: "Title by Artist", or the title alone, or
  * empty when it has no tags (its filename is used then) */
 static void set_track_name(char *out, size_t size, const music_search_result_t *r) {
    if (r->title[0] && r->artist[0]) {
-      snprintf(out, size, "%.200s by %.200s", r->title, r->artist); /* fits any reply */
+      /* Each tag cut to fit any reply, on a character boundary */
+      snprintf(out, size, "%.*s by %.*s", utf8_prefix_len(r->title, 200), r->title,
+               utf8_prefix_len(r->artist, 200), r->artist);
    } else {
       snprintf(out, size, "%s", r->title);
    }
@@ -385,7 +400,7 @@ static char *start_playback(bool report_result) {
    PlaybackArgs *args = malloc(sizeof(PlaybackArgs));
    if (!args) {
       OLOG_ERROR("Failed to allocate PlaybackArgs");
-      return report_result ? strdup("Failed to start music playback") : NULL;
+      return report_result ? strdup(TOOL_RESULT_ERROR_MARK "Failed to start music playback") : NULL;
    }
 
    args->sink_name = getPcmPlaybackDevice();
@@ -405,7 +420,7 @@ static char *start_playback(bool report_result) {
       setMusicPlay(0);
       OLOG_ERROR("Error creating music thread");
       free(args);
-      return report_result ? strdup("Failed to start music playback") : NULL;
+      return report_result ? strdup(TOOL_RESULT_ERROR_MARK "Failed to start music playback") : NULL;
    }
    s_thread_active = true;
 
@@ -673,7 +688,8 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("Please specify what to play, or pass items:[...] for a track list.");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Please specify what to play, or pass items:[...] for a track list.");
       }
 
       /* Search first, into a playlist of its own: a miss leaves what's playing
@@ -735,7 +751,8 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          *should_respond = 0;
          return NULL;
       }
-      return strdup("Queue editing and shuffle/repeat are available on the web interface.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Queue editing and shuffle/repeat are available on the web interface.");
 
    } else if (strcmp(action, "stop") == 0) {
       OLOG_INFO("Stopping music playback.");
@@ -778,7 +795,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("No playlist available");
+         return strdup(TOOL_RESULT_ERROR_MARK "No playlist available");
       }
 
    } else if (strcmp(action, "previous") == 0) {
@@ -812,7 +829,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("No playlist available");
+         return strdup(TOOL_RESULT_ERROR_MARK "No playlist available");
       }
 
    } else if (strcmp(action, "pause") == 0) {
@@ -864,7 +881,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("No track to resume");
+         return strdup(TOOL_RESULT_ERROR_MARK "No track to resume");
       }
 
    } else if (strcmp(action, "list") == 0) {
@@ -874,11 +891,11 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("Playlist is empty");
+         return strdup(TOOL_RESULT_ERROR_MARK "Playlist is empty");
       }
 
       /* Build playlist string: "1. Title by Artist\n2. Title by Artist\n..." */
-      size_t buf_size = s_playlist.count * 256 + 64;
+      size_t buf_size = s_playlist.count * (MUSIC_CALLBACK_BUFFER_SIZE + 32) + 64;
       result = malloc(buf_size);
       if (!result) {
          return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate playlist buffer");
@@ -906,7 +923,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("No playlist available");
+         return strdup(TOOL_RESULT_ERROR_MARK "No playlist available");
       }
 
       if (!value || !*value) {
@@ -914,7 +931,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("Please specify a track number");
+         return strdup(TOOL_RESULT_ERROR_MARK "Please specify a track number");
       }
       int track_num = atoi(value);
       if (track_num < 1 || track_num > s_playlist.count) {
@@ -924,8 +941,8 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
          result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
          if (result) {
-            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Invalid track number. Choose 1-%d",
-                     s_playlist.count);
+            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE,
+                     TOOL_RESULT_ERROR_MARK "Invalid track number. Choose 1-%d", s_playlist.count);
          }
          return result;
       }

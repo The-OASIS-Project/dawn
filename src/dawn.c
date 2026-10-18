@@ -546,12 +546,14 @@ static bool run_direct_command(const char *treg_command, bool secret, bool began
          text_to_speech(exec_result.result);
       }
    }
-   /* Record what the shortcut did as the turn's reply: an unanswered command in
-    * the history is one the model will carry out again on the next turn */
+   /* Record that the shortcut ran as the turn's reply: an unanswered command in
+    * the history is one the model will carry out again on the next turn.  Only
+    * DAWN's own status, never the tool's text, which can carry outside text (a
+    * track's tags) the history would present as the assistant's words. */
    if (!fall_back && began_turn) {
       bool ok = rc == 0 && exec_result.success && !exec_result.tool_error;
-      const char *reply = !ok ? VOICE_SHORTCUT_FAILED : text[0] ? text : VOICE_SHORTCUT_DONE;
-      session_add_turn_message(session_get_local(), "assistant", reply);
+      session_add_turn_message(session_get_local(), "assistant",
+                               ok ? VOICE_SHORTCUT_DONE : VOICE_SHORTCUT_FAILED);
    }
    cmd_exec_result_free(&exec_result);
    return !fall_back;
@@ -3885,6 +3887,9 @@ mqtt_disabled:
              * carry it, so the model gets it, as it always has. */
             bool treg_secret = false;
             if (command_processing_mode != CMD_MODE_LLM_ONLY) {
+               /* A tool's availability can depend on the session (its vision
+                * settings), so match with the local session as the context */
+               SESSION_SCOPED_COMMAND_CONTEXT(local_session);
                char normalized_text[MAX_COMMAND_LENGTH];
                normalize_for_matching(command_text, normalized_text, sizeof(normalized_text));
                treg_matched = try_tool_registry_match(normalized_text, treg_command,
