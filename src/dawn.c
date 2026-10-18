@@ -519,9 +519,10 @@ static void end_local_turn(void) {
  * can.  Any other failure, one in direct_only (no LLM to ask), or one for a
  * @p secret command (the LLM never gets the passphrase, so it couldn't do
  * better than the tool's own answer) is handled; a reply from the tool itself
- * is spoken.
+ * is spoken.  When @p began_turn (this utterance opened the turn), a handled
+ * command's outcome is also recorded as the turn's reply.
  */
-static bool run_direct_command(const char *treg_command, bool secret) {
+static bool run_direct_command(const char *treg_command, bool secret, bool began_turn) {
    struct json_object *cmd_json = json_tokener_parse(treg_command);
    if (!cmd_json) {
       OLOG_ERROR("TREG command unreadable");
@@ -544,6 +545,13 @@ static bool run_direct_command(const char *treg_command, bool secret) {
       if (exec_result.should_respond && exec_result.result) {
          text_to_speech(exec_result.result);
       }
+   }
+   /* Record what the shortcut did as the turn's reply: an unanswered command in
+    * the history is one the model will carry out again on the next turn */
+   if (!fall_back && began_turn) {
+      bool ok = rc == 0 && exec_result.success && !exec_result.tool_error;
+      const char *reply = !ok ? VOICE_SHORTCUT_FAILED : text[0] ? text : VOICE_SHORTCUT_DONE;
+      session_add_turn_message(session_get_local(), "assistant", reply);
    }
    cmd_exec_result_free(&exec_result);
    return !fall_back;
@@ -3919,7 +3927,7 @@ mqtt_disabled:
                   metrics_log_activity("TREG direct match");
 
                   /* Handled, or it gives way to the LLM below */
-                  direct_command_found = run_direct_command(treg_command, treg_secret);
+                  direct_command_found = run_direct_command(treg_command, treg_secret, began_turn);
                }
 
                /* Note: JSON-based pattern matching removed - tool_registry handles all patterns */

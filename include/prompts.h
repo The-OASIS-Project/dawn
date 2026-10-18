@@ -129,6 +129,11 @@
 // history, so the spoken words never go there.
 #define VOICE_PASSPHRASE_PLACEHOLDER "(a passphrase command; the passphrase is left out)"
 
+// The history's reply to a spoken command a voice shortcut handled, when its tool
+// gave no text.  Without a reply the model reads the command as still to do.
+#define VOICE_SHORTCUT_DONE "Done."
+#define VOICE_SHORTCUT_FAILED "That command didn't run."
+
 // Spoken-output directive for satellites + local mic (reply is heard, not read).
 #define DEFAULT_VOICE_OUTPUT_DIRECTIVE                                            \
    "This conversation is spoken aloud: your reply is read to the user by "        \
