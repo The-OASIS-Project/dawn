@@ -978,9 +978,13 @@
     * @param {string} message - Error message
     */
    function handleError(code, message) {
-      console.error('Music UI: Error', code, message);
+      // A declined "previous" is a notice, not a failure
+      const notice = code === 'NOTHING_EARLIER';
+      if (!notice) {
+         console.error('Music UI: Error', code, message);
+      }
       if (typeof DawnToast !== 'undefined') {
-         DawnToast.show(message || `Music error: ${code}`, 'error');
+         DawnToast.show(message || `Music error: ${code}`, notice ? 'info' : 'error');
       }
    }
 

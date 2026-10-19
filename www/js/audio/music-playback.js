@@ -735,7 +735,10 @@
 
       // Clear audio buffer immediately for actions that change playback position
       // (optimistic — before the server echoes music_state) so the UI feels responsive.
-      const bufferClearActions = ['seek', 'next', 'previous', 'play_index', 'stop'];
+      // Not "previous": the server can decline it (nothing earlier) and the track
+      // plays on, so flushing would skip ~2 s; a real change is flushed when its
+      // (untagged) state frame arrives.
+      const bufferClearActions = ['seek', 'next', 'play_index', 'stop'];
       if (bufferClearActions.includes(action)) {
          flushWorklet();
       }

@@ -493,6 +493,7 @@ static int music_tool_locked(ws_connection_t *conn,
 
       pthread_mutex_lock(&uq->queue_mutex);
       uq->queue_length = 0;
+      uq->replace_epoch++;
       for (int i = 0; i < count && uq->queue_length < WEBUI_MUSIC_MAX_QUEUE; i++) {
          music_queue_entry_t *entry = &uq->queue[uq->queue_length];
          safe_strncpy(entry->path, results[i].path, sizeof(entry->path));
@@ -678,7 +679,8 @@ static int music_tool_locked(ws_connection_t *conn,
       if (!webui_music_nav_step(state, next ? MUSIC_NAV_NEXT : MUSIC_NAV_PREVIOUS, path,
                                 sizeof(path), title, sizeof(title))) {
          if (result_out) {
-            *result_out = strdup(next ? "Already at end of queue" : "Already at start of queue");
+            *result_out = strdup(next ? "Already at end of queue"
+                                      : "Nothing earlier to go back to");
          }
          return SUCCESS;
       }

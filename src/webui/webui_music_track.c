@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -108,25 +109,50 @@ static int music_install_decoder(session_music_state_t *state, audio_decoder_t *
 
 /* ---- Plex prefetch ------------------------------------------------------ */
 
-/* Whether the shuffle plan still describes what follows the current track:
- * drawn under shuffle, from this queue position, for an entry that hasn't
- * moved (queue_mutex and state_mutex held) */
-static bool shuffle_plan_valid(session_music_state_t *state, user_music_queue_t *uq, int q_len) {
-   int planned = state->planned_next_index;
-   return planned >= 0 && planned < q_len && state->planned_shuffle &&
-          state->planned_from == state->queue_index && planned != state->queue_index &&
-          strcmp(uq->queue[planned].path, state->planned_next_path) == 0;
+/* ---- Play history (queue_mutex, then state_mutex, held) ----------------- */
+
+/* A history entry's queue position: the copy of path nearest its hint */
+static int queue_find(void *ctx, const char *path, int hint) {
+   user_music_queue_t *uq = (user_music_queue_t *)ctx;
+   if (hint >= 0 && hint < uq->queue_length && strcmp(uq->queue[hint].path, path) == 0) {
+      return hint; /* still where it was: the nearest copy */
+   }
+   int best = -1;
+   for (int i = 0; i < uq->queue_length; i++) {
+      if (strcmp(uq->queue[i].path, path) == 0 && (best < 0 || abs(i - hint) < abs(best - hint))) {
+         best = i;
+      }
+   }
+   return best;
 }
 
-/* Take the planned shuffle pick if it's still valid, else draw one
- * (queue_mutex and state_mutex held); clears the plan */
-static int take_shuffle_pick(session_music_state_t *state, user_music_queue_t *uq, int q_len) {
-   int planned = shuffle_plan_valid(state, uq, q_len) ? state->planned_next_index : -1;
-   state->planned_next_index = -1;
-   if (planned >= 0) {
-      return planned;
+/* The session's history, cleared first if the queue was replaced since */
+static music_history_t *history_of(session_music_state_t *state, user_music_queue_t *uq) {
+   music_history_sync(&state->history, uq->replace_epoch);
+   return &state->history;
+}
+
+/* Record that queue position index plays, unless it's the history's current
+ * entry already (a step through the history, or a replay); true when added */
+static bool history_record(session_music_state_t *state, user_music_queue_t *uq, int index) {
+   music_history_t *h = history_of(state, uq);
+   const char *current = music_history_current(h);
+   if (current && strcmp(current, uq->queue[index].path) == 0) {
+      return false;
    }
-   return webui_music_pick_random_index(state->queue_index, q_len, &state->shuffle_seed);
+   music_history_push(h, uq->queue[index].path, index);
+   return true;
+}
+
+/* The next track under shuffle: the history's next entry, else a new random
+ * pick, recorded (q_len > 1) */
+static int shuffle_next(session_music_state_t *state, user_music_queue_t *uq, int q_len) {
+   int next = music_history_step(history_of(state, uq), true, true, queue_find, uq);
+   if (next < 0) {
+      next = webui_music_pick_random_index(state->queue_index, q_len, &state->shuffle_seed);
+      music_history_push(&state->history, uq->queue[next].path, next);
+   }
+   return next;
 }
 
 static void *prefetch_thread(void *arg) {
@@ -210,25 +236,24 @@ static void prefetch_plan(session_music_state_t *state) {
    int q_len = uq->queue_length;
    int next = -1;
    if (q_len > 0 && uq->repeat_mode != MUSIC_REPEAT_ONE) {
-      if (uq->shuffle) {
-         /* Keep a pick already made for this position, so it isn't redrawn */
-         if (shuffle_plan_valid(state, uq, q_len)) {
-            next = state->planned_next_index;
-         } else if (q_len > 1) {
+      if (uq->shuffle && q_len > 1) {
+         /* The history's next entry, else a new pick planned as that entry,
+          * so next and auto-advance play the track prefetched here */
+         music_history_t *h = history_of(state, uq);
+         next = music_history_step(h, true, false, queue_find, uq);
+         if (next < 0) {
             next = webui_music_pick_random_index(state->queue_index, q_len, &state->shuffle_seed);
+            music_history_plan(h, uq->queue[next].path, next);
          }
+      } else if (uq->shuffle) {
+         /* A single track under shuffle: nothing follows */
       } else if (state->queue_index + 1 < q_len) {
          next = state->queue_index + 1;
       } else if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
          next = 0;
       }
    }
-   state->planned_next_index = next;
-   state->planned_from = state->queue_index;
-   state->planned_shuffle = uq->shuffle;
    if (next >= 0) {
-      snprintf(state->planned_next_path, sizeof(state->planned_next_path), "%s",
-               uq->queue[next].path);
       snprintf(next_path, sizeof(next_path), "%s", uq->queue[next].path);
    }
    bool already = next_path[0] && strcmp(state->prefetch_path, next_path) == 0;
@@ -339,6 +364,7 @@ music_advance_t webui_music_advance(session_music_state_t *state,
       int q_len = uq->queue_length;
       int next_index = state->queue_index;
       bool repeat_one = uq->repeat_mode == MUSIC_REPEAT_ONE;
+      bool recorded = false;
       bool stop = false;
       bool end_of_queue = false;
       const char *stop_error = NULL;
@@ -362,7 +388,8 @@ music_advance_t webui_music_advance(session_music_state_t *state,
          next_index = (next_index + 1) % q_len;
       } else if (uq->shuffle) {
          if (q_len > 1) {
-            next_index = take_shuffle_pick(state, uq, q_len);
+            next_index = shuffle_next(state, uq, q_len);
+            recorded = true;
          }
       } else if (++next_index >= q_len) {
          if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
@@ -395,6 +422,8 @@ music_advance_t webui_music_advance(session_music_state_t *state,
       if (next_index >= q_len) {
          next_index = 0; /* the queue shrank under a repeat-one or shuffle index */
       }
+      /* A replay of the current track adds nothing (history_record checks) */
+      state->history_fresh = recorded || history_record(state, uq, next_index);
       state->queue_index = next_index;
       state->cached_duration_sec = uq->queue[next_index].duration_sec;
       state->position_frames = 0;
@@ -460,6 +489,13 @@ bool webui_music_run_pending_open(session_music_state_t *state,
       return true;
    }
    publish_open(state, seq, unreachable ? MUSIC_OPEN_UNREACHABLE : MUSIC_OPEN_FAILED);
+   /* An auto-advance pick that didn't play: previous mustn't go back to it.
+    * The advance below records what plays instead.  A track the user picked
+    * stays: playback stops on it, and previous goes to the one before. */
+   const char *current = music_history_current(&state->history);
+   if (is_auto && state->history_fresh && current && strcmp(current, path) == 0) {
+      music_history_drop_current(&state->history);
+   }
 
    if (!is_auto) {
       /* A track the user picked: say so and stop, don't skip it */
@@ -551,6 +587,40 @@ music_open_result_t webui_music_await_track(session_music_state_t *state,
    return result;
 }
 
+/* Where a next/previous step lands, -1 for nowhere.  With commit the step is
+ * made (the history moves, or the pick is recorded); without, nothing but
+ * stale history entries changes, and a shuffle next returns 0 to mean "a
+ * move happens" (its pick is drawn only when committed). */
+static int nav_pick(session_music_state_t *state,
+                    user_music_queue_t *uq,
+                    music_nav_dir_t dir,
+                    bool commit) {
+   int q_len = uq->queue_length;
+   if (q_len == 0) {
+      return -1;
+   }
+   if (uq->shuffle && q_len > 1) {
+      if (dir == MUSIC_NAV_NEXT) {
+         return commit ? shuffle_next(state, uq, q_len) : 0;
+      }
+      return music_history_step(history_of(state, uq), false, commit, queue_find, uq);
+   }
+   /* Another tab's removes can leave this session's index past the end */
+   int current = state->queue_index < q_len ? state->queue_index : q_len - 1;
+   int next = -1;
+   if (dir == MUSIC_NAV_NEXT && current < q_len - 1) {
+      next = current + 1;
+   } else if (dir == MUSIC_NAV_PREVIOUS && current > 0) {
+      next = current - 1;
+   } else if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
+      next = dir == MUSIC_NAV_NEXT ? 0 : q_len - 1;
+   }
+   if (next >= 0 && commit) {
+      history_record(state, uq, next);
+   }
+   return next;
+}
+
 bool webui_music_nav_step(session_music_state_t *state,
                           music_nav_dir_t dir,
                           char *path_out,
@@ -558,7 +628,6 @@ bool webui_music_nav_step(session_music_state_t *state,
                           char *title_out,
                           size_t title_size) {
    user_music_queue_t *uq = state->shared_queue;
-   bool moved = false;
    path_out[0] = '\0';
    if (title_out && title_size > 0) {
       title_out[0] = '\0';
@@ -566,32 +635,38 @@ bool webui_music_nav_step(session_music_state_t *state,
 
    /* Lock order: queue, then state */
    pthread_mutex_lock(&uq->queue_mutex);
-   int q_len = uq->queue_length;
    pthread_mutex_lock(&state->state_mutex);
-   if (q_len > 0) {
-      if (uq->shuffle && q_len > 1) {
-         state->queue_index = take_shuffle_pick(state, uq, q_len);
-         moved = true;
-      } else if (dir == MUSIC_NAV_NEXT && state->queue_index < q_len - 1) {
-         state->queue_index++;
-         moved = true;
-      } else if (dir == MUSIC_NAV_PREVIOUS && state->queue_index > 0) {
-         state->queue_index--;
-         moved = true;
-      } else if (uq->repeat_mode == MUSIC_REPEAT_ALL) {
-         state->queue_index = dir == MUSIC_NAV_NEXT ? 0 : q_len - 1;
-         moved = true;
-      }
+   int target = nav_pick(state, uq, dir, false);
+   pthread_mutex_unlock(&state->state_mutex);
+   pthread_mutex_unlock(&uq->queue_mutex);
+   if (target < 0) {
+      return false; /* nothing to move to: the current track plays on */
    }
-   if (moved && state->queue_index < q_len) {
-      snprintf(path_out, path_size, "%s", uq->queue[state->queue_index].path);
+
+   /* Stop the stream thread before moving, so an auto-advance can't change
+    * the index or the history between the pick and the new track's start */
+   webui_music_stop_streaming(state);
+
+   pthread_mutex_lock(&uq->queue_mutex);
+   pthread_mutex_lock(&state->state_mutex);
+   target = nav_pick(state, uq, dir, true);
+   if (target >= 0 && target < uq->queue_length) {
+      state->queue_index = target;
+      snprintf(path_out, path_size, "%s", uq->queue[target].path);
       if (title_out && title_size > 0) {
-         snprintf(title_out, title_size, "%s", uq->queue[state->queue_index].title);
+         snprintf(title_out, title_size, "%s", uq->queue[target].title);
       }
    }
    pthread_mutex_unlock(&state->state_mutex);
    pthread_mutex_unlock(&uq->queue_mutex);
-   return moved && path_out[0] != '\0';
+   if (!path_out[0]) {
+      /* Another tab changed the queue during the stop: nothing to move to
+       * after all, so the current track plays on (if the track had just ended,
+       * there's nothing left to play and the restarted thread idles) */
+      webui_music_start_streaming(state);
+      return false;
+   }
+   return true;
 }
 
 void webui_music_clear_track(session_music_state_t *state) {
@@ -606,7 +681,6 @@ void webui_music_clear_track(session_music_state_t *state) {
       state->prefetched = NULL;
    }
    state->prefetch_path[0] = '\0';
-   state->planned_next_index = -1;
    state->seek_pending = false;
    state->playing = false;
    state->paused = false;
@@ -634,6 +708,9 @@ int webui_music_request_track(session_music_state_t *state,
    uint32_t duration = 0;
    if (state->queue_index >= 0 && state->queue_index < uq->queue_length) {
       duration = uq->queue[state->queue_index].duration_sec;
+      if (strcmp(uq->queue[state->queue_index].path, path) == 0) {
+         history_record(state, uq, state->queue_index);
+      }
    }
    pthread_mutex_unlock(&uq->queue_mutex);
 

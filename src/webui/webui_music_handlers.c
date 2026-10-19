@@ -335,6 +335,7 @@ static void music_control_locked(ws_connection_t *conn,
          user_music_queue_t *uq = state->shared_queue;
          pthread_mutex_lock(&uq->queue_mutex);
          uq->queue_length = 0;
+         uq->replace_epoch++;
          for (int i = 0; i < count && uq->queue_length < WEBUI_MUSIC_MAX_QUEUE; i++) {
             music_queue_entry_t *entry = &uq->queue[uq->queue_length];
             safe_strncpy(entry->path, results[i].path, sizeof(entry->path));
@@ -417,8 +418,12 @@ static void music_control_locked(ws_connection_t *conn,
    } else if (strcmp(action, "next") == 0 || strcmp(action, "previous") == 0) {
       music_nav_dir_t dir = strcmp(action, "next") == 0 ? MUSIC_NAV_NEXT : MUSIC_NAV_PREVIOUS;
       char path[WEBUI_MUSIC_PATH_MAX];
-      if (webui_music_nav_step(state, dir, path, sizeof(path), NULL, 0) &&
-          webui_music_start_playback(state, path) != 0) {
+      if (!webui_music_nav_step(state, dir, path, sizeof(path), NULL, 0)) {
+         if (dir == MUSIC_NAV_PREVIOUS) {
+            /* Shuffle with no history yet, or the queue's start: say so */
+            webui_music_send_error(conn, "NOTHING_EARLIER", "Nothing earlier to go back to");
+         }
+      } else if (webui_music_start_playback(state, path) != 0) {
          webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
       }
       webui_music_send_state(conn, state);
@@ -1005,6 +1010,7 @@ int webui_music_queue_apply_paths(session_music_state_t *state,
    pthread_mutex_lock(&uq->queue_mutex);
    if (replace) {
       uq->queue_length = 0;
+      uq->replace_epoch++;
    }
 
    for (int i = 0; i < n; i++) {
@@ -1164,6 +1170,7 @@ int webui_music_queue_clear(session_music_state_t *state, int *removed_out) {
       *removed_out = uq->queue_length;
    }
    uq->queue_length = 0;
+   uq->replace_epoch++;
    uq->generation++;
    music_queue_db_save(uq->user_id, uq);
    pthread_mutex_unlock(&uq->queue_mutex);

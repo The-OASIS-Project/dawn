@@ -1104,7 +1104,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_condattr_setclock(&open_attr, CLOCK_MONOTONIC);
    pthread_cond_init(&state->open_cond, &open_attr);
    pthread_condattr_destroy(&open_attr);
-   state->planned_next_index = -1;
+   music_history_init(&state->history);
    atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
@@ -1265,6 +1265,7 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
    pthread_mutex_destroy(&state->write_mutex);
    pthread_mutex_destroy(&state->control_mutex);
 
+   music_history_clear(&state->history);
    free(state);
    conn->music_state = NULL;
 
