@@ -27,12 +27,14 @@ on:
   workflow_dispatch: # manual run builds + validates the pipeline; publishes only on a tag
 
 permissions:
-  contents: write # create the release + upload assets (tag runs only)
+  contents: read
 
 jobs:
   client-arm64:
     name: Tier-1 satellite (trixie arm64)
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write # create the release + upload assets (tag runs only)
     steps:
       - name: Checkout (with submodules — whisper.cpp is needed for the full build)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

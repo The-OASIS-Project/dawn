@@ -412,14 +412,6 @@ int auth_db_backup(const char *dest_path) {
 
    sqlite3_close(dest_db);
 
-   /* Verify final permissions */
-   struct stat st;
-   if (result == AUTH_DB_SUCCESS && stat(dest_path, &st) == 0) {
-      if ((st.st_mode & 0777) != 0600) {
-         chmod(dest_path, 0600);
-      }
-   }
-
    pthread_mutex_unlock(&s_db.mutex);
 
    return result;
