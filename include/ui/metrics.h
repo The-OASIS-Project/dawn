@@ -381,7 +381,7 @@ void metrics_record_pipeline_total(double total_ms);
  * @param format printf format string
  * @param ... Format arguments
  */
-void metrics_log_activity(const char *format, ...);
+void metrics_log_activity(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
 /**
  * @brief Record user command for display
