@@ -236,6 +236,7 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | `session_compaction.c` | the WebUI's compaction marker | weak `session_compaction_client_notice` |
 | `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
 | `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
+| `src/audio/flac_playback.c` (a track ended, or won't open) | the music tool, which picks the next track | `audio_playback_set_next_fn` |
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |

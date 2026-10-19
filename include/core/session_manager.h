@@ -2055,8 +2055,11 @@ static inline void session_command_context_cleanup(session_t **ctx) {
  *
  * @param session Session to use for command context
  */
+/* Two levels so __LINE__ expands before it is pasted: one name per use */
+#define SESSION_SCOPED_CAT2(a, b) a##b
+#define SESSION_SCOPED_CAT(a, b) SESSION_SCOPED_CAT2(a, b)
 #define SESSION_SCOPED_COMMAND_CONTEXT(session)                                       \
-   session_t *_scoped_ctx_##__LINE__                                                  \
+   session_t *SESSION_SCOPED_CAT(_scoped_ctx_, __LINE__)                              \
        __attribute__((cleanup(session_command_context_cleanup), unused)) = (session); \
    session_set_command_context(session)
 

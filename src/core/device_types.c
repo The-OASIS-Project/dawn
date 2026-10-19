@@ -179,13 +179,17 @@ const device_type_def_t DEVICE_TYPE_PASSPHRASE = {
    .actions = {
       {
          .name = "execute",
+         /* The generic "%device_name% %value%" last: it would also catch the
+          * phrased forms, with their words in the value.  Whisper writes
+          * "passphrase" both ways. */
          .patterns = {
-            "%device_name% %value%",
             "%device_name% with passphrase %value%",
+            "%device_name% with pass phrase %value%",
             "%device_name% authorization %value%",
             "execute %device_name% %value%",
+            "%device_name% %value%",
          },
-         .pattern_count = 4,
+         .pattern_count = 5,
       },
    },
    .action_count = 1,
@@ -215,6 +219,10 @@ const device_type_def_t *device_type_get_def(tool_device_type_t type) {
 const char *device_type_get_name(tool_device_type_t type) {
    const device_type_def_t *def = device_type_get_def(type);
    return def ? def->name : "unknown";
+}
+
+bool device_type_value_is_secret(tool_device_type_t type) {
+   return type == TOOL_DEVICE_TYPE_PASSPHRASE;
 }
 
 /* ========== Pattern Matching ========== */
@@ -308,7 +316,12 @@ static bool match_single_pattern(const char *pattern,
          i += name_len;
          p += 13;
 
-         /* After device name, require whitespace or end if more pattern follows */
+         /* After device name, require a word boundary if more pattern follows:
+          * whitespace, punctuation ("Shutdown, alpha bravo" as Whisper writes
+          * it), or the end */
+         while (*p && ispunct((unsigned char)*i)) {
+            i++;
+         }
          if (*p && !isspace((unsigned char)*i) && *i != '\0') {
             return false;
          }

@@ -560,13 +560,13 @@ The control plane (ECHO) and audio plane (DAWN) hand off through an explicit rea
 ### Bridge Thread Lifecycle
 
 1. **Start** (on `pcm_ready`, call-state-guarded):
-   - Pause music **only if it was playing** (`getMusicPlay()` snapshot → `setMusicPlay(0)`), restored to the same state on teardown. TTS announcements are already suppressed during `ACTIVE` (`phone_service` announce guard); full TTS pause during a call is deferred — an open decision tied to whether Friday should be audible on the line (see "Friday-on-the-phone" future scope).
+   - Pause local music through the music tool (`music_tool_pause()`), which keeps its place; it stays paused after the call until the user resumes it. TTS announcements are already suppressed during `ACTIVE` (`phone_service` announce guard); full TTS pause during a call is deferred — an open decision tied to whether Friday should be audible on the line (see "Friday-on-the-phone" future scope).
    - Open `/dev/ttyUSB4` (`O_RDWR | O_NONBLOCK | O_NOFOLLOW`, path allow-listed to `/dev/ttyUSB*`/`/dev/ttyACM*`, `S_ISCHR` checked, raw `cfmakeraw` termios, no flow control)
    - No resampler needed on the local-handset path: both audio streams are opened at 16 kHz mono and PulseAudio converts to/from the device
 
 2. **Run** (single lockstep loop, per cycle): capture one mic frame (blocking ~20 ms — the real-time pace) → soft-gain + write it to ttyUSB4 (uplink) → read the matching amount of downlink from ttyUSB4 → soft-gain + write to local playback. The SIM7600 USB PCM is **synchronous full-duplex**, so read and write must stay balanced in one thread — two independent direction threads drift and the modem stops draining uplink (verified live). Both streams are 16 kHz mono (PulseAudio converts to/from the device — no resampler). Level is a `tanh` soft-limiter per direction (`PHONE_DOWNLINK_GAIN`/`PHONE_UPLINK_GAIN`): the modem's own `CRXVOL`/`CTXVOL` don't affect the USB PCM tap, so all gain is digital here.
 
-3. **Stop** (on `call_ended`/`modem_lost`): signal the thread, join it, close ttyUSB4 + the audio streams; restore music if the call paused it.
+3. **Stop** (on `call_ended`/`modem_lost`): signal the thread, join it, close ttyUSB4 + the audio streams. Music the call paused stays paused.
 
 ### Client Routing
 
@@ -805,7 +805,7 @@ The original tech-debt gap (no way for the LLM to delete SMS/call records) is re
 | Resampler | `resampler_create/process()` in `include/audio/resampler.h` | Modem 16 kHz ↔ client rate (e.g. 48 kHz WebUI) |
 | WebUI Opus | `webui_opus_encode/decode_stream()` in `src/webui/webui_audio.c` | Browser call audio |
 | TTS pause | `tts_playback_state` in `include/tts/text_to_speech.h` | Suppress TTS during call |
-| Music pause | `setMusicPlay(0/1)` in `src/audio/flac_playback.c` | Pause music during call |
+| Music pause | `music_tool_pause()` in `include/tools/music_tool.h` | Pause music for a call (resumed only by the user) |
 | OCP helpers | `ocp_get_timestamp_ms()` in `include/core/ocp_helpers.h` | Timestamp generation |
 
 ---
