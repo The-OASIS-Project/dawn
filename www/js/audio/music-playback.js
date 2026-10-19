@@ -746,6 +746,7 @@
       if (bufferClearActions.includes(action)) {
          flushWorklet();
       }
+      previousSent = action === 'previous';
 
       const payload = { action: action, ...opts };
       DawnWS.send({ type: 'music_control', payload: payload });
@@ -792,6 +793,10 @@
    // the title and counter change when the listener hears it, and a natural stop
    // doesn't flush the last seconds of the final track.
    let pendingAdvance = null; // { payload, applyAt (performance.now ms), timer }
+   // A previous was sent and not flushed early (the server may decline it): the
+   // next untagged state frame flushes if it moved, even onto another copy of
+   // the same track
+   let previousSent = false;
 
    function clearPendingAdvance() {
       if (pendingAdvance) {
@@ -894,9 +899,14 @@
       // truncate the ~2s of already-buffered audio (which includes the start of the
       // next track). User-initiated skips/seeks are NOT tagged, so they still flush.
       const autoAdvance = payload.advance === 'auto';
+      let previousMoved = false;
+      if (previousSent && !autoAdvance) {
+         previousMoved = state.queueIndex !== prevQueueIndex;
+         previousSent = false;
+      }
 
       // Clear audio buffer on track change or seek for instant response
-      if ((trackChanged || seeked) && !autoAdvance) {
+      if ((trackChanged || seeked || previousMoved) && !autoAdvance) {
          flushWorklet();
       }
 
