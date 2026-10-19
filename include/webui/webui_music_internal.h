@@ -217,6 +217,13 @@ typedef struct {
    /** The auto-advance pick in the pending slot added a history entry (a new
     *  track, or a step onto one), so a failed open drops it (state_mutex) */
    bool history_fresh;
+   /** The track this session picked, as queued then (what it reports as
+    *  playing, see webui_music_current), and the queue's replace_epoch at the
+    *  time (state_mutex; set with queue_mutex held too).  After another tab
+    *  replaces the queue the session plays on, then moves on from the new
+    *  queue's top.  Empty path when nothing is picked. */
+   music_queue_entry_t track;
+   uint32_t track_epoch;
    pthread_t prefetch_thread;
    bool prefetch_running;       /**< Stream thread only */
    atomic_bool prefetch_cancel; /**< Aborts the helper's download */
@@ -471,6 +478,21 @@ bool webui_music_nav_step(session_music_state_t *state,
                           size_t path_size,
                           char *title_out,
                           size_t title_size);
+
+/**
+ * @brief What the session reports as playing, and where the queue holds it
+ *
+ * While a track plays or is paused: the track the session picked (another tab
+ * may have replaced or edited the shared queue since), at the queue position
+ * holding it, or -1 when the queue no longer does.  Otherwise the entry at the
+ * session's position.  queue_mutex then state_mutex held.
+ *
+ * @param track_out Receives the track to report, or NULL when there is none
+ * @return Its queue position, or -1
+ */
+int webui_music_current(const session_music_state_t *state,
+                        const user_music_queue_t *uq,
+                        const music_queue_entry_t **track_out);
 
 /**
  * @brief Stop and unload the current track

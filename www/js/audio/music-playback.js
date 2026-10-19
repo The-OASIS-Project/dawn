@@ -706,11 +706,15 @@
          clearPendingAdvance();
          if (action === 'seek') {
             // A seek on the heard track: it's gone server-side, so start it again
-            // at the target (the seek below follows) rather than show the next one
-            DawnWS.send({
-               type: 'music_control',
-               payload: { action: 'play_index', index: heardIndex },
-            });
+            // at the target (the seek below follows) rather than show the next one.
+            // Not when it isn't in the queue (another tab replaced it): the seek
+            // then applies to the track that follows.
+            if (heardIndex >= 0) {
+               DawnWS.send({
+                  type: 'music_control',
+                  payload: { action: 'play_index', index: heardIndex },
+               });
+            }
          } else {
             applyStateUpdate(held);
             if (action === 'next' && movedToNext) {
@@ -875,10 +879,13 @@
          state.durationSec = state.track.duration_sec || 0;
       }
 
-      // Detect track change or seek (position jump > 2 seconds)
+      // Detect track change or seek (position jump > 2 seconds).  The path decides
+      // when both are known: another tab replacing the queue moves this tab's index
+      // (to -1, "not in the queue") while the same track plays on.
       const trackChanged =
-         state.queueIndex !== prevQueueIndex ||
-         (prevPath !== null && state.track !== null && state.track.path !== prevPath);
+         prevPath !== null && state.track !== null
+            ? state.track.path !== prevPath
+            : state.queueIndex !== prevQueueIndex;
       const seeked = !afterHold && Math.abs(state.positionSec - prevPosition) > 2;
 
       // A server-tagged natural auto-advance is gapless: the server keeps streaming

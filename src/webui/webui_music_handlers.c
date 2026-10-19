@@ -1070,8 +1070,10 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
    pthread_mutex_lock(&uq->queue_mutex);
    pthread_mutex_lock(&state->state_mutex);
    bool in_range = index0 >= 0 && index0 < uq->queue_length;
-   /* playing covers the gap at a track's end, before the next one is picked */
-   bool removing_current = in_range && index0 == state->queue_index &&
+   /* playing covers the gap at a track's end, before the next one is picked;
+    * a track the queue no longer holds is at no position */
+   const music_queue_entry_t *now = NULL;
+   bool removing_current = in_range && index0 == webui_music_current(state, uq, &now) &&
                            (state->decoder || state->pending_path[0] || state->playing);
    bool was_playing = state->playing && !state->paused;
    bool gone = false; /* another tab or tool call removed it meanwhile */
@@ -1241,8 +1243,11 @@ static void music_queue_locked(ws_connection_t *conn,
       }
 
       json_object_object_add(resp_payload, "queue", queue_arr);
-      json_object_object_add(resp_payload, "current_index",
-                             json_object_new_int(state->queue_index));
+      pthread_mutex_lock(&state->state_mutex);
+      const music_queue_entry_t *now = NULL;
+      int current_index = webui_music_current(state, uq, &now);
+      pthread_mutex_unlock(&state->state_mutex);
+      json_object_object_add(resp_payload, "current_index", json_object_new_int(current_index));
       json_object_object_add(resp_payload, "length", json_object_new_int(uq->queue_length));
 
       pthread_mutex_unlock(&uq->queue_mutex);
