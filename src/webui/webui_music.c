@@ -742,6 +742,12 @@ static void *music_stream_thread(void *arg) {
          audio_decoder_close(state->decoder);
          state->decoder = NULL;
          bool no_audio = state->position_frames == 0;
+         /* An auto-advance pick that produced nothing didn't play: previous
+          * mustn't go back to it (as for one that wouldn't open) */
+         const char *played = music_history_current(&state->history);
+         if (no_audio && state->history_fresh && played && strcmp(played, state->track.path) == 0) {
+            music_history_drop_current(&state->history);
+         }
          pthread_mutex_unlock(&state->state_mutex);
 
          /* A track that produced no audio failed, whether it errored or hit

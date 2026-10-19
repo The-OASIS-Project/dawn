@@ -810,6 +810,7 @@ int webui_music_request_track(session_music_state_t *state,
       publish_open(state, state->pending_seq, MUSIC_OPEN_CANCELLED);
    }
    uint32_t ticket = set_pending(state, path, false);
+   state->history_fresh = false; /* a user's pick: its failure leaves the history */
    state->request_seq = ticket;
    state->playing = true;
    state->paused = false;

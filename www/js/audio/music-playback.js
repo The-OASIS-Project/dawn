@@ -794,8 +794,9 @@
    // doesn't flush the last seconds of the final track.
    let pendingAdvance = null; // { payload, applyAt (performance.now ms), timer }
    // A previous was sent and not flushed early (the server may decline it): the
-   // next untagged state frame flushes if it moved, even onto another copy of
-   // the same track
+   // next untagged state frame flushes if it moved to a track's start, even onto
+   // another copy of the same track (a queue broadcast that only moves the index
+   // of the track still playing comes mid-track)
    let previousSent = false;
 
    function clearPendingAdvance() {
@@ -901,7 +902,7 @@
       const autoAdvance = payload.advance === 'auto';
       let previousMoved = false;
       if (previousSent && !autoAdvance) {
-         previousMoved = state.queueIndex !== prevQueueIndex;
+         previousMoved = state.queueIndex !== prevQueueIndex && state.positionSec < 2;
          previousSent = false;
       }
 
