@@ -335,6 +335,7 @@ static void music_control_locked(ws_connection_t *conn,
          user_music_queue_t *uq = state->shared_queue;
          pthread_mutex_lock(&uq->queue_mutex);
          uq->queue_length = 0;
+         uq->replace_epoch++;
          for (int i = 0; i < count && uq->queue_length < WEBUI_MUSIC_MAX_QUEUE; i++) {
             music_queue_entry_t *entry = &uq->queue[uq->queue_length];
             safe_strncpy(entry->path, results[i].path, sizeof(entry->path));
@@ -417,8 +418,12 @@ static void music_control_locked(ws_connection_t *conn,
    } else if (strcmp(action, "next") == 0 || strcmp(action, "previous") == 0) {
       music_nav_dir_t dir = strcmp(action, "next") == 0 ? MUSIC_NAV_NEXT : MUSIC_NAV_PREVIOUS;
       char path[WEBUI_MUSIC_PATH_MAX];
-      if (webui_music_nav_step(state, dir, path, sizeof(path), NULL, 0) &&
-          webui_music_start_playback(state, path) != 0) {
+      if (!webui_music_nav_step(state, dir, path, sizeof(path), NULL, 0)) {
+         if (dir == MUSIC_NAV_PREVIOUS) {
+            /* Shuffle with no history yet, or the queue's start: say so */
+            webui_music_send_error(conn, "NOTHING_EARLIER", "Nothing earlier to go back to");
+         }
+      } else if (webui_music_start_playback(state, path) != 0) {
          webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
       }
       webui_music_send_state(conn, state);
@@ -1005,6 +1010,7 @@ int webui_music_queue_apply_paths(session_music_state_t *state,
    pthread_mutex_lock(&uq->queue_mutex);
    if (replace) {
       uq->queue_length = 0;
+      uq->replace_epoch++;
    }
 
    for (int i = 0; i < n; i++) {
@@ -1064,8 +1070,10 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
    pthread_mutex_lock(&uq->queue_mutex);
    pthread_mutex_lock(&state->state_mutex);
    bool in_range = index0 >= 0 && index0 < uq->queue_length;
-   /* playing covers the gap at a track's end, before the next one is picked */
-   bool removing_current = in_range && index0 == state->queue_index &&
+   /* playing covers the gap at a track's end, before the next one is picked;
+    * a track the queue no longer holds is at no position */
+   const music_queue_entry_t *now = NULL;
+   bool removing_current = in_range && index0 == webui_music_current(state, uq, &now) &&
                            (state->decoder || state->pending_path[0] || state->playing);
    bool was_playing = state->playing && !state->paused;
    bool gone = false; /* another tab or tool call removed it meanwhile */
@@ -1164,6 +1172,7 @@ int webui_music_queue_clear(session_music_state_t *state, int *removed_out) {
       *removed_out = uq->queue_length;
    }
    uq->queue_length = 0;
+   uq->replace_epoch++;
    uq->generation++;
    music_queue_db_save(uq->user_id, uq);
    pthread_mutex_unlock(&uq->queue_mutex);
@@ -1234,8 +1243,11 @@ static void music_queue_locked(ws_connection_t *conn,
       }
 
       json_object_object_add(resp_payload, "queue", queue_arr);
-      json_object_object_add(resp_payload, "current_index",
-                             json_object_new_int(state->queue_index));
+      pthread_mutex_lock(&state->state_mutex);
+      const music_queue_entry_t *now = NULL;
+      int current_index = webui_music_current(state, uq, &now);
+      pthread_mutex_unlock(&state->state_mutex);
+      json_object_object_add(resp_payload, "current_index", json_object_new_int(current_index));
       json_object_object_add(resp_payload, "length", json_object_new_int(uq->queue_length));
 
       pthread_mutex_unlock(&uq->queue_mutex);

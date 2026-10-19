@@ -1602,6 +1602,13 @@ dawn_add_unit_test(test_word_to_number
    LIBS    unity m
    LABEL   ci)
 
+# Music play history: back/forward walks, planned next, unqueued entries, cap
+dawn_add_unit_test(test_music_nav
+   SOURCES test_music_nav.c
+           ${SRC_ROOT}/src/audio/music_nav.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_text_filter
    SOURCES test_text_filter.c
            ${SRC_ROOT}/src/core/text_filter.c

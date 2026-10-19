@@ -36,6 +36,7 @@
 
 #include "audio/audio_decoder.h"
 #include "audio/music_db.h"
+#include "audio/music_nav.h"
 #include "audio/resampler.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
@@ -134,7 +135,8 @@ struct user_music_queue {
    int user_id;
    pthread_mutex_t queue_mutex;
    int ref_count;
-   uint32_t generation; /**< Monotonic counter, incremented on every queue mutation */
+   uint32_t generation;    /**< Monotonic counter, incremented on every queue mutation */
+   uint32_t replace_epoch; /**< Bumped when the queue is replaced or cleared (play history) */
    music_queue_entry_t queue[WEBUI_MUSIC_MAX_QUEUE];
    int queue_length;
    bool shuffle;
@@ -206,14 +208,22 @@ typedef struct {
     *  that path is opened next; closed otherwise. */
    audio_decoder_t *prefetched;
    char prefetch_path[WEBUI_MUSIC_PATH_MAX]; /**< What's prefetched or prefetching */
-   /** The track planned to follow (-1 none): drawn once under shuffle, so
-    *  auto-advance and manual next play the track that was prefetched.  Valid
-    *  only while queue_index is still planned_from and the entry's path still
-    *  matches. */
-   int planned_next_index;
-   int planned_from;
-   bool planned_shuffle; /**< Drawn under shuffle */
-   char planned_next_path[WEBUI_MUSIC_PATH_MAX];
+   /** What this session played: previous under shuffle walks back through
+    *  it.  A shuffle pick planned for next is its forward entry, so
+    *  auto-advance and next play what was prefetched.  Written under
+    *  state_mutex; whatever syncs it with the queue or resolves its entries
+    *  also holds queue_mutex, taken first. */
+   music_history_t history;
+   /** The auto-advance pick in the pending slot added a history entry (a new
+    *  track, or a step onto one), so a failed open drops it (state_mutex) */
+   bool history_fresh;
+   /** The track this session picked, as queued then (what it reports as
+    *  playing, see webui_music_current), and the queue's replace_epoch at the
+    *  time (state_mutex; set with queue_mutex held too).  After another tab
+    *  replaces the queue the session plays on, then moves on from the new
+    *  queue's top.  Empty path when nothing is picked. */
+   music_queue_entry_t track;
+   uint32_t track_epoch;
    pthread_t prefetch_thread;
    bool prefetch_running;       /**< Stream thread only */
    atomic_bool prefetch_cancel; /**< Aborts the helper's download */
@@ -451,12 +461,16 @@ typedef enum {
 /**
  * @brief Move the session's queue index one step, as next/previous do
  *
- * Shuffle picks a random other track; otherwise the index moves by one, and
- * wraps only under repeat-all.  Takes queue_mutex then state_mutex.
+ * Under shuffle, next walks forward through the play history and then picks a
+ * random other track; previous walks back through it, and there is nothing
+ * earlier once it runs out.  Otherwise the index moves by one, and wraps only
+ * under repeat-all.  Stops the stream thread before moving, but only when a
+ * move happens.  Takes queue_mutex then state_mutex.
  *
  * @param path_out Receives the new track's path (path_size > 0)
  * @param title_out Optional: receives its title (NULL or title_size 0 to skip)
- * @return true if the index moved, false at the end (or start) of the queue
+ * @return true if the index moved, false at the end (or start) of the queue,
+ *         or with nothing earlier in the history
  */
 bool webui_music_nav_step(session_music_state_t *state,
                           music_nav_dir_t dir,
@@ -464,6 +478,21 @@ bool webui_music_nav_step(session_music_state_t *state,
                           size_t path_size,
                           char *title_out,
                           size_t title_size);
+
+/**
+ * @brief What the session reports as playing, and where the queue holds it
+ *
+ * While a track plays or is paused: the track the session picked (another tab
+ * may have replaced or edited the shared queue since), at the queue position
+ * holding it, or -1 when the queue no longer does.  Otherwise the entry at the
+ * session's position.  queue_mutex then state_mutex held.
+ *
+ * @param track_out Receives the track to report, or NULL when there is none
+ * @return Its queue position, or -1
+ */
+int webui_music_current(const session_music_state_t *state,
+                        const user_music_queue_t *uq,
+                        const music_queue_entry_t **track_out);
 
 /**
  * @brief Stop and unload the current track

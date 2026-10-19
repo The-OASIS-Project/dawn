@@ -128,8 +128,10 @@
             const s = DawnMusicPlayback.getState();
             if (s.paused) {
                DawnMusicPlayback.control('play');
-            } else if (s.queueLength > 0) {
+            } else if (s.queueLength > 0 && s.queueIndex >= 0) {
                changeTrack('play_index', { index: s.queueIndex });
+            } else if (s.queueLength > 0) {
+               DawnMusicPlayback.control('play'); // no position: the server starts at the top
             }
          },
          onPause: function () {
@@ -501,9 +503,12 @@
          DawnMusicPlayback.control('pause');
       } else if (state.paused) {
          DawnMusicPlayback.control('play');
-      } else if (state.queueLength > 0) {
+      } else if (state.queueLength > 0 && state.queueIndex >= 0) {
          // Have queue items - play from current index
          changeTrack('play_index', { index: state.queueIndex });
+      } else if (state.queueLength > 0) {
+         // No current position in this queue: the server starts at its top
+         DawnMusicPlayback.control('play');
       } else {
          // Nothing in queue, open library search
          switchTab('library');
@@ -978,9 +983,13 @@
     * @param {string} message - Error message
     */
    function handleError(code, message) {
-      console.error('Music UI: Error', code, message);
+      // A declined "previous" is a notice, not a failure
+      const notice = code === 'NOTHING_EARLIER';
+      if (!notice) {
+         console.error('Music UI: Error', code, message);
+      }
       if (typeof DawnToast !== 'undefined') {
-         DawnToast.show(message || `Music error: ${code}`, 'error');
+         DawnToast.show(message || `Music error: ${code}`, notice ? 'info' : 'error');
       }
    }
 

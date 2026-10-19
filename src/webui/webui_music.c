@@ -396,11 +396,15 @@ void webui_music_send_state_impl(ws_connection_t *conn,
    queue_length = uq->queue_length;
    shuffle = uq->shuffle;
    repeat_mode = uq->repeat_mode;
-   pthread_mutex_unlock(&uq->queue_mutex);
 
-   /* Snapshot per-session fields under state_mutex */
+   /* Snapshot per-session fields under state_mutex (nested: queue, then state) */
    pthread_mutex_lock(&state->state_mutex);
-   queue_index = state->queue_index;
+   const music_queue_entry_t *now = NULL;
+   queue_index = webui_music_current(state, uq, &now);
+   if (now) {
+      current_track = *now;
+      has_track = true;
+   }
    bool playing = state->playing;
    bool paused = state->paused;
    bool loading = state->loading;
@@ -413,13 +417,6 @@ void webui_music_send_state_impl(ws_connection_t *conn,
    music_quality_t quality = state->quality;
    music_bitrate_mode_t bitrate_mode = state->bitrate_mode;
    pthread_mutex_unlock(&state->state_mutex);
-
-   /* Read track info under queue_mutex (needs index from state) */
-   pthread_mutex_lock(&uq->queue_mutex);
-   if (queue_length > 0 && queue_index < uq->queue_length) {
-      current_track = uq->queue[queue_index];
-      has_track = true;
-   }
    pthread_mutex_unlock(&uq->queue_mutex);
 
    /* Build JSON (no locks held) */
@@ -745,6 +742,12 @@ static void *music_stream_thread(void *arg) {
          audio_decoder_close(state->decoder);
          state->decoder = NULL;
          bool no_audio = state->position_frames == 0;
+         /* An auto-advance pick that produced nothing didn't play: previous
+          * mustn't go back to it (as for one that wouldn't open) */
+         const char *played = music_history_current(&state->history);
+         if (no_audio && state->history_fresh && played && strcmp(played, state->track.path) == 0) {
+            music_history_drop_current(&state->history);
+         }
          pthread_mutex_unlock(&state->state_mutex);
 
          /* A track that produced no audio failed, whether it errored or hit
@@ -1104,7 +1107,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_condattr_setclock(&open_attr, CLOCK_MONOTONIC);
    pthread_cond_init(&state->open_cond, &open_attr);
    pthread_condattr_destroy(&open_attr);
-   state->planned_next_index = -1;
+   music_history_init(&state->history);
    atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
@@ -1265,6 +1268,7 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
    pthread_mutex_destroy(&state->write_mutex);
    pthread_mutex_destroy(&state->control_mutex);
 
+   music_history_clear(&state->history);
    free(state);
    conn->music_state = NULL;
 
@@ -1288,6 +1292,8 @@ struct json_object *webui_music_get_state(ws_connection_t *conn) {
    struct json_object *result = json_object_new_object();
    user_music_queue_t *uq = state->shared_queue;
 
+   /* Lock order: queue, then state */
+   pthread_mutex_lock(&uq->queue_mutex);
    pthread_mutex_lock(&state->state_mutex);
    json_object_object_add(result, "playing", json_object_new_boolean(state->playing));
    json_object_object_add(result, "paused", json_object_new_boolean(state->paused));
@@ -1295,13 +1301,10 @@ struct json_object *webui_music_get_state(ws_connection_t *conn) {
    if (state->source_rate > 0) {
       position_sec = (double)state->position_frames / state->source_rate;
    }
-   int queue_index = state->queue_index;
+   const music_queue_entry_t *track = NULL;
+   (void)webui_music_current(state, uq, &track);
    music_quality_t quality = state->quality;
-   pthread_mutex_unlock(&state->state_mutex);
-
-   pthread_mutex_lock(&uq->queue_mutex);
-   if (uq->queue_length > 0 && queue_index < uq->queue_length) {
-      music_queue_entry_t *track = &uq->queue[queue_index];
+   if (track) {
       struct json_object *track_obj = json_object_new_object();
       json_object_object_add(track_obj, "title", json_object_new_string(track->title));
       json_object_object_add(track_obj, "artist", json_object_new_string(track->artist));
@@ -1309,6 +1312,7 @@ struct json_object *webui_music_get_state(ws_connection_t *conn) {
       json_object_object_add(track_obj, "duration_sec", json_object_new_int(track->duration_sec));
       json_object_object_add(result, "track", track_obj);
    }
+   pthread_mutex_unlock(&state->state_mutex);
    json_object_object_add(result, "queue_length", json_object_new_int(uq->queue_length));
    pthread_mutex_unlock(&uq->queue_mutex);
 

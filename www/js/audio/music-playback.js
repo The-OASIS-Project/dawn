@@ -706,11 +706,15 @@
          clearPendingAdvance();
          if (action === 'seek') {
             // A seek on the heard track: it's gone server-side, so start it again
-            // at the target (the seek below follows) rather than show the next one
-            DawnWS.send({
-               type: 'music_control',
-               payload: { action: 'play_index', index: heardIndex },
-            });
+            // at the target (the seek below follows) rather than show the next one.
+            // Not when it isn't in the queue (another tab replaced it): the seek
+            // then applies to the track that follows.
+            if (heardIndex >= 0) {
+               DawnWS.send({
+                  type: 'music_control',
+                  payload: { action: 'play_index', index: heardIndex },
+               });
+            }
          } else {
             applyStateUpdate(held);
             if (action === 'next' && movedToNext) {
@@ -735,10 +739,14 @@
 
       // Clear audio buffer immediately for actions that change playback position
       // (optimistic — before the server echoes music_state) so the UI feels responsive.
-      const bufferClearActions = ['seek', 'next', 'previous', 'play_index', 'stop'];
+      // Not "previous": the server can decline it (nothing earlier) and the track
+      // plays on, so flushing would skip ~2 s; a real change is flushed when its
+      // (untagged) state frame arrives.
+      const bufferClearActions = ['seek', 'next', 'play_index', 'stop'];
       if (bufferClearActions.includes(action)) {
          flushWorklet();
       }
+      previousSent = action === 'previous';
 
       const payload = { action: action, ...opts };
       DawnWS.send({ type: 'music_control', payload: payload });
@@ -785,6 +793,11 @@
    // the title and counter change when the listener hears it, and a natural stop
    // doesn't flush the last seconds of the final track.
    let pendingAdvance = null; // { payload, applyAt (performance.now ms), timer }
+   // A previous was sent and not flushed early (the server may decline it): the
+   // next untagged state frame flushes if it moved to a track's start, even onto
+   // another copy of the same track (a queue broadcast that only moves the index
+   // of the track still playing comes mid-track)
+   let previousSent = false;
 
    function clearPendingAdvance() {
       if (pendingAdvance) {
@@ -872,10 +885,13 @@
          state.durationSec = state.track.duration_sec || 0;
       }
 
-      // Detect track change or seek (position jump > 2 seconds)
+      // Detect track change or seek (position jump > 2 seconds).  The path decides
+      // when both are known: another tab replacing the queue moves this tab's index
+      // (to -1, "not in the queue") while the same track plays on.
       const trackChanged =
-         state.queueIndex !== prevQueueIndex ||
-         (prevPath !== null && state.track !== null && state.track.path !== prevPath);
+         prevPath !== null && state.track !== null
+            ? state.track.path !== prevPath
+            : state.queueIndex !== prevQueueIndex;
       const seeked = !afterHold && Math.abs(state.positionSec - prevPosition) > 2;
 
       // A server-tagged natural auto-advance is gapless: the server keeps streaming
@@ -884,9 +900,14 @@
       // truncate the ~2s of already-buffered audio (which includes the start of the
       // next track). User-initiated skips/seeks are NOT tagged, so they still flush.
       const autoAdvance = payload.advance === 'auto';
+      let previousMoved = false;
+      if (previousSent && !autoAdvance) {
+         previousMoved = state.queueIndex !== prevQueueIndex && state.positionSec < 2;
+         previousSent = false;
+      }
 
       // Clear audio buffer on track change or seek for instant response
-      if ((trackChanged || seeked) && !autoAdvance) {
+      if ((trackChanged || seeked || previousMoved) && !autoAdvance) {
          flushWorklet();
       }
 

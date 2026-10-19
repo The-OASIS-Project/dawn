@@ -78,19 +78,31 @@ static void append_state_footer(strbuf_t *sb, session_music_state_t *state) {
    /* queue_index is a per-session field guarded by state_mutex; snapshot it under
     * that lock (nested inside queue_mutex — correct order) to avoid a torn read. */
    pthread_mutex_lock(&state->state_mutex);
-   int idx = state->queue_index;
-   pthread_mutex_unlock(&state->state_mutex);
-   if (len > 0 && idx >= 0 && idx < len) {
-      safe_strncpy(now_title, uq->queue[idx].title, sizeof(now_title));
-      safe_strncpy(now_artist, uq->queue[idx].artist, sizeof(now_artist));
+   const music_queue_entry_t *now = NULL;
+   int idx = webui_music_current(state, uq, &now);
+   if (now) {
+      safe_strncpy(now_title, now->title, sizeof(now_title));
+      safe_strncpy(now_artist, now->artist, sizeof(now_artist));
    }
+   pthread_mutex_unlock(&state->state_mutex);
    pthread_mutex_unlock(&uq->queue_mutex);
 
    const char *rep_s = rep == MUSIC_REPEAT_ALL ? "all" : (rep == MUSIC_REPEAT_ONE ? "one" : "none");
-   if (len > 0) {
+   if (len > 0 && now && idx < 0) {
+      /* Another tab replaced the queue; this session plays on a track it no longer holds */
+      strbuf_appendf(sb,
+                     "\n[queue: %d | now \"%s\" — %s, not in the queue | shuffle %s | repeat %s]",
+                     len, now_title[0] ? now_title : "Unknown",
+                     now_artist[0] ? now_artist : "Unknown", shuffle ? "on" : "off", rep_s);
+   } else if (len > 0) {
       strbuf_appendf(sb, "\n[queue: %d | now #%d \"%s\" — %s | shuffle %s | repeat %s]", len,
                      idx + 1, now_title[0] ? now_title : "Unknown",
                      now_artist[0] ? now_artist : "Unknown", shuffle ? "on" : "off", rep_s);
+   } else if (now) {
+      strbuf_appendf(
+          sb, "\n[queue: empty | now \"%s\" — %s, not in the queue | shuffle %s | repeat %s]",
+          now_title[0] ? now_title : "Unknown", now_artist[0] ? now_artist : "Unknown",
+          shuffle ? "on" : "off", rep_s);
    } else {
       strbuf_appendf(sb, "\n[queue: empty | shuffle %s | repeat %s]", shuffle ? "on" : "off",
                      rep_s);
@@ -493,6 +505,7 @@ static int music_tool_locked(ws_connection_t *conn,
 
       pthread_mutex_lock(&uq->queue_mutex);
       uq->queue_length = 0;
+      uq->replace_epoch++;
       for (int i = 0; i < count && uq->queue_length < WEBUI_MUSIC_MAX_QUEUE; i++) {
          music_queue_entry_t *entry = &uq->queue[uq->queue_length];
          safe_strncpy(entry->path, results[i].path, sizeof(entry->path));
@@ -678,7 +691,8 @@ static int music_tool_locked(ws_connection_t *conn,
       if (!webui_music_nav_step(state, next ? MUSIC_NAV_NEXT : MUSIC_NAV_PREVIOUS, path,
                                 sizeof(path), title, sizeof(title))) {
          if (result_out) {
-            *result_out = strdup(next ? "Already at end of queue" : "Already at start of queue");
+            *result_out = strdup(next ? "Already at end of queue"
+                                      : "Nothing earlier to go back to");
          }
          return SUCCESS;
       }
@@ -796,7 +810,12 @@ static int music_tool_locked(ws_connection_t *conn,
       /* Snapshot the per-session current index under state_mutex (nested in
        * queue_mutex — correct order) rather than reading it racily. */
       pthread_mutex_lock(&state->state_mutex);
-      int cur_idx = state->queue_index;
+      const music_queue_entry_t *now = NULL;
+      int cur_idx = webui_music_current(state, uq, &now);
+      char now_title[WEBUI_MUSIC_STRING_MAX] = { 0 };
+      if (now) {
+         safe_strncpy(now_title, now->title, sizeof(now_title));
+      }
       pthread_mutex_unlock(&state->state_mutex);
 
       /* Build queue list — strbuf so a long queue cannot silently truncate
@@ -804,7 +823,14 @@ static int music_tool_locked(ws_connection_t *conn,
        * exceeded the per-row estimate. */
       strbuf_t sb;
       strbuf_init(&sb, 1024 + (size_t)uq->queue_length * 64);
-      strbuf_appendf(&sb, "Queue (%d tracks, currently #%d):\n", uq->queue_length, cur_idx + 1);
+      if (cur_idx >= 0) {
+         strbuf_appendf(&sb, "Queue (%d tracks, currently #%d):\n", uq->queue_length, cur_idx + 1);
+      } else if (now) {
+         strbuf_appendf(&sb, "Queue (%d tracks; playing \"%s\", which isn't in it):\n",
+                        uq->queue_length, now_title[0] ? now_title : "Unknown");
+      } else {
+         strbuf_appendf(&sb, "Queue (%d tracks):\n", uq->queue_length);
+      }
       const char *rep_s = uq->repeat_mode == MUSIC_REPEAT_ALL
                               ? "all"
                               : (uq->repeat_mode == MUSIC_REPEAT_ONE ? "one" : "none");
