@@ -1051,9 +1051,12 @@ int gmail_list_labels(const char *token, char *out, size_t out_len) {
       if (!name[0])
          continue;
 
-      if (count > 0 && pos < (int)out_len - 2)
+      if (count > 0)
          pos += snprintf(out + pos, out_len - pos, ", ");
-      pos += snprintf(out + pos, out_len - pos, "%s", name);
+      if (pos < (int)out_len)
+         pos += snprintf(out + pos, out_len - pos, "%s", name);
+      if (pos >= (int)out_len)
+         break; /* out is full; snprintf cut it off and terminated it */
       count++;
    }
 
