@@ -173,10 +173,12 @@
       return sameDay(target, t);
    }
 
+   /* Times and days are the user's zone's (DawnTime), as Friday says them;
+    * sameDay/isTomorrow compare its civil dates. */
    function formatAbsTime(ts) {
-      const d = new Date(ts * 1000);
-      let h = d.getHours();
-      const m = d.getMinutes();
+      const p = DawnTime.parts(ts);
+      let h = p.hour;
+      const m = p.minute;
       const ampm = h >= 12 ? 'PM' : 'AM';
       h = h % 12;
       if (h === 0) h = 12;
@@ -185,15 +187,15 @@
 
    /* Human-readable "when": "in 4 minutes", "tomorrow at 7:00 AM", etc. */
    function formatWhen(event) {
-      const now = new Date();
+      const now = DawnTime.today();
       const fireTs = event.effective_fire_at || event.fire_at;
-      const fire = new Date(fireTs * 1000);
-      const diffSec = Math.floor((fire - now) / 1000);
+      const fire = DawnTime.dateOf(fireTs);
+      const diffSec = fireTs - DawnTime.nowSec();
 
       if (event.status === 'missed') {
          const day = sameDay(fire, now)
             ? 'today'
-            : isTomorrow(fire, new Date(now.getTime() - 86400000))
+            : sameDay(fire, new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
               ? 'yesterday'
               : fire.toLocaleDateString(undefined, {
                    weekday: 'short',
@@ -1656,6 +1658,10 @@
 
       els.btn.addEventListener('click', toggle);
       if (els.closeBtn) els.closeBtn.addEventListener('click', close);
+      /* Another zone changes every time shown. */
+      DawnEvents.on('timezone', function () {
+         if (state.isOpen) render();
+      });
       if (els.searchInput) els.searchInput.addEventListener('input', onSearchInput);
       if (els.clearMissedBtn) els.clearMissedBtn.addEventListener('click', onClearMissedClick);
 

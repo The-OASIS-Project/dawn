@@ -118,7 +118,7 @@
          const details = document.createElement('span');
          details.className = 'user-details';
          details.textContent = user.last_login
-            ? 'Last login: ' + new Date(user.last_login * 1000).toLocaleString()
+            ? 'Last login: ' + DawnTime.formatDateTime(user.last_login)
             : 'Never logged in';
 
          userInfo.appendChild(username);

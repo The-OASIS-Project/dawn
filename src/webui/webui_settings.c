@@ -31,6 +31,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/tz.h"
+#include "core/user_tz.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
 #include "logging.h"
@@ -245,6 +246,15 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
 
       /* Log event */
       auth_db_log_event("SETTINGS_UPDATED", conn->username, conn->client_ip, "Personal settings");
+
+      /* Every open tab shows this user's times in the zone now in force. */
+      json_object *tz_frame = json_object_new_object();
+      json_object *tz_payload = json_object_new_object();
+      json_object_object_add(tz_frame, "type", json_object_new_string("timezone_changed"));
+      json_object_object_add(tz_payload, "timezone",
+                             json_object_new_string(tz_name(user_tz(conn->auth_user_id))));
+      json_object_object_add(tz_frame, "payload", tz_payload);
+      webui_broadcast_json_to_user(conn->auth_user_id, tz_frame, true);
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",

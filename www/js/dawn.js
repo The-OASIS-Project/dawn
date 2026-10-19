@@ -324,6 +324,7 @@
                   DawnState.authState.username = msg.payload.username || '';
                   DawnSettings.updateAuthVisibility();
                }
+               if (msg.payload.authenticated) DawnTime.setZone(msg.payload.timezone);
                // Start the liveness heartbeat now that the session is authed (a
                // ping before auth would draw UNAUTHORIZED). Re-armed on every
                // (re)connect; startHeartbeat() resets any prior state.
@@ -797,6 +798,9 @@
             case 'resend_channel_code_response':
                if (typeof DawnMessaging !== 'undefined')
                   DawnMessaging.handleResendResponse(msg.payload);
+               break;
+            case 'timezone_changed':
+               DawnTime.setZone(msg.payload && msg.payload.timezone);
                break;
             case 'get_my_settings_response':
                DawnMySettings.handleGetResponse(msg.payload);

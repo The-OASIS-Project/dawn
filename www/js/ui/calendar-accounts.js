@@ -245,11 +245,11 @@
       const date = new Date(timestamp * 1000);
       const now = new Date();
       const diff = Math.floor((now - date) / 1000);
-      if (diff < 0) return date.toLocaleDateString();
+      if (diff < 0) return DawnTime.formatDate(timestamp);
       if (diff < 60) return 'Just now';
       if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
       if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-      return date.toLocaleDateString();
+      return DawnTime.formatDate(timestamp);
    }
 
    function renderAccounts() {

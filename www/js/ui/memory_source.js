@@ -48,7 +48,7 @@
    function formatSourceTime(createdAtSeconds) {
       if (!createdAtSeconds) return '';
       try {
-         return new Date(createdAtSeconds * 1000).toLocaleString([], {
+         return DawnTime.format(createdAtSeconds, {
             month: 'short',
             day: 'numeric',
             hour: 'numeric',

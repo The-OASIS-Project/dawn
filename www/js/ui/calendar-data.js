@@ -34,7 +34,7 @@
       return y + '-' + m + '-' + d;
    }
 
-   const _now = new Date();
+   const _now = DawnTime.today();
 
    const state = {
       active: false /* true while the Calendar tab is the visible pane */,
@@ -79,24 +79,22 @@
    }
 
    /* The 42-cell (6-week) month grid window for state.anchor, aligned to the
-    * locale week start.  All Date construction (never epoch ± 86400) so the
-    * cell days and window edges are DST-correct. */
+    * locale week start: from the first cell's midnight to the end of the last
+    * cell's day, in the user's zone.  Cell days by Date construction (never
+    * epoch ± 86400), so they are DST-correct. */
    function computeMonthWindow() {
       const ws = getWeekStart();
       const first = new Date(state.anchor.year, state.anchor.month, 1);
       const offset = (first.getDay() - ws + 7) % 7; /* days from week start to the 1st */
       const firstCell = new Date(state.anchor.year, state.anchor.month, 1 - offset);
-      const lastCell = new Date(
+      const afterLast = new Date(
          firstCell.getFullYear(),
          firstCell.getMonth(),
-         firstCell.getDate() + 41,
-         23,
-         59,
-         59
+         firstCell.getDate() + 42
       );
       return {
-         start: Math.floor(firstCell.getTime() / 1000) /* local midnight of the first cell */,
-         end: Math.floor(lastCell.getTime() / 1000) /* end of the last cell's day */,
+         start: DawnTime.startOf(firstCell),
+         end: DawnTime.startOf(afterLast) - 1,
       };
    }
 
