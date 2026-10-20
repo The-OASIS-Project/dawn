@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -283,9 +284,11 @@ static void test_lookup(void) {
 static void test_daemon_zone(void) {
    tz_daemon_init("America/Chicago");
    TEST_ASSERT_EQUAL_STRING("America/Chicago", tz_name(tz_daemon()));
-   /* A zoneinfo name libical doesn't list is accepted for the daemon. */
+   /* A zoneinfo name libical doesn't list is accepted for the daemon.  Since
+    * tzdata 2024b, CET is a link to Europe/Brussels, the name newer zoneinfo gives. */
    tz_daemon_init("CET");
-   TEST_ASSERT_EQUAL_STRING("CET", tz_name(tz_daemon()));
+   const char *cet = tz_name(tz_daemon());
+   TEST_ASSERT_TRUE_MESSAGE(strcmp(cet, "CET") == 0 || strcmp(cet, "Europe/Brussels") == 0, cet);
    /* One that isn't a zone falls back to UTC (with a warning). */
    tz_daemon_init("Not/A_Zone");
    TEST_ASSERT_EQUAL_STRING("UTC", tz_name(tz_daemon()));
