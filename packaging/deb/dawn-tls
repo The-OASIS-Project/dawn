@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# dawn-tls: keep the WebUI's TLS certificate valid.  Files, in /etc/dawn/ssl:
+#
+#   ca.crt, ca.key         a private CA made on this host (RSA-4096, 10 years).
+#                          Trust ca.crt in browsers, and give it to satellites as
+#                          their ca_cert_path.
+#   dawn-chain.crt, dawn.key   the server certificate (EC P-256, 825 days, the most
+#                          Apple accepts from a user-trusted CA), signed by that CA,
+#                          for this host's name, localhost and its addresses.
+#
+# dawn.service runs this as root before every start.  It makes the CA once, and a
+# new server certificate when there is none, when it expires within 60 days, or
+# when the host's name or addresses changed.  The CA stays, so browsers and
+# satellites that trust it keep working.  A server certificate this CA did not sign
+# (one you installed yourself) is left alone.
+set -eu
+
+DIR=/etc/dawn/ssl
+umask 077
+
+[ "$(id -u)" -eq 0 ] || { echo "dawn-tls: must run as root" >&2; exit 1; }
+[ -d "$DIR" ] || install -d -m 750 -o root -g dawn "$DIR"
+cd "$DIR"
+
+if [ ! -s ca.key ] || [ ! -s ca.crt ]; then
+   echo "dawn-tls: creating this host's DAWN CA ($DIR/ca.crt)"
+   openssl genrsa -out ca.key.new 4096 2>/dev/null
+   openssl req -new -x509 -key ca.key.new -out ca.crt.new -days 3650 \
+      -subj "/CN=DAWN Private CA ($(hostname))/O=DAWN"
+   chmod 644 ca.crt.new
+   mv -f ca.key.new ca.key
+   mv -f ca.crt.new ca.crt
+   rm -f dawn-chain.crt # signed by a CA that no longer exists
+fi
+
+san="DNS:localhost,DNS:$(hostname),IP:127.0.0.1"
+for ip in $(hostname -I 2>/dev/null); do
+   san="$san,IP:$ip"
+done
+
+if [ -s dawn-chain.crt ] && [ -s dawn.key ]; then
+   # Not signed by this CA (expired or not): someone else's certificate.
+   openssl verify -no_check_time -CAfile ca.crt dawn-chain.crt >/dev/null 2>&1 || exit 0
+   if openssl x509 -in dawn-chain.crt -noout -checkend 5184000 >/dev/null &&
+      [ "$(cat dawn.san 2>/dev/null)" = "$san" ]; then
+      exit 0
+   fi
+fi
+
+echo "dawn-tls: issuing the server certificate for $san"
+openssl ecparam -genkey -name prime256v1 -noout -out dawn.key.new 2>/dev/null
+openssl req -new -key dawn.key.new -subj "/CN=$(hostname)/O=DAWN" -out dawn.csr.new
+printf '%s\n' "basicConstraints=CA:FALSE" "keyUsage=digitalSignature,keyEncipherment" \
+   "extendedKeyUsage=serverAuth" "subjectAltName=$san" >dawn.ext.new
+openssl x509 -req -in dawn.csr.new -CA ca.crt -CAkey ca.key -CAcreateserial \
+   -days 825 -extfile dawn.ext.new -out dawn.crt.new 2>/dev/null
+cat dawn.crt.new ca.crt >dawn-chain.crt.new
+chgrp dawn dawn.key.new
+chmod 640 dawn.key.new
+chmod 644 dawn-chain.crt.new
+mv -f dawn.key.new dawn.key
+mv -f dawn-chain.crt.new dawn-chain.crt
+printf '%s' "$san" >dawn.san
+rm -f dawn.csr.new dawn.ext.new dawn.crt.new

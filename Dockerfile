@@ -25,17 +25,22 @@
 #   docker build -f Dockerfile.cuda -t dawn:cuda .
 # =============================================================================
 
+# The dependency stage's base.  packaging/deb/build-deb.sh builds this stage alone on
+# ubuntu:24.04, so the .deb links the same pinned dependencies as this image.
+# Dependabot doesn't follow an ARG: keep this digest equal to the runtime stage's.
+ARG DEPS_BASE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+
 # -----------------------------------------------------------------------------
 # Stage 1: Dependencies
 # -----------------------------------------------------------------------------
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS dawn-deps
+FROM ${DEPS_BASE} AS dawn-deps
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Build tools
+# Build tools (patchelf: packaging/deb points the libraries it bundles at /usr/lib/dawn)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake build-essential pkg-config git wget ca-certificates \
-    autotools-dev automake autoconf libtool \
+    autotools-dev automake autoconf libtool patchelf \
     # Core required
     libcurl4-openssl-dev libjson-c-dev libssl-dev libsqlite3-dev \
     libsodium-dev libspdlog-dev libwebsockets-dev libopus-dev \
@@ -78,19 +83,27 @@ RUN set -e; \
     && tar xzf "${ONNX_TARBALL}" \
     && cp -a "${ONNX_DIR}/lib/"* /usr/local/lib/ \
     && cp -r "${ONNX_DIR}/include/"* /usr/local/include/ \
+    && mkdir -p /usr/local/share/doc/onnxruntime \
+    && cp "${ONNX_DIR}/LICENSE" "${ONNX_DIR}/ThirdPartyNotices.txt" /usr/local/share/doc/onnxruntime/ \
     && ldconfig \
     && rm -rf /tmp/onnxruntime-*
 
 # --- espeak-ng (rhasspy fork, pinned commit) ---
+# espeak-ng compiles <prefix>/share/espeak-ng-data in as its data path, so the
+# package build sets ESPEAK_PREFIX=/usr/lib/dawn; the library and headers stay in
+# /usr/local, where piper-phonemize and DAWN's build look for them.
 ARG ESPEAK_COMMIT=8593723f10cfd9befd50de447f14bf0a9d2a14a4
+ARG ESPEAK_PREFIX=/usr/local
 RUN cd /tmp \
     && git init espeak-ng && cd espeak-ng \
     && git fetch --depth 1 https://github.com/rhasspy/espeak-ng.git ${ESPEAK_COMMIT} \
     && git checkout FETCH_HEAD \
     && ./autogen.sh \
-    && ./configure --prefix=/usr/local \
+    && ./configure --prefix=${ESPEAK_PREFIX} --libdir=/usr/local/lib --includedir=/usr/local/include \
     && make -j"$(nproc)" \
     && make install \
+    && mkdir -p /usr/local/share/doc/espeak-ng \
+    && cp COPYING COPYING.APACHE COPYING.BSD2 COPYING.UCD /usr/local/share/doc/espeak-ng/ \
     && ldconfig \
     && rm -rf /tmp/espeak-ng
 
@@ -107,6 +120,9 @@ RUN cd /tmp \
     && mkdir -p /usr/local/include/piper-phonemize \
     && cp ../src/*.hpp /usr/local/include/piper-phonemize/ \
     && cp ../src/uni_algo.h /usr/local/include/piper-phonemize/ \
+    && mkdir -p /usr/local/share/doc/piper-phonemize/uni-algo \
+    && cp ../LICENSE.md /usr/local/share/doc/piper-phonemize/ \
+    && cp ../licenses/uni-algo/LICENSE.md /usr/local/share/doc/piper-phonemize/uni-algo/ \
     && ldconfig \
     && rm -rf /tmp/piper-phonemize
 

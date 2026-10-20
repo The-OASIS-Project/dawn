@@ -1,0 +1,27 @@
+# DAWN daemon configuration.
+#
+# Every option and its default: /usr/share/doc/dawn/dawn.toml.example
+# Saving in the WebUI's settings panel rewrites this file.
+#
+# The paths below are where the dawn package installs things.
+
+[webui]
+enabled = true
+www_path = "/usr/share/dawn/www"
+# Made and renewed by dawn-tls; trust /etc/dawn/ssl/ca.crt in your browser.  HTTPS
+# is what lets a browser on another machine use the microphone.
+https = true
+ssl_cert_path = "/etc/dawn/ssl/dawn-chain.crt"
+ssl_key_path = "/etc/dawn/ssl/dawn.key"
+
+[asr]
+models_path = "/var/lib/dawn/models/whisper.cpp"
+
+[tts]
+models_path = "/var/lib/dawn/models"
+
+[sfx]
+sound_path = "/usr/share/dawn/sound_assets/"
+
+[paths]
+data_dir = "/var/lib/dawn/db"

@@ -80,6 +80,24 @@
       }
     },
     {
+      "name": "deb",
+      "inherits": "server",
+      "displayName": "Debian package (x86-64)",
+      "description": "The server build for packaging/deb: installs to /usr with whisper/ggml in the private /usr/lib/dawn (the binary's RUNPATH), and builds ggml for the x86-64-v3 baseline (AVX2, FMA, F16C, BMI2; what the package's preinst checks for) instead of the build machine's CPU.",
+      "binaryDir": "${sourceDir}/build-deb",
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "/usr",
+        "CMAKE_INSTALL_LIBDIR": "lib/dawn",
+        "GGML_NATIVE": "OFF",
+        "GGML_SSE42": "ON",
+        "GGML_AVX": "ON",
+        "GGML_AVX2": "ON",
+        "GGML_FMA": "ON",
+        "GGML_F16C": "ON",
+        "GGML_BMI2": "ON"
+      }
+    },
+    {
       "name": "ci",
       "displayName": "CI (Unit Tests Only)",
       "description": "Minimal build for CI: unit tests without ONNX, CUDA, WebUI, or hardware deps. VOSK=ON skips the whisper.cpp submodule.",
@@ -154,6 +172,10 @@
     {
       "name": "server-debug",
       "configurePreset": "server-debug"
+    },
+    {
+      "name": "deb",
+      "configurePreset": "deb"
     },
     {
       "name": "ci",

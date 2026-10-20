@@ -1,0 +1,34 @@
+[Unit]
+Description=DAWN voice assistant daemon
+Documentation=https://github.com/The-OASIS-Project/dawn
+# Wants=, not Requires=: DAWN still starts when the model download fails, and
+# [mqtt] can point at another broker.
+Wants=network-online.target dawn-models.service mosquitto.service
+After=network-online.target dawn-models.service mosquitto.service
+StartLimitIntervalSec=5min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=dawn
+Group=dawn
+# Models, tool instructions and the optional ./secrets.toml are looked up
+# relative to the working directory.
+WorkingDirectory=/var/lib/dawn
+Environment=HOME=/var/lib/dawn
+# As root (+): the WebUI's certificate in /etc/dawn/ssl, made or renewed as needed.
+ExecStartPre=+/usr/sbin/dawn-tls
+# --server: this build has no local audio.
+ExecStart=/usr/bin/dawn --server --config /etc/dawn/dawn.toml
+Restart=on-failure
+RestartSec=10s
+
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dawn /etc/dawn
+# read-only, not true: a music library under /home must stay readable.
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

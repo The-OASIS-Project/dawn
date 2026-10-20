@@ -7,6 +7,30 @@ Tested on Ubuntu 24.04 LTS (x86_64) with NVIDIA GPU (optional).
 
 ---
 
+## Ubuntu Package (.deb)
+
+On Ubuntu 24.04 (x86-64), each release has a `dawn_<version>_amd64.deb`: the CPU server build,
+nothing to compile. It needs an x86-64-v3 (AVX2) CPU.
+
+```bash
+sudo apt install ./dawn_<version>_amd64.deb
+sudo systemctl start dawn                     # first start downloads ~180 MB of models
+sudo journalctl -u dawn | grep -A6 'SETUP TOKEN'
+sudo dawn-admin user create <name> --admin    # paste the token (valid 5 minutes)
+```
+
+The first start also makes this host's own CA and a certificate for the WebUI (renewed
+automatically). Trust `/etc/dawn/ssl/ca.crt` in your browser (or copy it to
+`/usr/local/share/ca-certificates/` on each client and run `sudo update-ca-certificates`), then open
+`https://<host>:3000` and add an LLM API key under Settings. Satellites take the same `ca.crt` as
+their `ca_cert_path`. The package runs as the
+`dawn` user, with its private libraries in `/usr/lib/dawn`, configuration in `/etc/dawn/` and data
+in `/var/lib/dawn/`. Removing it keeps both; purging removes `/etc/dawn` and still keeps
+`/var/lib/dawn`. Remove a source install (`services/dawn-server/install.sh --uninstall`) first.
+To build the package yourself, see `packaging/deb/README.md`.
+
+---
+
 ## Docker Quickstart
 
 The fastest way to run DAWN on any Linux system. Docker handles all dependencies — no manual compilation needed.
@@ -293,6 +317,7 @@ make -C build-server-debug -j$(nproc)
 | `default` | Full release build |
 | `server` | Server-only release (no local audio required) |
 | `server-debug` | Server-only with debug symbols |
+| `deb` | `server` installed to `/usr` (libraries in `/usr/lib/dawn`) with portable (AVX2) ggml — the Ubuntu package's build |
 | `local` | Local-only (no WebUI) |
 | `full` | Full release build |
 

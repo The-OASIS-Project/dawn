@@ -1,0 +1,10 @@
+#!/bin/sh
+# dawn prerm: stop the daemon before its files go.  On upgrade it keeps running on
+# the old files until postinst restarts it onto the new ones (as debhelper does).
+set -e
+
+if [ -z "${DPKG_ROOT:-}" ] && [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+   deb-systemd-invoke stop dawn.service dawn-models.service >/dev/null || true
+fi
+
+exit 0

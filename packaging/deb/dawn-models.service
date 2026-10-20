@@ -1,0 +1,16 @@
+[Unit]
+Description=Download the DAWN daemon's speech-recognition and embedding models
+Documentation=https://github.com/The-OASIS-Project/dawn
+Wants=network-online.target
+After=network-online.target
+Before=dawn.service
+# Runs before every start of dawn: files already present with the right checksum
+# are skipped without touching the network, and a model a newer release adds is
+# fetched on existing installs too.
+
+[Service]
+Type=oneshot
+User=dawn
+Group=dawn
+ExecStart=/usr/bin/dawn-fetch-models
+TimeoutStartSec=30min

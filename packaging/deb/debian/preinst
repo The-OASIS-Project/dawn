@@ -1,0 +1,34 @@
+#!/bin/sh
+# dawn preinst: refuse an install that could not run, or that would fight a source
+# install of the daemon.
+set -e
+
+case "$1" in
+   install | upgrade)
+      # ggml is built for x86-64-v3; on an older CPU the daemon dies with SIGILL
+      # on every start instead of saying why.
+      for flag in avx2 fma f16c bmi2; do
+         if ! grep -qw "$flag" /proc/cpuinfo; then
+            echo "dawn: this CPU lacks $flag; the package needs an x86-64-v3 (AVX2) CPU." >&2
+            echo "      Build DAWN from source on this machine instead (GETTING_STARTED_SERVER.md)." >&2
+            exit 1
+         fi
+      done
+
+      # A source install (services/dawn-server/install.sh) runs its own service
+      # against /var/lib/dawn, and /usr/local/bin comes before /usr/bin on PATH.
+      if [ -e /usr/local/bin/dawn ] || [ -e /etc/systemd/system/dawn-server.service ]; then
+         cat >&2 <<'EOF'
+dawn: a source install of the DAWN daemon is present (/usr/local/bin/dawn or
+      dawn-server.service).  Both would run against /var/lib/dawn, and the
+      old binary would shadow this one on PATH.  Remove it first, from your
+      DAWN checkout, keeping your databases when asked:
+          sudo services/dawn-server/install.sh --uninstall
+      then install this package again.
+EOF
+         exit 1
+      fi
+      ;;
+esac
+
+exit 0
