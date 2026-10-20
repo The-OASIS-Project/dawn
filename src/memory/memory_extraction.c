@@ -1632,16 +1632,14 @@ static int trigger_extraction(int user_id,
       return 0;
    }
    /* Nothing the user said is new (only DAWN's own posts, say): mark it done
-    * rather than send the model an empty conversation. */
+    * rather than send the model an empty conversation.  Only as far as the
+    * history checked: a reply arriving since then is still to be read. */
    if (!memory_extraction_input_has_question(filtered)) {
       json_object_put(filtered);
       free(ctx);
-      if (conversation_id > 0) {
-         int64_t max_id = 0;
-         if (conv_db_get_max_msg_id(conversation_id, user_id, &max_id) == AUTH_DB_SUCCESS &&
-             max_id > 0) {
-            memory_db_set_last_extracted(conversation_id, message_count, max_id);
-         }
+      const int64_t checked_id = memory_extraction_history_max_id(conversation_history);
+      if (conversation_id > 0 && checked_id > last_msg_id) {
+         memory_db_set_last_extracted(conversation_id, message_count, checked_id);
       }
       OLOG_INFO("memory_extraction: conv %lld: nothing the user said is new; skipped",
                 (long long)conversation_id);

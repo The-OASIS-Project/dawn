@@ -286,6 +286,19 @@ static int distinct_row_id_count(struct json_object *ids) {
 }
 #endif /* ENABLE_AUTH */
 
+int64_t memory_extraction_history_max_id(struct json_object *history) {
+   int64_t max_id = 0;
+   for (size_t i = 0; history && i < json_object_array_length(history); i++) {
+      struct json_object *id_obj = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id_obj)) {
+         const int64_t id = json_object_get_int64(id_obj);
+         if (id > max_id)
+            max_id = id;
+      }
+   }
+   return max_id;
+}
+
 bool memory_extraction_input_has_question(struct json_object *input) {
    for (size_t i = 0; input && i < json_object_array_length(input); i++) {
       if (llm_history_is_question(json_object_array_get_idx(input, i))) {
@@ -295,7 +308,6 @@ bool memory_extraction_input_has_question(struct json_object *input) {
    return false;
 }
 
-#ifdef ENABLE_AUTH
 /* @p filtered without the rows DAWN wrote on its own (message_unprompted: a
  * briefing or message delivered to a channel, a completion note): DAWN's
  * words, never the user's.  Posts reach a history only from the database, so
@@ -338,7 +350,6 @@ static struct json_object *drop_unprompted(int user_id,
    json_object_put(filtered);
    return kept;
 }
-#endif /* ENABLE_AUTH */
 
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
@@ -457,6 +468,9 @@ struct json_object *memory_extraction_build_input(int user_id,
          rows_ok = false;
       }
    }
+#endif
+   /* In every build: DAWN's posts are in the database whether or not this
+    * build checks row ownership (the bench re-extracts without the WebUI). */
    if (rows_ok && row_ids) {
       filtered = drop_unprompted(user_id, row_ids, filtered);
       if (!filtered) {
@@ -467,7 +481,6 @@ struct json_object *memory_extraction_build_input(int user_id,
          return NULL;
       }
    }
-#endif
    json_object_put(row_ids);
    if (!rows_ok) {
       json_object_put(filtered);

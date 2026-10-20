@@ -63,6 +63,14 @@ extern "C" {
  */
 bool memory_extraction_input_has_question(struct json_object *input);
 
+/**
+ * @brief The highest row id in a conversation history (0 when none has one)
+ *
+ * Marking a conversation extracted after checking a history goes only this
+ * far: a row added since (a reply arriving meanwhile) was never checked.
+ */
+int64_t memory_extraction_history_max_id(struct json_object *history);
+
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
                                                   struct json_object *conversation_history,

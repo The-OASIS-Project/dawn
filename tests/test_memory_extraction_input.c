@@ -140,7 +140,6 @@ static void test_third_party_results_are_stubbed(void) {
 /* A row DAWN wrote on its own (a delivered briefing) never reaches
  * extraction; a failed lookup extracts nothing rather than the post. */
 static void test_unprompted_rows_are_left_out(void) {
-#ifdef ENABLE_AUTH
    struct json_object *hist = json_tokener_parse(HISTORY);
    g_unprompted_id = 12; /* the assistant's "Worth $5,245." */
    struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0);
@@ -157,9 +156,6 @@ static void test_unprompted_rows_are_left_out(void) {
    g_unprompted_fails = true;
    TEST_ASSERT_NULL(memory_extraction_build_input(1, 1699, hist, 0));
    json_object_put(hist);
-#else
-   TEST_IGNORE_MESSAGE("unprompted rows exist only with auth (WebUI builds)");
-#endif
 }
 
 /* An input holds a question only when the user said something in it. */
@@ -173,6 +169,17 @@ static void test_input_has_question(void) {
    TEST_ASSERT_FALSE(memory_extraction_input_has_question(only_reply));
    json_object_put(only_reply);
    json_object_put(hist);
+}
+
+/* The cursor after a skip goes only as far as the history checked, never to
+ * a row added since (rows without an id don't count). */
+static void test_history_max_id(void) {
+   struct json_object *hist = json_tokener_parse(HISTORY);
+   TEST_ASSERT_EQUAL_INT64(12, memory_extraction_history_max_id(hist));
+   json_object_put(hist);
+   struct json_object *none = json_tokener_parse("[{\"role\":\"user\",\"content\":\"x\"}]");
+   TEST_ASSERT_EQUAL_INT64(0, memory_extraction_history_max_id(none));
+   json_object_put(none);
 }
 
 static void test_unstamped_question_refused(void) {
@@ -189,5 +196,6 @@ int main(void) {
    RUN_TEST(test_third_party_results_are_stubbed);
    RUN_TEST(test_unprompted_rows_are_left_out);
    RUN_TEST(test_input_has_question);
+   RUN_TEST(test_history_max_id);
    return UNITY_END();
 }
