@@ -192,11 +192,28 @@ static int http_post_json(const char *url,
 }
 
 /**
+ * @brief Join a provider's base URL and an endpoint path into @p out
+ *
+ * @return true, or false (logged) if the URL does not fit: a cut-off URL would
+ *         query the wrong endpoint.
+ */
+static bool build_url(char *out, size_t size, const char *base_url, const char *path) {
+   int n = snprintf(out, size, "%s%s", base_url, path);
+   if (n < 0 || (size_t)n >= size) {
+      OLOG_WARNING("Local LLM: endpoint URL too long (%d bytes), skipping %s", n, path);
+      return false;
+   }
+   return true;
+}
+
+/**
  * @brief Probe endpoint with GET request (success = 200 OK)
  */
 static bool probe_endpoint(const char *base_url, const char *path, int timeout_ms) {
    char url[512];
-   snprintf(url, sizeof(url), "%s%s", base_url, path);
+   if (!build_url(url, sizeof(url), base_url, path)) {
+      return false;
+   }
 
    curl_buffer_t response;
    int result = http_get(url, timeout_ms, &response);
@@ -396,7 +413,9 @@ static int try_ollama_ps_context(const char *base_url, const char *model, int *c
    }
 
    char url[512];
-   snprintf(url, sizeof(url), "%s/api/ps", base_url);
+   if (!build_url(url, sizeof(url), base_url, "/api/ps")) {
+      return FAILURE;
+   }
 
    curl_buffer_t response;
    int result = http_get(url, 3000, &response);
@@ -454,7 +473,9 @@ static int try_ollama_show_context(const char *base_url, const char *model, int 
    }
 
    char url[512];
-   snprintf(url, sizeof(url), "%s/api/show", base_url);
+   if (!build_url(url, sizeof(url), base_url, "/api/show")) {
+      return FAILURE;
+   }
 
    /* Build JSON request body */
    struct json_object *req = json_object_new_object();
@@ -543,7 +564,9 @@ static int try_ollama_show_context(const char *base_url, const char *model, int 
  */
 static int try_llamacpp_context(const char *base_url, int *ctx_out) {
    char url[512];
-   snprintf(url, sizeof(url), "%s/props", base_url);
+   if (!build_url(url, sizeof(url), base_url, "/props")) {
+      return FAILURE;
+   }
 
    curl_buffer_t response;
    int result = http_get(url, 3000, &response);
@@ -596,7 +619,9 @@ static int try_llamacpp_context(const char *base_url, int *ctx_out) {
  */
 static int try_llamacpp_slots_context(const char *base_url, int *ctx_out) {
    char url[512];
-   snprintf(url, sizeof(url), "%s/slots", base_url);
+   if (!build_url(url, sizeof(url), base_url, "/slots")) {
+      return FAILURE;
+   }
 
    curl_buffer_t response;
    int result = http_get(url, 3000, &response);

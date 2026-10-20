@@ -553,7 +553,7 @@ static int entity_adapter_query(int user_id,
    }
    row_count = n_rows;
 
-   if (row_count == 0) {
+   if (row_count <= 0) {
       free(rows);
       return SUCCESS;
    }
