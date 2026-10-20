@@ -46,6 +46,8 @@
 #include "config/dawn_config.h"
 #include "core/scheduler.h"
 #include "core/session_manager.h"
+#include "core/tz.h"
+#include "core/user_tz.h"
 #include "dawn.h"
 #include "logging.h"
 #include "version.h"
@@ -501,11 +503,14 @@ void send_session_token_impl(ws_connection_t *conn, const char *token) {
       if (auth_db_get_session(conn->auth_session_token, &auth_session) == AUTH_DB_SUCCESS) {
          is_admin = auth_session.is_admin;
       }
+      /* The zone the client shows this user's times in, as Friday says them:
+       * their own setting, else the server's.  Zone names are [A-Za-z0-9_+-/]. */
       snprintf(json, sizeof(json),
                "{\"type\":\"session\",\"payload\":{\"token\":\"%s\","
                "\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s,"
-               "\"reconnected\":%s,\"session_id\":%u}}",
-               token, conn->username, is_admin ? "true" : "false", reconnected, session_id);
+               "\"reconnected\":%s,\"session_id\":%u,\"timezone\":\"%s\"}}",
+               token, conn->username, is_admin ? "true" : "false", reconnected, session_id,
+               tz_name(user_tz(conn->auth_user_id)));
    } else {
       /* Unauthenticated clients don't drive reconnect/load_conversation logic (it's
        * auth-gated), so omit reconnected/session_id here — no reason to hand the

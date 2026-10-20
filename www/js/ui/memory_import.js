@@ -131,11 +131,11 @@
       let blob, filename;
       if (payload.format === 'text') {
          blob = new Blob([payload.data], { type: 'text/plain' });
-         filename = `dawn-memories-${new Date().toISOString().slice(0, 10)}.txt`;
+         filename = `dawn-memories-${DawnTime.dayKey(DawnTime.nowSec())}.txt`;
       } else {
          const jsonStr = JSON.stringify(payload.data, null, 2);
          blob = new Blob([jsonStr], { type: 'application/json' });
-         filename = `dawn-memories-${new Date().toISOString().slice(0, 10)}.json`;
+         filename = `dawn-memories-${DawnTime.dayKey(DawnTime.nowSec())}.json`;
       }
 
       // Trigger download

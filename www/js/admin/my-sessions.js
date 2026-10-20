@@ -61,7 +61,6 @@
       list.innerHTML = sessions
          .map((session) => {
             const isCurrent = session.token_prefix === currentPrefix;
-            const createdDate = new Date(session.created_at * 1000);
             const lastActivity = new Date(session.last_activity * 1000);
             const userAgent = parseUserAgent(session.user_agent);
 

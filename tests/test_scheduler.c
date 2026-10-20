@@ -350,6 +350,26 @@ static void test_dismiss_optimistic(void) {
    TEST_ASSERT_NOT_EQUAL(0, rc);
 }
 
+/* A running task or briefing is 'ringing' and ends itself: a dismiss can't end
+ * it (it would schedule a second next occurrence), but a stop's leftover is
+ * ended at startup through scheduler_db_end_ring. */
+static void test_dismiss_rings_only(void) {
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   scheduler_db_update_status_fired(id, SCHED_STATUS_RINGING, 1000);
+
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_dismiss(id));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_RINGING, got.status);
+
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_end_ring(id, 1000, SCHED_STATUS_MISSED));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_MISSED, got.status);
+}
+
 /* A ringing event ends once: the ring's own ending and a user's dismiss can't
  * both win (each schedules the next occurrence when it does), and a ring's
  * ending can't end a later firing of the same row. */
@@ -1606,6 +1626,7 @@ int main(void) {
    RUN_TEST(test_cancel_optimistic);
    RUN_TEST(test_dismiss_optimistic);
    RUN_TEST(test_end_ring_optimistic);
+   RUN_TEST(test_dismiss_rings_only);
    RUN_TEST(test_latest_ringing);
    RUN_TEST(test_snooze);
    RUN_TEST(test_due_events);

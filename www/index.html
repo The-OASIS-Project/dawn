@@ -2742,7 +2742,10 @@ Format rules:
                               name="location"
                               placeholder="e.g., New York, NY"
                            />
-                           <p class="setting-hint">Used for weather and local information.</p>
+                           <p class="setting-hint">
+                              Yours, for weather and local information. Overrides the server's
+                              default.
+                           </p>
                         </div>
 
                         <div class="settings-row">
@@ -2751,6 +2754,9 @@ Format rules:
                               <select id="my-timezone" name="timezone">
                                  <!-- Filled by my-settings.js (DawnTimezones) -->
                               </select>
+                              <p class="setting-hint">
+                                 Yours. &ldquo;Same as server&rdquo; follows the server's zone.
+                              </p>
                            </div>
 
                            <div class="settings-group half">
@@ -3659,6 +3665,7 @@ token = "eyJ..."</pre
       <!-- storage.js must load before any consumer of DawnStore (state.js reads
            at load-time; theme/tts follow). -->
       <script defer src="/js/core/storage.js"></script>
+      <script defer src="/js/core/time.js"></script>
       <!-- escstack.js (global Escape/dismiss LIFO) must load before any overlay
            module that registers into it. -->
       <script defer src="/js/core/escstack.js"></script>

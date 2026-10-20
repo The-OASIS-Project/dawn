@@ -1619,10 +1619,13 @@
 
       // Group the remaining top-level rows by date (pinned rows already emitted).
       const groups = {};
-      const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-      const yesterday = today - 86400000;
-      const weekAgo = today - 604800000;
+      /* Days in the user's zone (DawnTime), as Friday says them. */
+      const now = DawnTime.today();
+      const dayStart = (back) =>
+         DawnTime.startOf(new Date(now.getFullYear(), now.getMonth(), now.getDate() - back)) * 1000;
+      const today = dayStart(0);
+      const yesterday = dayStart(1);
+      const weekAgo = dayStart(7);
 
       // Sort defensively by updated_at DESC — like the Pinned section above — so an
       // in-place pin/unpin patch (which mutates the cached array without a refetch)
@@ -1644,8 +1647,11 @@
          } else if (timestamp >= weekAgo) {
             groupKey = 'This Week';
          } else {
-            const date = new Date(timestamp);
-            groupKey = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+            groupKey = DawnTime.format(
+               conv.updated_at,
+               { month: 'long', year: 'numeric' },
+               'en-US'
+            );
          }
 
          if (!groups[groupKey]) {
@@ -2170,6 +2176,8 @@
       initHistoryElements();
       initHistoryListeners();
       restoreActiveConversationId();
+      /* The Today / Yesterday / This Week groups are the user's zone's days. */
+      DawnEvents.on('timezone', renderConversationList);
    }
 
    function setCallbacks(cbs) {
@@ -2274,10 +2282,10 @@
     * @returns {string} "YYYY-MM-DD-HHmm" or date-only fallback
     */
    function filenameDatetime(iso) {
-      if (!iso) return new Date().toISOString().substring(0, 10);
-      const d = new Date(iso);
+      if (!iso) return DawnTime.dayKey(DawnTime.nowSec());
+      const p = DawnTime.parts(Date.parse(iso) / 1000);
       const pad = (n) => String(n).padStart(2, '0');
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+      return `${p.year}-${pad(p.month)}-${pad(p.day)}-${pad(p.hour)}${pad(p.minute)}`;
    }
 
    /**

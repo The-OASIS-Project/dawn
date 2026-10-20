@@ -159,6 +159,15 @@
       return h + ':' + pad2(Math.floor(rem / 60)) + ':' + pad2(rem % 60);
    }
 
+   /* A task or briefing is 'ringing' while it runs; it ends itself and can't
+    * be dismissed. */
+   function isRunning(event) {
+      return (
+         event.status === 'ringing' &&
+         (event.event_type === 'task' || event.event_type === 'briefing')
+      );
+   }
+
    function sameDay(a, b) {
       return (
          a.getFullYear() === b.getFullYear() &&
@@ -173,10 +182,12 @@
       return sameDay(target, t);
    }
 
+   /* Times and days are the user's zone's (DawnTime), as Friday says them;
+    * sameDay/isTomorrow compare its civil dates. */
    function formatAbsTime(ts) {
-      const d = new Date(ts * 1000);
-      let h = d.getHours();
-      const m = d.getMinutes();
+      const p = DawnTime.parts(ts);
+      let h = p.hour;
+      const m = p.minute;
       const ampm = h >= 12 ? 'PM' : 'AM';
       h = h % 12;
       if (h === 0) h = 12;
@@ -185,15 +196,15 @@
 
    /* Human-readable "when": "in 4 minutes", "tomorrow at 7:00 AM", etc. */
    function formatWhen(event) {
-      const now = new Date();
+      const now = DawnTime.today();
       const fireTs = event.effective_fire_at || event.fire_at;
-      const fire = new Date(fireTs * 1000);
-      const diffSec = Math.floor((fire - now) / 1000);
+      const fire = DawnTime.dateOf(fireTs);
+      const diffSec = fireTs - DawnTime.nowSec();
 
       if (event.status === 'missed') {
          const day = sameDay(fire, now)
             ? 'today'
-            : isTomorrow(fire, new Date(now.getTime() - 86400000))
+            : sameDay(fire, new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
               ? 'yesterday'
               : fire.toLocaleDateString(undefined, {
                    weekday: 'short',
@@ -202,7 +213,7 @@
                 });
          return 'missed ' + day + ' ' + formatAbsTime(fireTs);
       }
-      if (event.status === 'ringing') return 'RINGING NOW';
+      if (event.status === 'ringing') return isRunning(event) ? 'RUNNING NOW' : 'RINGING NOW';
       if (event.status === 'snoozed') {
          return 'snoozed until ' + formatAbsTime(fireTs);
       }
@@ -540,6 +551,22 @@
             ? '<span class="sched-row-snooze-glyph" aria-hidden="true">Z</span>'
             : '';
 
+      /* The server won't dismiss a running task or briefing: no button. */
+      const deleteBtn = isRunning(event)
+         ? ''
+         : '<button type="button" class="sched-row-delete"' +
+           ' aria-label="' +
+           escapeAttr(deleteAria) +
+           '"' +
+           ' data-delete-label="' +
+           escapeAttr(deleteLabel) +
+           '">' +
+           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
+           ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+           '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/>' +
+           '</svg>' +
+           '</button>';
+
       return (
          '<li class="sched-row sched-type-' +
          type +
@@ -582,18 +609,7 @@
          escape(formatTimeColumn(event)) +
          '</time>' +
          '<div class="sched-row-actions">' +
-         '<button type="button" class="sched-row-delete"' +
-         ' aria-label="' +
-         escapeAttr(deleteAria) +
-         '"' +
-         ' data-delete-label="' +
-         escapeAttr(deleteLabel) +
-         '">' +
-         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
-         ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-         '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/>' +
-         '</svg>' +
-         '</button>' +
+         deleteBtn +
          '</div>' +
          '</li>'
       );
@@ -880,7 +896,8 @@
             const ev = state.events.find((e) => e.id === id);
             if (ev && els.srAnnounce) {
                els.srAnnounce.textContent =
-                  (ev.name || TYPE_LABEL[ev.event_type] || 'Event') + ' is ringing';
+                  (ev.name || TYPE_LABEL[ev.event_type] || 'Event') +
+                  (isRunning(ev) ? ' is running' : ' is ringing');
             }
          }
       });
@@ -1656,6 +1673,10 @@
 
       els.btn.addEventListener('click', toggle);
       if (els.closeBtn) els.closeBtn.addEventListener('click', close);
+      /* Another zone changes every time shown. */
+      DawnEvents.on('timezone', function () {
+         if (state.isOpen) render();
+      });
       if (els.searchInput) els.searchInput.addEventListener('input', onSearchInput);
       if (els.clearMissedBtn) els.clearMissedBtn.addEventListener('click', onClearMissedClick);
 

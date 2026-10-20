@@ -292,18 +292,19 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at);
 int scheduler_db_cancel(int64_t id);
 
 /**
- * @brief Dismiss a ringing event (optimistic: only if status='ringing')
+ * @brief Dismiss a ringing timer, alarm or reminder (optimistic: only if
+ *        status='ringing'); a running task or briefing ends itself
  * @param id Event ID
- * @return SUCCESS if dismissed, FAILURE if already handled
+ * @return SUCCESS if dismissed, FAILURE if already handled or not one of those
  */
 int scheduler_db_dismiss(int64_t id);
 
 /**
- * @brief End one firing of a ringing event as @p status (optimistic: only if
- *        it is still ringing from the firing at @p fired_at)
+ * @brief End one firing of a ringing event of any type as @p status
+ *        (optimistic: only if it is still ringing from the firing at @p fired_at)
  * @param id       Event ID
  * @param fired_at When this firing rang (the row's fired_at)
- * @param status   SCHED_STATUS_DISMISSED or SCHED_STATUS_TIMED_OUT
+ * @param status   The status it ends with
  * @return SUCCESS if ended, FAILURE if already handled (or ringing again)
  */
 int scheduler_db_end_ring(int64_t id, time_t fired_at, sched_status_t status);

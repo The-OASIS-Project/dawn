@@ -203,14 +203,11 @@
       );
    }
 
-   /** The item's date as the model sees it (YYYY-MM-DD, local), or '' without
+   /** The item's date as the model sees it (YYYY-MM-DD, the user's zone), or '' without
     *  a valid timestamp. */
    function itemDate(ts) {
       if (typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) return '';
-      const d = new Date(ts * 1000);
-      if (Number.isNaN(d.getTime())) return '';
-      const pad = (n) => String(n).padStart(2, '0');
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      return DawnTime.dayKey(ts);
    }
 
    /** Cache derived strings on the item so we don't re-sanitize/re-format on

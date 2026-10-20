@@ -46,8 +46,7 @@
    let chipDismissedAt = 0;
 
    function todayBucket() {
-      const d = new Date();
-      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      return DawnTime.dayKey(DawnTime.nowSec());
    }
 
    function rolloverIfNeeded() {
@@ -67,10 +66,8 @@
 
    function fmtTime(ts) {
       if (!ts) return '';
-      const d = new Date(ts * 1000);
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      return `${hh}:${mm}`;
+      const p = DawnTime.parts(ts);
+      return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
    }
 
    function sanitizeNote(note) {

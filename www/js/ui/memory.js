@@ -1528,18 +1528,17 @@
    function formatDate(timestamp) {
       if (!timestamp) return '';
 
-      const date = new Date(timestamp * 1000);
-      const now = new Date();
-      const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+      /* Calendar days in the user's zone (rounded: a DST day is 23 or 25 hours). */
+      const diffDays = Math.round((DawnTime.today() - DawnTime.dateOf(timestamp)) / 86400000);
 
       if (diffDays === 0) {
          return 'Today';
       } else if (diffDays === 1) {
          return 'Yesterday';
       } else if (diffDays < 7) {
-         return date.toLocaleDateString(undefined, { weekday: 'short' });
+         return DawnTime.format(timestamp, { weekday: 'short' });
       } else {
-         return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+         return DawnTime.format(timestamp, { month: 'short', day: 'numeric' });
       }
    }
 

@@ -762,7 +762,7 @@
       }
       const rows = versions
          .map((v) => {
-            const when = new Date(v.archived_at * 1000).toLocaleString();
+            const when = DawnTime.formatDateTime(v.archived_at);
             return `
             <div class="note-version-row">
                <div class="note-version-info">
@@ -819,7 +819,7 @@
       }
       const rows = items
          .map((d) => {
-            const when = new Date(d.archived_at * 1000).toLocaleString();
+            const when = DawnTime.formatDateTime(d.archived_at);
             return `
             <div class="note-version-row">
                <div class="note-version-info">
@@ -1017,7 +1017,7 @@
 
    function renderDocItem(doc) {
       const isNote = doc.is_note || doc.filetype === 'note';
-      const date = new Date(doc.created_at * 1000).toLocaleDateString();
+      const date = DawnTime.formatDate(doc.created_at);
       const globalBadge = doc.is_global ? '<span class="global-badge">GLOBAL</span>' : '';
       const ownerBadge =
          state.showAll && doc.owner_name

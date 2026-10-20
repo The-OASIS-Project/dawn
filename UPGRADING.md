@@ -12,6 +12,20 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-20 — Repeating reminders, timers and alarms that stopped may come back
+
+**What changed.** A reminder, timer or alarm that rang for someone other than the local
+speaker's user (anyone using DAWN only from the WebUI) never finished ringing, so a repeating
+one stopped after its first ring and stayed "ringing" in the scheduler panel. DAWN now ends any
+ring left open when it starts, and a repeating one goes on to its next time. On the first start
+after this upgrade, those stopped series resume.
+
+**What you need to do.** After the first start, open the scheduler panel and cancel any
+repeating reminder, timer or alarm you don't want back, including ones you had re-created by
+hand (they now fire twice).
+
+---
+
 ## 2026-10-16 — libical is required; "UTC" in My Settings now means the server's zone
 
 **What changed.** DAWN now reads clock times in a named time zone through libical, so building
