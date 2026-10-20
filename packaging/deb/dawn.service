@@ -1,8 +1,8 @@
 [Unit]
 Description=DAWN voice assistant daemon
 Documentation=https://github.com/The-OASIS-Project/dawn
-# Wants=, not Requires=: DAWN still starts when the model download fails, and
-# [mqtt] can point at another broker.
+# Wants=, not Requires=: [mqtt] can point at another broker.  The models are still
+# needed: without its Whisper model DAWN exits at start.
 Wants=network-online.target dawn-models.service mosquitto.service
 After=network-online.target dawn-models.service mosquitto.service
 

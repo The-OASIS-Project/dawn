@@ -136,18 +136,18 @@ jobs:
 
       - name: No package version published twice
         # A tag cut without bumping a component's version (include/version.h,
-        # satellite_version.h) would republish that version with new contents, and
-        # apt would treat everyone's upgrade as already done.
+        # satellite_version.h), or a re-run of this tag after its packages were
+        # uploaded, would republish that version with new contents, and apt would
+        # treat everyone's upgrade as already done.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          earlier="$(gh api --paginate "repos/$GH_REPO/releases" \
-            --jq '.[] | select(.tag_name != $ENV.GITHUB_REF_NAME) | .assets[].name')"
+          published="$(gh api --paginate "repos/$GH_REPO/releases" --jq '.[].assets[].name')"
           for f in dist/*.deb; do
-            if grep -qxF "${f##*/}" <<<"$earlier"; then
-              echo "${f##*/} is already in an earlier release: bump that component's version" >&2
+            if grep -qxF "${f##*/}" <<<"$published"; then
+              echo "${f##*/} is already published: bump that component's version" >&2
               exit 1
             fi
           done
@@ -164,6 +164,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Create the release if it doesn't exist yet; otherwise update its assets.
+          # Create the release if it doesn't exist yet; otherwise add to it (the check
+          # above stops a .deb from being replaced).
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/* \
             || gh release upload "$GITHUB_REF_NAME" dist/* --clobber

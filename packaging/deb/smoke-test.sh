@@ -9,10 +9,10 @@
 # package; that install enables dawn.service without starting it; that starting it
 # downloads the models (dawn-models.service), makes the TLS certificate
 # (dawn-tls), and boots the daemon (TTS loads, WebUI answers over HTTPS with the
-# host's CA, dawn-admin answers); that a restart keeps the certificate; that an
-# upgrade restarts the running daemon and keeps the config; that it comes up by
-# itself at boot; and that remove and purge stop it and keep or delete what they
-# should.
+# host's CA, dawn-admin answers); that install makes a satellite registration key;
+# that a restart keeps the certificate; that an upgrade restarts the running daemon,
+# keeps the config and gives it back to dawn; that it comes up by itself at boot;
+# and that remove and purge stop it and keep or delete what they should.
 set -euo pipefail
 
 deb="$(realpath "$1")"
@@ -33,6 +33,17 @@ up() {
    fail "dawn did not come up"
 }
 
+# restarted PID WHAT: wait for postinst's queued restart to replace PID, then for
+# the daemon to come up.
+restarted() {
+   for _ in $(seq 120); do
+      [ "$(systemctl show -p MainPID --value dawn)" = "$1" ] || break
+      sleep 1
+   done
+   [ "$(systemctl show -p MainPID --value dawn)" != "$1" ] || fail "$2 did not restart dawn"
+   up
+}
+
 install_phase() {
    apt-get update -qq
 
@@ -46,6 +57,8 @@ install_phase() {
    out="$(systemd-analyze verify "${units[@]}" 2>&1)" || fail "units: $out"
    [ -z "$out" ] || fail "units: $out"
    [ "$(systemctl is-enabled dawn)" = enabled ] || fail "install did not enable dawn"
+   grep -Eq '^satellite_registration_key = "[0-9a-f]{64}"$' /etc/dawn/secrets.toml ||
+      fail "no satellite registration key in /etc/dawn/secrets.toml"
    ! systemctl -q is-active dawn || fail "install started dawn"
 
    echo "==> libraries"
@@ -76,18 +89,22 @@ install_phase() {
    [ "$(journalctl -u dawn --no-pager | grep -c 'dawn-tls: issuing')" = 1 ] ||
       fail "dawn-tls reissued a current certificate"
 
-   echo "==> reinstall, upgrade (the running daemon is restarted, the config kept)"
+   echo "==> reinstall, upgrade (the running daemon is restarted, the config kept and given back to dawn)"
    echo "# smoke-marker" >>/etc/dawn/dawn.toml
+   pid="$(systemctl show -p MainPID --value dawn)"
    apt-get install -y -qq --reinstall "$deb" >/dev/null
+   restarted "$pid" reinstall
+   chown root:root /etc/dawn/dawn.toml /etc/dawn/secrets.toml
+   chmod 644 /etc/dawn/secrets.toml
    pid="$(systemctl show -p MainPID --value dawn)"
    dpkg-deb -R "$deb" /tmp/upgrade
    sed -i 's/^Version: .*/&+smoke1/' /tmp/upgrade/DEBIAN/control
    dpkg-deb --root-owner-group -b /tmp/upgrade /tmp/dawn-upgrade.deb >/dev/null
    apt-get install -y -qq /tmp/dawn-upgrade.deb >/dev/null
-   up
-   [ "$(systemctl show -p MainPID --value dawn)" != "$pid" ] || fail "upgrade did not restart dawn"
+   restarted "$pid" upgrade
    grep -q smoke-marker /etc/dawn/dawn.toml || fail "upgrade replaced /etc/dawn/dawn.toml"
    [ "$(stat -c %U /etc/dawn/dawn.toml)" = dawn ] || fail "dawn.toml not owned by dawn"
+   [ "$(stat -c %U /etc/dawn/secrets.toml)" = dawn ] || fail "secrets.toml not owned by dawn"
    [ "$(stat -c %a /etc/dawn/secrets.toml)" = 600 ] || fail "secrets.toml not mode 600"
 }
 

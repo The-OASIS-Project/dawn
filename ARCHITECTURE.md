@@ -53,6 +53,7 @@ dawn/
 ├── dawn_satellite_arduino/ # DAP2 Tier 2 satellite (ESP32-S3, Arduino sketch)
 ├── dawn-admin/             # Admin CLI (socket client to daemon)
 ├── services/               # Systemd service files
+├── packaging/              # .deb packaging: the daemon's Ubuntu package (deb/), helpers shared with the satellite's
 ├── scripts/                # Utility scripts (setup, tooling)
 ├── tests/                  # Unit and integration tests
 ├── benchmarks/             # Retrieval benchmark harness (LongMemEval, LoCoMo, ConvoMem)

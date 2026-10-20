@@ -2,18 +2,18 @@
 #
 # dawn-tls: keep the WebUI's TLS certificate valid.  Files, in /etc/dawn/ssl:
 #
-#   ca.crt, ca.key         a private CA made on this host (RSA-4096, 10 years).
-#                          Trust ca.crt in browsers, and give it to satellites as
-#                          their ca_cert_path.
+#   ca.crt, ca.key         a private CA made on this host (RSA-4096, 10 years), able
+#                          to sign server certificates only.  Trust ca.crt in
+#                          browsers, and give it to satellites as their ca_cert_path.
 #   dawn-chain.crt, dawn.key   the server certificate (EC P-256, 825 days, the most
 #                          Apple accepts from a user-trusted CA), signed by that CA,
-#                          for this host's name, localhost and its addresses.
+#                          for this host's names, localhost and its addresses.
 #
-# dawn.service runs this as root before every start.  It makes the CA once, and a
-# new server certificate when there is none, when it expires within 60 days, or
-# when the host's name or addresses changed.  The CA stays, so browsers and
-# satellites that trust it keep working.  A server certificate this CA did not sign
-# (one you installed yourself) is left alone.
+# dawn.service runs this as root before every start.  It makes the CA only when
+# neither ca.crt nor ca.key exists, and a new server certificate when there is none,
+# when it expires within 60 days, or when the host's names or addresses changed.  A
+# server certificate this CA did not sign (one you installed yourself) is left alone,
+# and so is everything when ca.key has been moved off the host or has a passphrase.
 set -eu
 
 DIR=/etc/dawn/ssl
@@ -23,36 +23,71 @@ umask 077
 [ -d "$DIR" ] || install -d -m 750 -o root -g dawn "$DIR"
 cd "$DIR"
 
-if [ ! -s ca.key ] || [ ! -s ca.crt ]; then
+# A server certificate this CA didn't sign is the operator's; decided before the CA
+# is touched, so a certificate installed without our CA is never replaced.
+if [ -s dawn-chain.crt ] && ! { [ -s ca.crt ] &&
+   openssl verify -no_check_time -CAfile ca.crt dawn-chain.crt >/dev/null 2>&1; }; then
+   exit 0
+fi
+
+if [ ! -e ca.key ] && [ ! -e ca.crt ]; then
    echo "dawn-tls: creating this host's DAWN CA ($DIR/ca.crt)"
+   printf '%s\n' "[req]" "distinguished_name=dn" "prompt=no" "[dn]" \
+      "CN=DAWN Private CA ($(hostname))" "O=DAWN" "[ca]" \
+      "basicConstraints=critical,CA:TRUE,pathlen:0" "keyUsage=critical,keyCertSign,cRLSign" \
+      "extendedKeyUsage=serverAuth" "subjectKeyIdentifier=hash" \
+      "authorityKeyIdentifier=keyid:always" >ca.cnf.new
    openssl genrsa -out ca.key.new 4096 2>/dev/null
-   openssl req -new -x509 -key ca.key.new -out ca.crt.new -days 3650 \
-      -subj "/CN=DAWN Private CA ($(hostname))/O=DAWN"
+   openssl req -new -x509 -config ca.cnf.new -extensions ca -key ca.key.new -out ca.crt.new \
+      -days 3650
    chmod 644 ca.crt.new
    mv -f ca.key.new ca.key
    mv -f ca.crt.new ca.crt
-   rm -f dawn-chain.crt # signed by a CA that no longer exists
+   rm -f ca.cnf.new
 fi
 
-san="DNS:localhost,DNS:$(hostname),IP:127.0.0.1"
-for ip in $(hostname -I 2>/dev/null); do
-   san="$san,IP:$ip"
-done
+# Names and addresses, sorted so the list only changes when they do.  IPv6 temporary
+# (privacy) addresses rotate daily and are left out; so are non-global ones.
+host="$(hostname)"
+fqdn="$(hostname -f 2>/dev/null || true)"
+san="$({
+   echo "DNS:localhost"
+   echo "DNS:$host"
+   case "$host" in *.*) ;; *) echo "DNS:$host.local" ;; esac
+   case "$fqdn" in *.*) echo "DNS:$fqdn" ;; esac
+   echo "IP:127.0.0.1"
+   for ip in $(hostname -I 2>/dev/null); do
+      case "$ip" in *:*) ;; *) echo "IP:$ip" ;; esac
+   done
+   # /proc/net/if_inet6: address, ifindex, prefix length, scope (00 global), flags
+   # (0x01 temporary).
+   while read -r addr _ _ scope flags _; do
+      [ "$scope" = 00 ] && [ $((0x$flags & 1)) -eq 0 ] &&
+         echo "IP:$(echo "$addr" | sed 's/..../&:/g; s/:$//')"
+   done </proc/net/if_inet6 2>/dev/null || true
+} | sort -u | paste -sd, -)"
 
-if [ -s dawn-chain.crt ] && [ -s dawn.key ]; then
-   # Not signed by this CA (expired or not): someone else's certificate.
-   openssl verify -no_check_time -CAfile ca.crt dawn-chain.crt >/dev/null 2>&1 || exit 0
-   if openssl x509 -in dawn-chain.crt -noout -checkend 5184000 >/dev/null &&
-      [ "$(cat dawn.san 2>/dev/null)" = "$san" ]; then
-      exit 0
-   fi
+if [ -s dawn-chain.crt ] && [ -s dawn.key ] &&
+   openssl x509 -in dawn-chain.crt -noout -checkend 5184000 >/dev/null &&
+   [ "$(cat dawn.san 2>/dev/null)" = "$san" ]; then
+   exit 0
+fi
+
+# No usable CA key: moved off the host, or passphrase-protected (nobody to type it).
+if [ ! -s ca.crt ] || ! openssl pkey -in ca.key -passin pass: -noout >/dev/null 2>&1; then
+   echo "dawn-tls: WARNING: the server certificate needs renewing or reissuing, but" \
+      "$DIR/ca.crt or ca.key is missing, or ca.key has a passphrase; put back both," \
+      "with the key unencrypted, or install your own certificate as dawn-chain.crt" \
+      "and dawn.key" >&2
+   exit 0
 fi
 
 echo "dawn-tls: issuing the server certificate for $san"
 openssl ecparam -genkey -name prime256v1 -noout -out dawn.key.new 2>/dev/null
-openssl req -new -key dawn.key.new -subj "/CN=$(hostname)/O=DAWN" -out dawn.csr.new
+openssl req -new -key dawn.key.new -subj "/CN=$host/O=DAWN" -out dawn.csr.new
 printf '%s\n' "basicConstraints=CA:FALSE" "keyUsage=digitalSignature,keyEncipherment" \
-   "extendedKeyUsage=serverAuth" "subjectAltName=$san" >dawn.ext.new
+   "extendedKeyUsage=serverAuth" "subjectKeyIdentifier=hash" \
+   "authorityKeyIdentifier=keyid" "subjectAltName=$san" >dawn.ext.new
 openssl x509 -req -in dawn.csr.new -CA ca.crt -CAkey ca.key -CAcreateserial \
    -days 825 -extfile dawn.ext.new -out dawn.crt.new 2>/dev/null
 cat dawn.crt.new ca.crt >dawn-chain.crt.new

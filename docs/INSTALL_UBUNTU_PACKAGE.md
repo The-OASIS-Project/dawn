@@ -20,10 +20,28 @@ The install enables the service but doesn't start it. The first start takes a mi
 downloads the speech-recognition and search models (about 180 MB) and creates this host's CA and
 the WebUI's HTTPS certificate. After that, DAWN starts at every boot.
 
-Remove a source install first: `sudo services/dawn-server/install.sh --uninstall` from your DAWN
-checkout, answering **no** when it asks to remove the databases. The package uses the same
-`/var/lib/dawn/db`, so your conversations, memory and users carry over; API keys don't (they were in
-`/usr/local/etc/dawn/secrets.toml`). The package refuses to install beside a source install.
+### Moving from a source install
+
+The package refuses to install beside a source install, and uninstalling one deletes its CA. First
+copy your keys and the CA, so satellites and browsers that trust it keep working:
+
+```bash
+sudo install -d -m 750 -g dawn /etc/dawn /etc/dawn/ssl
+sudo install -m 600 /usr/local/etc/dawn/secrets.toml /etc/dawn/
+sudo install -m 644 /var/lib/dawn/ssl/ca.crt /etc/dawn/ssl/
+sudo install -m 600 /dev/null /etc/dawn/ssl/ca.key
+sudo openssl pkey -in /var/lib/dawn/ssl/ca.key -out /etc/dawn/ssl/ca.key   # asks the CA passphrase
+```
+
+The package renews DAWN's certificate on its own, so it keeps the CA key without a passphrase,
+readable only by root.
+
+Then run `sudo services/dawn-server/install.sh --uninstall` from your DAWN checkout, answering
+**no** to both questions (databases, configuration). Keep the `dawn` user it suggests deleting: the
+package uses it, and it owns your databases. Then install the package. It uses the same
+`/var/lib/dawn/db`, so your conversations, memory and users carry over. Your other settings don't:
+make them again in the WebUI. If your old `secrets.toml` had no `satellite_registration_key`, add
+one (step 4).
 
 ## First steps
 
@@ -38,10 +56,12 @@ checkout, answering **no** when it asks to remove the databases. The package use
 3. **Open `https://<this-host>:3000`**, sign in, and add an LLM API key under Settings. Keys are
    saved in `/etc/dawn/secrets.toml`; to edit it by hand, see
    [secrets.toml](GETTING_STARTED_SERVER.md#secretstoml), then `sudo systemctl restart dawn`.
-4. **Satellites:** until you set a [registration key](DAP2_SATELLITE.md#registration-key), any device
-   on your network can register as one. Make one with `openssl rand -hex 32`, set it as
-   `satellite_registration_key` under `[secrets]` in `/etc/dawn/secrets.toml`, and
-   `sudo systemctl restart dawn`.
+4. **Satellites** need this host's [registration key](DAP2_SATELLITE.md#configure-satellites),
+   made at install: Settings → Satellite Management → **Pair new satellite** in the WebUI shows it,
+   or `sudo grep satellite_registration_key /etc/dawn/secrets.toml`. If it's missing
+   or commented out (a `secrets.toml` from a source install), make one with `openssl rand -hex 32`,
+   set it as `satellite_registration_key` under `[secrets]`, and `sudo systemctl restart dawn`;
+   until then any device on your network can register as a satellite.
 
 ## Where things are
 
@@ -58,19 +78,25 @@ The WebUI's settings panel rewrites `dawn.toml` when you save. DAWN runs as the 
 
 ## Upgrade and remove
 
-- **Upgrade:** `sudo apt install ./dawn_<newer version>+ubuntu<release>_amd64.deb`. A running DAWN is
-  restarted on the new version; your configuration and data stay.
+- **Upgrade:** there's no apt repository yet, so `apt upgrade` doesn't update DAWN. Watch the
+  [releases](https://github.com/The-OASIS-Project/dawn/releases) and install a newer package the same
+  way: `sudo apt install ./dawn_<newer version>+ubuntu<release>_amd64.deb`. A running DAWN is
+  restarted on the new version; your configuration and data stay. On 24.04 the PDF library (MuPDF)
+  is built into DAWN, so its security fixes arrive with a DAWN release, not Ubuntu's updates.
 - **Remove:** `sudo apt remove dawn` stops and removes DAWN but keeps `/etc/dawn` and `/var/lib/dawn`,
   so a reinstall picks up where you left off.
-- **Purge:** `sudo apt purge dawn` also deletes `/etc/dawn` (configuration, keys, the CA). It still
-  keeps `/var/lib/dawn`; delete that by hand if you want your data gone.
+- **Purge:** `sudo apt purge dawn` also deletes the configuration, keys and CA in `/etc/dawn` (files
+  you added there stay). It still keeps `/var/lib/dawn`; delete that by hand if you want your data
+  gone.
 
 ## Problems
 
 - **"this CPU lacks avx2"** at install: the package needs an x86-64-v3 CPU. Build from source instead.
-- **"a source install of the DAWN daemon is present"**: remove it as in *Install*, then install again.
-- **Speech recognition or search doesn't work:** the model download may have failed (no network at
-  first start). `sudo dawn-fetch-models` retries it; then `sudo systemctl restart dawn`.
+- **"a source install of the DAWN daemon is present"**: move off it as in
+  [Moving from a source install](#moving-from-a-source-install), then install again.
+- **DAWN keeps restarting after the first start:** the model download probably failed (no network
+  at first start), and DAWN can't start without its speech-recognition model.
+  `sudo dawn-fetch-models` retries it; then `sudo systemctl restart dawn`.
 - **The browser warns about the certificate:** the CA isn't trusted on that device yet (step 2), or
   you used an address the certificate doesn't cover. It covers this host's name and its addresses at
   start-up; a restart reissues it after they change.
