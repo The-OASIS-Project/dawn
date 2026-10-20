@@ -318,6 +318,16 @@ pkg_check_modules(LIBICAL REQUIRED libical)
 include_directories(${LIBICAL_INCLUDE_DIRS})
 message(STATUS "libical: Found (${LIBICAL_VERSION})")
 
+# libstemmer (Snowball): Porter2 stemming for the memory subsystem's BM25 keyword
+# index, linked as plain `stemmer` by the daemon and its tests.  It ships no
+# pkg-config file, so check here instead of failing mid-build on libstemmer.h.
+find_path(STEMMER_INCLUDE_DIR libstemmer.h)
+find_library(STEMMER_LIB stemmer)
+if(NOT STEMMER_INCLUDE_DIR OR NOT STEMMER_LIB)
+    message(FATAL_ERROR "libstemmer not found. Install with: sudo apt install libstemmer-dev")
+endif()
+message(STATUS "libstemmer: Found (${STEMMER_LIB})")
+
 # Tool subsystem - compile-time tool configuration
 # Provides options to enable/disable individual tools
 include(cmake/DawnTools.cmake)
