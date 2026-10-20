@@ -1,21 +1,23 @@
-# Ubuntu package (`dawn_<version>_amd64.deb`)
+# Ubuntu packages (`dawn_<version>+ubuntu<release>_amd64.deb`)
 
-The daemon's CPU server build for Ubuntu 24.04 on x86-64. Installing it is covered in
+The daemon's CPU server build for Ubuntu 24.04 and 26.04 on x86-64, one package per release.
+Installing it is covered in
 [GETTING_STARTED_SERVER.md](../../docs/GETTING_STARTED_SERVER.md#ubuntu-package-deb); this is how
 it is built.
 
 ```bash
 git submodule update --init whisper.cpp
-packaging/deb/build-deb.sh [VERSION]          # needs docker; → build-deb/dawn_<version>_amd64.deb
+UBUNTU=24.04 packaging/deb/build-deb.sh [VERSION]   # or 26.04; needs docker
 docker run --rm -v "$PWD":/repo -w /repo ubuntu:24.04 \
-   packaging/deb/smoke-test.sh build-deb/dawn_<version>_amd64.deb
+   packaging/deb/smoke-test.sh build-deb/dawn_<version>+ubuntu24.04_amd64.deb
 ```
 
-`release.yml` does both for every `v*` tag and publishes the package with the satellite's.
+`ci.yml` does both for each release on every PR; `release.yml` does them for every `v*` tag and publishes
+the packages with the satellite's.
 
 | File | Role |
 |---|---|
-| `build-deb.sh` | Builds the Dockerfile's `dawn-deps` stage on `ubuntu:24.04` and runs `stage.sh` in it |
+| `build-deb.sh` | Builds the Dockerfile's `dawn-deps` stage on the chosen release (pinned digest) and runs `stage.sh` in it |
 | `stage.sh` | Builds the `deb` CMake preset and lays out, links and packages the tree |
 | `../deb_closure.sh` | Shared with the satellite package: apt-owned libraries become `Depends:`, source-built ones are bundled |
 | `debian/` | Control template and maintainer scripts |
@@ -24,7 +26,7 @@ docker run --rm -v "$PWD":/repo -w /repo ubuntu:24.04 \
 | `dawn-tls` | Before each start: this host's CA and the WebUI certificate, made or renewed as needed |
 | `dawn.toml.in` | The package's changes from the defaults; postinst copies it (and `secrets.toml.example`, which sets nothing) to `/etc/dawn` when absent |
 | `copyright` | Licenses of everything the package ships |
-| `smoke-test.sh` | Install, boot, reinstall, upgrade, remove and purge in a clean container |
+| `smoke-test.sh` | lintian, then install, boot, reinstall, upgrade, remove and purge, in a clean container of the release |
 
 Design choices worth knowing before changing anything:
 

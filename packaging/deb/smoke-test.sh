@@ -1,11 +1,13 @@
 #!/bin/bash
 #
-# Install-test a dawn .deb in a clean Ubuntu 24.04 container, as root:
+# Check a dawn .deb in a clean container of the Ubuntu release it was built for,
+# as root:
 #
 #   docker run --rm -v "$PWD":/repo -w /repo ubuntu:24.04 \
-#      packaging/deb/smoke-test.sh build-deb/dawn_<version>_amd64.deb
+#      packaging/deb/smoke-test.sh build-deb/dawn_<version>+ubuntu24.04_amd64.deb
 #
-# Checks that apt can install it with nothing else present; that every library
+# Checks that the release's lintian finds no errors; that apt can install it
+# with nothing else present; that every library
 # resolves from /usr/lib/dawn or an apt package; that the daemon boots with the
 # packaged config and unit (TTS voice loads, WebUI listens, dawn-admin answers);
 # and that reinstall, upgrade, remove and purge keep what they should.  The
@@ -19,8 +21,13 @@ fail() {
    exit 1
 }
 
-echo "==> install"
 apt-get update -qq
+
+echo "==> lintian"
+apt-get install -y -qq lintian >/dev/null
+lintian --fail-on error "$deb" || fail "lintian errors"
+
+echo "==> install"
 apt-get install -y -qq "$deb" >/dev/null
 
 echo "==> libraries"

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Build DAWN and package it as dawn_<version>_amd64.deb.  Run from the repository
-# root inside the dependency image (build-deb.sh does this), or on an Ubuntu 24.04
+# root inside the dependency image (build-deb.sh does this), or on an Ubuntu LTS
 # host with the same dependencies installed.
 #
 #   VERSION=2.1.0 packaging/deb/stage.sh
@@ -39,8 +39,12 @@ rm -rf "$build/install" "$stage"
 DESTDIR="$PWD/$build/install" cmake --install "$build"
 installed="$build/install/usr"
 
+# Read once, not piped into grep -q: grep stopping early would SIGPIPE readelf
+# and, under pipefail, fail the check.
+dynamic="$(readelf -d "$installed/bin/dawn")"
+
 # The binary must find its libraries in /usr/lib/dawn, not the build machine's.
-readelf -d "$installed/bin/dawn" | grep -q 'R.*PATH.*\[/usr/lib/dawn\]' ||
+grep -q 'R.*PATH.*\[/usr/lib/dawn\]' <<<"$dynamic" ||
    { echo "ERROR: dawn's RUNPATH is not /usr/lib/dawn" >&2; exit 1; }
 
 # --- programs and libraries ---
@@ -91,7 +95,7 @@ install -m 644 /usr/share/doc/libmupdf-dev/copyright "$lic/mupdf.copyright"
 install -m 644 LICENSES/Apache-2.0.txt "$lic/"
 # A native package's changelog (Policy 12.7); the release notes are on GitHub.
 cat >"$doc/changelog" <<EOF
-dawn ($VERSION) noble; urgency=medium
+dawn ($VERSION) $(. /etc/os-release && echo "$VERSION_CODENAME"); urgency=medium
 
   * DAWN $VERSION.  Release notes:
     https://github.com/The-OASIS-Project/dawn/releases
@@ -102,10 +106,15 @@ gzip -9n "$doc/changelog"
 
 # --- control, checksums, maintainer scripts ---
 chmod -R go-w "$stage"
-built_using="$(dpkg-query -W -f='${source:Package} (= ${source:Version})' libmupdf-dev)"
+# Built-Using names the source of a statically linked library (Policy 7.8):
+# MuPDF, on releases that ship it only static (24.04).  26.04's is shared.
+built_using='/^Built-Using: @BUILT_USING@$/d'
+if ! grep -q 'NEEDED.*libmupdf' <<<"$dynamic"; then
+   built_using="s/@BUILT_USING@/$(dpkg-query -W -f='${source:Package} (= ${source:Version})' libmupdf-dev)/"
+fi
 size="$(du -sk "$stage" | cut -f1)"
 sed -e "s/@VERSION@/$VERSION/" -e "s|@MAINTAINER@|$MAINTAINER|" \
-   -e "s/@SHLIB_DEPS@/$shlib_deps/" -e "s/@BUILT_USING@/$built_using/" \
+   -e "s/@SHLIB_DEPS@/$shlib_deps/" -e "$built_using" \
    -e "s/@INSTALLED_SIZE@/$size/" \
    "$pkg/debian/control" >"$stage/DEBIAN/control"
 (cd "$stage" && find usr -type f -print0 | sort -z | xargs -0 md5sum) >"$stage/DEBIAN/md5sums"

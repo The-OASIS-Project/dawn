@@ -9,11 +9,12 @@ Tested on Ubuntu 24.04 LTS (x86_64) with NVIDIA GPU (optional).
 
 ## Ubuntu Package (.deb)
 
-On Ubuntu 24.04 (x86-64), each release has a `dawn_<version>_amd64.deb`: the CPU server build,
-nothing to compile. It needs an x86-64-v3 (AVX2) CPU.
+On Ubuntu 24.04 or 26.04 (x86-64), each release has a `dawn_<version>+ubuntu<release>_amd64.deb`
+for each: the CPU server build, nothing to compile. Take the one for your release. It needs an
+x86-64-v3 (AVX2) CPU.
 
 ```bash
-sudo apt install ./dawn_<version>_amd64.deb
+sudo apt install ./dawn_<version>+ubuntu24.04_amd64.deb
 sudo systemctl start dawn                     # first start downloads ~180 MB of models
 sudo journalctl -u dawn | grep -A6 'SETUP TOKEN'
 sudo dawn-admin user create <name> --admin    # paste the token (valid 5 minutes)

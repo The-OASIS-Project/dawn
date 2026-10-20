@@ -6,7 +6,7 @@
 #   Bases taken through an ARG, which Dependabot doesn't follow, are updated by
 #   hand: dawn_satellite/Dockerfile.pibase and .pibuild (ARG BASE_IMAGE), the
 #   Dockerfile's dependency stage (ARG DEPS_BASE; same digest as its runtime
-#   stage), and packaging/deb/build-deb.sh's ubuntu:24.04 digest.
+#   stage), and packaging/deb/build-deb.sh's ubuntu:24.04 and 26.04 digests.
 # - Submodules (whisper.cpp, webrtc-audio-processing) monthly: an update needs a
 #   CUDA build and test on a Jetson before it merges.
 # - npm is left out on purpose: its only package is Prettier, and a Prettier

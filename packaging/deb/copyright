@@ -6,9 +6,10 @@ Comment:
  Paths are as installed.  License texts not reproduced below are in
  /usr/share/common-licenses or /usr/share/doc/dawn/licenses.
  .
- The dawn binary links MuPDF statically (AGPL-3.0-or-later).  MuPDF's
- copyright and license are in /usr/share/doc/dawn/licenses/mupdf.copyright;
- its source is the Ubuntu package named in this package's Built-Using field.
+ The dawn binary links MuPDF (AGPL-3.0-or-later): statically on Ubuntu 24.04,
+ where its source is the package named in this package's Built-Using field,
+ and as Ubuntu's shared library on 26.04.  MuPDF's copyright and license are
+ in /usr/share/doc/dawn/licenses/mupdf.copyright.
  Because MuPDF is AGPL, anyone who modifies this combination and offers it to
  others over a network must offer them the corresponding source.
  .

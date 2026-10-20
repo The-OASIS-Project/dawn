@@ -268,31 +268,33 @@ jobs:
         run: docker run --rm dawn --help
 
   # -------------------------------------------------------------------------
-  # Ubuntu package: the .deb release.yml publishes, built the same way here so a
-  # change that breaks it fails its PR, not the release tag.  It is also the only
-  # GCC 13 (Ubuntu 24.04) Release build, whose -O2 warnings GCC 11/12 above don't
-  # raise.  lintian and the install/boot/upgrade/purge smoke run on the result.
+  # Ubuntu packages: the .debs release.yml publishes, built the same way here so
+  # a change that breaks one fails its PR, not the release tag.  They are also
+  # the only Release builds with GCC 13 (24.04) and GCC 15 (26.04), whose
+  # warnings GCC 11/12 above don't raise.  Each is linted, installed, booted,
+  # upgraded and purged in a clean container of its release.
   # -------------------------------------------------------------------------
   deb-package:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    env:
+      UBUNTU: ${{ matrix.ubuntu }}
     steps:
       - name: Checkout with submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           submodules: recursive
 
-      - name: Build .deb (ubuntu:24.04 container)
+      - name: Build .deb (ubuntu:${{ matrix.ubuntu }} container)
         run: ./packaging/deb/build-deb.sh
 
-      - name: lintian
+      - name: Check (lintian, install, boot, upgrade, remove, purge in a clean ubuntu:${{ matrix.ubuntu }})
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq lintian
-          lintian --fail-on error build-deb/dawn_*_amd64.deb
-
-      - name: Smoke test (install, boot, upgrade, remove, purge in a clean ubuntu:24.04)
-        run: |
-          deb="$(ls build-deb/dawn_*_amd64.deb)"
-          docker run --rm -v "$PWD":/repo -w /repo ubuntu:24.04 packaging/deb/smoke-test.sh "$deb"
+          deb="$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
+          docker run --rm -v "$PWD":/repo -w /repo "ubuntu:$UBUNTU" packaging/deb/smoke-test.sh "$deb"
 
   # -------------------------------------------------------------------------
   # Job 4: Tier 1 Satellite Build (~1 min)

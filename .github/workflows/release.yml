@@ -1,5 +1,5 @@
 # Release pipeline — builds the Tier-1 (Raspberry Pi, Debian trixie arm64)
-# satellite binaries and the x86-64 daemon .deb (Ubuntu 24.04), and publishes
+# satellite binaries and the x86-64 daemon .debs (Ubuntu 24.04 and 26.04), and publishes
 # both to one GitHub Release with one SHA256SUMS.
 #
 # Why arm64-native: the satellite must link the Pi's runtime (libwebsockets
@@ -66,15 +66,20 @@ jobs:
           if-no-files-found: error
 
   server-amd64:
-    name: Daemon .deb (Ubuntu 24.04 amd64)
+    name: Daemon .deb (Ubuntu ${{ matrix.ubuntu }} amd64)
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    env:
+      UBUNTU: ${{ matrix.ubuntu }}
     steps:
       - name: Checkout (with submodules — whisper.cpp is built into the package)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
-      - name: Build .deb (ubuntu:24.04 container)
+      - name: Build .deb (ubuntu:${{ matrix.ubuntu }} container)
         run: |
           set -euo pipefail
           # Tag vX.Y.Z → X.Y.Z, which must be the version compiled into the binary;
@@ -87,28 +92,22 @@ jobs:
           fi
           ./packaging/deb/build-deb.sh $ver
 
-      - name: lintian (Debian/Ubuntu policy; errors fail the release)
+      - name: Check (lintian, install, boot, upgrade, remove, purge in a clean ubuntu:${{ matrix.ubuntu }})
         run: |
           set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq lintian
-          lintian --fail-on error build-deb/dawn_*_amd64.deb
-
-      - name: Smoke test (install, boot, upgrade, remove, purge in a clean ubuntu:24.04)
-        run: |
-          set -euo pipefail
-          deb="$(ls build-deb/dawn_*_amd64.deb)"
-          docker run --rm -v "$PWD":/repo -w /repo ubuntu:24.04 packaging/deb/smoke-test.sh "$deb"
+          deb="$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
+          docker run --rm -v "$PWD":/repo -w /repo "ubuntu:$UBUNTU" packaging/deb/smoke-test.sh "$deb"
 
       - name: Stage artifacts
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp build-deb/dawn_*_amd64.deb dist/
+          cp build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: server-amd64
+          name: server-amd64-${{ matrix.ubuntu }}
           path: dist/
           if-no-files-found: error
 
@@ -137,8 +136,8 @@ jobs:
           set -euo pipefail
           # The daemon .deb bundles the rhasspy espeak-ng fork (GPL-3) as a binary,
           # built at the Dockerfile's pinned commit; its source goes beside it.
-          # (MuPDF, AGPL and linked statically, is Ubuntu's: its source is the
-          # archive package named in the .deb's Built-Using field.)
+          # (MuPDF, AGPL, is Ubuntu's own: linked statically on 24.04, where the
+          # .deb's Built-Using names its source package, and shared on 26.04.)
           commit="$(sed -n 's/^ARG ESPEAK_COMMIT=//p' Dockerfile)"
           [ -n "$commit" ] || { echo "no ESPEAK_COMMIT in Dockerfile" >&2; exit 1; }
           curl -fsSL --proto '=https' -o "dist/espeak-ng-$commit.tar.gz" \
