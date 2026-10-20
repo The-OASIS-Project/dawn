@@ -425,6 +425,33 @@ static void test_latest_ringing(void) {
 }
 
 /* ============================================================================
+ * Test: Move Pending (a zone change)
+ * ============================================================================ */
+
+static void test_move_pending(void) {
+   sched_event_t ev = make_event();
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   const time_t from = ev.fire_at, to = ev.fire_at + 3 * 3600;
+
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_move_pending(id, from, to));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+
+   /* Read before an edit moved it: the edit stands. */
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, from, from + 60));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+
+   /* Started ringing since it was read: left alone. */
+   scheduler_db_update_status(id, SCHED_STATUS_RINGING);
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, to, from));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+}
+
+/* ============================================================================
  * Test: Snooze
  * ============================================================================ */
 
@@ -1629,6 +1656,7 @@ int main(void) {
    RUN_TEST(test_dismiss_rings_only);
    RUN_TEST(test_latest_ringing);
    RUN_TEST(test_snooze);
+   RUN_TEST(test_move_pending);
    RUN_TEST(test_due_events);
    RUN_TEST(test_list_user_events);
    RUN_TEST(test_find_by_name);

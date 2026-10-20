@@ -64,6 +64,16 @@ static bool day_matches(int wday, sched_recurrence_t recurrence, const char *rec
    }
 }
 
+/* The occurrence's time of day, in seconds: original_time (HH:MM on the
+ * owner's clock), else when it was set to fire (@p fire_wall, its reading). */
+static time_t occurrence_clock(const char *original_time, time_t fire_wall) {
+   int hour = 0, minute = 0;
+   if (original_time && original_time[0] && sscanf(original_time, "%d:%d", &hour, &minute) == 2 &&
+       hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59)
+      return (time_t)hour * 3600 + (time_t)minute * 60;
+   return fire_wall % SCHED_RECUR_DAY;
+}
+
 time_t sched_next_occurrence(const tz_t *zone,
                              time_t fire_at,
                              const char *original_time,
@@ -74,15 +84,7 @@ time_t sched_next_occurrence(const tz_t *zone,
    if (recurrence == SCHED_RECUR_ONCE)
       return 0;
    const time_t fire_wall = tz_wall(zone, fire_at);
-
-   /* original_time (HH:MM on the owner's clock); else when it was set to fire */
-   int hour = 0, minute = 0;
-   time_t clock;
-   if (original_time && original_time[0] && sscanf(original_time, "%d:%d", &hour, &minute) == 2 &&
-       hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59)
-      clock = (time_t)hour * 3600 + (time_t)minute * 60;
-   else
-      clock = fire_wall % SCHED_RECUR_DAY;
+   const time_t clock = occurrence_clock(original_time, fire_wall);
 
    time_t day = fire_wall - fire_wall % SCHED_RECUR_DAY; /* the occurrence's date */
    /* Snoozed past midnight: that day's occurrence would come after fire_at.
@@ -109,4 +111,25 @@ time_t sched_next_occurrence(const tz_t *zone,
          return candidate;
    }
    return 0;
+}
+
+time_t sched_rezone_occurrence(const tz_t *from,
+                               const tz_t *to,
+                               time_t fire_at,
+                               const char *original_time,
+                               sched_recurrence_t recurrence,
+                               const char *recurrence_days,
+                               time_t now) {
+   if (recurrence == SCHED_RECUR_ONCE)
+      return fire_at;
+   const time_t wall = tz_wall(from, fire_at);
+   const time_t day = wall - wall % SCHED_RECUR_DAY;
+   const time_t moved = tz_from_wall(to, day + occurrence_clock(original_time, wall));
+   struct tm tm_day;
+   gmtime_r(&day, &tm_day);
+   /* A row placed on another clock than @p from can read as a day its rule
+    * skips: then, like one already past, the next one after now. */
+   if (moved > now && day_matches(tm_day.tm_wday, recurrence, recurrence_days))
+      return moved;
+   return sched_next_occurrence(to, moved, original_time, recurrence, recurrence_days, false, now);
 }

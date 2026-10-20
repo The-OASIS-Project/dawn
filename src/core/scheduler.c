@@ -1805,6 +1805,45 @@ static void end_interrupted_rings(void) {
       scheduler_broadcast_events_changed(0);
 }
 
+void scheduler_user_zone_changed(int user_id, const tz_t *from) {
+   const tz_t *to = user_tz(user_id);
+   if (user_id <= 0 || !from || from == to)
+      return;
+
+   /* All of them: the per-user cap applies to new events only, and can be
+    * lowered below what a user already has. */
+   int max = 0;
+   if (scheduler_db_count_user_events(user_id, &max) != SUCCESS || max <= 0)
+      return;
+   sched_event_t *events = calloc((size_t)max, sizeof(*events));
+   if (!events) {
+      OLOG_ERROR("scheduler: no memory to move user %d's events to their new zone", user_id);
+      return;
+   }
+
+   const time_t now = time(NULL);
+   const int count = scheduler_db_list_user_events(user_id, -1, events, max);
+   int moved = 0;
+   for (int i = 0; i < count; i++) {
+      const sched_event_t *e = &events[i];
+      if (e->status != SCHED_STATUS_PENDING || e->recurrence == SCHED_RECUR_ONCE)
+         continue;
+      const time_t next = sched_rezone_occurrence(from, to, e->fire_at, e->original_time,
+                                                  e->recurrence, e->recurrence_days, now);
+      if (next == 0 || next == e->fire_at || scheduler_db_move_pending(e->id, e->fire_at, next))
+         continue;
+      moved++;
+      OLOG_INFO("scheduler: '%s' (id=%lld) moved to %s with its owner's zone", e->name,
+                (long long)e->id, tz_name(to));
+   }
+   free(events);
+
+   if (moved > 0) {
+      scheduler_notify_new_event();
+      scheduler_broadcast_events_changed(user_id);
+   }
+}
+
 /* =============================================================================
  * Scheduler Thread
  * ============================================================================= */

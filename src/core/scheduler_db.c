@@ -459,6 +459,29 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
    return result;
 }
 
+int scheduler_db_move_pending(int64_t id, time_t from, time_t to) {
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
+
+   const char *sql = "UPDATE scheduled_events SET fire_at = ? "
+                     "WHERE id = ? AND status = 'pending' AND fire_at = ?";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, (int64_t)to);
+   sqlite3_bind_int64(stmt, 2, id);
+   sqlite3_bind_int64(stmt, 3, (int64_t)from);
+
+   int rc = sqlite3_step(stmt);
+   int result = (rc == SQLITE_DONE && sqlite3_changes(s_db.db) > 0) ? SUCCESS : FAILURE;
+
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
 int scheduler_db_cancel(int64_t id) {
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 

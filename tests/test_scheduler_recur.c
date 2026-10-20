@@ -109,6 +109,57 @@ static void test_custom_days(void) {
                                                     "", false, 1792148460));
 }
 
+/* ---- A zone change (Los Angeles <-> New York; times in UTC) -------------- */
+
+static time_t rezone(const char *from,
+                     const char *to,
+                     time_t fire_at,
+                     const char *original,
+                     sched_recurrence_t r,
+                     time_t now) {
+   return sched_rezone_occurrence(tz_lookup(from), tz_lookup(to), fire_at, original, r, NULL, now);
+}
+
+/* A weekday 15:30 set while in Los Angeles (22:30Z) goes to 15:30 New York
+ * (19:30Z) the same day. */
+static void test_rezone_keeps_clock_and_date(void) {
+   TEST_ASSERT_EQUAL_INT64(1792524600, rezone("America/Los_Angeles", "America/New_York", 1792535400,
+                                              "15:30", SCHED_RECUR_WEEKDAYS, 1792444500));
+}
+
+/* The other way: 05:00 New York (09:00Z) to 05:00 Los Angeles (12:00Z). */
+static void test_rezone_other_way(void) {
+   TEST_ASSERT_EQUAL_INT64(1792497600, rezone("America/New_York", "America/Los_Angeles", 1792486800,
+                                              "05:00", SCHED_RECUR_DAILY, 1792444500));
+}
+
+/* At 06:00 New York, today's 05:00 has passed on the new clock: tomorrow's,
+ * not one at once. */
+static void test_rezone_passed_goes_to_next(void) {
+   TEST_ASSERT_EQUAL_INT64(1792573200, rezone("America/Los_Angeles", "America/New_York", 1792497600,
+                                              "05:00", SCHED_RECUR_DAILY, 1792490400));
+}
+
+/* Passed on a Friday, weekdays: Monday. */
+static void test_rezone_passed_weekdays_skip_weekend(void) {
+   TEST_ASSERT_EQUAL_INT64(1793005200, rezone("America/Los_Angeles", "America/New_York", 1792756800,
+                                              "05:00", SCHED_RECUR_WEEKDAYS, 1792749600));
+}
+
+/* A weekday 07:00 placed on Tokyo's clock (Monday there, Sunday in Los
+ * Angeles) and rezoned Los Angeles -> New York early Sunday: Monday, not
+ * Sunday. */
+static void test_rezone_kept_day_must_match_rule(void) {
+   TEST_ASSERT_EQUAL_INT64(1793012400, rezone("America/Los_Angeles", "America/New_York", 1792965600,
+                                              "07:00", SCHED_RECUR_WEEKDAYS, 1792908000));
+}
+
+/* A one-time event keeps its instant. */
+static void test_rezone_once_unchanged(void) {
+   TEST_ASSERT_EQUAL_INT64(1792535400, rezone("America/Los_Angeles", "America/New_York", 1792535400,
+                                              "15:30", SCHED_RECUR_ONCE, 1792444500));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_daily_next_day);
@@ -122,5 +173,11 @@ int main(void) {
    RUN_TEST(test_weekdays_skip_weekend);
    RUN_TEST(test_no_original_time);
    RUN_TEST(test_custom_days);
+   RUN_TEST(test_rezone_keeps_clock_and_date);
+   RUN_TEST(test_rezone_other_way);
+   RUN_TEST(test_rezone_passed_goes_to_next);
+   RUN_TEST(test_rezone_passed_weekdays_skip_weekend);
+   RUN_TEST(test_rezone_kept_day_must_match_rule);
+   RUN_TEST(test_rezone_once_unchanged);
    return UNITY_END();
 }

@@ -285,6 +285,13 @@ int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t f
 int scheduler_db_snooze(int64_t id, time_t new_fire_at);
 
 /**
+ * @brief Move a pending event's fire time (only while it is still pending at
+ *        @p from, so a ring, snooze or edit since it was read is never undone)
+ * @return SUCCESS, or FAILURE when it is no longer pending at @p from
+ */
+int scheduler_db_move_pending(int64_t id, time_t from, time_t to);
+
+/**
  * @brief Cancel an event (optimistic: only if still pending/snoozed)
  * @param id Event ID
  * @return SUCCESS if cancelled, FAILURE if already fired/cancelled
