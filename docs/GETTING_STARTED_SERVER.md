@@ -9,26 +9,9 @@ Tested on Ubuntu 24.04 LTS (x86_64) with NVIDIA GPU (optional).
 
 ## Ubuntu Package (.deb)
 
-On Ubuntu 24.04 or 26.04 (x86-64), each release has a `dawn_<version>+ubuntu<release>_amd64.deb`
-for each: the CPU server build, nothing to compile. Take the one for your release. It needs an
-x86-64-v3 (AVX2) CPU.
-
-```bash
-sudo apt install ./dawn_<version>+ubuntu24.04_amd64.deb
-sudo systemctl start dawn                     # first start downloads ~180 MB of models
-sudo journalctl -u dawn | grep -A6 'SETUP TOKEN'
-sudo dawn-admin user create <name> --admin    # paste the token (valid 5 minutes)
-```
-
-The first start also makes this host's own CA and a certificate for the WebUI (renewed
-automatically). Trust `/etc/dawn/ssl/ca.crt` in your browser (or copy it to
-`/usr/local/share/ca-certificates/` on each client and run `sudo update-ca-certificates`), then open
-`https://<host>:3000` and add an LLM API key under Settings. Satellites take the same `ca.crt` as
-their `ca_cert_path`. The package runs as the
-`dawn` user, with its private libraries in `/usr/lib/dawn`, configuration in `/etc/dawn/` and data
-in `/var/lib/dawn/`. Removing it keeps both; purging removes `/etc/dawn` and still keeps
-`/var/lib/dawn`. Remove a source install (`services/dawn-server/install.sh --uninstall`) first.
-To build the package yourself, see `packaging/deb/README.md`.
+On Ubuntu 24.04 or 26.04 (x86-64), each release has a ready-made package of the CPU server build:
+nothing to compile. See **[INSTALL_UBUNTU_PACKAGE.md](INSTALL_UBUNTU_PACKAGE.md)**. To build the
+package yourself, see `packaging/deb/README.md`.
 
 ---
 
@@ -356,8 +339,29 @@ ssl_cert_path = "ssl/dawn-chain.crt"
 ssl_key_path = "ssl/dawn.key"
 ```
 
-For browser access, you'll need to accept the self-signed certificate or install the CA
-(`ssl/ca.crt`) in your browser's trust store.
+For browser access, trust the CA (`ssl/ca.crt`) as below.
+
+### Trusting the DAWN CA
+
+DAWN's certificate is signed by a CA made for your install: `ssl/ca.crt` from
+`generate_ssl_cert.sh`, or `/etc/dawn/ssl/ca.crt` with the Ubuntu package. Copy it to each device
+you use DAWN from (`scp`, a USB stick, ...) and trust it there once; until you do, browsers warn and
+won't allow the microphone. Menu names vary between versions.
+
+- **Debian, Ubuntu, Raspberry Pi OS (system, curl, satellites):**
+  `sudo cp ca.crt /usr/local/share/ca-certificates/dawn-ca.crt && sudo update-ca-certificates`.
+  Firefox and Chrome on Linux keep their own lists; import it in the browser too.
+- **Firefox (any OS):** Settings → Privacy & Security → Certificates → View Certificates →
+  Authorities → Import, and tick "Trust this CA to identify websites".
+- **Chrome / Edge on Linux:** Settings → Privacy and security → Security → Manage certificates →
+  import it as a trusted authority.
+- **macOS (Safari, Chrome):**
+  `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt`.
+- **Windows (Edge, Chrome):** in an administrator prompt, `certutil -addstore -f Root ca.crt`.
+- **Android:** Settings → Security → Encryption & credentials → Install a certificate → CA certificate.
+- **iPhone / iPad:** open the file (AirDrop or mail) and install the profile in Settings, then turn
+  it on under General → About → Certificate Trust Settings.
+- **Satellites:** set `ca_cert_path` to it ([DAP2_SATELLITE.md](DAP2_SATELLITE.md)).
 
 ---
 

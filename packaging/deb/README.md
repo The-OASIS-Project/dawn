@@ -1,9 +1,8 @@
 # Ubuntu packages (`dawn_<version>+ubuntu<release>_amd64.deb`)
 
 The daemon's CPU server build for Ubuntu 24.04 and 26.04 on x86-64, one package per release.
-Installing it is covered in
-[GETTING_STARTED_SERVER.md](../../docs/GETTING_STARTED_SERVER.md#ubuntu-package-deb); this is how
-it is built.
+Installing it is covered in [INSTALL_UBUNTU_PACKAGE.md](../../docs/INSTALL_UBUNTU_PACKAGE.md); this
+is how it is built.
 
 ```bash
 git submodule update --init whisper.cpp
@@ -18,7 +17,7 @@ the packages with the satellite's.
 |---|---|
 | `build-deb.sh` | Builds the Dockerfile's `dawn-deps` stage on the chosen release (pinned digest) and runs `stage.sh` in it |
 | `stage.sh` | Builds the `deb` CMake preset and lays out, links and packages the tree |
-| `../deb_closure.sh` | Shared with the satellite package: apt-owned libraries become `Depends:`, source-built ones are bundled |
+| `../deb_common.sh` | Shared with the satellite package: apt-owned libraries become `Depends:`, source-built ones are bundled; the version of an untagged build |
 | `debian/` | Control template and maintainer scripts |
 | `dawn.service`, `dawn-models.service` | The daemon, and the first-start model download it pulls in |
 | `dawn-fetch-models` | Downloads the Whisper and embedding models (pinned revisions, SHA-256 checked) |

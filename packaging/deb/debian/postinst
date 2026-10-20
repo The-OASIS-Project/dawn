@@ -77,19 +77,10 @@ fi
 if [ "$1" = configure ] && [ -z "$2" ]; then
    cat <<'EOF'
 
-DAWN is installed and enabled, but not started.
-  1. Start it:          sudo systemctl start dawn
-                        (the first start downloads about 180 MB of models)
-  2. Create the admin:  sudo journalctl -u dawn | grep -A6 'SETUP TOKEN'
-                        sudo dawn-admin user create <name> --admin
-                        (the token is valid for 5 minutes; restart dawn for a new one)
-  3. Trust this host's DAWN CA, /etc/dawn/ssl/ca.crt (made on first start): import
-     it in your browser, or copy it to each client as dawn-ca.crt and run
-        sudo cp dawn-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
-     Satellites take it as their ca_cert_path.
-  4. Open https://<this-host>:3000, sign in, and add an LLM API key under
-     Settings (or in /etc/dawn/secrets.toml, then: sudo systemctl restart dawn).
-Configuration: /etc/dawn/dawn.toml   Every option: /usr/share/doc/dawn/dawn.toml.example
+DAWN is installed and enabled, but not started.  Start it with
+    sudo systemctl start dawn
+then create the admin account and trust this host's CA as described in
+    https://github.com/The-OASIS-Project/dawn/blob/main/docs/INSTALL_UBUNTU_PACKAGE.md
 EOF
 fi
 
