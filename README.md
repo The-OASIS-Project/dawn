@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/The-OASIS-Project/dawn/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/The-OASIS-Project/dawn/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/The-OASIS-Project/dawn/badge)](https://scorecard.dev/viewer/?uri=github.com/The-OASIS-Project/dawn)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15697/badge)](https://www.bestpractices.dev/projects/15697)
 
 **D.A.W.N.** is the central intelligence layer of [The OASIS Project](https://github.com/The-OASIS-Project) — an open-source voice-controlled AI assistant built for embedded Linux hardware. Think JARVIS from *Iron Man*, but real: an always-listening, conversational AI that controls your smart home, answers questions, searches the web, plays music, and more — running on hardware you own.
 
