@@ -44,11 +44,11 @@ jobs:
         run: SAT_BUILD=full ./dawn_satellite/build-pi.sh
 
       - name: Build .deb (Tier-1 installer)
-        run: |
-          set -euo pipefail
-          # Tag vX.Y.Z → deb version X.Y.Z; manual dispatch falls back to git describe.
-          ver="${GITHUB_REF_NAME#v}"
-          DEB_VERSION="$ver" ./dawn_satellite/package-deb.sh
+        # The tag names the release; the package carries the satellite's own version
+        # (satellite_version.h), dated ~git on a manual run (packaging/deb_common.sh).
+        env:
+          DEB_RELEASE: ${{ github.ref_type == 'tag' && '1' || '' }}
+        run: ./dawn_satellite/package-deb.sh
 
       - name: Stage artifacts
         run: |
@@ -80,17 +80,11 @@ jobs:
           submodules: recursive
 
       - name: Build .deb (ubuntu:${{ matrix.ubuntu }} container)
-        run: |
-          set -euo pipefail
-          # Tag vX.Y.Z → X.Y.Z, which must be the version compiled into the binary;
-          # a manual run gets a dated ~git version from build-deb.sh.
-          ver=""
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            ver="${GITHUB_REF_NAME#v}"
-            grep -q "^#define VERSION_NUMBER \"$ver\"" include/version.h ||
-              { echo "tag $GITHUB_REF_NAME does not match VERSION_NUMBER in include/version.h" >&2; exit 1; }
-          fi
-          ./packaging/deb/build-deb.sh $ver
+        # The tag names the release; the package carries the daemon's own version
+        # (include/version.h), dated ~git on a manual run (packaging/deb_common.sh).
+        env:
+          DEB_RELEASE: ${{ github.ref_type == 'tag' && '1' || '' }}
+        run: ./packaging/deb/build-deb.sh
 
       - name: Check (lintian, then install, start, upgrade, reboot, purge under systemd in ubuntu:${{ matrix.ubuntu }})
         run: ./packaging/deb/check-deb.sh "$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
@@ -139,6 +133,24 @@ jobs:
           [ -n "$commit" ] || { echo "no ESPEAK_COMMIT in Dockerfile" >&2; exit 1; }
           curl -fsSL --proto '=https' -o "dist/espeak-ng-$commit.tar.gz" \
             "https://github.com/rhasspy/espeak-ng/archive/$commit.tar.gz"
+
+      - name: No package version published twice
+        # A tag cut without bumping a component's version (include/version.h,
+        # satellite_version.h) would republish that version with new contents, and
+        # apt would treat everyone's upgrade as already done.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          earlier="$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.tag_name != $ENV.GITHUB_REF_NAME) | .assets[].name')"
+          for f in dist/*.deb; do
+            if grep -qxF "${f##*/}" <<<"$earlier"; then
+              echo "${f##*/} is already in an earlier release: bump that component's version" >&2
+              exit 1
+            fi
+          done
 
       - name: Checksums
         run: |

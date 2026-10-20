@@ -30,7 +30,7 @@ lib="$stage/usr/lib/dawn"
 share="$stage/usr/share/dawn"
 doc="$stage/usr/share/doc/dawn"
 
-. packaging/deb_closure.sh
+. packaging/deb_common.sh
 
 # --- build (the deb preset: /usr prefix, private libdir, portable ggml) ---
 cmake --preset deb --fresh ${GIT_SHA:+-DGIT_SHA="$GIT_SHA"} # no stale cache in a release

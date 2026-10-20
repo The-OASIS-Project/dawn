@@ -1,7 +1,16 @@
 #!/bin/bash
 #
-# Shared by the .deb packagers (packaging/deb/stage.sh for the daemon,
+# Shared by the .deb packagers (packaging/deb/ for the daemon,
 # dawn_satellite/package-deb.sh for the Tier-1 satellite).  Source it; don't run it.
+#
+# deb_version BASE
+#
+#   A package's version from its component's own version BASE: BASE itself for a
+#   release (DEB_RELEASE=1, set by release.yml on a tag), otherwise
+#   BASE~git<date>.<count>.<sha>, which sorts below BASE, the release it leads to,
+#   and newer builds above older ones (a bare <sha> would sort by hex, so dpkg could
+#   read a newer build as older).  <count> is the CI run number, or the commit count
+#   locally.
 #
 # deb_bundle_closure BUNDLE_DIR BINARY...
 #
@@ -20,6 +29,18 @@
 #   Ownership is asked of dpkg rather than guessed from the path, because a
 #   source-built library can sit under /usr/lib (the espeak-ng fork does) and a
 #   path rule would leave it neither bundled nor depended on.
+
+deb_version() {
+   if [ -n "${DEB_RELEASE:-}" ]; then
+      echo "$1"
+      return
+   fi
+   local root sha count
+   root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+   sha="$(git -C "$root" rev-parse --short HEAD)"
+   count="${GITHUB_RUN_NUMBER:-$(git -C "$root" rev-list --count HEAD)}"
+   echo "$1~git$(date -u +%Y%m%d).$count.$sha"
+}
 
 deb_bundle_closure() {
    local -

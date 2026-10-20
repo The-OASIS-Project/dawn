@@ -26,14 +26,12 @@ VERSION="${1:-${DEB_VERSION:-}}"
 MAINTAINER="${DEB_MAINTAINER:-The OASIS Project <noreply@users.noreply.github.com>}"
 GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 
+# The daemon's own version (include/version.h); see deb_version.  Bump version.h
+# after a release, or later untagged builds sort below that release.
+. "$REPO_ROOT/packaging/deb_common.sh"
 if [ -z "$VERSION" ]; then
-   # An untagged build sorts below version.h's version (~), the release it leads
-   # to, and newer builds above older ones: <version.h>~git<date>.<count>.<sha>
-   # (a bare <sha> sorts by hex, so dpkg could read a newer build as older).
-   # Bump version.h after tagging, or builds after a release sort below it.
-   base_ver="$(sed -n 's/^#define VERSION_NUMBER "\(.*\)"/\1/p' "$REPO_ROOT/include/version.h")"
-   count="${GITHUB_RUN_NUMBER:-$(git -C "$REPO_ROOT" rev-list --count HEAD)}"
-   VERSION="${base_ver}~git$(date -u +%Y%m%d).${count}.${GIT_SHA}"
+   VERSION="$(deb_version "$(sed -n 's/^#define VERSION_NUMBER "\(.*\)"/\1/p' \
+      "$REPO_ROOT/include/version.h")")"
 fi
 VERSION="${VERSION}+ubuntu${UBUNTU}"
 

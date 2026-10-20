@@ -21,8 +21,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BASE_IMAGE_TAG="${BASE_IMAGE_TAG:-ghcr.io/the-oasis-project/dawn-satellite-build:trixie-arm64}"
 ARCH="arm64"
-VERSION="${1:-${DEB_VERSION:-$(git -C "$REPO_ROOT" describe --tags --always 2>/dev/null | sed 's/^v//')}}"
-VERSION="${VERSION:-0.0.0}"
+# The satellite's own version (satellite_version.h); see deb_version in
+# packaging/deb_common.sh.
+. "$REPO_ROOT/packaging/deb_common.sh"
+VERSION="${1:-${DEB_VERSION:-}}"
+VERSION="${VERSION:-$(deb_version "$(sed -n 's/^#define DAWN_SATELLITE_FIRMWARE_VERSION "\(.*\)"/\1/p' \
+   "$SCRIPT_DIR/include/satellite_version.h")")}"
 MAINTAINER="${DEB_MAINTAINER:-The OASIS Project <noreply@users.noreply.github.com>}"
 
 # Always do a FULL (SDL) build — never trust a possibly-stale build-pi/ binary
@@ -69,9 +73,9 @@ docker run --rm --platform linux/arm64 \
    install -m 755 "$bin" "$stage/usr/lib/dawn-satellite/dawn_satellite.dist"
 
    # Runtime libs: apt-owned → Depends, source-built → bundled into
-   # /usr/lib/dawn-satellite (see packaging/deb_closure.sh).
+   # /usr/lib/dawn-satellite (see packaging/deb_common.sh).
    echo "==> partitioning runtime libs (apt → Depends, private → bundle)…"
-   . packaging/deb_closure.sh
+   . packaging/deb_common.sh
    shlib_deps="$(deb_bundle_closure "$stage/usr/lib/dawn-satellite" "$bin" "$launch" |
       paste -sd"," - | sed "s/,/, /g")"
    [ -n "$shlib_deps" ] || { echo "ERROR: empty Depends closure"; exit 1; }
