@@ -916,6 +916,7 @@
 .sched-row-actions {
    display: flex;
    gap: 0.25rem;
+   min-width: 28px; /* a running task's row has no button; keep its time aligned */
    opacity: 0;
    transition: opacity var(--transition-fast);
 }

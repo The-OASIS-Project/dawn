@@ -1210,10 +1210,19 @@ fail:
    return NULL;
 }
 
+/* A briefing whose thread never started: nothing would end its row (a dismiss
+ * can't end a running briefing), so it ends as missed, as a failed one does. */
+static void briefing_not_started(const sched_event_t *event) {
+   scheduler_db_update_status(event->id, SCHED_STATUS_MISSED);
+   schedule_next_occurrence(event);
+   scheduler_broadcast_events_changed(event->user_id);
+}
+
 static void start_briefing_thread(const sched_event_t *event) {
    briefing_context_t *ctx = malloc(sizeof(briefing_context_t));
    if (!ctx) {
       OLOG_ERROR("scheduler: failed to allocate briefing context");
+      briefing_not_started(event);
       return;
    }
    memcpy(&ctx->event, event, sizeof(sched_event_t));
@@ -1226,6 +1235,7 @@ static void start_briefing_thread(const sched_event_t *event) {
    if (pthread_create(&tid, &attr, briefing_thread_func, ctx) != 0) {
       OLOG_ERROR("scheduler: failed to create briefing thread");
       free(ctx);
+      briefing_not_started(event);
    }
    pthread_attr_destroy(&attr);
 }

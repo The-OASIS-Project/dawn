@@ -159,6 +159,15 @@
       return h + ':' + pad2(Math.floor(rem / 60)) + ':' + pad2(rem % 60);
    }
 
+   /* A task or briefing is 'ringing' while it runs; it ends itself and can't
+    * be dismissed. */
+   function isRunning(event) {
+      return (
+         event.status === 'ringing' &&
+         (event.event_type === 'task' || event.event_type === 'briefing')
+      );
+   }
+
    function sameDay(a, b) {
       return (
          a.getFullYear() === b.getFullYear() &&
@@ -204,7 +213,7 @@
                 });
          return 'missed ' + day + ' ' + formatAbsTime(fireTs);
       }
-      if (event.status === 'ringing') return 'RINGING NOW';
+      if (event.status === 'ringing') return isRunning(event) ? 'RUNNING NOW' : 'RINGING NOW';
       if (event.status === 'snoozed') {
          return 'snoozed until ' + formatAbsTime(fireTs);
       }
@@ -542,6 +551,22 @@
             ? '<span class="sched-row-snooze-glyph" aria-hidden="true">Z</span>'
             : '';
 
+      /* The server won't dismiss a running task or briefing: no button. */
+      const deleteBtn = isRunning(event)
+         ? ''
+         : '<button type="button" class="sched-row-delete"' +
+           ' aria-label="' +
+           escapeAttr(deleteAria) +
+           '"' +
+           ' data-delete-label="' +
+           escapeAttr(deleteLabel) +
+           '">' +
+           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
+           ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+           '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/>' +
+           '</svg>' +
+           '</button>';
+
       return (
          '<li class="sched-row sched-type-' +
          type +
@@ -584,18 +609,7 @@
          escape(formatTimeColumn(event)) +
          '</time>' +
          '<div class="sched-row-actions">' +
-         '<button type="button" class="sched-row-delete"' +
-         ' aria-label="' +
-         escapeAttr(deleteAria) +
-         '"' +
-         ' data-delete-label="' +
-         escapeAttr(deleteLabel) +
-         '">' +
-         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
-         ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-         '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/>' +
-         '</svg>' +
-         '</button>' +
+         deleteBtn +
          '</div>' +
          '</li>'
       );
@@ -882,7 +896,8 @@
             const ev = state.events.find((e) => e.id === id);
             if (ev && els.srAnnounce) {
                els.srAnnounce.textContent =
-                  (ev.name || TYPE_LABEL[ev.event_type] || 'Event') + ' is ringing';
+                  (ev.name || TYPE_LABEL[ev.event_type] || 'Event') +
+                  (isRunning(ev) ? ' is running' : ' is ringing');
             }
          }
       });

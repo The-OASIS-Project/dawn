@@ -982,8 +982,8 @@ static char *handle_update(struct json_object *details, int user_id) {
       fields.fire_at = fire_time;
       mask |= SCHED_FIELD_FIRE_AT;
       /* Derive original_time (HH:MM on the owner's clock) from the new fire_at
-       * so a recurring event's time-of-day follows the edit — the recurrence
-       * engine reads original_time, not fire_at (see calculate_next_recurrence). */
+       * so a recurring event's time-of-day follows the edit: its next
+       * occurrence is original_time on fire_at's date (sched_next_occurrence). */
       struct tm fire_tm;
       tz_local(zone, fire_time, &fire_tm);
       snprintf(fields.original_time, SCHED_ORIGINAL_TIME_MAX, "%02d:%02d", fire_tm.tm_hour,
@@ -1251,6 +1251,11 @@ static char *handle_dismiss(struct json_object *details, int user_id) {
       event_id = own_ringing(user_id); /* else whatever rings (0) */
    if (!may_silence(event_id, user_id))
       return strdup("No alarm is currently ringing to dismiss.");
+
+   sched_event_t ev;
+   if (event_id > 0 && scheduler_db_get(event_id, &ev) == 0 && ev.status == SCHED_STATUS_RINGING &&
+       (ev.event_type == SCHED_EVENT_TASK || ev.event_type == SCHED_EVENT_BRIEFING))
+      return strdup("That one is running now; it ends on its own and can't be dismissed.");
 
    int result = scheduler_dismiss(event_id);
    if (result == 0)

@@ -514,12 +514,13 @@ int scheduler_db_clear_missed(int64_t id, int user_id) {
 
 /* A ringing event ends as @p status; FAILURE when it wasn't ringing (someone
  * else ended it first).  @p fired_at, when not 0, names the firing that must
- * still be ringing. */
-static int end_ringing(int64_t id, time_t fired_at, sched_status_t status) {
+ * still be ringing.  @p rings_only limits it to a timer, alarm or reminder. */
+static int end_ringing(int64_t id, time_t fired_at, sched_status_t status, bool rings_only) {
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET status = ?, fired_at = ? "
-                     "WHERE id = ? AND status = 'ringing' AND (?4 = 0 OR fired_at = ?4)";
+                     "WHERE id = ? AND status = 'ringing' AND (?4 = 0 OR fired_at = ?4) "
+                     "AND (?5 = 0 OR event_type IN ('timer', 'alarm', 'reminder'))";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
@@ -531,6 +532,7 @@ static int end_ringing(int64_t id, time_t fired_at, sched_status_t status) {
    sqlite3_bind_int64(stmt, 2, (int64_t)time(NULL));
    sqlite3_bind_int64(stmt, 3, id);
    sqlite3_bind_int64(stmt, 4, (int64_t)fired_at);
+   sqlite3_bind_int(stmt, 5, rings_only ? 1 : 0);
 
    rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
@@ -541,12 +543,14 @@ static int end_ringing(int64_t id, time_t fired_at, sched_status_t status) {
    return result;
 }
 
+/* A running task or briefing is 'ringing' too, and ends itself (scheduling its
+ * next occurrence): dismissing it would schedule a second. */
 int scheduler_db_dismiss(int64_t id) {
-   return end_ringing(id, 0, SCHED_STATUS_DISMISSED);
+   return end_ringing(id, 0, SCHED_STATUS_DISMISSED, true);
 }
 
 int scheduler_db_end_ring(int64_t id, time_t fired_at, sched_status_t status) {
-   return end_ringing(id, fired_at, status);
+   return end_ringing(id, fired_at, status, false);
 }
 
 /* =============================================================================
