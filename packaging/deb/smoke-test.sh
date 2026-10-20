@@ -1,94 +1,122 @@
 #!/bin/bash
 #
-# Check a dawn .deb in a clean container of the Ubuntu release it was built for,
-# as root:
+# Check a dawn .deb as root inside a clean, systemd-booted container of the Ubuntu
+# release it was built for.  check-deb.sh starts that container and runs this
+# twice: `install`, then reboots the container, then `reboot`.
 #
-#   docker run --rm -v "$PWD":/repo -w /repo ubuntu:24.04 \
-#      packaging/deb/smoke-test.sh build-deb/dawn_<version>+ubuntu24.04_amd64.deb
-#
-# Checks that the release's lintian finds no errors; that apt can install it
-# with nothing else present; that every library
-# resolves from /usr/lib/dawn or an apt package; that the daemon boots with the
-# packaged config and unit (TTS voice loads, WebUI listens, dawn-admin answers);
-# and that reinstall, upgrade, remove and purge keep what they should.  The
-# container has no systemd, so starting the service itself is not covered here.
+# Checks that the release's lintian finds no errors; that apt can install it with
+# nothing else present; that every library resolves from /usr/lib/dawn or an apt
+# package; that install enables dawn.service without starting it; that starting it
+# downloads the models (dawn-models.service), makes the TLS certificate
+# (dawn-tls), and boots the daemon (TTS loads, WebUI answers over HTTPS with the
+# host's CA, dawn-admin answers); that a restart keeps the certificate; that an
+# upgrade restarts the running daemon and keeps the config; that it comes up by
+# itself at boot; and that remove and purge stop it and keep or delete what they
+# should.
 set -euo pipefail
 
 deb="$(realpath "$1")"
+phase="$2"
 export DEBIAN_FRONTEND=noninteractive
 fail() {
    echo "SMOKE FAIL: $*" >&2
+   journalctl -u dawn -u dawn-models --no-pager | tail -60 >&2
    exit 1
 }
 
-apt-get update -qq
+# up: wait until the daemon answers dawn-admin (its admin socket comes up last).
+up() {
+   for _ in $(seq 120); do
+      dawn-admin ping >/dev/null 2>&1 && return
+      sleep 1
+   done
+   fail "dawn did not come up"
+}
 
-echo "==> lintian"
-apt-get install -y -qq lintian >/dev/null
-lintian --fail-on error "$deb" || fail "lintian errors"
+install_phase() {
+   apt-get update -qq
 
-echo "==> install"
-apt-get install -y -qq "$deb" >/dev/null
+   echo "==> lintian"
+   apt-get install -y -qq lintian >/dev/null
+   lintian --fail-on error "$deb" || fail "lintian errors"
 
-echo "==> libraries"
-libs=(/usr/bin/dawn /usr/bin/dawn-admin /usr/lib/dawn/*.so*)
-! ldd "${libs[@]}" | grep 'not found' || fail "unresolved libraries"
-stray="$(ldd "${libs[@]}" | awk '/=> \//{print $3}' | grep -Ev "^(/usr/lib|/lib)/" || true)"
-[ -z "$stray" ] || fail "libraries from outside /usr/lib (bundled or apt): $stray"
+   echo "==> install"
+   apt-get install -y -qq "$deb" >/dev/null
+   units=(/usr/lib/systemd/system/dawn.service /usr/lib/systemd/system/dawn-models.service)
+   out="$(systemd-analyze verify "${units[@]}" 2>&1)" || fail "units: $out"
+   [ -z "$out" ] || fail "units: $out"
+   [ "$(systemctl is-enabled dawn)" = enabled ] || fail "install did not enable dawn"
+   ! systemctl -q is-active dawn || fail "install started dawn"
 
-echo "==> boot (the unit's own command, environment and working directory)"
-dawn-fetch-models
-mosquitto -d # no systemd here to start the broker the package depends on
-unit=/usr/lib/systemd/system/dawn.service
-exec_start="$(sed -n 's/^ExecStart=//p' "$unit")"
-pre="$(sed -n 's/^ExecStartPre=+//p' "$unit")"
-$pre
-[ -z "$($pre)" ] || fail "dawn-tls reissued a current certificate"
-mapfile -t unit_env < <(sed -n 's/^Environment=//p' "$unit")
-log=/tmp/dawn-smoke.log
-(cd "$(sed -n 's/^WorkingDirectory=//p' "$unit")" &&
-   exec runuser -u dawn -- env "${unit_env[@]}" $exec_start) >"$log" 2>&1 &
-pid=$!
-# Started: the admin socket answers (it comes up after the WebUI).
-for _ in $(seq 90); do
-   dawn-admin ping >/dev/null 2>&1 && break
-   kill -0 "$pid" 2>/dev/null || { cat "$log"; fail "daemon exited during startup"; }
-   sleep 1
-done
-dawn-admin ping || { cat "$log"; fail "dawn-admin ping"; }
-grep -q 'WebUI: Server started successfully' "$log" || { cat "$log"; fail "WebUI never listened"; }
-grep -q 'Loaded TTS voice model' "$log" || { cat "$log"; fail "TTS voice did not load"; }
-# espeak-ng finds its data through the path compiled into the bundled fork.
-! grep -q 'Failed to initialize TTS engine' "$log" || { cat "$log"; fail "TTS engine (espeak-ng)"; }
-curl -fsS --cacert /etc/dawn/ssl/ca.crt -o /dev/null https://localhost:3000/ ||
-   fail "HTTPS with the host's CA"
-curl -fsS --cacert /etc/dawn/ssl/ca.crt -o /dev/null "https://$(hostname):3000/" ||
-   fail "HTTPS by host name"
-kill "$pid"
-wait "$pid" || true
+   echo "==> libraries"
+   libs=(/usr/bin/dawn /usr/bin/dawn-admin /usr/lib/dawn/*.so*)
+   ! ldd "${libs[@]}" | grep 'not found' || fail "unresolved libraries"
+   stray="$(ldd "${libs[@]}" | awk '/=> \//{print $3}' | grep -Ev "^(/usr/lib|/lib)/" || true)"
+   [ -z "$stray" ] || fail "libraries from outside /usr/lib (bundled or apt): $stray"
 
-echo "==> reinstall, upgrade"
-echo "# smoke-marker" >>/etc/dawn/dawn.toml
-apt-get install -y -qq --reinstall "$deb" >/dev/null
-up=/tmp/upgrade
-dpkg-deb -R "$deb" "$up"
-sed -i 's/^Version: .*/&+smoke1/' "$up/DEBIAN/control"
-dpkg-deb --root-owner-group -b "$up" /tmp/dawn-upgrade.deb >/dev/null
-apt-get install -y -qq /tmp/dawn-upgrade.deb >/dev/null
-grep -q smoke-marker /etc/dawn/dawn.toml || fail "upgrade replaced /etc/dawn/dawn.toml"
-[ "$(stat -c %U /etc/dawn/dawn.toml)" = dawn ] || fail "dawn.toml not owned by dawn"
-[ "$(stat -c %a /etc/dawn/secrets.toml)" = 600 ] || fail "secrets.toml not mode 600"
+   echo "==> start (models, certificate, daemon)"
+   systemctl start dawn
+   up
+   [ "$(systemctl show -p Result --value dawn-models)" = success ] || fail "dawn-models.service"
+   [ -s /var/lib/dawn/models/whisper.cpp/ggml-base.en.bin ] || fail "Whisper model not downloaded"
+   log="$(journalctl -u dawn --no-pager)"
+   grep -q 'WebUI: Server started successfully' <<<"$log" || fail "WebUI never listened"
+   grep -q 'Loaded TTS voice model' <<<"$log" || fail "TTS voice did not load"
+   # espeak-ng finds its data through the path compiled into the bundled fork.
+   ! grep -q 'Failed to initialize TTS engine' <<<"$log" || fail "TTS engine (espeak-ng)"
+   curl -fsS --cacert /etc/dawn/ssl/ca.crt -o /dev/null https://localhost:3000/ ||
+      fail "HTTPS with the host's CA"
+   curl -fsS --cacert /etc/dawn/ssl/ca.crt -o /dev/null "https://$(hostname):3000/" ||
+      fail "HTTPS by host name"
+   dawn-fetch-models >/dev/null || fail "dawn-fetch-models as root" # drops to dawn
 
-echo "==> remove"
-apt-get remove -y -qq dawn >/dev/null
-[ -f /etc/dawn/dawn.toml ] || fail "remove deleted /etc/dawn/dawn.toml"
-[ -d /var/lib/dawn/db ] || fail "remove deleted /var/lib/dawn/db"
+   echo "==> restart (the certificate is kept)"
+   systemctl restart dawn
+   up
+   [ "$(journalctl -u dawn --no-pager | grep -c 'dawn-tls: issuing')" = 1 ] ||
+      fail "dawn-tls reissued a current certificate"
 
-echo "==> purge"
-apt-get purge -y -qq dawn >/dev/null
-[ ! -e /etc/dawn/dawn.toml ] || fail "purge left /etc/dawn/dawn.toml"
-[ ! -e /etc/dawn/ssl ] || fail "purge left /etc/dawn/ssl"
-[ -d /var/lib/dawn/db ] || fail "purge deleted /var/lib/dawn/db"
-[ ! -L /var/lib/dawn/tool_instructions ] || fail "purge left the tool_instructions link"
+   echo "==> reinstall, upgrade (the running daemon is restarted, the config kept)"
+   echo "# smoke-marker" >>/etc/dawn/dawn.toml
+   apt-get install -y -qq --reinstall "$deb" >/dev/null
+   pid="$(systemctl show -p MainPID --value dawn)"
+   dpkg-deb -R "$deb" /tmp/upgrade
+   sed -i 's/^Version: .*/&+smoke1/' /tmp/upgrade/DEBIAN/control
+   dpkg-deb --root-owner-group -b /tmp/upgrade /tmp/dawn-upgrade.deb >/dev/null
+   apt-get install -y -qq /tmp/dawn-upgrade.deb >/dev/null
+   up
+   [ "$(systemctl show -p MainPID --value dawn)" != "$pid" ] || fail "upgrade did not restart dawn"
+   grep -q smoke-marker /etc/dawn/dawn.toml || fail "upgrade replaced /etc/dawn/dawn.toml"
+   [ "$(stat -c %U /etc/dawn/dawn.toml)" = dawn ] || fail "dawn.toml not owned by dawn"
+   [ "$(stat -c %a /etc/dawn/secrets.toml)" = 600 ] || fail "secrets.toml not mode 600"
+}
 
-echo "SMOKE OK"
+# After check-deb.sh reboots the container.
+reboot_phase() {
+   echo "==> boot (dawn came up by itself)"
+   up
+   systemctl -q is-active dawn || fail "dawn not active after boot"
+
+   echo "==> remove"
+   apt-get remove -y -qq dawn >/dev/null
+   ! systemctl -q is-active dawn || fail "remove left dawn running"
+   [ -f /etc/dawn/dawn.toml ] || fail "remove deleted /etc/dawn/dawn.toml"
+   [ -d /var/lib/dawn/db ] || fail "remove deleted /var/lib/dawn/db"
+
+   echo "==> purge"
+   apt-get purge -y -qq dawn >/dev/null
+   [ ! -e /etc/dawn/dawn.toml ] || fail "purge left /etc/dawn/dawn.toml"
+   [ ! -e /etc/dawn/ssl ] || fail "purge left /etc/dawn/ssl"
+   [ -d /var/lib/dawn/db ] || fail "purge deleted /var/lib/dawn/db"
+   [ ! -L /var/lib/dawn/tool_instructions ] || fail "purge left the tool_instructions link"
+   [ -z "$(find /etc/systemd -name 'dawn*' -print -quit)" ] || fail "purge left systemd links"
+}
+
+case "$phase" in
+   install) install_phase ;;
+   reboot)
+      reboot_phase
+      echo "SMOKE OK"
+      ;;
+   *) fail "phase must be install or reboot" ;;
+esac

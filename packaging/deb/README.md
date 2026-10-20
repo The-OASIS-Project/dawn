@@ -8,8 +8,7 @@ it is built.
 ```bash
 git submodule update --init whisper.cpp
 UBUNTU=24.04 packaging/deb/build-deb.sh [VERSION]   # or 26.04; needs docker
-docker run --rm -v "$PWD":/repo -w /repo ubuntu:24.04 \
-   packaging/deb/smoke-test.sh build-deb/dawn_<version>+ubuntu24.04_amd64.deb
+packaging/deb/check-deb.sh build-deb/dawn_<version>+ubuntu24.04_amd64.deb
 ```
 
 `ci.yml` does both for each release on every PR; `release.yml` does them for every `v*` tag and publishes
@@ -26,7 +25,8 @@ the packages with the satellite's.
 | `dawn-tls` | Before each start: this host's CA and the WebUI certificate, made or renewed as needed |
 | `dawn.toml.in` | The package's changes from the defaults; postinst copies it (and `secrets.toml.example`, which sets nothing) to `/etc/dawn` when absent |
 | `copyright` | Licenses of everything the package ships |
-| `smoke-test.sh` | lintian, then install, boot, reinstall, upgrade, remove and purge, in a clean container of the release |
+| `check-deb.sh` | Boots a systemd container of the package's release and runs `smoke-test.sh` in it, rebooting it halfway |
+| `smoke-test.sh` | lintian; install (enabled, not started), start (models, certificate, daemon over HTTPS), restart, upgrade (restarts the daemon), reboot (comes up by itself), remove, purge |
 
 Design choices worth knowing before changing anything:
 

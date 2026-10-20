@@ -271,8 +271,8 @@ jobs:
   # Ubuntu packages: the .debs release.yml publishes, built the same way here so
   # a change that breaks one fails its PR, not the release tag.  They are also
   # the only Release builds with GCC 13 (24.04) and GCC 15 (26.04), whose
-  # warnings GCC 11/12 above don't raise.  Each is linted, installed, booted,
-  # upgraded and purged in a clean container of its release.
+  # warnings GCC 11/12 above don't raise.  Each is linted, then installed,
+  # started, upgraded, rebooted and purged in a systemd container of its release.
   # -------------------------------------------------------------------------
   deb-package:
     runs-on: ubuntu-24.04
@@ -291,10 +291,8 @@ jobs:
       - name: Build .deb (ubuntu:${{ matrix.ubuntu }} container)
         run: ./packaging/deb/build-deb.sh
 
-      - name: Check (lintian, install, boot, upgrade, remove, purge in a clean ubuntu:${{ matrix.ubuntu }})
-        run: |
-          deb="$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
-          docker run --rm -v "$PWD":/repo -w /repo "ubuntu:$UBUNTU" packaging/deb/smoke-test.sh "$deb"
+      - name: Check (lintian, then install, start, upgrade, reboot, purge under systemd in ubuntu:${{ matrix.ubuntu }})
+        run: ./packaging/deb/check-deb.sh "$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
 
   # -------------------------------------------------------------------------
   # Job 4: Tier 1 Satellite Build (~1 min)

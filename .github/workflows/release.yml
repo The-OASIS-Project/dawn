@@ -92,11 +92,8 @@ jobs:
           fi
           ./packaging/deb/build-deb.sh $ver
 
-      - name: Check (lintian, install, boot, upgrade, remove, purge in a clean ubuntu:${{ matrix.ubuntu }})
-        run: |
-          set -euo pipefail
-          deb="$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
-          docker run --rm -v "$PWD":/repo -w /repo "ubuntu:$UBUNTU" packaging/deb/smoke-test.sh "$deb"
+      - name: Check (lintian, then install, start, upgrade, reboot, purge under systemd in ubuntu:${{ matrix.ubuntu }})
+        run: ./packaging/deb/check-deb.sh "$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
 
       - name: Stage artifacts
         run: |

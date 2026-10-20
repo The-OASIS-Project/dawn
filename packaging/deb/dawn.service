@@ -5,8 +5,6 @@ Documentation=https://github.com/The-OASIS-Project/dawn
 # [mqtt] can point at another broker.
 Wants=network-online.target dawn-models.service mosquitto.service
 After=network-online.target dawn-models.service mosquitto.service
-StartLimitIntervalSec=5min
-StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -20,8 +18,12 @@ Environment=HOME=/var/lib/dawn
 ExecStartPre=+/usr/sbin/dawn-tls
 # --server: this build has no local audio.
 ExecStart=/usr/bin/dawn --server --config /etc/dawn/dawn.toml
+# A failing start is retried every 10 s, backing off to every 5 min: a broker
+# that comes back is picked up, a broken config doesn't reload models nonstop.
 Restart=on-failure
 RestartSec=10s
+RestartSteps=5
+RestartMaxDelaySec=5min
 
 ProtectSystem=strict
 ReadWritePaths=/var/lib/dawn /etc/dawn
