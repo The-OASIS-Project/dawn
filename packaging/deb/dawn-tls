@@ -27,6 +27,12 @@ cd "$DIR"
 # is touched, so a certificate installed without our CA is never replaced.
 if [ -s dawn-chain.crt ] && ! { [ -s ca.crt ] &&
    openssl verify -no_check_time -CAfile ca.crt dawn-chain.crt >/dev/null 2>&1; }; then
+   # Unless it's ours and ca.crt was removed: then it can never be renewed.
+   if [ ! -e ca.crt ] &&
+      openssl x509 -in dawn-chain.crt -noout -issuer | grep -q 'CN = DAWN Private CA'; then
+      echo "dawn-tls: WARNING: $DIR/ca.crt is missing, so the server certificate it" \
+         "signed can't be renewed; put it back" >&2
+   fi
    exit 0
 fi
 
@@ -49,7 +55,8 @@ fi
 # Names and addresses, sorted so the list only changes when they do.  IPv6 temporary
 # (privacy) addresses rotate daily and are left out; so are non-global ones.
 host="$(hostname)"
-fqdn="$(hostname -f 2>/dev/null || true)"
+# A DNS lookup: bounded, so a host with broken DNS isn't held up at every start.
+fqdn="$(timeout 2 hostname -f 2>/dev/null || true)"
 san="$({
    echo "DNS:localhost"
    echo "DNS:$host"
