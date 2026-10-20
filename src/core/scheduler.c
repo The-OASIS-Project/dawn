@@ -1744,6 +1744,56 @@ static void recover_missed_events(void) {
    scheduler_broadcast_events_changed(0);
 }
 
+/* Ends the rings a stop left open.  A row still 'ringing' at startup was
+ * ringing, or a task or briefing was running, when the daemon stopped; nothing
+ * would end it now, and a repeating one would never come again.  Each ends as
+ * it would have (an alarm times out, a timer or reminder is dismissed, an
+ * unfinished task or briefing is missed) and a repeating one gets its next
+ * occurrence.  Only this thread sets 'ringing' (fire_event), and this runs
+ * before it fires anything, so every ringing row is a leftover. */
+static void end_interrupted_rings(void) {
+   sched_event_t events[20];
+   int ended = 0;
+   int count;
+   bool progress = true;
+
+   while (progress && (count = scheduler_db_get_ringing(events, 20)) > 0) {
+      progress = false;
+      for (int i = 0; i < count; i++) {
+         const sched_event_t *e = &events[i];
+         sched_status_t status = SCHED_STATUS_MISSED;
+         const char *what = NULL; /* a ring's ending, as end_ring says it */
+         if (e->event_type == SCHED_EVENT_ALARM) {
+            status = SCHED_STATUS_TIMED_OUT;
+            what = "Alarm timed out";
+         } else if (e->event_type == SCHED_EVENT_TIMER || e->event_type == SCHED_EVENT_REMINDER) {
+            status = SCHED_STATUS_DISMISSED;
+            what = "Auto-dismissed";
+         }
+
+         /* Bound to its firing: a dismiss since startup already ended it. */
+         if (scheduler_db_end_ring(e->id, e->fired_at, status) != SUCCESS)
+            continue;
+         progress = true;
+         ended++;
+         OLOG_INFO("scheduler: %s '%s' (id=%lld) was left ringing by a stop; now %s",
+                   sched_event_type_to_str(e->event_type), e->name, (long long)e->id,
+                   sched_status_to_str(status));
+#ifdef ENABLE_WEBUI
+         /* A browser that reconnected during the startup wait is still playing
+          * the ring: this tells it the ring is over. */
+         sched_event_t updated;
+         if (what && scheduler_db_get(e->id, &updated) == 0)
+            scheduler_broadcast_notification(&updated, what);
+#endif
+         schedule_next_occurrence(e);
+      }
+   }
+
+   if (ended > 0)
+      scheduler_broadcast_events_changed(0);
+}
+
 /* =============================================================================
  * Scheduler Thread
  * ============================================================================= */
@@ -1773,6 +1823,8 @@ static void *scheduler_thread_func(void *arg) {
        missed_expired > 0)
       OLOG_INFO("scheduler: expired %d stale missed notifications", missed_expired);
    time_t last_missed_expire = time(NULL);
+
+   end_interrupted_rings();
 
    /* Recover missed events */
    if (g_config.scheduler.missed_event_recovery)
@@ -1996,10 +2048,9 @@ int scheduler_dismiss(int64_t event_id) {
    pthread_mutex_lock(&ringing_mutex);
 
    /* Only clear the global ringing state if the target ID matches the
-    * currently-ringing event. With the missed-notification queue, stale
-    * SCHED_STATUS_RINGING rows accumulate for offline users and routinely
-    * get dismissed via dismiss_missed — we must NOT silence a different
-    * user's actively-ringing alarm in the process. */
+    * currently-ringing event: a dismiss by id (dismiss_missed, another
+    * user's silent ring) can name a row other than the one playing, and must
+    * NOT silence a different user's actively-ringing alarm. */
    const int64_t id = event_id > 0 ? event_id : ringing_target_locked();
    const bool matches_current = alarm_ringing && id == ringing_event.id;
    if (matches_current) {
