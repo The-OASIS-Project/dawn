@@ -24,17 +24,21 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 
+#include <json-c/json.h>
 #include <sqlite3.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
+#include "memory/memory_extraction.h"
 #include "unity.h"
 
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -355,6 +359,39 @@ void test_search_shows_relations_only_when_asked(void) {
    free(r);
 }
 
+/* Only DAWN's own posts are new: the conversation is marked extracted without a
+ * model call, but only as far as the history that was checked.  A reply that
+ * arrives after the history was taken stays to be read. */
+static void test_unprompted_skip_leaves_a_later_reply_unread(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Channel", &conv));
+   const conv_message_row_t post = { .role = "assistant",
+                                     .content = "Morning briefing: rain at noon.",
+                                     .unprompted = true };
+   int64_t first = 0, second = 0, reply = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &post, &first));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &post, &second));
+
+   char json[256];
+   snprintf(json, sizeof(json),
+            "[{\"role\":\"assistant\",\"content\":\"a\",\"id\":%lld},"
+            "{\"role\":\"assistant\",\"content\":\"b\",\"id\":%lld}]",
+            (long long)first, (long long)second);
+   struct json_object *history = json_tokener_parse(json);
+   TEST_ASSERT_NOT_NULL(history);
+
+   /* The reply lands after the history was taken. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_message_ex(conv, s_user, "user",
+                                                                 "I'll bring an umbrella", &reply));
+   TEST_ASSERT_EQUAL_INT(0, memory_trigger_extraction(s_user, conv, "s", history, 2, 0, NULL));
+   json_object_put(history);
+
+   int64_t cursor = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_last_extracted_msg_id(conv, &cursor));
+   TEST_ASSERT_EQUAL_INT64(second, cursor);
+   TEST_ASSERT_TRUE(reply > cursor);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_remember_in_a_known_conversation_is_learned_there);
@@ -367,5 +404,6 @@ int main(void) {
    RUN_TEST(test_list_merged_and_restore);
    RUN_TEST(test_forget_reports_already_merged);
    RUN_TEST(test_search_shows_relations_only_when_asked);
+   RUN_TEST(test_unprompted_skip_leaves_a_later_reply_unread);
    return UNITY_END();
 }

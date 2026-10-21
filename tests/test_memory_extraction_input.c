@@ -21,6 +21,8 @@
  */
 
 #include <json-c/json.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,7 +56,32 @@ int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_owner
    return AUTH_DB_SUCCESS;
 }
 
+/* The row the unprompted lookup reports as DAWN's own post (0 = none); the
+ * lookup failing when g_unprompted_fails. */
+static int64_t g_unprompted_id = 0;
+static bool g_unprompted_fails = false;
+
+int conv_db_messages_unprompted(int user_id,
+                                const char *ids_json,
+                                int64_t *ids_out,
+                                int max,
+                                int *count_out) {
+   (void)user_id;
+   *count_out = 0;
+   if (g_unprompted_fails) {
+      return AUTH_DB_FAILURE;
+   }
+   char needle[32];
+   snprintf(needle, sizeof(needle), "%lld", (long long)g_unprompted_id);
+   if (g_unprompted_id > 0 && max > 0 && strstr(ids_json, needle)) {
+      ids_out[(*count_out)++] = g_unprompted_id;
+   }
+   return AUTH_DB_SUCCESS;
+}
+
 void setUp(void) {
+   g_unprompted_id = 0;
+   g_unprompted_fails = false;
 }
 
 void tearDown(void) {
@@ -110,6 +137,51 @@ static void test_third_party_results_are_stubbed(void) {
 }
 
 /* A question without its row id still can't be attributed: refused. */
+/* A row DAWN wrote on its own (a delivered briefing) never reaches
+ * extraction; a failed lookup extracts nothing rather than the post. */
+static void test_unprompted_rows_are_left_out(void) {
+   struct json_object *hist = json_tokener_parse(HISTORY);
+   g_unprompted_id = 12; /* the assistant's "Worth $5,245." */
+   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0);
+   TEST_ASSERT_NOT_NULL(input);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(input));
+   for (size_t i = 0; i < json_object_array_length(input); i++) {
+      struct json_object *id = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(input, i), "id", &id)) {
+         TEST_ASSERT_NOT_EQUAL(12, json_object_get_int64(id));
+      }
+   }
+   json_object_put(input);
+
+   g_unprompted_fails = true;
+   TEST_ASSERT_NULL(memory_extraction_build_input(1, 1699, hist, 0));
+   json_object_put(hist);
+}
+
+/* An input holds a question only when the user said something in it. */
+static void test_input_has_question(void) {
+   struct json_object *hist = json_tokener_parse(HISTORY);
+   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0);
+   TEST_ASSERT_TRUE(memory_extraction_input_has_question(input));
+   json_object_put(input);
+   struct json_object *only_reply = json_tokener_parse(
+       "[{\"role\":\"assistant\",\"content\":\"Morning briefing.\",\"id\":5}]");
+   TEST_ASSERT_FALSE(memory_extraction_input_has_question(only_reply));
+   json_object_put(only_reply);
+   json_object_put(hist);
+}
+
+/* The cursor after a skip goes only as far as the history checked, never to
+ * a row added since (rows without an id don't count). */
+static void test_history_max_id(void) {
+   struct json_object *hist = json_tokener_parse(HISTORY);
+   TEST_ASSERT_EQUAL_INT64(12, memory_extraction_history_max_id(hist));
+   json_object_put(hist);
+   struct json_object *none = json_tokener_parse("[{\"role\":\"user\",\"content\":\"x\"}]");
+   TEST_ASSERT_EQUAL_INT64(0, memory_extraction_history_max_id(none));
+   json_object_put(none);
+}
+
 static void test_unstamped_question_refused(void) {
    struct json_object *hist = json_tokener_parse(HISTORY);
    json_object_object_del(json_object_array_get_idx(hist, 1), "id");
@@ -122,5 +194,8 @@ int main(void) {
    RUN_TEST(test_tool_results_need_no_id);
    RUN_TEST(test_unstamped_question_refused);
    RUN_TEST(test_third_party_results_are_stubbed);
+   RUN_TEST(test_unprompted_rows_are_left_out);
+   RUN_TEST(test_input_has_question);
+   RUN_TEST(test_history_max_id);
    return UNITY_END();
 }

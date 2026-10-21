@@ -1631,6 +1631,21 @@ static int trigger_extraction(int user_id,
       extraction_slot_release(user_id);
       return 0;
    }
+   /* Nothing the user said is new (only DAWN's own posts, say): mark it done
+    * rather than send the model an empty conversation.  Only as far as the
+    * history checked: a reply arriving since then is still to be read. */
+   if (!memory_extraction_input_has_question(filtered)) {
+      json_object_put(filtered);
+      free(ctx);
+      const int64_t checked_id = memory_extraction_history_max_id(conversation_history);
+      if (conversation_id > 0 && checked_id > last_msg_id) {
+         memory_db_set_last_extracted(conversation_id, message_count, checked_id);
+      }
+      OLOG_INFO("memory_extraction: conv %lld: nothing the user said is new; skipped",
+                (long long)conversation_id);
+      extraction_slot_release(user_id);
+      return 0;
+   }
 
    /* Every caller passes a stripped history; this is the backstop, so no
     * reasoning a vendor issued for itself reaches the extraction model. */

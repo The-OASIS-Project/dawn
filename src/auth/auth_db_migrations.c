@@ -3495,6 +3495,16 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
+   /* v109: message_unprompted. */
+   bool v109_ok = (current_version >= 109);
+   if (current_version < 109) {
+      if (auth_db_migrations_v109(s_db.db) == AUTH_DB_SUCCESS) {
+         v109_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v109 migration (message_unprompted) failed");
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3521,7 +3531,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
                               v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
                               v97_ok && v98_ok && v99_ok && v100_ok && v101_ok && v102_ok &&
-                              v103_ok && v104_ok && v106_ok && v107_ok && v108_ok;
+                              v103_ok && v104_ok && v106_ok && v107_ok && v108_ok && v109_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

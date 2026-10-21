@@ -476,6 +476,32 @@ int msg_insert_locked(int64_t conv_id,
    }
    *id_out = sqlite3_last_insert_rowid(s_db.db);
 
+   /* DAWN's own post (only an ordinary assistant row with text and no tool
+    * calls can be one), marked in the caller's transaction so it is never
+    * extracted unmarked. */
+   const bool can_post = strcmp(row->role, "assistant") == 0 && kind == MESSAGE_KIND_NONE &&
+                         !row->tool_calls && row->content[0] != '\0';
+   if (row->unprompted && !can_post) {
+      OLOG_WARNING("conv_db_add_row: a %s row in conv %lld can't be a post; saved unmarked",
+                   row->role, (long long)conv_id);
+   }
+   if (row->unprompted && can_post) {
+      sqlite3_stmt *post = NULL;
+      int prc = sqlite3_prepare_v2(s_db.db,
+                                   "INSERT INTO message_unprompted (message_id) VALUES (?)", -1,
+                                   &post, NULL);
+      if (prc == SQLITE_OK) {
+         sqlite3_bind_int64(post, 1, *id_out);
+         prc = sqlite3_step(post) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
+      }
+      sqlite3_finalize(post);
+      if (prc != SQLITE_OK) {
+         OLOG_ERROR("conv_db_add_row: marking post failed: %s", sqlite3_errmsg(s_db.db));
+         *id_out = 0;
+         return AUTH_DB_FAILURE;
+      }
+   }
+
    /* The conversation names the images the row holds (a tool row's captures,
     * a question's uploads), in the caller's transaction. */
    char question_ids[QUESTION_IDS_JSON_MAX];
@@ -519,8 +545,9 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* A row naming images is one transaction with what records them. */
-   const bool txn = images || (strcmp(row->role, "user") == 0 && strstr(row->content, "[IMAGE:"));
+   /* A row naming images, or a post, is one transaction with what records it. */
+   const bool txn = images || row->unprompted ||
+                    (strcmp(row->role, "user") == 0 && strstr(row->content, "[IMAGE:"));
    if (txn && auth_db_txn_begin_locked("messages") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
