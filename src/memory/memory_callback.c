@@ -527,6 +527,18 @@ static void append_tool_citation_hint(strbuf_t *sb) {
                   " (comma-separated, no spaces).\n");
 }
 
+/* One fact as search and recent list it: "- [ID:12] (told) text", the word
+ * saying how it was learned when there is one. */
+static void append_fact_line(strbuf_t *sb, const memory_fact_t *fact) {
+   const char *kind = memory_fact_kind_word(fact);
+   if (kind) {
+      strbuf_appendf(sb, "- " SURFACED_ID_FMT " (%s) %s\n", (long long)fact->id, kind,
+                     fact->fact_text);
+   } else {
+      strbuf_appendf(sb, "- " SURFACED_ID_FMT " %s\n", (long long)fact->id, fact->fact_text);
+   }
+}
+
 /* as_of_ts (v33): timestamp for relation validity in entity recall (0 = now).
  * include_historical (v33): bypass relation validity filter entirely. */
 char *memory_action_search(int user_id,
@@ -658,8 +670,7 @@ char *memory_action_search(int user_id,
 
       for (int i = 0; i < fact_count; i++) {
          /* The date stays in fact_text when extraction included it. */
-         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
-                        facts[i].fact_text);
+         append_fact_line(&sb, &facts[i]);
          memory_citation_record_tool_fact_current(facts[i].id);
          if (with_source && fact_conv[i] > 0 && src_count < SOURCE_TOP_FACTS) {
             src_conv[src_count] = fact_conv[i];
@@ -1339,8 +1350,7 @@ char *memory_action_recent(int user_id,
       }
 
       for (int i = 0; i < fact_count; i++) {
-         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
-                        facts[i].fact_text);
+         append_fact_line(&sb, &facts[i]);
          memory_citation_record_tool_fact_current(facts[i].id);
          if (with_source && fact_conv[i] > 0 && src_count < SOURCE_TOP_FACTS) {
             src_conv[src_count] = fact_conv[i];

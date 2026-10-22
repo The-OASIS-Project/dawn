@@ -323,6 +323,7 @@ int build_focus_block(session_t *session,
       if (c->item_id != NULL) {
          safe_strscpy(it->item_id, c->item_id);
       }
+      it->kind = c->kind;
       item_date(out->zone, c->item_timestamp, it->date, sizeof(it->date));
       it->text = text;
       it->score = result->score_breakdowns != NULL ? result->score_breakdowns[i].final_score

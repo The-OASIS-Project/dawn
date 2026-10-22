@@ -609,8 +609,13 @@ static void process_extraction_response(int user_id,
          const char *source = "inferred";
          float confidence = 0.7f;
          struct json_object *src_obj, *conf_obj;
-         if (json_object_object_get_ex(fact, "source", &src_obj))
-            source = json_object_get_string(src_obj);
+         /* Only the two values extraction may claim; anything else the model
+          * writes is stored as inferred, so the word surfaces show is true. */
+         if (json_object_object_get_ex(fact, "source", &src_obj)) {
+            const char *claimed = json_object_get_string(src_obj);
+            if (claimed && strcmp(claimed, "explicit") == 0)
+               source = "explicit";
+         }
          if (json_object_object_get_ex(fact, "confidence", &conf_obj))
             confidence = (float)json_object_get_double(conf_obj);
 

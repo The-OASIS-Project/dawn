@@ -264,6 +264,7 @@ static void test_fact_adapter_shape(void) {
    TEST_ASSERT_TRUE(fc->recency_score >= 0.0f && fc->recency_score <= 1.0f);
    TEST_ASSERT_EQUAL_INT64(42, fc->provenance.conv_id);
    TEST_ASSERT_EQUAL_INT64(304, fc->provenance.msg_id_start);
+   TEST_ASSERT_EQUAL_STRING("stub-kind", fc->kind);
    focus_result_free(&result);
 }
 

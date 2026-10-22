@@ -143,6 +143,7 @@ typedef struct {
    time_t last_accessed;
    int access_count;
    int64_t superseded_by; /* ID of fact that replaced this one, or 0 */
+   int64_t note_doc_id;   /* >0: a memory→note bridge gloss pointing at that note */
    int64_t expires_at;    /* v58: fact-lifecycle expiry, unix sec; 0 = durable (no expiry).
                            * Only populated by the by-id fetch (memory_db_fact_get); the
                            * keyword/list retrieval statements filter expired rows in SQL,

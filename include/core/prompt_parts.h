@@ -63,6 +63,8 @@ struct focus_panel;
 #define PROMPT_FOCUS_ITEM_ID_LEN 64
 /** An item's date as its line shows it (" YYYY-MM-DD"), with its NUL. */
 #define PROMPT_FOCUS_DATE_LEN 16
+/** An item's kind word as its line shows it (" inferred"), at most. */
+#define PROMPT_FOCUS_KIND_LEN 16
 
 /**
  * One item retrieved for a turn, ranked.  The turn's seam decides whether it
@@ -74,6 +76,7 @@ typedef struct {
                                                 0 when it has none (sent unnumbered) */
    char source[PROMPT_FOCUS_SOURCE_LEN];   /**< focus source ("memory_fact") */
    char item_id[PROMPT_FOCUS_ITEM_ID_LEN]; /**< opaque key ("fact:12"); "" when none */
+   const char *kind;                       /**< how it is known ("told"), static; NULL: none */
    char date[PROMPT_FOCUS_DATE_LEN];       /**< " YYYY-MM-DD" or "" */
    char *text;  /**< one line, DAWN's markers defused; masked at the seam (owned) */
    float score; /**< the ranker's composite score */

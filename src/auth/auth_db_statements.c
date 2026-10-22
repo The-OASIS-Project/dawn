@@ -457,12 +457,12 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * legitimately-missing fact would get; no oracle). */
    { "memory_fact_get",
      "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, category, expires_at FROM memory_facts "
+     "access_count, superseded_by, category, note_doc_id, expires_at FROM memory_facts "
      "WHERE id = ? AND user_id = ?",
      &s_db.stmt_memory_fact_get },
    { "memory_fact_list",
      "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, category FROM memory_facts "
+     "access_count, superseded_by, category, note_doc_id FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
@@ -473,21 +473,21 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * all three.  The id tiebreak keeps OFFSET paging stable across same-second rows. */
    { "memory_fact_list_created_desc",
      "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, category FROM memory_facts "
+     "access_count, superseded_by, category, note_doc_id FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
      &s_db.stmt_memory_fact_list_created_desc },
    { "memory_fact_list_created_asc",
      "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, category FROM memory_facts "
+     "access_count, superseded_by, category, note_doc_id FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
      &s_db.stmt_memory_fact_list_created_asc },
    { "memory_fact_search",
      "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, category FROM memory_facts "
+     "access_count, superseded_by, category, note_doc_id FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL AND fact_text LIKE ?2 ESCAPE '\\' "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY confidence DESC LIMIT ?3",
@@ -497,9 +497,9 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * (space-separated pre-stemmed tokens, OR-combined), 2=user_id,
     * 3=max_facts.  Returns rows ordered by BM25 score (raw negative;
     * caller flips sign + sigmoid-normalizes via memory_bm25_normalize).
-    * Score column appears as col 10 — populate_fact_from_row reads
-    * cols 0-9 by index so the extra col is ignored on the fact-fill
-    * side; the caller pulls the score with sqlite3_column_double(.,10). */
+    * Score column appears as col 11 — populate_fact_from_row reads
+    * cols 0-10 by index so the extra col is ignored on the fact-fill
+    * side; the caller pulls the score with sqlite3_column_double(.,11). */
    /* v48 BM25 prep statements are SOFT failures: if the FTS5 table is
     * missing (DB held at v47 because the v48 migration failed) these
     * preps fail.  Leave the pointers NULL: memory_db_fact_search_bm25_since then
@@ -507,7 +507,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * the daemon failing to start. */
    { .name = "memory_fact_search_bm25",
      .sql = "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
-            "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, "
+            "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, mf.note_doc_id, "
             "bm25(memory_facts_fts) AS score "
             "FROM memory_facts_fts "
             "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
@@ -524,7 +524,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * memory.search query. */
    { .name = "memory_fact_search_bm25_since",
      .sql = "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
-            "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, "
+            "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, mf.note_doc_id, "
             "bm25(memory_facts_fts) AS score "
             "FROM memory_facts_fts "
             "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
@@ -750,7 +750,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * the legacy _list_since semantics when callers pass until=INT64_MAX. */
    { "memory_fact_list_window_asc",
      "SELECT id, user_id, fact_text, confidence, source, created_at, "
-     "last_accessed, access_count, superseded_by, category FROM memory_facts "
+     "last_accessed, access_count, superseded_by, category, note_doc_id FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND created_at >= ?2 AND created_at <= ?3 "
      "  AND (expires_at IS NULL OR expires_at >= ?5) "
@@ -758,7 +758,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_memory_fact_list_window_asc },
    { "memory_fact_list_window_desc",
      "SELECT id, user_id, fact_text, confidence, source, created_at, "
-     "last_accessed, access_count, superseded_by, category FROM memory_facts "
+     "last_accessed, access_count, superseded_by, category, note_doc_id FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND created_at >= ?2 AND created_at <= ?3 "
      "  AND (expires_at IS NULL OR expires_at >= ?5) "

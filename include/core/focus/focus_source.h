@@ -137,6 +137,8 @@ typedef struct {
    memory_provenance_t provenance; /* Source back-link (conv_id +
                                      msg_id_start/end) — zeroed if not
                                      applicable */
+   const char *kind;               /* How the item is known ("told", "inferred",
+                                     ...), static; NULL shows nothing */
 } focus_candidate_t;
 
 /* =============================================================================

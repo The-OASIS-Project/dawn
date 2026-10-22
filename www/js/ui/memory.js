@@ -650,7 +650,7 @@
             </div>
             <div class="memory-item-meta">
                <span class="memory-item-confidence ${confidenceClass}">${confidencePercent}%</span>
-               <span class="memory-item-source">${escapeHtml(fact.source || 'unknown')}</span>
+               <span class="memory-item-source">${escapeHtml(fact.kind || fact.source || 'unknown')}</span>
                <span class="memory-item-date">${dateStr}</span>
             </div>
          </div>

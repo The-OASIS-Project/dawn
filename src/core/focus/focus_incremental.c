@@ -42,8 +42,9 @@
 
 /* The most bytes a turn's item lines take; a line past it is left out. */
 #define FOCUS_ITEMS_MAX_BYTES (64 * 1024)
-/* A line's framing past its source and text: "[M123456789 ", the date, "] ". */
-#define FOCUS_LINE_OVERHEAD (16 + PROMPT_FOCUS_DATE_LEN)
+/* A line's framing past its source and text: "[M123456789 ", the kind word, the
+ * date, "] ". */
+#define FOCUS_LINE_OVERHEAD (16 + PROMPT_FOCUS_KIND_LEN + PROMPT_FOCUS_DATE_LEN)
 /* The marker, reference line and reminder, at most. */
 #define FOCUS_FRAME_BYTES 1024
 /* Longest frame open line: "--- TURN CONTEXT (<tag>) ---". */
@@ -472,9 +473,15 @@ static int render_lines(const prompt_focus_item_t *items, focus_selection_t *sel
                       FOCUS_ITEMS_MAX_BYTES);
          break;
       }
-      const int rc = it->handle > 0 ? strbuf_appendf(sb, "[M%d %s%s] %s\n", it->handle, it->source,
-                                                     it->date, text)
-                                    : strbuf_appendf(sb, "[%s%s] %s\n", it->source, it->date, text);
+      /* "[M3 memory_fact told 2026-09-14] text": the kind word, when there is
+       * one, sits between the source and the date; a scan skips both. */
+      const bool has_kind = it->kind && *it->kind;
+      const char *sp = has_kind ? " " : "";
+      const char *kind = has_kind ? it->kind : "";
+      const int rc = it->handle > 0 ? strbuf_appendf(sb, "[M%d %s%s%s%s] %s\n", it->handle,
+                                                     it->source, sp, kind, it->date, text)
+                                    : strbuf_appendf(sb, "[%s%s%s%s] %s\n", it->source, sp, kind,
+                                                     it->date, text);
       if (rc < 0) {
          break;
       }

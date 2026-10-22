@@ -308,6 +308,18 @@ int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t enti
 int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_at);
 
 /**
+ * @brief The word that says how a fact was learned, as surfaces show it.
+ *
+ * "told" (the user said it), "inferred", "imported", or "noted" for a
+ * memory→note gloss (whatever its source).  NULL for any other source: show
+ * nothing.  The returned string is static.
+ *
+ * @param fact The fact (its source and note_doc_id); NULL returns NULL
+ * @return A static word, or NULL
+ */
+const char *memory_fact_kind_word(const memory_fact_t *fact);
+
+/**
  * @brief Link a fact to a saved note (memory→note bridge, v61).
  *
  * Sets memory_facts.note_doc_id so the fact becomes a thin "gloss" pointer to a

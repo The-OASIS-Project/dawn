@@ -50,8 +50,10 @@
  * ============================================================================= */
 
 /* Reads from SELECTs ordered: id, user_id, fact_text, confidence, source,
- * created_at, last_accessed, access_count, superseded_by, category.
- * category appended last (col 9, v34) so existing column indices are preserved. */
+ * created_at, last_accessed, access_count, superseded_by, category, note_doc_id.
+ * A statement's own extra column (expires_at, a BM25 score) follows them. */
+#define FACT_COL_NOTE_DOC_ID 10
+#define FACT_COL_EXTRA 11
 static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->id = sqlite3_column_int64(stmt, 0);
    fact->user_id = sqlite3_column_int(stmt, 1);
@@ -79,12 +81,13 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    } else {
       safe_strscpy(fact->category, "general");
    }
+   fact->note_doc_id = sqlite3_column_int64(stmt, FACT_COL_NOTE_DOC_ID);
 
-   /* expires_at (v58) is NOT in the shared 10-column projection — the
-    * keyword/list retrieval statements filter expired rows in SQL via the
-    * expiry guard, so anything reaching this reader is non-expired.  Default to
-    * 0 (durable); only memory_db_fact_get's by-id projection carries the column
-    * and overwrites this after the call (the un-guarded semantic-path fetch). */
+   /* expires_at (v58) is NOT in the shared projection: only the by-id read
+    * carries it, at FACT_COL_EXTRA.  The keyword/list retrieval statements
+    * filter expired rows in SQL via the expiry guard, so anything reaching this
+    * reader is non-expired.  Default to 0 (durable); memory_db_fact_get
+    * overwrites this after the call (the un-guarded semantic-path fetch). */
    fact->expires_at = 0;
 }
 
@@ -242,11 +245,11 @@ int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact) {
    int result = MEMORY_DB_NOT_FOUND;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       populate_fact_from_row(stmt, out_fact);
-      /* This statement's projection carries expires_at as col 10 (the only
-       * fact reader that does — see stmt_memory_fact_get).  populate_fact_from_row
-       * defaulted it to 0; overwrite with the stored value (NULL → 0) so the
-       * semantic-path expiry guard can decide.  v58. */
-      out_fact->expires_at = sqlite3_column_int64(stmt, 10);
+      /* This statement's projection carries expires_at after the shared columns
+       * (the only fact reader that does — see stmt_memory_fact_get).
+       * populate_fact_from_row defaulted it to 0; overwrite with the stored value
+       * (NULL → 0) so the semantic-path expiry guard can decide.  v58. */
+      out_fact->expires_at = sqlite3_column_int64(stmt, FACT_COL_EXTRA);
       result = MEMORY_DB_SUCCESS;
    }
 
@@ -446,10 +449,10 @@ int memory_db_fact_search_bm25_since(int user_id,
    int count = 0;
    while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
       populate_fact_from_row(stmt, &out_facts[count]);
-      /* Column 10 carries bm25() — negative-for-relevant per FTS5
-       * convention.  Flip sign so memory_bm25_normalize sees the
+      /* The column after the shared ones carries bm25() — negative-for-relevant
+       * per FTS5 convention.  Flip sign so memory_bm25_normalize sees the
        * "larger is better" convention it (and Mem0) expect. */
-      double raw = sqlite3_column_double(stmt, 10);
+      double raw = sqlite3_column_double(stmt, FACT_COL_EXTRA);
       out_scores[count] = memory_bm25_normalize((float)(-raw), midpoint, steepness);
       count++;
    }
@@ -648,6 +651,25 @@ int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_
    if (step_rc != SQLITE_DONE)
       return MEMORY_DB_FAILURE;
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+const char *memory_fact_kind_word(const memory_fact_t *fact) {
+   if (!fact) {
+      return NULL;
+   }
+   if (fact->note_doc_id > 0) {
+      return "noted";
+   }
+   if (strcmp(fact->source, "explicit") == 0) {
+      return "told";
+   }
+   if (strcmp(fact->source, "inferred") == 0) {
+      return "inferred";
+   }
+   if (strcmp(fact->source, "import") == 0) {
+      return "imported";
+   }
+   return NULL;
 }
 
 int memory_db_fact_set_note_doc_id(int64_t fact_id, int user_id, int64_t note_doc_id) {

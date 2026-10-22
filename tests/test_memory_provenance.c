@@ -267,7 +267,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category, expires_at FROM memory_facts "
+       "access_count, superseded_by, category, note_doc_id, expires_at FROM memory_facts "
        "WHERE id = ? AND user_id = ?",
        -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK)
@@ -321,7 +321,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, category, note_doc_id FROM memory_facts "
        "WHERE user_id = ?1 AND superseded_by IS NULL "
        "  AND (expires_at IS NULL OR expires_at >= ?4) "
        "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
@@ -334,7 +334,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, category, note_doc_id FROM memory_facts "
        "WHERE user_id = ?1 AND superseded_by IS NULL "
        "  AND (expires_at IS NULL OR expires_at >= ?4) "
        "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
@@ -345,7 +345,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, category, note_doc_id FROM memory_facts "
        "WHERE user_id = ?1 AND superseded_by IS NULL "
        "  AND (expires_at IS NULL OR expires_at >= ?4) "
        "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
@@ -1023,7 +1023,7 @@ void test_expiry_guard_hides_and_restores(void) {
    TEST_ASSERT_EQUAL(1, n);
    TEST_ASSERT_EQUAL(durable_id, facts[0].id);
 
-   /* By-id fetch stays un-guarded and carries expires_at (col 10). */
+   /* By-id fetch stays un-guarded and carries expires_at (after the shared columns). */
    memory_fact_t got = { 0 };
    TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(transient_id, 1, &got));
    TEST_ASSERT_EQUAL_INT64(past, got.expires_at);
