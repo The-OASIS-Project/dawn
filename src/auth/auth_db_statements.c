@@ -646,9 +646,9 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_memory_fact_delete },
 
    /* note_doc_id IS NULL: exclude memory→note bridge glosses (v61).  This
-    * statement backs extraction's like-match dedup AND the relation-supersede
-    * old-fact lookup; a LIKE hit on a gloss could otherwise supersede it and
-    * silently kill the bridge. */
+    * statement backs remember's and import's similar-fact checks AND the
+    * old-fact lookup for an extracted correction; a LIKE hit on a gloss could
+    * otherwise supersede it and silently kill the bridge. */
    { "memory_fact_find_similar",
      "SELECT id, fact_text, confidence FROM memory_facts "
      "WHERE user_id = ? AND superseded_by IS NULL "

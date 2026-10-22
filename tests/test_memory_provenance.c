@@ -1131,6 +1131,36 @@ static void q_exec(const char *sql) {
                                  err ? err : sql);
 }
 
+/* An exact repeat is the same text, case aside; never a note gloss, another
+ * user's fact, or the same words in another order (same hash). */
+void test_find_exact_repeat(void) {
+   int64_t id = 0, found = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_create(1, "User owns a red bike", 0.7f,
+                                                              "explicit", NULL, NULL, &id));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_find_exact(1, "User owns a red bike", &found));
+   TEST_ASSERT_EQUAL_INT64(id, found);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_find_exact(1, "user OWNS a Red bike", &found));
+   TEST_ASSERT_EQUAL_INT64(id, found);
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(1, "User owns a blue bike", &found));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(1, "A red bike owns user", &found));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(2, "User owns a red bike", &found));
+
+   int64_t gloss = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_create(1, "Gate code note", 0.7f, "explicit",
+                                                              NULL, NULL, &gloss));
+   char sql[128];
+   snprintf(sql, sizeof(sql), "UPDATE memory_facts SET note_doc_id = 5 WHERE id = %lld",
+            (long long)gloss);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_find_exact(1, "Gate code note", &found));
+   TEST_ASSERT_EQUAL_INT64(0, found);
+}
+
 /* Forgetting is of what was learned so far: the forgotten conversation, or
  * every conversation of the user after "delete all", counts as extracted, so
  * memory recovery doesn't learn it again.  Another user's stays as it was. */
@@ -2390,6 +2420,7 @@ int main(void) {
    RUN_TEST(test_forget_keeps_alias_target_entity);
    RUN_TEST(test_conversation_delete_drops_sources);
    RUN_TEST(test_forget_queries_use_their_indexes);
+   RUN_TEST(test_find_exact_repeat);
    RUN_TEST(test_forget_keeps_what_was_stated_directly);
    RUN_TEST(test_forget_chain_stops_at_imported_fact);
 

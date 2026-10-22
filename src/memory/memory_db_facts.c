@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "auth/auth_db.h"
@@ -1134,6 +1135,49 @@ int memory_db_fact_find_similar(int user_id,
    if (count_out)
       *count_out = count;
    return MEMORY_DB_SUCCESS;
+}
+
+/* Exact repeats: the hash narrows, the text decides (the hash ignores word
+ * order and stopwords).  Note glosses are never a repeat. */
+static const char FIND_EXACT_SQL[] = "SELECT id, fact_text FROM memory_facts "
+                                     "WHERE user_id = ? AND normalized_hash = ? "
+                                     "AND superseded_by IS NULL AND note_doc_id IS NULL";
+
+int memory_db_fact_find_exact(int user_id, const char *text, int64_t *id_out) {
+   if (!id_out || !text || user_id <= 0)
+      return MEMORY_DB_FAILURE;
+   *id_out = 0;
+   const uint32_t hash = memory_normalize_and_hash(text);
+   if (hash == 0)
+      return MEMORY_DB_NOT_FOUND;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   bool kept = false;
+   sqlite3_stmt *st = exec_statement(FIND_EXACT_SQL, &kept);
+   if (!st) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(st, 1, user_id);
+   sqlite3_bind_int64(st, 2, (int64_t)hash);
+   int rc;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+      const char *stored = (const char *)sqlite3_column_text(st, 1);
+      if (stored && strcasecmp(stored, text) == 0) {
+         *id_out = sqlite3_column_int64(st, 0);
+         break;
+      }
+   }
+   if (kept) {
+      sqlite3_reset(st);
+      sqlite3_clear_bindings(st);
+   } else {
+      sqlite3_finalize(st);
+   }
+   AUTH_DB_UNLOCK();
+   if (*id_out > 0)
+      return MEMORY_DB_SUCCESS;
+   return rc == SQLITE_DONE ? MEMORY_DB_NOT_FOUND : MEMORY_DB_FAILURE;
 }
 
 int memory_db_fact_find_by_hash(int user_id,

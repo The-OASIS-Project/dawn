@@ -533,6 +533,19 @@ int memory_db_fact_find_by_hash(int user_id,
                                 int *count_out);
 
 /**
+ * @brief Find a live fact with exactly this text (ignoring ASCII case)
+ *
+ * Looked up by normalized hash, then compared as text.  Note glosses
+ * (note_doc_id set) are never returned.
+ *
+ * @param user_id User ID
+ * @param text Fact text
+ * @param id_out Output: the fact's ID (0 when none)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_find_exact(int user_id, const char *text, int64_t *id_out);
+
+/**
  * @brief Prune old merged duplicates
  *
  * Deletes duplicates merged into another fact more than the retention period
