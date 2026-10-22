@@ -1772,13 +1772,10 @@ static void end_interrupted_rings(void) {
       for (int i = 0; i < count; i++) {
          const sched_event_t *e = &events[i];
          sched_status_t status = SCHED_STATUS_MISSED;
-         const char *what = NULL; /* a ring's ending, as end_ring says it */
          if (e->event_type == SCHED_EVENT_ALARM) {
             status = SCHED_STATUS_TIMED_OUT;
-            what = "Alarm timed out";
          } else if (e->event_type == SCHED_EVENT_TIMER || e->event_type == SCHED_EVENT_REMINDER) {
             status = SCHED_STATUS_DISMISSED;
-            what = "Auto-dismissed";
          }
 
          /* Bound to its firing: a dismiss since startup already ended it. */
@@ -1790,6 +1787,10 @@ static void end_interrupted_rings(void) {
                    sched_event_type_to_str(e->event_type), e->name, (long long)e->id,
                    sched_status_to_str(status));
 #ifdef ENABLE_WEBUI
+         /* The ring's ending, as end_ring says it. */
+         const char *what = status == SCHED_STATUS_TIMED_OUT   ? "Alarm timed out"
+                            : status == SCHED_STATUS_DISMISSED ? "Auto-dismissed"
+                                                               : NULL;
          /* A browser that reconnected during the startup wait is still playing
           * the ring: this tells it the ring is over. */
          sched_event_t updated;

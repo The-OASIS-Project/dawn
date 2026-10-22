@@ -122,6 +122,26 @@ void test_remember_outside_a_turn_is_stated_outside_any_conversation(void) {
    TEST_ASSERT_EQUAL_INT(1, unsourced);
 }
 
+/* A dated fact given as one object, not in a list: its text is stored, not
+ * the JSON. */
+void test_remember_one_object_stores_its_text(void) {
+   g_config.memory.expire_enabled = true;
+   free(remember("{\"text\": \"Dentist visit on 2026-11-02\", \"expires_at\": \"2026-11-02\"}"));
+   int64_t source = -1;
+   int unsourced = -1;
+   TEST_ASSERT_TRUE(fact_row("Dentist visit on 2026-11-02", &source, &unsourced));
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK, sqlite3_prepare_v2(s_db.db,
+                                     "SELECT COUNT(*), SUM(expires_at > 0) FROM memory_facts "
+                                     "WHERE fact_text LIKE 'Dentist%'",
+                                     -1, &st, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_INT(1, sqlite3_column_int(st, 0));
+   TEST_ASSERT_EQUAL_INT(1, sqlite3_column_int(st, 1)); /* its expiry was taken too */
+   sqlite3_finalize(st);
+}
+
 void test_remember_waiting_for_its_conversation_is_kept(void) {
    g_stub_defer_result = SESSION_FACT_SOURCE_QUEUED; /* a new chat's first message */
    char *r = remember("My hat size is seven");
@@ -396,6 +416,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_remember_in_a_known_conversation_is_learned_there);
    RUN_TEST(test_remember_outside_a_turn_is_stated_outside_any_conversation);
+   RUN_TEST(test_remember_one_object_stores_its_text);
    RUN_TEST(test_remember_waiting_for_its_conversation_is_kept);
    RUN_TEST(test_remember_past_the_waiting_limit_is_refused_and_not_stored);
    RUN_TEST(test_forget_tells_a_replacement_from_a_duplicate);

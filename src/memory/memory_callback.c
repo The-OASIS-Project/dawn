@@ -1015,14 +1015,25 @@ static char *memory_action_remember_single(int user_id,
  * "2026-06-05"}].  Each element runs the full single-fact pipeline (dedup + embed +
  * advisory); results are concatenated.  A value that is not a JSON array (parse
  * failure or any non-array type) falls through to the single-fact path, so existing
- * callers — and any ordinary fact text — are unaffected.  Capped at
- * MAX_REMEMBER_FACTS per call. */
+ * callers — and any ordinary fact text — are unaffected; a single object (not in
+ * a list) is taken as a list of one.  Capped at MAX_REMEMBER_FACTS per call. */
 static char *memory_action_remember(int user_id, const char *value) {
    if (!value || !*value) {
       return strdup("Please provide the fact to remember.");
    }
 
    struct json_object *arr = json_tokener_parse(value);
+   /* One {text, expires_at} object, not in a list: a list of one (else its
+    * JSON would be stored as the fact). */
+   if (arr && json_object_is_type(arr, json_type_object) &&
+       json_object_object_get_ex(arr, "text", NULL)) {
+      struct json_object *list = json_object_new_array();
+      if (list && json_object_array_add(list, arr) == 0) {
+         arr = list;
+      } else {
+         json_object_put(list);
+      }
+   }
    if (arr && json_object_is_type(arr, json_type_array)) {
       int n = json_object_array_length(arr);
       strbuf_t sb;
