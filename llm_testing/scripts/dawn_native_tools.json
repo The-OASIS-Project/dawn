@@ -233,20 +233,6 @@
             "type": "string",
             "description": "For 'merge_entities': the name of the entity to make canonical (keeps its name and identity; the source becomes a soft alias that resolves here)."
           },
-          "category": {
-            "type": "string",
-            "description": "Optional topic tag. No longer narrows 'search' results — semantic ranking covers all categories, so you do NOT need to guess a category to find a fact. Accepted for back-compat but safe to omit.",
-            "enum": [
-              "personal",
-              "professional",
-              "relationships",
-              "health",
-              "interests",
-              "practical",
-              "preferences",
-              "general"
-            ]
-          },
           "as_of": {
             "type": "string",
             "description": "Optional ISO date (YYYY-MM-DD or YYYY) for 'search'. Returns relations valid at that point in time (e.g., 'who did Alice work for in 2020'). Defaults to now() when omitted."

@@ -527,15 +527,11 @@ static void append_tool_citation_hint(strbuf_t *sb) {
                   " (comma-separated, no spaces).\n");
 }
 
-/* category (v34): when non-NULL/non-empty, pre-filters fact-ID set by exact category
- *   match before hybrid scoring.  Bypasses time_range path (categories layer above
- *   recency for now — combinable in a follow-up if useful).
- * as_of_ts (v33): timestamp for relation validity in entity recall (0 = now).
+/* as_of_ts (v33): timestamp for relation validity in entity recall (0 = now).
  * include_historical (v33): bypass relation validity filter entirely. */
 char *memory_action_search(int user_id,
                            const char *keywords,
                            time_t since_ts,
-                           const char *category,
                            int64_t as_of_ts,
                            bool include_historical,
                            bool with_source,
@@ -559,16 +555,9 @@ char *memory_action_search(int user_id,
    /* Search facts — keyword search first, then hybrid if embeddings available */
    memory_fact_t facts[10];
    int fact_count = 0;
-   /* Category hard-filtering removed (was: pre-filter facts by exact category via the
-    * now-deleted memory_db_fact_search_by_category).  Extraction scatters one semantic cluster
-    * across multiple categories, so an LLM-guessed `category` systematically hid
-    * relevant facts (e.g. a single task list filed under general + professional +
-    * practical at once).  Always use the unified full-corpus path —
-    * `memory_search_execute` does hybrid + entity-graph + Phase 2 Step 1
-    * query-aware scoring + merge + score floor in one call, shared with the bench
-    * harness to prevent drift, and it strictly subsumes the old branch.
-    * `category` is still accepted but no longer narrows search results. */
-   (void)category;
+   /* `memory_search_execute` does hybrid + entity-graph + query-aware scoring +
+    * merge + score floor in one call, shared with the bench harness to prevent
+    * drift. */
    float scores[10];
    memory_search_execute(user_id, keywords, since_ts, facts, scores, 10, &fact_count);
 
@@ -1831,7 +1820,7 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       /* source_budget from dawn.toml [memory] source_budget_chars; 0 falls
        * back to MEMORY_SOURCE_BUDGET_CHARS inside the action.  Bench harness
        * invokes memory_action_search() directly with its own override. */
-      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts, NULL, as_of_ts,
+      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts, as_of_ts,
                                   include_historical, with_source,
                                   g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "remember") == 0) {

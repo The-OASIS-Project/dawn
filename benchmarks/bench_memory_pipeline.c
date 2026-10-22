@@ -1089,11 +1089,10 @@ static int handle_query_memory_callback(struct json_object *cmd) {
       source_budget = 0;
 
    /* Production path: same call as memoryCallback("search", ...) takes after
-    * value-string parsing.  No since_ts / category / as_of / include_historical
+    * value-string parsing.  No since_ts / as_of / include_historical
     * for the LoCoMo bench questions — bench uses the simplest production flow. */
    char *text = memory_action_search(BENCH_MP_USER_ID, query_text,
                                      /* since_ts */ 0,
-                                     /* category */ NULL,
                                      /* as_of_ts */ 0,
                                      /* include_historical */ false, with_source, source_budget);
    if (!text) {

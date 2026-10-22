@@ -766,10 +766,9 @@ typedef struct {
     * below this value before they reach the LLM.  Closes the "I don't
     * remember" gate against marginal-cosine fabrication: at 0 the LLM
     * sees every cosine hit above the embeddings layer's 0.01 near-zero
-    * cut; at 0.30 (default) marginal hits are dropped silently.  Only applies
-    * to the non-category branch of memory_action_search() and the per-
-    * turn focus-injection fact adapter — category-filtered searches are
-    * SQL-LIKE grounded and need no floor.  0.30 was chosen live (see
+    * cut; at 0.30 (default) marginal hits are dropped silently.  Applies
+    * to memory_action_search() and the per-turn focus-injection fact
+    * adapter.  0.30 was chosen live (see
     * config_defaults.c); drop to 0.10-0.20 if your corpus shows over-
     * filtering, or push higher if weak fabrications persist.
     *

@@ -89,7 +89,7 @@ Memory extraction happens at session end, not during conversation — zero laten
 
 - **memory_fact_search.c/h**: Hybrid-search public surface
    - Extracted from `memory_embeddings.c` (header-only split May 2026)
-   - Keyword + cosine + temporal-proximity scoring; category pre-filter; bitemporal `as_of` / `include_historical` handling
+   - Keyword + cosine + temporal-proximity scoring; bitemporal `as_of` / `include_historical` handling
 
 - **memory_history_loader.c/h**: Shared message-history loader
    - Used by both `memory_recovery.c` and `memory_summarize_missing.c`
@@ -133,7 +133,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Forgotten facts stay forgotten (`memory_forgotten.c`, schema v110). A single-fact forget (`memory_db_fact_forget`, from the Memory panel or the memory tool) keeps the fact's text with the latest message id at the time (`memory_forgotten.forget_msg_id`), since messages said before it still say it. A voice session saves its rows when it ends, after the forget, so its save moves every forget the user made while it ran (here or from another surface) past its rows (`memory_forgotten_saved`). An extraction runs as usual; then what it returned is checked against the user's forgets made after its batch began (`memory_forgotten_screen`), except one a live fact still says (a kept copy of a deleted duplicate, `MEMORY_FORGOTTEN_STILL_KNOWN`): the same text (ignoring case and spacing) is dropped, and the facts close to a forgotten one (cosine 0.70 or more, or every one without embeddings) are asked about together in one call to the extraction model, tried twice (`MEMORY_FORGOTTEN_CHECK_PROMPT`), which drops the same information reworded and keeps a new value or another fact about the same thing, reworded without a forgotten fact it still mentions ("green, replacing blue" is stored as "green", without relations); a dropped fact's relations go with it. If the check can't be made, the facts it would have asked about are not stored and the rest is. Listing the forgotten facts in the extraction prompt instead was measured and rejected: it made the model drop what else the conversation said about the same people and topics. Memory recovery's pass removes records no extraction reads any more (a day old, and none of the user's messages is from before the forget: `memory_forgotten_sweep`)
 
 - **memory_callback.c**: Tool handler for `MEMORY` device type
-   - `search`: hybrid keyword + semantic search across all memory tables; optional `category` / `time_range` / `as_of` / `include_historical` / `with_source` params
+   - `search`: hybrid keyword + semantic search across all memory tables; optional `time_range` / `as_of` / `include_historical` / `with_source` params
    - `recent`: windowed retrieval — `query` (lower bound, default `"7d"`, max `"10y"`) + `before` (upper bound) bracket `[now − query, now − before]`; `sort` (`newest` default / `oldest`) + `limit` (1-50). Supports h/m/d/w/y units (Bundle 3, 2026-05-13).
    - `remember`: immediate fact storage with injection filter (`memory_filter_check()`)
    - `forget`: delete facts by numeric ID (`memory_db_fact_forget`; the user's extraction is held once for the batch, as `memory_forget_fact` does for the WebUI), with the duplicates merged into them, bringing back the values they replaced (`memory_facts.superseded_kind` tells a merge from a replacement; recall hides both alike); with `duplicate_of`, merge duplicates into one kept (their relations move to it); (`memory_callback_forget.c`) with `newer_fact_id`, file older values a newer fact replaced (`memory_db_fact_replace`: their relations are closed by it, and come back if it is forgotten); `replaced_by`, the older name of `duplicate_of`, still merges
@@ -141,7 +141,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; the hard merge (`memory_db_entity_merge`) is left to the WebUI's operator merge.
    - `save_contact`, `find_contact`, `list_contacts`, `delete_contact`: contact management
    - `append_graph_context()`: the named entities' relations, appended to search output when `as_of` or `include_historical` is given
-   - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 19 params, generated into per-provider schemas by the tool registry
+   - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 18 params, generated into per-provider schemas by the tool registry
 
 - **memory_filter.c/h**: Injection filter — runs at the trust boundary only (raw user input at ingestion + USER_CONTENT at retrieval); see "Security Guardrails" below
    - Unicode normalization: zero-width/invisible char stripping, homoglyph mapping, Latin-1 accent stripping, fullwidth ASCII mapping, tag character handling

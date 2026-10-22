@@ -33,7 +33,7 @@
 #include "config/dawn_config.h"
 #include "logging.h"
 #include "memory/memory_db.h"
-#include "memory/memory_types.h" /* MEMORY_FACT_CATEGORIES */
+#include "memory/memory_types.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
@@ -189,23 +189,6 @@ static const treg_param_t memory_params[] = {
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "target_name",
-   },
-   /* v34 — fact-category pre-filter for retrieval.  Mirrors the canonical
-    * MEMORY_FACT_CATEGORIES taxonomy in memory_db.c.  Inline duplication is
-    * intentional: tool registry needs compile-time enum_values, and centralizing
-    * it via a runtime pointer would force a registry-shape change. */
-   {
-       .name = "category",
-       .description = "Optional topic tag. No longer narrows 'search' results — semantic "
-                      "ranking covers all categories, so you do NOT need to guess a category "
-                      "to find a fact. Accepted for back-compat but safe to omit.",
-       .type = TOOL_PARAM_TYPE_ENUM,
-       .required = false,
-       .maps_to = TOOL_MAPS_TO_CUSTOM,
-       .field_name = "category",
-       .enum_values = { "personal", "professional", "relationships", "health", "interests",
-                        "practical", "preferences", "general" },
-       .enum_count = 8,
    },
    /* v33 — relation validity at a historical timestamp. */
    {
