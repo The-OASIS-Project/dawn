@@ -1,4 +1,5 @@
-# CLI: python3 -m llm_testing.memory_audit sample|label|classify|compare|report|examples|reextract
+# CLI: python3 -m llm_testing.memory_audit
+#        sample|label|classify|compare|report|examples|reextract|candidates
 #
 # An audit of what memory extraction has stored for a user: which facts are worth
 # keeping and which kinds of unwanted fact extraction produces.
@@ -11,10 +12,12 @@
 #   examples  print facts of one kind (shows fact text: for the user, not for logs)
 #   reextract run DAWN's extraction on chosen stored conversations into a scratch
 #             database, so a prompt variant can be measured on the same input
+#   candidates counts and conversation ids where memory may have gone wrong,
+#             for the owner to write memory eval cases from (prints no text)
 #
 # Privacy: everything read or written lives under llm_testing/memory_audit/data/
 # (ignored by git).  Only `label` and `examples` print fact text; the others
-# print counts.  The database is opened read-only.
+# print counts (and `candidates` ids).  The database is opened read-only.
 #
 # License: GPLv3, same as DAWN.
 
@@ -29,7 +32,7 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from . import models, reextract, rubric
+from . import candidates, models, reextract, rubric
 from .storage import DATA, data_path, private_open, text_sha
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -449,7 +452,16 @@ def main(argv=None):
     s.add_argument("--config", default="",
                    help="dawn.toml for the bench (default: the run dir's); a variant's settings")
 
+    s = sub.add_parser("candidates",
+                       help="counts and conversation ids per memory failure signal (no text)")
+    s.add_argument("--db", default=DEFAULT_DB, help="auth.db (opened read-only)")
+    s.add_argument("--user-id", type=int, default=1)
+    s.add_argument("--max-ids", type=int, default=100, help="ids printed per signal")
+
     a = p.parse_args(argv)
+    if a.cmd == "candidates":
+        candidates.run(a)
+        return
     if a.cmd == "reextract":
         reextract.run(a, _data)
         return

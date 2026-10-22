@@ -3,11 +3,15 @@
 #
 # License: GPLv3, same as DAWN.
 
+import contextlib
+import io
 import os
+import sqlite3
+import tempfile
 import unittest
 
-from . import models, rubric, storage
-from .__main__ import kappa, stratified
+from . import candidates, models, rubric, storage
+from .__main__ import kappa, main, stratified
 
 
 def _fact(i, month):
@@ -112,6 +116,86 @@ class TestStorage(unittest.TestCase):
     def test_fingerprint_tracks_text(self):
         self.assertEqual(storage.text_sha("a"), storage.text_sha("a"))
         self.assertNotEqual(storage.text_sha("a"), storage.text_sha("b"))
+
+
+SECRET = "zz-secret-"  # every text written below starts with it; none may be printed
+
+_CANDIDATE_SCHEMA = """
+CREATE TABLE conversations (id INTEGER PRIMARY KEY, user_id INTEGER);
+CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id INTEGER, role TEXT,
+                       content TEXT, kind TEXT);
+CREATE TABLE memory_facts (id INTEGER PRIMARY KEY, user_id INTEGER, fact_text TEXT,
+                           superseded_by INTEGER, superseded_kind INTEGER NOT NULL DEFAULT 0,
+                           source_conversation_id INTEGER);
+CREATE TABLE memory_forgotten (id INTEGER PRIMARY KEY, user_id INTEGER, fact_text TEXT,
+                               forget_msg_id INTEGER, created_at INTEGER);
+CREATE TABLE memory_citation_audit (id INTEGER PRIMARY KEY, conversation_id INTEGER,
+                                    message_id INTEGER, user_id INTEGER, injected_ids TEXT,
+                                    cited_ids TEXT);
+"""
+
+
+class Candidates(unittest.TestCase):
+    def setUp(self):
+        fd, self.db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        con = sqlite3.connect(self.db)
+        con.executescript(_CANDIDATE_SCHEMA)
+        s = SECRET
+        con.executemany("INSERT INTO conversations VALUES (?, ?)", [(10, 1), (11, 1), (20, 2)])
+        con.executemany("INSERT INTO messages VALUES (?, ?, ?, ?, ?)", [
+            (1, 10, "user", s + "what's my number", None),
+            (2, 10, "assistant", s + "it is 555", None),
+            (3, 10, "user", "No, " + s + "it changed", None),        # correction, memory reply
+                                                                     # (audited under msg 1)
+            (4, 11, "user", "Actually " + s + "hi", None),           # no reply before it
+            (5, 11, "assistant", s + "hello", None),
+            (6, 11, "user", s + "context: actually", "context"),     # a context row
+            (7, 11, "user", s + "thanks, that's wrong", None),       # correction, no memory
+            (8, 20, "assistant", s + "x", None),
+            (9, 20, "user", "no, " + s + "other user", None)])
+        con.executemany("INSERT INTO memory_facts VALUES (?, ?, ?, ?, ?, ?)", [
+            (1, 1, s + "old", 2, 1, 10), (2, 1, s + "new", None, 0, 11),
+            (3, 1, s + "dup", 2, 0, 10), (4, 2, s + "theirs", 5, 1, 20)])
+        con.executemany("INSERT INTO memory_forgotten VALUES (?, ?, ?, ?, ?)", [
+            (1, 1, s + "gone", 3, 0), (2, 1, s + "panel", 9, 0), (3, 2, s + "theirs", 9, 0)])
+        con.executemany("INSERT INTO memory_citation_audit VALUES (?, ?, ?, ?, ?, ?)", [
+            (1, 10, 1, 1, "fact:1", ""), (2, 11, 99, 1, "fact:2", "fact:2"),
+            (3, 11, 0, 1, "", ""), (4, 20, 8, 2, "fact:4", "")])
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        os.unlink(self.db)
+
+    def test_counts_and_ids(self):
+        got = {s["name"].split(":")[0]: s for s in candidates.collect(self.db, 1)}
+        self.assertEqual((got["forgetting"]["count"], got["forgetting"]["ids"]), (2, [10]))
+        self.assertEqual((got["staleness"]["count"], got["staleness"]["ids"]), (1, [11]))
+        corr = got["staleness/sycophancy"]
+        self.assertEqual((corr["count"], corr["ids"]), (2, [10, 11]))
+        self.assertTrue(corr["note"].startswith("1 after"))
+        self.assertEqual((got["injected, none cited"]["count"],
+                          got["injected, none cited"]["ids"]), (1, [10]))
+        self.assertIn("no attention_log table", got["over-interruption"]["note"])
+
+    def test_prints_no_text(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["candidates", "--db", self.db])
+        self.assertNotIn(SECRET, out.getvalue())
+        self.assertIn("forgetting: 2", out.getvalue())
+
+    def test_read_only(self):
+        con = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+        with self.assertRaises(sqlite3.OperationalError):
+            con.execute("DELETE FROM messages")
+        con.close()
+        candidates.collect(self.db, 1)
+        con = sqlite3.connect(self.db)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 9)
+        con.close()
+
 
 if __name__ == "__main__":
     unittest.main()
