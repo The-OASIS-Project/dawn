@@ -84,7 +84,7 @@
                label: 'AI Description',
                rows: 5,
                placeholder:
-                  'Leave empty to use built-in default:\n"Your name is {AI Name}. Iron-Man-style AI assistant. Female voice; witty, playful, and kind..."',
+                  'Leave empty to use built-in default:\n"Your name is {AI Name}. Iron-Man-style AI assistant running on DAWN, in the mold of JARVIS and FRIDAY..."',
                hint: 'System-wide base persona for all users. Individual users can append to or replace this via My Settings. Leave empty for the built-in default.',
             },
          },

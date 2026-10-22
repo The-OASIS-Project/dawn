@@ -23,10 +23,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
+#include "auth/auth_db.h"
+#include "core/buf_printf.h"
 #include "core/prompt_parts.h"
 #include "dawn_error.h"
+#include "utils/string_utils.h"
 
 static bool is_blank(char c) {
    return c == '\n' || c == '\r' || c == ' ' || c == '\t';
@@ -161,4 +165,92 @@ char *prompt_framed(const char *name,
    }
    frame_line(out + off, len + 1 - off, "END ", name, tag);
    return out;
+}
+
+/* The identity block of a user who gave an address but no real name. */
+#define IDENTITY_ADDRESS_ONLY_FMT "\n\n## User Identity\nThe user prefers to be addressed as %s.\n"
+
+char *prompt_identity_text(const char *real_name, const char *address, const char *aliases) {
+   real_name = real_name ? real_name : "";
+   address = address ? address : "";
+   aliases = aliases ? aliases : "";
+   if (real_name[0] == '\0') {
+      if (address[0] == '\0') {
+         return NULL;
+      }
+      char only[sizeof(IDENTITY_ADDRESS_ONLY_FMT) + AUTH_PREFERRED_ADDRESS_MAX];
+      snprintf(only, sizeof(only), IDENTITY_ADDRESS_ONLY_FMT, address);
+      return strdup(only);
+   }
+
+   /* Parse identity_aliases: split on \n, strip whitespace per token,
+    * drop empties, dedupe case-insensitive.  Up to 16 aliases tracked. */
+   char joined_aliases[AUTH_IDENTITY_ALIASES_MAX];
+   joined_aliases[0] = '\0';
+   if (aliases[0] != '\0') {
+      char buf[AUTH_IDENTITY_ALIASES_MAX];
+      safe_strscpy(buf, aliases);
+
+      char *seen[16];
+      int seen_count = 0;
+      size_t out_off = 0;
+
+      char *save = NULL;
+      for (char *line = strtok_r(buf, "\n", &save); line != NULL && seen_count < 16;
+           line = strtok_r(NULL, "\n", &save)) {
+         /* Strip leading whitespace */
+         while (*line == ' ' || *line == '\t' || *line == '\r')
+            line++;
+         /* Strip trailing whitespace */
+         char *end = line + strlen(line);
+         while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
+            end--;
+         *end = '\0';
+         if (*line == '\0')
+            continue;
+         /* Case-insensitive dedupe against already-emitted aliases. */
+         bool dup = false;
+         for (int i = 0; i < seen_count; i++) {
+            if (strcasecmp(seen[i], line) == 0) {
+               dup = true;
+               break;
+            }
+         }
+         if (dup)
+            continue;
+         seen[seen_count++] = line;
+         /* Append to joined_aliases with comma separator. */
+         size_t alias_len = strlen(line);
+         size_t need = alias_len + (out_off > 0 ? 2 : 0); /* + ", " when not first */
+         if (out_off + need + 1 >= sizeof(joined_aliases))
+            break;
+         if (out_off > 0) {
+            joined_aliases[out_off++] = ',';
+            joined_aliases[out_off++] = ' ';
+         }
+         memcpy(joined_aliases + out_off, line, alias_len);
+         out_off += alias_len;
+         joined_aliases[out_off] = '\0';
+      }
+   }
+
+   /* Worst-case stack: ~1.5 KB.  Trip if any cap bumps push past 4 KB so we
+    * notice before the LLM/refresh worker stack (8 MB) gets uncomfortable. */
+   _Static_assert(
+       AUTH_REAL_NAME_MAX + AUTH_PREFERRED_ADDRESS_MAX + AUTH_IDENTITY_ALIASES_MAX + 256 < 4096,
+       "prompt_identity_text stack buffer exceeded 4 KB; revisit caps or heap-alloc");
+   char block[AUTH_REAL_NAME_MAX + AUTH_PREFERRED_ADDRESS_MAX + AUTH_IDENTITY_ALIASES_MAX + 256];
+   size_t off = 0;
+   size_t rem = sizeof(block);
+   BUF_PRINTF(block, off, rem, "\n\n## User Identity\nYou are speaking with %s.", real_name);
+   if (address[0] != '\0') {
+      BUF_PRINTF(block, off, rem, " They prefer to be addressed as %s.", address);
+   }
+   if (joined_aliases[0] != '\0') {
+      BUF_PRINTF(block, off, rem, " They may also be referred to as: %s.", joined_aliases);
+   }
+   BUF_PRINTF(block, off, rem,
+              " Use this information to recognize when memory facts or extracted entities refer "
+              "to them.\n");
+   return strdup(block);
 }

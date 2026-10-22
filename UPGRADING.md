@@ -12,6 +12,18 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-22 — The built-in persona is new
+
+**What changed.** The built-in persona is new and longer (values, then tone). A custom
+`[persona]` or a replace-mode personal persona is unaffected; an append-mode one now adds to the
+new text.
+
+**What you need to do.** If a personal persona appends to the built-in one (My Settings →
+Persona, append mode), read it again on top of the new text and trim anything that now repeats
+or contradicts it.
+
+---
+
 ## 2026-10-22 — Fact categories retired: `category_threshold` and `recategorize-all` are gone
 
 **What changed.** DAWN no longer sorts memory facts into categories (personal, professional,

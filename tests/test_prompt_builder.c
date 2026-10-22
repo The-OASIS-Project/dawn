@@ -596,6 +596,21 @@ static void test_panel_not_told_when_disabled(void) {
    composed_prompt_free(&cp);
 }
 
+/* The identity block: a user who gave only an address still gets it; one
+ * who gave neither gets no block. */
+static void test_identity_address_without_a_real_name(void) {
+   char *t = prompt_identity_text("", "sir", "");
+   TEST_ASSERT_NOT_NULL(t);
+   TEST_ASSERT_NOT_NULL(strstr(t, "The user prefers to be addressed as sir."));
+   free(t);
+   TEST_ASSERT_NULL(prompt_identity_text("", "", "Ace"));
+   t = prompt_identity_text("Pat Doe", "boss", "Pat\n pat \nP.D.");
+   TEST_ASSERT_NOT_NULL(t);
+   TEST_ASSERT_NOT_NULL(strstr(t, "You are speaking with Pat Doe. They prefer to be addressed "
+                                  "as boss. They may also be referred to as: Pat, P.D."));
+   free(t);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_focus_disabled_short_circuits);
@@ -613,6 +628,7 @@ int main(void) {
    RUN_TEST(test_focus_compose_failure_leaves_nothing);
    RUN_TEST(test_focus_filter_rejection_no_items);
    RUN_TEST(test_cross_turn_no_content_leak);
+   RUN_TEST(test_identity_address_without_a_real_name);
    RUN_TEST(test_failed_then_successful_refresh_no_carry);
    RUN_TEST(test_disabled_after_enabled_returns_nothing);
    RUN_TEST(test_memory_cycle_1000x_reusing_the_prompt);

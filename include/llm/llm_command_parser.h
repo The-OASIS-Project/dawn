@@ -96,7 +96,8 @@ int is_vision_enabled_for_current_llm(void);
 void invalidate_system_instructions(void);
 
 /**
- * @brief Write the default persona (AI_PERSONA_TEMPLATE, prompts.h) into @p out
+ * @brief Write the default persona (AI_PERSONA_VALUES then AI_PERSONA_VOICE,
+ *        prompts.h) into @p out
  *
  * Uses general.ai_name (AI_NAME when unset), first letter capitalized.  Not the
  * effective persona: a [persona] description, when set, replaces this.  Shown by

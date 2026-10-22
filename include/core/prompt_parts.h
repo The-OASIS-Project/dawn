@@ -185,6 +185,20 @@ char *prompt_sections_join(const composed_prompt_t *cp);
 struct tm;
 char *prompt_turn_head(const struct tm *tm_info, const char *zone);
 
+/**
+ * @brief The "## User Identity" block appended after the persona: who the
+ *        user is, how to address them, other names they go by.
+ *
+ * Aliases are newline-separated (whitespace stripped, empties dropped,
+ * deduped case-insensitively, emitted comma-joined).  Without a real name the
+ * block is the address alone: aliases name the user for memory matching,
+ * which needs the name.  Each argument may be NULL or empty (unset).
+ *
+ * @return Heap text (caller frees), or NULL when neither a real name nor an
+ *         address is set (or on allocation failure)
+ */
+char *prompt_identity_text(const char *real_name, const char *address, const char *aliases);
+
 /** The pieces of a block DAWN frames, at most. */
 #define PROMPT_FRAMED_PIECES 5
 

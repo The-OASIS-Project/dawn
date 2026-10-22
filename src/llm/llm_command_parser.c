@@ -234,6 +234,11 @@ static void localization_text(char *localization_context) {
    }
 }
 
+/* The persona with the longest name fits the buffers it is built into. */
+_Static_assert(sizeof(AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE) + CONFIG_NAME_MAX <=
+                   CONFIG_DESCRIPTION_MAX,
+               "default persona too long for CONFIG_DESCRIPTION_MAX");
+
 void llm_persona_default(char *out, size_t size) {
    const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name : AI_NAME;
 
@@ -243,7 +248,7 @@ void llm_persona_default(char *out, size_t size) {
    if (name[0] >= 'a' && name[0] <= 'z') {
       name[0] -= 32;
    }
-   snprintf(out, size, AI_PERSONA_TEMPLATE, name);
+   snprintf(out, size, AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE, name);
 }
 
 void llm_persona_effective(char *out, size_t size) {
