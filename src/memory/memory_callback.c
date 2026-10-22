@@ -1630,8 +1630,7 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
 
    /* Soft-link by default (entity-merge Phase 1, design §14): set
     * canonical_id on the source row + audit-row insert.  The link is
-    * reversible — operators promote to permanent merge via
-    * `dawn-admin memory entity consolidate` (Phase 3). */
+    * reversible (unlink in the Memory panel, `dawn-admin memory entity split`). */
    int64_t link_id = 0;
    int rc = memory_db_entity_alias_link(user_id, src_entity.id, tgt_entity.id, "soft",
                                         "llm-tool-action",
@@ -1643,8 +1642,8 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
          snprintf(result, 768,
                   "Linked '%s' as a soft alias of '%s' (link id %lld). "
                   "The '%s' entity is preserved and will be resolved to '%s' on lookup. "
-                  "Use 'split' to undo, or 'dawn-admin memory entity consolidate' to make it "
-                  "permanent.",
+                  "The user can undo it in the Memory panel (unlink) or with 'dawn-admin memory "
+                  "entity split'.",
                   source_name, target_name, (long long)link_id, source_name, target_name);
       return result ? result : strdup("Entities soft-linked.");
    } else if (rc == MEMORY_DB_NOT_FOUND) {

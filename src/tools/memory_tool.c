@@ -573,7 +573,6 @@ static const tool_metadata_t memory_metadata = {
                   "Use 'merge_entities' to soft-link two entities that refer to the same "
                   "person/pet/place (query: source name, target_name: canonical entity to keep). "
                   "The link is reversible — the source row is preserved and can be split later. "
-                  "Use 'dawn-admin memory entity consolidate' to make a soft link permanent. "
                   "Use with_source=true on 'search'/'recent' to include verbatim conversation "
                   "excerpts for the top few facts. "
                   "Memories persist across sessions and are private to each user.",

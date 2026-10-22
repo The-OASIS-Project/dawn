@@ -138,16 +138,16 @@ Memory extraction happens at session end, not during conversation — zero laten
    - `remember`: immediate fact storage with injection filter (`memory_filter_check()`)
    - `forget`: delete facts by numeric ID (`memory_db_fact_forget`; the user's extraction is held once for the batch, as `memory_forget_fact` does for the WebUI), with the duplicates merged into them, bringing back the values they replaced (`memory_facts.superseded_kind` tells a merge from a replacement; recall hides both alike); with `duplicate_of`, merge duplicates into one kept (their relations move to it); (`memory_callback_forget.c`) with `newer_fact_id`, file older values a newer fact replaced (`memory_db_fact_replace`: their relations are closed by it, and come back if it is forgotten); `replaced_by`, the older name of `duplicate_of`, still merges
    - `list_merged` / `restore` (`memory_callback_restore.c`): what was merged into a fact or replaced by a newer one, and bringing one back (`restore` is an act: refused where an outsider's text could ask, and described by the fact's text when it needs a reply code)
-   - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; hard merge remains available via `dawn-admin memory entity consolidate`.
+   - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; the hard merge (`memory_db_entity_merge`) is left to the WebUI's operator merge.
    - `save_contact`, `find_contact`, `list_contacts`, `delete_contact`: contact management
    - `append_graph_context()`: the named entities' relations, appended to search output when `as_of` or `include_historical` is given
-   - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 11 params, generated into per-provider schemas by the tool registry
+   - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 19 params, generated into per-provider schemas by the tool registry
 
 - **memory_filter.c/h**: Injection filter — runs at the trust boundary only (raw user input at ingestion + USER_CONTENT at retrieval); see "Security Guardrails" below
    - Unicode normalization: zero-width/invisible char stripping, homoglyph mapping, Latin-1 accent stripping, fullwidth ASCII mapping, tag character handling
    - ~118 blocked patterns across 17 categories (substring matching on normalized text)
    - ReAct co-occurrence check (blocks when >= 2 of thought:/action:/observation: appear)
-   - Called from `memory_callback.c`, `memory_extraction.c`, and `webui_memory.c` before every `memory_db_fact_create()` / `memory_db_pref_upsert()` / entity/relation/summary storage
+   - Called where raw user text is stored: `remember` and `merge_entities` (`memory_callback.c`), the WebUI's preference and merge edits (`webui_memory.c`), imports (`memory_import.c`) and note glosses (`memory_note_bridge.c`). Extraction output is LLM paraphrase and is not filtered
    - Stateless and thread-safe (pure function, no mutexes)
 
 - **contacts_db.c/h**: Contacts database operations
@@ -162,7 +162,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Deduplicates via ROW_NUMBER() window function
    - Absorbs mention count and time range from source entity
    - Deletes source row (no rollback — use soft-link `alias_link` if reversibility matters)
-   - Exposed via `dawn-admin memory entity consolidate <source> <target>` for hardening a previously soft-linked alias
+   - Exposed only through the WebUI Memory panel's entity merge (`webui_memory.c`)
 
 - **memory_maintenance.c/h**: Nightly decay orchestration
    - Called from auth maintenance thread (15-minute cycle)
@@ -187,7 +187,7 @@ Memory extraction happens at session end, not during conversation — zero laten
 
 ## Database Schema
 
-Memory tables in the auth database (`/var/lib/dawn/auth.db`). Schema version **v46** at time of writing — see [atlas/dawn/memory/SYSTEM_DESIGN.md §6](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/SYSTEM_DESIGN.md#6-storage-schema) for the full column-by-column definitions including provenance triples, bitemporal relation bounds, fact categories, summary embeddings, and the entity-alias surface.
+Memory tables in the auth database (`/var/lib/dawn/auth.db`). Schema version: `AUTH_DB_SCHEMA_VERSION` (`include/auth/auth_db_internal.h`) — see [atlas/dawn/memory/SYSTEM_DESIGN.md §6](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/SYSTEM_DESIGN.md#6-storage-schema) for the full column-by-column definitions including provenance triples, bitemporal relation bounds, fact categories, summary embeddings, and the entity-alias surface.
 
 ```sql
 -- Facts: discrete pieces of information (v34 category, v40 source_* triple)
@@ -291,10 +291,9 @@ Full rationale, research citations, and risk model: [atlas/dawn/memory/INJECTION
 enabled = true
 context_budget_tokens = 800
 session_timeout_minutes = 15
-
-[memory.extraction]
-provider = "local"        # "local", "openai", "claude", "ollama"
-model = "qwen2.5:7b"      # Model for extraction
+extraction_provider = "claude"         # "local", "openai", "claude", "openrouter"
+extraction_model = "claude-haiku-5-5"  # Model for extraction
+extraction_effort = "medium"           # "off", "low", "medium", "high"
 
 [memory.embeddings]
 provider = "onnx"         # "onnx" (default), "ollama", "openai"
@@ -336,13 +335,12 @@ review_threshold = 0.50    # Composite score floor for review-band proposal
 
 [memory.focus_injection]
 top_k = 12                 # Per-turn focus block size (May 2026 tuned default)
-weight_recency = 0.15      # Recency contribution; tension with summary-relevant
-                           # evidence documented in config_defaults.c
+weight_recency = 0.30      # Recency contribution
 ```
 
 `[memory.entity_merge]` (May 2026): controls the Phase 2 auto-merge gate that runs at extraction time after the relations loop. Composite ≥ `auto_threshold` → silent `alias_link`; composite ∈ [`review_threshold`, `auto_threshold`) → row in `memory_entity_merge_proposals` for operator review. `enabled=false` disables both bands; the entity-merge cascade still runs for `dawn-admin memory entity link-user-self` and operator-driven WebUI merges.
 
-`[memory.focus_injection]` (May 2026): controls the per-turn focus block. `top_k=12` (up from 8) leaves slots for the new semantic summary adapter — at 8 the summary adapter starved out of the block on facts-heavy turns. `weight_recency=0.15` is Phase 1j bench-tuned; live observation suggests 0.3 ranks recent summary matches above legacy paraphrase-ladder facts, but re-bench with summary-relevant probes is pending before promoting 0.3 (open tension documented in `config_defaults.c`).
+`[memory.focus_injection]` (May 2026): controls the per-turn focus block. `top_k=12` (up from 8) leaves slots for the new semantic summary adapter — at 8 the summary adapter starved out of the block on facts-heavy turns. `weight_recency=0.30` ranks recent summary matches above older paraphrased facts; the summary-vs-fact probes behind it are in `benchmarks/focus_probe_cases.json` (cases 12-15, see `config_defaults.c`).
 
 ## WebUI Memory Viewer
 
