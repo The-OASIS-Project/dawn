@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 109
+#define AUTH_DB_SCHEMA_VERSION 110
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -954,10 +954,15 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
    " AND m.kind IS NULL), 0)"
 
 /* The SET clause marking a conversations row extracted up to now (what was
- * learned so far: forgetting, delete-all). */
-#define CONV_MARK_EXTRACTED_SET_SQL                                   \
-   "last_extracted_msg_count = message_count, last_extracted_msg_id " \
-   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extraction_attempts = 0"
+ * learned so far: forgetting, delete-all), and extracting it again from the
+ * start (the reextract wipe) beginning there too. */
+#define CONV_MARK_EXTRACTED_SET_SQL                                                              \
+   "last_extracted_msg_count = message_count, last_extracted_msg_id "                            \
+   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extract_floor_msg_id "             \
+                                                           "= " CONV_EXTRACTION_MAX_MSG_ID_SQL(  \
+                                                               "conversations.id") ", "          \
+                                                                                   "extraction_" \
+                                                                                   "attempts = 0"
 
 /* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),
  * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
@@ -1165,6 +1170,9 @@ int auth_db_migrations_v108(sqlite3 *db);
 
 /* v109: message_unprompted, DAWN's own posts (auth_db_migrations_v109.c). */
 int auth_db_migrations_v109(sqlite3 *db);
+
+/* v110: forgotten memories and extraction floors (auth_db_migrations_v110.c). */
+int auth_db_migrations_v110(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

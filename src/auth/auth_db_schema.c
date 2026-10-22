@@ -168,6 +168,9 @@ static const char *SCHEMA_SQL =
     "   reasoning_effort TEXT DEFAULT NULL,"
     "   last_extracted_msg_count INTEGER DEFAULT 0,"
     "   last_extracted_msg_id    INTEGER NOT NULL DEFAULT 0,"
+    /* extract_floor_msg_id (v110): where a forget-everything or a conversation
+     * forget left it; the reextract wipe starts the cursor there. */
+    "   extract_floor_msg_id     INTEGER NOT NULL DEFAULT 0,"
     "   extraction_attempts INTEGER DEFAULT 0,"
     "   extraction_last_attempt_at INTEGER DEFAULT 0,"
     "   is_private INTEGER DEFAULT 0,"

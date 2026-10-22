@@ -940,6 +940,7 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
       }
    }
    atomic_store(&session->history_conversation_id, 0);
+   session->context_started_at = time(NULL);
    /* The new context has none of the old one's visual guidelines, nor its
     * unsaved exchange or waiting facts.  (Which retrieved items it shows is
     * read from the history itself, at each turn's seam.) */

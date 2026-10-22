@@ -318,8 +318,8 @@ static int forget_in_tx_locked(int user_id,
                "id IN (SELECT id FROM forget_entities) AND " MEMORY_ENTITY_UNREFERENCED,
                d->entities);
    /* Forgetting means what was learned so far: the conversations count as
-    * extracted, so memory recovery doesn't learn them again (what is said in
-    * them from now on is extracted as usual). */
+    * extracted, so memory recovery (or a reextract) doesn't learn them again
+    * (what is said in them from now on is extracted as usual). */
    FORGET_STEP("UPDATE conversations SET " CONV_MARK_EXTRACTED_SET_SQL
                " WHERE user_id = ?1 AND id IN " MEMORY_FORGET_IN_SET,
                ignored);
@@ -459,6 +459,32 @@ static int forget_collect(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+/* A record of each fact going (memory_forgotten), so a later extraction of a
+ * conversation said before the forget doesn't learn it again: the latest
+ * message so far marks the forget.  Caller holds the lock, in the transaction. */
+static int record_forgotten_locked(int user_id, const forget_fact_t *facts, int n) {
+   sqlite3_stmt *rec = NULL;
+   bool ok = sqlite3_prepare_v2(s_db.db,
+                                "INSERT INTO memory_forgotten (user_id, fact_text, "
+                                "forget_msg_id, created_at) SELECT user_id, fact_text, (SELECT "
+                                "COALESCE(MAX(id), 0) FROM messages WHERE kind IS NULL), "
+                                "CAST(strftime('%s', 'now') AS INTEGER) FROM memory_facts WHERE id "
+                                "= ?2 AND user_id = ?1",
+                                -1, &rec, NULL) == SQLITE_OK;
+   for (int i = 0; ok && i < n; i++) {
+      sqlite3_reset(rec);
+      sqlite3_bind_int(rec, 1, user_id);
+      sqlite3_bind_int64(rec, 2, facts[i].id);
+      ok = sqlite3_step(rec) == SQLITE_DONE;
+   }
+   sqlite3_finalize(rec);
+   if (!ok) {
+      OLOG_ERROR("memory_db: recording a forgotten fact for user %d failed: %s", user_id,
+                 sqlite3_errmsg(s_db.db));
+   }
+   return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
 /* The forget itself, in one transaction: the tree again (FORGET_SET_CHANGED
  * when it changed since it was stemmed), settle, the deletes, then bring back
  * what is current again.  Caller holds the lock. */
@@ -482,7 +508,9 @@ static int forget_fact_tx_locked(int user_id,
    if (!same) {
       return auth_db_txn_end_locked(FORGET_SET_CHANGED, "memory_db: forget fact");
    }
-   bool ok = memory_db_internal_going_reset_locked() == MEMORY_DB_SUCCESS;
+   /* Recorded before the deletes take the facts' sources with them. */
+   bool ok = record_forgotten_locked(user_id, facts, n) == MEMORY_DB_SUCCESS;
+   ok = ok && memory_db_internal_going_reset_locked() == MEMORY_DB_SUCCESS;
    for (int i = 0; ok && i < n; i++) {
       ok = memory_db_internal_exec_locked("INSERT INTO fact_going VALUES (?2)", user_id,
                                           facts[i].id, 0) == SQLITE_DONE;

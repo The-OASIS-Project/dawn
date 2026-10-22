@@ -433,6 +433,7 @@ typedef struct session {
    _Atomic time_t last_activity; /* touched on WS activity (session_touch, lock-free) and read by
                                   * session_cleanup_expired under a DIFFERENT lock — atomic so the
                                   * two never race on this plain-width field */
+   time_t context_started_at;    // when this history began (0: at created_at)
    time_t last_interaction_complete;  // Last wake-word-to-response cycle (for idle timeout)
 
    // Conversation history (owned by session, protected by history_mutex)

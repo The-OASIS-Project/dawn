@@ -299,6 +299,19 @@ int64_t memory_extraction_history_max_id(struct json_object *history) {
    return max_id;
 }
 
+int64_t memory_extraction_history_first_id(struct json_object *history) {
+   int64_t first = 0;
+   for (size_t i = 0; history && i < json_object_array_length(history); i++) {
+      struct json_object *id_obj = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id_obj)) {
+         const int64_t id = json_object_get_int64(id_obj);
+         if (id > 0 && (first == 0 || id < first))
+            first = id;
+      }
+   }
+   return first;
+}
+
 bool memory_extraction_input_has_question(struct json_object *input) {
    for (size_t i = 0; input && i < json_object_array_length(input); i++) {
       if (llm_history_is_question(json_object_array_get_idx(input, i))) {

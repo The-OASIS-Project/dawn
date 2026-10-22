@@ -71,6 +71,9 @@ bool memory_extraction_input_has_question(struct json_object *input);
  */
 int64_t memory_extraction_history_max_id(struct json_object *history);
 
+/** The lowest row id in @p history (0 when none has one). */
+int64_t memory_extraction_history_first_id(struct json_object *history);
+
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
                                                   struct json_object *conversation_history,

@@ -44,6 +44,7 @@
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_forgotten.h"
 #include "utils/string_utils.h"
 
 static const char *row_field(struct json_object *row, const char *key) {
@@ -437,6 +438,8 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
     * this conversation. */
    session_fact_source_t facts[SESSION_PENDING_FACT_SOURCES_MAX];
    const int fact_count = session_take_fact_sources_locked(session, facts);
+   const time_t began = session->context_started_at ? session->context_started_at
+                                                    : session->created_at;
    session_new_context_locked(session, next_prompt);
    session->last_interaction_complete = 0;
 
@@ -444,9 +447,11 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
    free(next_prompt);
 
    session_record_fact_sources(facts, fact_count, conv_id, user_id);
+   /* What the user forgot while it ran was said in it before the forget. */
+   memory_forgotten_saved(user_id, (int64_t)began, conv_id);
 
    if (history_copy) {
-      int duration_seconds = (int)(time(NULL) - session->created_at);
+      int duration_seconds = (int)(time(NULL) - began);
       char session_id_str[32];
       snprintf(session_id_str, sizeof(session_id_str), "voice_%u", session->session_id);
       memory_extraction_fallback_t fb;

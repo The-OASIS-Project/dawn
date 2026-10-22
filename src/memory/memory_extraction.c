@@ -58,6 +58,7 @@
 #include "memory/memory_embeddings_internal.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_extraction_internal.h"
+#include "memory/memory_forgotten.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
 #include "memory/memory_predicate_dedup.h"
@@ -77,6 +78,7 @@ typedef struct {
    int message_count;       /* Total messages in conversation */
    int new_message_count;   /* Messages being extracted this time */
    int duration_seconds;
+   int64_t first_msg_id;                  /* the batch's first saved row (0: none) */
    bool has_fallback;                     /* Whether fallback LLM info is available */
    memory_extraction_fallback_t fallback; /* Session's active LLM for retry */
 } extraction_context_t;
@@ -362,7 +364,8 @@ static void process_extraction_response(int user_id,
                                         const char *response_text,
                                         int message_count,
                                         int duration_seconds,
-                                        const memory_provenance_t *prov) {
+                                        const memory_provenance_t *prov,
+                                        const memory_forgotten_list_t *forgotten) {
    if (!response_text) {
       OLOG_WARNING("memory_extraction: NULL response from LLM");
       return;
@@ -623,6 +626,15 @@ static void process_extraction_response(int user_id,
           * raw user input.  See INJECTION_FILTER.md §"Filtering at the
           * trust boundary, not after paraphrase". */
 
+         /* A fact the user forgot, said again: skipped with its relations.  One
+          * that only mentions it is stored without that part (and without
+          * relations). */
+         if (memory_forgotten_is_repeat(forgotten, text, conversation_id))
+            continue;
+         const char *reworded = memory_forgotten_rewritten(forgotten, text);
+         if (reworded)
+            text = reworded;
+
          /* Paraphrase dedup + insert.  Sets `fact_id` to the row we'll
           * attribute relations to — either the newly-created row or the
           * matched-existing row for paraphrase merges. */
@@ -799,7 +811,9 @@ static void process_extraction_response(int user_id,
           * relations loop (entity_map → upsert for subject, entity_map → DB
           * lookup for object since objects are often literal values). */
          struct json_object *rels_arr;
-         if (json_object_object_get_ex(fact, "relations", &rels_arr) &&
+         /* A fact reworded without a forgotten one: its relations may be the
+          * forgotten part, so none are stored. */
+         if (!reworded && json_object_object_get_ex(fact, "relations", &rels_arr) &&
              json_object_is_type(rels_arr, json_type_array)) {
             int rel_count = json_object_array_length(rels_arr);
             for (int r = 0; r < rel_count; r++) {
@@ -1010,6 +1024,17 @@ static void process_extraction_response(int user_id,
             const char *new_fact = json_object_get_string(new_obj);
 
             /* No substring filter — LLM-paraphrased correction text. */
+            /* A forgotten fact said again: skipped. */
+            if (!new_fact || memory_forgotten_is_repeat(forgotten, new_fact, conversation_id))
+               continue;
+            const char *reworded = memory_forgotten_rewritten(forgotten, new_fact);
+            if (reworded)
+               new_fact = reworded;
+            /* A correction of a forgotten fact: skipped.  That one was deleted, so
+             * another row would be marked replaced in its place; the new value
+             * comes as a fact of its own. */
+            if (memory_forgotten_names(forgotten, old_fact))
+               continue;
 
             /* Find and supersede old fact */
             memory_fact_t similar[3];
@@ -1191,6 +1216,19 @@ static void *extraction_thread(void *arg) {
    /* Build existing profile */
    char *existing_profile = build_existing_profile(ctx->user_id);
 
+   /* What the user forgot after this batch began: what the model returns is
+    * checked against it.  Unreadable: not extracted now (the cursor stays, so
+    * recovery tries again), rather than learn it back. */
+   memory_forgotten_list_t *forgotten = calloc(1, sizeof(*forgotten));
+   /* A history never saved: it began duration_seconds ago. */
+   const int64_t since = (int64_t)time(NULL) - ctx->duration_seconds;
+   if (!forgotten || memory_forgotten_load(ctx->user_id, ctx->conversation_id, ctx->first_msg_id,
+                                           since, forgotten) != MEMORY_DB_SUCCESS) {
+      OLOG_WARNING("memory_extraction: conv %lld: forgotten facts unreadable; not extracting now",
+                   (long long)ctx->conversation_id);
+      goto cleanup;
+   }
+
    char anchor_line[MEMORY_EXTRACTION_ANCHOR_LINE_LEN];
    memory_extraction_anchor_line(ctx->user_id, ctx->conversation_id, anchor_line,
                                  sizeof(anchor_line));
@@ -1272,6 +1310,7 @@ static void *extraction_thread(void *arg) {
 
    /* If primary model failed and we have a fallback, retry with the session's active model */
    bool used_fallback = false;
+   llm_resolved_config_t fallback_config = { 0 }; /* the model that answered, when it did */
    if (!response && ctx->has_fallback && ctx->fallback.model[0] != '\0') {
       /* Skip retry if fallback is the same model, provider, and endpoint */
       bool same_config = (extraction_config.model && ctx->fallback.model[0] != '\0' &&
@@ -1283,7 +1322,6 @@ static void *extraction_thread(void *arg) {
          OLOG_WARNING("memory_extraction: primary model failed, retrying with session model %s",
                       ctx->fallback.model);
 
-         llm_resolved_config_t fallback_config = { 0 };
          fallback_config.type = ctx->fallback.type;
          fallback_config.cloud_provider = ctx->fallback.cloud_provider;
          fallback_config.endpoint = ctx->fallback.endpoint;
@@ -1353,8 +1391,20 @@ static void *extraction_thread(void *arg) {
     * count as learned, and forgetting them waits for it to end
     * (memory_extraction_hold_user). */
    bool revoked = false;
+   /* What it returned that states a forgotten fact again isn't stored (out of
+    * memory: nothing is now; the cursor stays, and recovery tries again).
+    * Before the privacy re-check below: the check is another model call. */
+   if (response &&
+       memory_forgotten_screen(forgotten, response,
+                               used_fallback ? &fallback_config : &extraction_config) != SUCCESS) {
+      OLOG_WARNING("memory_extraction: conv %lld: not stored now (forgotten-fact check failed)",
+                   (long long)ctx->conversation_id);
+      free(response);
+      response = NULL;
+      revoked = true;
+   }
 #ifdef ENABLE_AUTH
-   if (response && ctx->conversation_id > 0) {
+   if (!revoked && response && ctx->conversation_id > 0) {
       bool now_private = false;
       int priv_rc = conv_db_is_private(ctx->conversation_id, ctx->user_id, &now_private);
       if (priv_rc != AUTH_DB_SUCCESS || now_private) {
@@ -1374,7 +1424,7 @@ static void *extraction_thread(void *arg) {
    } else if (response) {
       process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id, response,
                                   ctx->new_message_count, ctx->duration_seconds,
-                                  prov.conv_id > 0 ? &prov : NULL);
+                                  prov.conv_id > 0 ? &prov : NULL, forgotten);
       free(response);
 
       /* Notify user if we had to fall back */
@@ -1464,6 +1514,8 @@ static void *extraction_thread(void *arg) {
    free(prompt);
 
 cleanup:
+   memory_forgotten_free(forgotten);
+   free(forgotten);
    free(existing_profile);
    free(ctx->conversation_json);
 
@@ -1634,6 +1686,7 @@ static int trigger_extraction(int user_id,
    /* Nothing the user said is new (only DAWN's own posts, say): mark it done
     * rather than send the model an empty conversation.  Only as far as the
     * history checked: a reply arriving since then is still to be read. */
+   ctx->first_msg_id = memory_extraction_history_first_id(filtered);
    if (!memory_extraction_input_has_question(filtered)) {
       json_object_put(filtered);
       free(ctx);

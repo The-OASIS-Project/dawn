@@ -40,6 +40,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_forgotten.h"
 #include "memory/memory_history_loader.h"
 
 /* Per-conversation timeouts.  Block on a single extraction up to this long
@@ -343,6 +344,7 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out) {
    if (!g_config.memory.enabled || !g_config.memory.recovery_enabled) {
       goto out;
    }
+   (void)memory_forgotten_sweep((int64_t)time(NULL) - MEMORY_FORGOTTEN_SWEEP_AGE_SEC);
 
    int idle_threshold = g_config.memory.recovery_idle_threshold_seconds;
    int max_attempts = g_config.memory.recovery_max_attempts;

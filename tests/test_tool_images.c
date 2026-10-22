@@ -138,6 +138,11 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
    json_object_put(session->conversation_history);
    session->conversation_history = json_object_new_array();
 }
+void memory_forgotten_saved(int user_id, int64_t since, int64_t conv_id) {
+   (void)user_id;
+   (void)since;
+   (void)conv_id;
+}
 void memory_extraction_build_fallback(session_t *session, memory_extraction_fallback_t *fb) {
    (void)session;
    (void)fb;

@@ -103,3 +103,91 @@ float memory_embeddings_cosine_with_norms(const float *a,
    (void)norm_b;
    return 0.0f;
 }
+
+/* The forgotten-fact check (memory_forgotten.c): no embeddings here, so every
+ * pair is asked about; the model's reply is the test's (g_stub_llm_reply, NULL:
+ * the call fails), and what it was asked is kept for the test to read. */
+#include <json-c/json.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "llm/llm_cache_monitor.h"
+#include "llm/llm_interface.h"
+
+const char *g_stub_llm_reply = NULL;
+const char *g_stub_llm_reply_later = NULL; /* from the second call on, when set */
+int g_stub_llm_calls = 0;
+char g_stub_llm_prompt[8192];
+
+/* Embeddings for a test that sets it (a fixed vector), and the live fact the
+ * nearest-fact lookup finds (0: none). */
+bool g_stub_embeddings = false;
+int64_t g_stub_nearest = 0;
+
+bool memory_embeddings_available(void) {
+   return g_stub_embeddings;
+}
+
+int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
+   (void)text;
+   if (!g_stub_embeddings) {
+      return 1;
+   }
+   for (int i = 0; i < 4; i++) {
+      out[i] = 1.0f;
+   }
+   *out_dims = 4;
+   return 0;
+}
+
+int memory_embeddings_nearest_fact(int user_id,
+                                   const float *query_vec,
+                                   int query_dims,
+                                   float threshold,
+                                   int64_t *matched_id_out,
+                                   float *score_out) {
+   (void)user_id;
+   (void)query_vec;
+   (void)query_dims;
+   (void)threshold;
+   *matched_id_out = g_stub_nearest;
+   *score_out = g_stub_nearest ? 1.0f : 0.0f;
+   return 0;
+}
+
+struct json_object *memory_extraction_parse_json(const char *response) {
+   return response ? json_tokener_parse(response) : NULL;
+}
+
+int llm_cache_monitor_push_kind(llm_call_kind_t kind) {
+   (void)kind;
+   return 0;
+}
+
+void llm_cache_monitor_pop_kind(int previous) {
+   (void)previous;
+}
+
+void llm_tools_suppress_push(void) {
+}
+
+void llm_tools_suppress_pop(void) {
+}
+
+char *llm_chat_completion_with_config(struct json_object *conversation_history,
+                                      const char *input_text,
+                                      const llm_resolved_config_t *config) {
+   (void)input_text;
+   (void)config;
+   g_stub_llm_calls++;
+   struct json_object *msg = json_object_array_get_idx(conversation_history, 0);
+   struct json_object *content = NULL;
+   g_stub_llm_prompt[0] = '\0';
+   if (msg && json_object_object_get_ex(msg, "content", &content)) {
+      snprintf(g_stub_llm_prompt, sizeof(g_stub_llm_prompt), "%s", json_object_get_string(content));
+   }
+   const char *reply = g_stub_llm_calls > 1 && g_stub_llm_reply_later ? g_stub_llm_reply_later
+                                                                      : g_stub_llm_reply;
+   return reply ? strdup(reply) : NULL;
+}
