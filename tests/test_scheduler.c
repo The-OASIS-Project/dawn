@@ -429,31 +429,54 @@ static void test_latest_ringing(void) {
  * Test: Move Pending (a zone change)
  * ============================================================================ */
 
+/* The one pending repeating event, as the rezone reads it. */
+static sched_repeating_t read_repeating(void) {
+   sched_repeating_t *rows = NULL, r;
+   int count = 0;
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(0, &rows, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   r = rows[0];
+   free(rows);
+   return r;
+}
+
 static void test_move_pending(void) {
    sched_event_t ev = make_event();
+   ev.recurrence = SCHED_RECUR_DAILY;
+   snprintf(ev.original_time, sizeof(ev.original_time), "07:00");
    snprintf(ev.zone, sizeof(ev.zone), "America/Los_Angeles");
    int64_t id = 0;
    scheduler_db_insert(&ev, &id);
-   const time_t from = ev.fire_at, to = ev.fire_at - 3 * 3600;
+   const time_t to = ev.fire_at - 3 * 3600;
 
+   sched_repeating_t r = read_repeating();
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_move_pending(&r, to, "America/New_York"));
    sched_event_t got;
    scheduler_db_get(id, &got);
-   TEST_ASSERT_EQUAL_STRING("America/Los_Angeles", got.zone);
-
-   TEST_ASSERT_EQUAL_INT(0, scheduler_db_move_pending(id, from, to, "America/New_York"));
-   scheduler_db_get(id, &got);
    TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
    TEST_ASSERT_EQUAL_STRING("America/New_York", got.zone);
 
-   /* Read before an edit moved it: the edit stands. */
-   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, from, from + 60, "Europe/Paris"));
+   /* Read before it moved (or an edit moved it): the newer state stands. */
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(&r, to + 60, "Europe/Paris"));
+
+   /* Edited to repeat on other days, or to fire once, since it was read:
+    * fire_at and status unchanged, but it isn't moved. */
+   r = read_repeating();
+   sched_event_t f;
+   memset(&f, 0, sizeof(f));
+   snprintf(f.recurrence_days, sizeof(f.recurrence_days), "mon");
+   f.recurrence = SCHED_RECUR_CUSTOM;
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_update_fields(id, ev.user_id, &f,
+                                                       SCHED_FIELD_RECURRENCE |
+                                                           SCHED_FIELD_RECURRENCE_DAYS));
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(&r, to + 60, "Europe/Paris"));
    scheduler_db_get(id, &got);
    TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
-   TEST_ASSERT_EQUAL_STRING("America/New_York", got.zone);
 
    /* Started ringing since it was read: left alone. */
+   r = read_repeating();
    scheduler_db_update_status(id, SCHED_STATUS_RINGING);
-   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, to, from, "Europe/Paris"));
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(&r, to + 60, "Europe/Paris"));
    scheduler_db_get(id, &got);
    TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
 }

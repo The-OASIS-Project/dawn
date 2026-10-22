@@ -462,11 +462,13 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
    return result;
 }
 
-int scheduler_db_move_pending(int64_t id, time_t from, time_t to, const char *zone) {
+int scheduler_db_move_pending(const sched_repeating_t *read, time_t to, const char *zone) {
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET fire_at = ?, zone = ? "
-                     "WHERE id = ? AND status = 'pending' AND fire_at = ?";
+                     "WHERE id = ? AND status = 'pending' AND fire_at = ? AND recurrence = ? "
+                     "AND COALESCE(recurrence_days, '') = ? AND COALESCE(original_time, '') = ? "
+                     "AND COALESCE(zone, '') = ?";
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       AUTH_DB_UNLOCK();
@@ -475,8 +477,12 @@ int scheduler_db_move_pending(int64_t id, time_t from, time_t to, const char *zo
 
    sqlite3_bind_int64(stmt, 1, (int64_t)to);
    sqlite3_bind_text(stmt, 2, zone && zone[0] ? zone : NULL, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 3, id);
-   sqlite3_bind_int64(stmt, 4, (int64_t)from);
+   sqlite3_bind_int64(stmt, 3, read->id);
+   sqlite3_bind_int64(stmt, 4, (int64_t)read->fire_at);
+   sqlite3_bind_text(stmt, 5, sched_recurrence_to_str(read->recurrence), -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 6, read->recurrence_days, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(stmt, 7, read->original_time, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(stmt, 8, read->zone, -1, SQLITE_TRANSIENT);
 
    int rc = sqlite3_step(stmt);
    int result = (rc == SQLITE_DONE && sqlite3_changes(s_db.db) > 0) ? SUCCESS : FAILURE;

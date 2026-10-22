@@ -1846,7 +1846,7 @@ static void rezone(int user_id) {
          if (next == 0)
             continue; /* no day to move it to: left as placed, for a later try */
       }
-      if (scheduler_db_move_pending(r->id, r->fire_at, next, to_name) != SUCCESS)
+      if (scheduler_db_move_pending(r, next, to_name) != SUCCESS)
          continue;
       if (next != r->fire_at) {
          moved++;
