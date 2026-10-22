@@ -469,8 +469,6 @@
    "    {\n"                                                                                     \
    "      \"text\": \"factual statement; subject must be a named entity, not a pronoun\",\n"     \
    "      \"subject\": \"the named entity this fact is about (REQUIRED)\",\n"                    \
-   "      \"category\": \"personal|professional|relationships|health|interests|practical|"       \
-   "preferences|general\",\n"                                                                    \
    "      \"source\": \"explicit|inferred\",\n"                                                  \
    "      \"confidence\": 0.0-1.0,\n"                                                            \
    "      \"relations\": [\n"                                                                    \
@@ -637,19 +635,9 @@
    "- DO NOT overload \"is\" or \"is_a\" as catch-alls.  Use a specific verb whenever "          \
    "one applies.  \"Caroline attended a support group\" should emit "                            \
    "(Caroline, attended, support group), NOT (Caroline, is_a, support_group_attendee).\n\n"      \
-   "FACT CATEGORIES:\n"                                                                          \
+   "FACT RULES:\n"                                                                               \
    "- \"explicit\" source: user directly stated it\n"                                            \
    "- \"inferred\" source: reasonably deduced from context\n"                                    \
-   "- Fact category: pick the SINGLE dominant category. Only use \"general\" if the fact "       \
-   "is truly cross-cutting and fits no other category.\n"                                        \
-   "  * personal: biographical (name, age, where born, where grew up)\n"                         \
-   "  * professional: job, employer, education, skills\n"                                        \
-   "  * relationships: family, friends, contacts (the user's connections to other people)\n"     \
-   "  * health: medical, fitness, dietary, allergies\n"                                          \
-   "  * interests: hobbies, media tastes, travel, sports\n"                                      \
-   "  * practical: home, vehicles, schedules, routines, addresses, accounts\n"                   \
-   "  * preferences: communication style, UI tastes, formats (overlaps preferences[]; "          \
-   "use this category for free-text preference facts)\n"                                         \
    "- Use short, simple categories for preferences (e.g., \"verbosity\", \"humor\", "            \
    "\"formality\", \"detail_level\", \"units\", \"theme\")\n"                                    \
    "- Only include facts that are specific to this user, not general knowledge\n"                \

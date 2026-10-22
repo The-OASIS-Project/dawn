@@ -251,25 +251,6 @@ struct json_object *memory_extraction_parse_json(const char *response) {
 #include "webui/webui_server.h"
 #endif
 
-/* =============================================================================
- * Helpers: Category validation + ISO-8601 date parsing
- * ============================================================================= */
-
-/* Validate against canonical taxonomy from memory_db.c; fall back to "general"
- * on miss.  We log unknowns at INFO so taxonomy drift is visible without spam. */
-static const char *validate_fact_category(const char *raw) {
-   if (!raw || !*raw)
-      return "general";
-   for (int i = 0; i < MEMORY_FACT_CATEGORY_COUNT; i++) {
-      if (strcmp(raw, MEMORY_FACT_CATEGORIES[i]) == 0) {
-         return MEMORY_FACT_CATEGORIES[i];
-      }
-   }
-   OLOG_INFO("memory_extraction: unknown category '%s', mapping to 'general'", raw);
-   return "general";
-}
-
-
 /* Phase 0 removed the fact_map array, FACT_MAP_MAX cap, and
  * `find_fact_for_relation` helper: the new prompt schema (v47) pairs
  * relations inside their parent fact's `relations[]` array, so the parser
@@ -612,13 +593,10 @@ static void process_extraction_response(int user_id,
 
          /* Optional fields with defaults */
          const char *source = "inferred";
-         const char *category = "general";
          float confidence = 0.7f;
-         struct json_object *src_obj, *cat_obj, *conf_obj;
+         struct json_object *src_obj, *conf_obj;
          if (json_object_object_get_ex(fact, "source", &src_obj))
             source = json_object_get_string(src_obj);
-         if (json_object_object_get_ex(fact, "category", &cat_obj))
-            category = validate_fact_category(json_object_get_string(cat_obj));
          if (json_object_object_get_ex(fact, "confidence", &conf_obj))
             confidence = (float)json_object_get_double(conf_obj);
 
@@ -679,9 +657,9 @@ static void process_extraction_response(int user_id,
                   fact_id_origin = "paraphrase_match";
                } else {
                   /* No paraphrase — create new fact + store precomputed vector. */
-                  memory_db_fact_create_at(user_id, text, confidence, source, category, prov,
+                  memory_db_fact_create_at(user_id, text, confidence, source, NULL, prov,
                                            conv_created_at, &fact_id);
-                  OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
+                  OLOG_INFO("memory_extraction: stored fact: %s", text);
                   if (fact_id > 0) {
                      memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
                      fact_id_origin = "paraphrase_create";
@@ -699,9 +677,9 @@ static void process_extraction_response(int user_id,
             int similar_count = 0;
             memory_db_fact_find_similar(user_id, text, similar, 3, &similar_count);
             if (similar_count == 0) {
-               memory_db_fact_create_at(user_id, text, confidence, source, category, prov,
+               memory_db_fact_create_at(user_id, text, confidence, source, NULL, prov,
                                         conv_created_at, &fact_id);
-               OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
+               OLOG_INFO("memory_extraction: stored fact: %s", text);
                if (fact_id > 0 && memory_embeddings_available()) {
                   memory_embeddings_embed_and_store(user_id, fact_id, text);
                }

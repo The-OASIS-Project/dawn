@@ -10,25 +10,25 @@ from . import models, rubric, storage
 from .__main__ import kappa, stratified
 
 
-def _fact(i, cat, month):
-    return {"id": i, "category": cat, "date": f"2026-{month:02d}-01"}
+def _fact(i, month):
+    return {"id": i, "date": f"2026-{month:02d}-01"}
 
 
 class Stratified(unittest.TestCase):
     def test_size_and_spread(self):
-        facts = [_fact(i, "work" if i % 4 else "home", 1 + i % 6) for i in range(600)]
+        facts = [_fact(i, 2 + i % 5 if i % 4 else 1) for i in range(600)]
         got = stratified(facts, 60, seed=1)
         self.assertEqual(len(got), 60)
         self.assertEqual(len({f["id"] for f in got}), 60)
-        home = sum(1 for f in got if f["category"] == "home")
-        self.assertTrue(13 <= home <= 17, home)  # a quarter of the facts
+        jan = sum(1 for f in got if f["date"].startswith("2026-01"))
+        self.assertTrue(13 <= jan <= 17, jan)  # a quarter of the facts
 
     def test_n_above_total_returns_all(self):
-        facts = [_fact(i, "x", 1) for i in range(5)]
+        facts = [_fact(i, 1) for i in range(5)]
         self.assertEqual(len(stratified(facts, 10, seed=1)), 5)
 
     def test_seeded(self):
-        facts = [_fact(i, "x" if i % 2 else "y", 1 + i % 3) for i in range(100)]
+        facts = [_fact(i, 1 + i % 3) for i in range(100)]
         self.assertEqual([f["id"] for f in stratified(facts, 20, 7)],
                          [f["id"] for f in stratified(facts, 20, 7)])
 

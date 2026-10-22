@@ -114,12 +114,11 @@ def scratch_facts(db_path):
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, fact_text, category, source, created_at, confidence, expires_at, "
+        "SELECT id, fact_text, source, created_at, confidence, expires_at, "
         "source_conversation_id FROM memory_facts WHERE superseded_by IS NULL "
         "ORDER BY id").fetchall()
     con.close()
-    return [{"id": r["id"], "text": r["fact_text"], "category": r["category"],
-             "source": r["source"], "created_at": r["created_at"],
+    return [{"id": r["id"], "text": r["fact_text"], "source": r["source"], "created_at": r["created_at"],
              "date": time.strftime("%Y-%m-%d", time.gmtime(r["created_at"])),
              "confidence": r["confidence"], "expires_at": r["expires_at"],
              "access_count": 0, "last_cited": None,

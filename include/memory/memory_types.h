@@ -245,30 +245,6 @@ typedef struct {
 } memory_extraction_request_t;
 
 /* =============================================================================
- * Extraction Result Structures
- *
- * Used to parse the JSON response from the extraction LLM.
- * ============================================================================= */
-
-typedef struct {
-   char text[MEMORY_FACT_TEXT_MAX];
-   char source[MEMORY_SOURCE_MAX];
-   char category[MEMORY_CATEGORY_MAX]; /* Validated against MEMORY_FACT_CATEGORIES (v34) */
-   float confidence;
-} memory_extracted_fact_t;
-
-typedef struct {
-   char category[MEMORY_CATEGORY_MAX];
-   char value[MEMORY_PREF_VALUE_MAX];
-   float confidence;
-} memory_extracted_preference_t;
-
-typedef struct {
-   char old_fact[MEMORY_FACT_TEXT_MAX];
-   char new_fact[MEMORY_FACT_TEXT_MAX];
-} memory_extracted_correction_t;
-
-/* =============================================================================
  * Entity Graph Structures (Phase S4)
  *
  * Entities represent named people, pets, places, organizations, and things

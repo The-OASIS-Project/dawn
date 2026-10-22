@@ -163,8 +163,8 @@ def tier_system_prompt(assistant: str, today: str) -> str:
 
 
 def batch_prompt(facts) -> str:
-    """The user message for one batch: id, date, category and text per fact."""
+    """The user message for one batch: id, date and text per fact."""
     lines = ["Facts:"]
     for f in facts:
-        lines.append(f"[{f['id']}] ({f['date']}, {f['category']}) {f['text']}")
+        lines.append(f"[{f['id']}] ({f['date']}) {f['text']}")
     return "\n".join(lines)

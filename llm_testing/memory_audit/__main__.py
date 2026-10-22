@@ -7,7 +7,7 @@
 #   label     name each sampled fact's kind by hand; the reference for the models
 #   classify  a model classifies a sample against the rubric
 #   compare   a classification (or two) against the hand labels
-#   report    counts by kind, category, month and use for a classification
+#   report    counts by kind, month and use for a classification
 #   examples  print facts of one kind (shows fact text: for the user, not for logs)
 #   reextract run DAWN's extraction on chosen stored conversations into a scratch
 #             database, so a prompt variant can be measured on the same input
@@ -66,15 +66,14 @@ def _live_facts(db, user_id):
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, fact_text, category, source, created_at, confidence, expires_at, "
+        "SELECT id, fact_text, source, created_at, confidence, expires_at, "
         "access_count, last_cited, source_conversation_id FROM memory_facts "
         "WHERE user_id = ? AND superseded_by IS NULL ORDER BY id", (user_id,)).fetchall()
     con.close()
     out = []
     for r in rows:
         out.append({
-            "id": r["id"], "text": r["fact_text"], "category": r["category"],
-            "source": r["source"], "created_at": r["created_at"],
+            "id": r["id"], "text": r["fact_text"], "source": r["source"], "created_at": r["created_at"],
             "date": time.strftime("%Y-%m-%d", time.gmtime(r["created_at"])),
             "confidence": r["confidence"], "expires_at": r["expires_at"],
             "access_count": r["access_count"] or 0, "last_cited": r["last_cited"],
@@ -84,11 +83,11 @@ def _live_facts(db, user_id):
 
 
 def _stratum(f):
-    return (f["category"], f["date"][:7])
+    return f["date"][:7]
 
 
 def stratified(facts, n, seed):
-    """n facts spread over (category, month) in proportion to their size,
+    """n facts spread over months in proportion to their size,
     largest remainder first, at least one from each stratum while n allows."""
     groups = defaultdict(list)
     for f in facts:
@@ -119,9 +118,7 @@ def cmd_sample(a):
     with private_open(path) as f:
         for x in chosen:
             f.write(json.dumps(x) + "\n")
-    cats = Counter(x["category"] for x in chosen)
     print(f"{len(chosen)} of {len(facts)} live facts (user {a.user_id}) -> {path}")
-    print("by category: " + ", ".join(f"{k} {v}" for k, v in cats.most_common()))
 
 
 # --------------------------------------------------------------------------- label
@@ -146,7 +143,7 @@ def _kind_menu():
 
 def _ask(f, n_done, n_total, current):
     print("\033[2J\033[H", end="")
-    print(f"[{n_done + 1}/{n_total}]  id {f['id']}  {f['date']}  {f['category']}  "
+    print(f"[{n_done + 1}/{n_total}]  id {f['id']}  {f['date']}  "
           f"source={f['source']}  used={f['access_count']}  "
           f"cited={'yes' if f['last_cited'] else 'no'}"
           f"{'  expires' if f['expires_at'] else ''}")
@@ -367,18 +364,14 @@ def cmd_report(a):
               f"{_pct(len(ks), n):>6s} "
               f"{_pct(used, len(ks)):>6s} "
               f"{_pct(cited, len(ks)):>6s} {_pct(exp, len(ks)):>8s}")
-    for label, key in (("category", lambda i: facts[i]["category"]),
-                       ("month", lambda i: facts[i]["date"][:7])):
-        print(f"\ntier by {label}:")
-        print(f"  {'':14s} {'n':>5s} " + " ".join(f"{t:>9s}" for t in rubric.TIERS))
-        groups = defaultdict(Counter)
-        for i in ids:
-            groups[key(i)][_tier(cls[i])] += 1
-        order = sorted(groups) if label == "month" else \
-            sorted(groups, key=lambda g: -sum(groups[g].values()))
-        for g in order:
-            c, tot = groups[g], sum(groups[g].values())
-            print(f"  {g:14s} {tot:5d} " + " ".join(f"{_pct(c[t], tot):>9s}" for t in rubric.TIERS))
+    print("\ntier by month:")
+    print(f"  {'':14s} {'n':>5s} " + " ".join(f"{t:>9s}" for t in rubric.TIERS))
+    groups = defaultdict(Counter)
+    for i in ids:
+        groups[facts[i]["date"][:7]][_tier(cls[i])] += 1
+    for g in sorted(groups):
+        c, tot = groups[g], sum(groups[g].values())
+        print(f"  {g:14s} {tot:5d} " + " ".join(f"{_pct(c[t], tot):>9s}" for t in rubric.TIERS))
 
 
 def cmd_examples(a):
@@ -387,7 +380,7 @@ def cmd_examples(a):
     ids = [i for i in cls if cls[i]["kind"] == a.kind and i in facts]
     random.Random(a.seed).shuffle(ids)
     for i in ids[:a.n]:
-        print(f"[{i}] {facts[i]['date']} {facts[i]['category']}: {facts[i]['text']}")
+        print(f"[{i}] {facts[i]['date']}: {facts[i]['text']}")
         print(f"      -> {cls[i]['reason']}")
 
 
@@ -427,7 +420,7 @@ def main(argv=None):
     s.add_argument("runs", nargs="+", help="one or two classification files")
     s.add_argument("--labels", default=f"labels_r{rubric.RUBRIC_VERSION}.json")
 
-    s = sub.add_parser("report", help="counts by kind, category, month and use")
+    s = sub.add_parser("report", help="counts by kind, month and use")
     s.add_argument("run")
     s.add_argument("--set", default="facts.jsonl")
 
