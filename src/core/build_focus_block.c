@@ -115,24 +115,6 @@ static void drop_candidate(focus_compose_result_t *r, int i) {
    r->candidates[i].item_id = NULL;
 }
 
-/* A question this short ("what's that for?", "and the other one?") may lean
- * on the one before it: when its own words find nothing, retrieval tries
- * again with an embedding that reads both. */
-#define FOCUS_FOLLOWUP_MAX_WORDS 6
-/* The earlier question's bytes, at most, that go with it. */
-#define FOCUS_FOLLOWUP_PREV_MAX_BYTES 600
-
-static int word_count(const char *text) {
-   int words = 0;
-   bool in_word = false;
-   for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
-      const bool space = *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r';
-      words += !space && !in_word;
-      in_word = !space;
-   }
-   return words;
-}
-
 /* Embed @p text into @p buf: @p buf, or NULL when there's no embedding (the
  * vector adapters skip themselves; calendar still runs). */
 static const float *embed_query(const char *text, int user_id, float *buf, int *dims) {
@@ -148,32 +130,6 @@ static const float *embed_query(const char *text, int user_id, float *buf, int *
       return NULL;
    }
    return buf;
-}
-
-/* The text a short follow-up's retry embeds: the previous question in front
- * of it (heap, caller frees), else NULL (not a short follow-up, or nothing
- * before it).  Only the embedding reads it: keyword and date matching stay on
- * the turn's own words, so a "tomorrow?" isn't read as the "today" asked about
- * before.  Never the first try: a short question on a new subject ("What do
- * you know about Dawn?") would be searched as the old one. */
-static char *followup_embed_text(session_t *session, const char *turn_text) {
-   if (!session || word_count(turn_text) > FOCUS_FOLLOWUP_MAX_WORDS) {
-      return NULL;
-   }
-   char *prev = session_previous_question_dup(session);
-   if (!prev) {
-      return NULL;
-   }
-   const size_t prev_len = focus_utf8_safe_cap(prev, FOCUS_FOLLOWUP_PREV_MAX_BYTES);
-   const size_t turn_len = strlen(turn_text);
-   char *text = malloc(prev_len + 1 + turn_len + 1);
-   if (text) {
-      memcpy(text, prev, prev_len);
-      text[prev_len] = '\n';
-      memcpy(text + prev_len + 1, turn_text, turn_len + 1);
-   }
-   free(prev);
-   return text;
 }
 
 /* " YYYY-MM-DD" (in @p zone, the user's) for an item's timestamp, or ""
@@ -239,19 +195,6 @@ int build_focus_block(session_t *session,
    focus_compose_result_t *result = &panel->result;
    int rc = focus_compose(user_id, /*include_private*/ false, user_turn_text, query_ptr,
                           (size_t)embed_dims, now, top_k, result);
-   if (rc == SUCCESS && result->candidate_count == 0 && query_ptr != NULL) {
-      char *followup = followup_embed_text(session, user_turn_text);
-      const bool retry = followup != NULL &&
-                         embed_query(followup, user_id, query_embed, &embed_dims) != NULL;
-      free(followup);
-      if (retry) {
-         OLOG_INFO("focus: nothing on a short turn's own words; retrying with the previous "
-                   "question");
-         focus_result_free(result);
-         rc = focus_compose(user_id, /*include_private*/ false, user_turn_text, query_ptr,
-                            (size_t)embed_dims, now, top_k, result);
-      }
-   }
    if (rc != SUCCESS) {
       OLOG_WARNING("focus: focus_compose failed (user_id=%d)", user_id);
       focus_panel_free(panel);

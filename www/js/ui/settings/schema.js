@@ -1259,7 +1259,7 @@
                type: 'group',
                label: 'Per-Turn Context Injection',
                description:
-                  'Pulls memory, document, calendar, and email content above a relevance threshold and injects it into each user turn. Off by default.',
+                  'Pulls memory, document, calendar, and email content above a relevance threshold and injects it into each user turn.',
                fields: {
                   focus_enabled: {
                      type: 'checkbox',

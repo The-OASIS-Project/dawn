@@ -402,8 +402,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.recovery_recurring_interval_seconds = 86400; /* daily */
 
    /* Per-turn focus injection: automatically adds relevant memory, document,
-    * calendar and email content to each turn.  Opt-in. */
-   config->memory.focus_injection.enabled = false;
+    * calendar and email content to each turn. */
+   config->memory.focus_injection.enabled = true;
    /* Per-turn focus-block budget in BYTES (same unit as FOCUS_TEXT_MAX_BYTES).
     * 10240 ≈ two full document chunks plus several small fact/summary
     * candidates — the multi-source coexistence target. */

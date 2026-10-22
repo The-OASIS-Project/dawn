@@ -339,7 +339,7 @@ weight_recency = 0.30      # Recency contribution
 
 `[memory.entity_merge]` (May 2026): controls the Phase 2 auto-merge gate that runs at extraction time after the relations loop. Composite ≥ `auto_threshold` → silent `alias_link`; composite ∈ [`review_threshold`, `auto_threshold`) → row in `memory_entity_merge_proposals` for operator review. `enabled=false` disables both bands; the entity-merge cascade still runs for `dawn-admin memory entity link-user-self` and operator-driven WebUI merges.
 
-`[memory.focus_injection]` (May 2026): controls the per-turn focus block. `top_k=12` (up from 8) leaves slots for the new semantic summary adapter — at 8 the summary adapter starved out of the block on facts-heavy turns. `weight_recency=0.30` ranks recent summary matches above older paraphrased facts; the summary-vs-fact probes behind it are in `benchmarks/focus_probe_cases.json` (cases 12-15, see `config_defaults.c`).
+`[memory.focus_injection]` (May 2026): controls the per-turn focus block, on by default. `top_k=12` (up from 8) leaves slots for the new semantic summary adapter — at 8 the summary adapter starved out of the block on facts-heavy turns. `weight_recency=0.30` ranks recent summary matches above older paraphrased facts; the summary-vs-fact probes behind it are in `benchmarks/focus_probe_cases.json` (cases 12-15, see `config_defaults.c`).
 
 ## WebUI Memory Viewer
 

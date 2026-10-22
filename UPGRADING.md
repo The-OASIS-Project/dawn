@@ -12,6 +12,21 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-22 — Per-turn context injection is on by default
+
+**What changed.** `[memory.focus_injection] enabled` now defaults to true: each turn
+retrieves the memories, documents and calendar events relevant to it and adds them to the
+turn. This includes voice devices (satellites and the local microphone), so a reply spoken in
+a shared room may mention what it retrieved, such as health or family details.
+
+**What you need to do.** If others share a room with a voice device, turn it off in
+Settings → Memory → Per-Turn Context Injection (or set `enabled = false`). If you have ever
+saved settings from the WebUI, your `dawn.toml` already says `enabled = false` under
+`[memory.focus_injection]` and keeps it off; turn it on in the same place to get the new
+default.
+
+---
+
 ## 2026-10-22 — The built-in persona is new
 
 **What changed.** The built-in persona is new and longer (values, then tone). A custom

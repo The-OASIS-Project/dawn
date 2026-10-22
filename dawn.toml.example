@@ -712,8 +712,9 @@ citation_reinforcement_boost = 0.05
 # Per-turn context injection.  When enabled, the daemon retrieves memory
 # facts, entities, relations, summaries, document chunks and calendar
 # events relevant to each user turn and adds them to that turn as a
-# budget-bounded "context for this turn" block.  Off by default.
-# enabled = false                     # Master enable
+# budget-bounded "context for this turn" block.  On by default; on a
+# voice device in a shared room, every turn may speak what it retrieves.
+# enabled = true                      # Master enable
 # focus_budget_bytes = 10240          # Byte cap on the assembled focus block (per turn).
                                       # Range: 1024 - 65536  (~4 bytes/token; exact byte budget)
 # top_k = 12                          # Maximum candidates retained after ranking.

@@ -324,14 +324,6 @@ int focus_handles_assign(struct session *session,
 /* session_turn_conversation stub — the panel hook re-reads the turn's
  * conversation (first-turn race fix); no conversation here, so the one the
  * prompt was built with stands. */
-/* The previous question session_previous_question_dup gives, or NULL. */
-const char *pb_previous_question = NULL;
-
-char *session_previous_question_dup(struct session *session) {
-   (void)session;
-   return pb_previous_question ? strdup(pb_previous_question) : NULL;
-}
-
 int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
