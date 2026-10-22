@@ -249,8 +249,9 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
       /* Log event */
       auth_db_log_event("SETTINGS_UPDATED", conn->username, conn->client_ip, "Personal settings");
 
-      /* Repeating events follow the user to the new zone. */
-      scheduler_user_zone_changed(conn->auth_user_id, old_zone);
+      /* Repeating events follow the user to a new zone. */
+      if (user_tz(conn->auth_user_id) != old_zone)
+         scheduler_rezone(conn->auth_user_id);
 
       /* Every open tab shows this user's times in the zone now in force. */
       json_object *tz_frame = json_object_new_object();

@@ -160,6 +160,51 @@ static void test_rezone_once_unchanged(void) {
                                               "15:30", SCHED_RECUR_ONCE, 1792444500));
 }
 
+/* Rung on its old clock, dismissed after the owner moved east: a daily 23:30
+ * set in Los Angeles rings Tue 23:30 there (06:30Z Wed); next is Wed 23:30 New
+ * York, not Thursday (no day skipped). */
+static void test_placed_east_no_skip(void) {
+   TEST_ASSERT_EQUAL_INT64(
+       1792639800, sched_next_occurrence_placed(tz_lookup("America/Los_Angeles"),
+                                                tz_lookup("America/New_York"), 1792564200, "23:30",
+                                                SCHED_RECUR_DAILY, NULL, false, 1792564500));
+}
+
+/* West: a daily 00:30 set in New York rings Wed 00:30 there (04:30Z); with the
+ * owner now in Los Angeles, next is Thu 00:30 there, not Wed 00:30 (the same
+ * occurrence again, three hours later). */
+static void test_placed_west_no_repeat(void) {
+   TEST_ASSERT_EQUAL_INT64(1792654200,
+                           sched_next_occurrence_placed(tz_lookup("America/New_York"),
+                                                        tz_lookup("America/Los_Angeles"),
+                                                        1792557000, "00:30", SCHED_RECUR_DAILY,
+                                                        NULL, false, 1792557300));
+}
+
+/* Processed more than a day late with the owner now west of where it was
+ * placed: a daily 23:00 placed in London (Sun 23:00 BST), handled at Mon 20:00
+ * in Los Angeles, next is Mon 23:00 there, not Tuesday (London's date is
+ * already Tuesday). */
+static void test_placed_late_west_keeps_owner_today(void) {
+   TEST_ASSERT_EQUAL_INT64(1791266400,
+                           sched_next_occurrence_placed(tz_lookup("Europe/London"),
+                                                        tz_lookup("America/Los_Angeles"),
+                                                        1791151200, "23:00", SCHED_RECUR_DAILY,
+                                                        NULL, false, 1791255600));
+}
+
+/* Placed on the owner's clock (or unknown): as sched_next_occurrence. */
+static void test_placed_same_zone(void) {
+   TEST_ASSERT_EQUAL_INT64(next(1792148400, "07:00", SCHED_RECUR_DAILY, 1792148460),
+                           sched_next_occurrence_placed(s_ny, s_ny, 1792148400, "07:00",
+                                                        SCHED_RECUR_DAILY, NULL, false,
+                                                        1792148460));
+   TEST_ASSERT_EQUAL_INT64(next(1792148400, "07:00", SCHED_RECUR_DAILY, 1792148460),
+                           sched_next_occurrence_placed(NULL, s_ny, 1792148400, "07:00",
+                                                        SCHED_RECUR_DAILY, NULL, false,
+                                                        1792148460));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_daily_next_day);
@@ -179,5 +224,9 @@ int main(void) {
    RUN_TEST(test_rezone_passed_weekdays_skip_weekend);
    RUN_TEST(test_rezone_kept_day_must_match_rule);
    RUN_TEST(test_rezone_once_unchanged);
+   RUN_TEST(test_placed_east_no_skip);
+   RUN_TEST(test_placed_west_no_repeat);
+   RUN_TEST(test_placed_late_west_keeps_owner_today);
+   RUN_TEST(test_placed_same_zone);
    return UNITY_END();
 }

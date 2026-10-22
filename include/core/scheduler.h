@@ -31,7 +31,6 @@
 #include <stdint.h>
 
 #include "core/scheduler_db.h"
-#include "core/tz.h"
 
 /* Forward decl for scheduler_send_tts_to_session below; avoids pulling
  * core/session_manager.h into every scheduler consumer. */
@@ -172,15 +171,21 @@ int scheduler_cancel_and_broadcast(int64_t id, int user_id);
 int scheduler_cancel_occurrence_and_broadcast(int64_t id, int user_id);
 
 /**
- * @brief A user's zone changed from @p from: their pending repeating events
- *        move to the same date and time of day on the new clock, so the next
- *        one doesn't ring at the old zone's time (sched_rezone_occurrence).
- *        One-time and snoozed events keep their instant.
+ * @brief Pending repeating events of @p user_id placed in a zone other than
+ *        their owner's now move to the same date and time of day on the
+ *        owner's clock (sched_rezone_occurrence), and record it.  For a change
+ *        of the user's zone.  One-time, snoozed and already-due events keep
+ *        their instant; one placed in a zone no longer known keeps it too and
+ *        records the owner's zone.  @p user_id <= 0 does nothing.
  *
  * Reads the user's settings and the scheduler table: never call it holding
  * the auth_db lock.
  */
-void scheduler_user_zone_changed(int user_id, const tz_t *from);
+void scheduler_rezone(int user_id);
+
+/** @brief scheduler_rezone for every user: at startup, for a change of the
+ *         server's zone (users without their own follow it). */
+void scheduler_rezone_all(void);
 
 /* =============================================================================
  * Notification Broadcast Hooks

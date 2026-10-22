@@ -72,6 +72,7 @@ static const char *DDL =
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 tri-state TTS override */
     "  deliver_to TEXT,"                      /* v54 messaging channel fan-out */
     "  briefing_instructions TEXT,"           /* v84 per-briefing summarization steering */
+    "  zone TEXT,"                            /* v111 the zone fire_at was placed in */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
@@ -430,25 +431,77 @@ static void test_latest_ringing(void) {
 
 static void test_move_pending(void) {
    sched_event_t ev = make_event();
+   snprintf(ev.zone, sizeof(ev.zone), "America/Los_Angeles");
    int64_t id = 0;
    scheduler_db_insert(&ev, &id);
-   const time_t from = ev.fire_at, to = ev.fire_at + 3 * 3600;
+   const time_t from = ev.fire_at, to = ev.fire_at - 3 * 3600;
 
-   TEST_ASSERT_EQUAL_INT(0, scheduler_db_move_pending(id, from, to));
    sched_event_t got;
    scheduler_db_get(id, &got);
-   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+   TEST_ASSERT_EQUAL_STRING("America/Los_Angeles", got.zone);
 
-   /* Read before an edit moved it: the edit stands. */
-   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, from, from + 60));
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_move_pending(id, from, to, "America/New_York"));
    scheduler_db_get(id, &got);
    TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+   TEST_ASSERT_EQUAL_STRING("America/New_York", got.zone);
+
+   /* Read before an edit moved it: the edit stands. */
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, from, from + 60, "Europe/Paris"));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+   TEST_ASSERT_EQUAL_STRING("America/New_York", got.zone);
 
    /* Started ringing since it was read: left alone. */
    scheduler_db_update_status(id, SCHED_STATUS_RINGING);
-   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, to, from));
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(id, to, from, "Europe/Paris"));
    scheduler_db_get(id, &got);
    TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+}
+
+/* Pending, repeating and placed in a zone; of one user or all, by user. */
+static void test_list_pending_repeating(void) {
+   const struct {
+      int user;
+      sched_recurrence_t recurrence;
+      const char *zone;
+      sched_status_t status;
+   } rows[] = {
+      { 2, SCHED_RECUR_DAILY, "America/New_York", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_WEEKDAYS, "America/Los_Angeles", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_ONCE, "America/Los_Angeles", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_DAILY, "", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_DAILY, "America/Los_Angeles", SCHED_STATUS_SNOOZED },
+   };
+   for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+      sched_event_t ev = make_event();
+      ev.user_id = rows[i].user;
+      ev.recurrence = rows[i].recurrence;
+      snprintf(ev.original_time, sizeof(ev.original_time), "07:00");
+      snprintf(ev.zone, sizeof(ev.zone), "%s", rows[i].zone);
+      int64_t id = 0;
+      scheduler_db_insert(&ev, &id);
+      if (rows[i].status != SCHED_STATUS_PENDING)
+         scheduler_db_update_status(id, rows[i].status);
+   }
+
+   sched_repeating_t *out = NULL;
+   int count = 0;
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(0, &out, &count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_INT(1, out[0].user_id);
+   TEST_ASSERT_EQUAL_INT(SCHED_RECUR_WEEKDAYS, out[0].recurrence);
+   TEST_ASSERT_EQUAL_STRING("America/Los_Angeles", out[0].zone);
+   TEST_ASSERT_EQUAL_STRING("07:00", out[0].original_time);
+   TEST_ASSERT_EQUAL_INT(2, out[1].user_id);
+   free(out);
+
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(2, &out, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   free(out);
+
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(3, &out, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+   TEST_ASSERT_NULL(out);
 }
 
 /* ============================================================================
@@ -1657,6 +1710,7 @@ int main(void) {
    RUN_TEST(test_latest_ringing);
    RUN_TEST(test_snooze);
    RUN_TEST(test_move_pending);
+   RUN_TEST(test_list_pending_repeating);
    RUN_TEST(test_due_events);
    RUN_TEST(test_list_user_events);
    RUN_TEST(test_find_by_name);

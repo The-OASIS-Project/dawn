@@ -113,6 +113,28 @@ time_t sched_next_occurrence(const tz_t *zone,
    return 0;
 }
 
+time_t sched_next_occurrence_placed(const tz_t *placed,
+                                    const tz_t *owner,
+                                    time_t fire_at,
+                                    const char *original_time,
+                                    sched_recurrence_t recurrence,
+                                    const char *recurrence_days,
+                                    bool snoozed,
+                                    time_t now) {
+   if (!placed || placed == owner)
+      return sched_next_occurrence(owner, fire_at, original_time, recurrence, recurrence_days,
+                                   snoozed, now);
+   /* Which day it stood for, and the one after it, are read on the clock it
+    * was placed on (from the row, not from now: catching up to now is done on
+    * the owner's clock, whose today may be a day behind); the next one then
+    * moves to the owner's clock. */
+   const time_t next = sched_next_occurrence(placed, fire_at, original_time, recurrence,
+                                             recurrence_days, snoozed, fire_at);
+   return next ? sched_rezone_occurrence(placed, owner, next, original_time, recurrence,
+                                         recurrence_days, now)
+               : 0;
+}
+
 time_t sched_rezone_occurrence(const tz_t *from,
                                const tz_t *to,
                                time_t fire_at,

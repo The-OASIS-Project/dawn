@@ -265,6 +265,7 @@ static char *handle_create(struct json_object *details,
       return strdup(result);
    }
 
+   safe_strscpy(event.zone, tz_name(zone)); /* the clock its time is placed on */
    if (duration_min > 0) {
       /* Any type can use duration_minutes as a relative offset */
       event.fire_at = time(NULL) + (time_t)duration_min * 60;
@@ -989,6 +990,8 @@ static char *handle_update(struct json_object *details, int user_id) {
       snprintf(fields.original_time, SCHED_ORIGINAL_TIME_MAX, "%02d:%02d", fire_tm.tm_hour,
                fire_tm.tm_min);
       mask |= SCHED_FIELD_ORIGINAL_TIME;
+      safe_strscpy(fields.zone, tz_name(zone));
+      mask |= SCHED_FIELD_ZONE;
    }
 
    const char *recur = json_get_string(details, "recurrence");

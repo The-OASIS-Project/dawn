@@ -62,7 +62,8 @@ time_t sched_next_occurrence(const tz_t *zone,
  * The occurrence keeps its date and time of day (@p original_time, else
  * @p fire_at's time on @p from's clock) and is read on @p to's clock, so a
  * 05:00 alarm still rings at 05:00 where its owner now is.  When that has
- * already passed, the next occurrence after @p now (sched_next_occurrence).
+ * already passed, or falls on a day the rule skips, the next occurrence after
+ * @p now (sched_next_occurrence).
  * A one-time event is returned unchanged: its instant was what was asked for.
  *
  * @return The instant (@p fire_at when nothing moves), or 0 when no day matches.
@@ -74,6 +75,23 @@ time_t sched_rezone_occurrence(const tz_t *from,
                                sched_recurrence_t recurrence,
                                const char *recurrence_days,
                                time_t now);
+
+/**
+ * @brief The next occurrence of a repeating event placed on @p placed's clock
+ *        whose owner is now on @p owner's: the occurrence after the one it
+ *        stood for on the clock it was placed on, moved to the owner's
+ *        (sched_rezone_occurrence).  A row still ringing or snoozed when its
+ *        owner's zone changed then neither skips a day nor rings one twice.
+ *        @p placed NULL or @p owner: sched_next_occurrence on @p owner.
+ */
+time_t sched_next_occurrence_placed(const tz_t *placed,
+                                    const tz_t *owner,
+                                    time_t fire_at,
+                                    const char *original_time,
+                                    sched_recurrence_t recurrence,
+                                    const char *recurrence_days,
+                                    bool snoozed,
+                                    time_t now);
 
 #ifdef __cplusplus
 }

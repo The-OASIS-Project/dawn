@@ -1016,6 +1016,52 @@ static void test_v108_scheduled_times(void) {
    }
 }
 
+/* v111: each live event records its owner's zone as user_tz reads it (theirs,
+ * else the daemon's); a finished one gets none, and a rerun changes nothing. */
+static void test_v111_scheduled_zones(void) {
+   const int la = create_and_get_id("zone_la", "hash", false);
+   const int unset = create_and_get_id("zone_unset", "hash", false);
+   const int old_name = create_and_get_id("zone_old", "hash", false);
+   const int bad = create_and_get_id("zone_bad", "hash", false);
+   auth_user_settings_t settings;
+   memset(&settings, 0, sizeof(settings));
+   safe_strscpy(settings.timezone, "America/Los_Angeles");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(la, &settings));
+   safe_strscpy(settings.timezone, "US/Eastern");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(old_name, &settings));
+   safe_strscpy(settings.timezone, "somewhere nice");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(bad, &settings));
+   tz_daemon_init("America/Chicago");
+   char sql[1024];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO scheduled_events (id, user_id, status, name, fire_at, created_at, "
+            "recurrence) VALUES (9101, %d, 'pending', 'a', 1792238400, 0, 'daily'),"
+            "(9102, %d, 'snoozed', 'b', 1792238400, 0, 'once'),"
+            "(9103, %d, 'pending', 'c', 1792238400, 0, 'daily'),"
+            "(9104, %d, 'fired', 'd', 1792238400, 0, 'daily'),"
+            "(9105, %d, 'pending', 'e', 1792238400, 0, 'daily'),"
+            "(9106, %d, 'pending', 'f', 1792238400, 0, 'daily')",
+            la, la, unset, la, old_name, bad);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v111(s_db.db));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v111(s_db.db));
+
+   /* An old spelling records the zone's name; a bad one the daemon's (as
+    * user_tz reads them). */
+   static const char *const want[] = { "America/Los_Angeles", "America/Los_Angeles",
+                                       "America/Chicago",     "",
+                                       "America/New_York",    "America/Chicago" };
+   for (int i = 0; i < 6; i++) {
+      sqlite3_stmt *st = NULL;
+      sqlite3_prepare_v2(s_db.db, "SELECT COALESCE(zone, '') FROM scheduled_events WHERE id = ?",
+                         -1, &st, NULL);
+      sqlite3_bind_int(st, 1, 9101 + i);
+      TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+      TEST_ASSERT_EQUAL_STRING(want[i], (const char *)sqlite3_column_text(st, 0));
+      sqlite3_finalize(st);
+   }
+}
+
 static void test_user_settings_set_and_get(void) {
    int user_id = create_and_get_id("settings_user2", "hash", false);
 
@@ -1498,6 +1544,7 @@ int main(void) {
    RUN_TEST(test_v107_timezone_settings);
    RUN_TEST(test_user_tz);
    RUN_TEST(test_v108_scheduled_times);
+   RUN_TEST(test_v111_scheduled_zones);
    RUN_TEST(test_user_settings_set_and_get);
 
    /* v43 schema (entity-merge / user-identity-dedup) */
