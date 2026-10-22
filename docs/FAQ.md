@@ -137,16 +137,6 @@ dawn-admin music rescan
 
 ## Memory
 
-### How do I recategorize "general" facts?
-
-The memory subsystem assigns one of eight categories (personal, professional, relationships, health, interests, practical, preferences, general) to each extracted fact.  Facts created before the categorization feature shipped, or where the embedding-centroid backfill couldn't decide, end up labeled `general`.  This command sends batches of `general` facts to the configured extraction LLM for per-fact classification.
-
-```bash
-dawn-admin memory recategorize-all jon
-```
-
-Runs in the background — fire-and-forget.  Cost is small (one extraction LLM call per ~25 facts, typically a few cents per thousand facts on Claude Haiku).  Watch daemon logs for progress and final per-category distribution.
-
 ### How do I re-extract memory from scratch after extraction-prompt or model improvements?
 
 When the extraction prompt, model, or post-processing logic changes meaningfully, derived state (facts, entities, relations, summaries, preferences, embeddings) can become stale relative to what the current pipeline would produce from the same conversations.  Conversations + messages are the source of truth; everything derived can be rebuilt from them.

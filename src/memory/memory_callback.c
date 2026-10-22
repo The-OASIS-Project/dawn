@@ -1773,11 +1773,10 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
              value ? value : "(null)", user_id);
 
    if (strcmp(actionName, "search") == 0) {
-      /* Extract base keywords and optional time_range / category / as_of /
+      /* Extract base keywords and optional time_range / as_of /
        * include_historical / with_source from encoded value. */
       char keywords[512] = "";
       time_t since_ts = 0;
-      char category[MEMORY_CATEGORY_MAX] = "";
       int64_t as_of_ts = 0;
       bool include_historical = false;
       bool with_source = false;
@@ -1792,20 +1791,6 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
                since_ts = time(NULL) - seconds;
                if (since_ts < 0)
                   since_ts = 0;
-            }
-         }
-
-         /* category param: validate against canonical taxonomy; ignore unknowns. */
-         char raw_cat[MEMORY_CATEGORY_MAX] = "";
-         if (tool_param_extract_custom(value, "category", raw_cat, sizeof(raw_cat)) && raw_cat[0]) {
-            for (int i = 0; i < MEMORY_FACT_CATEGORY_COUNT; i++) {
-               if (strcmp(raw_cat, MEMORY_FACT_CATEGORIES[i]) == 0) {
-                  safe_strscpy(category, raw_cat);
-                  break;
-               }
-            }
-            if (!category[0]) {
-               OLOG_INFO("memory_callback: ignoring unknown category '%s'", raw_cat);
             }
          }
 
@@ -1846,9 +1831,9 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       /* source_budget from dawn.toml [memory] source_budget_chars; 0 falls
        * back to MEMORY_SOURCE_BUDGET_CHARS inside the action.  Bench harness
        * invokes memory_action_search() directly with its own override. */
-      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts,
-                                  category[0] ? category : NULL, as_of_ts, include_historical,
-                                  with_source, g_config.memory.source_budget_chars);
+      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts, NULL, as_of_ts,
+                                  include_historical, with_source,
+                                  g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "remember") == 0) {
       char *gate = memory_private_confirm_gate(user_id, value);
       if (gate != NULL) {

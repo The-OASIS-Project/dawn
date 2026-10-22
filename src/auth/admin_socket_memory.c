@@ -16,11 +16,10 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Admin-socket memory-maintenance handlers (dawn-admin memory *).  Five
- * synchronous handlers backed by the memory subsystem's admin layer:
- * recategorize, cleanup_meta_facts, summarize_missing, reextract,
- * reextract_status.  Split out of admin_socket.c so that file can stay
- * under the size limits in CLAUDE.md.  Sibling of
+ * Admin-socket memory-maintenance handlers (dawn-admin memory *).
+ * Synchronous handlers backed by the memory subsystem's admin layer:
+ * cleanup_meta_facts, summarize_missing, reextract, reextract_status.  Split out of admin_socket.c
+ * so that file can stay under the size limits in CLAUDE.md.  Sibling of
  * admin_socket_memory_entity.c (which owns the entity-merge handlers).
  * Dispatched from handle_client() in admin_socket.c via declarations in
  * include/auth/admin_socket_internal.h.
@@ -42,47 +41,8 @@
 #include "memory/memory_db_admin.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_note_bridge.h"
-#include "memory/memory_recategorize.h"
 #include "memory/memory_summarize_missing.h"
 #include "tools/document_db.h"
-
-int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len) {
-   if (payload_len == 0 || payload_len >= AUTH_USERNAME_MAX) {
-      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
-   }
-
-   char username[AUTH_USERNAME_MAX];
-   memcpy(username, payload, payload_len);
-   username[payload_len] = '\0';
-
-   auth_user_t user;
-   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
-      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "User not found");
-   }
-
-   if (memory_recategorize_is_running()) {
-      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Recategorization already running");
-   }
-
-   int count = 0;
-   if (memory_db_fact_count_general(user.id, &count) != MEMORY_DB_SUCCESS) {
-      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
-                                "Failed to query general facts");
-   }
-   if (count == 0) {
-      return send_text_response(client_fd, ADMIN_RESP_SUCCESS, "No general facts to recategorize");
-   }
-
-   if (memory_recategorize_start(user.id) != 0) {
-      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
-                                "Failed to start recategorization thread");
-   }
-
-   char msg[256];
-   snprintf(msg, sizeof(msg), "Recategorization started for user %s (%d general facts)", username,
-            count);
-   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
-}
 
 /* =============================================================================
  * Memory cleanup_meta_facts — bulk-delete interaction-event "meta-facts"
@@ -157,12 +117,11 @@ int handle_memory_cleanup_meta_facts(int client_fd, const char *payload, uint16_
 
 /* =============================================================================
  * Memory summarize-missing — backfill summary rows for conversations whose
- * extraction never produced one.  Mirrors the recategorize pattern: dry-run
- * preview returns the pending count, --confirm spawns a background worker
- * that loops over the missing-summary set, runs the canonical extraction
- * prompt per conversation, and stores summary+topics only.
+ * extraction never produced one.  A dry-run preview returns the pending count, --confirm spawns a
+ * background worker that loops over the missing-summary set, runs the canonical extraction prompt
+ * per conversation, and stores summary+topics only.
  *
- * Payload wire format (matches the recategorize/cleanup pattern):
+ * Payload wire format (matches the cleanup pattern):
  *   Byte 0:        flags (bit 0 = ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN)
  *   Byte 1..4:     max_count (uint32_t little-endian; 0 = unlimited)
  *   Byte 5..:      username string (length = payload_len - 5)
@@ -406,10 +365,6 @@ int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload
    }
 
    /* CONFIRMED PATH — concurrency guards. */
-   if (memory_recategorize_is_running()) {
-      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
-                                "Recategorization is running; refuse to reset");
-   }
    if (memory_extraction_in_progress(user.id)) {
       return send_text_response(client_fd, ADMIN_RESP_FAILURE,
                                 "Extraction is in progress for this user; refuse to reset");

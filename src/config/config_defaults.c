@@ -373,7 +373,6 @@ void config_set_defaults(dawn_config_t *config) {
     * LoCoMo-blind (parser doesn't fire on cat-2 "what date" shape) but no
     * regression observed; complements (does not replace) soft temporal_weight. */
    config->memory.temporal_filter_enabled = true;
-   config->memory.category_threshold = 0.25f;
    /* Entity-graph candidates: the facts about the entities a query names.
     * max_facts_per_query bounds fan-out for high-degree entities. */
    config->memory.graph_retrieval.enabled = true;

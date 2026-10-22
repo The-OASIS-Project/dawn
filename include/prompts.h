@@ -60,7 +60,6 @@
  *     MEMORY_EXTRACTION_PROMPT_TEMPLATE
  *     MEMORY_EXTRACTION_EXPIRY_BLOCK
  *     MEMORY_FORGOTTEN_CHECK_PROMPT
- *     MEMORY_RECATEGORIZE_PROMPT_TEMPLATE
  *     MEMORY_CONTEXT_DATA_LEAD
  *     MEMORY_EXTRACTION_THIRD_PARTY_STUB
  *   THIRD-PARTY CONTENT
@@ -439,7 +438,7 @@
 
 /* =============================================================================
  * MEMORY
- * Extraction (run at session end) and fact recategorizing.
+ * Extraction (run at session end).
  * ============================================================================= */
 
 /* =============================================================================
@@ -793,23 +792,6 @@
    "June 2026\" is a permanent record (no expiry); \"Jon is planning a trip to "         \
    "Savannah June 21-28\" is transient (set expires_at to the end date, 2026-06-28).\n"  \
    "- When in doubt, OMIT expires_at — the fact stays durable.\n\n"
-
-#define MEMORY_RECATEGORIZE_PROMPT_TEMPLATE                                             \
-   "Classify each fact into exactly ONE category. Respond ONLY with a JSON array.\n\n"  \
-   "Categories:\n"                                                                      \
-   "- personal: biographical (name, age, birthplace, hometown, background)\n"           \
-   "- professional: job, employer, education, skills, career\n"                         \
-   "- relationships: family, friends, contacts, pets (connections to people/animals)\n" \
-   "- health: medical conditions, fitness, dietary, allergies, medications\n"           \
-   "- interests: hobbies, media tastes, travel, sports, learning\n"                     \
-   "- practical: home, vehicles, schedules, routines, addresses, accounts, devices\n"   \
-   "- preferences: communication style, UI tastes, formats, likes/dislikes\n"           \
-   "- general: ONLY if the fact truly fits no other category\n\n"                       \
-   "Strongly prefer a specific category over \"general\".\n"                            \
-   "Return only ids from the input.\n\n"                                                \
-   "Facts:\n%s\n\n"                                                                     \
-   "Respond with ONLY a JSON array:\n"                                                  \
-   "[{\"id\": 42, \"category\": \"relationships\"}, ...]\n"
 
 /* Opens the USER MEMORY block a turn carries (memory_context.c). */
 #define MEMORY_CONTEXT_DATA_LEAD                                           \

@@ -44,14 +44,6 @@
 #include "memory/memory_stem.h"
 #include "utils/string_utils.h"
 
-/* Canonical fact category labels (v34).  Single source of truth referenced by
- * extraction allowlist (memory_extraction.c), tool enum_values (memory_tool.c),
- * and centroid seed table (memory_embeddings.c).  See memory_types.h. */
-const char *const MEMORY_FACT_CATEGORIES[] = { "personal",    "professional", "relationships",
-                                               "health",      "interests",    "practical",
-                                               "preferences", "general",      NULL };
-const int MEMORY_FACT_CATEGORY_COUNT = 8;
-
 /* =============================================================================
  * Helper: Populate fact from statement row
  * ============================================================================= */
@@ -229,182 +221,6 @@ int memory_db_fact_create(int user_id,
                           int64_t *id_out) {
    return memory_db_fact_create_at(user_id, fact_text, confidence, source, category, prov,
                                    /*created_at_override*/ 0, id_out);
-}
-
-/* Per-fact category UPDATE used by the centroid backfill pass (v34).
- * Caller batches these inside a transaction to amortize lock cost. */
-int memory_db_fact_update_category(int64_t fact_id, int user_id, const char *category) {
-   if (!category || !*category || user_id <= 0)
-      return MEMORY_DB_FAILURE;
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   /* SQL filters on (id, user_id) — defense-in-depth CWE-639. */
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_update_category;
-   sqlite3_reset(stmt);
-   sqlite3_bind_text(stmt, 1, category, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 2, fact_id);
-   sqlite3_bind_int(stmt, 3, user_id);
-
-   int rc = sqlite3_step(stmt);
-   sqlite3_reset(stmt);
-   AUTH_DB_UNLOCK();
-
-   return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
-}
-
-int memory_db_fact_list_general_embedded(int user_id,
-                                         int64_t after_id,
-                                         int dims,
-                                         int max,
-                                         int64_t *ids_out,
-                                         float *embs_out,
-                                         int *count_out,
-                                         int64_t *last_id_out) {
-   if (count_out)
-      *count_out = 0;
-   if (last_id_out)
-      *last_id_out = after_id;
-   if (user_id <= 0 || dims <= 0 || max <= 0 || !ids_out || !embs_out || !count_out)
-      return MEMORY_DB_FAILURE;
-
-   AUTH_DB_LOCK_OR_FAIL();
-   sqlite3_stmt *stmt = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT id, embedding FROM memory_facts "
-                          "WHERE user_id = ? AND superseded_by IS NULL "
-                          "  AND embedding IS NOT NULL AND id > ? "
-                          "  AND category = 'general' "
-                          "ORDER BY id ASC LIMIT ?",
-                          -1, &stmt, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int64(stmt, 2, after_id);
-   sqlite3_bind_int(stmt, 3, max);
-
-   const int want = dims * (int)sizeof(float);
-   int n = 0;
-   int64_t last = after_id;
-   int rc;
-   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-      const int64_t id = sqlite3_column_int64(stmt, 0);
-      if (id > last)
-         last = id;
-      const void *blob = sqlite3_column_blob(stmt, 1);
-      if (blob && sqlite3_column_bytes(stmt, 1) == want && n < max) {
-         ids_out[n] = id;
-         memcpy(embs_out + (size_t)n * (size_t)dims, blob, (size_t)want);
-         n++;
-      }
-   }
-   sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
-   if (rc != SQLITE_DONE)
-      return MEMORY_DB_FAILURE;
-   *count_out = n;
-   if (last_id_out)
-      *last_id_out = last;
-   return MEMORY_DB_SUCCESS;
-}
-
-int memory_db_fact_set_categories(int user_id,
-                                  const int64_t *ids,
-                                  const char *const *categories,
-                                  int n,
-                                  int *written_out) {
-   if (written_out)
-      *written_out = 0;
-   if (user_id <= 0 || !ids || !categories || n < 0)
-      return MEMORY_DB_FAILURE;
-   if (n == 0)
-      return MEMORY_DB_SUCCESS;
-
-   AUTH_DB_LOCK_OR_FAIL();
-   if (sqlite3_exec(s_db.db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("memory_db: set_categories BEGIN failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   int written = 0;
-   bool ok = true;
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_update_category;
-   for (int i = 0; i < n && ok; i++) {
-      if (!categories[i] || !*categories[i])
-         continue;
-      sqlite3_reset(stmt);
-      sqlite3_bind_text(stmt, 1, categories[i], -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64(stmt, 2, ids[i]);
-      sqlite3_bind_int(stmt, 3, user_id);
-      ok = sqlite3_step(stmt) == SQLITE_DONE;
-      /* An UPDATE that matches nothing still returns SQLITE_DONE; count real writes. */
-      written += ok ? sqlite3_changes(s_db.db) : 0;
-   }
-   sqlite3_reset(stmt);
-   if (!ok || sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-      OLOG_ERROR("memory_db: set_categories failed: %s", sqlite3_errmsg(s_db.db));
-      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   AUTH_DB_UNLOCK();
-   if (written_out)
-      *written_out = written;
-   return MEMORY_DB_SUCCESS;
-}
-
-int memory_db_fact_list_general(int user_id,
-                                int64_t cursor_id,
-                                memory_fact_t *out_facts,
-                                int max_facts,
-                                int *count_out) {
-   if (count_out)
-      *count_out = 0;
-   if (!out_facts || max_facts <= 0)
-      return MEMORY_DB_FAILURE;
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_list_general;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int64(stmt, 2, cursor_id);
-   sqlite3_bind_int(stmt, 3, max_facts);
-
-   int count = 0;
-   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
-      populate_fact_from_row(stmt, &out_facts[count]);
-      count++;
-   }
-
-   sqlite3_reset(stmt);
-   AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
-   return MEMORY_DB_SUCCESS;
-}
-
-int memory_db_fact_count_general(int user_id, int *count_out) {
-   if (count_out)
-      *count_out = 0;
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_count_general;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-
-   int count = 0;
-   if (sqlite3_step(stmt) == SQLITE_ROW) {
-      count = sqlite3_column_int(stmt, 0);
-   }
-
-   sqlite3_reset(stmt);
-   AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
-   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact) {
@@ -2078,21 +1894,14 @@ int memory_db_fact_users_needing_backfill(int expected_dims,
 
    /* Sweep-only (at boot, after a re-index, or to continue an overflowed sweep),
     * so an ad-hoc prepare is cheaper than a statement held for the process
-    * lifetime.  Second arm: users whose one-shot category pass hasn't run yet
-    * (reset by an admin re-extract, or pre-v34 data) but whose facts are all
-    * embedded — the pass runs at the end of a backfill, so they need queuing too. */
+    * lifetime. */
    sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT user_id FROM memory_facts "
-       "WHERE superseded_by IS NULL AND fact_text != '' AND user_id > ?1 "
-       "AND (embedding IS NULL OR length(embedding)/4 != ?2) "
-       "UNION "
-       "SELECT u.id FROM users u WHERE u.id > ?1 AND u.categories_backfilled_at = 0 "
-       "AND EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = u.id "
-       "AND f.superseded_by IS NULL) "
-       "ORDER BY 1 LIMIT ?3",
-       -1, &stmt, NULL);
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT DISTINCT user_id FROM memory_facts "
+                               "WHERE superseded_by IS NULL AND fact_text != '' AND user_id > ?1 "
+                               "AND (embedding IS NULL OR length(embedding)/4 != ?2) "
+                               "ORDER BY 1 LIMIT ?3",
+                               -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("memory_db: prepare fact_users_needing_backfill failed: %s",
                    sqlite3_errmsg(s_db.db));

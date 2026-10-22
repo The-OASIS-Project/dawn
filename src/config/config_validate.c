@@ -151,8 +151,6 @@ int config_validate(const dawn_config_t *config,
 
    /* ===== Memory Embedding Weights ===== */
    VALIDATE_RANGE_FLOAT("memory.temporal_weight", config->memory.temporal_weight, 0.0f, 1.0f);
-   VALIDATE_RANGE_FLOAT("memory.category_threshold", config->memory.category_threshold, 0.05f,
-                        0.95f);
    VALIDATE_RANGE_FLOAT("memory.search_score_floor", config->memory.search_score_floor, 0.0f, 1.0f);
    VALIDATE_RANGE_INT("memory.graph_retrieval.max_facts_per_query",
                       config->memory.graph_retrieval.max_facts_per_query, 1, 200);

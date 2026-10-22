@@ -49,7 +49,7 @@
 #include "utils/string_utils.h"
 
 /* =============================================================================
- * Worker state — CAS-guarded busy flag, mirrors memory_recategorize.c.
+ * Worker state — CAS-guarded busy flag.
  *
  * Shutdown coordination: the admin worker calls memory_recovery_run_pass(),
  * whose inner loops poll the recovery module's `s_running` flag once per
@@ -244,14 +244,11 @@ int memory_db_admin_reset_derived(int user_id,
       goto rollback;
    }
 
-   /* Reset users.categories_backfilled_at and users.embeddings_model_id so the
-    * lazy fact-category backfill and the embedding-recompute worker re-run
-    * after re-extraction populates fresh data. */
+   /* Reset users.embeddings_model_id so the embedding-recompute worker
+    * re-runs after re-extraction populates fresh data. */
    sqlite3_stmt *up_user = NULL;
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE users SET categories_backfilled_at = 0, "
-                           "embeddings_model_id = NULL WHERE id = ?",
-                           -1, &up_user, NULL);
+   rc = sqlite3_prepare_v2(s_db.db, "UPDATE users SET embeddings_model_id = NULL WHERE id = ?", -1,
+                           &up_user, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db_admin: prepare user UPDATE failed: %s", sqlite3_errmsg(s_db.db));
       goto rollback;
@@ -475,8 +472,7 @@ int memory_db_admin_query_status(int user_id, memory_db_admin_status_t *out) {
 
 /* =============================================================================
  * Worker thread — drains the post-reset stuck-conversation backlog by
- * calling memory_recovery_run_pass() once.  Detached / fire-and-forget;
- * mirrors memory_recategorize_start.
+ * calling memory_recovery_run_pass() once.  Detached / fire-and-forget.
  * ============================================================================= */
 
 static void *reextract_thread_fn(void *arg) {

@@ -744,10 +744,6 @@ typedef struct {
     * research synthesis).  Off-by-default for A/B; flip in
     * `config_defaults.c` after bench validation. */
    bool temporal_filter_enabled;
-   /* Category backfill — cosine similarity above which a fact is assigned to a
-    * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
-    * (mpnet, nomic, OpenAI) may need different values. */
-   float category_threshold;
    /* Graph retrieval: a candidate source for memory.search alongside hybrid
     * keyword + cosine search.  Resolves the entities the query names, fans
     * out one hop (facts about each, facts its relations came from), and

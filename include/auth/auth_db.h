@@ -254,20 +254,6 @@ int auth_db_create_user(const char *username, const char *password_hash, bool is
 int auth_db_get_user(const char *username, auth_user_t *user_out);
 
 /**
- * @brief When the user's one-shot fact-category pass ran (0 = not yet)
- *
- * @return AUTH_DB_SUCCESS (ts 0 also for an unknown user) or AUTH_DB_FAILURE
- */
-int auth_db_user_get_categories_backfilled_at(int user_id, int64_t *ts_out);
-
-/**
- * @brief Record when the user's one-shot fact-category pass ran
- *
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
- */
-int auth_db_user_set_categories_backfilled_at(int user_id, int64_t ts);
-
-/**
  * @brief Get total user count
  *
  * Useful for checking if any users exist (first-run detection).

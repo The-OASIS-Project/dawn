@@ -138,7 +138,7 @@ typedef struct {
    char fact_text[MEMORY_FACT_TEXT_MAX];
    float confidence;
    char source[MEMORY_SOURCE_MAX];     /* "explicit" or "inferred" */
-   char category[MEMORY_CATEGORY_MAX]; /* One of MEMORY_FACT_CATEGORIES (v34) */
+   char category[MEMORY_CATEGORY_MAX]; /* category column (v34); no longer assigned */
    time_t created_at;
    time_t last_accessed;
    int access_count;
@@ -148,23 +148,6 @@ typedef struct {
                            * keyword/list retrieval statements filter expired rows in SQL,
                            * so their results default this to 0. */
 } memory_fact_t;
-
-/* =============================================================================
- * Canonical fact category labels (v34).
- *
- * Single source of truth referenced by:
- *   - extraction allowlist  (memory_extraction.c)
- *   - LLM tool enum_values  (memory_tool.c)
- *   - centroid seed table   (memory_embeddings.c)
- *
- * NULL-terminated.  "general" is the always-present fallback when a fact does
- * not clearly fit any other category.  Add new labels at the end and bump
- * MEMORY_FACT_CATEGORY_COUNT — the schema accepts arbitrary TEXT, so old DBs
- * tolerate additions.
- * ============================================================================= */
-
-extern const char *const MEMORY_FACT_CATEGORIES[];
-extern const int MEMORY_FACT_CATEGORY_COUNT;
 
 /* =============================================================================
  * Memory Preference Structure

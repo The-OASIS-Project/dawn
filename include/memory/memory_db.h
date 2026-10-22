@@ -62,7 +62,7 @@ extern "C" {
  * @param fact_text The fact content
  * @param confidence Confidence level (0.0-1.0)
  * @param source Source of fact ("explicit" or "inferred")
- * @param category One of MEMORY_FACT_CATEGORIES; NULL or empty defaults to "general" (v34)
+ * @param category Stored in the category column; NULL or empty stores "general" (v34)
  * @param prov Provenance (source range in conversation); NULL or conv_id==0 = no provenance
  * @param id_out Output: fact ID on success (may be NULL if caller doesn't need it)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
@@ -96,84 +96,6 @@ int memory_db_fact_create_at(int user_id,
                              const memory_provenance_t *prov,
                              int64_t created_at_override,
                              int64_t *id_out);
-
-/**
- * @brief Update a fact's category in place (v34).  Used by the embedding-centroid
- * backfill pass and the future LLM recategorize-all admin command.
- *
- * @param fact_id Fact ID
- * @param user_id User ID (ownership check — SQL filter, defense-in-depth)
- * @param category New category (must be one of MEMORY_FACT_CATEGORIES)
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_update_category(int64_t fact_id, int user_id, const char *category);
-
-/**
- * @brief Page of a user's current, embedded facts still in category 'general'
- *
- * For the embedding-centroid category pass.  Facts with id > @p after_id, in id
- * order; those whose embedding isn't @p dims wide are skipped (but still advance
- * @p last_id_out, so paging always progresses).
- *
- * @param user_id     Owner
- * @param after_id    Cursor: only ids greater than this
- * @param dims        Expected embedding dimension
- * @param max         Page size
- * @param ids_out     [out] Up to @p max fact ids
- * @param embs_out    [out] Their embeddings, @p max * @p dims floats
- * @param count_out   [out] Facts written
- * @param last_id_out [out] Highest id seen (next cursor; may be NULL)
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_list_general_embedded(int user_id,
-                                         int64_t after_id,
-                                         int dims,
-                                         int max,
-                                         int64_t *ids_out,
-                                         float *embs_out,
-                                         int *count_out,
-                                         int64_t *last_id_out);
-
-/**
- * @brief Set many facts' categories in one transaction
- *
- * NULL or empty entries in @p categories are skipped.
- *
- * @param written_out [out] Facts actually updated (may be NULL)
- * @return MEMORY_DB_SUCCESS, or MEMORY_DB_FAILURE (nothing written)
- */
-int memory_db_fact_set_categories(int user_id,
-                                  const int64_t *ids,
-                                  const char *const *categories,
-                                  int n,
-                                  int *written_out);
-
-/**
- * @brief List facts with category='general' for a user, paginated by id.
- *
- * Used by LLM recategorization to fetch batches of uncategorized facts.
- *
- * @param user_id     User ID
- * @param cursor_id   Return facts with id > cursor_id (0 for first batch)
- * @param out_facts   Output array (caller allocates)
- * @param max_facts   Size of out_facts array
- * @param count_out   Output: number of facts fetched
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_list_general(int user_id,
-                                int64_t cursor_id,
-                                memory_fact_t *out_facts,
-                                int max_facts,
-                                int *count_out);
-
-/**
- * @brief Count non-superseded facts with category='general' for a user.
- *
- * @param user_id User ID
- * @param count_out Output: count of general facts
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_count_general(int user_id, int *count_out);
 
 /**
  * @brief Get a fact by ID, scoped to a user (CWE-639 defense-in-depth).

@@ -29,7 +29,7 @@
  *                            CONTRADICTORY_PAIRS / memory_db_relation_supersede)
  *   memory_db_alias.c       (Phase 1/2 equivalence-class resolver cascade)
  *   memory_db_provenance.c  (Phase B provenance reads)
- *   memory_db_admin.c       (recategorize / reextract / etc. workers)
+ *   memory_db_admin.c       (reextract: reset, cost estimate, worker)
  *
  * This TU keeps:
  *   - cross-domain helpers (bind_provenance / build_like_pattern /

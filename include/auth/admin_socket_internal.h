@@ -63,7 +63,6 @@ int handle_memory_entity_link_user_self(int client_fd, const char *payload, uint
 
 /* Memory-maintenance handlers (admin_socket_memory.c).  Dispatched from
  * handle_client() in admin_socket.c against ADMIN_MSG_MEMORY_* opcodes. */
-int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_cleanup_meta_facts(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_summarize_missing(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_backfill_note_glosses(int client_fd, const char *payload, uint16_t payload_len);

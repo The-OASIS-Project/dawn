@@ -93,7 +93,6 @@ static void print_usage(const char *prog) {
    fprintf(stderr, "  music list [--limit N]            List tracks (default: all)\n");
    fprintf(stderr, "  music rescan                      Trigger library rescan\n");
    fprintf(stderr, "\nMemory Management:\n");
-   fprintf(stderr, "  memory recategorize-all <user>     LLM-classify 'general' facts\n");
    fprintf(stderr, "  memory backfill-note-glosses <user>  Create memory→note bridge glosses for\n"
                    "                                       existing notes (Phase 9, idempotent)\n");
    fprintf(stderr,
@@ -1250,26 +1249,6 @@ static int cmd_music_rescan(void) {
    }
 }
 
-static int cmd_memory_recategorize(const char *username) {
-   int fd = admin_client_connect();
-   if (fd < 0) {
-      return 1;
-   }
-
-   char response[256];
-   admin_resp_code_t resp = admin_client_memory_recategorize(fd, username, response,
-                                                             sizeof(response));
-   admin_client_disconnect(fd);
-
-   if (resp == ADMIN_RESP_SUCCESS) {
-      printf("%s\n", response);
-      return 0;
-   } else {
-      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
-      return 1;
-   }
-}
-
 static int cmd_memory_backfill_note_glosses(const char *username) {
    int fd = admin_client_connect();
    if (fd < 0) {
@@ -1842,9 +1821,8 @@ int main(int argc, char *argv[]) {
    if (strcmp(cmd, "memory") == 0) {
       if (argc < 3) {
          fprintf(stderr, "Error: Missing memory subcommand\n");
-         fprintf(stderr, "Usage: %s memory recategorize-all <username>\n", argv[0]);
          fprintf(stderr,
-                 "       %s memory reextract --user <username> [--confirm] [--keep-summaries] "
+                 "Usage: %s memory reextract --user <username> [--confirm] [--keep-summaries] "
                  "[--backup-path <path>] [--max-cost-usd <X>]\n",
                  argv[0]);
          fprintf(stderr, "       %s memory reextract-status --user <username>\n", argv[0]);
@@ -1862,15 +1840,6 @@ int main(int argc, char *argv[]) {
       if (strcmp(subcmd, "superseded") == 0 || strcmp(subcmd, "restore") == 0) {
          return cmd_memory_facts(argc, argv); /* cmd_memory.c */
       }
-      if (strcmp(subcmd, "recategorize-all") == 0) {
-         if (argc < 4) {
-            fprintf(stderr, "Error: Missing username\n");
-            fprintf(stderr, "Usage: %s memory recategorize-all <username>\n", argv[0]);
-            return 1;
-         }
-         return cmd_memory_recategorize(argv[3]);
-      }
-
       if (strcmp(subcmd, "backfill-note-glosses") == 0) {
          if (argc < 4) {
             fprintf(stderr, "Error: Missing username\n");
@@ -2113,7 +2082,7 @@ int main(int argc, char *argv[]) {
       }
 
       fprintf(stderr, "Error: Unknown memory subcommand: %s\n", subcmd);
-      fprintf(stderr, "Available: recategorize-all, reextract, reextract-status, entity\n");
+      fprintf(stderr, "Available: reextract, reextract-status, entity\n");
       return 1;
    }
 

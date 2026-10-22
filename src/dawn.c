@@ -137,7 +137,6 @@
 #include "memory/memory_embed_recompute.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_focus_adapters.h"
-#include "memory/memory_recategorize.h"
 #include "memory/memory_summarize_missing.h"
 #include "tools/external_focus_adapters.h"
 #ifdef ENABLE_AUTH
@@ -4192,8 +4191,8 @@ server_shutdown:
     * command can complete its synchronous response path, AND before
     * auth_db_shutdown since every worker reads SQLite through s_db.
     *
-    * Workers grouped together (recovery / recategorize / summarize-missing
-    * / reextract) — all four are admin-triggered or boot-triggered and
+    * Workers grouped together (recovery / summarize-missing / reextract)
+    * — all three are admin-triggered or boot-triggered and
     * compile under ENABLE_AUTH only; calling their _stop()s on a non-AUTH
     * build is dead code at best.  Recompute worker is part of the same
     * group; auth_maintenance is its own concern. */
@@ -4203,8 +4202,6 @@ server_shutdown:
    memory_recovery_stop();
    OLOG_INFO("Shutdown: memory_embed_recompute_stop");
    memory_embed_recompute_stop();
-   OLOG_INFO("Shutdown: memory_recategorize_stop");
-   memory_recategorize_stop();
    OLOG_INFO("Shutdown: memory_summarize_missing_stop");
    memory_summarize_missing_stop();
    OLOG_INFO("Shutdown: memory_db_admin_stop_reextract_worker");

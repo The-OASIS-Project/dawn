@@ -1165,17 +1165,6 @@
                      displayValue: (v) => Math.round(v * 100) + '%',
                      advanced: true,
                   },
-                  category_threshold: {
-                     type: 'range',
-                     label: 'Category Classification Threshold',
-                     hint: 'Cosine similarity threshold for auto-classifying memories into categories. Calibrated for MiniLM-L6 at 0.25. Higher = more selective.',
-                     configPath: 'memory.category_threshold',
-                     min: 0.05,
-                     max: 0.95,
-                     step: 0.05,
-                     displayValue: (v) => v.toFixed(2),
-                     advanced: true,
-                  },
                   embedding_backfill_on_startup: {
                      type: 'checkbox',
                      label: 'Index Existing Memories',

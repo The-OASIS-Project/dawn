@@ -1411,6 +1411,11 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       note_retired_keys(embeddings, "memory.embeddings", retired_search_keys,
                         "only its default behavior remains (see UPGRADING.md)",
                         &s_retired_search_told);
+      static const char *const retired_category_keys[] = { "category_threshold", NULL };
+      static bool s_retired_category_told;
+      note_retired_keys(embeddings, "memory.embeddings", retired_category_keys,
+                        "fact categories are no longer computed (see UPGRADING.md)",
+                        &s_retired_category_told);
 
       PARSE_STRING(embeddings, "provider", config->embedding_provider);
       PARSE_STRING(embeddings, "model", config->embedding_model);
@@ -1419,7 +1424,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(embeddings, "vector_weight", config->embedding_vector_weight);
       PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_BOOL(embeddings, "temporal_filter_enabled", config->temporal_filter_enabled);
-      PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);
       PARSE_DOUBLE(embeddings, "search_score_floor", config->search_score_floor);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);
       PARSE_STRING(embeddings, "model_id", config->model_id);
@@ -1432,7 +1436,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    CONFIG_CLAMP(config->embedding_keyword_weight, 0.0f, 1.0f);
    CONFIG_CLAMP(config->embedding_vector_weight, 0.0f, 1.0f);
    CONFIG_CLAMP(config->temporal_weight, 0.0f, 1.0f);
-   CONFIG_CLAMP(config->category_threshold, 0.05f, 0.95f);
    CONFIG_CLAMP(config->search_score_floor, 0.0f, 1.0f);
 
    /* Parse [memory.graph_retrieval] sub-table */

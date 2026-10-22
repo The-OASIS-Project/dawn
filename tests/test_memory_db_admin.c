@@ -19,7 +19,7 @@
  * Unit tests for memory_db_admin (dawn-admin reextract):
  *   - reset_derived drops the five derived tables atomically
  *   - reset_derived honors keep_summaries
- *   - reset_derived resets users.categories_backfilled_at + embeddings_model_id
+ *   - reset_derived resets users.embeddings_model_id
  *   - reset_derived resets conversations extraction high-water marks
  *   - reset_derived FK isolation: user A's drop doesn't touch user B's rows
  *   - estimate_reextract_cost uses the real prompt template size
@@ -361,13 +361,10 @@ void test_reset_derived_resets_user_flags(void) {
    memory_db_admin_reset_counts_t c = { 0 };
    TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_reset_derived(1, false, &c));
 
-   TEST_ASSERT_EQUAL(0, scalar_int64("SELECT categories_backfilled_at FROM users WHERE id = ?", 1));
    char *embed = scalar_text("SELECT embeddings_model_id FROM users WHERE id = ?", 1);
    TEST_ASSERT_NULL(embed); /* NULL after reset */
 
-   /* Other user's flags untouched. */
-   TEST_ASSERT_EQUAL(1234567890,
-                     scalar_int64("SELECT categories_backfilled_at FROM users WHERE id = ?", 2));
+   /* Other user's flag untouched. */
    char *embed2 = scalar_text("SELECT embeddings_model_id FROM users WHERE id = ?", 2);
    TEST_ASSERT_NOT_NULL(embed2);
    TEST_ASSERT_EQUAL_STRING("bge-small", embed2);

@@ -12,6 +12,19 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-22 — Fact categories retired: `category_threshold` and `recategorize-all` are gone
+
+**What changed.** DAWN no longer sorts memory facts into categories (personal, professional,
+health, ...). Nothing used them: search and ranking ignored them and the Memory panel never showed them. The setting
+that tuned the automatic sorting, `[memory.embeddings] category_threshold`, is ignored, and the
+`dawn-admin memory recategorize-all` command is removed.
+
+**What you need to do.** If your `dawn.toml` sets `category_threshold`, delete the line: DAWN
+logs at startup that it is retired and ignored (a settings save from the WebUI also drops it).
+Remove any script that runs `dawn-admin memory recategorize-all`.
+
+---
+
 ## 2026-10-20 — Repeating reminders, timers and alarms that stopped may come back
 
 **What changed.** A reminder, timer or alarm that rang for someone other than the local

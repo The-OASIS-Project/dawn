@@ -650,10 +650,6 @@ citation_reinforcement_boost = 0.05
                                   # "in 2023", "summer 2022"). 0 disables. 0.20
                                   # validated on LongMemEval temporal-reasoning
                                   # (+2.3pp R@10) and LoCoMo cat-2 (+3.2pp).
-# category_threshold = 0.25       # Cosine similarity threshold for auto-categorizing
-                                  # memories. Calibrated for MiniLM-L6. Lower values
-                                  # classify more facts; higher = more selective.
-                                  # Range: 0.05-0.95
 # search_score_floor = 0.30       # "I don't remember" gate — drops marginal-cosine
                                   # hits from memory.search and per-turn focus
                                   # injection before they reach the LLM. Closes the

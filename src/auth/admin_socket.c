@@ -118,7 +118,7 @@ static int handle_get_conversation(int client_fd, const char *payload, uint16_t 
 static int handle_delete_conversation(int client_fd, const char *payload, uint16_t payload_len);
 /* send_response, send_text_response, the Phase 6.5 entity handlers
  * (handle_memory_entity_*), and the memory-maintenance handlers
- * (handle_memory_{recategorize,cleanup_meta_facts,summarize_missing,
+ * (handle_memory_{cleanup_meta_facts,summarize_missing,
  * reextract,reextract_status}) are declared in
  * auth/admin_socket_internal.h. */
 static int send_list_response(int client_fd,
@@ -2255,9 +2255,6 @@ static int handle_client(int client_fd) {
          return admin_handle_music_rescan(client_fd);
 
       /* Phase 6: Memory */
-      case ADMIN_MSG_MEMORY_RECATEGORIZE:
-         return handle_memory_recategorize(client_fd, payload, header.payload_len);
-
       case ADMIN_MSG_MEMORY_REEXTRACT:
          return handle_memory_reextract(client_fd, payload, header.payload_len);
 

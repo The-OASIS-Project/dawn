@@ -591,25 +591,6 @@ static const auth_db_stmt_def_t s_stmts[] = {
      .stmt = &s_db.stmt_memory_facts_fts_delete,
      .optional = true },
 
-   /* Per-fact category UPDATE used by the centroid backfill pass (v34).
-    * CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
-    * rowid cannot overwrite another user's category. */
-   { "memory_fact_update_category",
-     "UPDATE memory_facts SET category = ? WHERE id = ? AND user_id = ?",
-     &s_db.stmt_memory_fact_update_category },
-   { "memory_fact_list_general",
-     "SELECT id, user_id, fact_text, confidence, source, "
-     "  created_at, last_accessed, access_count, superseded_by, category "
-     "FROM memory_facts "
-     "WHERE user_id = ? AND superseded_by IS NULL "
-     "  AND category = 'general' AND id > ? "
-     "ORDER BY id ASC LIMIT ?",
-     &s_db.stmt_memory_fact_list_general },
-   { "memory_fact_count_general",
-     "SELECT COUNT(*) FROM memory_facts "
-     "WHERE user_id = ? AND superseded_by IS NULL "
-     "  AND category = 'general'",
-     &s_db.stmt_memory_fact_count_general },
    { "memory_fact_update_access",
      "UPDATE memory_facts SET last_accessed = ?,"
      "  access_count = access_count + 1,"

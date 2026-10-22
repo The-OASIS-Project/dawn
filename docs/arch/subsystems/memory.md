@@ -247,7 +247,7 @@ users (..., real_name, preferred_address, identity_aliases, embeddings_model_id,
 
 Schema-version highlights since v33:
 - **v33** — `memory_relations.valid_from/valid_to` (bitemporal); auto-close via `memory_db_relation_supersede`
-- **v34** — `memory_facts.category` + `users.categories_backfilled_at`
+- **v34** — `memory_facts.category` + `users.categories_backfilled_at` (fact categories are no longer computed; the columns stay)
 - **v37** — `document_chunks.created_at` for temporal scoring
 - **v38** — `summary_nodes` (LCM Phase-4 hierarchical compaction DAG)
 - **v39** — `conversations.extraction_attempts` + `extraction_last_attempt_at` for recovery worker
@@ -278,7 +278,7 @@ Memory content flows into future prompts, creating potential injection vectors. 
 
 - **Ingestion (trust boundary)**: WebUI fact/preference import, LLM `remember` tool action, silent-observe of observed conversation text. Filter applied.
 - **Retrieval (trust boundary)**: focus-injection candidates whose `source_type == FOCUS_SOURCE_USER_CONTENT` (inbound email body, future external feeds). Filter applied. INTERNAL (memory items — already extraction-LLM-paraphrased) and EXTERNAL (user-uploaded documents, user's CalDAV) skip the retrieval-time filter.
-- **Internal re-processing**: extraction-LLM JSON output, summarize-missing backfill, fact recategorization. Filter **not** applied — these operate on already-paraphrased data and gain nothing from substring re-scanning.
+- **Internal re-processing**: extraction-LLM JSON output, summarize-missing backfill. Filter **not** applied — these operate on already-paraphrased data and gain nothing from substring re-scanning.
 
 Defense-in-depth: the turn context that carries the focus block is framed by lines carrying a per-conversation random tag, the system prompt's `context_rules` section says retrieved items are data (never instructions) and only tagged framing is DAWN's, and every item passes through `llm_context_neutralize()` (`src/llm/llm_context_text.c`), which defuses text imitating the framing. See [llm.md](llm.md#prompt-construction-append-only-cache-aware). Tool design (TTLs on destructive actions, two-step confirmation, operator-only on sensitive operations) limits blast radius per Meta's "Agents Rule of Two" pattern.
 
@@ -302,7 +302,6 @@ provider = "onnx"         # "onnx" (default), "ollama", "openai"
 keyword_weight = 0.30     # Hybrid search: keyword component weight (0.0-1.0)
 vector_weight = 0.70      # Hybrid search: semantic component weight (0.0-1.0)
 temporal_weight = 0.20    # Temporal proximity boost for date-anchored queries
-category_threshold = 0.25 # Cosine threshold for centroid-based category backfill
 backfill_on_startup = true
 model_id = "bge-small-en-v1.5-int8"  # Bump when MODEL_PATH changes to trigger recompute
 recompute_on_model_change = true      # Re-index all stored embeddings on model_id change

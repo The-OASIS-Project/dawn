@@ -203,9 +203,8 @@ bool llm_cache_monitor_in_side_call(void) {
 }
 
 bool llm_cache_monitor_one_off_call(void) {
-   /* A compaction's summary; memory extraction, its backfilled summaries and
-    * recategorizing: each request is built for one conversation or batch and
-    * sent once. */
+   /* A compaction's summary; memory extraction and its backfilled summaries:
+    * each request is built for one conversation or batch and sent once. */
    return t_kind == LLM_CALL_COMPACTION || t_kind == LLM_CALL_EXTRACTION;
 }
 

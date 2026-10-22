@@ -159,7 +159,7 @@ typedef enum {
    ADMIN_MSG_MUSIC_RESCAN = 0x73, /**< Trigger immediate library rescan */
 
    /* Phase 6: Memory Management */
-   ADMIN_MSG_MEMORY_RECATEGORIZE = 0x80,     /**< LLM-classify general facts for a user */
+   /* 0x80: retired (fact recategorize); do not reuse */
    ADMIN_MSG_MEMORY_REEXTRACT = 0x81,        /**< Drop derived memory tables + re-extract */
    ADMIN_MSG_MEMORY_REEXTRACT_STATUS = 0x82, /**< Query reextract progress for a user */
 
