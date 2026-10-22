@@ -1821,7 +1821,7 @@ static void rezone(int user_id) {
    const time_t now = time(NULL);
    int moved = 0, owner = -1;
    const tz_t *to = NULL;
-   const char *to_name = NULL;
+   const char *to_name = ""; /* set with the first row's owner */
    for (int i = 0; i < count; i++) {
       const sched_repeating_t *r = &rows[i];
       if (r->user_id != owner) { /* rows come grouped by owner */
