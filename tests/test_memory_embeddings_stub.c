@@ -148,53 +148,6 @@ int memory_db_fact_users_needing_backfill(int expected_dims,
    return 0;
 }
 
-int memory_db_fact_list_general_embedded(int user_id,
-                                         int64_t after_id,
-                                         int dims,
-                                         int max,
-                                         int64_t *ids_out,
-                                         float *embs_out,
-                                         int *count_out,
-                                         int64_t *last_id_out) {
-   (void)user_id;
-   (void)dims;
-   (void)max;
-   (void)ids_out;
-   (void)embs_out;
-   if (count_out)
-      *count_out = 0;
-   if (last_id_out)
-      *last_id_out = after_id;
-   return 0;
-}
-
-int memory_db_fact_set_categories(int user_id,
-                                  const int64_t *ids,
-                                  const char *const *categories,
-                                  int n,
-                                  int *written_out) {
-   (void)user_id;
-   (void)ids;
-   (void)categories;
-   (void)n;
-   if (written_out)
-      *written_out = 0;
-   return 0;
-}
-
-int auth_db_user_get_categories_backfilled_at(int user_id, int64_t *ts_out) {
-   (void)user_id;
-   if (ts_out)
-      *ts_out = 1; /* treat as already classified */
-   return 0;
-}
-
-int auth_db_user_set_categories_backfilled_at(int user_id, int64_t ts) {
-   (void)user_id;
-   (void)ts;
-   return 0;
-}
-
 #include "memory/memory_db_entities.h"
 #include "memory/memory_types.h"
 

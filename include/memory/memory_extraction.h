@@ -242,6 +242,38 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
  */
 size_t memory_extraction_get_template_size_chars(void);
 
+/** The text around the extraction template's four values, as a benchmark gives it. */
+#define MEMORY_EXTRACTION_TEMPLATE_PIECES 5
+
+/**
+ * @brief Benchmarks only: extract with this template instead of the compiled
+ *        one, so a prompt variant is measured without a rebuild.  The pieces
+ *        are the literal text before, between and after the four values
+ *        (anchor, conversation, profile, expiry); they are never used as a
+ *        format.  The caller keeps the array and its strings alive until it
+ *        passes NULL, which restores the compiled template.  The daemon never
+ *        calls this.
+ *
+ * @param pieces The template's text, or NULL for the compiled template
+ */
+void memory_extraction_set_template_pieces(
+    const char *const pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES]);
+
+/**
+ * @brief The prompt an extraction sends: the compiled template (or a
+ *        benchmark's pieces) with the four values in place.
+ *
+ * @param anchor       The conversation's "now" line
+ * @param conversation The conversation JSON
+ * @param profile      What is already known about the user
+ * @param expiry       The fact-expiry instructions, or ""
+ * @return The prompt (caller frees), or NULL when out of memory
+ */
+char *memory_extraction_build_prompt(const char *anchor,
+                                     const char *conversation,
+                                     const char *profile,
+                                     const char *expiry);
+
 #ifdef __cplusplus
 }
 #endif

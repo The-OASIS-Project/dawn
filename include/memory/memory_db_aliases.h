@@ -69,21 +69,16 @@ extern "C" {
  * Production routing in `memory_db_entity_consider_auto_merge` reads
  * `g_config.memory.entity_merge_*_threshold`, NOT these constants.
  *
- * The #defines below are retained as:
- *   1. Test-reference values for unit tests that fix g_config to known
- *      defaults via config_set_defaults().
- *   2. Historical baseline ("first-ship" values when the config gate
- *      landed) — the runtime defaults in config_defaults.c match these
- *      for AUTO (0.90) but DIVERGE for REVIEW (runtime default 0.50,
- *      down from the original compile-time 0.70).  See the rationale
- *      in dawn.toml.example §[memory.entity_merge].
+ * MEMORY_ALIAS_AUTO_THRESHOLD below matches the runtime default in
+ * config_defaults.c and is the test-reference value for unit tests that
+ * fix g_config to known defaults via config_set_defaults().  Tests of the
+ * review band read g_config.memory.entity_merge_review_threshold.
  *
  * If you bump AUTO_THRESHOLD here, also bump the runtime default in
  * config_defaults.c and the SETTINGS_SCHEMA range minimum.
  * ============================================================================= */
 
 #define MEMORY_ALIAS_AUTO_THRESHOLD 0.90f
-#define MEMORY_ALIAS_REVIEW_THRESHOLD 0.70f /* historical default — runtime default is 0.50 */
 
 /* Threshold for promoting an existing entity to is_user_self=1 during
  * link-user-self when no is_user_self=1 row exists yet (design §8 Path B

@@ -100,7 +100,7 @@ memory_import_status_t memory_import_fact(int user_id,
       return MEMORY_IMPORT_ACCEPTED;
    }
 
-   if (memory_db_fact_create(user_id, out_text, confidence, "import", NULL, NULL, NULL) !=
+   if (memory_db_fact_create(user_id, out_text, confidence, "import", NULL, NULL) !=
        MEMORY_DB_SUCCESS) {
       return MEMORY_IMPORT_FAILED;
    }

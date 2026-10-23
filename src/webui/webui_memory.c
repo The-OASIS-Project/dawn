@@ -96,6 +96,15 @@ void handle_get_memory_stats(ws_connection_t *conn) {
  * Memory Facts Handlers
  * ============================================================================= */
 
+/* The panel's word for how a fact was learned ("told", "noted", ...); left out
+ * when there is none, and the panel shows the raw source. */
+static void add_fact_kind(json_object *obj, const memory_fact_t *fact) {
+   const char *kind = memory_fact_kind_word(fact);
+   if (kind) {
+      json_object_object_add(obj, "kind", json_object_new_string(kind));
+   }
+}
+
 /* Map an optional "sort" payload field to a memory_list_sort_t.  Facts accept
  * "confidence" (default) / "created_desc" / "created_asc"; summaries accept
  * "created_desc" (default) / "created_asc".  Absent or unrecognized ->
@@ -174,6 +183,7 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
          json_object_object_add(fact_obj, "confidence",
                                 json_object_new_double(facts[i].confidence));
          json_object_object_add(fact_obj, "source", json_object_new_string(facts[i].source));
+         add_fact_kind(fact_obj, &facts[i]);
          json_object_object_add(fact_obj, "created_at", json_object_new_int64(facts[i].created_at));
          json_object_object_add(fact_obj, "last_accessed",
                                 json_object_new_int64(facts[i].last_accessed));
@@ -1080,6 +1090,7 @@ void handle_search_memory(ws_connection_t *conn, struct json_object *payload) {
          json_object_object_add(fact_obj, "confidence",
                                 json_object_new_double(facts[i].confidence));
          json_object_object_add(fact_obj, "source", json_object_new_string(facts[i].source));
+         add_fact_kind(fact_obj, &facts[i]);
          json_object_object_add(fact_obj, "created_at", json_object_new_int64(facts[i].created_at));
          json_object_array_add(facts_array, fact_obj);
       }

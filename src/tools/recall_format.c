@@ -101,6 +101,8 @@ static bool filename_from_text(const char *text, char *buf, size_t buflen) {
 /* The bullet before each line ("  • " is 6 bytes in UTF-8) and its newline. */
 #define BULLET_BYTES 6
 #define NEWLINE_BYTES 1
+/* The parentheses and space around a kind word: "(" ") ". */
+#define KIND_FRAME_BYTES 3
 
 /* @p text as a single line in @p line (ONELINE_BUF bytes): CR/LF/tab become
  * spaces, runs of whitespace collapse, capped at RECALL_LINE_TEXT_MAX bytes
@@ -189,12 +191,18 @@ static size_t read_pointer(const focus_candidate_t *c, recall_family_t fam, char
    return (n > 0) ? strlen(buf) : 0;
 }
 
+/* Bytes of the "(told) " before a candidate's text: a fact's word for how it
+ * was learned, when it has one. */
+static size_t kind_bytes(const focus_candidate_t *c) {
+   return (c->kind && *c->kind) ? strlen(c->kind) + KIND_FRAME_BYTES : 0;
+}
+
 int recall_format_item_bytes(const focus_candidate_t *c) {
    char line[ONELINE_BUF];
    char pointer[POINTER_BUF];
    const recall_family_t fam = family_of(c->source_id);
-   return (int)(BULLET_BYTES + oneline(c->text, line) + read_pointer(c, fam, pointer) +
-                NEWLINE_BYTES);
+   return (int)(BULLET_BYTES + kind_bytes(c) + oneline(c->text, line) +
+                read_pointer(c, fam, pointer) + NEWLINE_BYTES);
 }
 
 /* Emit one candidate's line (without leading marker), including its
@@ -204,6 +212,8 @@ static void append_candidate_line(strbuf_t *sb, const focus_candidate_t *c, reca
    char line[ONELINE_BUF];
    char pointer[POINTER_BUF];
    oneline(c->text, line);
+   if (kind_bytes(c) > 0)
+      (void)strbuf_appendf(sb, "(%s) ", c->kind);
    (void)strbuf_append(sb, line);
    if (read_pointer(c, fam, pointer) > 0)
       (void)strbuf_append(sb, pointer);

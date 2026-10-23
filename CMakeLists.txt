@@ -1090,7 +1090,6 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_embeddings.c
     src/memory/memory_embeddings_entity.c
     src/memory/memory_embed_backfill.c
-    src/memory/memory_recategorize.c
     src/memory/memory_embed_tokenizer.c
     src/memory/memory_embed_unicode.c
     src/memory/memory_embed_onnx.c

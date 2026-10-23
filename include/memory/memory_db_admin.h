@@ -106,8 +106,7 @@ typedef struct {
  *   - UPDATE conversations SET last_extracted_msg_count = 0,
  *            last_extracted_msg_id = 0, extraction_attempts = 0,
  *            extraction_last_attempt_at = 0 WHERE user_id = ?
- *   - UPDATE users SET categories_backfilled_at = 0,
- *            embeddings_model_id = NULL WHERE id = ?
+ *   - UPDATE users SET embeddings_model_id = NULL WHERE id = ?
  *
  * Embeddings live on the memory_facts.embedding / memory_entities.embedding
  * columns and die with the row.  document_chunks belong to a different
@@ -154,8 +153,7 @@ bool memory_db_admin_reextract_is_running(void);
  * @brief Spawn a detached thread that runs memory_recovery_run_pass()
  *        once to drain the post-reset stuck-conversations backlog.
  *
- * Mirrors memory_recategorize_start: CAS-guarded busy flag, joinable
- * thread, releases flag on exit.  Caller must have already done the
+ * CAS-guarded busy flag, joinable thread, releases flag on exit.  Caller must have already done the
  * concurrency-guard check, the backup, and the reset transaction.
  *
  * @return SUCCESS if thread spawned, FAILURE otherwise.

@@ -95,9 +95,8 @@ void tearDown(void) {
 
 static int64_t fact_at(const char *text, int64_t created_at) {
    int64_t id = 0;
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
-                         memory_db_fact_create_at(1, text, 0.9f, "explicit", "general", NULL,
-                                                  created_at, &id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create_at(1, text, 0.9f, "explicit",
+                                                                     NULL, created_at, &id));
    return id;
 }
 

@@ -41,7 +41,7 @@ typedef enum {
    LLM_CALL_TOOL_ITER,  /**< A later call in a turn's tool loop */
    LLM_CALL_JOB,        /**< A background job's call */
    LLM_CALL_RESEARCH,   /**< A deep-research run's call */
-   LLM_CALL_EXTRACTION, /**< Memory extraction / summarization / recategorization */
+   LLM_CALL_EXTRACTION, /**< Memory extraction / summarization */
    LLM_CALL_COMPACTION, /**< Conversation compaction */
    LLM_CALL_BRIEFING,   /**< A scheduled briefing */
    LLM_CALL_OBSERVE,    /**< Silent observation */

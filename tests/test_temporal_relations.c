@@ -380,13 +380,6 @@ static void test_supersede_skips_close_for_historical_insert(void) {
    TEST_ASSERT_TRUE_MESSAGE(found_google_2019, "as-of 2019: entity-20 row is valid");
 }
 
-static void test_canonical_categories(void) {
-   TEST_ASSERT_EQUAL_INT(8, MEMORY_FACT_CATEGORY_COUNT);
-   TEST_ASSERT_EQUAL_STRING("personal", MEMORY_FACT_CATEGORIES[0]);
-   TEST_ASSERT_EQUAL_STRING("general", MEMORY_FACT_CATEGORIES[7]);
-   TEST_ASSERT_NULL(MEMORY_FACT_CATEGORIES[8]);
-}
-
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_supersede_exclusive);
@@ -395,6 +388,5 @@ int main(void) {
    RUN_TEST(test_list_by_subject_at);
    RUN_TEST(test_supersede_closes_at_new_valid_from);
    RUN_TEST(test_supersede_skips_close_for_historical_insert);
-   RUN_TEST(test_canonical_categories);
    return UNITY_END();
 }

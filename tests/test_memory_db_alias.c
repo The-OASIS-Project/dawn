@@ -851,10 +851,7 @@ static void test_consider_auto_merge_substring_rescue_into_review(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_PROPOSED, eval.outcome);
    TEST_ASSERT_EQUAL_INT64(self, eval.target_entity_id);
    TEST_ASSERT_GREATER_THAN(0, eval.proposal_id);
-   /* Assert against the runtime threshold (the actual routing gate), not
-    * the historical compile-time constant.  Otherwise this test would
-    * keep agreeing with stale documentation if the runtime default ever
-    * diverges from MEMORY_ALIAS_REVIEW_THRESHOLD. */
+   /* Assert against the runtime threshold (the actual routing gate). */
    TEST_ASSERT_GREATER_OR_EQUAL_FLOAT((float)g_config.memory.entity_merge_review_threshold,
                                       eval.evidence.composite_score);
    /* No alias write — operator review required. */
@@ -2602,7 +2599,8 @@ static void test_link_user_self_dry_run_synthetic_scores_existing_cluster(void) 
    }
    TEST_ASSERT_NULL(jon_row); /* Jon is the self, excluded from candidates */
    TEST_ASSERT_NOT_NULL(acme_row);
-   TEST_ASSERT_LESS_THAN_FLOAT(MEMORY_ALIAS_REVIEW_THRESHOLD, acme_row->composite_score);
+   TEST_ASSERT_LESS_THAN_FLOAT((float)g_config.memory.entity_merge_review_threshold,
+                               acme_row->composite_score);
 
    /* No DB mutation: alias / proposal tables stay empty. */
    TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_aliases "
@@ -2684,7 +2682,8 @@ static void test_synthetic_seed_unions_real_name_and_alias_tokens(void) {
          r_ctl = &result.rows[i];
    }
    TEST_ASSERT_NOT_NULL(r_ctl);
-   TEST_ASSERT_LESS_THAN_FLOAT(MEMORY_ALIAS_REVIEW_THRESHOLD, r_ctl->composite_score);
+   TEST_ASSERT_LESS_THAN_FLOAT((float)g_config.memory.entity_merge_review_threshold,
+                               r_ctl->composite_score);
 }
 
 static void test_synthetic_seed_aliases_parsing_strip_dedup_skip_empty(void) {
@@ -3529,8 +3528,7 @@ static void test_entity_upsert_wrapper_uses_now(void) {
 
 static int64_t insert_fact_at(int user_id, const char *text, int64_t created_at) {
    int64_t fact_id = 0;
-   int rc = memory_db_fact_create_at(user_id, text, 1.0f, "explicit", "general", NULL, created_at,
-                                     &fact_id);
+   int rc = memory_db_fact_create_at(user_id, text, 1.0f, "explicit", NULL, created_at, &fact_id);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_GREATER_THAN_INT64(0, fact_id);
    return fact_id;

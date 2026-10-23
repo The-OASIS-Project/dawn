@@ -334,6 +334,7 @@ static int fact_adapter_query(int user_id,
       out[produced].provenance.conv_id = conv_ids[i];
       out[produced].provenance.msg_id_start = starts[i];
       out[produced].provenance.msg_id_end = ends[i];
+      out[produced].kind = memory_fact_kind_word(&facts[i]);
       produced++;
    }
 

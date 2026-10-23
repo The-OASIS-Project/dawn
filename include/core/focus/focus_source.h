@@ -137,6 +137,10 @@ typedef struct {
    memory_provenance_t provenance; /* Source back-link (conv_id +
                                      msg_id_start/end) — zeroed if not
                                      applicable */
+   const char *kind;               /* How the item is known ("told", "inferred",
+                                     ...), static; NULL shows nothing.  The
+                                     framework sets "outside" on every item
+                                     not of the INTERNAL tier */
 } focus_candidate_t;
 
 /* =============================================================================
@@ -334,6 +338,7 @@ int focus_register_source(const focus_source_adapter_t *adapter);
  * Pipeline:
  *   1. For each adapter:
  *        - Skip if `requires_embedding && query_embedding == NULL`.
+ *        - Skip INTERNAL (memory) adapters when `g_config.memory.enabled` is off.
  *        - Call adapter with all positional parameters.
  *        - Reject candidates whose text matches the memory injection
  *          filter — gated by source trust tier.  INTERNAL items are

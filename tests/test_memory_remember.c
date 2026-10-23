@@ -33,12 +33,14 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
+#include "bench_prompt_pieces.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
 #include "memory/memory_extraction.h"
+#include "prompts.h"
 #include "unity.h"
 
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -412,6 +414,45 @@ static void test_unprompted_skip_leaves_a_later_reply_unread(void) {
    TEST_ASSERT_TRUE(reply > cursor);
 }
 
+/* A benchmark's prompt file is split into literal pieces the way printf reads
+ * the compiled template, so the same text gives the same prompt either way. */
+static void test_prompt_file_pieces_give_the_compiled_prompt(void) {
+   char *compiled = memory_extraction_build_prompt("A%s", "C%%", "P", "E");
+   TEST_ASSERT_NOT_NULL(compiled);
+
+   char text[] = MEMORY_EXTRACTION_PROMPT_TEMPLATE;
+   const char *pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES];
+   TEST_ASSERT_EQUAL_INT(0, bench_prompt_split(text, pieces));
+   memory_extraction_set_template_pieces(pieces);
+   char *from_pieces = memory_extraction_build_prompt("A%s", "C%%", "P", "E");
+   memory_extraction_set_template_pieces(NULL);
+
+   TEST_ASSERT_NOT_NULL(from_pieces);
+   TEST_ASSERT_EQUAL_STRING(compiled, from_pieces);
+   free(compiled);
+   free(from_pieces);
+}
+
+static void test_prompt_file_split(void) {
+   const char *pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES];
+   char ok[] = "%s 100%% %s%s|%s";
+   TEST_ASSERT_EQUAL_INT(0, bench_prompt_split(ok, pieces));
+   TEST_ASSERT_EQUAL_STRING("", pieces[0]);
+   TEST_ASSERT_EQUAL_STRING(" 100% ", pieces[1]);
+   TEST_ASSERT_EQUAL_STRING("", pieces[2]);
+   TEST_ASSERT_EQUAL_STRING("|", pieces[3]);
+   TEST_ASSERT_EQUAL_STRING("", pieces[4]);
+
+   char three[] = "%s %s %s";
+   char five[] = "%s %s %s %s %s";
+   char other[] = "%s %s %d %s %s";
+   char lone[] = "%s %s %s %s %";
+   TEST_ASSERT_EQUAL_INT(1, bench_prompt_split(three, pieces));
+   TEST_ASSERT_EQUAL_INT(1, bench_prompt_split(five, pieces));
+   TEST_ASSERT_EQUAL_INT(1, bench_prompt_split(other, pieces));
+   TEST_ASSERT_EQUAL_INT(1, bench_prompt_split(lone, pieces));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_remember_in_a_known_conversation_is_learned_there);
@@ -426,5 +467,7 @@ int main(void) {
    RUN_TEST(test_forget_reports_already_merged);
    RUN_TEST(test_search_shows_relations_only_when_asked);
    RUN_TEST(test_unprompted_skip_leaves_a_later_reply_unread);
+   RUN_TEST(test_prompt_file_pieces_give_the_compiled_prompt);
+   RUN_TEST(test_prompt_file_split);
    return UNITY_END();
 }

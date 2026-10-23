@@ -316,6 +316,68 @@ void test_cache_load_order_live_first_then_score(void) {
    TEST_ASSERT_TRUE(seen_has(&seen, 1) && seen_has(&seen, 2)); /* live beats score */
 }
 
+/* A gloss reads as "noted" whatever its source, through both the by-id read
+ * and the shared list projection; other facts read by their source. */
+void test_kind_word(void) {
+   seed_doc(100);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_note_bridge_upsert_gloss(1, 100, "Public Bio"));
+   int64_t gloss = 0;
+   memory_db_fact_find_by_note_doc_id(1, 100, &gloss);
+   int64_t told = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(1, "The dog is Ash.", 0.9f,
+                                                                  "explicit", NULL, &told));
+
+   memory_fact_t f;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
+   TEST_ASSERT_EQUAL_INT64(100, f.note_doc_id);
+   TEST_ASSERT_EQUAL_STRING("explicit", f.source);
+   TEST_ASSERT_EQUAL_STRING("noted", memory_fact_kind_word(&f));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(told, 1, &f));
+   TEST_ASSERT_EQUAL_INT64(0, f.note_doc_id);
+   TEST_ASSERT_EQUAL_STRING("told", memory_fact_kind_word(&f));
+
+   memory_fact_t listed[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_list(1, listed, 4, 0, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_EQUAL_STRING(listed[i].id == gloss ? "noted" : "told",
+                               memory_fact_kind_word(&listed[i]));
+   }
+
+   memset(&f, 0, sizeof(f));
+   snprintf(f.source, sizeof(f.source), "inferred");
+   TEST_ASSERT_EQUAL_STRING("inferred", memory_fact_kind_word(&f));
+   snprintf(f.source, sizeof(f.source), "import");
+   TEST_ASSERT_EQUAL_STRING("imported", memory_fact_kind_word(&f));
+   snprintf(f.source, sizeof(f.source), "whatever");
+   TEST_ASSERT_NULL(memory_fact_kind_word(&f));
+   TEST_ASSERT_NULL(memory_fact_kind_word(NULL));
+}
+
+/* The keyword search reads its score from the column after the shared ones:
+ * a column added before the score would read as a score (or as zero) and
+ * flatten keyword ranking.  Two facts matching the query to different degrees
+ * score above zero and apart. */
+void test_bm25_reads_its_score(void) {
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_create(1, "The dog Ash likes long walks in the park.", 0.9f,
+                                               "explicit", NULL, &id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_create(1, "Ash the dog walks to the dog park daily.", 0.9f,
+                                               "explicit", NULL, &id));
+   memory_fact_t facts[4];
+   float scores[4] = { 0 };
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_search_bm25_since(1, "dog park", 0, facts, scores, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_TRUE(scores[0] > 0.0f && scores[1] > 0.0f);
+   TEST_ASSERT_TRUE(scores[0] != scores[1]);
+   TEST_ASSERT_EQUAL_STRING("told", memory_fact_kind_word(&facts[0]));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_upsert_creates_gloss_linked_to_note);
@@ -325,5 +387,7 @@ int main(void) {
    RUN_TEST(test_cross_user_note_link_refused);
    RUN_TEST(test_disabled_memory_is_noop);
    RUN_TEST(test_cache_load_order_live_first_then_score);
+   RUN_TEST(test_kind_word);
+   RUN_TEST(test_bm25_reads_its_score);
    return UNITY_END();
 }

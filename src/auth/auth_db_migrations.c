@@ -3107,13 +3107,10 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
-   /* v88: re-run the one-shot fact-category pass for every user.  Its inline
-    * UPDATE (memory_embeddings.c categorize_user_facts) bound only (category, id)
-    * against "... WHERE id = ? AND user_id = ?", so user_id compared against NULL,
-    * nothing was written, and users.categories_backfilled_at was still set.  Every
-    * pass that ran since that filter was added was a silent no-op.  Clearing the
-    * flag lets the next backfill sweep run the fixed pass; it only classifies facts
-    * still in 'general', so categories set by extraction are untouched. */
+   /* v88: cleared users.categories_backfilled_at so the one-shot fact-category
+    * pass would run again (its UPDATE had bound only (category, id), so it never
+    * wrote).  That pass is retired; the column is kept, unread, and clearing it
+    * now has no effect. */
    bool v88_ok = (current_version >= 88);
    if (current_version < 88) {
       rc = sqlite3_exec(s_db.db, "UPDATE users SET categories_backfilled_at = 0", NULL, NULL,

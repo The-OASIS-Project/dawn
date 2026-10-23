@@ -44,8 +44,7 @@ struct session;
  * @brief Retrieve the turn's items into @p out (focus_items, focus_panel).
  *
  * Pipeline (when enabled):
- *   1. Embed `user_turn_text` (with the previous question, for a short
- *      follow-up) via memory_embeddings_embed.
+ *   1. Embed `user_turn_text` via memory_embeddings_embed.
  *   2. focus_compose for the top_k most relevant items (no over-fetch).
  *   3. Give each its handle for the conversation (focus_handles_assign),
  *      defuse DAWN's markers in its text and make it one line.

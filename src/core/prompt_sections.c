@@ -23,9 +23,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "core/prompt_parts.h"
+#include "core/strbuf.h"
 #include "dawn_error.h"
 
 static bool is_blank(char c) {
@@ -161,4 +163,72 @@ char *prompt_framed(const char *name,
    }
    frame_line(out + off, len + 1 - off, "END ", name, tag);
    return out;
+}
+
+/* The identity block of a user who gave an address but no real name. */
+#define IDENTITY_ADDRESS_ONLY_FMT "\n\n## User Identity\nThe user prefers to be addressed as %s.\n"
+
+/* The most aliases the identity block names. */
+#define IDENTITY_ALIASES_MAX 16
+
+static bool is_line_blank(char c) {
+   return c == ' ' || c == '\t' || c == '\r';
+}
+
+/* " They may also be referred to as: A, B." onto @p sb from @p aliases (one
+ * per line): each trimmed, empties dropped, repeats (case aside) named once.
+ * Nothing when none is left. */
+static void append_aliases(strbuf_t *sb, const char *aliases) {
+   char *buf = strdup(aliases);
+   if (!buf) {
+      return;
+   }
+   const char *seen[IDENTITY_ALIASES_MAX];
+   int seen_count = 0;
+   char *save = NULL;
+   for (char *line = strtok_r(buf, "\n", &save); line != NULL && seen_count < IDENTITY_ALIASES_MAX;
+        line = strtok_r(NULL, "\n", &save)) {
+      while (is_line_blank(*line))
+         line++;
+      char *end = line + strlen(line);
+      while (end > line && is_line_blank(end[-1]))
+         end--;
+      *end = '\0';
+      bool dup = (*line == '\0');
+      for (int i = 0; i < seen_count && !dup; i++) {
+         dup = strcasecmp(seen[i], line) == 0;
+      }
+      if (dup)
+         continue;
+      strbuf_append(sb, seen_count == 0 ? " They may also be referred to as: " : ", ");
+      strbuf_append(sb, line);
+      seen[seen_count++] = line;
+   }
+   if (seen_count > 0) {
+      strbuf_append(sb, ".");
+   }
+   free(buf);
+}
+
+char *prompt_identity_text(const char *real_name, const char *address, const char *aliases) {
+   real_name = real_name ? real_name : "";
+   address = address ? address : "";
+   aliases = aliases ? aliases : "";
+   strbuf_t sb;
+   strbuf_init(&sb, 0);
+   if (real_name[0] == '\0') {
+      if (address[0] == '\0') {
+         return NULL;
+      }
+      strbuf_appendf(&sb, IDENTITY_ADDRESS_ONLY_FMT, address);
+      return strbuf_steal_or_null(&sb);
+   }
+   strbuf_appendf(&sb, "\n\n## User Identity\nYou are speaking with %s.", real_name);
+   if (address[0] != '\0') {
+      strbuf_appendf(&sb, " They prefer to be addressed as %s.", address);
+   }
+   append_aliases(&sb, aliases);
+   strbuf_append(&sb, " Use this information to recognize when memory facts or extracted entities "
+                      "refer to them.\n");
+   return strbuf_steal_or_null(&sb);
 }

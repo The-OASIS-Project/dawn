@@ -84,7 +84,7 @@
                label: 'AI Description',
                rows: 5,
                placeholder:
-                  'Leave empty to use built-in default:\n"Your name is {AI Name}. Iron-Man-style AI assistant. Female voice; witty, playful, and kind..."',
+                  'Leave empty to use built-in default:\n"Your name is {AI Name}. Iron-Man-style AI assistant running on DAWN, in the mold of JARVIS and FRIDAY..."',
                hint: 'System-wide base persona for all users. Individual users can append to or replace this via My Settings. Leave empty for the built-in default.',
             },
          },
@@ -1165,17 +1165,6 @@
                      displayValue: (v) => Math.round(v * 100) + '%',
                      advanced: true,
                   },
-                  category_threshold: {
-                     type: 'range',
-                     label: 'Category Classification Threshold',
-                     hint: 'Cosine similarity threshold for auto-classifying memories into categories. Calibrated for MiniLM-L6 at 0.25. Higher = more selective.',
-                     configPath: 'memory.category_threshold',
-                     min: 0.05,
-                     max: 0.95,
-                     step: 0.05,
-                     displayValue: (v) => v.toFixed(2),
-                     advanced: true,
-                  },
                   embedding_backfill_on_startup: {
                      type: 'checkbox',
                      label: 'Index Existing Memories',
@@ -1270,12 +1259,12 @@
                type: 'group',
                label: 'Per-Turn Context Injection',
                description:
-                  'Pulls memory, document, calendar, and email content above a relevance threshold and injects it into each user turn. Off by default.',
+                  'Pulls memory, document, and calendar content above a relevance threshold and injects it into each user turn. On voice devices in a shared room, replies may mention what it retrieves.',
                fields: {
                   focus_enabled: {
                      type: 'checkbox',
                      label: 'Enable per-turn context injection',
-                     hint: 'Master switch: automatically add relevant memories, documents, calendar, and email to each turn.',
+                     hint: 'Master switch: automatically add relevant memories, documents, and calendar events to each turn.',
                      configPath: 'memory.focus_injection.enabled',
                   },
                   focus_budget_bytes: {

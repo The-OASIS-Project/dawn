@@ -89,7 +89,7 @@ Memory extraction happens at session end, not during conversation — zero laten
 
 - **memory_fact_search.c/h**: Hybrid-search public surface
    - Extracted from `memory_embeddings.c` (header-only split May 2026)
-   - Keyword + cosine + temporal-proximity scoring; category pre-filter; bitemporal `as_of` / `include_historical` handling
+   - Keyword + cosine + temporal-proximity scoring; bitemporal `as_of` / `include_historical` handling
 
 - **memory_history_loader.c/h**: Shared message-history loader
    - Used by both `memory_recovery.c` and `memory_summarize_missing.c`
@@ -133,21 +133,21 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Forgotten facts stay forgotten (`memory_forgotten.c`, schema v110). A single-fact forget (`memory_db_fact_forget`, from the Memory panel or the memory tool) keeps the fact's text with the latest message id at the time (`memory_forgotten.forget_msg_id`), since messages said before it still say it. A voice session saves its rows when it ends, after the forget, so its save moves every forget the user made while it ran (here or from another surface) past its rows (`memory_forgotten_saved`). An extraction runs as usual; then what it returned is checked against the user's forgets made after its batch began (`memory_forgotten_screen`), except one a live fact still says (a kept copy of a deleted duplicate, `MEMORY_FORGOTTEN_STILL_KNOWN`): the same text (ignoring case and spacing) is dropped, and the facts close to a forgotten one (cosine 0.70 or more, or every one without embeddings) are asked about together in one call to the extraction model, tried twice (`MEMORY_FORGOTTEN_CHECK_PROMPT`), which drops the same information reworded and keeps a new value or another fact about the same thing, reworded without a forgotten fact it still mentions ("green, replacing blue" is stored as "green", without relations); a dropped fact's relations go with it. If the check can't be made, the facts it would have asked about are not stored and the rest is. Listing the forgotten facts in the extraction prompt instead was measured and rejected: it made the model drop what else the conversation said about the same people and topics. Memory recovery's pass removes records no extraction reads any more (a day old, and none of the user's messages is from before the forget: `memory_forgotten_sweep`)
 
 - **memory_callback.c**: Tool handler for `MEMORY` device type
-   - `search`: hybrid keyword + semantic search across all memory tables; optional `category` / `time_range` / `as_of` / `include_historical` / `with_source` params
+   - `search`: hybrid keyword + semantic search across all memory tables; optional `time_range` / `as_of` / `include_historical` / `with_source` params
    - `recent`: windowed retrieval — `query` (lower bound, default `"7d"`, max `"10y"`) + `before` (upper bound) bracket `[now − query, now − before]`; `sort` (`newest` default / `oldest`) + `limit` (1-50). Supports h/m/d/w/y units (Bundle 3, 2026-05-13).
    - `remember`: immediate fact storage with injection filter (`memory_filter_check()`)
    - `forget`: delete facts by numeric ID (`memory_db_fact_forget`; the user's extraction is held once for the batch, as `memory_forget_fact` does for the WebUI), with the duplicates merged into them, bringing back the values they replaced (`memory_facts.superseded_kind` tells a merge from a replacement; recall hides both alike); with `duplicate_of`, merge duplicates into one kept (their relations move to it); (`memory_callback_forget.c`) with `newer_fact_id`, file older values a newer fact replaced (`memory_db_fact_replace`: their relations are closed by it, and come back if it is forgotten); `replaced_by`, the older name of `duplicate_of`, still merges
    - `list_merged` / `restore` (`memory_callback_restore.c`): what was merged into a fact or replaced by a newer one, and bringing one back (`restore` is an act: refused where an outsider's text could ask, and described by the fact's text when it needs a reply code)
-   - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; hard merge remains available via `dawn-admin memory entity consolidate`.
+   - `merge_entities`: **soft-link** two entities (May 2026) — sets `source.canonical_id = target.id`, both rows preserved, reversible via `memory_db_entity_alias_unlink()`. Replaces the original Phase 6.7 hard-merge for the LLM-facing path; the hard merge (`memory_db_entity_merge`) is left to the WebUI's operator merge.
    - `save_contact`, `find_contact`, `list_contacts`, `delete_contact`: contact management
    - `append_graph_context()`: the named entities' relations, appended to search output when `as_of` or `include_historical` is given
-   - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 11 params, generated into per-provider schemas by the tool registry
+   - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 18 params, generated into per-provider schemas by the tool registry
 
 - **memory_filter.c/h**: Injection filter — runs at the trust boundary only (raw user input at ingestion + USER_CONTENT at retrieval); see "Security Guardrails" below
    - Unicode normalization: zero-width/invisible char stripping, homoglyph mapping, Latin-1 accent stripping, fullwidth ASCII mapping, tag character handling
    - ~118 blocked patterns across 17 categories (substring matching on normalized text)
    - ReAct co-occurrence check (blocks when >= 2 of thought:/action:/observation: appear)
-   - Called from `memory_callback.c`, `memory_extraction.c`, and `webui_memory.c` before every `memory_db_fact_create()` / `memory_db_pref_upsert()` / entity/relation/summary storage
+   - Called where raw user text is stored: `remember` and `merge_entities` (`memory_callback.c`), the WebUI's preference and merge edits (`webui_memory.c`), imports (`memory_import.c`) and note glosses (`memory_note_bridge.c`). Extraction output is LLM paraphrase and is not filtered
    - Stateless and thread-safe (pure function, no mutexes)
 
 - **contacts_db.c/h**: Contacts database operations
@@ -162,7 +162,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Deduplicates via ROW_NUMBER() window function
    - Absorbs mention count and time range from source entity
    - Deletes source row (no rollback — use soft-link `alias_link` if reversibility matters)
-   - Exposed via `dawn-admin memory entity consolidate <source> <target>` for hardening a previously soft-linked alias
+   - Exposed only through the WebUI Memory panel's entity merge (`webui_memory.c`)
 
 - **memory_maintenance.c/h**: Nightly decay orchestration
    - Called from auth maintenance thread (15-minute cycle)
@@ -187,7 +187,7 @@ Memory extraction happens at session end, not during conversation — zero laten
 
 ## Database Schema
 
-Memory tables in the auth database (`/var/lib/dawn/auth.db`). Schema version **v46** at time of writing — see [atlas/dawn/memory/SYSTEM_DESIGN.md §6](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/SYSTEM_DESIGN.md#6-storage-schema) for the full column-by-column definitions including provenance triples, bitemporal relation bounds, fact categories, summary embeddings, and the entity-alias surface.
+Memory tables in the auth database (`/var/lib/dawn/auth.db`). Schema version: `AUTH_DB_SCHEMA_VERSION` (`include/auth/auth_db_internal.h`) — see [atlas/dawn/memory/SYSTEM_DESIGN.md §6](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/SYSTEM_DESIGN.md#6-storage-schema) for the full column-by-column definitions including provenance triples, bitemporal relation bounds, fact categories, summary embeddings, and the entity-alias surface.
 
 ```sql
 -- Facts: discrete pieces of information (v34 category, v40 source_* triple)
@@ -247,7 +247,7 @@ users (..., real_name, preferred_address, identity_aliases, embeddings_model_id,
 
 Schema-version highlights since v33:
 - **v33** — `memory_relations.valid_from/valid_to` (bitemporal); auto-close via `memory_db_relation_supersede`
-- **v34** — `memory_facts.category` + `users.categories_backfilled_at`
+- **v34** — `memory_facts.category` + `users.categories_backfilled_at` (fact categories are no longer computed; the columns stay)
 - **v37** — `document_chunks.created_at` for temporal scoring
 - **v38** — `summary_nodes` (LCM Phase-4 hierarchical compaction DAG)
 - **v39** — `conversations.extraction_attempts` + `extraction_last_attempt_at` for recovery worker
@@ -278,7 +278,7 @@ Memory content flows into future prompts, creating potential injection vectors. 
 
 - **Ingestion (trust boundary)**: WebUI fact/preference import, LLM `remember` tool action, silent-observe of observed conversation text. Filter applied.
 - **Retrieval (trust boundary)**: focus-injection candidates whose `source_type == FOCUS_SOURCE_USER_CONTENT` (inbound email body, future external feeds). Filter applied. INTERNAL (memory items — already extraction-LLM-paraphrased) and EXTERNAL (user-uploaded documents, user's CalDAV) skip the retrieval-time filter.
-- **Internal re-processing**: extraction-LLM JSON output, summarize-missing backfill, fact recategorization. Filter **not** applied — these operate on already-paraphrased data and gain nothing from substring re-scanning.
+- **Internal re-processing**: extraction-LLM JSON output, summarize-missing backfill. Filter **not** applied — these operate on already-paraphrased data and gain nothing from substring re-scanning.
 
 Defense-in-depth: the turn context that carries the focus block is framed by lines carrying a per-conversation random tag, the system prompt's `context_rules` section says retrieved items are data (never instructions) and only tagged framing is DAWN's, and every item passes through `llm_context_neutralize()` (`src/llm/llm_context_text.c`), which defuses text imitating the framing. See [llm.md](llm.md#prompt-construction-append-only-cache-aware). Tool design (TTLs on destructive actions, two-step confirmation, operator-only on sensitive operations) limits blast radius per Meta's "Agents Rule of Two" pattern.
 
@@ -291,10 +291,9 @@ Full rationale, research citations, and risk model: [atlas/dawn/memory/INJECTION
 enabled = true
 context_budget_tokens = 800
 session_timeout_minutes = 15
-
-[memory.extraction]
-provider = "local"        # "local", "openai", "claude", "ollama"
-model = "qwen2.5:7b"      # Model for extraction
+extraction_provider = "local"          # "local", "openai", "claude", "openrouter"
+extraction_model = "qwen2.5:7b"        # Model for extraction
+extraction_effort = "off"              # "off", "low", "medium", "high"
 
 [memory.embeddings]
 provider = "onnx"         # "onnx" (default), "ollama", "openai"
@@ -303,7 +302,6 @@ provider = "onnx"         # "onnx" (default), "ollama", "openai"
 keyword_weight = 0.30     # Hybrid search: keyword component weight (0.0-1.0)
 vector_weight = 0.70      # Hybrid search: semantic component weight (0.0-1.0)
 temporal_weight = 0.20    # Temporal proximity boost for date-anchored queries
-category_threshold = 0.25 # Cosine threshold for centroid-based category backfill
 backfill_on_startup = true
 model_id = "bge-small-en-v1.5-int8"  # Bump when MODEL_PATH changes to trigger recompute
 recompute_on_model_change = true      # Re-index all stored embeddings on model_id change
@@ -336,22 +334,21 @@ review_threshold = 0.50    # Composite score floor for review-band proposal
 
 [memory.focus_injection]
 top_k = 12                 # Per-turn focus block size (May 2026 tuned default)
-weight_recency = 0.15      # Recency contribution; tension with summary-relevant
-                           # evidence documented in config_defaults.c
+weight_recency = 0.30      # Recency contribution
 ```
 
 `[memory.entity_merge]` (May 2026): controls the Phase 2 auto-merge gate that runs at extraction time after the relations loop. Composite ≥ `auto_threshold` → silent `alias_link`; composite ∈ [`review_threshold`, `auto_threshold`) → row in `memory_entity_merge_proposals` for operator review. `enabled=false` disables both bands; the entity-merge cascade still runs for `dawn-admin memory entity link-user-self` and operator-driven WebUI merges.
 
-`[memory.focus_injection]` (May 2026): controls the per-turn focus block. `top_k=12` (up from 8) leaves slots for the new semantic summary adapter — at 8 the summary adapter starved out of the block on facts-heavy turns. `weight_recency=0.15` is Phase 1j bench-tuned; live observation suggests 0.3 ranks recent summary matches above legacy paraphrase-ladder facts, but re-bench with summary-relevant probes is pending before promoting 0.3 (open tension documented in `config_defaults.c`).
+`[memory.focus_injection]` (May 2026): controls the per-turn focus block, on by default. `top_k=12` (up from 8) leaves slots for the new semantic summary adapter — at 8 the summary adapter starved out of the block on facts-heavy turns. `weight_recency=0.30` ranks recent summary matches above older paraphrased facts; the summary-vs-fact probes behind it are in `benchmarks/focus_probe_cases.json` (cases 12-15, see `config_defaults.c`).
 
 ## WebUI Memory Viewer
 
 The memory viewer provides a browser-based interface for inspecting and managing all memory types:
 
-- **Tabs**: Facts, Preferences, Summaries, Graph (entities), Contacts
+- **Tabs**: Facts, Preferences, Summaries, Graph (entities), Contacts; facts and preferences show how each is known (told / inferred / imported / noted)
 - **Stats bar**: real-time counts for each memory type including contacts; entity counts now reflect equivalence-class totals across canonical + aliases (Bundle 2, May 2026)
 - **Search**: filter memories by keyword across all tabs
-- **Graph tab**: entity cards with type badges, expandable relations (→ outgoing, ← incoming), contact count badge on person entities, two-click entity merge (select source → click target → confirm — defaults to soft `alias_link`; operator hardens via dawn-admin). Entity `first_seen` / `last_seen` now span the original conversation timespan instead of "today" (Bug 2 follow-up to Bundle 1 — `memory_db_entity_upsert_at()` accepts `first_seen` / `last_seen` overrides so reextract preserves natural temporal spread).
+- **Graph tab**: entity cards with type badges, expandable relations (→ outgoing, ← incoming), contact count badge on person entities, two-click entity merge (select source → click target → confirm — defaults to soft `alias_link`). Entity `first_seen` / `last_seen` now span the original conversation timespan instead of "today" (Bug 2 follow-up to Bundle 1 — `memory_db_entity_upsert_at()` accepts `first_seen` / `last_seen` overrides so reextract preserves natural temporal spread).
 - **Suggested-Merges panel** (Phase 2, May 2026): pending entity-merge proposals from `memory_entity_merge_proposals`. Approve writes the soft alias via `memory_db_entity_alias_link()`; reject just stamps `resolved_at`.
 - **Memory-icon dot indicator** (Phase 2): mirrors the music-playing dot pattern, pulses 0.5s out of phase, lights when proposals are pending, `prefers-reduced-motion` carve-out suppresses both this dot's pulse and the music dot's pulse. First click while pending auto-routes to the Graph tab with a 600 ms accent-glow flash so the user's eye lands on why they're not on Facts; subsequent clicks respect whichever tab they had active.
 - **Contacts tab**: contact cards with field_type/label badges, hover-reveal edit/delete, search, pagination. Add/edit modal with entity typeahead. Cross-linked from Graph tab person entities.

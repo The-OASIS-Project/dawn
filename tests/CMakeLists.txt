@@ -1206,6 +1206,7 @@ dawn_add_unit_test(test_llm_dup_check
    SOURCES test_llm_dup_check.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1225,6 +1226,7 @@ dawn_add_unit_test(test_llm_tools_finish
    SOURCES test_llm_tools_finish.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1243,6 +1245,7 @@ dawn_add_unit_test(test_llm_tools_args
    SOURCES test_llm_tools_args.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1262,6 +1265,7 @@ dawn_add_unit_test(test_llm_tools_frozen
    SOURCES test_llm_tools_frozen.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1282,6 +1286,7 @@ dawn_add_unit_test(test_tool_images_render
    SOURCES test_tool_images_render.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1727,6 +1732,7 @@ dawn_add_unit_test(test_memory_extraction_input
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
    LIBS    dawn_common unity json-c
    LABEL   ci)
@@ -2391,6 +2397,7 @@ dawn_add_unit_test(bench_retrieval
    SOURCES ${SRC_ROOT}/benchmarks/bench_retrieval.c
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
            ${SRC_ROOT}/benchmarks/bench_memory_pipeline.c
+           ${SRC_ROOT}/benchmarks/bench_prompt_pieces.c
            ${SRC_ROOT}/src/tools/document_db.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
@@ -2514,11 +2521,13 @@ dawn_add_unit_test(bench_retrieval
 
 # The remember tool end to end (memory_callback.c on a real schema), linked like
 # the retrieval bench: where a remembered fact's source comes from, and the
-# refusal when a turn has more facts waiting than it can track.  It never
+# refusal when a turn has more facts waiting than it can track, and a
+# benchmark prompt file's pieces giving the compiled prompt.  It never
 # embeds, so the ONNX provider is a stub: CI runners have no onnxruntime.
 dawn_add_unit_test(test_memory_remember
    SOURCES test_memory_remember.c test_memory_remember_stub.c
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
+           ${SRC_ROOT}/benchmarks/bench_prompt_pieces.c
            ${SRC_ROOT}/src/tools/document_db.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
@@ -2633,6 +2642,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   INCLUDES ${SRC_ROOT}/benchmarks
    LABEL   ci)
 
 # Merged vs replaced facts on every path (real schema; same sources as above).

@@ -48,8 +48,7 @@ void memory_embeddings_request_backfill(int user_id);
 /**
  * @brief Queue a backfill pass for every user with un-embedded facts
  *
- * Also queues users whose one-shot category pass hasn't run.  Runs one query on
- * the caller's thread (all users' facts), so call it from startup or a
+ * Runs one query on the caller's thread (all users' facts), so call it from startup or a
  * background thread, never the lws service thread.  This is the safety net for
  * any fact that missed its embedding (engine unavailable at creation time, or a
  * creation path that doesn't embed).

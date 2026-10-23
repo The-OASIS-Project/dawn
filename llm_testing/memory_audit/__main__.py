@@ -1,26 +1,32 @@
-# CLI: python3 -m llm_testing.memory_audit sample|label|classify|compare|report|examples|reextract
+# CLI: python3 -m llm_testing.memory_audit
+#        sample|label|classify|compare|report|examples|reextract|candidates|coverage
 #
 # An audit of what memory extraction has stored for a user: which facts are worth
 # keeping and which kinds of unwanted fact extraction produces.
 #
-#   sample    stratified sample (or --all) of a user's live facts -> JSONL
-#   label     name each sampled fact's kind by hand; the reference for the models
-#   classify  a model classifies a sample against the rubric
-#   compare   a classification (or two) against the hand labels
-#   report    counts by kind, category, month and use for a classification
-#   examples  print facts of one kind (shows fact text: for the user, not for logs)
-#   reextract run DAWN's extraction on chosen stored conversations into a scratch
-#             database, so a prompt variant can be measured on the same input
+#   sample     stratified sample (or --all) of a user's live facts -> JSONL
+#   label      name each sampled fact's kind by hand; the reference for the models
+#   classify   a model classifies a sample against the rubric
+#   compare    a classification (or two) against the hand labels
+#   report     counts by kind, month and use for a classification
+#   examples   print facts of one kind (shows fact text: for the user, not for logs)
+#   reextract  run DAWN's extraction on chosen stored conversations into a scratch
+#              database, so a prompt variant can be measured on the same input
+#   candidates counts and conversation ids where memory may have gone wrong,
+#              for the owner to write memory eval cases from (prints no text)
+#   coverage   how many of run A's facts (by tier) run B also stored, judged by a
+#              model per conversation: covered / partial / missing (counts only)
 #
 # Privacy: everything read or written lives under llm_testing/memory_audit/data/
 # (ignored by git).  Only `label` and `examples` print fact text; the others
-# print counts.  The database is opened read-only.
+# print counts (and `candidates` ids).  The database is opened read-only.
 #
 # License: GPLv3, same as DAWN.
 
 import argparse
 import json
 import os
+import pathlib
 import random
 import re
 import sqlite3
@@ -29,7 +35,7 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from . import models, reextract, rubric
+from . import candidates, coverage, models, reextract, rubric
 from .storage import DATA, data_path, private_open, text_sha
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,18 +69,18 @@ def _assistant_name():
 # --------------------------------------------------------------------------- sample
 
 def _live_facts(db, user_id):
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = sqlite3.connect(pathlib.Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, fact_text, category, source, created_at, confidence, expires_at, "
+        "SELECT id, fact_text, source, created_at, confidence, expires_at, "
         "access_count, last_cited, source_conversation_id FROM memory_facts "
         "WHERE user_id = ? AND superseded_by IS NULL ORDER BY id", (user_id,)).fetchall()
     con.close()
     out = []
     for r in rows:
         out.append({
-            "id": r["id"], "text": r["fact_text"], "category": r["category"],
-            "source": r["source"], "created_at": r["created_at"],
+            "id": r["id"], "text": r["fact_text"], "source": r["source"],
+            "created_at": r["created_at"],
             "date": time.strftime("%Y-%m-%d", time.gmtime(r["created_at"])),
             "confidence": r["confidence"], "expires_at": r["expires_at"],
             "access_count": r["access_count"] or 0, "last_cited": r["last_cited"],
@@ -84,11 +90,11 @@ def _live_facts(db, user_id):
 
 
 def _stratum(f):
-    return (f["category"], f["date"][:7])
+    return f["date"][:7]
 
 
 def stratified(facts, n, seed):
-    """n facts spread over (category, month) in proportion to their size,
+    """n facts spread over months in proportion to their size,
     largest remainder first, at least one from each stratum while n allows."""
     groups = defaultdict(list)
     for f in facts:
@@ -119,9 +125,7 @@ def cmd_sample(a):
     with private_open(path) as f:
         for x in chosen:
             f.write(json.dumps(x) + "\n")
-    cats = Counter(x["category"] for x in chosen)
     print(f"{len(chosen)} of {len(facts)} live facts (user {a.user_id}) -> {path}")
-    print("by category: " + ", ".join(f"{k} {v}" for k, v in cats.most_common()))
 
 
 # --------------------------------------------------------------------------- label
@@ -146,7 +150,7 @@ def _kind_menu():
 
 def _ask(f, n_done, n_total, current):
     print("\033[2J\033[H", end="")
-    print(f"[{n_done + 1}/{n_total}]  id {f['id']}  {f['date']}  {f['category']}  "
+    print(f"[{n_done + 1}/{n_total}]  id {f['id']}  {f['date']}  "
           f"source={f['source']}  used={f['access_count']}  "
           f"cited={'yes' if f['last_cited'] else 'no'}"
           f"{'  expires' if f['expires_at'] else ''}")
@@ -199,15 +203,20 @@ def cmd_label(a):
 
 # --------------------------------------------------------------------------- classify
 
+def _class_name(model, set_path, prompt):
+    """classify's default output file for a set."""
+    return (f"class_{re.sub(r'[^A-Za-z0-9.-]+', '_', model)}"
+            f"_{os.path.splitext(os.path.basename(set_path))[0]}_r{rubric.RUBRIC_VERSION}"
+            f"{'_tier' if prompt == 'tier' else ''}.jsonl")
+
+
 def cmd_classify(a):
     keys = models.load_keys(a.secrets)
     models.check_ready(a.model, keys, a.endpoint)
     facts = _read_jsonl(_data(a.set))
     if not facts:
         raise SystemExit(f"no facts in {_data(a.set)}; run `sample` first")
-    out_path = _data(a.out or f"class_{re.sub(r'[^A-Za-z0-9.-]+', '_', a.model)}"
-                     f"_{os.path.splitext(os.path.basename(a.set))[0]}_r{rubric.RUBRIC_VERSION}"
-                     f"{'_tier' if a.prompt == 'tier' else ''}.jsonl")
+    out_path = _data(a.out or _class_name(a.model, a.set, a.prompt))
     # A row counts as done only for the same text: scratch databases reuse ids.
     done = {(r["id"], r.get("sha")) for r in _read_jsonl(out_path) if r.get("kind")}
     todo = [f for f in facts if (f["id"], text_sha(f["text"])) not in done]
@@ -367,18 +376,14 @@ def cmd_report(a):
               f"{_pct(len(ks), n):>6s} "
               f"{_pct(used, len(ks)):>6s} "
               f"{_pct(cited, len(ks)):>6s} {_pct(exp, len(ks)):>8s}")
-    for label, key in (("category", lambda i: facts[i]["category"]),
-                       ("month", lambda i: facts[i]["date"][:7])):
-        print(f"\ntier by {label}:")
-        print(f"  {'':14s} {'n':>5s} " + " ".join(f"{t:>9s}" for t in rubric.TIERS))
-        groups = defaultdict(Counter)
-        for i in ids:
-            groups[key(i)][_tier(cls[i])] += 1
-        order = sorted(groups) if label == "month" else \
-            sorted(groups, key=lambda g: -sum(groups[g].values()))
-        for g in order:
-            c, tot = groups[g], sum(groups[g].values())
-            print(f"  {g:14s} {tot:5d} " + " ".join(f"{_pct(c[t], tot):>9s}" for t in rubric.TIERS))
+    print("\ntier by month:")
+    print(f"  {'':14s} {'n':>5s} " + " ".join(f"{t:>9s}" for t in rubric.TIERS))
+    groups = defaultdict(Counter)
+    for i in ids:
+        groups[facts[i]["date"][:7]][_tier(cls[i])] += 1
+    for g in sorted(groups):
+        c, tot = groups[g], sum(groups[g].values())
+        print(f"  {g:14s} {tot:5d} " + " ".join(f"{_pct(c[t], tot):>9s}" for t in rubric.TIERS))
 
 
 def cmd_examples(a):
@@ -387,7 +392,7 @@ def cmd_examples(a):
     ids = [i for i in cls if cls[i]["kind"] == a.kind and i in facts]
     random.Random(a.seed).shuffle(ids)
     for i in ids[:a.n]:
-        print(f"[{i}] {facts[i]['date']} {facts[i]['category']}: {facts[i]['text']}")
+        print(f"[{i}] {facts[i]['date']}: {facts[i]['text']}")
         print(f"      -> {cls[i]['reason']}")
 
 
@@ -427,7 +432,7 @@ def main(argv=None):
     s.add_argument("runs", nargs="+", help="one or two classification files")
     s.add_argument("--labels", default=f"labels_r{rubric.RUBRIC_VERSION}.json")
 
-    s = sub.add_parser("report", help="counts by kind, category, month and use")
+    s = sub.add_parser("report", help="counts by kind, month and use")
     s.add_argument("run")
     s.add_argument("--set", default="facts.jsonl")
 
@@ -456,7 +461,37 @@ def main(argv=None):
     s.add_argument("--config", default="",
                    help="dawn.toml for the bench (default: the run dir's); a variant's settings")
 
+    s = sub.add_parser("candidates",
+                       help="counts and conversation ids per memory failure signal (no text)")
+    s.add_argument("--db", default=DEFAULT_DB, help="auth.db (opened read-only)")
+    s.add_argument("--user-id", type=int, default=1)
+    s.add_argument("--max-ids", type=int, default=100, help="ids printed per signal")
+
+    s = sub.add_parser("coverage", help="how many of run A's facts run B also stored (counts)")
+    s.add_argument("a_set", help="run A's facts, e.g. reextract_<label>_facts.jsonl")
+    s.add_argument("b_set", help="run B's facts")
+    s.add_argument("--a-class", default="",
+                   help="A's classification (default: classify's output name for a_set "
+                        "under --class-model)")
+    s.add_argument("--class-model", default="",
+                   help="the model that classified a_set (default: --model)")
+    s.add_argument("--tiers", default="semantic,pointer,episodic", help="A tiers to judge")
+    s.add_argument("--model", default="claude:claude-haiku-5-5")
+    s.add_argument("--endpoint", default="")
+    s.add_argument("--secrets", default=DEFAULT_SECRETS)
+    s.add_argument("--workers", type=int, default=4)
+    s.add_argument("--out", default="", help="verdict cache (default: from both set names)")
+
     a = p.parse_args(argv)
+    if a.cmd == "coverage":
+        a.a_class = a.a_class or _class_name(a.class_model or a.model, a.a_set, "kind")
+        if not os.path.exists(_data(a.a_class)):
+            raise SystemExit(f"classification file not found: {_data(a.a_class)}")
+        coverage.run(a, _by_id, _tier)
+        return
+    if a.cmd == "candidates":
+        candidates.run(a)
+        return
     if a.cmd == "reextract":
         reextract.run(a, _data)
         return

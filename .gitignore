@@ -75,4 +75,6 @@ llm_testing/quality/*.log
 
 # Memory audit: samples, labels and classifications of a user's stored facts
 llm_testing/memory_audit/data/
+# Memory eval: case drafts taken from the owner's own conversations
+llm_testing/memory_eval/data/
 quality_[0-9]*.json

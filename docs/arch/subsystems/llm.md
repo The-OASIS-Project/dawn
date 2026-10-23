@@ -79,7 +79,7 @@ A conversation's request is **append-only**: nothing already sent to the model i
 - **`tool_names` / `tool_schemas`** — the tool set to freeze (every registered tool except the research-only ones, independent of what is enabled right now: `llm_tools_freeze_names`) and a hash of each schema (`llm_tools_schema_hashes`).
 - **`memory_body`** — preferences + recent conversation summaries (`memory_build_context`, unframed).
 - **`context_head`** — the turn context's first line, `[system_time]` (`prompt_turn_head`; never empty, so the head is always that line).
-- **`focus_items`** — the ranked retrieved items as data (`build_focus_block`): source, item id, date, one-line text with DAWN's markers defused, score, and each held item's handle `[M<n>]` for the whole conversation (`focus_handles.c`; the date is when the item was learned, saved or happens). Retrieval embeds a short follow-up (six words or fewer) together with the previous question, so "what's that for?" finds what the conversation was about; keyword and date matching stay on the turn's own words. Which of them the turn sends is decided at the seam (below).
+- **`focus_items`** — the ranked retrieved items as data (`build_focus_block`): source, item id, date, one-line text with DAWN's markers defused, score, and each held item's handle `[M<n>]` for the whole conversation (`focus_handles.c`; the date is when the item was learned, saved or happens). Which of them the turn sends is decided at the seam (below).
 - **`context_tail`** — per-turn notes after the items (a spoken turn's transcription hint).
 - **`focus_panel`** — what the WebUI context panel is told about the retrieval, the builder's own type; the seam tells it each item's place once decided.
 

@@ -426,7 +426,7 @@ static void test_memory_search_keys_retired(void) {
    static const char *const retired[] = { "rrf_enabled",         "bm25_enabled",
                                           "memory_text_minimal", "entity_grounding_bonus",
                                           "use_query_scoring",   "entity_bonus",
-                                          "classifier_enabled" };
+                                          "classifier_enabled",  "category_threshold" };
    const int n_retired = (int)(sizeof(retired) / sizeof(retired[0]));
    TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
    FILE *fp = fopen(RT_PATH, "r");
@@ -443,7 +443,7 @@ static void test_memory_search_keys_retired(void) {
    fp = fopen(RT_PATH, "w");
    TEST_ASSERT_NOT_NULL(fp);
    fputs("[memory.embeddings]\nrrf_enabled = false\nbm25_enabled = true\n"
-         "memory_text_minimal = true\n"
+         "memory_text_minimal = true\ncategory_threshold = 0.25\n"
          "[memory.graph_retrieval]\nmax_facts_per_query = 25\n"
          "entity_grounding_bonus = 0.40\nuse_query_scoring = true\nentity_bonus = 0.00\n"
          "[memory.focus_injection]\nclassifier_enabled = false\n",

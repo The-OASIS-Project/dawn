@@ -744,10 +744,6 @@ typedef struct {
     * research synthesis).  Off-by-default for A/B; flip in
     * `config_defaults.c` after bench validation. */
    bool temporal_filter_enabled;
-   /* Category backfill — cosine similarity above which a fact is assigned to a
-    * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
-    * (mpnet, nomic, OpenAI) may need different values. */
-   float category_threshold;
    /* Graph retrieval: a candidate source for memory.search alongside hybrid
     * keyword + cosine search.  Resolves the entities the query names, fans
     * out one hop (facts about each, facts its relations came from), and
@@ -770,10 +766,9 @@ typedef struct {
     * below this value before they reach the LLM.  Closes the "I don't
     * remember" gate against marginal-cosine fabrication: at 0 the LLM
     * sees every cosine hit above the embeddings layer's 0.01 near-zero
-    * cut; at 0.30 (default) marginal hits are dropped silently.  Only applies
-    * to the non-category branch of memory_action_search() and the per-
-    * turn focus-injection fact adapter — category-filtered searches are
-    * SQL-LIKE grounded and need no floor.  0.30 was chosen live (see
+    * cut; at 0.30 (default) marginal hits are dropped silently.  Applies
+    * to memory_action_search() and the per-turn focus-injection fact
+    * adapter.  0.30 was chosen live (see
     * config_defaults.c); drop to 0.10-0.20 if your corpus shows over-
     * filtering, or push higher if weak fabrications persist.
     *

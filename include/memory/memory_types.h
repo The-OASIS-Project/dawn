@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -137,34 +138,46 @@ typedef struct {
    int user_id;
    char fact_text[MEMORY_FACT_TEXT_MAX];
    float confidence;
-   char source[MEMORY_SOURCE_MAX];     /* "explicit" or "inferred" */
-   char category[MEMORY_CATEGORY_MAX]; /* One of MEMORY_FACT_CATEGORIES (v34) */
+   char source[MEMORY_SOURCE_MAX]; /* "explicit" or "inferred" */
    time_t created_at;
    time_t last_accessed;
    int access_count;
    int64_t superseded_by; /* ID of fact that replaced this one, or 0 */
+   int64_t note_doc_id;   /* >0: a memory→note bridge gloss pointing at that note */
    int64_t expires_at;    /* v58: fact-lifecycle expiry, unix sec; 0 = durable (no expiry).
                            * Only populated by the by-id fetch (memory_db_fact_get); the
                            * keyword/list retrieval statements filter expired rows in SQL,
                            * so their results default this to 0. */
 } memory_fact_t;
 
-/* =============================================================================
- * Canonical fact category labels (v34).
+/**
+ * @brief The word that says how a fact was learned, as surfaces show it.
  *
- * Single source of truth referenced by:
- *   - extraction allowlist  (memory_extraction.c)
- *   - LLM tool enum_values  (memory_tool.c)
- *   - centroid seed table   (memory_embeddings.c)
+ * "told" (the user said it), "inferred", "imported", or "noted" for a
+ * memory→note gloss (whatever its source).  NULL for any other source: show
+ * nothing.  The returned string is static.
  *
- * NULL-terminated.  "general" is the always-present fallback when a fact does
- * not clearly fit any other category.  Add new labels at the end and bump
- * MEMORY_FACT_CATEGORY_COUNT — the schema accepts arbitrary TEXT, so old DBs
- * tolerate additions.
- * ============================================================================= */
-
-extern const char *const MEMORY_FACT_CATEGORIES[];
-extern const int MEMORY_FACT_CATEGORY_COUNT;
+ * @param fact The fact (its source and note_doc_id); NULL returns NULL
+ * @return A static word, or NULL
+ */
+static inline const char *memory_fact_kind_word(const memory_fact_t *fact) {
+   if (!fact) {
+      return NULL;
+   }
+   if (fact->note_doc_id > 0) {
+      return "noted";
+   }
+   if (strcmp(fact->source, "explicit") == 0) {
+      return "told";
+   }
+   if (strcmp(fact->source, "inferred") == 0) {
+      return "inferred";
+   }
+   if (strcmp(fact->source, "import") == 0) {
+      return "imported";
+   }
+   return NULL;
+}
 
 /* =============================================================================
  * Memory Preference Structure
@@ -243,30 +256,6 @@ typedef struct {
    int message_count;
    int duration_seconds;
 } memory_extraction_request_t;
-
-/* =============================================================================
- * Extraction Result Structures
- *
- * Used to parse the JSON response from the extraction LLM.
- * ============================================================================= */
-
-typedef struct {
-   char text[MEMORY_FACT_TEXT_MAX];
-   char source[MEMORY_SOURCE_MAX];
-   char category[MEMORY_CATEGORY_MAX]; /* Validated against MEMORY_FACT_CATEGORIES (v34) */
-   float confidence;
-} memory_extracted_fact_t;
-
-typedef struct {
-   char category[MEMORY_CATEGORY_MAX];
-   char value[MEMORY_PREF_VALUE_MAX];
-   float confidence;
-} memory_extracted_preference_t;
-
-typedef struct {
-   char old_fact[MEMORY_FACT_TEXT_MAX];
-   char new_fact[MEMORY_FACT_TEXT_MAX];
-} memory_extracted_correction_t;
 
 /* =============================================================================
  * Entity Graph Structures (Phase S4)

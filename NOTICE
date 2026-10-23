@@ -53,9 +53,9 @@ Changes from upstream Mem0:
   - All adapted Python is reimplemented in C against D.A.W.N.'s SQLite-backed
     storage layer; no Mem0 Python code is shipped or executed at runtime.
   - Lemmatization uses Snowball Porter2 (libstemmer) rather than spaCy.
-  - Extraction prompt preserves D.A.W.N.'s atomic-with-composite-exception
-    fact-shape philosophy and entity-graph contract; Mem0's "contextually
-    rich, not atomic" guidance is deliberately not adopted.
+  - Extraction prompt preserves D.A.W.N.'s entity-graph contract (every
+    fact carries a relation); Mem0's "contextually rich, not atomic"
+    guidance is deliberately not adopted.
   - Mem0's no-echo rule (filter out facts the assistant restated from user
     turns) is deliberately not adopted — bench-validated as over-aggressive
     against D.A.W.N.'s existing provenance + source-excerpt machinery, which

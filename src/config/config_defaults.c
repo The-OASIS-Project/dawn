@@ -373,7 +373,6 @@ void config_set_defaults(dawn_config_t *config) {
     * LoCoMo-blind (parser doesn't fire on cat-2 "what date" shape) but no
     * regression observed; complements (does not replace) soft temporal_weight. */
    config->memory.temporal_filter_enabled = true;
-   config->memory.category_threshold = 0.25f;
    /* Entity-graph candidates: the facts about the entities a query names.
     * max_facts_per_query bounds fan-out for high-degree entities. */
    config->memory.graph_retrieval.enabled = true;
@@ -402,9 +401,9 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.recovery_max_attempts = 2;
    config->memory.recovery_recurring_interval_seconds = 86400; /* daily */
 
-   /* Per-turn focus injection: automatically adds relevant memory, document,
-    * calendar and email content to each turn.  Opt-in. */
-   config->memory.focus_injection.enabled = false;
+   /* Per-turn focus injection: automatically adds relevant memory, document
+    * and calendar content to each turn. */
+   config->memory.focus_injection.enabled = true;
    /* Per-turn focus-block budget in BYTES (same unit as FOCUS_TEXT_MAX_BYTES).
     * 10240 ≈ two full document chunks plus several small fact/summary
     * candidates — the multi-source coexistence target. */

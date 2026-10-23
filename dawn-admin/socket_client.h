@@ -582,21 +582,6 @@ admin_resp_code_t admin_client_music_list(int fd, int limit, char *response, siz
 admin_resp_code_t admin_client_music_rescan(int fd, char *response, size_t resp_len);
 
 /**
- * @brief Trigger LLM recategorization of general facts for a user.
- *
- * @param fd Connected socket FD.
- * @param username Username whose facts to recategorize.
- * @param response Output buffer for daemon response text.
- * @param resp_len Size of response buffer.
- *
- * @return Response code from daemon.
- */
-admin_resp_code_t admin_client_memory_recategorize(int fd,
-                                                   const char *username,
-                                                   char *response,
-                                                   size_t resp_len);
-
-/**
  * @brief Backfill memory→note bridge glosses for a user's existing notes.
  *
  * One-time Phase 9 remediation; non-destructive and idempotent (skips notes

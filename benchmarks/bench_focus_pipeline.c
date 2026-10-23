@@ -526,11 +526,6 @@ int focus_handles_assign(struct session *session,
  * Signature mirrors the declaration in include/core/session_manager.h.  Same
  * shape as tests/test_prompt_builder_stub.c. */
 struct session;
-char *session_previous_question_dup(struct session *session) {
-   (void)session;
-   return NULL;
-}
-
 int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
@@ -797,6 +792,7 @@ static int validate_float_range(const char *field, float v, float lo, float hi) 
 static int parse_config(struct json_object *cfg) {
    focus_injection_config_t *fi = &g_config.memory.focus_injection;
    /* Production defaults; JSON overrides any field present. */
+   g_config.memory.enabled = true;
    fi->enabled = true;
    fi->top_k = json_get_int(cfg, "top_k", 8);
    fi->min_score = (float)json_get_double(cfg, "min_score", 0.4);

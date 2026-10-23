@@ -586,11 +586,6 @@ typedef struct {
    sqlite3_stmt *stmt_memory_summary_list_window_asc;
    sqlite3_stmt *stmt_memory_summary_list_window_desc;
 
-   /* Category-filtered fact queries (v34) */
-   sqlite3_stmt *stmt_memory_fact_update_category;
-   sqlite3_stmt *stmt_memory_fact_list_general;
-   sqlite3_stmt *stmt_memory_fact_count_general;
-
    /* Extraction tracking */
    sqlite3_stmt *stmt_conv_get_last_extracted;
    sqlite3_stmt *stmt_conv_set_last_extracted;

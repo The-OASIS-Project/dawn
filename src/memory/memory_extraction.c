@@ -44,6 +44,7 @@
 #include "core/iso8601.h"
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "core/user_tz.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
@@ -251,32 +252,31 @@ struct json_object *memory_extraction_parse_json(const char *response) {
 #include "webui/webui_server.h"
 #endif
 
-/* =============================================================================
- * Helpers: Category validation + ISO-8601 date parsing
- * ============================================================================= */
-
-/* Validate against canonical taxonomy from memory_db.c; fall back to "general"
- * on miss.  We log unknowns at INFO so taxonomy drift is visible without spam. */
-static const char *validate_fact_category(const char *raw) {
-   if (!raw || !*raw)
-      return "general";
-   for (int i = 0; i < MEMORY_FACT_CATEGORY_COUNT; i++) {
-      if (strcmp(raw, MEMORY_FACT_CATEGORIES[i]) == 0) {
-         return MEMORY_FACT_CATEGORIES[i];
-      }
-   }
-   OLOG_INFO("memory_extraction: unknown category '%s', mapping to 'general'", raw);
-   return "general";
-}
-
-
 /* Phase 0 removed the fact_map array, FACT_MAP_MAX cap, and
  * `find_fact_for_relation` helper: the new prompt schema (v47) pairs
  * relations inside their parent fact's `relations[]` array, so the parser
  * knows `fact_id` directly at relation-insert time.  Post-hoc text-
  * matching is no longer needed and the 128-entry cap no longer bounds
- * relation linkage coverage.  See dawn/docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md
- * §"C-side changes required". */
+ * relation linkage coverage. */
+
+/* An extracted fact seen again (@p existing as stored, NULL when unreadable):
+ * raise its confidence and record this conversation as teaching it too.  Said
+ * again word for word as stated (@p now_told), a fact not yet told becomes told. */
+static void reinforce_fact(int user_id,
+                           int64_t fact_id,
+                           const memory_fact_t *existing,
+                           bool now_told,
+                           const memory_provenance_t *prov) {
+   /* Unreadable: as if it were at the default 0.7. */
+   const float new_conf = existing ? existing->confidence + 0.1f : 0.8f;
+   memory_db_fact_update_confidence(fact_id, user_id, new_conf > 1.0f ? 1.0f : new_conf);
+   if (now_told && existing && strcmp(existing->source, "explicit") != 0)
+      memory_db_fact_mark_explicit(fact_id, user_id);
+   if (prov && prov->conv_id > 0) {
+      memory_db_fact_provenance_extend(fact_id, user_id, prov->conv_id, prov->msg_id_start,
+                                       prov->msg_id_end);
+   }
+}
 
 /* =============================================================================
  * Helper: Phase 2 auto-merge gate sweep
@@ -583,7 +583,7 @@ static void process_extraction_response(int user_id,
    /* Process facts — Phase 0 paired-output schema: each fact has a `subject`
     * field (required, resolves to an entity FK on the fact row) and a
     * nested `relations[]` array (processed inline with fact_id known, no
-    * post-hoc text matching).  See dawn/docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md. */
+    * post-hoc text matching). */
 
    /* Phase 0 counters: track how often the subject-entity FK is left NULL
     * so we can quantify the gap before tightening to NOT NULL in a follow-
@@ -612,13 +612,15 @@ static void process_extraction_response(int user_id,
 
          /* Optional fields with defaults */
          const char *source = "inferred";
-         const char *category = "general";
          float confidence = 0.7f;
-         struct json_object *src_obj, *cat_obj, *conf_obj;
-         if (json_object_object_get_ex(fact, "source", &src_obj))
-            source = json_object_get_string(src_obj);
-         if (json_object_object_get_ex(fact, "category", &cat_obj))
-            category = validate_fact_category(json_object_get_string(cat_obj));
+         struct json_object *src_obj, *conf_obj;
+         /* Only the two values extraction may claim; anything else the model
+          * writes is stored as inferred, so the word surfaces show is true. */
+         if (json_object_object_get_ex(fact, "source", &src_obj)) {
+            const char *claimed = json_object_get_string(src_obj);
+            if (claimed && strcmp(claimed, "explicit") == 0)
+               source = "explicit";
+         }
          if (json_object_object_get_ex(fact, "confidence", &conf_obj))
             confidence = (float)json_object_get_double(conf_obj);
 
@@ -643,83 +645,60 @@ static void process_extraction_response(int user_id,
           * defensive-check probe below can distinguish paraphrase-merge
           * vs fresh-create as the leak source for the "vanished" race. */
          const char *fact_id_origin = "unset";
-         bool gate_used_embedding = false;
-         if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available()) {
-            float vec[MAX_EMBEDDING_DIMS];
-            int dims = 0;
-            if (memory_embeddings_embed(text, vec, &dims) == SUCCESS && dims > 0) {
-               gate_used_embedding = true;
-               int64_t matched_id = 0;
-               float score = 0.0f;
-               memory_embeddings_nearest_fact(user_id, vec, dims,
-                                              g_config.memory.paraphrase_dedup_threshold,
-                                              &matched_id, &score);
-               if (matched_id > 0) {
-                  /* Paraphrase hit — bump existing fact's confidence +
-                   * extend provenance.  No fact_map population (Phase 0
-                   * pairs relations with fact_id directly; no text match
-                   * needed). */
-                  memory_fact_t existing = { 0 };
-                  if (memory_db_fact_get(matched_id, user_id, &existing) == MEMORY_DB_SUCCESS) {
-                     float new_conf = existing.confidence + 0.1f;
-                     if (new_conf > 1.0f)
-                        new_conf = 1.0f;
-                     memory_db_fact_update_confidence(matched_id, user_id, new_conf);
-                  } else {
-                     memory_db_fact_update_confidence(matched_id, user_id, 0.8f);
-                  }
-                  if (prov && prov->conv_id > 0) {
-                     memory_db_fact_provenance_extend(matched_id, user_id, prov->conv_id,
-                                                      prov->msg_id_start, prov->msg_id_end);
-                  }
-                  OLOG_INFO("memory_extraction: paraphrase merged into fact_id=%lld "
-                            "score=%.3f: %s",
-                            (long long)matched_id, (double)score, text);
-                  fact_id = matched_id;
-                  fact_id_origin = "paraphrase_match";
-               } else {
-                  /* No paraphrase — create new fact + store precomputed vector. */
-                  memory_db_fact_create_at(user_id, text, confidence, source, category, prov,
-                                           conv_created_at, &fact_id);
-                  OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
-                  if (fact_id > 0) {
-                     memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
-                     fact_id_origin = "paraphrase_create";
-                  }
-               }
-            }
-            /* Embed call failed — fall through to LIKE fallback below. */
-         }
-
-         if (!gate_used_embedding) {
-            /* Fallback: LIKE-based similar-fact check + create.  Used when
-             * embeddings are unavailable, dedup is disabled, or the embed
-             * call failed.  Identical reinforcement semantics. */
-            memory_fact_t similar[3];
-            int similar_count = 0;
-            memory_db_fact_find_similar(user_id, text, similar, 3, &similar_count);
-            if (similar_count == 0) {
-               memory_db_fact_create_at(user_id, text, confidence, source, category, prov,
-                                        conv_created_at, &fact_id);
-               OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
-               if (fact_id > 0 && memory_embeddings_available()) {
-                  memory_embeddings_embed_and_store(user_id, fact_id, text);
-               }
-               if (fact_id > 0)
-                  fact_id_origin = "like_create";
+         float vec[MAX_EMBEDDING_DIMS];
+         int dims = 0;
+         int64_t repeat_id = 0;
+         memory_fact_t seen = { 0 };
+         if (memory_db_fact_find_exact(user_id, text, &repeat_id) == MEMORY_DB_SUCCESS) {
+            /* Stored before word for word: reinforce it, as a paraphrase hit is. */
+            const bool read = memory_db_fact_get(repeat_id, user_id, &seen) == MEMORY_DB_SUCCESS;
+            reinforce_fact(user_id, repeat_id, read ? &seen : NULL, strcmp(source, "explicit") == 0,
+                           prov);
+            OLOG_INFO("memory_extraction: repeat of fact_id=%lld: %s", (long long)repeat_id, text);
+            fact_id = repeat_id;
+            fact_id_origin = "hash_match";
+         } else if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available() &&
+                    memory_embeddings_embed(text, vec, &dims) == SUCCESS && dims > 0) {
+            int64_t matched_id = 0;
+            float score = 0.0f;
+            memory_embeddings_nearest_fact(user_id, vec, dims,
+                                           g_config.memory.paraphrase_dedup_threshold, &matched_id,
+                                           &score);
+            /* An expired fact the prune hasn't removed yet is no match. */
+            const bool read = matched_id > 0 &&
+                              memory_db_fact_get(matched_id, user_id, &seen) == MEMORY_DB_SUCCESS;
+            if (read && memory_db_fact_expiry_hidden(seen.expires_at))
+               matched_id = 0;
+            if (matched_id > 0) {
+               /* Paraphrase hit — bump existing fact's confidence +
+                * extend provenance.  No fact_map population: relations are
+                * paired with their fact, so no text lookup. */
+               reinforce_fact(user_id, matched_id, read ? &seen : NULL, false, prov);
+               OLOG_INFO("memory_extraction: paraphrase merged into fact_id=%lld "
+                         "score=%.3f: %s",
+                         (long long)matched_id, (double)score, text);
+               fact_id = matched_id;
+               fact_id_origin = "paraphrase_match";
             } else {
-               float new_conf = similar[0].confidence + 0.1f;
-               if (new_conf > 1.0f)
-                  new_conf = 1.0f;
-               memory_db_fact_update_confidence(similar[0].id, user_id, new_conf);
-               /* This conversation taught it too (a forget of the other keeps it). */
-               if (prov && prov->conv_id > 0) {
-                  memory_db_fact_provenance_extend(similar[0].id, user_id, prov->conv_id,
-                                                   prov->msg_id_start, prov->msg_id_end);
+               /* No paraphrase — create new fact + store precomputed vector. */
+               memory_db_fact_create_at(user_id, text, confidence, source, prov, conv_created_at,
+                                        &fact_id);
+               OLOG_INFO("memory_extraction: stored fact: %s", text);
+               if (fact_id > 0) {
+                  memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
+                  fact_id_origin = "paraphrase_create";
                }
-               fact_id = similar[0].id;
-               fact_id_origin = "like_match";
             }
+         } else {
+            /* Dedup off, or no embedding: store it.  A failed embed is covered
+             * by the embedding backfill. */
+            memory_db_fact_create_at(user_id, text, confidence, source, prov, conv_created_at,
+                                     &fact_id);
+            OLOG_INFO("memory_extraction: stored fact: %s", text);
+            if (fact_id > 0 && memory_embeddings_available())
+               memory_embeddings_embed_and_store(user_id, fact_id, text);
+            if (fact_id > 0)
+               fact_id_origin = "create";
          }
 
          if (fact_id <= 0)
@@ -727,7 +706,7 @@ static void process_extraction_response(int user_id,
 
          /* Fact expiry (v58, C3) — AI-decided.  Apply whenever the extraction LLM
           * attached an expires_at to THIS fact, for BOTH fresh creates AND
-          * paraphrase/LIKE merges.  Adopting on merge is deliberate: a transient
+          * repeat/paraphrase merges.  Adopting on merge is deliberate: a transient
           * fact often arrives first via the 'remember' tool (or a prior session)
           * and is then re-stated, so the merge path is exactly where a transient
           * fact gets reinforced — skipping it would leave it immortal (the failure
@@ -922,7 +901,7 @@ static void process_extraction_response(int user_id,
                 * extraction by a concurrent worker).
                 *
                 * Phase 3.1 diagnostic: log fact_id_origin (paraphrase_match /
-                * paraphrase_create / like_match / like_create / unset) and
+                * paraphrase_create / hash_match / create / unset) and
                 * fact_text so the analysis script can post-correlate against
                 * the live DB (existence + superseded_by) at log-parse time.
                 * Origin tag narrows the leak source: if every vanish is
@@ -1044,8 +1023,8 @@ static void process_extraction_response(int user_id,
             if (similar_count > 0) {
                /* Create new fact and supersede old one */
                int64_t new_id = 0;
-               memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", NULL, prov,
-                                        conv_created_at, &new_id);
+               memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", prov, conv_created_at,
+                                        &new_id);
                if (new_id > 0) {
                   /* The old fact is an older value the correction replaced
                    * (back if the correction is forgotten); what it stated stays
@@ -1267,20 +1246,12 @@ static void *extraction_thread(void *arg) {
     * confusion axis) off the prompt when the feature is dormant. */
    const char *expiry_block = g_config.memory.expire_enabled ? MEMORY_EXTRACTION_EXPIRY_BLOCK : "";
 
-   /* Build extraction prompt.  + 100 covers snprintf overhead consuming the
-    * four "%s" format specifiers plus a small safety margin; expand if more
-    * placeholders are added to MEMORY_EXTRACTION_PROMPT_TEMPLATE. */
-   size_t prompt_size = strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
-                        strlen(ctx->conversation_json) + strlen(existing_profile) +
-                        strlen(expiry_block) + 100;
-   char *prompt = malloc(prompt_size);
+   char *prompt = memory_extraction_build_prompt(anchor_line, ctx->conversation_json,
+                                                 existing_profile, expiry_block);
    if (!prompt) {
       OLOG_ERROR("memory_extraction: failed to allocate prompt");
       goto cleanup;
    }
-
-   snprintf(prompt, prompt_size, MEMORY_EXTRACTION_PROMPT_TEMPLATE, anchor_line,
-            ctx->conversation_json, existing_profile, expiry_block);
 
    /* Call LLM for extraction using configured provider/model */
    char *response = NULL;
@@ -1767,6 +1738,49 @@ int extraction_run_queued(int user_id,
 
 size_t memory_extraction_get_template_size_chars(void) {
    return strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE);
+}
+
+/* Set only by the benchmark harness (DAWN_EXTRACTION_PROMPT_FILE); the daemon
+ * never sets it, so it always extracts with the compiled template. */
+static const char *const *s_template_pieces;
+
+void memory_extraction_set_template_pieces(
+    const char *const pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES]) {
+   s_template_pieces = pieces;
+}
+
+char *memory_extraction_build_prompt(const char *anchor,
+                                     const char *conversation,
+                                     const char *profile,
+                                     const char *expiry) {
+   const char *const values[MEMORY_EXTRACTION_TEMPLATE_PIECES - 1] = { anchor, conversation,
+                                                                       profile, expiry };
+   size_t values_len = 0;
+   for (int i = 0; i < MEMORY_EXTRACTION_TEMPLATE_PIECES - 1; i++)
+      values_len += strlen(values[i]);
+
+   if (s_template_pieces) {
+      /* A benchmark's prompt file: its text goes in as text, never as a format. */
+      size_t total = values_len + 1;
+      for (int i = 0; i < MEMORY_EXTRACTION_TEMPLATE_PIECES; i++)
+         total += strlen(s_template_pieces[i]);
+      strbuf_t sb;
+      strbuf_init_with_max(&sb, total, total);
+      for (int i = 0; i < MEMORY_EXTRACTION_TEMPLATE_PIECES - 1; i++) {
+         strbuf_append(&sb, s_template_pieces[i]);
+         strbuf_append(&sb, values[i]);
+      }
+      strbuf_append(&sb, s_template_pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES - 1]);
+      return strbuf_steal(&sb);
+   }
+
+   /* The template's %s and %% shrink in the output, so its length covers them. */
+   size_t size = strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE) + values_len + 1;
+   char *prompt = malloc(size);
+   if (prompt)
+      snprintf(prompt, size, MEMORY_EXTRACTION_PROMPT_TEMPLATE, anchor, conversation, profile,
+               expiry);
+   return prompt;
 }
 
 int memory_extraction_resolve_config(llm_resolved_config_t *cfg,

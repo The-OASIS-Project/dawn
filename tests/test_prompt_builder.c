@@ -299,55 +299,6 @@ static void test_focus_asks_for_top_k_only(void) {
    composed_prompt_free(&cp);
 }
 
-extern const char *pb_previous_question;
-
-/* A short turn retrieves on its own words first ("what do you know about
- * Dawn?" is a new subject, not the last one).  Only when they find nothing
- * does it try again with the previous question embedded in front; the words
- * retrieval matches stay the turn's own.  A long turn never retries. */
-static void test_focus_followup_retries_with_previous_question(void) {
-   session_t s;
-   pb_session_init(&s, 7);
-   set_dispatch(&s);
-   pb_embed_state()->available = true;
-   pb_embed_state()->dims = 4;
-   pb_previous_question = "what's my garage code?";
-   composed_prompt_t cp;
-
-   /* Found on its own words: one retrieval, the turn's own embedding. */
-   pb_focus_state()->seeded_count = 1;
-   pb_focus_state()->seeded[0] = (pb_seed_candidate_t){ "memory_entity", "Dawn", "entity:1" };
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build(5, 0, 0, "What do you know about Dawn?", &cp));
-   composed_prompt_free(&cp);
-   TEST_ASSERT_EQUAL_INT(1, pb_focus_state()->call_count);
-   TEST_ASSERT_EQUAL_INT(1, pb_embed_state()->embed_call_count);
-   TEST_ASSERT_EQUAL_STRING("What do you know about Dawn?", pb_embed_state()->last_text);
-
-   /* Nothing on its own words: a second retrieval with both questions. */
-   pb_focus_state()->seeded_count = 0;
-   pb_focus_state()->call_count = 0;
-   pb_embed_state()->embed_call_count = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, build(5, 0, 0, "what's that for?", &cp));
-   composed_prompt_free(&cp);
-   TEST_ASSERT_EQUAL_INT(2, pb_focus_state()->call_count);
-   TEST_ASSERT_EQUAL_INT(2, pb_embed_state()->embed_call_count);
-   TEST_ASSERT_EQUAL_STRING("what's my garage code?\nwhat's that for?",
-                            pb_embed_state()->last_text);
-   TEST_ASSERT_EQUAL_STRING("what's that for?", pb_focus_state()->last_query_text);
-
-   /* A long turn finding nothing doesn't retry. */
-   pb_focus_state()->call_count = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         build(5, 0, 0, "what is the weather going to be in town tomorrow", &cp));
-   composed_prompt_free(&cp);
-   TEST_ASSERT_EQUAL_INT(1, pb_focus_state()->call_count);
-   TEST_ASSERT_EQUAL_STRING("what is the weather going to be in town tomorrow",
-                            pb_embed_state()->last_text);
-   pb_previous_question = NULL;
-   set_dispatch(NULL);
-   pb_session_destroy(&s);
-}
-
 static void test_focus_passes_user_id_and_text(void) {
    pb_embed_state()->available = true;
    pb_embed_state()->dims = 4;
@@ -596,6 +547,29 @@ static void test_panel_not_told_when_disabled(void) {
    composed_prompt_free(&cp);
 }
 
+/* The identity block: a user who gave only an address still gets it; one
+ * who gave neither gets no block. */
+static void test_identity_address_without_a_real_name(void) {
+   char *t = prompt_identity_text("", "sir", "");
+   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nThe user prefers to be addressed as sir.\n", t);
+   free(t);
+   TEST_ASSERT_NULL(prompt_identity_text("", "", "Ace"));
+   t = prompt_identity_text("Pat Doe", "boss", "Pat\n pat \nPD");
+   TEST_ASSERT_EQUAL_STRING(
+       "\n\n## User Identity\nYou are speaking with Pat Doe. They prefer to be "
+       "addressed as boss. They may also be referred to as: Pat, PD. Use "
+       "this information to recognize when memory facts or extracted "
+       "entities refer to them.\n",
+       t);
+   free(t);
+   t = prompt_identity_text("Pat Doe", "", " \n");
+   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nYou are speaking with Pat Doe. Use this "
+                            "information to recognize when memory facts or extracted entities "
+                            "refer to them.\n",
+                            t);
+   free(t);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_focus_disabled_short_circuits);
@@ -605,7 +579,6 @@ int main(void) {
    RUN_TEST(test_focus_item_text_is_one_defused_line);
    RUN_TEST(test_focus_handles_by_session_or_turn);
    RUN_TEST(test_focus_asks_for_top_k_only);
-   RUN_TEST(test_focus_followup_retries_with_previous_question);
    RUN_TEST(test_focus_passes_user_id_and_text);
    RUN_TEST(test_focus_zero_candidates_keeps_the_panel);
    RUN_TEST(test_focus_embedding_unavailable_passes_null);
@@ -613,6 +586,7 @@ int main(void) {
    RUN_TEST(test_focus_compose_failure_leaves_nothing);
    RUN_TEST(test_focus_filter_rejection_no_items);
    RUN_TEST(test_cross_turn_no_content_leak);
+   RUN_TEST(test_identity_address_without_a_real_name);
    RUN_TEST(test_failed_then_successful_refresh_no_carry);
    RUN_TEST(test_disabled_after_enabled_returns_nothing);
    RUN_TEST(test_memory_cycle_1000x_reusing_the_prompt);

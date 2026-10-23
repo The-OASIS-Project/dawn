@@ -55,7 +55,6 @@ char *memory_action_restore(int user_id, const char *query);
  * @param user_id Owner of the memory store
  * @param keywords Search query (NULL or empty returns an error string)
  * @param since_ts If > 0, restricts to items created on/after this timestamp
- * @param category Optional fact category filter (NULL = all)
  * @param as_of_ts > 0: add the named entities' relations valid at that time
  * @param include_historical Add the named entities' relations, ended ones too
  * @param with_source Append verbatim source excerpts for the top facts
@@ -68,7 +67,6 @@ char *memory_action_restore(int user_id, const char *query);
 char *memory_action_search(int user_id,
                            const char *keywords,
                            time_t since_ts,
-                           const char *category,
                            int64_t as_of_ts,
                            bool include_historical,
                            bool with_source,

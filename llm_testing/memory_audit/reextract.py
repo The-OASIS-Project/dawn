@@ -18,6 +18,7 @@
 
 import json
 import os
+import pathlib
 import re
 import select
 import sqlite3
@@ -29,13 +30,15 @@ from .storage import private_open
 
 READY_TIMEOUT_S = 60
 EXTRACT_TIMEOUT_S = 660  # the bench gives up on one extraction at 600 s
+USAGE_RE = re.compile(rb"LLM cache: provider=\S+ model=\S+ kind=\S+ .*? prompt=(\d+) "
+                      rb".* output=(\d+)")
 
 
 def pick_conversations(db, user_id, n, since, min_messages):
     """Up to n recent conversations, taken in turn from each origin (webui,
     voice, messaging...) so one surface doesn't fill the set.  Private and
     background-job conversations are left out."""
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = sqlite3.connect(pathlib.Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     rows = con.execute(
         "SELECT id, origin FROM conversations WHERE user_id = ? AND is_private = 0 "
         "AND job_status IS NULL AND message_count >= ? AND created_at >= ? "
@@ -69,12 +72,14 @@ class Bench:
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                      bufsize=0, preexec_fn=lambda: os.umask(0o077))
         self.buf = b""
+        self.usage = Counter()  # model tokens, from the bench's numeric "LLM cache:" lines
         self.ready = self.reply(READY_TIMEOUT_S)
         if self.ready.get("status") != "ready":
             raise SystemExit(f"bench did not start: {self.ready.get('message', '?')}")
 
     def reply(self, timeout):
-        """The next status line; the bench's log lines are dropped unread."""
+        """The next status line.  The bench's log lines are dropped unread, but for
+        the token counts on its per-call "LLM cache:" lines (numbers only)."""
         deadline = time.monotonic() + timeout
         while True:
             while b"\n" in self.buf:
@@ -84,6 +89,11 @@ class Bench:
                         return json.loads(line)
                     except ValueError:  # a reply we can't read must not desync the stream
                         return {"status": "error", "message": "unreadable reply"}
+                m = USAGE_RE.search(line)
+                if m:
+                    self.usage["calls"] += 1
+                    self.usage["in"] += int(m.group(1))
+                    self.usage["out"] += int(m.group(2))
             left = deadline - time.monotonic()
             if left <= 0:
                 return {"status": "error", "message": "timed out"}
@@ -111,15 +121,16 @@ class Bench:
 def scratch_facts(db_path):
     """Live facts from the saved scratch DB.  Extraction stores each fact with
     its conversation's time, so created_at is already the conversation's."""
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = sqlite3.connect(pathlib.Path(db_path).resolve().as_uri() + "?mode=ro",
+                          uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, fact_text, category, source, created_at, confidence, expires_at, "
+        "SELECT id, fact_text, source, created_at, confidence, expires_at, "
         "source_conversation_id FROM memory_facts WHERE superseded_by IS NULL "
         "ORDER BY id").fetchall()
     con.close()
-    return [{"id": r["id"], "text": r["fact_text"], "category": r["category"],
-             "source": r["source"], "created_at": r["created_at"],
+    return [{"id": r["id"], "text": r["fact_text"], "source": r["source"],
+             "created_at": r["created_at"],
              "date": time.strftime("%Y-%m-%d", time.gmtime(r["created_at"])),
              "confidence": r["confidence"], "expires_at": r["expires_at"],
              "access_count": 0, "last_cited": None,
@@ -204,6 +215,8 @@ def run(a, data):
     per = Counter(x["conversation"] for x in facts)
     print(f"done in {time.time() - t0:.0f}s: " +
           ", ".join(f"{k} {v}" for k, v in outcome.items()))
+    print(f"model calls {bench.usage['calls']}: tokens in {bench.usage['in']} "
+          f"out {bench.usage['out']}")
     print(f"{len(facts)} live facts from {len(per)} conversations "
           f"({len(facts) / max(1, outcome['extracted']):.1f} per extracted conversation) "
           f"-> {facts_out}")

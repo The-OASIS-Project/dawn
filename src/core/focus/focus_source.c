@@ -281,6 +281,9 @@ int focus_compose_ex(int user_id,
       return FAILURE;
    }
    int pool_count = 0;
+   /* Memory turned off: its items (the INTERNAL tier) are not retrieved, on a
+    * turn or by recall; documents and calendar still are. */
+   const bool memory_on = g_config.memory.enabled;
 
    for (int s = 0; s < n_sources; s++) {
       const focus_source_adapter_t *a = s_registry[s];
@@ -288,6 +291,8 @@ int focus_compose_ex(int user_id,
          continue;
 
       if (a->requires_embedding && query_embedding == NULL)
+         continue;
+      if (a->source_type == FOCUS_SOURCE_INTERNAL && !memory_on)
          continue;
 
       /* Resolve the per-adapter source weight ONCE.  Constant for every
@@ -380,6 +385,9 @@ int focus_compose_ex(int user_id,
          pool[pool_count] = *c;
          pool[pool_count].source_id = a->source_id;
          pool[pool_count].source_type = a->source_type;
+         /* Text others may have written (an invitation, a document) says so. */
+         if (a->source_type != FOCUS_SOURCE_INTERNAL)
+            pool[pool_count].kind = "outside";
          pool_weights[pool_count] = adapter_weight;
          /* Adapter buffer no longer owns text/item_id; zero so a stray
           * later free won't double-free. */

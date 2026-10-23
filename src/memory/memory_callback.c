@@ -527,15 +527,23 @@ static void append_tool_citation_hint(strbuf_t *sb) {
                   " (comma-separated, no spaces).\n");
 }
 
-/* category (v34): when non-NULL/non-empty, pre-filters fact-ID set by exact category
- *   match before hybrid scoring.  Bypasses time_range path (categories layer above
- *   recency for now — combinable in a follow-up if useful).
- * as_of_ts (v33): timestamp for relation validity in entity recall (0 = now).
+/* One fact as search and recent list it: "- [ID:12] (told) text", the word
+ * saying how it was learned when there is one. */
+static void append_fact_line(strbuf_t *sb, const memory_fact_t *fact) {
+   const char *kind = memory_fact_kind_word(fact);
+   if (kind) {
+      strbuf_appendf(sb, "- " SURFACED_ID_FMT " (%s) %s\n", (long long)fact->id, kind,
+                     fact->fact_text);
+   } else {
+      strbuf_appendf(sb, "- " SURFACED_ID_FMT " %s\n", (long long)fact->id, fact->fact_text);
+   }
+}
+
+/* as_of_ts (v33): timestamp for relation validity in entity recall (0 = now).
  * include_historical (v33): bypass relation validity filter entirely. */
 char *memory_action_search(int user_id,
                            const char *keywords,
                            time_t since_ts,
-                           const char *category,
                            int64_t as_of_ts,
                            bool include_historical,
                            bool with_source,
@@ -559,16 +567,9 @@ char *memory_action_search(int user_id,
    /* Search facts — keyword search first, then hybrid if embeddings available */
    memory_fact_t facts[10];
    int fact_count = 0;
-   /* Category hard-filtering removed (was: pre-filter facts by exact category via the
-    * now-deleted memory_db_fact_search_by_category).  Extraction scatters one semantic cluster
-    * across multiple categories, so an LLM-guessed `category` systematically hid
-    * relevant facts (e.g. a single task list filed under general + professional +
-    * practical at once).  Always use the unified full-corpus path —
-    * `memory_search_execute` does hybrid + entity-graph + Phase 2 Step 1
-    * query-aware scoring + merge + score floor in one call, shared with the bench
-    * harness to prevent drift, and it strictly subsumes the old branch.
-    * `category` is still accepted but no longer narrows search results. */
-   (void)category;
+   /* `memory_search_execute` does hybrid + entity-graph + query-aware scoring +
+    * merge + score floor in one call, shared with the bench harness to prevent
+    * drift. */
    float scores[10];
    memory_search_execute(user_id, keywords, since_ts, facts, scores, 10, &fact_count);
 
@@ -669,8 +670,7 @@ char *memory_action_search(int user_id,
 
       for (int i = 0; i < fact_count; i++) {
          /* The date stays in fact_text when extraction included it. */
-         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
-                        facts[i].fact_text);
+         append_fact_line(&sb, &facts[i]);
          memory_citation_record_tool_fact_current(facts[i].id);
          if (with_source && fact_conv[i] > 0 && src_count < SOURCE_TOP_FACTS) {
             src_conv[src_count] = fact_conv[i];
@@ -938,8 +938,7 @@ static char *memory_action_remember_single(int user_id,
     * was learned in (checked to still exist and be this user's, atomically with
     * the write), or keep it waiting for one. */
    int64_t fact_id = 0;
-   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, NULL,
-                                         &fact_id);
+   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
       return strdup(TOOL_RESULT_ERROR_MARK "Failed to store the fact. Please try again.");
@@ -1350,8 +1349,7 @@ char *memory_action_recent(int user_id,
       }
 
       for (int i = 0; i < fact_count; i++) {
-         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
-                        facts[i].fact_text);
+         append_fact_line(&sb, &facts[i]);
          memory_citation_record_tool_fact_current(facts[i].id);
          if (with_source && fact_conv[i] > 0 && src_count < SOURCE_TOP_FACTS) {
             src_conv[src_count] = fact_conv[i];
@@ -1630,8 +1628,7 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
 
    /* Soft-link by default (entity-merge Phase 1, design §14): set
     * canonical_id on the source row + audit-row insert.  The link is
-    * reversible — operators promote to permanent merge via
-    * `dawn-admin memory entity consolidate` (Phase 3). */
+    * reversible (unlink in the Memory panel, `dawn-admin memory entity split`). */
    int64_t link_id = 0;
    int rc = memory_db_entity_alias_link(user_id, src_entity.id, tgt_entity.id, "soft",
                                         "llm-tool-action",
@@ -1643,8 +1640,8 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
          snprintf(result, 768,
                   "Linked '%s' as a soft alias of '%s' (link id %lld). "
                   "The '%s' entity is preserved and will be resolved to '%s' on lookup. "
-                  "Use 'split' to undo, or 'dawn-admin memory entity consolidate' to make it "
-                  "permanent.",
+                  "The user can undo it in the Memory panel (unlink) or with 'dawn-admin memory "
+                  "entity split'.",
                   source_name, target_name, (long long)link_id, source_name, target_name);
       return result ? result : strdup("Entities soft-linked.");
    } else if (rc == MEMORY_DB_NOT_FOUND) {
@@ -1774,11 +1771,10 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
              value ? value : "(null)", user_id);
 
    if (strcmp(actionName, "search") == 0) {
-      /* Extract base keywords and optional time_range / category / as_of /
+      /* Extract base keywords and optional time_range / as_of /
        * include_historical / with_source from encoded value. */
       char keywords[512] = "";
       time_t since_ts = 0;
-      char category[MEMORY_CATEGORY_MAX] = "";
       int64_t as_of_ts = 0;
       bool include_historical = false;
       bool with_source = false;
@@ -1793,20 +1789,6 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
                since_ts = time(NULL) - seconds;
                if (since_ts < 0)
                   since_ts = 0;
-            }
-         }
-
-         /* category param: validate against canonical taxonomy; ignore unknowns. */
-         char raw_cat[MEMORY_CATEGORY_MAX] = "";
-         if (tool_param_extract_custom(value, "category", raw_cat, sizeof(raw_cat)) && raw_cat[0]) {
-            for (int i = 0; i < MEMORY_FACT_CATEGORY_COUNT; i++) {
-               if (strcmp(raw_cat, MEMORY_FACT_CATEGORIES[i]) == 0) {
-                  safe_strscpy(category, raw_cat);
-                  break;
-               }
-            }
-            if (!category[0]) {
-               OLOG_INFO("memory_callback: ignoring unknown category '%s'", raw_cat);
             }
          }
 
@@ -1847,9 +1829,9 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       /* source_budget from dawn.toml [memory] source_budget_chars; 0 falls
        * back to MEMORY_SOURCE_BUDGET_CHARS inside the action.  Bench harness
        * invokes memory_action_search() directly with its own override. */
-      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts,
-                                  category[0] ? category : NULL, as_of_ts, include_historical,
-                                  with_source, g_config.memory.source_budget_chars);
+      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts, as_of_ts,
+                                  include_historical, with_source,
+                                  g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "remember") == 0) {
       char *gate = memory_private_confirm_gate(user_id, value);
       if (gate != NULL) {

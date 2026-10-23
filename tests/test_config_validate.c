@@ -55,7 +55,6 @@ static void set_valid_defaults(void) {
    s_config.llm.compact_hard_threshold = 0.85f;
    s_config.llm.max_tokens = 4096;
    s_config.memory.temporal_weight = 0.2f;
-   s_config.memory.category_threshold = 0.25f;
    /* paraphrase_dedup_threshold validator added in commit 6aa2e32 (May 2026) —
     * test helper updated to provide a valid default in the same range [0.5,1.0]. */
    s_config.memory.paraphrase_dedup_threshold = 0.92f;

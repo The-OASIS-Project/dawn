@@ -252,10 +252,10 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
-                           "category, created_at, normalized_hash, "
+                           "created_at, normalized_hash, "
                            "source_conversation_id, source_msg_id_start, source_msg_id_end, "
                            "origin_unsourced) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL)",
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?7 IS NULL)",
                            -1, &s_db.stmt_memory_fact_create, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
@@ -267,7 +267,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category, expires_at FROM memory_facts "
+       "access_count, superseded_by, note_doc_id, expires_at FROM memory_facts "
        "WHERE id = ? AND user_id = ?",
        -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK)
@@ -321,7 +321,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, note_doc_id FROM memory_facts "
        "WHERE user_id = ?1 AND superseded_by IS NULL "
        "  AND (expires_at IS NULL OR expires_at >= ?4) "
        "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
@@ -334,7 +334,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, note_doc_id FROM memory_facts "
        "WHERE user_id = ?1 AND superseded_by IS NULL "
        "  AND (expires_at IS NULL OR expires_at >= ?4) "
        "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
@@ -345,7 +345,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, note_doc_id FROM memory_facts "
        "WHERE user_id = ?1 AND superseded_by IS NULL "
        "  AND (expires_at IS NULL OR expires_at >= ?4) "
        "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
@@ -484,8 +484,7 @@ void tearDown(void) {
 void test_fact_create_with_source_roundtrip(void) {
    memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
    int64_t id = 0;
-   int rc = memory_db_fact_create(1, "User likes coffee", 0.9f, "inferred", "interests", &prov,
-                                  &id);
+   int rc = memory_db_fact_create(1, "User likes coffee", 0.9f, "inferred", &prov, &id);
    TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_GREATER_THAN(0, id);
 
@@ -499,7 +498,7 @@ void test_fact_create_with_source_roundtrip(void) {
 
 void test_fact_create_null_provenance_returns_not_found(void) {
    int64_t id = 0;
-   int rc = memory_db_fact_create(1, "No prov fact", 0.8f, "inferred", "general", NULL, &id);
+   int rc = memory_db_fact_create(1, "No prov fact", 0.8f, "inferred", NULL, &id);
    TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_GREATER_THAN(0, id);
 
@@ -510,7 +509,7 @@ void test_fact_create_null_provenance_returns_not_found(void) {
 
 void test_null_bind_produces_sql_null_not_zero(void) {
    int64_t id = 0;
-   memory_db_fact_create(1, "Null bind test", 0.7f, "inferred", "general", NULL, &id);
+   memory_db_fact_create(1, "Null bind test", 0.7f, "inferred", NULL, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    /* Verify column is SQL NULL, not integer 0 */
@@ -526,7 +525,7 @@ void test_null_bind_produces_sql_null_not_zero(void) {
 void test_get_source_wrong_user_returns_not_found(void) {
    memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
    int64_t id = 0;
-   memory_db_fact_create(1, "Alice's fact", 0.9f, "inferred", "personal", &prov, &id);
+   memory_db_fact_create(1, "Alice's fact", 0.9f, "inferred", &prov, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    /* User 2 should not see user 1's source */
@@ -539,7 +538,7 @@ void test_get_source_private_conv_returns_not_found(void) {
    /* Conv 20 is marked is_private=1 in DDL */
    memory_provenance_t prov = { .conv_id = 20, .msg_id_start = 200, .msg_id_end = 200 };
    int64_t id = 0;
-   memory_db_fact_create(1, "Private source fact", 0.9f, "inferred", "personal", &prov, &id);
+   memory_db_fact_create(1, "Private source fact", 0.9f, "inferred", &prov, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    int64_t conv_id = 0, start = 0, end = 0;
@@ -801,7 +800,7 @@ void test_summaries_get_sources_n_chunked_succeeds(void) {
 void test_facts_get_sources_n_chunked_succeeds(void) {
    memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
    int64_t fid = 0;
-   memory_db_fact_create(1, "chunked fact", 0.9f, "inferred", "general", &prov, &fid);
+   memory_db_fact_create(1, "chunked fact", 0.9f, "inferred", &prov, &fid);
    TEST_ASSERT_GREATER_THAN(0, fid);
    int64_t ids[64];
    int64_t conv[64] = { 0 }, start[64] = { 0 }, end[64] = { 0 };
@@ -828,7 +827,7 @@ void test_facts_get_sources_n_chunked_succeeds(void) {
 void test_provenance_extend_adopts_when_no_prior(void) {
    /* No-prov fact (NULL prov on create). */
    int64_t id = 0;
-   memory_db_fact_create(1, "User likes hiking", 0.8f, "inferred", "interests", NULL, &id);
+   memory_db_fact_create(1, "User likes hiking", 0.8f, "inferred", NULL, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    int rc = memory_db_fact_provenance_extend(id, 1, /* new_conv */ 10, /* start */ 100,
@@ -845,7 +844,7 @@ void test_provenance_extend_adopts_when_no_prior(void) {
 void test_provenance_extend_same_conv_widens_range(void) {
    memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 105 };
    int64_t id = 0;
-   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", "personal", &prov, &id);
+   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", &prov, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    /* Newer mention in same conv at messages 200-210 — widen to 100..210. */
@@ -870,7 +869,7 @@ void test_provenance_extend_same_conv_widens_range(void) {
 void test_provenance_extend_newer_conv_replaces(void) {
    memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 105 };
    int64_t id = 0;
-   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", "personal", &prov, &id);
+   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", &prov, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    /* New mention in conv 25 (later) — replace the whole triple. */
@@ -887,8 +886,7 @@ void test_provenance_extend_newer_conv_replaces(void) {
 void test_provenance_extend_older_conv_is_noop(void) {
    memory_provenance_t prov = { .conv_id = 25, .msg_id_start = 500, .msg_id_end = 502 };
    int64_t id = 0;
-   memory_db_fact_create(1, "User works at Netsurion", 0.9f, "explicit", "professional", &prov,
-                         &id);
+   memory_db_fact_create(1, "User works at Netsurion", 0.9f, "explicit", &prov, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    /* Older conv 10 — should NOT overwrite the more-recent conv 25. */
@@ -905,7 +903,7 @@ void test_provenance_extend_older_conv_is_noop(void) {
 void test_provenance_extend_wrong_user_returns_not_found(void) {
    memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 105 };
    int64_t id = 0;
-   memory_db_fact_create(1, "User likes coffee", 0.9f, "explicit", "preferences", &prov, &id);
+   memory_db_fact_create(1, "User likes coffee", 0.9f, "explicit", &prov, &id);
    TEST_ASSERT_GREATER_THAN(0, id);
 
    /* Wrong user must fail without modifying the row. */
@@ -931,10 +929,9 @@ void test_provenance_extend_missing_fact_returns_not_found(void) {
 
 void test_cleanup_meta_facts_dry_run_counts_without_delete(void) {
    int64_t id1 = 0, id2 = 0, id3 = 0;
-   memory_db_fact_create(1, "User asked about gold prices", 0.7f, "inferred", "general", NULL,
-                         &id1);
-   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", "personal", NULL, &id2);
-   memory_db_fact_create(1, "User inquired about lights", 0.7f, "inferred", "general", NULL, &id3);
+   memory_db_fact_create(1, "User asked about gold prices", 0.7f, "inferred", NULL, &id1);
+   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", NULL, &id2);
+   memory_db_fact_create(1, "User inquired about lights", 0.7f, "inferred", NULL, &id3);
 
    const char *patterns[] = { "User asked%", "User inquired%" };
    int matched = -1;
@@ -951,14 +948,11 @@ void test_cleanup_meta_facts_dry_run_counts_without_delete(void) {
 
 void test_cleanup_meta_facts_commit_deletes_matches_only(void) {
    int64_t id_meta1 = 0, id_meta2 = 0, id_keep = 0, id_other_user = 0;
-   memory_db_fact_create(1, "User asked about weather", 0.7f, "inferred", "general", NULL,
-                         &id_meta1);
-   memory_db_fact_create(1, "User requested weather info", 0.7f, "inferred", "general", NULL,
-                         &id_meta2);
-   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", "personal", NULL, &id_keep);
+   memory_db_fact_create(1, "User asked about weather", 0.7f, "inferred", NULL, &id_meta1);
+   memory_db_fact_create(1, "User requested weather info", 0.7f, "inferred", NULL, &id_meta2);
+   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", NULL, &id_keep);
    /* Scope check — user 2's matching row must NOT be touched. */
-   memory_db_fact_create(2, "User asked about something", 0.7f, "inferred", "general", NULL,
-                         &id_other_user);
+   memory_db_fact_create(2, "User asked about something", 0.7f, "inferred", NULL, &id_other_user);
 
    const char *patterns[] = { "User asked%", "User requested%" };
    int deleted = -1;
@@ -978,7 +972,7 @@ void test_cleanup_meta_facts_commit_deletes_matches_only(void) {
 
 void test_cleanup_meta_facts_no_match_returns_zero(void) {
    int64_t id = 0;
-   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", "personal", NULL, &id);
+   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", NULL, &id);
 
    const char *patterns[] = { "Nonexistent prefix%" };
    int matched = -1;
@@ -1001,9 +995,8 @@ void test_expiry_guard_hides_and_restores(void) {
    g_config.memory.expire_enabled = false; /* known starting state */
 
    int64_t durable_id = 0, transient_id = 0;
-   memory_db_fact_create(1, "Jon lives in Atlanta", 0.9f, "explicit", "personal", NULL,
-                         &durable_id);
-   memory_db_fact_create(1, "Forecast for 2026-04-12: clear", 0.9f, "explicit", "general", NULL,
+   memory_db_fact_create(1, "Jon lives in Atlanta", 0.9f, "explicit", NULL, &durable_id);
+   memory_db_fact_create(1, "Forecast for 2026-04-12: clear", 0.9f, "explicit", NULL,
                          &transient_id);
    TEST_ASSERT_TRUE(durable_id > 0 && transient_id > 0);
 
@@ -1023,7 +1016,7 @@ void test_expiry_guard_hides_and_restores(void) {
    TEST_ASSERT_EQUAL(1, n);
    TEST_ASSERT_EQUAL(durable_id, facts[0].id);
 
-   /* By-id fetch stays un-guarded and carries expires_at (col 10). */
+   /* By-id fetch stays un-guarded and carries expires_at (after the shared columns). */
    memory_fact_t got = { 0 };
    TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(transient_id, 1, &got));
    TEST_ASSERT_EQUAL_INT64(past, got.expires_at);
@@ -1050,12 +1043,9 @@ void test_fact_list_sort_orders(void) {
    int64_t id_old = 0, id_mid = 0, id_new = 0;
    /* confidence order (0.9 > 0.7 > 0.5) is deliberately different from age order
     * so DEFAULT (confidence) and CREATED_* produce distinct sequences. */
-   memory_db_fact_create_at(1, "oldest fact", 0.5f, "explicit", "general", NULL, now - 300,
-                            &id_old);
-   memory_db_fact_create_at(1, "middle fact", 0.9f, "explicit", "general", NULL, now - 200,
-                            &id_mid);
-   memory_db_fact_create_at(1, "newest fact", 0.7f, "explicit", "general", NULL, now - 100,
-                            &id_new);
+   memory_db_fact_create_at(1, "oldest fact", 0.5f, "explicit", NULL, now - 300, &id_old);
+   memory_db_fact_create_at(1, "middle fact", 0.9f, "explicit", NULL, now - 200, &id_mid);
+   memory_db_fact_create_at(1, "newest fact", 0.7f, "explicit", NULL, now - 100, &id_new);
    TEST_ASSERT_TRUE(id_old > 0 && id_mid > 0 && id_new > 0);
 
    memory_fact_t facts[8];
@@ -1094,11 +1084,9 @@ void test_fact_list_sort_orders(void) {
  * leaves durable + future-expiry facts intact. */
 void test_prune_expired_removes_past_only(void) {
    int64_t durable_id = 0, transient_id = 0, future_id = 0;
-   memory_db_fact_create(1, "Jon works at Acme", 0.9f, "explicit", "professional", NULL,
-                         &durable_id);
-   memory_db_fact_create(1, "Event on 2026-01-01", 0.9f, "explicit", "general", NULL,
-                         &transient_id);
-   memory_db_fact_create(1, "Launch on 2030-01-01", 0.9f, "explicit", "general", NULL, &future_id);
+   memory_db_fact_create(1, "Jon works at Acme", 0.9f, "explicit", NULL, &durable_id);
+   memory_db_fact_create(1, "Event on 2026-01-01", 0.9f, "explicit", NULL, &transient_id);
+   memory_db_fact_create(1, "Launch on 2030-01-01", 0.9f, "explicit", NULL, &future_id);
 
    memory_db_fact_set_expires_at(transient_id, 1, (int64_t)time(NULL) - 86400);
    memory_db_fact_set_expires_at(future_id, 1, (int64_t)time(NULL) + 30 * 86400);
@@ -1129,6 +1117,65 @@ static void q_exec(const char *sql) {
    char *err = NULL;
    TEST_ASSERT_EQUAL_INT_MESSAGE(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, &err),
                                  err ? err : sql);
+}
+
+/* An exact repeat is the same text, case aside; never a note gloss, another
+ * user's fact, or the same words in another order (same hash). */
+void test_find_exact_repeat(void) {
+   int64_t id = 0, found = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_create(1, "User owns a red bike", 0.7f, "explicit", NULL, &id));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_find_exact(1, "User owns a red bike", &found));
+   TEST_ASSERT_EQUAL_INT64(id, found);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_find_exact(1, "user OWNS a Red bike", &found));
+   TEST_ASSERT_EQUAL_INT64(id, found);
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(1, "User owns a blue bike", &found));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(1, "A red bike owns user", &found));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(2, "User owns a red bike", &found));
+
+   int64_t gloss = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_create(1, "Gate code note", 0.7f, "explicit", NULL, &gloss));
+   char sql[128];
+   snprintf(sql, sizeof(sql), "UPDATE memory_facts SET note_doc_id = 5 WHERE id = %lld",
+            (long long)gloss);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_find_exact(1, "Gate code note", &found));
+   TEST_ASSERT_EQUAL_INT64(0, found);
+
+   /* An expired fact the prune hasn't removed yet is not a repeat. */
+   g_config.memory.expire_enabled = true;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_set_expires_at(id, 1, (int64_t)time(NULL) - 86400));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(1, "User owns a red bike", &found));
+   g_config.memory.expire_enabled = false;
+}
+
+/* An inferred fact the user then states becomes told; a note gloss stays noted. */
+void test_mark_explicit(void) {
+   int64_t id = 0, gloss = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_create(1, "User plays cello", 0.7f, "inferred", NULL, &id));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_mark_explicit(id, 1));
+   memory_fact_t f = { 0 };
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id, 1, &f));
+   TEST_ASSERT_EQUAL_STRING("explicit", f.source);
+
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_create(1, "Cello note", 0.7f, "inferred", NULL, &gloss));
+   char sql[128];
+   snprintf(sql, sizeof(sql), "UPDATE memory_facts SET note_doc_id = 5 WHERE id = %lld",
+            (long long)gloss);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_mark_explicit(gloss, 1));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
+   TEST_ASSERT_EQUAL_STRING("inferred", f.source);
 }
 
 /* Forgetting is of what was learned so far: the forgotten conversation, or
@@ -1178,14 +1225,13 @@ void test_forget_keeps_facts_taught_elsewhere(void) {
    memory_provenance_t p10 = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
    memory_provenance_t p25 = { .conv_id = 25, .msg_id_start = 0, .msg_id_end = 0 };
    int64_t shared = 0, only25 = 0;
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
-                         memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit",
-                                               "personal", &p10, &shared));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(1, "User lives in Atlanta", 0.9f,
+                                                                  "explicit", &p10, &shared));
    /* Re-mentioned in 25: the fact's own source now points at 25. */
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_provenance_extend(shared, 1, 25, 0, 0));
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
                          memory_db_fact_create(1, "User has a doctor visit Friday", 0.8f,
-                                               "explicit", "health", &p25, &only25));
+                                               "explicit", &p25, &only25));
 
    char sql[512];
    q_exec("INSERT INTO memory_entities (id, user_id, name) VALUES (500, 1, 'Dr Orphan');"
@@ -1269,8 +1315,8 @@ void test_preference_sources_follow_the_value(void) {
 void test_forget_is_user_scoped(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t mine = 0, theirs = 0;
-   memory_db_fact_create(1, "mine", 0.9f, "explicit", "general", &p25, &mine);
-   memory_db_fact_create(2, "theirs", 0.9f, "explicit", "general", &p25, &theirs);
+   memory_db_fact_create(1, "mine", 0.9f, "explicit", &p25, &mine);
+   memory_db_fact_create(2, "theirs", 0.9f, "explicit", &p25, &theirs);
    const int64_t set[] = { 25 };
    memory_conv_learned_t d;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
@@ -1286,7 +1332,7 @@ void test_forget_is_user_scoped(void) {
 void test_forget_keeps_relation_taught_elsewhere(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t f = 0;
-   memory_db_fact_create(1, "User works at Acme", 0.9f, "explicit", "work", &p25, &f);
+   memory_db_fact_create(1, "User works at Acme", 0.9f, "explicit", &p25, &f);
    char sql[256];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, fact_id, "
@@ -1312,9 +1358,9 @@ void test_forget_keeps_relation_taught_elsewhere(void) {
 void test_forget_takes_superseded_chain(void) {
    memory_provenance_t p10 = { .conv_id = 10 }, p25 = { .conv_id = 25 };
    int64_t boston = 0, austin = 0, denver = 0;
-   memory_db_fact_create(1, "User lives in Boston", 0.9f, "explicit", "personal", &p10, &boston);
-   memory_db_fact_create(1, "User lives in Austin", 0.9f, "explicit", "personal", &p10, &austin);
-   memory_db_fact_create(1, "User lives in Denver", 0.9f, "explicit", "personal", &p25, &denver);
+   memory_db_fact_create(1, "User lives in Boston", 0.9f, "explicit", &p10, &boston);
+   memory_db_fact_create(1, "User lives in Austin", 0.9f, "explicit", &p10, &austin);
+   memory_db_fact_create(1, "User lives in Denver", 0.9f, "explicit", &p25, &denver);
    char sql[256];
    snprintf(sql, sizeof(sql),
             "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;"
@@ -1337,8 +1383,8 @@ void test_forget_takes_superseded_chain(void) {
 void test_forget_keeps_what_a_merge_brought(void) {
    memory_provenance_t p10 = { .conv_id = 10 }, p25 = { .conv_id = 25 };
    int64_t dup = 0, keep = 0;
-   memory_db_fact_create(1, "User plays cello", 0.9f, "explicit", "interests", &p10, &dup);
-   memory_db_fact_create(1, "User plays the cello", 0.9f, "explicit", "interests", &p25, &keep);
+   memory_db_fact_create(1, "User plays cello", 0.9f, "explicit", &p10, &dup);
+   memory_db_fact_create(1, "User plays the cello", 0.9f, "explicit", &p25, &keep);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
    const int64_t set[] = { 25 };
    memory_conv_learned_t n, d;
@@ -1354,8 +1400,8 @@ void test_forget_keeps_what_a_merge_brought(void) {
 void test_merge_carries_unsourced_origin(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t said = 0, keep = 0;
-   memory_db_fact_create(1, "User is vegetarian", 0.9f, "explicit", "health", NULL, &said);
-   memory_db_fact_create(1, "User eats no meat", 0.9f, "explicit", "health", &p25, &keep);
+   memory_db_fact_create(1, "User is vegetarian", 0.9f, "explicit", NULL, &said);
+   memory_db_fact_create(1, "User eats no meat", 0.9f, "explicit", &p25, &keep);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(said, keep, 1));
    char sql[128];
    snprintf(sql, sizeof(sql), "SELECT origin_unsourced FROM memory_facts WHERE id = %lld",
@@ -1370,8 +1416,8 @@ void test_merge_carries_unsourced_origin(void) {
 void test_merge_with_a_deleted_source_conversation(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t old = 0, keep = 0;
-   memory_db_fact_create(1, "User has a dog", 0.9f, "explicit", "personal", &p25, &old);
-   memory_db_fact_create(1, "User owns a dog", 0.9f, "explicit", "personal", &p25, &keep);
+   memory_db_fact_create(1, "User has a dog", 0.9f, "explicit", &p25, &old);
+   memory_db_fact_create(1, "User owns a dog", 0.9f, "explicit", &p25, &keep);
    char sql[160];
    snprintf(sql, sizeof(sql),
             "DELETE FROM memory_fact_sources WHERE fact_id = %lld;"
@@ -1391,10 +1437,10 @@ void test_merge_with_a_deleted_source_conversation(void) {
  * at nothing and come back as current. */
 void test_forget_takes_what_was_merged_into_it(void) {
    int64_t keep = 0, dup1 = 0, dup2 = 0, other = 0;
-   memory_db_fact_create(1, "User drinks oat milk", 0.9f, "explicit", "health", NULL, &keep);
-   memory_db_fact_create(1, "User likes oat milk", 0.9f, "explicit", "health", NULL, &dup1);
-   memory_db_fact_create(1, "User prefers oat milk", 0.9f, "explicit", "health", NULL, &dup2);
-   memory_db_fact_create(1, "User lives near a park", 0.9f, "explicit", "personal", NULL, &other);
+   memory_db_fact_create(1, "User drinks oat milk", 0.9f, "explicit", NULL, &keep);
+   memory_db_fact_create(1, "User likes oat milk", 0.9f, "explicit", NULL, &dup1);
+   memory_db_fact_create(1, "User prefers oat milk", 0.9f, "explicit", NULL, &dup2);
+   memory_db_fact_create(1, "User lives near a park", 0.9f, "explicit", NULL, &other);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup1, keep, 1));
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup2, keep, 1));
    memory_forget_result_t fr;
@@ -1409,8 +1455,8 @@ void test_forget_takes_what_was_merged_into_it(void) {
 void test_forget_records_the_fact(void) {
    memory_provenance_t p10 = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
    int64_t keep = 0, dup = 0;
-   memory_db_fact_create(1, "User is a Trek fan", 0.9f, "explicit", "interests", &p10, &keep);
-   memory_db_fact_create(1, "User loves Star Trek", 0.9f, "explicit", "interests", &p10, &dup);
+   memory_db_fact_create(1, "User is a Trek fan", 0.9f, "explicit", &p10, &keep);
+   memory_db_fact_create(1, "User loves Star Trek", 0.9f, "explicit", &p10, &dup);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
    q_exec("INSERT INTO messages (id, conversation_id, role, content, kind) "
           "VALUES (300, 10, 'user', 'ctx', 'turn_context');");
@@ -1428,7 +1474,7 @@ void test_forget_records_the_fact(void) {
  * and it is old enough that no voice session saving later still moves it. */
 void test_forgotten_sweep(void) {
    int64_t f = 0;
-   memory_db_fact_create(1, "User flies to Denver", 0.9f, "explicit", "general", NULL, &f);
+   memory_db_fact_create(1, "User flies to Denver", 0.9f, "explicit", NULL, &f);
    memory_db_fact_forget(f, 1, NULL);
    const int64_t later = (int64_t)time(NULL) + 1;
    TEST_ASSERT_EQUAL_INT(0, memory_forgotten_sweep(later));
@@ -1456,7 +1502,7 @@ void test_forget_writes_floors(void) {
    TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT extract_floor_msg_id FROM conversations "
                                     "WHERE id = 30"));
    int64_t f = 0;
-   memory_db_fact_create(1, "User sails on weekends", 0.9f, "explicit", "interests", NULL, &f);
+   memory_db_fact_create(1, "User sails on weekends", 0.9f, "explicit", NULL, &f);
    memory_db_fact_forget(f, 1, NULL);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_delete_user_memories(1));
    TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_forgotten"));
@@ -1476,8 +1522,8 @@ extern char g_stub_llm_prompt[8192];
  * says so.  A check that can't be made drops what it asked about. */
 void test_forgotten_load_and_screen(void) {
    int64_t a = 0, b = 0;
-   memory_db_fact_create(1, "User is a Trek fan", 0.9f, "explicit", "interests", NULL, &a);
-   memory_db_fact_create(1, "User hates olives", 0.9f, "explicit", "preferences", NULL, &b);
+   memory_db_fact_create(1, "User is a Trek fan", 0.9f, "explicit", NULL, &a);
+   memory_db_fact_create(1, "User hates olives", 0.9f, "explicit", NULL, &b);
    memory_db_fact_forget(a, 1, NULL);
    q_exec("INSERT INTO messages (id, conversation_id, role, content) VALUES "
           "(9001, 10, 'user', 'x');");
@@ -1597,8 +1643,8 @@ extern int64_t g_stub_nearest;
  * it, so what says it isn't dropped; with no copy left, it is. */
 void test_forgotten_still_known(void) {
    int64_t f = 0;
-   memory_db_fact_create(1, "User's favorite colors are blue and orange", 0.9f, "explicit",
-                         "preferences", NULL, &f);
+   memory_db_fact_create(1, "User's favorite colors are blue and orange", 0.9f, "explicit", NULL,
+                         &f);
    memory_db_fact_forget(f, 1, NULL);
    const char *returned = "{\"facts\":[{\"text\":\"User's favorite colors are blue and orange\"}]}";
    g_stub_embeddings = true;
@@ -1621,7 +1667,7 @@ void test_forgotten_still_known(void) {
 /* However many facts an extraction returns, one question checks them all. */
 void test_forgotten_checks_them_all(void) {
    int64_t id = 0;
-   memory_db_fact_create(1, "User owns a gadget", 0.9f, "explicit", "general", NULL, &id);
+   memory_db_fact_create(1, "User owns a gadget", 0.9f, "explicit", NULL, &id);
    memory_db_fact_forget(id, 1, NULL);
    memory_forgotten_list_t list;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 100, 0, &list));
@@ -1653,8 +1699,8 @@ void test_forgotten_checks_them_all(void) {
  * checked; forgets from before the session began aren't moved. */
 void test_forgotten_waits_for_voice_save(void) {
    int64_t old = 0, f = 0;
-   memory_db_fact_create(1, "User owns a canoe", 0.9f, "explicit", "general", NULL, &old);
-   memory_db_fact_create(1, "User's gate code is 4321", 0.9f, "explicit", "practical", NULL, &f);
+   memory_db_fact_create(1, "User owns a canoe", 0.9f, "explicit", NULL, &old);
+   memory_db_fact_create(1, "User's gate code is 4321", 0.9f, "explicit", NULL, &f);
    memory_db_fact_forget(old, 1, NULL);
    memory_db_fact_forget(f, 1, NULL);
    q_exec("UPDATE memory_forgotten SET created_at = 1000 WHERE fact_text LIKE '%canoe%';");
@@ -1679,9 +1725,9 @@ void test_forgotten_waits_for_voice_save(void) {
 /* A merge chain (A into B, B into K) goes with K, at any depth. */
 void test_forget_takes_a_merge_chain(void) {
    int64_t k = 0, b = 0, a = 0;
-   memory_db_fact_create(1, "User runs on Sundays", 0.9f, "explicit", "health", NULL, &k);
-   memory_db_fact_create(1, "User jogs on Sundays", 0.9f, "explicit", "health", NULL, &b);
-   memory_db_fact_create(1, "User goes running Sundays", 0.9f, "explicit", "health", NULL, &a);
+   memory_db_fact_create(1, "User runs on Sundays", 0.9f, "explicit", NULL, &k);
+   memory_db_fact_create(1, "User jogs on Sundays", 0.9f, "explicit", NULL, &b);
+   memory_db_fact_create(1, "User goes running Sundays", 0.9f, "explicit", NULL, &a);
    char sql[200];
    snprintf(sql, sizeof(sql),
             "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;"
@@ -1698,12 +1744,9 @@ void test_forget_takes_a_merge_chain(void) {
  * left with no fact, they would keep bringing it back.  Another fact's stay. */
 void test_forget_takes_the_facts_relations(void) {
    int64_t keep = 0, dup = 0, other = 0;
-   memory_db_fact_create(1, "User's work email is a@example.com", 0.9f, "explicit", "personal",
-                         NULL, &keep);
-   memory_db_fact_create(1, "User uses a@example.com for work", 0.9f, "explicit", "personal", NULL,
-                         &dup);
-   memory_db_fact_create(1, "User's home email is b@example.com", 0.9f, "explicit", "personal",
-                         NULL, &other);
+   memory_db_fact_create(1, "User's work email is a@example.com", 0.9f, "explicit", NULL, &keep);
+   memory_db_fact_create(1, "User uses a@example.com for work", 0.9f, "explicit", NULL, &dup);
+   memory_db_fact_create(1, "User's home email is b@example.com", 0.9f, "explicit", NULL, &other);
    char sql[600];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -1725,9 +1768,8 @@ void test_forget_takes_the_facts_relations(void) {
  * is pruned, so forgetting the kept fact still reaches it. */
 void test_prune_moves_relations_to_the_kept_fact(void) {
    int64_t keep = 0, dup = 0;
-   memory_db_fact_create(1, "User's phone is 555-0100", 0.9f, "explicit", "personal", NULL, &keep);
-   memory_db_fact_create(1, "User can be reached at 555-0100", 0.9f, "explicit", "personal", NULL,
-                         &dup);
+   memory_db_fact_create(1, "User's phone is 555-0100", 0.9f, "explicit", NULL, &keep);
+   memory_db_fact_create(1, "User can be reached at 555-0100", 0.9f, "explicit", NULL, &dup);
    char sql[400];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -1750,9 +1792,8 @@ void test_prune_moves_relations_to_the_kept_fact(void) {
 /* Forgetting a fact takes an entity only it named; one something else names stays. */
 void test_forget_takes_an_entity_only_it_named(void) {
    int64_t f = 0, g = 0;
-   memory_db_fact_create(1, "User is married to Jane Roe", 0.9f, "explicit", "relationships", NULL,
-                         &f);
-   memory_db_fact_create(1, "User works with Sam Poe", 0.9f, "explicit", "work", NULL, &g);
+   memory_db_fact_create(1, "User is married to Jane Roe", 0.9f, "explicit", NULL, &f);
+   memory_db_fact_create(1, "User works with Sam Poe", 0.9f, "explicit", NULL, &g);
    char sql[700];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES "
@@ -1772,8 +1813,7 @@ void test_forget_takes_an_entity_only_it_named(void) {
 /* Every entity a forgotten fact named goes, however many (no cap). */
 void test_forget_takes_every_entity_it_named(void) {
    int64_t f = 0;
-   memory_db_fact_create(1, "User met twenty people at the meetup", 0.9f, "explicit", "personal",
-                         NULL, &f);
+   memory_db_fact_create(1, "User met twenty people at the meetup", 0.9f, "explicit", NULL, &f);
    q_exec(
        "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES (1000, 1, 'Me', 1);");
    char sql[300];
@@ -1796,10 +1836,8 @@ void test_forget_takes_every_entity_it_named(void) {
 void test_forget_keeps_a_relation_taught_elsewhere(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t f = 0, g = 0;
-   memory_db_fact_create(1, "User is married to Jane Roe", 0.9f, "explicit", "relationships", &p25,
-                         &f);
-   memory_db_fact_create(1, "User's sister is Ann Roe", 0.9f, "explicit", "relationships", &p25,
-                         &g);
+   memory_db_fact_create(1, "User is married to Jane Roe", 0.9f, "explicit", &p25, &f);
+   memory_db_fact_create(1, "User's sister is Ann Roe", 0.9f, "explicit", &p25, &g);
    char sql[700];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES "
@@ -1820,7 +1858,7 @@ void test_forget_keeps_a_relation_taught_elsewhere(void) {
    TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 992"));
    q_exec("DELETE FROM memory_relations WHERE id = 993;");
    int64_t h = 0;
-   memory_db_fact_create(1, "User likes tea", 0.9f, "explicit", "preferences", NULL, &h);
+   memory_db_fact_create(1, "User likes tea", 0.9f, "explicit", NULL, &h);
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
             "object_value, fact_id) VALUES (995, 1, 990, 'likes', 'tea', %lld);",
@@ -1835,8 +1873,8 @@ void test_forget_keeps_a_relation_taught_elsewhere(void) {
 void test_forget_takes_a_merged_duplicates_relation_from_both(void) {
    memory_provenance_t p25 = { .conv_id = 25 }, p30 = { .conv_id = 30 };
    int64_t keep = 0, dup = 0;
-   memory_db_fact_create(1, "User's phone is 555-0101", 0.9f, "explicit", "personal", &p30, &keep);
-   memory_db_fact_create(1, "User's number is 555-0101", 0.9f, "explicit", "personal", &p25, &dup);
+   memory_db_fact_create(1, "User's phone is 555-0101", 0.9f, "explicit", &p30, &keep);
+   memory_db_fact_create(1, "User's number is 555-0101", 0.9f, "explicit", &p25, &dup);
    char sql[500];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -1853,9 +1891,9 @@ void test_forget_takes_a_merged_duplicates_relation_from_both(void) {
 /* A merge and a replacement are told apart, and recall hides both alike. */
 void test_merged_and_replaced_hide_alike(void) {
    int64_t keep = 0, dup = 0, old = 0;
-   memory_db_fact_create(1, "User drives a blue car", 0.9f, "explicit", "personal", NULL, &keep);
-   memory_db_fact_create(1, "User's car is blue", 0.9f, "explicit", "personal", NULL, &dup);
-   memory_db_fact_create(1, "User drives a red car", 0.9f, "explicit", "personal", NULL, &old);
+   memory_db_fact_create(1, "User drives a blue car", 0.9f, "explicit", NULL, &keep);
+   memory_db_fact_create(1, "User's car is blue", 0.9f, "explicit", NULL, &dup);
+   memory_db_fact_create(1, "User drives a red car", 0.9f, "explicit", NULL, &old);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_replace(old, keep, 1));
    char sql[160];
@@ -1884,11 +1922,9 @@ void test_merged_and_replaced_hide_alike(void) {
  * its merged duplicates go with it. */
 void test_forget_brings_back_what_it_replaced(void) {
    int64_t old = 0, fresh = 0, dup = 0;
-   memory_db_fact_create(1, "User is married to Alex", 0.9f, "explicit", "relationships", NULL,
-                         &old);
-   memory_db_fact_create(1, "User is married to Sam", 0.9f, "explicit", "relationships", NULL,
-                         &fresh);
-   memory_db_fact_create(1, "User's spouse is Sam", 0.9f, "explicit", "relationships", NULL, &dup);
+   memory_db_fact_create(1, "User is married to Alex", 0.9f, "explicit", NULL, &old);
+   memory_db_fact_create(1, "User is married to Sam", 0.9f, "explicit", NULL, &fresh);
+   memory_db_fact_create(1, "User's spouse is Sam", 0.9f, "explicit", NULL, &dup);
    char sql[700];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -1923,9 +1959,8 @@ void test_forget_brings_back_what_it_replaced(void) {
 void test_forget_reopens_what_it_closed(void) {
    int64_t both = 0, fresh = 0;
    memory_db_fact_create(1, "User's phone is 555-0100 and email a@example.com", 0.9f, "explicit",
-                         "personal", NULL, &both);
-   memory_db_fact_create(1, "User's new phone is 555-0199", 0.9f, "explicit", "personal", NULL,
-                         &fresh);
+                         NULL, &both);
+   memory_db_fact_create(1, "User's new phone is 555-0199", 0.9f, "explicit", NULL, &fresh);
    char sql[500];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -1943,9 +1978,8 @@ void test_forget_reopens_what_it_closed(void) {
  * newer fact reopens it. */
 void test_replace_closes_and_forget_reopens(void) {
    int64_t old = 0, fresh = 0;
-   memory_db_fact_create(1, "User's phone is 555-0101", 0.9f, "explicit", "personal", NULL, &old);
-   memory_db_fact_create(1, "User's phone is now 555-0202", 0.9f, "explicit", "personal", NULL,
-                         &fresh);
+   memory_db_fact_create(1, "User's phone is 555-0101", 0.9f, "explicit", NULL, &old);
+   memory_db_fact_create(1, "User's phone is now 555-0202", 0.9f, "explicit", NULL, &fresh);
    char sql[300];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -1968,8 +2002,8 @@ void test_replace_closes_and_forget_reopens(void) {
 /* A merge moves what the duplicate stated to the fact kept. */
 void test_merge_moves_relations_to_the_kept_fact(void) {
    int64_t keep = 0, dup = 0;
-   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", "personal", NULL, &keep);
-   memory_db_fact_create(1, "User's home is Atlanta", 0.9f, "explicit", "personal", NULL, &dup);
+   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", NULL, &keep);
+   memory_db_fact_create(1, "User's home is Atlanta", 0.9f, "explicit", NULL, &dup);
    char sql[300];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -1987,7 +2021,7 @@ void test_prune_follows_a_long_merge_chain(void) {
    char text[64];
    for (int i = 0; i < 12; i++) {
       snprintf(text, sizeof(text), "User has %d email accounts, take %d", 4, i);
-      memory_db_fact_create(1, text, 0.9f, "explicit", "personal", NULL, &chain[i]);
+      memory_db_fact_create(1, text, 0.9f, "explicit", NULL, &chain[i]);
    }
    char sql[400];
    for (int i = 0; i < 11; i++) { /* chain[i] merged into chain[i + 1], long ago */
@@ -1997,7 +2031,7 @@ void test_prune_follows_a_long_merge_chain(void) {
       q_exec(sql);
    }
    int64_t old = 0;
-   memory_db_fact_create(1, "User's old address is gone", 0.9f, "explicit", "personal", NULL, &old);
+   memory_db_fact_create(1, "User's old address is gone", 0.9f, "explicit", NULL, &old);
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
             "object_value, fact_id) VALUES (1120, 1, 601, 'email_is', 'a@example.com', %lld),"
@@ -2018,9 +2052,8 @@ void test_prune_follows_a_long_merge_chain(void) {
 /* Restore doesn't reopen "likes X" while the "dislikes X" that closed it is open. */
 void test_restore_keeps_a_contradiction_closed(void) {
    int64_t liked = 0, disliked = 0;
-   memory_db_fact_create(1, "User likes cilantro", 0.9f, "explicit", "preferences", NULL, &liked);
-   memory_db_fact_create(1, "User dislikes cilantro", 0.9f, "explicit", "preferences", NULL,
-                         &disliked);
+   memory_db_fact_create(1, "User likes cilantro", 0.9f, "explicit", NULL, &liked);
+   memory_db_fact_create(1, "User dislikes cilantro", 0.9f, "explicit", NULL, &disliked);
    char sql[600];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -2042,8 +2075,8 @@ void test_restore_keeps_a_contradiction_closed(void) {
  * another user's, and not twice. */
 void test_restore_brings_a_merged_fact_back(void) {
    int64_t keep = 0, dup = 0;
-   memory_db_fact_create(1, "User's cat is named Miso", 0.9f, "explicit", "personal", NULL, &keep);
-   memory_db_fact_create(1, "User has a cat called Miso", 0.9f, "explicit", "personal", NULL, &dup);
+   memory_db_fact_create(1, "User's cat is named Miso", 0.9f, "explicit", NULL, &keep);
+   memory_db_fact_create(1, "User has a cat called Miso", 0.9f, "explicit", NULL, &dup);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
 
    memory_superseded_fact_t rows[4];
@@ -2075,10 +2108,8 @@ void test_restore_brings_a_merged_fact_back(void) {
  * ended, and not a one-at-a-time value while another is open. */
 void test_restore_reopens_what_its_replacement_closed(void) {
    int64_t old = 0, fresh = 0;
-   memory_db_fact_create(1, "User's email is old@example.com", 0.9f, "explicit", "personal", NULL,
-                         &old);
-   memory_db_fact_create(1, "User's email is new@example.com", 0.9f, "explicit", "personal", NULL,
-                         &fresh);
+   memory_db_fact_create(1, "User's email is old@example.com", 0.9f, "explicit", NULL, &old);
+   memory_db_fact_create(1, "User's email is new@example.com", 0.9f, "explicit", NULL, &fresh);
    char sql[1024];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
@@ -2105,7 +2136,7 @@ void test_restore_reopens_what_its_replacement_closed(void) {
 void test_forget_keeps_alias_target_entity(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t f = 0;
-   memory_db_fact_create(1, "Sam likes chess", 0.9f, "explicit", "general", &p25, &f);
+   memory_db_fact_create(1, "Sam likes chess", 0.9f, "explicit", &p25, &f);
    char sql[256];
    snprintf(sql, sizeof(sql),
             "INSERT INTO memory_entities (id, user_id, name) VALUES (600, 1, 'Sam');"
@@ -2127,7 +2158,7 @@ void test_forget_keeps_alias_target_entity(void) {
 void test_conversation_delete_drops_sources(void) {
    memory_provenance_t p10 = { .conv_id = 10 }, p30 = { .conv_id = 30 };
    int64_t f = 0;
-   memory_db_fact_create(1, "User owns a kayak", 0.9f, "explicit", "general", &p30, &f);
+   memory_db_fact_create(1, "User owns a kayak", 0.9f, "explicit", &p30, &f);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_provenance_extend(f, 1, 10, 0, 0));
    (void)p10;
    q_exec("DELETE FROM conversations WHERE id = 30;");
@@ -2176,7 +2207,7 @@ void test_forget_queries_use_their_indexes(void) {
 void test_forget_keeps_what_was_stated_directly(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t f = 0;
-   memory_db_fact_create(1, "User is allergic to peanuts", 0.9f, "explicit", "health", NULL, &f);
+   memory_db_fact_create(1, "User is allergic to peanuts", 0.9f, "explicit", NULL, &f);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_provenance_extend(f, 1, 25, 0, 0));
    memory_db_pref_upsert(1, "tone", "brief", 0.8f, "inferred", &p25);
    memory_db_pref_upsert(1, "tone", "brief", 0.8f, "import", NULL);
@@ -2195,8 +2226,8 @@ void test_forget_keeps_what_was_stated_directly(void) {
 void test_forget_chain_stops_at_imported_fact(void) {
    memory_provenance_t p25 = { .conv_id = 25 };
    int64_t imported = 0, denver = 0;
-   memory_db_fact_create(1, "User lives in Boston", 0.9f, "import", "personal", NULL, &imported);
-   memory_db_fact_create(1, "User lives in Denver", 0.9f, "explicit", "personal", &p25, &denver);
+   memory_db_fact_create(1, "User lives in Boston", 0.9f, "import", NULL, &imported);
+   memory_db_fact_create(1, "User lives in Denver", 0.9f, "explicit", &p25, &denver);
    char sql[160];
    snprintf(sql, sizeof(sql), "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;",
             (long long)denver, (long long)imported);
@@ -2230,7 +2261,7 @@ static void fact_origin(int64_t id, int64_t *conv_out, int *unsourced_out) {
 /* A remember made before its conversation existed: recorded as learned in it. */
 void test_attach_source_records_where_a_remember_was_made(void) {
    int64_t id = 0;
-   memory_db_fact_create(1, "Garage code hint", 1.0f, "explicit", "general", NULL, &id);
+   memory_db_fact_create(1, "Garage code hint", 1.0f, "explicit", NULL, &id);
    int64_t conv = 0;
    int unsourced = 0;
    fact_origin(id, &conv, &unsourced);
@@ -2244,7 +2275,7 @@ void test_attach_source_records_where_a_remember_was_made(void) {
 /* Already pointing at a newer conversation: still recorded as learned in one. */
 void test_attach_source_marks_learned_when_columns_keep_a_newer_one(void) {
    int64_t id = 0;
-   memory_db_fact_create(1, "Prefers tea", 1.0f, "explicit", "general", NULL, &id);
+   memory_db_fact_create(1, "Prefers tea", 1.0f, "explicit", NULL, &id);
    memory_db_fact_provenance_extend(id, 1, 30, 0, 0); /* restated in 30 meanwhile */
    memory_db_fact_attach_source(id, 1, true, 25);
    int64_t conv = 0;
@@ -2257,7 +2288,7 @@ void test_attach_source_marks_learned_when_columns_keep_a_newer_one(void) {
 /* A conversation deleted (or someone else's) is never recorded as a source. */
 void test_attach_source_refuses_a_missing_conversation(void) {
    int64_t id = 0;
-   memory_db_fact_create(1, "Deleted-conversation fact", 1.0f, "explicit", "general", NULL, &id);
+   memory_db_fact_create(1, "Deleted-conversation fact", 1.0f, "explicit", NULL, &id);
    memory_db_fact_attach_source(id, 1, true, 999);
    int64_t conv = 0;
    int unsourced = 0;
@@ -2270,9 +2301,9 @@ void test_attach_source_refuses_a_missing_conversation(void) {
  * and exists; the others are left alone. */
 void test_attach_sources_batch_checks_each_fact(void) {
    int64_t mine = 0, again = 0, bobs = 0;
-   memory_db_fact_create(1, "Batch fact one", 1.0f, "explicit", "general", NULL, &mine);
-   memory_db_fact_create(1, "Batch fact two", 1.0f, "explicit", "general", NULL, &again);
-   memory_db_fact_create(2, "Bob's fact", 1.0f, "explicit", "general", NULL, &bobs);
+   memory_db_fact_create(1, "Batch fact one", 1.0f, "explicit", NULL, &mine);
+   memory_db_fact_create(1, "Batch fact two", 1.0f, "explicit", NULL, &again);
+   memory_db_fact_create(2, "Bob's fact", 1.0f, "explicit", NULL, &bobs);
    const session_fact_source_t batch[] = {
       { .fact_id = mine, .user_id = 1, .created = true },
       { .fact_id = bobs, .user_id = 2, .created = true }, /* conversation 10 is user 1's */
@@ -2296,7 +2327,7 @@ void test_attach_sources_batch_checks_each_fact(void) {
 void test_attach_source_restated_refuses_a_missing_conversation(void) {
    int64_t id = 0;
    memory_provenance_t prov = { .conv_id = 25 };
-   memory_db_fact_create(1, "Restated fact", 1.0f, "explicit", "general", &prov, &id);
+   memory_db_fact_create(1, "Restated fact", 1.0f, "explicit", &prov, &id);
    memory_db_fact_attach_source(id, 1, false, 999);
    int64_t conv = 0;
    int unsourced = 0;
@@ -2390,6 +2421,8 @@ int main(void) {
    RUN_TEST(test_forget_keeps_alias_target_entity);
    RUN_TEST(test_conversation_delete_drops_sources);
    RUN_TEST(test_forget_queries_use_their_indexes);
+   RUN_TEST(test_find_exact_repeat);
+   RUN_TEST(test_mark_explicit);
    RUN_TEST(test_forget_keeps_what_was_stated_directly);
    RUN_TEST(test_forget_chain_stops_at_imported_fact);
 

@@ -55,20 +55,11 @@
 #include "webui/webui_server.h"
 
 /**
- * @brief Build the v44 user-identity block.
- *
- * Composes real_name / preferred_address / identity_aliases into the
- * "## User Identity" block that's appended after the persona/settings
- * block in the system prompt.  Returns an allocated string (caller
- * frees) or NULL if the user has no real_name set.
- *
- * Aliases parsing: newline-separated input, strip whitespace, drop empty
- * lines, dedupe case-insensitive, emit comma-joined.  Total output size
- * bounded by the AUTH_REAL_NAME_MAX + AUTH_PREFERRED_ADDRESS_MAX +
- * AUTH_IDENTITY_ALIASES_MAX caps and a small fixed overhead.
+ * @brief Build the v44 user-identity block (prompt_identity_text) for
+ *        @p user_id.
  *
  * @param user_id User ID (0 returns NULL — block requires a known user)
- * @return Allocated string (caller frees) or NULL if real_name unset
+ * @return Allocated string (caller frees) or NULL if real_name and address unset
  */
 static char *build_identity_block(int user_id) {
    if (user_id <= 0)
@@ -77,81 +68,8 @@ static char *build_identity_block(int user_id) {
    auth_user_identity_t identity;
    if (auth_db_get_user_identity(user_id, &identity) != AUTH_DB_SUCCESS)
       return NULL;
-   if (identity.real_name[0] == '\0')
-      return NULL; /* no real_name → skip the entire block */
-
-   /* Parse identity_aliases: split on \n, strip whitespace per token,
-    * drop empties, dedupe case-insensitive.  Up to 16 aliases tracked. */
-   char joined_aliases[AUTH_IDENTITY_ALIASES_MAX];
-   joined_aliases[0] = '\0';
-   if (identity.identity_aliases[0] != '\0') {
-      char buf[AUTH_IDENTITY_ALIASES_MAX];
-      safe_strscpy(buf, identity.identity_aliases);
-
-      char *seen[16];
-      int seen_count = 0;
-      size_t out_off = 0;
-
-      char *save = NULL;
-      for (char *line = strtok_r(buf, "\n", &save); line != NULL && seen_count < 16;
-           line = strtok_r(NULL, "\n", &save)) {
-         /* Strip leading whitespace */
-         while (*line == ' ' || *line == '\t' || *line == '\r')
-            line++;
-         /* Strip trailing whitespace */
-         char *end = line + strlen(line);
-         while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
-            end--;
-         *end = '\0';
-         if (*line == '\0')
-            continue;
-         /* Case-insensitive dedupe against already-emitted aliases. */
-         bool dup = false;
-         for (int i = 0; i < seen_count; i++) {
-            if (strcasecmp(seen[i], line) == 0) {
-               dup = true;
-               break;
-            }
-         }
-         if (dup)
-            continue;
-         seen[seen_count++] = line;
-         /* Append to joined_aliases with comma separator. */
-         size_t alias_len = strlen(line);
-         size_t need = alias_len + (out_off > 0 ? 2 : 0); /* + ", " when not first */
-         if (out_off + need + 1 >= sizeof(joined_aliases))
-            break;
-         if (out_off > 0) {
-            joined_aliases[out_off++] = ',';
-            joined_aliases[out_off++] = ' ';
-         }
-         memcpy(joined_aliases + out_off, line, alias_len);
-         out_off += alias_len;
-         joined_aliases[out_off] = '\0';
-      }
-   }
-
-   /* Worst-case stack: ~1.5 KB.  Trip if any cap bumps push past 4 KB so we
-    * notice before the LLM/refresh worker stack (8 MB) gets uncomfortable. */
-   _Static_assert(
-       AUTH_REAL_NAME_MAX + AUTH_PREFERRED_ADDRESS_MAX + AUTH_IDENTITY_ALIASES_MAX + 256 < 4096,
-       "build_identity_block stack buffer exceeded 4 KB; revisit caps or heap-alloc");
-   char block[AUTH_REAL_NAME_MAX + AUTH_PREFERRED_ADDRESS_MAX + AUTH_IDENTITY_ALIASES_MAX + 256];
-   size_t off = 0;
-   size_t rem = sizeof(block);
-   BUF_PRINTF(block, off, rem, "\n\n## User Identity\nYou are speaking with %s.",
-              identity.real_name);
-   if (identity.preferred_address[0] != '\0') {
-      BUF_PRINTF(block, off, rem, " They prefer to be addressed as %s.",
-                 identity.preferred_address);
-   }
-   if (joined_aliases[0] != '\0') {
-      BUF_PRINTF(block, off, rem, " They may also be referred to as: %s.", joined_aliases);
-   }
-   BUF_PRINTF(block, off, rem,
-              " Use this information to recognize when memory facts or extracted entities refer "
-              "to them.\n");
-   return strdup(block);
+   return prompt_identity_text(identity.real_name, identity.preferred_address,
+                               identity.identity_aliases);
 }
 
 /* The user's own context: location and units, and (append mode) their

@@ -35,11 +35,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "utils/string_utils.h"
-
-#define AUTH_DB_INTERNAL_ALLOWED /* needed for direct sqlite access in category backfill */
-
-#include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "core/time_query_parser.h"
@@ -49,6 +44,7 @@
 #include "memory/memory_embed_backfill.h"
 #include "memory/memory_embeddings_internal.h"
 #include "memory/memory_types.h"
+#include "utils/string_utils.h"
 
 /* In-memory embedding cache for fast cosine search.
  * created_ats added in #3 — per-fact origin timestamps used by temporal-query

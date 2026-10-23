@@ -650,10 +650,6 @@ citation_reinforcement_boost = 0.05
                                   # "in 2023", "summer 2022"). 0 disables. 0.20
                                   # validated on LongMemEval temporal-reasoning
                                   # (+2.3pp R@10) and LoCoMo cat-2 (+3.2pp).
-# category_threshold = 0.25       # Cosine similarity threshold for auto-categorizing
-                                  # memories. Calibrated for MiniLM-L6. Lower values
-                                  # classify more facts; higher = more selective.
-                                  # Range: 0.05-0.95
 # search_score_floor = 0.30       # "I don't remember" gate — drops marginal-cosine
                                   # hits from memory.search and per-turn focus
                                   # injection before they reach the LLM. Closes the
@@ -716,8 +712,9 @@ citation_reinforcement_boost = 0.05
 # Per-turn context injection.  When enabled, the daemon retrieves memory
 # facts, entities, relations, summaries, document chunks and calendar
 # events relevant to each user turn and adds them to that turn as a
-# budget-bounded "context for this turn" block.  Off by default.
-# enabled = false                     # Master enable
+# budget-bounded "context for this turn" block.  On by default; on a
+# voice device in a shared room, every turn may speak what it retrieves.
+# enabled = true                      # Master enable
 # focus_budget_bytes = 10240          # Byte cap on the assembled focus block (per turn).
                                       # Range: 1024 - 65536  (~4 bytes/token; exact byte budget)
 # top_k = 12                          # Maximum candidates retained after ranking.
