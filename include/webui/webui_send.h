@@ -101,6 +101,17 @@ int send_json_message(struct lws *wsi, const char *json);
  */
 int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, size_t len);
 
+/**
+ * @brief Send the oldest frame the connection is holding, if any (from its
+ *        LWS_CALLBACK_SERVER_WRITEABLE).
+ *
+ * @return 0, or LWS_CLOSE_CONNECTION if the write failed
+ */
+int webui_send_held_frame(ws_connection_t *conn);
+
+/** @brief Free the frames a closing connection still holds. */
+void webui_send_drop_held(ws_connection_t *conn);
+
 void send_state_impl(struct lws *wsi, const char *state, const char *detail);
 void send_state_impl_full(struct lws *wsi,
                           const char *state,
