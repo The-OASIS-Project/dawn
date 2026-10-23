@@ -219,6 +219,14 @@ typedef struct {
    uint64_t tts_pace_start_us;  /* CLOCK_MONOTONIC when first audio sent (0 = not started) */
    uint64_t tts_audio_sent_us;  /* Cumulative audio duration sent (microseconds) */
    uint32_t tts_pace_stream_id; /* Stream ID for reset detection */
+
+   /* Frames sent while earlier output was still going out, held until the
+    * connection is writable (webui_send.c).  libwebsockets (seen on 4.0.20) sends
+    * a second frame written behind buffered output with no WebSocket header.  LWS
+    * thread only; freed on close. */
+   struct ws_held_frame *held_head;
+   struct ws_held_frame *held_tail;
+   int held_count;
 } ws_connection_t;
 
 /**

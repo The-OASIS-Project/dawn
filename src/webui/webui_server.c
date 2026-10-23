@@ -50,6 +50,7 @@
 #include "memory/memory_db_aliases.h" /* memory_db_proposal_count_pending */
 #include "webui/webui_internal.h"
 #include "webui/webui_protocol.h"
+#include "webui/webui_send.h"
 
 #ifdef ENABLE_WEBUI_AUDIO
 #include "webui/webui_audio.h"
@@ -357,9 +358,9 @@ void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn) {
     * but reverse proxies (Vite dev http-proxy, nginx) STRIP a custom WS close code
     * — a proxied browser sees a generic 1006 and would treat it as a normal drop
     * and auto-reconnect (re-storming).  A data frame proxies through intact, so it
-    * is the proxy-robust signal the client keys off.  Send the frame synchronously
-    * so it is buffered before the close, then arm PENDING_TIMEOUT_CLOSE_SEND, which
-    * waits for pending output to flush before actually closing. */
+    * is the proxy-robust signal the client keys off.  Send the frame first (written,
+    * or held until the connection is writable), then arm PENDING_TIMEOUT_CLOSE_SEND,
+    * which closes once pending output has had its chance to go out. */
    send_json_message(old->wsi,
                      "{\"type\":\"session_superseded\",\"payload\":{\"reason\":\"superseded\"}}");
 
@@ -853,6 +854,7 @@ static int callback_websocket(struct lws *wsi,
 
          /* Clear wsi reference */
          conn->wsi = NULL;
+         webui_send_drop_held(conn);
 
          /* Free any pending audio buffer */
          if (conn->audio_buffer) {
@@ -1303,8 +1305,14 @@ static int callback_websocket(struct lws *wsi,
       }
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
-         /* A connection whose login ended closes now, its force_logout sent
+         /* Frames held while earlier output was going out go first, one per
+          * callback; a connection whose login ended closes once they're out
           * (lws_close_reason carries WEBUI_CLOSE_LOGGED_OUT). */
+         if (conn && conn->held_head) {
+            int ret = webui_send_held_frame(conn);
+            lws_callback_on_writable(wsi);
+            return ret;
+         }
          if (conn && conn->logged_out) {
             return LWS_CLOSE_CONNECTION;
          }

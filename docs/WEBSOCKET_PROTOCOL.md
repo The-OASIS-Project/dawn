@@ -1975,8 +1975,8 @@ Error or informational notification.
 This connection's login ended: a logout (from this or another tab), a login over it
 in the same browser, a revoke (WebUI or `dawn-admin`), a password change, a deleted
 user, or the login expiring. Sent **immediately before** the server closes the socket
-with WS close code **`4002` "logged out"** (skipped only if a large frame is still
-being sent: then the close code alone says it). Frames the client sends in between
+with WS close code **`4002` "logged out"**, after any frame still going out; only a
+client that doesn't read it within 3 seconds gets the close code alone. Frames the client sends in between
 are ignored.
 ```json
 {
