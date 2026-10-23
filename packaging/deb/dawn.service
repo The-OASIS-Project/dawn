@@ -31,6 +31,25 @@ ReadWritePaths=/var/lib/dawn /etc/dawn
 ProtectHome=read-only
 PrivateTmp=true
 NoNewPrivileges=true
+# DAWN reads mail, web pages and documents from outside; these limit what a bug in
+# that parsing could reach.  dawn-tls (+) runs outside them.  Not set, as they can
+# break on some hosts: SystemCallFilter, MemoryDenyWriteExecute, PrivateDevices,
+# and ProtectClock (it also closes the device policy, like PrivateDevices; without
+# capabilities the dawn user can't set the clock anyway).
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Netlink: glibc's resolver uses it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target

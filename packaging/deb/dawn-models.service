@@ -14,3 +14,12 @@ User=dawn
 Group=dawn
 ExecStart=/usr/bin/dawn-fetch-models
 TimeoutStartSec=30min
+# It only writes the models directory.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dawn/models
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
