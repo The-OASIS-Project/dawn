@@ -23,6 +23,7 @@
 
 #include "audio/music_queue_db.h"
 
+#include <pthread.h>
 #include <sqlite3.h>
 #include <string.h>
 
@@ -30,7 +31,12 @@
 #include "core/path_utils.h"
 #include "logging.h"
 
+/* One connection for every user's queue: each user's queue_mutex lets two
+ * users save at once, and a second BEGIN on a connection already in a
+ * transaction fails.  s_db_mutex holds each call's whole use of it (a leaf:
+ * nothing else is taken under it). */
 static sqlite3 *s_db = NULL;
+static pthread_mutex_t s_db_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* =============================================================================
  * Schema
@@ -56,7 +62,7 @@ static const char *SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS user_queue ("
  * Lifecycle
  * ============================================================================= */
 
-int music_queue_db_init(const char *db_path) {
+static int db_init(const char *db_path) {
    if (s_db) {
       return 0; /* Already initialized */
    }
@@ -98,7 +104,7 @@ int music_queue_db_init(const char *db_path) {
    return 0;
 }
 
-void music_queue_db_cleanup(void) {
+static void db_cleanup(void) {
    if (s_db) {
       sqlite3_close(s_db);
       s_db = NULL;
@@ -110,7 +116,7 @@ void music_queue_db_cleanup(void) {
  * Save
  * ============================================================================= */
 
-int music_queue_db_save(int user_id, const user_music_queue_t *uq) {
+static int db_save(int user_id, const user_music_queue_t *uq) {
    if (!s_db || !uq || user_id <= 0) {
       return 0; /* Skip private queues silently */
    }
@@ -203,7 +209,7 @@ int music_queue_db_save(int user_id, const user_music_queue_t *uq) {
  * Save State Only (shuffle/repeat)
  * ============================================================================= */
 
-int music_queue_db_save_state(int user_id, const user_music_queue_t *uq) {
+static int db_save_state(int user_id, const user_music_queue_t *uq) {
    if (!s_db || !uq || user_id <= 0) {
       return 0;
    }
@@ -232,7 +238,7 @@ int music_queue_db_save_state(int user_id, const user_music_queue_t *uq) {
  * Load
  * ============================================================================= */
 
-int music_queue_db_load(int user_id, user_music_queue_t *uq) {
+static int db_load(int user_id, user_music_queue_t *uq) {
    if (!s_db || !uq || user_id <= 0) {
       return 0; /* Skip private queues silently */
    }
@@ -299,7 +305,7 @@ int music_queue_db_load(int user_id, user_music_queue_t *uq) {
  * Delete
  * ============================================================================= */
 
-int music_queue_db_delete_user(int user_id) {
+static int db_delete_user(int user_id) {
    if (!s_db || user_id <= 0) {
       return 0;
    }
@@ -323,4 +329,49 @@ int music_queue_db_delete_user(int user_id) {
 
    OLOG_INFO("Music queue DB: Deleted queue data for user %d", user_id);
    return 0;
+}
+
+/* =============================================================================
+ * Public entry points: each holds s_db_mutex across its whole use of s_db
+ * ============================================================================= */
+
+int music_queue_db_init(const char *db_path) {
+   pthread_mutex_lock(&s_db_mutex);
+   int rc = db_init(db_path);
+   pthread_mutex_unlock(&s_db_mutex);
+   return rc;
+}
+
+void music_queue_db_cleanup(void) {
+   pthread_mutex_lock(&s_db_mutex);
+   db_cleanup();
+   pthread_mutex_unlock(&s_db_mutex);
+}
+
+int music_queue_db_save(int user_id, const user_music_queue_t *uq) {
+   pthread_mutex_lock(&s_db_mutex);
+   int rc = db_save(user_id, uq);
+   pthread_mutex_unlock(&s_db_mutex);
+   return rc;
+}
+
+int music_queue_db_save_state(int user_id, const user_music_queue_t *uq) {
+   pthread_mutex_lock(&s_db_mutex);
+   int rc = db_save_state(user_id, uq);
+   pthread_mutex_unlock(&s_db_mutex);
+   return rc;
+}
+
+int music_queue_db_load(int user_id, user_music_queue_t *uq) {
+   pthread_mutex_lock(&s_db_mutex);
+   int rc = db_load(user_id, uq);
+   pthread_mutex_unlock(&s_db_mutex);
+   return rc;
+}
+
+int music_queue_db_delete_user(int user_id) {
+   pthread_mutex_lock(&s_db_mutex);
+   int rc = db_delete_user(user_id);
+   pthread_mutex_unlock(&s_db_mutex);
+   return rc;
 }

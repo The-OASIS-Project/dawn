@@ -18,15 +18,18 @@
  *
  * Unit tests for the music queue (music_queue.c): shared and private queues,
  * adding with dedup and a full queue, inserting at the top, removing, the
- * nearest copy, and a queue kept across a restart (temp database).
+ * nearest copy, a queue kept across a restart, and two users saving at once
+ * (temp database).
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "audio/music_queue.h"
+#include "audio/music_queue_db.h"
 #include "dawn_error.h"
 #include "unity.h"
 
@@ -181,6 +184,45 @@ static void test_kept_across_restart(void) {
    music_queue_release(other);
 }
 
+/* Two users save at once: each holds only its own queue_mutex, and both go
+ * through the one connection */
+#define CONCURRENT_SAVES 200
+
+static void *save_loop(void *arg) {
+   user_music_queue_t *uq = arg;
+   intptr_t failures = 0;
+   for (int i = 0; i < CONCURRENT_SAVES; i++) {
+      pthread_mutex_lock(&uq->queue_mutex);
+      if (music_queue_db_save(uq->user_id, uq) != 0) {
+         failures++;
+      }
+      pthread_mutex_unlock(&uq->queue_mutex);
+   }
+   return (void *)failures;
+}
+
+static void test_two_users_save_at_once(void) {
+   user_music_queue_t *a = music_queue_acquire(7);
+   user_music_queue_t *b = music_queue_acquire(8);
+   for (int i = 0; i < 40; i++) {
+      char path[32];
+      snprintf(path, sizeof(path), "/m/%d.flac", i);
+      music_search_result_t x = track(path);
+      music_queue_insert(a, a->queue_length, &x);
+      music_queue_insert(b, b->queue_length, &x);
+   }
+   pthread_t ta, tb;
+   TEST_ASSERT_EQUAL_INT(0, pthread_create(&ta, NULL, save_loop, a));
+   TEST_ASSERT_EQUAL_INT(0, pthread_create(&tb, NULL, save_loop, b));
+   void *fa, *fb;
+   pthread_join(ta, &fa);
+   pthread_join(tb, &fb);
+   TEST_ASSERT_EQUAL_INT(0, (int)(intptr_t)fa);
+   TEST_ASSERT_EQUAL_INT(0, (int)(intptr_t)fb);
+   music_queue_release(a);
+   music_queue_release(b);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_shared_and_private);
@@ -188,5 +230,6 @@ int main(void) {
    RUN_TEST(test_insert_top_drops_last_when_full);
    RUN_TEST(test_remove_and_nearest_copy);
    RUN_TEST(test_kept_across_restart);
+   RUN_TEST(test_two_users_save_at_once);
    return UNITY_END();
 }

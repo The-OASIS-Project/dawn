@@ -525,6 +525,8 @@ Per-module locks (scoped to a single subsystem):
                                                                      and then teardown
   music_queue::s_user_queues_mutex (src/audio/music_queue.c)    — the per-user queue registry (held across a queue's first load
                                                                      from music.db; taken under s_music_teardown_mutex, never the reverse)
+  music_queue_db::s_db_mutex (src/audio/music_queue_db.c)      — the one music.db connection queues are saved through (LEAF: held
+                                                                     across a save, load or delete, under a queue_mutex or s_user_queues_mutex)
   tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
                                                                      history_mutex; held only to find, pin, insert and release a slot, never across a render)
   tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that
