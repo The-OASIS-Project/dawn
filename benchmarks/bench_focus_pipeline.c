@@ -792,6 +792,7 @@ static int validate_float_range(const char *field, float v, float lo, float hi) 
 static int parse_config(struct json_object *cfg) {
    focus_injection_config_t *fi = &g_config.memory.focus_injection;
    /* Production defaults; JSON overrides any field present. */
+   g_config.memory.enabled = true;
    fi->enabled = true;
    fi->top_k = json_get_int(cfg, "top_k", 8);
    fi->min_score = (float)json_get_double(cfg, "min_score", 0.4);

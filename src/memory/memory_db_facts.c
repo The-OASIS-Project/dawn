@@ -579,6 +579,20 @@ int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confide
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
+/* A stored fact not already explicit (inferred or imported) that the user
+ * states is now known as told.  Never a note gloss (noted stays noted). */
+static const char MARK_EXPLICIT_SQL[] = "UPDATE memory_facts SET source = 'explicit' "
+                                        "WHERE user_id = ?1 AND id = ?2 AND note_doc_id IS NULL";
+
+int memory_db_fact_mark_explicit(int64_t fact_id, int user_id) {
+   if (fact_id <= 0 || user_id <= 0)
+      return MEMORY_DB_FAILURE;
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   const int rc = memory_db_internal_exec_locked(MARK_EXPLICIT_SQL, user_id, fact_id, 0);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
 /* Phase 0 v47: write the subject_entity_id FK onto an existing fact row.
  * Ad-hoc prepared statement (not cached in s_db.stmt_*) because this runs
  * once per fact insert during extraction — bounded by extraction cadence,
@@ -1160,10 +1174,12 @@ int memory_db_fact_find_similar(int user_id,
 }
 
 /* Exact repeats: the hash narrows, the text decides (the hash ignores word
- * order and stopwords).  Note glosses are never a repeat. */
+ * order and stopwords).  Note glosses are never a repeat, nor is an expired
+ * fact the prune hasn't removed yet. */
 static const char FIND_EXACT_SQL[] = "SELECT id, fact_text FROM memory_facts "
                                      "WHERE user_id = ? AND normalized_hash = ? "
-                                     "AND superseded_by IS NULL AND note_doc_id IS NULL";
+                                     "AND superseded_by IS NULL AND note_doc_id IS NULL "
+                                     "AND (expires_at IS NULL OR expires_at >= ?)";
 
 int memory_db_fact_find_exact(int user_id, const char *text, int64_t *id_out) {
    if (!id_out || !text || user_id <= 0)
@@ -1182,6 +1198,7 @@ int memory_db_fact_find_exact(int user_id, const char *text, int64_t *id_out) {
    }
    sqlite3_bind_int(st, 1, user_id);
    sqlite3_bind_int64(st, 2, (int64_t)hash);
+   sqlite3_bind_int64(st, 3, fact_expiry_guard_now()); /* expiry guard (v58) */
    int rc;
    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
       const char *stored = (const char *)sqlite3_column_text(st, 1);

@@ -195,6 +195,7 @@ dawn_config_t g_config;
 
 static void reset_config_defaults(void) {
    memset(&g_config, 0, sizeof(g_config));
+   g_config.memory.enabled = true;
    g_config.memory.focus_injection.enabled = true;
    g_config.memory.focus_injection.focus_budget_bytes = 16384;
    g_config.memory.focus_injection.top_k = 16;
@@ -252,6 +253,56 @@ static void test_register_and_iterate_all_adapters(void) {
    TEST_ASSERT_EQUAL_INT(1, s_fake[0].call_count);
    TEST_ASSERT_EQUAL_INT(1, s_fake[1].call_count);
    TEST_ASSERT_EQUAL_INT(1, s_fake[2].call_count);
+   focus_result_free(&result);
+}
+
+/* Memory turned off: memory items are not retrieved; documents still are. */
+static void test_memory_off_skips_internal_sources(void) {
+   const char *texts0[] = { "a fact" };
+   const char *texts1[] = { "a document line" };
+   register_fake("memory_fact", FOCUS_SOURCE_INTERNAL, false);
+   register_fake("document_chunk", FOCUS_SOURCE_EXTERNAL, false);
+   s_fake[0].candidate_count = 1;
+   s_fake[0].texts = texts0;
+   s_fake[1].candidate_count = 1;
+   s_fake[1].texts = texts1;
+
+   g_config.memory.enabled = false;
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 0, 5, &result));
+   TEST_ASSERT_EQUAL_INT(1, result.candidate_count);
+   TEST_ASSERT_EQUAL_STRING("document_chunk", result.candidates[0].source_id);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, s_fake[0].call_count, "memory adapter not consulted");
+   focus_result_free(&result);
+
+   g_config.memory.enabled = true;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 0, 5, &result));
+   TEST_ASSERT_EQUAL_INT(2, result.candidate_count);
+   focus_result_free(&result);
+}
+
+/* An item from outside text (a document, a calendar event) is marked outside;
+ * a memory item keeps its adapter's kind. */
+static void test_external_items_marked_outside(void) {
+   const char *texts0[] = { "a fact" };
+   const char *texts1[] = { "a document line" };
+   register_fake("memory_fact", FOCUS_SOURCE_INTERNAL, false);
+   register_fake("document_chunk", FOCUS_SOURCE_EXTERNAL, false);
+   s_fake[0].candidate_count = 1;
+   s_fake[0].texts = texts0;
+   s_fake[1].candidate_count = 1;
+   s_fake[1].texts = texts1;
+
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 0, 5, &result));
+   TEST_ASSERT_EQUAL_INT(2, result.candidate_count);
+   for (int i = 0; i < result.candidate_count; i++) {
+      const focus_candidate_t *c = &result.candidates[i];
+      if (strcmp(c->source_id, "document_chunk") == 0)
+         TEST_ASSERT_EQUAL_STRING("outside", c->kind);
+      else
+         TEST_ASSERT_NULL(c->kind);
+   }
    focus_result_free(&result);
 }
 
@@ -835,6 +886,8 @@ static void test_include_private_flag_propagated(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_register_and_iterate_all_adapters);
+   RUN_TEST(test_memory_off_skips_internal_sources);
+   RUN_TEST(test_external_items_marked_outside);
    RUN_TEST(test_cross_user_isolation);
    RUN_TEST(test_ranker_math);
    RUN_TEST(test_ranker_tiebreak_by_timestamp);

@@ -1159,6 +1159,35 @@ void test_find_exact_repeat(void) {
    q_exec(sql);
    TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_find_exact(1, "Gate code note", &found));
    TEST_ASSERT_EQUAL_INT64(0, found);
+
+   /* An expired fact the prune hasn't removed yet is not a repeat. */
+   g_config.memory.expire_enabled = true;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_set_expires_at(id, 1, (int64_t)time(NULL) - 86400));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND,
+                     memory_db_fact_find_exact(1, "User owns a red bike", &found));
+   g_config.memory.expire_enabled = false;
+}
+
+/* An inferred fact the user then states becomes told; a note gloss stays noted. */
+void test_mark_explicit(void) {
+   int64_t id = 0, gloss = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_create(1, "User plays cello", 0.7f,
+                                                              "inferred", NULL, NULL, &id));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_mark_explicit(id, 1));
+   memory_fact_t f = { 0 };
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id, 1, &f));
+   TEST_ASSERT_EQUAL_STRING("explicit", f.source);
+
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_create(1, "Cello note", 0.7f, "inferred", NULL, NULL, &gloss));
+   char sql[128];
+   snprintf(sql, sizeof(sql), "UPDATE memory_facts SET note_doc_id = 5 WHERE id = %lld",
+            (long long)gloss);
+   q_exec(sql);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_mark_explicit(gloss, 1));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
+   TEST_ASSERT_EQUAL_STRING("inferred", f.source);
 }
 
 /* Forgetting is of what was learned so far: the forgotten conversation, or
@@ -2421,6 +2450,7 @@ int main(void) {
    RUN_TEST(test_conversation_delete_drops_sources);
    RUN_TEST(test_forget_queries_use_their_indexes);
    RUN_TEST(test_find_exact_repeat);
+   RUN_TEST(test_mark_explicit);
    RUN_TEST(test_forget_keeps_what_was_stated_directly);
    RUN_TEST(test_forget_chain_stops_at_imported_fact);
 

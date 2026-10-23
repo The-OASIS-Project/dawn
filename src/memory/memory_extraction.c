@@ -260,14 +260,19 @@ struct json_object *memory_extraction_parse_json(const char *response) {
  * relation linkage coverage.  See dawn/docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md
  * §"C-side changes required". */
 
-/* An extracted fact seen again: raise its confidence and record this
- * conversation as teaching it too. */
-static void reinforce_fact(int user_id, int64_t fact_id, const memory_provenance_t *prov) {
-   memory_fact_t existing = { 0 };
-   float new_conf = 0.8f; /* unreadable: as if it were at the default 0.7 */
-   if (memory_db_fact_get(fact_id, user_id, &existing) == MEMORY_DB_SUCCESS)
-      new_conf = existing.confidence + 0.1f;
+/* An extracted fact seen again (@p existing as stored, NULL when unreadable):
+ * raise its confidence and record this conversation as teaching it too.  Said
+ * again word for word as stated (@p now_told), a fact not yet told becomes told. */
+static void reinforce_fact(int user_id,
+                           int64_t fact_id,
+                           const memory_fact_t *existing,
+                           bool now_told,
+                           const memory_provenance_t *prov) {
+   /* Unreadable: as if it were at the default 0.7. */
+   const float new_conf = existing ? existing->confidence + 0.1f : 0.8f;
    memory_db_fact_update_confidence(fact_id, user_id, new_conf > 1.0f ? 1.0f : new_conf);
+   if (now_told && existing && strcmp(existing->source, "explicit") != 0)
+      memory_db_fact_mark_explicit(fact_id, user_id);
    if (prov && prov->conv_id > 0) {
       memory_db_fact_provenance_extend(fact_id, user_id, prov->conv_id, prov->msg_id_start,
                                        prov->msg_id_end);
@@ -644,9 +649,12 @@ static void process_extraction_response(int user_id,
          float vec[MAX_EMBEDDING_DIMS];
          int dims = 0;
          int64_t repeat_id = 0;
+         memory_fact_t seen = { 0 };
          if (memory_db_fact_find_exact(user_id, text, &repeat_id) == MEMORY_DB_SUCCESS) {
             /* Stored before word for word: reinforce it, as a paraphrase hit is. */
-            reinforce_fact(user_id, repeat_id, prov);
+            const bool read = memory_db_fact_get(repeat_id, user_id, &seen) == MEMORY_DB_SUCCESS;
+            reinforce_fact(user_id, repeat_id, read ? &seen : NULL, strcmp(source, "explicit") == 0,
+                           prov);
             OLOG_INFO("memory_extraction: repeat of fact_id=%lld: %s", (long long)repeat_id, text);
             fact_id = repeat_id;
             fact_id_origin = "hash_match";
@@ -657,12 +665,17 @@ static void process_extraction_response(int user_id,
             memory_embeddings_nearest_fact(user_id, vec, dims,
                                            g_config.memory.paraphrase_dedup_threshold, &matched_id,
                                            &score);
+            /* An expired fact the prune hasn't removed yet is no match. */
+            const bool read = matched_id > 0 &&
+                              memory_db_fact_get(matched_id, user_id, &seen) == MEMORY_DB_SUCCESS;
+            if (read && memory_db_fact_expiry_hidden(seen.expires_at))
+               matched_id = 0;
             if (matched_id > 0) {
                /* Paraphrase hit — bump existing fact's confidence +
                 * extend provenance.  No fact_map population (Phase 0
                 * pairs relations with fact_id directly; no text match
                 * needed). */
-               reinforce_fact(user_id, matched_id, prov);
+               reinforce_fact(user_id, matched_id, read ? &seen : NULL, false, prov);
                OLOG_INFO("memory_extraction: paraphrase merged into fact_id=%lld "
                          "score=%.3f: %s",
                          (long long)matched_id, (double)score, text);

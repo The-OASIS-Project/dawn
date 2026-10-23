@@ -258,6 +258,7 @@ void setUp(void) {
     * weight_semantic = 1, others = 0 means recency/importance/source
     * differences are invisible unless the test sets them.  This isolates
     * each property to one test. */
+   g_config.memory.enabled = true;
    g_config.memory.focus_injection.enabled = true;
    g_config.memory.focus_injection.focus_budget_bytes = 16384;
    g_config.memory.focus_injection.top_k = 8;

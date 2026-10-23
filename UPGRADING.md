@@ -16,7 +16,7 @@ This is not a changelog: git history and the pull requests cover everything else
 
 **What changed.** `[memory.focus_injection] enabled` now defaults to true: each turn
 retrieves the memories, documents and calendar events relevant to it and adds them to the
-turn. This includes voice devices (satellites and the local microphone), so a reply spoken in
+turn, marking documents and calendar events as outside text. This includes voice devices (satellites and the local microphone), so a reply spoken in
 a shared room may mention what it retrieved, such as health or family details.
 
 **What you need to do.** If others share a room with a voice device, turn it off in

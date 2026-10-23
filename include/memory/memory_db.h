@@ -268,6 +268,18 @@ int memory_db_fact_reinforce_citation(int64_t fact_id, int user_id);
 int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confidence);
 
 /**
+ * @brief Record a stored fact as one the user stated (source "explicit").
+ *
+ * For a stored fact not already explicit (inferred or imported) that the user
+ * then says; a note gloss is left as it is.
+ *
+ * @param fact_id Fact to mark
+ * @param user_id Owner (the update is scoped to it)
+ * @return MEMORY_DB_SUCCESS, or MEMORY_DB_FAILURE on bad input or a DB error
+ */
+int memory_db_fact_mark_explicit(int64_t fact_id, int user_id);
+
+/**
  * @brief Record that a fact was also learned outside any conversation
  *
  * The user stated it directly ("remember", an import): forgetting what a

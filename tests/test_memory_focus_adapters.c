@@ -47,6 +47,7 @@ static void config_defaults_for_test(void) {
     * min_score / token-budget trimming.  Every adapter's source weight
     * is 1.0 so the ranker doesn't reorder by source. */
    memset(&g_config, 0, sizeof(g_config));
+   g_config.memory.enabled = true;
    g_config.memory.focus_injection.enabled = true;
    g_config.memory.focus_injection.focus_budget_bytes = 16384;
    g_config.memory.focus_injection.top_k = 32;
