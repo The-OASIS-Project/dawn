@@ -5,12 +5,14 @@
 
 import contextlib
 import io
+import json
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
 
-from . import candidates, models, rubric, storage
+from . import candidates, coverage, models, rubric, storage
 from .__main__ import kappa, main, stratified
 
 
@@ -195,6 +197,93 @@ class Candidates(unittest.TestCase):
         con = sqlite3.connect(self.db)
         self.assertEqual(con.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 9)
         con.close()
+
+
+class Coverage(unittest.TestCase):
+    """coverage with a stubbed judge: counts, the verdict cache, and no text."""
+
+    def setUp(self):
+        s = SECRET
+        self.paths = []
+
+        def write(name, rows):
+            path = storage.data_path(name)
+            with storage.private_open(path) as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            self.paths.append(path)
+            return name
+
+        a = [{"id": i, "text": f"{s}a{i}", "conversation": c} for i, c in
+             [(1, 10), (2, 10), (3, 11), (4, 11)]]
+        self.a = write("_test_cov_a.jsonl", a)
+        self.b = write("_test_cov_b.jsonl", [{"id": 9, "text": s + "b", "conversation": 10}])
+        kinds = {1: "identity", 2: "preference", 3: "work_log", 4: "assistant_said"}
+        self.cls = write("_test_cov_class.jsonl", [
+            {"id": i, "sha": storage.text_sha(f"{s}a{i}"), "kind": k, "tier": rubric.TIER[k]}
+            for i, k in kinds.items()])
+        self.out = storage.data_path("_test_cov_out.jsonl")
+        self.paths.append(self.out)
+        self.calls = []
+        reply = {1: "covered", 2: "partial", 3: "missing"}
+
+        self.fail = None  # an A fact text whose request fails
+
+        def judge(spec, system, user, keys, endpoint):
+            self.calls.append(user)
+            if self.fail and self.fail in user:
+                raise RuntimeError("judge request failed")
+            n = len(re.findall(r"^\[(\d+)\]", user, re.M))  # A facts are numbered 1..n
+            first = {f"{SECRET}a{i}": i for i in reply}
+            ids = [first[t] for t in re.findall(r"^\[\d+\] (\S+)", user, re.M) if t in first]
+            text = "Sure: " + json.dumps([{"id": k, "v": reply[i]}
+                                          for k, i in enumerate(ids, 1)][:n])
+            return text, {"in": 1, "out": 1}
+
+        self._saved = (models.classify_batch, models.check_ready, models.load_keys)
+        models.classify_batch = judge
+        models.check_ready = lambda *a: None
+        models.load_keys = lambda p: {}
+
+    def tearDown(self):
+        models.classify_batch, models.check_ready, models.load_keys = self._saved
+        for p in self.paths:
+            if os.path.exists(p):
+                os.unlink(p)
+
+    def _run(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            main(["coverage", self.a, self.b, "--a-class", self.cls, "--out", self.out,
+                  "--workers", "1"])
+        return out.getvalue()
+
+    def test_counts_cache_and_no_text(self):
+        got = self._run()
+        self.assertIn("semantic  n=   2  covered 1  partial 1", got)
+        self.assertIn("    10        1        1        0        0", got)  # per conversation
+        self.assertIn("episodic  n=   1  missing 1", got)   # discard-tier fact 4 not judged
+        self.assertIn("lost 50.0%", got)                   # missing 1 + partial half, of 3
+        self.assertNotIn(SECRET, got)
+        self.assertEqual(len(self.calls), 2)                 # one call per conversation
+        self.assertIn(SECRET + "b", self.calls[0].split("other conversations")[0])
+        again = self._run()                                  # verdicts come from the cache
+        self.assertEqual(again.splitlines()[:-1], got.splitlines()[:-1])
+        self.assertIn("judge tokens in 0", again)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_loss_counts_judged_facts_only(self):
+        self.fail = SECRET + "a3"  # conversation 11's request fails, fact 3 stays unjudged
+        got = self._run()
+        self.assertIn("episodic  n=   1  unjudged 1", got)
+        self.assertIn("lost 25.0% of 2 judged, partial = half; 1 unjudged, so incomplete", got)
+        self.assertNotIn(SECRET, got)
+
+    def test_parse_verdicts(self):
+        text = 'I see [1] and [2]: [{"id": "1", "v": "covered"}, {"id": 2, "v": "maybe"}, ' \
+               '{"id": 7, "v": "missing"}]'
+        self.assertEqual(coverage.parse_verdicts(text, {1, 2}), {1: "covered"})
+        self.assertEqual(coverage.parse_verdicts("[{bad", {1}), {})
 
 
 if __name__ == "__main__":

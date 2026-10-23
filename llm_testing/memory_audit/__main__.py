@@ -1,5 +1,5 @@
 # CLI: python3 -m llm_testing.memory_audit
-#        sample|label|classify|compare|report|examples|reextract|candidates
+#        sample|label|classify|compare|report|examples|reextract|candidates|coverage
 #
 # An audit of what memory extraction has stored for a user: which facts are worth
 # keeping and which kinds of unwanted fact extraction produces.
@@ -14,6 +14,8 @@
 #             database, so a prompt variant can be measured on the same input
 #   candidates counts and conversation ids where memory may have gone wrong,
 #             for the owner to write memory eval cases from (prints no text)
+#   coverage  how many of run A's facts (by tier) run B also stored, judged by a
+#             model per conversation: covered / partial / missing (counts only)
 #
 # Privacy: everything read or written lives under llm_testing/memory_audit/data/
 # (ignored by git).  Only `label` and `examples` print fact text; the others
@@ -32,7 +34,7 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from . import candidates, models, reextract, rubric
+from . import candidates, coverage, models, reextract, rubric
 from .storage import DATA, data_path, private_open, text_sha
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -199,15 +201,20 @@ def cmd_label(a):
 
 # --------------------------------------------------------------------------- classify
 
+def _class_name(model, set_path, prompt):
+    """classify's default output file for a set."""
+    return (f"class_{re.sub(r'[^A-Za-z0-9.-]+', '_', model)}"
+            f"_{os.path.splitext(os.path.basename(set_path))[0]}_r{rubric.RUBRIC_VERSION}"
+            f"{'_tier' if prompt == 'tier' else ''}.jsonl")
+
+
 def cmd_classify(a):
     keys = models.load_keys(a.secrets)
     models.check_ready(a.model, keys, a.endpoint)
     facts = _read_jsonl(_data(a.set))
     if not facts:
         raise SystemExit(f"no facts in {_data(a.set)}; run `sample` first")
-    out_path = _data(a.out or f"class_{re.sub(r'[^A-Za-z0-9.-]+', '_', a.model)}"
-                     f"_{os.path.splitext(os.path.basename(a.set))[0]}_r{rubric.RUBRIC_VERSION}"
-                     f"{'_tier' if a.prompt == 'tier' else ''}.jsonl")
+    out_path = _data(a.out or _class_name(a.model, a.set, a.prompt))
     # A row counts as done only for the same text: scratch databases reuse ids.
     done = {(r["id"], r.get("sha")) for r in _read_jsonl(out_path) if r.get("kind")}
     todo = [f for f in facts if (f["id"], text_sha(f["text"])) not in done]
@@ -458,7 +465,25 @@ def main(argv=None):
     s.add_argument("--user-id", type=int, default=1)
     s.add_argument("--max-ids", type=int, default=100, help="ids printed per signal")
 
+    s = sub.add_parser("coverage", help="how many of run A's facts run B also stored (counts)")
+    s.add_argument("a_set", help="run A's facts, e.g. reextract_<label>_facts.jsonl")
+    s.add_argument("b_set", help="run B's facts")
+    s.add_argument("--a-class", default="",
+                   help="A's classification (default: classify's output name for a_set)")
+    s.add_argument("--tiers", default="semantic,pointer,episodic", help="A tiers to judge")
+    s.add_argument("--model", default="claude:claude-haiku-5-5")
+    s.add_argument("--endpoint", default="")
+    s.add_argument("--secrets", default=DEFAULT_SECRETS)
+    s.add_argument("--workers", type=int, default=4)
+    s.add_argument("--out", default="", help="verdict cache (default: from both set names)")
+
     a = p.parse_args(argv)
+    if a.cmd == "coverage":
+        a.a_class = a.a_class or _class_name(a.model, a.a_set, "kind")
+        if not os.path.exists(_data(a.a_class)):
+            raise SystemExit(f"classification file not found: {_data(a.a_class)}")
+        coverage.run(a, _by_id, _tier)
+        return
     if a.cmd == "candidates":
         candidates.run(a)
         return

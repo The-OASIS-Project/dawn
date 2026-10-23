@@ -75,8 +75,9 @@ int bench_mp_run_smoke(const char *locomo_path, int conv_idx);
 int bench_mp_dispatch(struct json_object *cmd);
 
 /**
- * Return SHA-256 (lowercase hex, 64 chars + NUL) of the live
- * MEMORY_EXTRACTION_PROMPT_TEMPLATE body.  Computed once on first call and
+ * Return SHA-256 (lowercase hex, 64 chars + NUL) of the extraction template in
+ * use (the compiled MEMORY_EXTRACTION_PROMPT_TEMPLATE, or the
+ * DAWN_EXTRACTION_PROMPT_FILE override).  Computed once on first call and
  * cached.
  *
  * The Python harness embeds this in the snapshot cache key so that any change

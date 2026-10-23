@@ -44,6 +44,7 @@
 #include "core/iso8601.h"
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "core/user_tz.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
@@ -1234,20 +1235,12 @@ static void *extraction_thread(void *arg) {
     * confusion axis) off the prompt when the feature is dormant. */
    const char *expiry_block = g_config.memory.expire_enabled ? MEMORY_EXTRACTION_EXPIRY_BLOCK : "";
 
-   /* Build extraction prompt.  + 100 covers snprintf overhead consuming the
-    * four "%s" format specifiers plus a small safety margin; expand if more
-    * placeholders are added to MEMORY_EXTRACTION_PROMPT_TEMPLATE. */
-   size_t prompt_size = strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
-                        strlen(ctx->conversation_json) + strlen(existing_profile) +
-                        strlen(expiry_block) + 100;
-   char *prompt = malloc(prompt_size);
+   char *prompt = memory_extraction_build_prompt(anchor_line, ctx->conversation_json,
+                                                 existing_profile, expiry_block);
    if (!prompt) {
       OLOG_ERROR("memory_extraction: failed to allocate prompt");
       goto cleanup;
    }
-
-   snprintf(prompt, prompt_size, MEMORY_EXTRACTION_PROMPT_TEMPLATE, anchor_line,
-            ctx->conversation_json, existing_profile, expiry_block);
 
    /* Call LLM for extraction using configured provider/model */
    char *response = NULL;
@@ -1734,6 +1727,49 @@ int extraction_run_queued(int user_id,
 
 size_t memory_extraction_get_template_size_chars(void) {
    return strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE);
+}
+
+/* Set only by the benchmark harness (DAWN_EXTRACTION_PROMPT_FILE); the daemon
+ * never sets it, so it always extracts with the compiled template. */
+static const char *const *s_template_pieces;
+
+void memory_extraction_set_template_pieces(
+    const char *const pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES]) {
+   s_template_pieces = pieces;
+}
+
+char *memory_extraction_build_prompt(const char *anchor,
+                                     const char *conversation,
+                                     const char *profile,
+                                     const char *expiry) {
+   const char *const values[MEMORY_EXTRACTION_TEMPLATE_PIECES - 1] = { anchor, conversation,
+                                                                       profile, expiry };
+   size_t values_len = 0;
+   for (int i = 0; i < MEMORY_EXTRACTION_TEMPLATE_PIECES - 1; i++)
+      values_len += strlen(values[i]);
+
+   if (s_template_pieces) {
+      /* A benchmark's prompt file: its text goes in as text, never as a format. */
+      size_t total = values_len + 1;
+      for (int i = 0; i < MEMORY_EXTRACTION_TEMPLATE_PIECES; i++)
+         total += strlen(s_template_pieces[i]);
+      strbuf_t sb;
+      strbuf_init_with_max(&sb, total, total);
+      for (int i = 0; i < MEMORY_EXTRACTION_TEMPLATE_PIECES - 1; i++) {
+         strbuf_append(&sb, s_template_pieces[i]);
+         strbuf_append(&sb, values[i]);
+      }
+      strbuf_append(&sb, s_template_pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES - 1]);
+      return strbuf_steal(&sb);
+   }
+
+   /* The template's %s and %% shrink in the output, so its length covers them. */
+   size_t size = strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE) + values_len + 1;
+   char *prompt = malloc(size);
+   if (prompt)
+      snprintf(prompt, size, MEMORY_EXTRACTION_PROMPT_TEMPLATE, anchor, conversation, profile,
+               expiry);
+   return prompt;
 }
 
 int memory_extraction_resolve_config(llm_resolved_config_t *cfg,

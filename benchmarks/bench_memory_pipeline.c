@@ -72,6 +72,7 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
 #include "bench_memory_schema.h"
+#include "bench_prompt_pieces.h"
 #include "config/dawn_config.h"
 #include "memory/memory_callback_internal.h"
 #include "memory/memory_db.h"
@@ -131,7 +132,57 @@ static void dia_map_add(const char *dia_id, int64_t msg_id) {
  * and memory_db_* helpers.  Tmpfile is cheap, gets unlinked on teardown. */
 static char s_bench_db_path[64] = "";
 
+/* DAWN_EXTRACTION_PROMPT_FILE: extract with the template in this file instead of
+ * the compiled MEMORY_EXTRACTION_PROMPT_TEMPLATE, so a prompt variant is measured
+ * without a rebuild (the ready line's prompt hash covers the file's text).  The
+ * file is written like the template (four %s, %% for a percent sign) but is only
+ * split into literal pieces, never used as a format.  Returns 0 when unset or
+ * loaded. */
+static char *s_prompt_text;   /* the file's text, for the prompt hash */
+static char *s_prompt_pieces; /* a copy split at its %s */
+static const char *s_prompt_piece[MEMORY_EXTRACTION_TEMPLATE_PIECES];
+
+static int load_prompt_override(void) {
+   const char *path = getenv("DAWN_EXTRACTION_PROMPT_FILE");
+   if (!path || !path[0])
+      return 0;
+   FILE *f = fopen(path, "rb");
+   if (!f) {
+      fprintf(stderr, "bench_mp_init: cannot open %s\n", path);
+      return 1;
+   }
+   char *buf = NULL;
+   long len = -1;
+   if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0) {
+      buf = malloc((size_t)len + 1);
+      if (buf && fread(buf, 1, (size_t)len, f) != (size_t)len) {
+         free(buf);
+         buf = NULL;
+      }
+   }
+   fclose(f);
+   if (!buf) {
+      fprintf(stderr, "bench_mp_init: cannot read %s\n", path);
+      return 1;
+   }
+   buf[len] = '\0';
+   char *pieces = strdup(buf);
+   if (!pieces || bench_prompt_split(pieces, s_prompt_piece) != 0) {
+      fprintf(stderr, "bench_mp_init: %s needs exactly four %%s and no other conversion\n", path);
+      free(pieces);
+      free(buf);
+      return 1;
+   }
+   s_prompt_text = buf;
+   s_prompt_pieces = pieces;
+   memory_extraction_set_template_pieces(s_prompt_piece);
+   return 0;
+}
+
 int bench_mp_init(void) {
+   if (load_prompt_override() != 0)
+      return 1;
+
    /* mkstemp gives us a unique writable path; close the fd immediately so
     * sqlite can open it. */
    snprintf(s_bench_db_path, sizeof(s_bench_db_path), "/tmp/bench_mp_XXXXXX.db");
@@ -178,6 +229,11 @@ void bench_mp_teardown(void) {
    s_db.initialized = false;
    if (s_bench_db_path[0])
       unlink(s_bench_db_path);
+   memory_extraction_set_template_pieces(NULL);
+   free(s_prompt_pieces);
+   s_prompt_pieces = NULL;
+   free(s_prompt_text);
+   s_prompt_text = NULL;
 }
 
 /* =============================================================================
@@ -1204,7 +1260,8 @@ static int copy_file(const char *src, const char *dst) {
    return rc;
 }
 
-/* SHA-256 of the live MEMORY_EXTRACTION_PROMPT_TEMPLATE body, lowercase hex.
+/* SHA-256 of the extraction template in use (the compiled one, or the
+ * DAWN_EXTRACTION_PROMPT_FILE override), lowercase hex.
  * Computed once on first call and cached.  Used by both the ready-message
  * publisher (so the Python harness can mix it into its cache key) and by the
  * snapshot save/load path (so a stale snapshot is detected at load time
@@ -1216,10 +1273,9 @@ const char *bench_mp_extraction_prompt_sha256(void) {
    static int computed = 0;
    if (computed)
       return hex;
-   const char *tmpl = MEMORY_EXTRACTION_PROMPT_TEMPLATE;
-   size_t tmpl_len = tmpl ? strlen(tmpl) : 0;
+   const char *tmpl = s_prompt_text ? s_prompt_text : MEMORY_EXTRACTION_PROMPT_TEMPLATE;
    unsigned char digest[SHA256_DIGEST_LENGTH];
-   SHA256((const unsigned char *)(tmpl ? tmpl : ""), tmpl_len, digest);
+   SHA256((const unsigned char *)tmpl, strlen(tmpl), digest);
    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
       snprintf(hex + i * 2, 3, "%02x", digest[i]);
    }
