@@ -3528,8 +3528,7 @@ static void test_entity_upsert_wrapper_uses_now(void) {
 
 static int64_t insert_fact_at(int user_id, const char *text, int64_t created_at) {
    int64_t fact_id = 0;
-   int rc = memory_db_fact_create_at(user_id, text, 1.0f, "explicit", "general", NULL, created_at,
-                                     &fact_id);
+   int rc = memory_db_fact_create_at(user_id, text, 1.0f, "explicit", NULL, created_at, &fact_id);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_GREATER_THAN_INT64(0, fact_id);
    return fact_id;

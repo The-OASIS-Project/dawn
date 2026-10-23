@@ -257,8 +257,7 @@ struct json_object *memory_extraction_parse_json(const char *response) {
  * relations inside their parent fact's `relations[]` array, so the parser
  * knows `fact_id` directly at relation-insert time.  Post-hoc text-
  * matching is no longer needed and the 128-entry cap no longer bounds
- * relation linkage coverage.  See dawn/docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md
- * §"C-side changes required". */
+ * relation linkage coverage. */
 
 /* An extracted fact seen again (@p existing as stored, NULL when unreadable):
  * raise its confidence and record this conversation as teaching it too.  Said
@@ -584,7 +583,7 @@ static void process_extraction_response(int user_id,
    /* Process facts — Phase 0 paired-output schema: each fact has a `subject`
     * field (required, resolves to an entity FK on the fact row) and a
     * nested `relations[]` array (processed inline with fact_id known, no
-    * post-hoc text matching).  See dawn/docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md. */
+    * post-hoc text matching). */
 
    /* Phase 0 counters: track how often the subject-entity FK is left NULL
     * so we can quantify the gap before tightening to NOT NULL in a follow-
@@ -672,9 +671,8 @@ static void process_extraction_response(int user_id,
                matched_id = 0;
             if (matched_id > 0) {
                /* Paraphrase hit — bump existing fact's confidence +
-                * extend provenance.  No fact_map population (Phase 0
-                * pairs relations with fact_id directly; no text match
-                * needed). */
+                * extend provenance.  No fact_map population: relations are
+                * paired with their fact, so no text lookup. */
                reinforce_fact(user_id, matched_id, read ? &seen : NULL, false, prov);
                OLOG_INFO("memory_extraction: paraphrase merged into fact_id=%lld "
                          "score=%.3f: %s",
@@ -683,8 +681,8 @@ static void process_extraction_response(int user_id,
                fact_id_origin = "paraphrase_match";
             } else {
                /* No paraphrase — create new fact + store precomputed vector. */
-               memory_db_fact_create_at(user_id, text, confidence, source, NULL, prov,
-                                        conv_created_at, &fact_id);
+               memory_db_fact_create_at(user_id, text, confidence, source, prov, conv_created_at,
+                                        &fact_id);
                OLOG_INFO("memory_extraction: stored fact: %s", text);
                if (fact_id > 0) {
                   memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
@@ -694,7 +692,7 @@ static void process_extraction_response(int user_id,
          } else {
             /* Dedup off, or no embedding: store it.  A failed embed is covered
              * by the embedding backfill. */
-            memory_db_fact_create_at(user_id, text, confidence, source, NULL, prov, conv_created_at,
+            memory_db_fact_create_at(user_id, text, confidence, source, prov, conv_created_at,
                                      &fact_id);
             OLOG_INFO("memory_extraction: stored fact: %s", text);
             if (fact_id > 0 && memory_embeddings_available())
@@ -1025,8 +1023,8 @@ static void process_extraction_response(int user_id,
             if (similar_count > 0) {
                /* Create new fact and supersede old one */
                int64_t new_id = 0;
-               memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", NULL, prov,
-                                        conv_created_at, &new_id);
+               memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", prov, conv_created_at,
+                                        &new_id);
                if (new_id > 0) {
                   /* The old fact is an older value the correction replaced
                    * (back if the correction is forgotten); what it stated stays

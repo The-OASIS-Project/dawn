@@ -50,10 +50,10 @@
  * ============================================================================= */
 
 /* Reads from SELECTs ordered: id, user_id, fact_text, confidence, source,
- * created_at, last_accessed, access_count, superseded_by, category, note_doc_id.
+ * created_at, last_accessed, access_count, superseded_by, note_doc_id.
  * A statement's own extra column (expires_at, a BM25 score) follows them. */
-#define FACT_COL_NOTE_DOC_ID 10
-#define FACT_COL_EXTRA 11
+#define FACT_COL_NOTE_DOC_ID 9
+#define FACT_COL_EXTRA 10
 static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->id = sqlite3_column_int64(stmt, 0);
    fact->user_id = sqlite3_column_int(stmt, 1);
@@ -74,13 +74,6 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->last_accessed = (time_t)sqlite3_column_int64(stmt, 6);
    fact->access_count = sqlite3_column_int(stmt, 7);
    fact->superseded_by = sqlite3_column_int64(stmt, 8);
-
-   const char *category = (const char *)sqlite3_column_text(stmt, 9);
-   if (category) {
-      safe_strscpy(fact->category, category);
-   } else {
-      safe_strscpy(fact->category, "general");
-   }
    fact->note_doc_id = sqlite3_column_int64(stmt, FACT_COL_NOTE_DOC_ID);
 
    /* expires_at (v58) is NOT in the shared projection: only the by-id read
@@ -127,7 +120,6 @@ int memory_db_fact_create_at(int user_id,
                              const char *fact_text,
                              float confidence,
                              const char *source,
-                             const char *category,
                              const memory_provenance_t *prov,
                              int64_t created_at_override,
                              int64_t *id_out) {
@@ -136,11 +128,6 @@ int memory_db_fact_create_at(int user_id,
    if (!fact_text || !source) {
       return MEMORY_DB_FAILURE;
    }
-
-   /* category may be NULL — schema default 'general' applies via the column DEFAULT,
-    * but we explicitly bind to keep the SQL pure (no default-fallback ambiguity
-    * across SQLite versions). */
-   const char *cat = (category && *category) ? category : "general";
 
    /* 0 sentinel = "use NOW()".  Callers that want extraction-time temporal
     * fidelity pass the source conversation's created_at; everyone else gets
@@ -172,10 +159,9 @@ int memory_db_fact_create_at(int user_id,
    sqlite3_bind_text(stmt, 2, fact_text, -1, SQLITE_STATIC);
    sqlite3_bind_double(stmt, 3, confidence);
    sqlite3_bind_text(stmt, 4, source, -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 5, cat, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 6, created_at);
-   sqlite3_bind_int64(stmt, 7, (int64_t)normalized_hash);
-   memory_db_internal_bind_provenance(stmt, 8, prov);
+   sqlite3_bind_int64(stmt, 5, created_at);
+   sqlite3_bind_int64(stmt, 6, (int64_t)normalized_hash);
+   memory_db_internal_bind_provenance(stmt, 7, prov);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);
@@ -211,8 +197,8 @@ int memory_db_fact_create_at(int user_id,
    if (id_out)
       *id_out = id;
 
-   OLOG_INFO("memory_db: created fact %ld for user %d (hash=%u, category=%s)", (long)id, user_id,
-             normalized_hash, cat);
+   OLOG_INFO("memory_db: created fact %ld for user %d (hash=%u)", (long)id, user_id,
+             normalized_hash);
    return MEMORY_DB_SUCCESS;
 }
 
@@ -220,10 +206,9 @@ int memory_db_fact_create(int user_id,
                           const char *fact_text,
                           float confidence,
                           const char *source,
-                          const char *category,
                           const memory_provenance_t *prov,
                           int64_t *id_out) {
-   return memory_db_fact_create_at(user_id, fact_text, confidence, source, category, prov,
+   return memory_db_fact_create_at(user_id, fact_text, confidence, source, prov,
                                    /*created_at_override*/ 0, id_out);
 }
 
@@ -665,25 +650,6 @@ int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_
    if (step_rc != SQLITE_DONE)
       return MEMORY_DB_FAILURE;
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
-}
-
-const char *memory_fact_kind_word(const memory_fact_t *fact) {
-   if (!fact) {
-      return NULL;
-   }
-   if (fact->note_doc_id > 0) {
-      return "noted";
-   }
-   if (strcmp(fact->source, "explicit") == 0) {
-      return "told";
-   }
-   if (strcmp(fact->source, "inferred") == 0) {
-      return "inferred";
-   }
-   if (strcmp(fact->source, "import") == 0) {
-      return "imported";
-   }
-   return NULL;
 }
 
 int memory_db_fact_set_note_doc_id(int64_t fact_id, int user_id, int64_t note_doc_id) {

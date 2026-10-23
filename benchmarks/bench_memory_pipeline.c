@@ -578,10 +578,10 @@ int bench_mp_run_smoke(const char *locomo_path, int conv_idx) {
    for (int i = 0; i < fact_count; i++) {
       const char *fact_text_esc = json_object_to_json_string(
           json_object_new_string(facts[i].fact_text));
-      printf("    {\"id\": %" PRId64 ", \"text\": %s, \"category\": \"%s\", "
+      printf("    {\"id\": %" PRId64 ", \"text\": %s, "
              "\"conv_id\": %" PRId64 ", \"msg_start\": %" PRId64 ", \"msg_end\": %" PRId64 "}%s\n",
-             facts[i].id, fact_text_esc, facts[i].category, prov_conv_ids[i], prov_starts[i],
-             prov_ends[i], i + 1 < fact_count ? "," : "");
+             facts[i].id, fact_text_esc, prov_conv_ids[i], prov_starts[i], prov_ends[i],
+             i + 1 < fact_count ? "," : "");
    }
    printf("  ]\n");
    printf("}\n");

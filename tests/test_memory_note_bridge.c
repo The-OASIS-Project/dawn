@@ -325,7 +325,7 @@ void test_kind_word(void) {
    memory_db_fact_find_by_note_doc_id(1, 100, &gloss);
    int64_t told = 0;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(1, "The dog is Ash.", 0.9f,
-                                                                  "explicit", NULL, NULL, &told));
+                                                                  "explicit", NULL, &told));
 
    memory_fact_t f;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
@@ -363,10 +363,10 @@ void test_bm25_reads_its_score(void) {
    int64_t id = 0;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
                          memory_db_fact_create(1, "The dog Ash likes long walks in the park.", 0.9f,
-                                               "explicit", NULL, NULL, &id));
+                                               "explicit", NULL, &id));
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
                          memory_db_fact_create(1, "Ash the dog walks to the dog park daily.", 0.9f,
-                                               "explicit", NULL, NULL, &id));
+                                               "explicit", NULL, &id));
    memory_fact_t facts[4];
    float scores[4] = { 0 };
    int n = 0;

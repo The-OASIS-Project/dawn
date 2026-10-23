@@ -96,8 +96,8 @@ int memory_note_bridge_upsert_gloss(int user_id, int64_t note_doc_id, const char
       memory_db_fact_delete(existing, user_id);
 
    int64_t fact_id = 0;
-   if (memory_db_fact_create(user_id, text, MEMORY_NOTE_GLOSS_CONFIDENCE, "explicit", "general",
-                             NULL, &fact_id) != MEMORY_DB_SUCCESS ||
+   if (memory_db_fact_create(user_id, text, MEMORY_NOTE_GLOSS_CONFIDENCE, "explicit", NULL,
+                             &fact_id) != MEMORY_DB_SUCCESS ||
        fact_id <= 0) {
       OLOG_WARNING("memory_note_bridge: failed to create gloss for note %lld",
                    (long long)note_doc_id);

@@ -242,6 +242,7 @@ static void test_summary_cross_user(void) {
 
 static void test_fact_adapter_shape(void) {
    seed_fact(0, 100, 1, "Pepper's birthday is March 14", 0.85f);
+   strcpy(s_mock.facts[0].source, "explicit"); /* carried as its kind word */
    s_mock.facts[0].created_at = 1700000000;
    s_mock.fact_provenance[0] = (memory_provenance_t){ .conv_id = 42,
                                                       .msg_id_start = 304,
@@ -265,7 +266,7 @@ static void test_fact_adapter_shape(void) {
    TEST_ASSERT_TRUE(fc->recency_score >= 0.0f && fc->recency_score <= 1.0f);
    TEST_ASSERT_EQUAL_INT64(42, fc->provenance.conv_id);
    TEST_ASSERT_EQUAL_INT64(304, fc->provenance.msg_id_start);
-   TEST_ASSERT_EQUAL_STRING("stub-kind", fc->kind);
+   TEST_ASSERT_EQUAL_STRING("told", fc->kind);
    focus_result_free(&result);
 }
 

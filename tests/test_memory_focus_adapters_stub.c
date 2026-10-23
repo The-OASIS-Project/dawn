@@ -121,12 +121,6 @@ bool memory_db_fact_expiry_hidden(int64_t expires_at) {
    return false;
 }
 
-/* Kind-word stub: a fixed word, so a test can see the fact adapter carries it
- * onto its candidate (the mapping itself is tested against the real DB). */
-const char *memory_fact_kind_word(const memory_fact_t *fact) {
-   return fact ? "stub-kind" : NULL;
-}
-
 int memory_db_facts_get_sources(int user_id,
                                 const int64_t *fact_ids,
                                 int n,

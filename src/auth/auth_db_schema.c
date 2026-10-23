@@ -66,7 +66,8 @@ static const char *SCHEMA_SQL =
     "   value TEXT NOT NULL"
     ");"
 
-    /* Users table (categories_backfilled_at added in v34 — gates lazy fact-category backfill;
+    /* Users table (categories_backfilled_at added in v34 for the fact-category pass, since
+     * retired; the column is kept, unread;
      * embeddings_model_id added in v41 — per-user gate for embedding recomputation;
      * v44: real_name / preferred_address / identity_aliases — user-identity fields
      * surfaced in WebUI Settings, injected into the LLM system prompt, and used

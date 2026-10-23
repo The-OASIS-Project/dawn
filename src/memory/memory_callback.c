@@ -938,8 +938,7 @@ static char *memory_action_remember_single(int user_id,
     * was learned in (checked to still exist and be this user's, atomically with
     * the write), or keep it waiting for one. */
    int64_t fact_id = 0;
-   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, NULL,
-                                         &fact_id);
+   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
       return strdup(TOOL_RESULT_ERROR_MARK "Failed to store the fact. Please try again.");

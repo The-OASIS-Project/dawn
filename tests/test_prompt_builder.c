@@ -551,14 +551,22 @@ static void test_panel_not_told_when_disabled(void) {
  * who gave neither gets no block. */
 static void test_identity_address_without_a_real_name(void) {
    char *t = prompt_identity_text("", "sir", "");
-   TEST_ASSERT_NOT_NULL(t);
-   TEST_ASSERT_NOT_NULL(strstr(t, "The user prefers to be addressed as sir."));
+   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nThe user prefers to be addressed as sir.\n", t);
    free(t);
    TEST_ASSERT_NULL(prompt_identity_text("", "", "Ace"));
-   t = prompt_identity_text("Pat Doe", "boss", "Pat\n pat \nP.D.");
-   TEST_ASSERT_NOT_NULL(t);
-   TEST_ASSERT_NOT_NULL(strstr(t, "You are speaking with Pat Doe. They prefer to be addressed "
-                                  "as boss. They may also be referred to as: Pat, P.D."));
+   t = prompt_identity_text("Pat Doe", "boss", "Pat\n pat \nPD");
+   TEST_ASSERT_EQUAL_STRING(
+       "\n\n## User Identity\nYou are speaking with Pat Doe. They prefer to be "
+       "addressed as boss. They may also be referred to as: Pat, PD. Use "
+       "this information to recognize when memory facts or extracted "
+       "entities refer to them.\n",
+       t);
+   free(t);
+   t = prompt_identity_text("Pat Doe", "", " \n");
+   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nYou are speaking with Pat Doe. Use this "
+                            "information to recognize when memory facts or extracted entities "
+                            "refer to them.\n",
+                            t);
    free(t);
 }
 

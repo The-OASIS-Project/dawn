@@ -62,7 +62,6 @@ extern "C" {
  * @param fact_text The fact content
  * @param confidence Confidence level (0.0-1.0)
  * @param source Source of fact ("explicit" or "inferred")
- * @param category Stored in the category column; NULL or empty stores "general" (v34)
  * @param prov Provenance (source range in conversation); NULL or conv_id==0 = no provenance
  * @param id_out Output: fact ID on success (may be NULL if caller doesn't need it)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
@@ -71,7 +70,6 @@ int memory_db_fact_create(int user_id,
                           const char *fact_text,
                           float confidence,
                           const char *source,
-                          const char *category,
                           const memory_provenance_t *prov,
                           int64_t *id_out);
 
@@ -92,7 +90,6 @@ int memory_db_fact_create_at(int user_id,
                              const char *fact_text,
                              float confidence,
                              const char *source,
-                             const char *category,
                              const memory_provenance_t *prov,
                              int64_t created_at_override,
                              int64_t *id_out);
@@ -318,18 +315,6 @@ int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t enti
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
  */
 int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_at);
-
-/**
- * @brief The word that says how a fact was learned, as surfaces show it.
- *
- * "told" (the user said it), "inferred", "imported", or "noted" for a
- * memory→note gloss (whatever its source).  NULL for any other source: show
- * nothing.  The returned string is static.
- *
- * @param fact The fact (its source and note_doc_id); NULL returns NULL
- * @return A static word, or NULL
- */
-const char *memory_fact_kind_word(const memory_fact_t *fact);
 
 /**
  * @brief Link a fact to a saved note (memory→note bridge, v61).

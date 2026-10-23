@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -137,8 +138,7 @@ typedef struct {
    int user_id;
    char fact_text[MEMORY_FACT_TEXT_MAX];
    float confidence;
-   char source[MEMORY_SOURCE_MAX];     /* "explicit" or "inferred" */
-   char category[MEMORY_CATEGORY_MAX]; /* category column (v34); no longer assigned */
+   char source[MEMORY_SOURCE_MAX]; /* "explicit" or "inferred" */
    time_t created_at;
    time_t last_accessed;
    int access_count;
@@ -149,6 +149,35 @@ typedef struct {
                            * keyword/list retrieval statements filter expired rows in SQL,
                            * so their results default this to 0. */
 } memory_fact_t;
+
+/**
+ * @brief The word that says how a fact was learned, as surfaces show it.
+ *
+ * "told" (the user said it), "inferred", "imported", or "noted" for a
+ * memory→note gloss (whatever its source).  NULL for any other source: show
+ * nothing.  The returned string is static.
+ *
+ * @param fact The fact (its source and note_doc_id); NULL returns NULL
+ * @return A static word, or NULL
+ */
+static inline const char *memory_fact_kind_word(const memory_fact_t *fact) {
+   if (!fact) {
+      return NULL;
+   }
+   if (fact->note_doc_id > 0) {
+      return "noted";
+   }
+   if (strcmp(fact->source, "explicit") == 0) {
+      return "told";
+   }
+   if (strcmp(fact->source, "inferred") == 0) {
+      return "inferred";
+   }
+   if (strcmp(fact->source, "import") == 0) {
+      return "imported";
+   }
+   return NULL;
+}
 
 /* =============================================================================
  * Memory Preference Structure

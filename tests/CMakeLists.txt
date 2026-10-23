@@ -1208,6 +1208,7 @@ dawn_add_unit_test(test_llm_dup_check
    SOURCES test_llm_dup_check.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1227,6 +1228,7 @@ dawn_add_unit_test(test_llm_tools_finish
    SOURCES test_llm_tools_finish.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1245,6 +1247,7 @@ dawn_add_unit_test(test_llm_tools_args
    SOURCES test_llm_tools_args.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1264,6 +1267,7 @@ dawn_add_unit_test(test_llm_tools_frozen
    SOURCES test_llm_tools_frozen.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1284,6 +1288,7 @@ dawn_add_unit_test(test_tool_images_render
    SOURCES test_tool_images_render.c test_llm_dup_check_stub.c test_tool_call_policy_stub.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
            ${SRC_ROOT}/src/llm/llm_tool_images_render.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
@@ -1729,6 +1734,7 @@ dawn_add_unit_test(test_memory_extraction_input
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
    LIBS    dawn_common unity json-c
    LABEL   ci)

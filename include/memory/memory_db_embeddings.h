@@ -129,9 +129,8 @@ int memory_db_fact_list_without_embedding(int user_id,
  * @brief List users that need an embedding-backfill pass
  *
  * A user qualifies if they have a live, non-empty fact with a NULL or
- * wrong-dimension embedding, or if their one-shot category pass has not run
- * (users.categories_backfilled_at = 0) and they have any live fact.  Paged by
- * user id so a sweep larger than the backfill queue can resume.
+ * wrong-dimension embedding.  Paged by user id so a sweep larger than the
+ * backfill queue can resume.
  *
  * @param expected_dims Expected embedding dimensions
  * @param after_user_id Only return users with id > after_user_id (0 = from start)

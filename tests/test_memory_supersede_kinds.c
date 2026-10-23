@@ -67,7 +67,7 @@ static int64_t fact(const char *text, int64_t conv_id) {
    memory_provenance_t prov = { .conv_id = conv_id, .msg_id_start = 1, .msg_id_end = 1 };
    int64_t id = 0;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
-                         memory_db_fact_create(s_user, text, 0.9f, "explicit", NULL, &prov, &id));
+                         memory_db_fact_create(s_user, text, 0.9f, "explicit", &prov, &id));
    return id;
 }
 
