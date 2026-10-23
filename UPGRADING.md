@@ -20,7 +20,7 @@ turn. This includes voice devices (satellites and the local microphone), so a re
 a shared room may mention what it retrieved, such as health or family details.
 
 **What you need to do.** If others share a room with a voice device, turn it off in
-Settings → Memory → Per-Turn Context Injection (or set `enabled = false`). If you have ever
+Settings → Memory System → Per-Turn Context Injection (or set `enabled = false`). If you have ever
 saved settings from the WebUI, your `dawn.toml` already says `enabled = false` under
 `[memory.focus_injection]` and keeps it off; turn it on in the same place to get the new
 default.

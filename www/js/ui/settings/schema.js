@@ -1259,12 +1259,12 @@
                type: 'group',
                label: 'Per-Turn Context Injection',
                description:
-                  'Pulls memory, document, calendar, and email content above a relevance threshold and injects it into each user turn.',
+                  'Pulls memory, document, and calendar content above a relevance threshold and injects it into each user turn.',
                fields: {
                   focus_enabled: {
                      type: 'checkbox',
                      label: 'Enable per-turn context injection',
-                     hint: 'Master switch: automatically add relevant memories, documents, calendar, and email to each turn.',
+                     hint: 'Master switch: automatically add relevant memories, documents, and calendar events to each turn.',
                      configPath: 'memory.focus_injection.enabled',
                   },
                   focus_budget_bytes: {
