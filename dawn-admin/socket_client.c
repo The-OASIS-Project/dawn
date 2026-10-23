@@ -21,15 +21,45 @@
  * Socket client implementation for dawn-admin CLI.
  */
 
+#define _GNU_SOURCE /* struct ucred */
+
 #include "socket_client.h"
 
 #include <errno.h>
+#include <pwd.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+/* An abstract socket name belongs to whoever binds it first, so while the daemon is
+ * down any local user could listen there and read what we send (a new user's
+ * password).  Talk only to a daemon running as root, as us, or as the dawn user. */
+static int peer_is_daemon(int fd) {
+   struct ucred cred;
+   socklen_t len = sizeof(cred);
+   if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+      fprintf(stderr, "Error: Failed to check the admin socket's owner: %s\n", strerror(errno));
+      return 0;
+   }
+   if (cred.uid == 0 || cred.uid == getuid()) {
+      return 1;
+   }
+   struct passwd pwd_buf;
+   struct passwd *pw = NULL;
+   char pw_storage[1024];
+   if (getpwnam_r("dawn", &pwd_buf, pw_storage, sizeof(pw_storage), &pw) == 0 && pw &&
+       cred.uid == pw->pw_uid) {
+      return 1;
+   }
+   fprintf(stderr,
+           "Error: The admin socket is held by uid %u, which is not root, the dawn user or "
+           "you, so it isn't DAWN; refusing to send to it\n",
+           (unsigned)cred.uid);
+   return 0;
+}
 
 int admin_client_connect(void) {
    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -58,6 +88,11 @@ int admin_client_connect(void) {
       } else {
          fprintf(stderr, "Error: Failed to connect to daemon: %s\n", strerror(errno));
       }
+      close(fd);
+      return -1;
+   }
+
+   if (!peer_is_daemon(fd)) {
       close(fd);
       return -1;
    }

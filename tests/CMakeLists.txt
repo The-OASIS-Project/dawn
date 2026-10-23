@@ -1016,10 +1016,7 @@ dawn_add_unit_test(test_document_extract
    INCLUDES ${SRC_ROOT}/include
    LABEL   ci)
 if(MUPDF_FOUND)
-   target_link_libraries(test_document_extract PRIVATE
-       ${MUPDF_LIB} ${MUPDF_THIRD_LIB}
-       mujs gumbo openjp2 jbig2dec jpeg
-       ${HARFBUZZ_LIB} ${FREETYPE2_LIBRARIES} z m)
+   target_link_libraries(test_document_extract PRIVATE ${MUPDF_LIBRARIES} m)
    target_compile_definitions(test_document_extract PRIVATE HAVE_MUPDF)
 else()
    target_link_libraries(test_document_extract PRIVATE m)

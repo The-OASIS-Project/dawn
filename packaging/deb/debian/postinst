@@ -1,0 +1,105 @@
+#!/bin/sh
+# dawn postinst: system user, state directories, config from templates, shipped
+# models, systemd.  Runs offline; the models too big to ship are downloaded by
+# dawn-models.service when dawn first starts.
+set -e
+
+SHARE=/usr/share/dawn
+DATA=/var/lib/dawn
+CONF=/etc/dawn
+
+# link <target> <link>: point <link> at <target> unless <link> is the operator's own
+# file (anything but a symlink), which is left alone.
+link() {
+   if [ ! -e "$2" ] || [ -L "$2" ]; then
+      ln -sfn "$1" "$2"
+   fi
+}
+
+if [ "$1" = configure ]; then
+   # Unconditional: a no-op for an existing system user and group, and a failed
+   # install, not a service running as someone's login, for a person named dawn.
+   addgroup --quiet --system dawn
+   adduser --quiet --system --ingroup dawn --home "$DATA" --no-create-home \
+      --shell /usr/sbin/nologin --gecos "DAWN daemon" dawn
+
+   # Created when missing, never re-owned: an operator's choices under
+   # /var/lib/dawn (a bind-mounted db/, OTA keys) survive every upgrade.
+   for d in "$DATA" "$DATA/db" "$DATA/models" "$DATA/ota"; do
+      [ -d "$d" ] || install -d -m 750 -o dawn -g dawn "$d"
+   done
+
+   # The daemon rewrites dawn.toml and secrets.toml (and their .bak) on a WebUI
+   # settings save, so it owns those files; the directory stays root's.  Not
+   # conffiles: dpkg would mark every save a local change.
+   [ -d "$CONF" ] || install -d -m 750 -o root -g dawn "$CONF"
+   if [ ! -e "$CONF/dawn.toml" ]; then
+      install -m 640 -o dawn -g dawn "$SHARE/conf/dawn.toml" "$CONF/dawn.toml"
+   fi
+   # Always present, or a secrets save from the WebUI would create
+   # /var/lib/dawn/secrets.toml, which is read first and would shadow this one.  A
+   # new one gets this host's satellite registration key, so only devices given it
+   # can register as satellites.
+   if [ ! -e "$CONF/secrets.toml" ]; then
+      key="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+      install -m 600 -o dawn -g dawn /dev/null "$CONF/secrets.toml"
+      # In the environment, not argv: other users can read a process's arguments.
+      KEY="$key" awk '$0 == "# satellite_registration_key = \"\"" {
+         $0 = "satellite_registration_key = \"" ENVIRON["KEY"] "\""
+      } { print }' "$SHARE/conf/secrets.toml" >"$CONF/secrets.toml"
+   fi
+   for f in dawn.toml.bak secrets.toml.bak; do
+      [ -e "$CONF/$f" ] || install -m 600 -o dawn -g dawn /dev/null "$CONF/$f"
+   done
+   # Also when the files came from elsewhere (a restore, a migration, a copy as
+   # root): the daemon can't read secrets or save settings it doesn't own.
+   chown dawn:dawn "$CONF/dawn.toml" "$CONF/secrets.toml" "$CONF/dawn.toml.bak" \
+      "$CONF/secrets.toml.bak"
+   chmod 600 "$CONF/secrets.toml" "$CONF/secrets.toml.bak"
+
+   # Shipped models and tool instructions, where the daemon looks for them
+   # (relative to its working directory, /var/lib/dawn).
+   for m in "$SHARE"/models/*; do
+      link "$m" "$DATA/models/${m##*/}"
+   done
+   link "$SHARE/tool_instructions" "$DATA/tool_instructions"
+fi
+
+# systemd, as debhelper's dh_installsystemd --no-start does it: enable on first
+# install, keep the operator's choice after that, restart a running daemon onto
+# the new version.  The restart doesn't wait: it runs dawn-models.service first,
+# and apt shouldn't sit through a model download.  deb-systemd-invoke can't queue
+# it, so policy-rc.d is asked here as deb-systemd-invoke would (101: not allowed).
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigure ] ||
+   [ "$1" = abort-remove ]; then
+   deb-systemd-helper unmask dawn.service >/dev/null || true
+   if deb-systemd-helper --quiet was-enabled dawn.service; then
+      deb-systemd-helper enable dawn.service >/dev/null || true
+   else
+      deb-systemd-helper update-state dawn.service >/dev/null || true
+   fi
+   if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+      systemctl --system daemon-reload >/dev/null || true
+      if [ -n "$2" ]; then
+         policy=0
+         if [ -x /usr/sbin/policy-rc.d ]; then
+            /usr/sbin/policy-rc.d dawn.service try-restart || policy=$?
+         fi
+         if [ "$policy" -ne 101 ]; then
+            systemctl --system --no-block try-restart dawn.service >/dev/null || true
+         fi
+      fi
+   fi
+fi
+
+if [ "$1" = configure ] && [ -z "$2" ]; then
+   cat <<'EOF'
+
+DAWN is installed and enabled, but not started.  Start it with
+    sudo systemctl start dawn
+then create the admin account and trust this host's CA as described in
+    https://github.com/The-OASIS-Project/dawn/blob/main/docs/INSTALL_UBUNTU_PACKAGE.md
+EOF
+fi
+
+exit 0

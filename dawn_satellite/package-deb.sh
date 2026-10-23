@@ -21,8 +21,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BASE_IMAGE_TAG="${BASE_IMAGE_TAG:-ghcr.io/the-oasis-project/dawn-satellite-build:trixie-arm64}"
 ARCH="arm64"
-VERSION="${1:-${DEB_VERSION:-$(git -C "$REPO_ROOT" describe --tags --always 2>/dev/null | sed 's/^v//')}}"
-VERSION="${VERSION:-0.0.0}"
+# The satellite's own version (satellite_version.h); see deb_version in
+# packaging/deb_common.sh.
+. "$REPO_ROOT/packaging/deb_common.sh"
+VERSION="${1:-${DEB_VERSION:-}}"
+VERSION="${VERSION:-$(deb_version "$(sed -n 's/^#define DAWN_SATELLITE_FIRMWARE_VERSION "\(.*\)"/\1/p' \
+   "$SCRIPT_DIR/include/satellite_version.h")")}"
 MAINTAINER="${DEB_MAINTAINER:-The OASIS Project <noreply@users.noreply.github.com>}"
 
 # Always do a FULL (SDL) build — never trust a possibly-stale build-pi/ binary
@@ -68,26 +72,12 @@ docker run --rm --platform linux/arm64 \
    # pristine binary (apt-owned); postinst seeds the live /var/lib copy from it
    install -m 755 "$bin" "$stage/usr/lib/dawn-satellite/dawn_satellite.dist"
 
-   # Partition the runtime dependency closure (proper dpkg-shlibdeps semantics):
-   # for each resolved .so, if an apt package OWNS it → it becomes a Depends;
-   # if NOT (private / source-built lib, wherever it lives — e.g. the rhasspy
-   # libespeak-ng built into /usr/lib, or whisper/onnx/piper) → bundle it into
-   # /usr/lib/dawn-satellite.  A path heuristic would miss a source lib that
-   # happens to sit under /usr/lib, leaving it neither bundled nor depended on.
+   # Runtime libs: apt-owned → Depends, source-built → bundled into
+   # /usr/lib/dawn-satellite (see packaging/deb_common.sh).
    echo "==> partitioning runtime libs (apt → Depends, private → bundle)…"
-   deps_file="$(mktemp)"
-   ldd "$bin" "$launch" 2>/dev/null | awk "/=> \//{print \$3}" | sort -u | while read -r so; do
-      real="$(realpath "$so" 2>/dev/null || echo "$so")"
-      pkg="$(dpkg -S "$real" 2>/dev/null | cut -d: -f1 | tr "," "\n" | sed "s/ //g" | grep . | head -1 || true)"
-      if [ -n "$pkg" ]; then
-         echo "$pkg" >> "$deps_file"
-      else
-         echo "    bundle (no apt pkg): $real"
-         cp -aL "$real" "$stage/usr/lib/dawn-satellite/" || true
-      fi
-   done
-   shlib_deps="$(sort -u "$deps_file" | grep . | paste -sd"," - | sed "s/,/, /g")"
-   rm -f "$deps_file"
+   . packaging/deb_common.sh
+   shlib_deps="$(deb_bundle_closure "$stage/usr/lib/dawn-satellite" "$bin" "$launch" |
+      paste -sd"," - | sed "s/,/, /g")"
    [ -n "$shlib_deps" ] || { echo "ERROR: empty Depends closure"; exit 1; }
    echo "==> Depends: $shlib_deps, adduser"
 

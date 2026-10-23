@@ -1,0 +1,55 @@
+[Unit]
+Description=DAWN voice assistant daemon
+Documentation=https://github.com/The-OASIS-Project/dawn
+# Wants=, not Requires=: [mqtt] can point at another broker.  The models are still
+# needed: without its Whisper model DAWN exits at start.
+Wants=network-online.target dawn-models.service mosquitto.service
+After=network-online.target dawn-models.service mosquitto.service
+
+[Service]
+Type=simple
+User=dawn
+Group=dawn
+# Models, tool instructions and the optional ./secrets.toml are looked up
+# relative to the working directory.
+WorkingDirectory=/var/lib/dawn
+Environment=HOME=/var/lib/dawn
+# As root (+): the WebUI's certificate in /etc/dawn/ssl, made or renewed as needed.
+ExecStartPre=+/usr/sbin/dawn-tls
+# --server: this build has no local audio.
+ExecStart=/usr/bin/dawn --server --config /etc/dawn/dawn.toml
+# A failing start is retried every 10 s, backing off to every 5 min: a broker
+# that comes back is picked up, a broken config doesn't reload models nonstop.
+Restart=on-failure
+RestartSec=10s
+RestartSteps=5
+RestartMaxDelaySec=5min
+
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dawn /etc/dawn
+# read-only, not true: a music library under /home must stay readable.
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+# DAWN reads mail, web pages and documents from outside; these limit what a bug in
+# that parsing could reach.  dawn-tls (+) runs outside them.  Not set, as they can
+# break on some hosts: SystemCallFilter, MemoryDenyWriteExecute, PrivateDevices,
+# and ProtectClock (it also closes the device policy, like PrivateDevices; without
+# capabilities the dawn user can't set the clock anyway).
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Netlink: glibc's resolver uses it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

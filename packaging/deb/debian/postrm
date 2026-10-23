@@ -1,0 +1,31 @@
+#!/bin/sh
+# dawn postrm.  remove keeps configuration and data; purge removes the
+# configuration and the package's links, and still keeps /var/lib/dawn
+# (databases, downloaded models), which no package action should destroy.
+set -e
+
+DATA=/var/lib/dawn
+CONF=/etc/dawn
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+   systemctl --system daemon-reload >/dev/null || true
+fi
+
+if [ "$1" = purge ]; then
+   deb-systemd-helper purge dawn.service >/dev/null || true
+   rm -f "$CONF/dawn.toml" "$CONF/dawn.toml.bak" "$CONF/secrets.toml" "$CONF/secrets.toml.bak"
+   (cd "$CONF/ssl" 2>/dev/null &&
+      rm -f ca.crt ca.key ca.srl dawn-chain.crt dawn.key dawn.san && cd / && rmdir "$CONF/ssl") || true
+   rmdir "$CONF" 2>/dev/null || true
+   # Links postinst made into /usr/share/dawn, now dangling.
+   for l in "$DATA"/models/* "$DATA/tool_instructions"; do
+      case "$(readlink "$l" 2>/dev/null)" in /usr/share/dawn/*) rm -f "$l" ;; esac
+   done
+   if [ -d "$DATA" ]; then
+      echo "dawn: kept $DATA (databases, downloaded models); remove it by hand if you want it gone."
+   fi
+   # The dawn user stays: it owns what is left in $DATA, and the satellite package
+   # uses the same account.
+fi
+
+exit 0
