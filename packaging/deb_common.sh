@@ -10,7 +10,7 @@
 #   BASE~git<date>.<count>.<sha>, which sorts below BASE, the release it leads to,
 #   and newer builds above older ones (a bare <sha> would sort by hex, so dpkg could
 #   read a newer build as older).  <count> is the CI run number, or the commit count
-#   locally.
+#   locally.  A build with uncommitted changes to tracked files ends in .dirty.
 #
 # deb_bundle_closure BUNDLE_DIR BINARY...
 #
@@ -35,11 +35,13 @@ deb_version() {
       echo "$1"
       return
    fi
-   local root sha count
+   local root sha count dirty=
    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
    sha="$(git -C "$root" rev-parse --short HEAD)"
    count="${GITHUB_RUN_NUMBER:-$(git -C "$root" rev-list --count HEAD)}"
-   echo "$1~git$(date -u +%Y%m%d).$count.$sha"
+   # Uncommitted changes to tracked files: not what HEAD's commit id says it is.
+   [ -z "$(git -C "$root" status --porcelain --untracked-files=no)" ] || dirty=.dirty
+   echo "$1~git$(date -u +%Y%m%d).$count.$sha$dirty"
 }
 
 deb_bundle_closure() {

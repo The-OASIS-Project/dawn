@@ -66,6 +66,11 @@ one (step 4).
    or commented out (a `secrets.toml` from a source install), make one with `openssl rand -hex 32`,
    set it as `satellite_registration_key` under `[secrets]`, and `sudo systemctl restart dawn`;
    until then any device on your network can register as a satellite.
+5. **Web search** needs a search service, which the package doesn't include. Either run a
+   [SearXNG container](../GETTING_STARTED.md#searxng-setup-for-web-search) (free, local; DAWN looks
+   for it at `http://127.0.0.1:8384`), or use [Tavily](../GETTING_STARTED.md#tavily-commercial-search--url-extract)
+   (a hosted API with a free tier): add your Tavily key with the API keys under Settings, and set
+   Settings → Web Search → engine to `tavily`. Without either, every search fails.
 
 ## Where things are
 
