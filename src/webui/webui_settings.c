@@ -29,6 +29,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/scheduler.h"
 #include "core/session_manager.h"
 #include "core/tz.h"
 #include "core/user_tz.h"
@@ -235,6 +236,7 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    }
 
    /* Save settings */
+   const tz_t *old_zone = user_tz(conn->auth_user_id);
    int result = auth_db_set_user_settings(conn->auth_user_id, &settings);
 
    if (result == AUTH_DB_SUCCESS) {
@@ -246,6 +248,10 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
 
       /* Log event */
       auth_db_log_event("SETTINGS_UPDATED", conn->username, conn->client_ip, "Personal settings");
+
+      /* Repeating events follow the user to a new zone. */
+      if (user_tz(conn->auth_user_id) != old_zone)
+         scheduler_rezone(conn->auth_user_id);
 
       /* Every open tab shows this user's times in the zone now in force. */
       json_object *tz_frame = json_object_new_object();

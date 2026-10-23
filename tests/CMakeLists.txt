@@ -147,6 +147,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_calendar.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
