@@ -473,9 +473,9 @@
  * The "SPECIFICITY RULES" block below ports verbatim phrasing from Mem0's
  * `_get_extraction_prompt` for proper-noun preservation, numerical
  * precision, qualifier preservation and casual-topics rules (Mem0's no-echo
- * rule was deliberately not adopted).  DAWN diverges from Mem0 in keeping the
- * atomic-with-composite philosophy + paired JSON schema; NOTICE lists what was
- * adapted and what was changed.
+ * rule was deliberately not adopted).  DAWN diverges from Mem0 in its
+ * entity-graph contract (every fact carries a relation) + paired JSON schema;
+ * NOTICE lists what was adapted and what was changed.
  *
  * Shared by the live extraction worker and the summarize-missing backfill; do
  * not duplicate it.  Args, in order: anchor line, conversation JSON, existing
@@ -527,7 +527,7 @@
    "only thing future sessions can retrieve about what happened here, so "                       \
    "preserve enough detail to answer 'what did we discuss / decide / do "                        \
    "about X' weeks later.\",\n"                                                                  \
-   "  \"title\": \"short conversation title, max 40 chars\",\n"                                  \
+   "  \"title\": \"short conversation title: a label, not a sentence, max 40 chars\",\n"         \
    "  \"topics\": [\"topic1\", \"topic2\"]\n"                                                    \
    "}\n\n"                                                                                       \
    "FACTS AND RELATIONS — load-bearing structural rules:\n"                                    \
@@ -549,63 +549,6 @@
    "relation grounds the fact in the entity graph.  A fact without a relation is "               \
    "not a useful fact — refactor the fact_text until you can express the assertion "           \
    "as a (subject, predicate, object) triple.\n\n"                                               \
-   "FACT_TEXT CONTENT — what to preserve verbatim:\n"                                          \
-   "- A useful fact_text answers a specific question.  A reader asking \"when?\", "              \
-   "\"where?\", \"how much?\", \"which one?\" should be able to point at the "                   \
-   "fact_text and find the answer.  If you've written something a downstream "                   \
-   "reader would call vague (\"Caroline mentioned a book\", \"Melanie visited a "                \
-   "place recently\"), refactor it until it carries the specifics.\n"                            \
-   "- PRESERVE SPECIFIC TOKENS verbatim in fact_text:\n"                                         \
-   "  * Named things: book/film/song/album titles, place names, brand names, "                   \
-   "model numbers, addresses, URLs, email addresses, phone numbers, hashtags.\n"                 \
-   "  * Trait or descriptor words the speaker actually used (\"thoughtful\", "                   \
-   "\"driven\", \"expensive\", \"rare\") — do NOT paraphrase to \"has good "                   \
-   "qualities\" or \"discussed traits\".\n"                                                      \
-   "  * Quantities, durations, amounts, distances, ages — keep the number AND "                \
-   "the unit (\"3 hours\", \"$300\", \"2.5 miles\", \"age 12\"), not "                           \
-   "paraphrases (\"a few hours\", \"a few hundred dollars\", \"young\").\n"                      \
-   "- ONE ASSERTION PER FACT, EXCEPT for inherently composite assertions.  "                     \
-   "A composite assertion is one whose answer depends on MULTIPLE subjects "                     \
-   "or objects sharing one relationship — \"X and Y both did Z\", \"A caused "                 \
-   "B\", \"X chose Y over W\", \"X is between A and B\", \"X and Y had a "                       \
-   "conversation about Z\".  KEEP these as ONE fact — splitting loses the "                    \
-   "shared-context that multi-hop questions need (e.g., \"which city did "                       \
-   "BOTH Jean and John visit\" requires the shared-visit fact to be intact).  "                  \
-   "For non-composite multi-assertion turns (\"X is A, B, and C\" describing "                   \
-   "three independent traits, or \"Y did P and Q on Z\" describing three "                       \
-   "independent events), emit one fact per assertion.  When in doubt, ask: "                     \
-   "\"could a question be asked that requires both subjects or both events "                     \
-   "in the SAME fact to answer?\"  If yes, keep them together.\n"                                \
-   "- AVOID HEDGING MODIFIERS in fact_text — \"approximately\", \"around\", "                  \
-   "\"roughly\", \"about\", \"sort of\" — unless the user literally said them.  "              \
-   "If you resolved a relative phrase to a date, write the resolved date "                       \
-   "plainly; the parenthesized phrase carries the user's wording (see TIME "                     \
-   "BOUNDS below).\n\n"                                                                          \
-   "FACT_TEXT EXAMPLES — concrete patterns to follow:\n"                                       \
-   "- Dialog: \"I went camping last weekend, around June 17 or 18.\"\n"                          \
-   "  GOOD: \"Melanie went camping on 2023-06-17 (\\\"last weekend\\\") in the "                 \
-   "mountains with her family\"\n"                                                               \
-   "  BAD:  \"Melanie went camping recently\"  (lost the date)\n"                                \
-   "- Dialog: \"Caroline told me to read 'Becoming Nicole' — it's been "                       \
-   "life-changing.\"\n"                                                                          \
-   "  GOOD: \"Melanie is reading 'Becoming Nicole', a book Caroline "                            \
-   "recommended, and finds it life-changing\"\n"                                                 \
-   "  BAD:  \"Melanie is reading a book Caroline recommended\"  (lost the "                      \
-   "title)\n"                                                                                    \
-   "- Dialog: \"John and Jean both made it to Rome last year, on totally "                       \
-   "different trips.\"\n"                                                                        \
-   "  GOOD (composite, ONE fact): \"John and Jean both visited Rome in 2022 "                    \
-   "on separate trips\"\n"                                                                       \
-   "  BAD:  two split facts (\"John visited Rome\" + \"Jean visited Rome\") "                    \
-   "— a question asking which city BOTH visited needs them together.\n"                        \
-   "- Dialog: \"I spent half an hour searching for my keys this morning, "                       \
-   "then finally made it to the gym.\"\n"                                                        \
-   "  GOOD (TWO facts, independent assertions):\n"                                               \
-   "    1) \"Caroline spent half an hour searching for her keys on "                             \
-   "2023-05-19\"\n"                                                                              \
-   "    2) \"Caroline went to the gym on 2023-05-19\"\n"                                         \
-   "  BAD:  \"Caroline had a busy morning\"  (collapses two answerable "                         \
-   "facts into one vague summary)\n\n"                                                           \
    "SPECIFICITY RULES — adapted from Mem0 (Apache-2.0):\n"                                     \
    "- PROPER-NOUN PRESERVATION.  If the user names a specific thing, "                           \
    "KEEP the proper noun in fact_text — do not generalize.\n"                                  \
@@ -737,7 +680,6 @@
    "an event that HAPPENED — a talk given, an appointment attended, a "                        \
    "purchase made — IS a durable fact; keep it with the date in "                              \
    "fact_text.  A live STATE VALUE is not an event — drop it.\n"                               \
-   "- High confidence (0.8-1.0) for explicit statements, lower for inferences\n"                 \
    "- List corrections if new information contradicts existing profile\n\n"                      \
    "ENTITIES:\n"                                                                                 \
    "- Extract named entities (people, pets, places, organizations) mentioned by the user\n"      \
@@ -773,11 +715,7 @@
    "\"lived in Boston 2015-2020\", \"member of club 2019-present\"), not "                       \
    "single moments.  If you're tempted to emit valid_from == valid_to, "                         \
    "the event is instantaneous — drop the bounds and rely on fact_text.\n\n"                   \
-   "%s" /* Optional FACT EXPIRY block — empty unless [memory] expire_enabled */                \
-   "OUTPUT:\n"                                                                                   \
-   "- Generate a concise title (under 40 characters) that captures the main topic(s)\n"          \
-   "- Title should be human-friendly, not a sentence — more like a label\n"                    \
-   "- If nothing notable to extract, return empty arrays\n"
+   "%s" /* Optional FACT EXPIRY block — empty unless [memory] expire_enabled */
 
 /* After an extraction of messages said before the user forgot facts: which
  * returned facts state one again, and the rest without what was forgotten
