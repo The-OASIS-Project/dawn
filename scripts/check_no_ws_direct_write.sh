@@ -4,21 +4,22 @@
 # check_no_ws_direct_write.sh - CI invariant for the WebUI send path
 #
 # Enforces the WebSocket-send funnel rule: every server->client WS DATA frame
-# on the main WebUI connection must go through the response queue
-# (send_json_response() / queue_response() -> process_one_response()), NEVER a
-# direct lws_write().
+# on the main WebUI connection goes through webui_send.c's write_frame()
+# (send_json_message() / send_binary_message(), reached from the response queue
+# or a receive handler), NEVER a direct lws_write().
 #
-# WHY: libwebsockets permits only ONE lws_write() per writeable callback, and a
-# write issued while a large queued frame is still draining on the same socket
-# interleaves into that frame.  The browser then sees "Invalid frame header" /
-# "Could not decode a text frame as UTF-8", drops the socket (1006), reconnects,
-# reloads the same large conversation, and loops forever.  This exact bug was a
-# pair of direct lws_write() calls in webui_config.c (2026-06).
+# WHY: a frame written while earlier output is still buffered on the socket
+# leaves libwebsockets mid-frame, and the next write goes out with no WebSocket
+# header.  The browser then sees "Invalid frame header" / "Could not decode a
+# text frame as UTF-8", drops the socket, reconnects, reloads the same large
+# conversation, and can loop.  write_frame() holds a frame until the connection
+# is writable; a direct lws_write() skips that.  This bug was a pair of direct
+# lws_write() calls in webui_config.c (2026-06).
 #
 # RULE: no LWS_WRITE_TEXT / LWS_WRITE_BINARY in src/webui/*.c except the files
 # that legitimately own a write path:
-#   - webui_send.c          the main response-queue drain (the one sanctioned
-#                           writer for the main connection)
+#   - webui_send.c          write_frame() and its held-frame send (the one
+#                           sanctioned writer for the main connection)
 #   - webui_music.c         music streaming write_pending() — SEPARATE music lws
 #                           context, driven by its own WRITEABLE callback
 #   - webui_music_server.c  music handshake auth_ok/auth_failed — SEPARATE music

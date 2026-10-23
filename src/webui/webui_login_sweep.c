@@ -92,10 +92,9 @@ bool webui_conn_end_login(ws_connection_t *conn, const char *reason) {
                                  ? session->session_id
                                  : 0;
 
-   /* The frame first (a proxy strips the close code; the frame gets through),
-    * unless a large frame is still going out, which it would interleave with:
-    * then the close code alone says it. */
-   if (conn->wsi && !lws_partial_buffered(conn->wsi)) {
+   /* The frame first (a proxy strips the close code; the frame gets through).
+    * Behind a large frame still going out, it is held until that is sent. */
+   if (conn->wsi) {
       send_force_logout_impl(conn->wsi, reason);
    }
 

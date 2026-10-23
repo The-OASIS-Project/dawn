@@ -178,6 +178,111 @@ void free_response(ws_response_t *resp) {
 /* LWS requires LWS_PRE bytes before the buffer for protocol framing.
  * WS_SEND_BUFFER_SIZE is defined in webui_internal.h */
 
+/* Frames a connection may hold before it is closed.  They build up only while
+ * a client keeps sending (pings, audio, requests) but doesn't read. */
+#define WS_HELD_FRAMES_MAX 32
+
+struct ws_held_frame {
+   struct ws_held_frame *next;
+   enum lws_write_protocol type;
+   size_t len;
+   unsigned char buf[]; /* LWS_PRE bytes of headroom, then the payload */
+};
+
+static int hold_frame(ws_connection_t *conn,
+                      struct lws *wsi,
+                      const unsigned char *payload,
+                      size_t len,
+                      enum lws_write_protocol type) {
+   if (conn->held_count >= WS_HELD_FRAMES_MAX) {
+      OLOG_WARNING("WebUI: connection holds %d unsent frames and isn't reading, closing it",
+                   conn->held_count);
+      lws_set_timeout(wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+      return LWS_CLOSE_CONNECTION;
+   }
+   struct ws_held_frame *f = malloc(sizeof(*f) + LWS_PRE + len);
+   if (!f) {
+      /* Close rather than go on with a frame missing */
+      OLOG_ERROR("WebUI: Failed to allocate held frame (%zu bytes), closing connection", len);
+      lws_set_timeout(wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+      return LWS_CLOSE_CONNECTION;
+   }
+   f->next = NULL;
+   f->type = type;
+   f->len = len;
+   memcpy(f->buf + LWS_PRE, payload, len);
+   if (conn->held_tail) {
+      conn->held_tail->next = f;
+   } else {
+      conn->held_head = f;
+   }
+   conn->held_tail = f;
+   conn->held_count++;
+   lws_callback_on_writable(wsi);
+   return 0;
+}
+
+/* Write one frame (@p payload has LWS_PRE bytes of headroom before it), or hold
+ * it while earlier output is still going out.  libwebsockets (seen on 4.0.20)
+ * appends a frame written behind buffered output but leaves itself mid-frame,
+ * so the next such write goes out with no WebSocket header and the browser
+ * drops the connection.  The response queue skips a connection that is choked
+ * or holding frames; this covers the direct writes (pongs, always-on states,
+ * error replies).  A frame is held, too, while earlier ones wait, so they go
+ * out in order.  Only a negative lws_write() return is a failure: lws sends
+ * later whatever the socket didn't take. */
+static int write_frame(struct lws *wsi,
+                       unsigned char *payload,
+                       size_t len,
+                       enum lws_write_protocol type) {
+   ws_connection_t *conn = lws_wsi_user(wsi);
+   if (conn && (conn->held_head || lws_send_pipe_choked(wsi))) {
+      return hold_frame(conn, wsi, payload, len, type);
+   }
+   int written = lws_write(wsi, payload, len, type);
+   if (written < 0) {
+      OLOG_ERROR("WebUI: lws_write failed (%d, %zu bytes)", written, len);
+      return LWS_CLOSE_CONNECTION;
+   }
+   return 0;
+}
+
+int webui_send_held_frame(ws_connection_t *conn) {
+   struct ws_held_frame *f = conn->held_head;
+   if (!f || !conn->wsi) {
+      return 0;
+   }
+   if (lws_send_pipe_choked(conn->wsi)) {
+      lws_callback_on_writable(conn->wsi);
+      return 0;
+   }
+   conn->held_head = f->next;
+   if (!conn->held_head) {
+      conn->held_tail = NULL;
+   }
+   conn->held_count--;
+   int written = lws_write(conn->wsi, f->buf + LWS_PRE, f->len, f->type);
+   free(f);
+   if (written < 0) {
+      OLOG_ERROR("WebUI: lws_write of a held frame failed (%d)", written);
+      return LWS_CLOSE_CONNECTION;
+   }
+   if (conn->held_head) {
+      lws_callback_on_writable(conn->wsi);
+   }
+   return 0;
+}
+
+void webui_send_drop_held(ws_connection_t *conn) {
+   while (conn->held_head) {
+      struct ws_held_frame *f = conn->held_head;
+      conn->held_head = f->next;
+      free(f);
+   }
+   conn->held_tail = NULL;
+   conn->held_count = 0;
+}
+
 int send_json_message(struct lws *wsi, const char *json) {
    size_t len = strlen(json);
 
@@ -212,12 +317,7 @@ int send_json_message(struct lws *wsi, const char *json) {
       // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
       memcpy(&buf[LWS_PRE], json, len);
 
-      int written = lws_write(wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
-      if (written < (int)len) {
-         OLOG_ERROR("WebUI: lws_write failed (wrote %d of %zu)", written, len);
-         return LWS_CLOSE_CONNECTION;
-      }
-      return 0;
+      return write_frame(wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
    }
 
    /* Large messages (e.g. transcript with attached documents): heap-allocate */
@@ -230,15 +330,9 @@ int send_json_message(struct lws *wsi, const char *json) {
    /* WebSocket frame sent by length (lws_write), never read as a C string */
    // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
    memcpy(&buf[LWS_PRE], json, len);
-   int written = lws_write(wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
+   int ret = write_frame(wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
    free(buf);
-
-   if (written < (int)len) {
-      OLOG_ERROR("WebUI: lws_write failed (wrote %d of %zu)", written, len);
-      return LWS_CLOSE_CONNECTION;
-   }
-
-   return 0;
+   return ret;
 }
 
 int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, size_t len) {
@@ -260,20 +354,9 @@ int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, 
       memcpy(&buf[LWS_PRE + 1], data, len);
    }
 
-   int written = lws_write(wsi, &buf[LWS_PRE], total_len, LWS_WRITE_BINARY);
+   int ret = write_frame(wsi, &buf[LWS_PRE], total_len, LWS_WRITE_BINARY);
    free(buf);
-
-   if (written < 0) {
-      OLOG_ERROR("WebUI: lws_write binary failed with error %d", written);
-      return LWS_CLOSE_CONNECTION;
-   }
-
-   if (written < (int)total_len) {
-      OLOG_ERROR("WebUI: lws_write binary partial write (%d of %zu)", written, total_len);
-      return LWS_CLOSE_CONNECTION;
-   }
-
-   return 0;
+   return ret;
 }
 
 void send_audio_impl(struct lws *wsi, const uint8_t *data, size_t len) {
@@ -826,9 +909,10 @@ void send_reasoning_summary_impl(struct lws *wsi,
 /* =============================================================================
  * Response Queue Processing (called from WebUI thread)
  *
- * IMPORTANT: libwebsockets only allows ONE lws_write() per writeable callback.
  * This function processes only ONE response per call. If more responses are
  * pending, it requests a writeable callback via lws_callback_on_writable().
+ * A connection that is choked or holding frames (write_frame) is skipped, so
+ * its queued frames wait here, in order, instead of piling onto its held list.
  * ============================================================================= */
 
 /* Invalidate any queued responses that reference a session about to be freed, so
@@ -882,9 +966,11 @@ void process_one_response(void) {
          break;
       }
 
-      /* Check flow control — skip choked sockets, schedule writeable retry */
+      /* Check flow control — skip choked sockets and ones holding frames,
+       * schedule writeable retry */
       ws_connection_t *cand_conn = (ws_connection_t *)candidate->session->client_data;
-      if (cand_conn && cand_conn->wsi && lws_send_pipe_choked(cand_conn->wsi)) {
+      if (cand_conn && cand_conn->wsi &&
+          (cand_conn->held_head || lws_send_pipe_choked(cand_conn->wsi))) {
          lws_callback_on_writable(cand_conn->wsi);
          continue;
       }
