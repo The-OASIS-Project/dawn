@@ -45,14 +45,18 @@ one (step 4).
 
 ## First steps
 
-1. **Create the admin account** as in
-   [First admin account](GETTING_STARTED_SERVER.md#first-admin-account). With the package, the setup
-   token is in the journal, `sudo journalctl -u dawn | grep 'Token:' | tail -1`, and `dawn-admin` is on
-   your `PATH` but needs `sudo`: `sudo dawn-admin user create <name> --admin`. To use `dawn-admin`
-   without `sudo`, join the `dawn` group (`sudo adduser $USER dawn`); members can also read DAWN's
-   configuration and data, so on a shared machine keep using `sudo`.
+1. **Create the admin account** with the one-time setup token DAWN prints at its first start
+   ([First admin account](GETTING_STARTED_SERVER.md#first-admin-account) has the details):
+   - Get the token: `sudo journalctl -u dawn | grep 'Token:' | tail -1`. It's valid for 5 minutes;
+     if it has expired, `sudo systemctl restart dawn` prints a new one.
+   - `sudo dawn-admin user create <name> --admin`, paste the token when asked, and choose a password.
+   - Sign in to the WebUI (step 3) with that name and password.
+
+   `dawn-admin` needs `sudo`. To use it without, join the `dawn` group (`sudo adduser $USER dawn`);
+   members can also read DAWN's configuration and data, so on a shared machine keep using `sudo`.
 2. **Trust this host's CA**, `/etc/dawn/ssl/ca.crt`, on each device you use DAWN from:
-   [Trusting the DAWN CA](GETTING_STARTED_SERVER.md#trusting-the-dawn-ca).
+   [Trusting the DAWN CA](GETTING_STARTED_SERVER.md#trusting-the-dawn-ca). `/etc/dawn` isn't readable
+   by your user, so first make a copy you can hand out: `sudo cp /etc/dawn/ssl/ca.crt ~/dawn-ca.crt`.
 3. **Open `https://<this-host>:3000`**, sign in, and add an LLM API key under Settings. Keys are
    saved in `/etc/dawn/secrets.toml`; to edit it by hand, see
    [secrets.toml](GETTING_STARTED_SERVER.md#secretstoml), then `sudo systemctl restart dawn`.
