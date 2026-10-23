@@ -10,9 +10,10 @@
 # downloads the models (dawn-models.service), makes the TLS certificate
 # (dawn-tls), and boots the daemon (TTS loads, WebUI answers over HTTPS with the
 # host's CA, dawn-admin answers); that install makes a satellite registration key;
-# that a restart keeps the certificate; that an upgrade restarts the running daemon,
-# keeps the config and gives it back to dawn; that it comes up by itself at boot;
-# and that remove and purge stop it and keep or delete what they should.
+# that a restart keeps the certificate; that an upgrade restarts the running daemon
+# (unless policy-rc.d forbids it), keeps the config and gives it back to dawn; that
+# it comes up by itself at boot; and that remove and purge stop it and keep or
+# delete what they should.
 set -euo pipefail
 
 deb="$(realpath "$1")"
@@ -92,6 +93,16 @@ install_phase() {
    echo "==> reinstall, upgrade (the running daemon is restarted, the config kept and given back to dawn)"
    echo "# smoke-marker" >>/etc/dawn/dawn.toml
    pid="$(systemctl show -p MainPID --value dawn)"
+   printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d # the admin forbids restarts
+   chmod 755 /usr/sbin/policy-rc.d
+   apt-get install -y -qq --reinstall "$deb" >/dev/null
+   rm /usr/sbin/policy-rc.d
+   sleep 5
+   # Same process, active, and no stop or restart queued: a slow stop would keep the PID.
+   [ "$(systemctl show -p MainPID --value dawn)" = "$pid" ] &&
+      [ "$(systemctl show -p ActiveState --value dawn)" = active ] &&
+      [ -z "$(systemctl list-jobs --no-legend dawn.service)" ] ||
+      fail "restarted despite policy-rc.d"
    apt-get install -y -qq --reinstall "$deb" >/dev/null
    restarted "$pid" reinstall
    chown root:root /etc/dawn/dawn.toml /etc/dawn/secrets.toml

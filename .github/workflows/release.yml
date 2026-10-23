@@ -25,7 +25,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: # manual run builds + validates the pipeline; publishes only on a tag
+  workflow_dispatch: # manual run builds + validates the pipeline; only a tag push publishes
 
 permissions:
   contents: read
@@ -105,7 +105,8 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [client-arm64, server-amd64]
-    if: github.ref_type == 'tag'
+    # A push, not a manual run started on a tag (also ref_type tag): those only validate.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write # create the release + upload assets

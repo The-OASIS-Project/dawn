@@ -68,7 +68,8 @@ fi
 # systemd, as debhelper's dh_installsystemd --no-start does it: enable on first
 # install, keep the operator's choice after that, restart a running daemon onto
 # the new version.  The restart doesn't wait: it runs dawn-models.service first,
-# and apt shouldn't sit through a model download.
+# and apt shouldn't sit through a model download.  deb-systemd-invoke can't queue
+# it, so policy-rc.d is asked here as deb-systemd-invoke would (101: not allowed).
 if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigure ] ||
    [ "$1" = abort-remove ]; then
    deb-systemd-helper unmask dawn.service >/dev/null || true
@@ -80,7 +81,13 @@ if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigur
    if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
       systemctl --system daemon-reload >/dev/null || true
       if [ -n "$2" ]; then
-         systemctl --system --no-block try-restart dawn.service >/dev/null || true
+         policy=0
+         if [ -x /usr/sbin/policy-rc.d ]; then
+            /usr/sbin/policy-rc.d dawn.service try-restart || policy=$?
+         fi
+         if [ "$policy" -ne 101 ]; then
+            systemctl --system --no-block try-restart dawn.service >/dev/null || true
+         fi
       fi
    fi
 fi

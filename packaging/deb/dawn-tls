@@ -24,9 +24,11 @@ umask 077
 cd "$DIR"
 
 # A server certificate this CA didn't sign is the operator's; decided before the CA
-# is touched, so a certificate installed without our CA is never replaced.
-if [ -s dawn-chain.crt ] && ! { [ -s ca.crt ] &&
-   openssl verify -no_check_time -CAfile ca.crt dawn-chain.crt >/dev/null 2>&1; }; then
+# is touched, so a certificate installed without our CA is never replaced.  Only
+# this CA counts: not the system's trusted CAs, which sign certificates like Let's
+# Encrypt's.
+if [ -s dawn-chain.crt ] && ! { [ -s ca.crt ] && openssl verify -no_check_time -no-CApath \
+   -no-CAstore -CAfile ca.crt dawn-chain.crt >/dev/null 2>&1; }; then
    # Unless it's ours and ca.crt was removed: then it can never be renewed.
    if [ ! -e ca.crt ] &&
       openssl x509 -in dawn-chain.crt -noout -issuer | grep -q 'CN = DAWN Private CA'; then
@@ -39,7 +41,7 @@ fi
 if [ ! -e ca.key ] && [ ! -e ca.crt ]; then
    echo "dawn-tls: creating this host's DAWN CA ($DIR/ca.crt)"
    printf '%s\n' "[req]" "distinguished_name=dn" "prompt=no" "[dn]" \
-      "CN=DAWN Private CA ($(hostname))" "O=DAWN" "[ca]" \
+      "CN=DAWN Private CA ($(hostname | cut -c1-46))" "O=DAWN" "[ca]" \
       "basicConstraints=critical,CA:TRUE,pathlen:0" "keyUsage=critical,keyCertSign,cRLSign" \
       "extendedKeyUsage=serverAuth" "subjectKeyIdentifier=hash" \
       "authorityKeyIdentifier=keyid:always" >ca.cnf.new
