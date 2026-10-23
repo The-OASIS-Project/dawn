@@ -94,11 +94,7 @@
    function formatWhen(seconds) {
       if (!seconds) return '';
       try {
-         return new Date(seconds * 1000).toLocaleDateString([], {
-            month: 'short',
-            day: 'numeric',
-            year: 'numeric',
-         });
+         return DawnTime.format(seconds, { month: 'short', day: 'numeric', year: 'numeric' });
       } catch (e) {
          return '';
       }

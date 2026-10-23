@@ -251,7 +251,7 @@ validate_api_key() {
       claude)
          status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
             -H "x-api-key: $key" \
-            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-version: 2026-10-21" \
             -H "content-type: application/json" \
             -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
             https://api.anthropic.com/v1/messages 2>/dev/null || echo "000")

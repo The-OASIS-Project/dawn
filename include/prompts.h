@@ -59,6 +59,7 @@
  *   MEMORY
  *     MEMORY_EXTRACTION_PROMPT_TEMPLATE
  *     MEMORY_EXTRACTION_EXPIRY_BLOCK
+ *     MEMORY_FORGOTTEN_CHECK_PROMPT
  *     MEMORY_RECATEGORIZE_PROMPT_TEMPLATE
  *     MEMORY_CONTEXT_DATA_LEAD
  *     MEMORY_EXTRACTION_THIRD_PARTY_STUB
@@ -765,6 +766,25 @@
    "- Generate a concise title (under 40 characters) that captures the main topic(s)\n"          \
    "- Title should be human-friendly, not a sentence — more like a label\n"                    \
    "- If nothing notable to extract, return empty arrays\n"
+
+/* After an extraction of messages said before the user forgot facts: which
+ * returned facts state one again, and the rest without what was forgotten
+ * (memory_forgotten_screen).  First %s: the forgotten facts, "- <text>\n" each;
+ * second: the new ones, "<n>. <text>\n".  Reply parsed as
+ * {"same": [n, ...], "rewrite": {"<n>": "<text>", ...}}. */
+#define MEMORY_FORGOTTEN_CHECK_PROMPT                                                        \
+   "The user asked their assistant to forget the FORGOTTEN memories below. For each NEW "    \
+   "fact, say whether it states the same information as one of them: the same thing, "       \
+   "reworded, with less detail, or with more. A different or newer value for the same "      \
+   "thing, or a different fact about the same person, place or topic, is not the same.\n\n"  \
+   "Rewrite a NEW fact that is not the same only when part of it states a forgotten memory " \
+   "itself, for example \"..., replacing blue\" when \"favorite color is blue\" was "        \
+   "forgotten: remove just that part, keeping everything else it says. A different fact "    \
+   "that names the same person, place or thing (someone else drives the forgotten car) is "  \
+   "kept unchanged, with no rewrite.\n\n"                                                    \
+   "FORGOTTEN:\n%s\nNEW:\n%s\nReply with JSON only: {\"same\": [the numbers of the NEW "     \
+   "facts that are the same], \"rewrite\": {\"<number>\": \"<the fact without the "          \
+   "forgotten part>\"}}"
 
 /* The FACT EXPIRY block: the template's last "%s" when [memory] expire_enabled, else "".
  * Its "expires_at" field is read by process_extraction_response(). */

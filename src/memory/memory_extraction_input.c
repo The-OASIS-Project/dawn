@@ -286,6 +286,84 @@ static int distinct_row_id_count(struct json_object *ids) {
 }
 #endif /* ENABLE_AUTH */
 
+int64_t memory_extraction_history_max_id(struct json_object *history) {
+   int64_t max_id = 0;
+   for (size_t i = 0; history && i < json_object_array_length(history); i++) {
+      struct json_object *id_obj = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id_obj)) {
+         const int64_t id = json_object_get_int64(id_obj);
+         if (id > max_id)
+            max_id = id;
+      }
+   }
+   return max_id;
+}
+
+int64_t memory_extraction_history_first_id(struct json_object *history) {
+   int64_t first = 0;
+   for (size_t i = 0; history && i < json_object_array_length(history); i++) {
+      struct json_object *id_obj = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id_obj)) {
+         const int64_t id = json_object_get_int64(id_obj);
+         if (id > 0 && (first == 0 || id < first))
+            first = id;
+      }
+   }
+   return first;
+}
+
+bool memory_extraction_input_has_question(struct json_object *input) {
+   for (size_t i = 0; input && i < json_object_array_length(input); i++) {
+      if (llm_history_is_question(json_object_array_get_idx(input, i))) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* @p filtered without the rows DAWN wrote on its own (message_unprompted: a
+ * briefing or message delivered to a channel, a completion note): DAWN's
+ * words, never the user's.  Posts reach a history only from the database, so
+ * they always carry their row id.  Takes @p filtered; NULL when the lookup
+ * fails (the caller then extracts nothing, and recovery retries). */
+static struct json_object *drop_unprompted(int user_id,
+                                           struct json_object *row_ids,
+                                           struct json_object *filtered) {
+   const int n = (int)json_object_array_length(row_ids);
+   int64_t *unprompted = n > 0 ? malloc((size_t)n * sizeof(*unprompted)) : NULL;
+   int count = 0;
+   if (n > 0 &&
+       (!unprompted || conv_db_messages_unprompted(
+                           user_id, json_object_to_json_string_ext(row_ids, JSON_C_TO_STRING_PLAIN),
+                           unprompted, n, &count) != AUTH_DB_SUCCESS)) {
+      free(unprompted);
+      json_object_put(filtered);
+      return NULL;
+   }
+   if (count == 0) {
+      free(unprompted);
+      return filtered;
+   }
+   struct json_object *kept = json_object_new_array();
+   for (size_t i = 0; kept && i < json_object_array_length(filtered); i++) {
+      struct json_object *msg = json_object_array_get_idx(filtered, i);
+      struct json_object *id_obj = NULL;
+      const int64_t id = json_object_object_get_ex(msg, "id", &id_obj)
+                             ? json_object_get_int64(id_obj)
+                             : 0;
+      bool is_post = false;
+      for (int k = 0; id > 0 && k < count && !is_post; k++) {
+         is_post = unprompted[k] == id;
+      }
+      if (!is_post) {
+         json_object_array_add(kept, json_object_get(msg));
+      }
+   }
+   free(unprompted);
+   json_object_put(filtered);
+   return kept;
+}
+
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
                                                   struct json_object *conversation_history,
@@ -404,6 +482,18 @@ struct json_object *memory_extraction_build_input(int user_id,
       }
    }
 #endif
+   /* In every build: DAWN's posts are in the database whether or not this
+    * build checks row ownership (the bench re-extracts without the WebUI). */
+   if (rows_ok && row_ids) {
+      filtered = drop_unprompted(user_id, row_ids, filtered);
+      if (!filtered) {
+         OLOG_WARNING("memory_extraction: refusing conv %lld for user %d: unprompted-row lookup "
+                      "failed",
+                      (long long)conversation_id, user_id);
+         json_object_put(row_ids);
+         return NULL;
+      }
+   }
    json_object_put(row_ids);
    if (!rows_ok) {
       json_object_put(filtered);

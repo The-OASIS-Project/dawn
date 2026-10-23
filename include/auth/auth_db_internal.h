@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 108
+#define AUTH_DB_SCHEMA_VERSION 111
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -168,6 +168,12 @@
  * reaches the blocks after it on a migrated table (user rows hold none). */
 #define CONV_MSG_EMAIL_REF_COL(t) "CASE WHEN " #t ".role = 'user' THEN " #t ".email_ref END"
 
+/* messages has foreign-key children (message_unprompted, which DAWN's own posts are
+ * recorded in), so a rebuild of messages must keep every row id and run with
+ * foreign_keys OFF and legacy_alter_table ON, never dropping the live table
+ * while children point at it (as v98 does): otherwise the children are
+ * cascade-deleted or left pointing at a renamed table, silently.  The test
+ * test_messages_fk_children lists them. */
 #define CONV_MESSAGES_TABLE_SQL                                                      \
    "CREATE TABLE IF NOT EXISTS messages ("                                           \
    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
@@ -948,10 +954,15 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
    " AND m.kind IS NULL), 0)"
 
 /* The SET clause marking a conversations row extracted up to now (what was
- * learned so far: forgetting, delete-all). */
-#define CONV_MARK_EXTRACTED_SET_SQL                                   \
-   "last_extracted_msg_count = message_count, last_extracted_msg_id " \
-   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extraction_attempts = 0"
+ * learned so far: forgetting, delete-all), and extracting it again from the
+ * start (the reextract wipe) beginning there too. */
+#define CONV_MARK_EXTRACTED_SET_SQL                                                              \
+   "last_extracted_msg_count = message_count, last_extracted_msg_id "                            \
+   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extract_floor_msg_id "             \
+                                                           "= " CONV_EXTRACTION_MAX_MSG_ID_SQL(  \
+                                                               "conversations.id") ", "          \
+                                                                                   "extraction_" \
+                                                                                   "attempts = 0"
 
 /* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),
  * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
@@ -1156,6 +1167,15 @@ int auth_db_migrations_v107(sqlite3 *db);
 
 /** v108: a repeating event's original_time from the daemon's clock to its owner's. */
 int auth_db_migrations_v108(sqlite3 *db);
+
+/* v109: message_unprompted, DAWN's own posts (auth_db_migrations_v109.c). */
+int auth_db_migrations_v109(sqlite3 *db);
+
+/* v110: forgotten memories and extraction floors (auth_db_migrations_v110.c). */
+int auth_db_migrations_v110(sqlite3 *db);
+
+/** v111: scheduled_events.zone, each live row's owner's zone. */
+int auth_db_migrations_v111(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

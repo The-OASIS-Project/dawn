@@ -59,6 +59,7 @@
    let changeTimer = null;
    let detailEscToken = null;
    let detailReturnFocus = null;
+   let detailEvent = null; /* the event the detail dialog shows, while open */
    /* Set once the user navigates/selects a day, so we stop auto-anchoring to
     * "today's month" on activate (they've chosen where to look). */
    let userTouched = false;
@@ -105,15 +106,17 @@
       return Data.keyFromDate(dt);
    }
 
+   /* Event times and days are the user's zone's (DawnTime), as Friday says them. */
    function localDateKey(epochSec) {
-      return keyFromDate(new Date(epochSec * 1000));
+      return DawnTime.dayKey(epochSec);
+   }
+
+   function todayKey() {
+      return keyFromDate(DawnTime.today());
    }
 
    function formatTime(epochSec) {
-      return new Date(epochSec * 1000).toLocaleTimeString([], {
-         hour: '2-digit',
-         minute: '2-digit',
-      });
+      return DawnTime.format(epochSec, { hour: '2-digit', minute: '2-digit' });
    }
 
    /* 'YYYY-MM-DD' -> "Today · Thu Jul 31" / "Tomorrow · …" / "Mon Aug 4".
@@ -121,9 +124,8 @@
    function dayLabel(dateKey) {
       const parts = dateKey.split('-');
       const date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
-      const today = new Date();
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      const today = DawnTime.today();
+      const tomorrow = addDays(today, 1);
       const weekday = date.toLocaleDateString([], { weekday: 'short' });
       const md = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
       let prefix = '';
@@ -153,10 +155,10 @@
    function buildBuckets(events) {
       const buckets = Object.create(null);
       const win = Data.state.window;
-      const winStart = win && win.start ? startOfLocalDay(new Date(win.start * 1000)) : null;
-      const winEnd = win && win.end ? startOfLocalDay(new Date(win.end * 1000)) : null;
+      const winStart = win && win.start ? DawnTime.dateOf(win.start) : null;
+      const winEnd = win && win.end ? DawnTime.dateOf(win.end) : null;
       const upcoming = isUpcomingOnly();
-      const todayKey = keyFromDate(new Date());
+      const today = todayKey();
       for (let i = 0; i < events.length; i++) {
          const ev = events[i];
          if (Data.isFilteredOff(ev.calendarKey)) continue;
@@ -173,20 +175,16 @@
                guard < 60
             ) {
                const k = keyFromDate(d);
-               if (!upcoming || k >= todayKey) (buckets[k] || (buckets[k] = [])).push(ev);
+               if (!upcoming || k >= today) (buckets[k] || (buckets[k] = [])).push(ev);
                d = addDays(d, 1);
                guard++;
             }
          } else {
             const k = localDateKey(ev.start);
-            if (!upcoming || k >= todayKey) (buckets[k] || (buckets[k] = [])).push(ev);
+            if (!upcoming || k >= today) (buckets[k] || (buckets[k] = [])).push(ev);
          }
       }
       return buckets;
-   }
-
-   function startOfLocalDay(dt) {
-      return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
    }
 
    /* ---- mode / viewport -------------------------------------------------- */
@@ -314,12 +312,12 @@
       const groups = [];
       const index = {};
       const upcoming = isUpcomingOnly();
-      const todayKey = keyFromDate(new Date());
+      const today = todayKey();
       for (let i = 0; i < events.length; i++) {
          const ev = events[i];
          if (Data.isFilteredOff(ev.calendarKey)) continue;
          const key = ev.allDay && ev.startDate ? ev.startDate : localDateKey(ev.start);
-         if (upcoming && key < todayKey) continue;
+         if (upcoming && key < today) continue;
          let g = index[key];
          if (!g) {
             g = { key: key, label: dayLabel(key), items: [] };
@@ -450,7 +448,7 @@
          year: s.anchor.year,
          month: s.anchor.month,
          weekStart: Data.getWeekStart(),
-         todayKey: keyFromDate(new Date()),
+         todayKey: todayKey(),
          selectedKey: s.selectedKey,
          buckets: buildBuckets(s.events),
          colorFor: Data.colorFor,
@@ -585,7 +583,7 @@
 
    function formatDetailWhen(ev) {
       if (ev.allDay) {
-         const start = ev.startDate ? parseDateKey(ev.startDate) : new Date(ev.start * 1000);
+         const start = ev.startDate ? parseDateKey(ev.startDate) : DawnTime.dateOf(ev.start);
          /* endDate is the iCal-exclusive DTEND; the inclusive last day is
           * endDate - 1. Show a range only for genuinely multi-day events. */
          let lastDay = null;
@@ -595,10 +593,10 @@
          }
          return 'All day · ' + fmtDayShort(start) + (lastDay ? ' – ' + fmtDayShort(lastDay) : '');
       }
-      const start = new Date(ev.start * 1000);
+      const start = DawnTime.dateOf(ev.start);
       let s = fmtDayShort(start) + ' · ' + formatTime(ev.start);
       if (ev.end) {
-         const end = new Date(ev.end * 1000);
+         const end = DawnTime.dateOf(ev.end);
          /* Prefix the end time with its date when the event crosses midnight. */
          const crossesDay = keyFromDate(start) !== keyFromDate(end);
          s += ' – ' + (crossesDay ? fmtDayShort(end) + ' ' : '') + formatTime(ev.end);
@@ -653,15 +651,20 @@
       }
    }
 
+   /* The open event's date, time, place and calendar (again on a zone change). */
+   function fillDetailMeta(ev) {
+      if (!els.detailMeta) return;
+      els.detailMeta.innerHTML = detailMetaHTML(ev);
+      const dot = els.detailMeta.querySelector('.cal-legend-dot[data-cal-key]');
+      if (dot) dot.style.backgroundColor = Data.colorFor(dot.getAttribute('data-cal-key')) || '';
+   }
+
    function openDetail(ev) {
       if (!ev || !els.detail) return;
       detailReturnFocus = document.activeElement;
+      detailEvent = ev;
       if (els.detailTitle) els.detailTitle.textContent = ev.title || '(no title)';
-      if (els.detailMeta) {
-         els.detailMeta.innerHTML = detailMetaHTML(ev);
-         const dot = els.detailMeta.querySelector('.cal-legend-dot[data-cal-key]');
-         if (dot) dot.style.backgroundColor = Data.colorFor(dot.getAttribute('data-cal-key')) || '';
-      }
+      fillDetailMeta(ev);
       els.detail.classList.remove('hidden');
       if (detailEscToken) DawnEscStack.unregister(detailEscToken);
       detailEscToken = DawnEscStack.register(function () {
@@ -674,6 +677,7 @@
    function closeDetail(returnFocus) {
       if (!els.detail || els.detail.classList.contains('hidden')) return;
       els.detail.classList.add('hidden');
+      detailEvent = null;
       if (detailEscToken) {
          DawnEscStack.unregister(detailEscToken);
          detailEscToken = null;
@@ -740,7 +744,7 @@
     * new month contains today, else its 1st. */
    function reselectForAnchor() {
       const s = Data.state;
-      const now = new Date();
+      const now = DawnTime.today();
       if (now.getFullYear() === s.anchor.year && now.getMonth() === s.anchor.month) {
          Data.setSelectedKey(keyFromDate(now));
       } else {
@@ -812,22 +816,24 @@
 
    /* ---- lifecycle / public API ------------------------------------------ */
 
+   /* An untouched calendar shows today's month with today selected (the user's
+    * zone's today).  Returns true when the month moved. */
+   function anchorToday() {
+      if (userTouched) return false;
+      const s = Data.state;
+      const now = DawnTime.today();
+      const moved = s.anchor.year !== now.getFullYear() || s.anchor.month !== now.getMonth();
+      if (moved) Data.setAnchorMonth(now.getFullYear(), now.getMonth());
+      Data.setSelectedKey(keyFromDate(now));
+      return moved;
+   }
+
    function activate() {
       const s = Data.state;
       Data.setActive(true);
-      /* Re-anchor an untouched calendar to today's month — covers the page
-       * staying open across a month boundary (anchor was seeded at script load).
-       * If that moves the anchor, the cached events are for the old month, so
-       * force a refetch. */
-      let anchorMoved = false;
-      if (!userTouched) {
-         const now = new Date();
-         if (s.anchor.year !== now.getFullYear() || s.anchor.month !== now.getMonth()) {
-            Data.setAnchorMonth(now.getFullYear(), now.getMonth());
-            anchorMoved = true;
-         }
-         Data.setSelectedKey(keyFromDate(now));
-      }
+      /* Covers the page staying open across a month boundary (the anchor was
+       * seeded at script load); a moved anchor makes the cached events stale. */
+      const anchorMoved = anchorToday();
       const modeChanged = syncMode(); /* reflect the pref + viewport before painting */
       render(); /* show cached state (or the loading placeholder) immediately */
       if (!s.eventsLoaded || s.dirty || s.error || modeChanged || anchorMoved) {
@@ -919,6 +925,13 @@
             onToggleView('list');
          });
       }
+      /* Another zone moves the month grid's edges and every day: refetch, and
+       * keep an untouched selection on the zone's today. */
+      DawnEvents.on('timezone', function () {
+         anchorToday();
+         if (detailEvent) fillDetailMeta(detailEvent);
+         onEventsChanged();
+      });
       if (NARROW_MQ) {
          if (NARROW_MQ.addEventListener) NARROW_MQ.addEventListener('change', onViewportChange);
          else if (NARROW_MQ.addListener) NARROW_MQ.addListener(onViewportChange); /* older */

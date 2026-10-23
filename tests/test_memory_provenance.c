@@ -35,10 +35,12 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_internal.h"
 #include "memory/memory_db_provenance.h"
+#include "memory/memory_forgotten.h"
 #include "memory/memory_types.h"
 #include "unity.h"
 
@@ -404,6 +406,11 @@ static void open_db(void) {
    if (sqlite3_exec(s_db.db, DDL, NULL, NULL, &err) != SQLITE_OK) {
       fprintf(stderr, "DDL failed: %s\n", err ? err : "?");
       sqlite3_free(err);
+      exit(1);
+   }
+   /* Forgotten-fact records and the extraction floor (the real migration). */
+   if (auth_db_migrations_v110(s_db.db) != AUTH_DB_SUCCESS) {
+      fprintf(stderr, "v110 failed\n");
       exit(1);
    }
    if (prepare_statements() != 0) {
@@ -1397,6 +1404,278 @@ void test_forget_takes_what_was_merged_into_it(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_fact_forget(424242, 1, NULL));
 }
 
+/* A forget leaves a record of the fact (and of what was merged into it), at
+ * the latest message so far. */
+void test_forget_records_the_fact(void) {
+   memory_provenance_t p10 = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
+   int64_t keep = 0, dup = 0;
+   memory_db_fact_create(1, "User is a Trek fan", 0.9f, "explicit", "interests", &p10, &keep);
+   memory_db_fact_create(1, "User loves Star Trek", 0.9f, "explicit", "interests", &p10, &dup);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, 1));
+   q_exec("INSERT INTO messages (id, conversation_id, role, content, kind) "
+          "VALUES (300, 10, 'user', 'ctx', 'turn_context');");
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(keep, 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(2, q_int("SELECT COUNT(*) FROM memory_forgotten WHERE user_id = 1"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_forgotten WHERE "
+                                    "fact_text = 'User is a Trek fan'"));
+   /* Request-context rows aren't extracted, so they don't mark it. */
+   TEST_ASSERT_EQUAL_INT64(2, q_int("SELECT COUNT(*) FROM memory_forgotten WHERE "
+                                    "forget_msg_id = 200"));
+}
+
+/* A record goes once none of its user's messages is from before the forget,
+ * and it is old enough that no voice session saving later still moves it. */
+void test_forgotten_sweep(void) {
+   int64_t f = 0;
+   memory_db_fact_create(1, "User flies to Denver", 0.9f, "explicit", "general", NULL, &f);
+   memory_db_fact_forget(f, 1, NULL);
+   const int64_t later = (int64_t)time(NULL) + 1;
+   TEST_ASSERT_EQUAL_INT(0, memory_forgotten_sweep(later));
+   q_exec("INSERT INTO messages (id, conversation_id, role, content) VALUES "
+          "(9001, 30, 'user', 'later');");
+   q_exec("DELETE FROM conversations WHERE id IN (10, 20);");
+   TEST_ASSERT_EQUAL_INT(0, memory_forgotten_sweep(later - 1000));
+   TEST_ASSERT_EQUAL_INT(1, memory_forgotten_sweep(later));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_forgotten"));
+}
+
+/* Forgetting a conversation, or everything, leaves where it reached (a floor
+ * for the reextract wipe, no content); forgetting everything takes the
+ * forgotten-fact records too. */
+void test_forget_writes_floors(void) {
+   q_exec("INSERT INTO messages (id, conversation_id, role, content) VALUES "
+          "(8001, 25, 'user', 'a'), (8002, 30, 'user', 'b');"
+          "INSERT INTO messages (id, conversation_id, role, content, kind) "
+          "VALUES (8010, 25, 'user', 'ctx', 'turn_context');");
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT64(8001, q_int("SELECT extract_floor_msg_id FROM conversations "
+                                       "WHERE id = 25"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT extract_floor_msg_id FROM conversations "
+                                    "WHERE id = 30"));
+   int64_t f = 0;
+   memory_db_fact_create(1, "User sails on weekends", 0.9f, "explicit", "interests", NULL, &f);
+   memory_db_fact_forget(f, 1, NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_delete_user_memories(1));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_forgotten"));
+   TEST_ASSERT_EQUAL_INT64(8002, q_int("SELECT extract_floor_msg_id FROM conversations "
+                                       "WHERE id = 30"));
+}
+
+extern const char *g_stub_llm_reply;
+extern int g_stub_llm_calls;
+extern const char *g_stub_llm_reply_later;
+extern char g_stub_llm_prompt[8192];
+
+/* An extraction is checked against what the user forgot after its batch began:
+ * the same words are dropped without asking, the rest close to a forgotten
+ * one (every one here: no embeddings) goes to the model, and what it says is
+ * the same is dropped; a new value it says isn't stays, reworded when it
+ * says so.  A check that can't be made drops what it asked about. */
+void test_forgotten_load_and_screen(void) {
+   int64_t a = 0, b = 0;
+   memory_db_fact_create(1, "User is a Trek fan", 0.9f, "explicit", "interests", NULL, &a);
+   memory_db_fact_create(1, "User hates olives", 0.9f, "explicit", "preferences", NULL, &b);
+   memory_db_fact_forget(a, 1, NULL);
+   q_exec("INSERT INTO messages (id, conversation_id, role, content) VALUES "
+          "(9001, 10, 'user', 'x');");
+   memory_db_fact_forget(b, 1, NULL);
+
+   memory_forgotten_list_t list;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 101, 0, &list));
+   TEST_ASSERT_EQUAL_INT(2, list.count);
+   memory_forgotten_free(&list);
+   /* A batch begun after the first forget: only the second. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 9001, 0, &list));
+   TEST_ASSERT_EQUAL_INT(1, list.count);
+   TEST_ASSERT_EQUAL_STRING("User hates olives", list.items[0].text);
+   memory_forgotten_free(&list);
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 101, 0, &list));
+   const char *returned =
+       "{\"facts\":[{\"text\":\"user is  a Trek fan.\"},"
+       "{\"text\":\"User loves Star Trek\"},"
+       "{\"text\":\"User now likes Star Wars more\"},"
+       "{\"text\":\"User is not a Trek fan\"}],"
+       "\"corrections\":[{\"old_fact\":\"x\",\"new_fact\":\"User adores Trek\"}]}";
+   g_stub_llm_calls = 0;
+   g_stub_llm_reply = "{\"same\": [1, 4], \"rewrite\": {\"2\": \"User likes Star Wars\", "
+                      "\"4\": \"ignored: dropped\", \"9\": \"out of range\"}}";
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_EQUAL_INT(1, g_stub_llm_calls);
+   /* One question: the forgotten facts, then the four that aren't their words. */
+   TEST_ASSERT_NOT_NULL(
+       strstr(g_stub_llm_prompt, "FORGOTTEN:\n- User hates olives\n- User is a Trek fan\n"));
+   TEST_ASSERT_NOT_NULL(strstr(g_stub_llm_prompt, "NEW:\n1. User loves Star Trek\n"
+                                                  "2. User now likes Star Wars more\n"
+                                                  "3. User is not a Trek fan\n"
+                                                  "4. User adores Trek\n"));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "user is  a Trek fan.", 10));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User loves Star Trek", 10));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User adores Trek", 10));
+   TEST_ASSERT_FALSE(memory_forgotten_is_repeat(&list, "User now likes Star Wars more", 10));
+   /* "not" counts: not the same words, and the model kept it. */
+   TEST_ASSERT_FALSE(memory_forgotten_is_repeat(&list, "User is not a Trek fan", 10));
+   /* A kept fact is stored without what it mentioned of a forgotten one. */
+   TEST_ASSERT_EQUAL_STRING("User likes Star Wars",
+                            memory_forgotten_rewritten(&list, "user now likes star wars more"));
+   TEST_ASSERT_NULL(memory_forgotten_rewritten(&list, "User adores Trek"));
+   TEST_ASSERT_NULL(memory_forgotten_rewritten(&list, "User is not a Trek fan"));
+   TEST_ASSERT_TRUE(memory_forgotten_names(&list, "User is a Trek fan."));
+
+   /* A rewording that leaves nothing, or is a forgotten fact itself: not
+    * stored at all. */
+   g_stub_llm_reply = "{\"same\": [], \"rewrite\": {\"1\": \" . \", "
+                      "\"2\": \"User is a Trek fan\"}}";
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User loves Star Trek", 10));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User now likes Star Wars more", 10));
+   TEST_ASSERT_FALSE(memory_forgotten_is_repeat(&list, "User adores Trek", 10));
+
+   /* The check couldn't be made (twice): what it asked about isn't stored;
+    * the same words still aren't, a trailing " ." aside. */
+   g_stub_llm_calls = 0;
+   g_stub_llm_reply = "not json";
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_EQUAL_INT(2, g_stub_llm_calls);
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User is not a Trek fan", 10));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "user is a trek fan .", 10));
+   /* An answer whose numbers aren't numbers isn't taken as "none the same". */
+   g_stub_llm_reply = "{\"same\": [{\"id\": 1}]}";
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User is not a Trek fan", 10));
+   /* Numbers written as strings or whole doubles are numbers. */
+   g_stub_llm_reply = "{\"same\": [\"3\", 4.0]}";
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User is not a Trek fan", 10));
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User adores Trek", 10));
+   TEST_ASSERT_FALSE(memory_forgotten_is_repeat(&list, "User loves Star Trek", 10));
+   g_stub_llm_reply = "not json";
+   /* Answered on the second try. */
+   g_stub_llm_reply_later = "{\"same\": []}";
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_FALSE(memory_forgotten_is_repeat(&list, "User is not a Trek fan", 10));
+   g_stub_llm_reply_later = NULL;
+   memory_forgotten_free(&list);
+
+   /* A batch said wholly after the forgets: the user said it again. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 9002, 0, &list));
+   TEST_ASSERT_EQUAL_INT(0, list.count);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   /* Another user sees none of user 1's. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(2, 10, 1, 0, &list));
+   TEST_ASSERT_EQUAL_INT(0, list.count);
+   /* A history without row ids: its conversation's rows not extracted yet. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 0, 0, &list));
+   TEST_ASSERT_EQUAL_INT(2, list.count);
+   memory_forgotten_free(&list);
+   q_exec("UPDATE conversations SET last_extracted_msg_id = 101 WHERE id = 10;");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 0, 0, &list));
+   TEST_ASSERT_EQUAL_INT(1, list.count);
+   memory_forgotten_free(&list);
+   q_exec("UPDATE conversations SET last_extracted_msg_id = 9001 WHERE id = 10;");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 0, 0, &list));
+   TEST_ASSERT_EQUAL_INT(0, list.count);
+   /* A history never saved (no conversation): what was forgotten since it
+    * began. */
+   q_exec("UPDATE memory_forgotten SET created_at = 1000 WHERE fact_text LIKE '%Trek%';");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 0, 0, 2000, &list));
+   TEST_ASSERT_EQUAL_INT(1, list.count);
+   TEST_ASSERT_EQUAL_STRING("User hates olives", list.items[0].text);
+   memory_forgotten_free(&list);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 0, 0, 0, &list));
+   TEST_ASSERT_EQUAL_INT(0, list.count);
+   g_stub_llm_reply = NULL;
+}
+
+extern bool g_stub_embeddings;
+extern int64_t g_stub_nearest;
+
+/* One copy of a fact deleted while another is kept: the kept one still says
+ * it, so what says it isn't dropped; with no copy left, it is. */
+void test_forgotten_still_known(void) {
+   int64_t f = 0;
+   memory_db_fact_create(1, "User's favorite colors are blue and orange", 0.9f, "explicit",
+                         "preferences", NULL, &f);
+   memory_db_fact_forget(f, 1, NULL);
+   const char *returned = "{\"facts\":[{\"text\":\"User's favorite colors are blue and orange\"}]}";
+   g_stub_embeddings = true;
+   g_stub_nearest = 4242;
+   memory_forgotten_list_t list;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 100, 0, &list));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_FALSE(
+       memory_forgotten_is_repeat(&list, "User's favorite colors are blue and orange", 10));
+   memory_forgotten_free(&list);
+   g_stub_nearest = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 100, 0, &list));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_TRUE(
+       memory_forgotten_is_repeat(&list, "User's favorite colors are blue and orange", 10));
+   memory_forgotten_free(&list);
+   g_stub_embeddings = false;
+}
+
+/* However many facts an extraction returns, one question checks them all. */
+void test_forgotten_checks_them_all(void) {
+   int64_t id = 0;
+   memory_db_fact_create(1, "User owns a gadget", 0.9f, "explicit", "general", NULL, &id);
+   memory_db_fact_forget(id, 1, NULL);
+   memory_forgotten_list_t list;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 10, 100, 0, &list));
+   enum {
+      N = 150
+   };
+   strbuf_t json;
+   strbuf_init(&json, 8192);
+   strbuf_append(&json, "{\"facts\":[");
+   for (int i = 0; i < N; i++) {
+      strbuf_appendf(&json, "%s{\"text\":\"User has gadget %d\"}", i ? "," : "", i);
+   }
+   strbuf_append(&json, "]}");
+   char *returned = strbuf_steal_or_null(&json);
+   TEST_ASSERT_NOT_NULL(returned);
+   g_stub_llm_calls = 0;
+   g_stub_llm_reply = "{\"same\": [150]}";
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_forgotten_screen(&list, returned, NULL));
+   TEST_ASSERT_EQUAL_INT(1, g_stub_llm_calls);
+   TEST_ASSERT_TRUE(memory_forgotten_is_repeat(&list, "User has gadget 149", 10));
+   TEST_ASSERT_FALSE(memory_forgotten_is_repeat(&list, "User has gadget 0", 10));
+   free(returned);
+   memory_forgotten_free(&list);
+   g_stub_llm_reply = NULL;
+}
+
+/* A fact forgotten while a voice session ran (here, or from another surface):
+ * its save moves the forget past the session's rows, so its extraction is
+ * checked; forgets from before the session began aren't moved. */
+void test_forgotten_waits_for_voice_save(void) {
+   int64_t old = 0, f = 0;
+   memory_db_fact_create(1, "User owns a canoe", 0.9f, "explicit", "general", NULL, &old);
+   memory_db_fact_create(1, "User's gate code is 4321", 0.9f, "explicit", "practical", NULL, &f);
+   memory_db_fact_forget(old, 1, NULL);
+   memory_db_fact_forget(f, 1, NULL);
+   q_exec("UPDATE memory_forgotten SET created_at = 1000 WHERE fact_text LIKE '%canoe%';");
+   TEST_ASSERT_EQUAL_INT64(2, q_int("SELECT COUNT(*) FROM memory_forgotten WHERE "
+                                    "forget_msg_id = 200"));
+
+   q_exec("INSERT INTO messages (id, conversation_id, role, content) VALUES "
+          "(9101, 30, 'user', 'my gate code'), (9102, 30, 'user', 'forget it');");
+   memory_forgotten_saved(1, 2000, 30);
+   TEST_ASSERT_EQUAL_INT64(9102, q_int("SELECT forget_msg_id FROM memory_forgotten WHERE "
+                                       "fact_text LIKE '%gate%'"));
+   TEST_ASSERT_EQUAL_INT64(200, q_int("SELECT forget_msg_id FROM memory_forgotten WHERE "
+                                      "fact_text LIKE '%canoe%'"));
+
+   memory_forgotten_list_t list;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_forgotten_load(1, 30, 9101, 0, &list));
+   TEST_ASSERT_EQUAL_INT(1, list.count);
+   TEST_ASSERT_EQUAL_STRING("User's gate code is 4321", list.items[0].text);
+   memory_forgotten_free(&list);
+}
+
 /* A merge chain (A into B, B into K) goes with K, at any depth. */
 void test_forget_takes_a_merge_chain(void) {
    int64_t k = 0, b = 0, a = 0;
@@ -2085,6 +2364,13 @@ int main(void) {
    RUN_TEST(test_merge_carries_unsourced_origin);
    RUN_TEST(test_merge_with_a_deleted_source_conversation);
    RUN_TEST(test_forget_takes_what_was_merged_into_it);
+   RUN_TEST(test_forget_records_the_fact);
+   RUN_TEST(test_forgotten_sweep);
+   RUN_TEST(test_forget_writes_floors);
+   RUN_TEST(test_forgotten_load_and_screen);
+   RUN_TEST(test_forgotten_still_known);
+   RUN_TEST(test_forgotten_checks_them_all);
+   RUN_TEST(test_forgotten_waits_for_voice_save);
    RUN_TEST(test_forget_takes_a_merge_chain);
    RUN_TEST(test_forget_takes_the_facts_relations);
    RUN_TEST(test_prune_moves_relations_to_the_kept_fact);

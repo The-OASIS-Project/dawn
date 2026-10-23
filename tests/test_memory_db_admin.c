@@ -75,6 +75,13 @@ static const char *DDL =
    "  last_extracted_msg_id, extraction_attempts, extraction_last_attempt_at) "
    "  VALUES (10, 1, 50, 50, 999, 1, 100), (11, 1, 30, 10, 444, 2, 200), (12, 2, 20, 20, 555, 0, 0);"
 
+   "CREATE TABLE messages ("
+   "  id INTEGER PRIMARY KEY,"
+   "  conversation_id INTEGER NOT NULL,"
+   "  kind TEXT DEFAULT NULL"
+   ");"
+   "INSERT INTO messages (id, conversation_id) VALUES (650, 10), (800, 11);"
+
    "CREATE TABLE memory_facts ("
    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
    "  user_id INTEGER NOT NULL,"
@@ -236,6 +243,11 @@ static void open_db(void) {
       sqlite3_free(err);
       exit(1);
    }
+   /* Forgotten-fact records and the extraction floor (the real migration). */
+   if (auth_db_migrations_v110(s_db.db) != AUTH_DB_SUCCESS) {
+      fprintf(stderr, "v110 failed\n");
+      exit(1);
+   }
    s_db.initialized = true;
 }
 
@@ -312,6 +324,37 @@ void test_reset_derived_keep_summaries_keeps_summaries(void) {
    TEST_ASSERT_EQUAL(2, count_rows("SELECT COUNT(*) FROM memory_summaries WHERE user_id = ?", 1));
    /* But facts/prefs/entities/relations are still gone. */
    TEST_ASSERT_EQUAL(0, count_rows("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?", 1));
+}
+
+/* What the user forgot stays forgotten through the wipe: a conversation's
+ * cursor goes back only to where a forget of it (or of everything) reached,
+ * and the forgotten-fact records are kept.  One with nothing said after its
+ * floor stays counted as extracted. */
+void test_reset_derived_keeps_forget_floors(void) {
+   sqlite3_exec(s_db.db,
+                "UPDATE conversations SET extract_floor_msg_id = 700 WHERE id = 10;"
+                "INSERT INTO memory_forgotten (user_id, fact_text, forget_msg_id, created_at) "
+                "VALUES (1, 'User is a Trek fan', 800, 1);",
+                NULL, NULL, NULL);
+   memory_db_admin_reset_counts_t c = { 0 };
+   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_reset_derived(1, false, &c));
+   TEST_ASSERT_EQUAL(700, scalar_int64("SELECT last_extracted_msg_id FROM conversations "
+                                       "WHERE id = ?",
+                                       10));
+   TEST_ASSERT_EQUAL(0, scalar_int64("SELECT last_extracted_msg_id FROM conversations "
+                                     "WHERE id = ?",
+                                     11));
+   TEST_ASSERT_EQUAL(50, scalar_int64("SELECT last_extracted_msg_count FROM conversations "
+                                      "WHERE id = ?",
+                                      10));
+   TEST_ASSERT_EQUAL(0, scalar_int64("SELECT last_extracted_msg_count FROM conversations "
+                                     "WHERE id = ?",
+                                     11));
+   TEST_ASSERT_EQUAL(1, count_rows("SELECT COUNT(*) FROM memory_forgotten WHERE user_id = ?", 1));
+   /* User 2 isn't touched. */
+   TEST_ASSERT_EQUAL(555, scalar_int64("SELECT last_extracted_msg_id FROM conversations "
+                                       "WHERE id = ?",
+                                       12));
 }
 
 void test_reset_derived_resets_user_flags(void) {
@@ -607,6 +650,7 @@ int main(void) {
    RUN_TEST(test_reset_derived_does_not_touch_other_users);
    RUN_TEST(test_reset_derived_keep_summaries_keeps_summaries);
    RUN_TEST(test_reset_derived_resets_user_flags);
+   RUN_TEST(test_reset_derived_keeps_forget_floors);
    RUN_TEST(test_reset_derived_resets_conversation_high_water_marks);
    RUN_TEST(test_reset_derived_invalid_user_fails);
    RUN_TEST(test_estimate_uses_real_template_size);

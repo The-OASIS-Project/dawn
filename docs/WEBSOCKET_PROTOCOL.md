@@ -1841,7 +1841,8 @@ Session token and auth state (sent on connect/reconnect).
       "username": "alice",
       "is_admin": false,
       "reconnected": true,
-      "session_id": 42
+      "session_id": 42,
+      "timezone": "America/Los_Angeles"
    }
 }
 ```
@@ -1853,6 +1854,18 @@ Session token and auth state (sent on connect/reconnect).
   Feature-detect it (older servers omit it → treat as "load").
 - `session_id` — the adopted session's numeric id (correlation). Emitted **only on the
   authenticated frame** (omitted pre-auth).
+- `timezone` — the IANA zone this user's times are in: their own My Settings zone, else the
+  server's (`[localization] timezone`, else the system's). The server reads and speaks times in it; show times in
+  it too (format with this `timeZone`, not the browser's), so the user sees what Friday says.
+  Authenticated frame only; older servers omit it (use the browser's zone).
+
+#### `timezone_changed`
+Sent after every My Settings save to each browser connection of that user, so it may repeat the
+current zone. Same meaning as the `session` frame's `timezone`; when it differs, redraw what shows
+a time or a day.
+```json
+{ "type": "timezone_changed", "payload": { "timezone": "America/Los_Angeles" } }
+```
 
 #### `session_superseded`
 Another connection (a second tab, or the same browser reconnecting) has taken over this

@@ -168,6 +168,9 @@ static const char *SCHEMA_SQL =
     "   reasoning_effort TEXT DEFAULT NULL,"
     "   last_extracted_msg_count INTEGER DEFAULT 0,"
     "   last_extracted_msg_id    INTEGER NOT NULL DEFAULT 0,"
+    /* extract_floor_msg_id (v110): where a forget-everything or a conversation
+     * forget left it; the reextract wipe starts the cursor there. */
+    "   extract_floor_msg_id     INTEGER NOT NULL DEFAULT 0,"
     "   extraction_attempts INTEGER DEFAULT 0,"
     "   extraction_last_attempt_at INTEGER DEFAULT 0,"
     "   is_private INTEGER DEFAULT 0,"
@@ -735,6 +738,7 @@ static const char *SCHEMA_SQL =
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 — tri-state TTS override (briefings) */
     "  deliver_to TEXT,"                      /* v54 — messaging channel for fan-out (optional) */
     "  briefing_instructions TEXT," /* v84 — per-briefing summarization steering (optional) */
+    "  zone TEXT,"                  /* v111 — the zone fire_at was placed in */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire ON scheduled_events(status, fire_at);"

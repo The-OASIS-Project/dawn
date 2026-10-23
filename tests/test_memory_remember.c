@@ -24,17 +24,21 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 
+#include <json-c/json.h>
 #include <sqlite3.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
+#include "memory/memory_extraction.h"
 #include "unity.h"
 
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -116,6 +120,26 @@ void test_remember_outside_a_turn_is_stated_outside_any_conversation(void) {
    TEST_ASSERT_TRUE(fact_row("My bike is green", &source, &unsourced));
    TEST_ASSERT_EQUAL_INT64(0, source);
    TEST_ASSERT_EQUAL_INT(1, unsourced);
+}
+
+/* A dated fact given as one object, not in a list: its text is stored, not
+ * the JSON. */
+void test_remember_one_object_stores_its_text(void) {
+   g_config.memory.expire_enabled = true;
+   free(remember("{\"text\": \"Dentist visit on 2026-11-02\", \"expires_at\": \"2026-11-02\"}"));
+   int64_t source = -1;
+   int unsourced = -1;
+   TEST_ASSERT_TRUE(fact_row("Dentist visit on 2026-11-02", &source, &unsourced));
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK, sqlite3_prepare_v2(s_db.db,
+                                     "SELECT COUNT(*), SUM(expires_at > 0) FROM memory_facts "
+                                     "WHERE fact_text LIKE 'Dentist%'",
+                                     -1, &st, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_INT(1, sqlite3_column_int(st, 0));
+   TEST_ASSERT_EQUAL_INT(1, sqlite3_column_int(st, 1)); /* its expiry was taken too */
+   sqlite3_finalize(st);
 }
 
 void test_remember_waiting_for_its_conversation_is_kept(void) {
@@ -355,10 +379,44 @@ void test_search_shows_relations_only_when_asked(void) {
    free(r);
 }
 
+/* Only DAWN's own posts are new: the conversation is marked extracted without a
+ * model call, but only as far as the history that was checked.  A reply that
+ * arrives after the history was taken stays to be read. */
+static void test_unprompted_skip_leaves_a_later_reply_unread(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Channel", &conv));
+   const conv_message_row_t post = { .role = "assistant",
+                                     .content = "Morning briefing: rain at noon.",
+                                     .unprompted = true };
+   int64_t first = 0, second = 0, reply = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &post, &first));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &post, &second));
+
+   char json[256];
+   snprintf(json, sizeof(json),
+            "[{\"role\":\"assistant\",\"content\":\"a\",\"id\":%lld},"
+            "{\"role\":\"assistant\",\"content\":\"b\",\"id\":%lld}]",
+            (long long)first, (long long)second);
+   struct json_object *history = json_tokener_parse(json);
+   TEST_ASSERT_NOT_NULL(history);
+
+   /* The reply lands after the history was taken. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_message_ex(conv, s_user, "user",
+                                                                 "I'll bring an umbrella", &reply));
+   TEST_ASSERT_EQUAL_INT(0, memory_trigger_extraction(s_user, conv, "s", history, 2, 0, NULL));
+   json_object_put(history);
+
+   int64_t cursor = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_last_extracted_msg_id(conv, &cursor));
+   TEST_ASSERT_EQUAL_INT64(second, cursor);
+   TEST_ASSERT_TRUE(reply > cursor);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_remember_in_a_known_conversation_is_learned_there);
    RUN_TEST(test_remember_outside_a_turn_is_stated_outside_any_conversation);
+   RUN_TEST(test_remember_one_object_stores_its_text);
    RUN_TEST(test_remember_waiting_for_its_conversation_is_kept);
    RUN_TEST(test_remember_past_the_waiting_limit_is_refused_and_not_stored);
    RUN_TEST(test_forget_tells_a_replacement_from_a_duplicate);
@@ -367,5 +425,6 @@ int main(void) {
    RUN_TEST(test_list_merged_and_restore);
    RUN_TEST(test_forget_reports_already_merged);
    RUN_TEST(test_search_shows_relations_only_when_asked);
+   RUN_TEST(test_unprompted_skip_leaves_a_later_reply_unread);
    return UNITY_END();
 }

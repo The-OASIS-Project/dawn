@@ -89,14 +89,17 @@
     */
    function formatDateTime(iso) {
       if (!iso) return '';
-      const d = new Date(iso);
-      return d.toLocaleDateString('en-US', {
-         year: 'numeric',
-         month: 'short',
-         day: 'numeric',
-         hour: 'numeric',
-         minute: '2-digit',
-      });
+      return DawnTime.format(
+         Date.parse(iso) / 1000,
+         {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+         },
+         'en-US'
+      );
    }
 
    /**
@@ -106,11 +109,11 @@
     */
    function formatTime(iso) {
       if (!iso) return '';
-      const d = new Date(iso);
-      return d.toLocaleTimeString('en-US', {
-         hour: 'numeric',
-         minute: '2-digit',
-      });
+      return DawnTime.format(
+         Date.parse(iso) / 1000,
+         { hour: 'numeric', minute: '2-digit' },
+         'en-US'
+      );
    }
 
    /* =============================================================================

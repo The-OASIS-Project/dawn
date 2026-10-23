@@ -191,14 +191,16 @@ int memory_db_delete_user_memories(int user_id) {
    /* FK-safe order: relations -> entities -> facts -> prefs -> summaries.
     * Last, "delete all" forgets what was learned so far: every conversation
     * counts as extracted, so memory recovery doesn't learn it all again (what
-    * is said from now on is extracted as usual).  One transaction: all of it,
-    * or none (a delete whose marks failed would come back). */
+    * is said from now on is extracted as usual), not even by a reextract; the
+    * forgotten-fact records go with the rest.  One transaction: all of it, or
+    * none (a delete whose marks failed would come back). */
    static const char *const k_steps[] = {
       "DELETE FROM memory_relations WHERE user_id = ?",
       "DELETE FROM memory_entities WHERE user_id = ?",
       "DELETE FROM memory_facts WHERE user_id = ?",
       "DELETE FROM memory_preferences WHERE user_id = ?",
       "DELETE FROM memory_summaries WHERE user_id = ?",
+      "DELETE FROM memory_forgotten WHERE user_id = ?",
       // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): one statement split across lines
       "UPDATE conversations SET " CONV_MARK_EXTRACTED_SET_SQL " WHERE user_id = ?",
    };

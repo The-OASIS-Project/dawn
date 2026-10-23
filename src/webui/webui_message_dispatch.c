@@ -1723,10 +1723,16 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          } else if (strcmp(action, "dismiss") == 0) {
             int rc = scheduler_dismiss(event_id);
             if (rc != 0) {
-               /* Already dismissed (e.g. auto-dismiss for timers) — rebroadcast
-                * so other clients (satellites) can sync their UI. */
-               scheduler_broadcast_notification(&ev, "Dismissed");
-               scheduler_broadcast_events_changed(ev.user_id);
+               /* Not dismissed here.  If its ring already ended (a timer's
+                * auto-dismiss), rebroadcast so other clients close their banner;
+                * if it is still ringing the dismiss failed, and its status as read
+                * above would tell them it's ringing. */
+               if (scheduler_db_get(event_id, &ev) != 0 || ev.status == SCHED_STATUS_RINGING) {
+                  send_error_impl(conn->wsi, "PROCESSING_ERROR", "Could not dismiss");
+               } else {
+                  scheduler_broadcast_notification(&ev, "Dismissed");
+                  scheduler_broadcast_events_changed(ev.user_id);
+               }
             }
          } else if (strcmp(action, "snooze") == 0) {
             json_object_object_get_ex(payload, "snooze_minutes", &snooze_obj);

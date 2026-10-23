@@ -73,6 +73,9 @@ extern "C" {
  * comfortable margin without bloating the summarization prompt. */
 #define SCHED_INSTRUCTIONS_MAX 1024
 
+/* An IANA zone name (as user_settings.timezone holds) */
+#define SCHED_ZONE_MAX 64
+
 /* Hard cap on briefing step count.  Not a config knob — at 9+ steps the LLM
  * summarization context approaches diminishing returns and the briefing
  * duration becomes user-hostile. */
@@ -194,7 +197,24 @@ typedef struct {
    /* Optional per-briefing summarization steering (schema v84).  Empty = default
     * prompt.  Briefing events only (tasks don't summarize). */
    char instructions[SCHED_INSTRUCTIONS_MAX];
+   /* The zone fire_at was placed in (schema v111): the owner's when it was
+    * scheduled.  Lets a later change of the owner's zone, or the server's,
+    * move a repeating event to the same time on the new clock.  Empty on a
+    * row finished before v111. */
+   char zone[SCHED_ZONE_MAX];
 } sched_event_t;
+
+/* What a zone change needs of a pending repeating event
+ * (scheduler_db_list_pending_repeating). */
+typedef struct {
+   int64_t id;
+   int user_id;
+   time_t fire_at;
+   sched_recurrence_t recurrence;
+   char recurrence_days[SCHED_RECURRENCE_DAYS_MAX];
+   char original_time[SCHED_ORIGINAL_TIME_MAX];
+   char zone[SCHED_ZONE_MAX];
+} sched_repeating_t;
 
 /* Single step within a multi-step briefing.  Schema v50+. */
 typedef struct {
@@ -285,6 +305,23 @@ int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t f
 int scheduler_db_snooze(int64_t id, time_t new_fire_at);
 
 /**
+ * @brief Move a pending event, as @p read by scheduler_db_list_pending_repeating,
+ *        to @p to, placed in @p zone: only while it is still pending and
+ *        exactly as read, so a ring, snooze or edit since then is never undone
+ * @return SUCCESS, or FAILURE when it has changed since it was read
+ */
+int scheduler_db_move_pending(const sched_repeating_t *read, time_t to, const char *zone);
+
+/**
+ * @brief The pending repeating events placed in a zone, of @p user_id (0: every
+ *        user), ordered by user
+ * @param out Set to a malloc'd array (NULL when there are none); caller frees
+ * @param count_out Rows in @p out
+ * @return SUCCESS or FAILURE
+ */
+int scheduler_db_list_pending_repeating(int user_id, sched_repeating_t **out, int *count_out);
+
+/**
  * @brief Cancel an event (optimistic: only if still pending/snoozed)
  * @param id Event ID
  * @return SUCCESS if cancelled, FAILURE if already fired/cancelled
@@ -292,18 +329,19 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at);
 int scheduler_db_cancel(int64_t id);
 
 /**
- * @brief Dismiss a ringing event (optimistic: only if status='ringing')
+ * @brief Dismiss a ringing timer, alarm or reminder (optimistic: only if
+ *        status='ringing'); a running task or briefing ends itself
  * @param id Event ID
- * @return SUCCESS if dismissed, FAILURE if already handled
+ * @return SUCCESS if dismissed, FAILURE if already handled or not one of those
  */
 int scheduler_db_dismiss(int64_t id);
 
 /**
- * @brief End one firing of a ringing event as @p status (optimistic: only if
- *        it is still ringing from the firing at @p fired_at)
+ * @brief End one firing of a ringing event of any type as @p status
+ *        (optimistic: only if it is still ringing from the firing at @p fired_at)
  * @param id       Event ID
  * @param fired_at When this firing rang (the row's fired_at)
- * @param status   SCHED_STATUS_DISMISSED or SCHED_STATUS_TIMED_OUT
+ * @param status   The status it ends with
  * @return SUCCESS if ended, FAILURE if already handled (or ringing again)
  */
 int scheduler_db_end_ring(int64_t id, time_t fired_at, sched_status_t status);
@@ -503,6 +541,7 @@ int scheduler_db_briefing_steps_update(int64_t event_id,
 #define SCHED_FIELD_DELIVER_TO (1u << 6)
 #define SCHED_FIELD_SAY_ALOUD (1u << 7)
 #define SCHED_FIELD_INSTRUCTIONS (1u << 8)
+#define SCHED_FIELD_ZONE (1u << 9) /* with FIRE_AT: the zone it was placed in */
 
 /**
  * @brief Ownership- and status-guarded scalar-field edit of a scheduled event

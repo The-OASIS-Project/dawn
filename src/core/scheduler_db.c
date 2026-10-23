@@ -27,6 +27,7 @@
 #define AUTH_DB_INTERNAL_ALLOWED
 #include "core/scheduler_db.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
@@ -181,6 +182,7 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
    /* v84: briefing_instructions is the 24th column.  NULL (legacy row) reads as
     * empty → default summarization prompt. */
    read_text_col(stmt, 24, event->instructions, SCHED_INSTRUCTIONS_MAX);
+   read_text_col(stmt, 25, event->zone, SCHED_ZONE_MAX); /* v111 */
 }
 
 /* Bind every column of the INSERT statement.  Both insert call sites
@@ -221,6 +223,7 @@ static void bind_event_columns(sqlite3_stmt *stmt, const sched_event_t *event) {
                      SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 24, event->instructions[0] ? event->instructions : NULL, -1,
                      SQLITE_TRANSIENT);
+   sqlite3_bind_text(stmt, 25, event->zone[0] ? event->zone : NULL, -1, SQLITE_TRANSIENT);
 }
 
 /* Select all columns in consistent order */
@@ -229,7 +232,7 @@ static void bind_event_columns(sqlite3_stmt *stmt, const sched_event_t *event) {
    "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, " \
    "source_uuid, source_location, source_client_type, announce_all, "          \
    "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "   \
-   "deliver_to, briefing_instructions"
+   "deliver_to, briefing_instructions, zone"
 
 /* =============================================================================
  * CRUD Operations
@@ -247,9 +250,9 @@ static int insert_event_unlocked(sched_event_t *event, int64_t *id_out) {
                      "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
                      "source_uuid, source_location, source_client_type, announce_all, "
                      "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "
-                     "deliver_to, briefing_instructions) "
+                     "deliver_to, briefing_instructions, zone) "
                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                     "?)";
+                     "?, ?)";
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -332,9 +335,9 @@ int scheduler_db_insert_checked(sched_event_t *event,
                      "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
                      "source_uuid, source_location, source_client_type, announce_all, "
                      "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "
-                     "deliver_to, briefing_instructions) "
+                     "deliver_to, briefing_instructions, zone) "
                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                     "?)";
+                     "?, ?)";
 
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -459,6 +462,85 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
    return result;
 }
 
+int scheduler_db_move_pending(const sched_repeating_t *read, time_t to, const char *zone) {
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
+
+   const char *sql = "UPDATE scheduled_events SET fire_at = ?, zone = ? "
+                     "WHERE id = ? AND status = 'pending' AND fire_at = ? AND recurrence = ? "
+                     "AND COALESCE(recurrence_days, '') = ? AND COALESCE(original_time, '') = ? "
+                     "AND COALESCE(zone, '') = ?";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, (int64_t)to);
+   sqlite3_bind_text(stmt, 2, zone && zone[0] ? zone : NULL, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(stmt, 3, read->id);
+   sqlite3_bind_int64(stmt, 4, (int64_t)read->fire_at);
+   sqlite3_bind_text(stmt, 5, sched_recurrence_to_str(read->recurrence), -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 6, read->recurrence_days, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(stmt, 7, read->original_time, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(stmt, 8, read->zone, -1, SQLITE_TRANSIENT);
+
+   int rc = sqlite3_step(stmt);
+   int result = (rc == SQLITE_DONE && sqlite3_changes(s_db.db) > 0) ? SUCCESS : FAILURE;
+
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+int scheduler_db_list_pending_repeating(int user_id, sched_repeating_t **out, int *count_out) {
+   *out = NULL;
+   *count_out = 0;
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
+
+   const char *sql = "SELECT id, user_id, fire_at, recurrence, recurrence_days, original_time, "
+                     "zone, COUNT(*) OVER () FROM scheduled_events "
+                     "WHERE status = 'pending' AND recurrence != 'once' AND zone IS NOT NULL "
+                     "AND (?1 = 0 OR user_id = ?1) ORDER BY user_id";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+
+   int result = SUCCESS, count = 0, rc;
+   sched_repeating_t *rows = NULL;
+   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      if (!rows) {
+         rows = calloc((size_t)sqlite3_column_int(stmt, 7), sizeof(*rows));
+         if (!rows) {
+            result = FAILURE;
+            break;
+         }
+      }
+      sched_repeating_t *r = &rows[count++];
+      r->id = sqlite3_column_int64(stmt, 0);
+      r->user_id = sqlite3_column_int(stmt, 1);
+      r->fire_at = (time_t)sqlite3_column_int64(stmt, 2);
+      r->recurrence = sched_recurrence_from_str((const char *)sqlite3_column_text(stmt, 3));
+      read_text_col(stmt, 4, r->recurrence_days, sizeof(r->recurrence_days));
+      read_text_col(stmt, 5, r->original_time, sizeof(r->original_time));
+      read_text_col(stmt, 6, r->zone, sizeof(r->zone));
+   }
+   if (rc != SQLITE_DONE && rc != SQLITE_ROW)
+      result = FAILURE;
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (result != SUCCESS) {
+      free(rows);
+      return FAILURE;
+   }
+   *out = rows;
+   *count_out = count;
+   return SUCCESS;
+}
+
 int scheduler_db_cancel(int64_t id) {
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
@@ -514,12 +596,13 @@ int scheduler_db_clear_missed(int64_t id, int user_id) {
 
 /* A ringing event ends as @p status; FAILURE when it wasn't ringing (someone
  * else ended it first).  @p fired_at, when not 0, names the firing that must
- * still be ringing. */
-static int end_ringing(int64_t id, time_t fired_at, sched_status_t status) {
+ * still be ringing.  @p rings_only limits it to a timer, alarm or reminder. */
+static int end_ringing(int64_t id, time_t fired_at, sched_status_t status, bool rings_only) {
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET status = ?, fired_at = ? "
-                     "WHERE id = ? AND status = 'ringing' AND (?4 = 0 OR fired_at = ?4)";
+                     "WHERE id = ? AND status = 'ringing' AND (?4 = 0 OR fired_at = ?4) "
+                     "AND (?5 = 0 OR event_type IN ('timer', 'alarm', 'reminder'))";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
@@ -531,6 +614,7 @@ static int end_ringing(int64_t id, time_t fired_at, sched_status_t status) {
    sqlite3_bind_int64(stmt, 2, (int64_t)time(NULL));
    sqlite3_bind_int64(stmt, 3, id);
    sqlite3_bind_int64(stmt, 4, (int64_t)fired_at);
+   sqlite3_bind_int(stmt, 5, rings_only ? 1 : 0);
 
    rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
@@ -541,12 +625,14 @@ static int end_ringing(int64_t id, time_t fired_at, sched_status_t status) {
    return result;
 }
 
+/* A running task or briefing is 'ringing' too, and ends itself (scheduling its
+ * next occurrence): dismissing it would schedule a second. */
 int scheduler_db_dismiss(int64_t id) {
-   return end_ringing(id, 0, SCHED_STATUS_DISMISSED);
+   return end_ringing(id, 0, SCHED_STATUS_DISMISSED, true);
 }
 
 int scheduler_db_end_ring(int64_t id, time_t fired_at, sched_status_t status) {
-   return end_ringing(id, fired_at, status);
+   return end_ringing(id, fired_at, status, false);
 }
 
 /* =============================================================================
@@ -1073,6 +1159,7 @@ int scheduler_db_update_fields(int64_t id,
    SCHED_SET_COL(SCHED_FIELD_DELIVER_TO, "deliver_to");
    SCHED_SET_COL(SCHED_FIELD_SAY_ALOUD, "say_aloud");
    SCHED_SET_COL(SCHED_FIELD_INSTRUCTIONS, "briefing_instructions");
+   SCHED_SET_COL(SCHED_FIELD_ZONE, "zone");
 #undef SCHED_SET_COL
    off += snprintf(sql + off, sizeof(sql) - off,
                    " WHERE id = ? AND user_id = ? AND status IN ('pending', 'snoozed')");
@@ -1112,6 +1199,8 @@ int scheduler_db_update_fields(int64_t id,
       /* Bind NULL when cleared so the column stays canonical (NULL = unset). */
       sqlite3_bind_text(stmt, idx++, fields->instructions[0] ? fields->instructions : NULL, -1,
                         SQLITE_TRANSIENT);
+   if (field_mask & SCHED_FIELD_ZONE)
+      sqlite3_bind_text(stmt, idx++, fields->zone[0] ? fields->zone : NULL, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int64(stmt, idx++, id);
    sqlite3_bind_int(stmt, idx++, user_id);
 

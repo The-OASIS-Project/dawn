@@ -217,15 +217,20 @@ int memory_db_admin_reset_derived(int user_id,
          goto rollback;
    }
 
-   /* Reset conversations extraction high-water marks.  Keep last_extracted_msg_id
-    * in sync with last_extracted_msg_count = 0 so the ID-based filter (v40+)
-    * sees the conversation as "never extracted." */
+   /* Reset conversations extraction high-water marks: to the start, or to
+    * where the user forgot everything or forgot that conversation
+    * (extract_floor_msg_id: what was said before it stays forgotten).  The
+    * ID-based filter (v40+) starts after the cursor; a conversation with
+    * nothing after its floor stays counted as extracted, the rest not. */
    sqlite3_stmt *up_conv = NULL;
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE conversations SET last_extracted_msg_count = 0, "
-                           "last_extracted_msg_id = 0, extraction_attempts = 0, "
-                           "extraction_last_attempt_at = 0 WHERE user_id = ?",
-                           -1, &up_conv, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE conversations SET last_extracted_msg_id = extract_floor_msg_id, "
+       "last_extracted_msg_count = CASE WHEN extract_floor_msg_id "
+       ">= " CONV_EXTRACTION_MAX_MSG_ID_SQL(
+           "conversations.id") " THEN message_count ELSE 0 END, extraction_attempts = 0, "
+                               "extraction_last_attempt_at = 0 WHERE user_id = ?",
+       -1, &up_conv, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db_admin: prepare conv UPDATE failed: %s", sqlite3_errmsg(s_db.db));
       goto rollback;

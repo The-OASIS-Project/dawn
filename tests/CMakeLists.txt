@@ -147,9 +147,12 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_calendar.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v109.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v110.c
     ${SRC_ROOT}/src/auth/auth_db_messages.c
     ${SRC_ROOT}/src/auth/auth_db_conv_prefix.c
     ${SRC_ROOT}/src/auth/auth_db_focus_handles.c
@@ -1755,6 +1758,9 @@ dawn_add_unit_test(test_strbuf
 
 dawn_add_unit_test(test_memory_provenance
    SOURCES test_memory_provenance.c test_memory_provenance_stub.c
+           ${SRC_ROOT}/src/auth/auth_db_migrations_v110.c
+           ${SRC_ROOT}/src/memory/memory_forgotten.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
@@ -1769,7 +1775,7 @@ dawn_add_unit_test(test_memory_provenance
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_stem.c
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_summarize_missing
@@ -1780,6 +1786,7 @@ dawn_add_unit_test(test_memory_summarize_missing
 
 dawn_add_unit_test(test_memory_db_admin
    SOURCES test_memory_db_admin.c test_memory_db_admin_stub.c
+           ${SRC_ROOT}/src/auth/auth_db_migrations_v110.c
            ${SRC_ROOT}/src/memory/memory_db_admin.c
            # memory_db.c linked so memory_db_undo_extraction_attempt is
            # exercised directly (transient-failure rollback path).
@@ -2421,6 +2428,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
@@ -2547,6 +2555,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
@@ -2666,6 +2675,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c

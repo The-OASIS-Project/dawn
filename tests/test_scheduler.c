@@ -72,6 +72,7 @@ static const char *DDL =
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 tri-state TTS override */
     "  deliver_to TEXT,"                      /* v54 messaging channel fan-out */
     "  briefing_instructions TEXT,"           /* v84 per-briefing summarization steering */
+    "  zone TEXT,"                            /* v111 the zone fire_at was placed in */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
@@ -350,6 +351,26 @@ static void test_dismiss_optimistic(void) {
    TEST_ASSERT_NOT_EQUAL(0, rc);
 }
 
+/* A running task or briefing is 'ringing' and ends itself: a dismiss can't end
+ * it (it would schedule a second next occurrence), but a stop's leftover is
+ * ended at startup through scheduler_db_end_ring. */
+static void test_dismiss_rings_only(void) {
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   scheduler_db_update_status_fired(id, SCHED_STATUS_RINGING, 1000);
+
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_dismiss(id));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_RINGING, got.status);
+
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_end_ring(id, 1000, SCHED_STATUS_MISSED));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_MISSED, got.status);
+}
+
 /* A ringing event ends once: the ring's own ending and a user's dismiss can't
  * both win (each schedules the next occurrence when it does), and a ring's
  * ending can't end a later firing of the same row. */
@@ -402,6 +423,108 @@ static void test_latest_ringing(void) {
    scheduler_db_insert(&ev, &briefing);
    scheduler_db_update_status_fired(briefing, SCHED_STATUS_RINGING, 4000);
    TEST_ASSERT_EQUAL_INT64(b, scheduler_db_latest_ringing(ev.user_id));
+}
+
+/* ============================================================================
+ * Test: Move Pending (a zone change)
+ * ============================================================================ */
+
+/* The one pending repeating event, as the rezone reads it. */
+static sched_repeating_t read_repeating(void) {
+   sched_repeating_t *rows = NULL, r;
+   int count = 0;
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(0, &rows, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   r = rows[0];
+   free(rows);
+   return r;
+}
+
+static void test_move_pending(void) {
+   sched_event_t ev = make_event();
+   ev.recurrence = SCHED_RECUR_DAILY;
+   snprintf(ev.original_time, sizeof(ev.original_time), "07:00");
+   snprintf(ev.zone, sizeof(ev.zone), "America/Los_Angeles");
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   const time_t to = ev.fire_at - 3 * 3600;
+
+   sched_repeating_t r = read_repeating();
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_move_pending(&r, to, "America/New_York"));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+   TEST_ASSERT_EQUAL_STRING("America/New_York", got.zone);
+
+   /* Read before it moved (or an edit moved it): the newer state stands. */
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(&r, to + 60, "Europe/Paris"));
+
+   /* Edited to repeat on other days, or to fire once, since it was read:
+    * fire_at and status unchanged, but it isn't moved. */
+   r = read_repeating();
+   sched_event_t f;
+   memset(&f, 0, sizeof(f));
+   snprintf(f.recurrence_days, sizeof(f.recurrence_days), "mon");
+   f.recurrence = SCHED_RECUR_CUSTOM;
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_update_fields(id, ev.user_id, &f,
+                                                       SCHED_FIELD_RECURRENCE |
+                                                           SCHED_FIELD_RECURRENCE_DAYS));
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(&r, to + 60, "Europe/Paris"));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+
+   /* Started ringing since it was read: left alone. */
+   r = read_repeating();
+   scheduler_db_update_status(id, SCHED_STATUS_RINGING);
+   TEST_ASSERT_NOT_EQUAL(0, scheduler_db_move_pending(&r, to + 60, "Europe/Paris"));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(to, got.fire_at);
+}
+
+/* Pending, repeating and placed in a zone; of one user or all, by user. */
+static void test_list_pending_repeating(void) {
+   const struct {
+      int user;
+      sched_recurrence_t recurrence;
+      const char *zone;
+      sched_status_t status;
+   } rows[] = {
+      { 2, SCHED_RECUR_DAILY, "America/New_York", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_WEEKDAYS, "America/Los_Angeles", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_ONCE, "America/Los_Angeles", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_DAILY, "", SCHED_STATUS_PENDING },
+      { 1, SCHED_RECUR_DAILY, "America/Los_Angeles", SCHED_STATUS_SNOOZED },
+   };
+   for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+      sched_event_t ev = make_event();
+      ev.user_id = rows[i].user;
+      ev.recurrence = rows[i].recurrence;
+      snprintf(ev.original_time, sizeof(ev.original_time), "07:00");
+      snprintf(ev.zone, sizeof(ev.zone), "%s", rows[i].zone);
+      int64_t id = 0;
+      scheduler_db_insert(&ev, &id);
+      if (rows[i].status != SCHED_STATUS_PENDING)
+         scheduler_db_update_status(id, rows[i].status);
+   }
+
+   sched_repeating_t *out = NULL;
+   int count = 0;
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(0, &out, &count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_INT(1, out[0].user_id);
+   TEST_ASSERT_EQUAL_INT(SCHED_RECUR_WEEKDAYS, out[0].recurrence);
+   TEST_ASSERT_EQUAL_STRING("America/Los_Angeles", out[0].zone);
+   TEST_ASSERT_EQUAL_STRING("07:00", out[0].original_time);
+   TEST_ASSERT_EQUAL_INT(2, out[1].user_id);
+   free(out);
+
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(2, &out, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   free(out);
+
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_list_pending_repeating(3, &out, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+   TEST_ASSERT_NULL(out);
 }
 
 /* ============================================================================
@@ -1606,8 +1729,11 @@ int main(void) {
    RUN_TEST(test_cancel_optimistic);
    RUN_TEST(test_dismiss_optimistic);
    RUN_TEST(test_end_ring_optimistic);
+   RUN_TEST(test_dismiss_rings_only);
    RUN_TEST(test_latest_ringing);
    RUN_TEST(test_snooze);
+   RUN_TEST(test_move_pending);
+   RUN_TEST(test_list_pending_repeating);
    RUN_TEST(test_due_events);
    RUN_TEST(test_list_user_events);
    RUN_TEST(test_find_by_name);

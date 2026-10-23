@@ -162,9 +162,10 @@ static dawn_chime_buf_t alarm_tone_buf;
 
 /* Forward declarations */
 static void schedule_next_occurrence(const sched_event_t *fired_event);
-static time_t calculate_next_recurrence(const sched_event_t *event);
+static time_t calculate_next_recurrence(const sched_event_t *event, const tz_t *zone);
 static void prepare_next_occurrence_row(const sched_event_t *src,
                                         time_t next_fire,
+                                        const tz_t *zone,
                                         sched_event_t *next_out);
 
 /* =============================================================================
@@ -1210,10 +1211,19 @@ fail:
    return NULL;
 }
 
+/* A briefing whose thread never started: nothing would end its row (a dismiss
+ * can't end a running briefing), so it ends as missed, as a failed one does. */
+static void briefing_not_started(const sched_event_t *event) {
+   scheduler_db_update_status(event->id, SCHED_STATUS_MISSED);
+   schedule_next_occurrence(event);
+   scheduler_broadcast_events_changed(event->user_id);
+}
+
 static void start_briefing_thread(const sched_event_t *event) {
    briefing_context_t *ctx = malloc(sizeof(briefing_context_t));
    if (!ctx) {
       OLOG_ERROR("scheduler: failed to allocate briefing context");
+      briefing_not_started(event);
       return;
    }
    memcpy(&ctx->event, event, sizeof(sched_event_t));
@@ -1226,6 +1236,7 @@ static void start_briefing_thread(const sched_event_t *event) {
    if (pthread_create(&tid, &attr, briefing_thread_func, ctx) != 0) {
       OLOG_ERROR("scheduler: failed to create briefing thread");
       free(ctx);
+      briefing_not_started(event);
    }
    pthread_attr_destroy(&attr);
 }
@@ -1500,19 +1511,18 @@ static void start_alarm_sound(const sched_event_t *event) {
  * ============================================================================= */
 
 /**
- * @brief Calculate next fire time for a recurring event, in its owner's zone
- *        (see sched_next_occurrence)
- *
- * Reads the owner's settings: never called while holding the auth_db lock.
+ * @brief Calculate next fire time for a recurring event, in @p zone, its
+ *        owner's (user_tz), the day it stood for read on the clock it was
+ *        placed on (sched_next_occurrence_placed)
  *
  * @param event The event that just fired (or is being cancelled)
  * @return Next fire time, or 0 if no next occurrence (shouldn't happen for recurring)
  */
-static time_t calculate_next_recurrence(const sched_event_t *event) {
+static time_t calculate_next_recurrence(const sched_event_t *event, const tz_t *zone) {
    if (event->recurrence == SCHED_RECUR_ONCE)
       return 0;
-   const time_t next = sched_next_occurrence(
-       user_tz(event->user_id), event->fire_at, event->original_time, event->recurrence,
+   const time_t next = sched_next_occurrence_placed(
+       tz_lookup(event->zone), zone, event->fire_at, event->original_time, event->recurrence,
        event->recurrence_days, event->snooze_count > 0 || event->status == SCHED_STATUS_SNOOZED,
        time(NULL));
    if (next == 0)
@@ -1525,9 +1535,9 @@ static time_t calculate_next_recurrence(const sched_event_t *event) {
  * (fire-time path) and scheduler_cancel_occurrence (atomic cancel+insert path)
  * so both pipelines stamp identical row shapes from the same source event.
  *
- * Fields reset on the new row: id (DB assigns), status, fire_at, fired_at,
- * and the snooze counters.  Everything else inherits via the leading struct
- * copy — most notably:
+ * Fields reset on the new row: id (DB assigns), status, fire_at (placed in
+ * @p zone, which the row records), fired_at, and the snooze counters.  Everything else inherits via
+ * the leading struct copy — most notably:
  *   - say_aloud (schema v53): INTENTIONALLY carried through.  A user who set
  *     a recurring briefing to NEVER speak expects every occurrence to stay
  *     silent; a daily ALWAYS-speak briefing keeps speaking.  If a future
@@ -1539,11 +1549,13 @@ static time_t calculate_next_recurrence(const sched_event_t *event) {
  *     tool_* all carry through by design. */
 static void prepare_next_occurrence_row(const sched_event_t *src,
                                         time_t next_fire,
+                                        const tz_t *zone,
                                         sched_event_t *next_out) {
    *next_out = *src;
    next_out->id = 0;
    next_out->status = SCHED_STATUS_PENDING;
    next_out->fire_at = next_fire;
+   safe_strscpy(next_out->zone, tz_name(zone));
    next_out->fired_at = 0;
    next_out->snooze_count = 0;
    next_out->snoozed_until = 0;
@@ -1559,13 +1571,15 @@ static void schedule_next_occurrence(const sched_event_t *fired_event) {
    if (fired_event->recurrence == SCHED_RECUR_ONCE)
       return;
 
-   time_t next_fire = calculate_next_recurrence(fired_event);
+   /* The owner's settings: never read holding the auth_db lock. */
+   const tz_t *zone = user_tz(fired_event->user_id);
+   time_t next_fire = calculate_next_recurrence(fired_event, zone);
    if (next_fire == 0)
       return;
 
    /* Create new event as a copy with updated fire time */
    sched_event_t next;
-   prepare_next_occurrence_row(fired_event, next_fire, &next);
+   prepare_next_occurrence_row(fired_event, next_fire, zone, &next);
 
    int64_t new_id = 0;
    /* Briefings carry steps in the briefing_steps table; clone them
@@ -1744,6 +1758,119 @@ static void recover_missed_events(void) {
    scheduler_broadcast_events_changed(0);
 }
 
+/* Ends the rings a stop left open.  A row still 'ringing' at startup was
+ * ringing, or a task or briefing was running, when the daemon stopped; nothing
+ * would end it now, and a repeating one would never come again.  Each ends as
+ * it would have (an alarm times out, a timer or reminder is dismissed, an
+ * unfinished task or briefing is missed) and a repeating one gets its next
+ * occurrence.  Only this thread sets 'ringing' (fire_event), and this runs
+ * before it fires anything, so every ringing row is a leftover. */
+static void end_interrupted_rings(void) {
+   sched_event_t events[20];
+   int ended = 0;
+   int count;
+   bool progress = true;
+
+   while (progress && (count = scheduler_db_get_ringing(events, 20)) > 0) {
+      progress = false;
+      for (int i = 0; i < count; i++) {
+         const sched_event_t *e = &events[i];
+         sched_status_t status = SCHED_STATUS_MISSED;
+         if (e->event_type == SCHED_EVENT_ALARM) {
+            status = SCHED_STATUS_TIMED_OUT;
+         } else if (e->event_type == SCHED_EVENT_TIMER || e->event_type == SCHED_EVENT_REMINDER) {
+            status = SCHED_STATUS_DISMISSED;
+         }
+
+         /* Bound to its firing: a dismiss since startup already ended it. */
+         if (scheduler_db_end_ring(e->id, e->fired_at, status) != SUCCESS)
+            continue;
+         progress = true;
+         ended++;
+         OLOG_INFO("scheduler: %s '%s' (id=%lld) was left ringing by a stop; now %s",
+                   sched_event_type_to_str(e->event_type), e->name, (long long)e->id,
+                   sched_status_to_str(status));
+#ifdef ENABLE_WEBUI
+         /* The ring's ending, as end_ring says it. */
+         const char *what = status == SCHED_STATUS_TIMED_OUT   ? "Alarm timed out"
+                            : status == SCHED_STATUS_DISMISSED ? "Auto-dismissed"
+                                                               : NULL;
+         /* A browser that reconnected during the startup wait is still playing
+          * the ring: this tells it the ring is over. */
+         sched_event_t updated;
+         if (what && scheduler_db_get(e->id, &updated) == 0)
+            scheduler_broadcast_notification(&updated, what);
+#endif
+         schedule_next_occurrence(e);
+      }
+   }
+
+   if (ended > 0)
+      scheduler_broadcast_events_changed(0);
+}
+
+/* scheduler_rezone / scheduler_rezone_all: @p user_id 0 is every user. */
+static void rezone(int user_id) {
+   sched_repeating_t *rows = NULL;
+   int count = 0;
+   if (scheduler_db_list_pending_repeating(user_id, &rows, &count) != SUCCESS) {
+      OLOG_ERROR("scheduler: couldn't read events to follow their owners' zones");
+      return;
+   }
+
+   const time_t now = time(NULL);
+   int moved = 0, owner = -1;
+   const tz_t *to = NULL;
+   const char *to_name = ""; /* set with the first row's owner */
+   for (int i = 0; i < count; i++) {
+      const sched_repeating_t *r = &rows[i];
+      if (r->user_id != owner) { /* rows come grouped by owner */
+         owner = r->user_id;
+         to = user_tz(owner);
+         to_name = tz_name(to);
+      }
+      /* Already due: the main loop fires it as it stands. */
+      if (r->fire_at <= now || strcmp(r->zone, to_name) == 0)
+         continue;
+      const tz_t *from = tz_lookup(r->zone);
+      time_t next = r->fire_at;
+      if (!from) {
+         /* A zone no longer loaded (an unlisted server zone since changed):
+          * it fires once as placed, and its next follows the owner's clock.
+          * Recorded so it isn't reported again. */
+         OLOG_WARNING("scheduler: event %lld was placed in unknown zone '%s'; left as is",
+                      (long long)r->id, r->zone);
+      } else if (from != to) { /* not the same zone by another name */
+         next = sched_rezone_occurrence(from, to, r->fire_at, r->original_time, r->recurrence,
+                                        r->recurrence_days, now);
+         if (next == 0)
+            continue; /* no day to move it to: left as placed, for a later try */
+      }
+      if (scheduler_db_move_pending(r, next, to_name) != SUCCESS)
+         continue;
+      if (next != r->fire_at) {
+         moved++;
+         OLOG_INFO("scheduler: event %lld followed its owner from %s to %s", (long long)r->id,
+                   r->zone, to_name);
+      }
+   }
+   free(rows);
+
+   if (moved > 0) {
+      scheduler_notify_new_event();
+      scheduler_broadcast_events_changed(user_id);
+   }
+}
+
+void scheduler_rezone(int user_id) {
+   if (user_id > 0)
+      rezone(user_id);
+}
+
+void scheduler_rezone_all(void) {
+   rezone(0);
+}
+
 /* =============================================================================
  * Scheduler Thread
  * ============================================================================= */
@@ -1774,9 +1901,15 @@ static void *scheduler_thread_func(void *arg) {
       OLOG_INFO("scheduler: expired %d stale missed notifications", missed_expired);
    time_t last_missed_expire = time(NULL);
 
+   end_interrupted_rings();
+
    /* Recover missed events */
    if (g_config.scheduler.missed_event_recovery)
       recover_missed_events();
+
+   /* After recovery, so only events still ahead move: the server's zone, or an
+    * owner's, may have changed while the daemon was down. */
+   scheduler_rezone_all();
 
    /* Main scheduling loop */
    while (!scheduler_shutdown_flag) {
@@ -1952,14 +2085,15 @@ int scheduler_cancel_occurrence(int64_t id) {
    if (ev.recurrence == SCHED_RECUR_ONCE)
       return scheduler_db_cancel(id);
 
-   time_t next_fire = calculate_next_recurrence(&ev);
+   const tz_t *zone = user_tz(ev.user_id);
+   time_t next_fire = calculate_next_recurrence(&ev, zone);
    if (next_fire == 0)
       return scheduler_db_cancel(id);
 
    /* Build next-occurrence row using the shared builder so this path stamps
     * the same shape schedule_next_occurrence does at fire time. */
    sched_event_t next;
-   prepare_next_occurrence_row(&ev, next_fire, &next);
+   prepare_next_occurrence_row(&ev, next_fire, zone, &next);
 
    bool clone_steps = (ev.event_type == SCHED_EVENT_BRIEFING);
    int64_t new_id = 0;
@@ -1996,10 +2130,9 @@ int scheduler_dismiss(int64_t event_id) {
    pthread_mutex_lock(&ringing_mutex);
 
    /* Only clear the global ringing state if the target ID matches the
-    * currently-ringing event. With the missed-notification queue, stale
-    * SCHED_STATUS_RINGING rows accumulate for offline users and routinely
-    * get dismissed via dismiss_missed — we must NOT silence a different
-    * user's actively-ringing alarm in the process. */
+    * currently-ringing event: a dismiss by id (dismiss_missed, another
+    * user's silent ring) can name a row other than the one playing, and must
+    * NOT silence a different user's actively-ringing alarm. */
    const int64_t id = event_id > 0 ? event_id : ringing_target_locked();
    const bool matches_current = alarm_ringing && id == ringing_event.id;
    if (matches_current) {

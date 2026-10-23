@@ -1109,7 +1109,10 @@ void session_manager_finalize(session_t *session) {
       int64_t conv_id = 0;
       int message_count = 0;
       struct json_object *clean = session_snapshot_history(session, &conv_id, &message_count);
-      int duration_seconds = (int)(time(NULL) - session->created_at);
+      /* This history's (a voice save starts a new one). */
+      const time_t began = session->context_started_at ? session->context_started_at
+                                                       : session->created_at;
+      int duration_seconds = (int)(time(NULL) - began);
 
       /* Extract the conversation this history belongs to, by id, so
        * memory_trigger_extraction applies its privacy and background-job checks

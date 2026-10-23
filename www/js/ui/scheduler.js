@@ -372,7 +372,9 @@
             } else {
                localDismissed.add(eventId);
                setTimeout(() => localDismissed.delete(eventId), 5000);
-               sendAction('dismiss', eventId);
+               /* A task or briefing ends itself (the server refuses to dismiss
+                * it): Close only closes the banner here. */
+               if (eventType !== 'task' && eventType !== 'briefing') sendAction('dismiss', eventId);
                /* Stop TTS if scheduler audio is playing */
                if (typeof DawnAudioPlayback !== 'undefined' && DawnAudioPlayback.stop) {
                   DawnAudioPlayback.stop();

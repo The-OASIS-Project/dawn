@@ -501,6 +501,9 @@ typedef struct {
  *        is usually saying it was wrong.  A failure changes nothing.  Hold the user's extraction
  * around it (memory_forget_fact) so a merge can't land in between.
  *
+ * Each fact deleted is also kept as forgotten (memory_forgotten), so extracting
+ * a conversation said before the forget doesn't learn it again.
+ *
  * @param out What else it did (may be NULL)
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE (also
  *         when more than a few hundred facts were merged into it: nothing deleted)
