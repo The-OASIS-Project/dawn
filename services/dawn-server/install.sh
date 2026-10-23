@@ -78,11 +78,13 @@ uninstall() {
         rm -f "/etc/logrotate.d/dawn-server"
     fi
 
-    # 4. Remove binary
-    if [ -f "/usr/local/bin/dawn" ]; then
-        log "Removing /usr/local/bin/dawn"
-        rm -f "/usr/local/bin/dawn"
-    fi
+    # 4. Remove the binaries cmake --install put there
+    for bin in /usr/local/bin/dawn /usr/local/bin/dawn-admin; do
+        if [ -f "$bin" ]; then
+            log "Removing $bin"
+            rm -f "$bin"
+        fi
+    done
 
     # 5. Remove secrets.toml symlink
     if [ -L "$DATA_DIR/secrets.toml" ]; then

@@ -21,10 +21,19 @@ case "$1" in
          cat >&2 <<'EOF'
 dawn: a source install of the DAWN daemon is present (/usr/local/bin/dawn or
       dawn-server.service).  Both would run against /var/lib/dawn, and the
-      old binary would shadow this one on PATH.  Remove it first, from your
+      old binaries would shadow these on PATH.  Remove it first, from your
       DAWN checkout, keeping your databases when asked:
           sudo services/dawn-server/install.sh --uninstall
       then install this package again.
+EOF
+         exit 1
+      fi
+      # Left by an older uninstaller, which removed only dawn: the rest is gone.
+      if [ -e /usr/local/bin/dawn-admin ]; then
+         cat >&2 <<'EOF'
+dawn: /usr/local/bin/dawn-admin, left from a source install, would shadow this
+      package's dawn-admin on PATH.  Remove it, then install this package again:
+          sudo rm /usr/local/bin/dawn-admin
 EOF
          exit 1
       fi
