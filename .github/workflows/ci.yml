@@ -268,6 +268,33 @@ jobs:
         run: docker run --rm dawn --help
 
   # -------------------------------------------------------------------------
+  # Ubuntu packages: the .debs release.yml publishes, built the same way here so
+  # a change that breaks one fails its PR, not the release tag.  They are also
+  # the only Release builds with GCC 13 (24.04) and GCC 15 (26.04), whose
+  # warnings GCC 11/12 above don't raise.  Each is linted, then installed,
+  # started, upgraded, rebooted and purged in a systemd container of its release.
+  # -------------------------------------------------------------------------
+  deb-package:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    env:
+      UBUNTU: ${{ matrix.ubuntu }}
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Build .deb (ubuntu:${{ matrix.ubuntu }} container)
+        run: ./packaging/deb/build-deb.sh
+
+      - name: Check (lintian, then install, start, upgrade, reboot, purge under systemd in ubuntu:${{ matrix.ubuntu }})
+        run: ./packaging/deb/check-deb.sh "$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
+
+  # -------------------------------------------------------------------------
   # Job 4: Tier 1 Satellite Build (~1 min)
   # Headless config (no ML deps): VAD/ASR/TTS/SDL all OFF, so it builds with
   # apt-only libs (lws, json-c, alsa, opus) — no ONNX Runtime / Vosk / whisper.

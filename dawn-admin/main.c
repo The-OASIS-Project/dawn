@@ -35,11 +35,10 @@
 #include "password_prompt.h"
 #include "socket_client.h"
 #include "utils/string_utils.h"
-
-#define VERSION "2.0.0"
+#include "version.h"
 
 static void print_usage(const char *prog) {
-   fprintf(stderr, "Dawn Admin CLI v%s\n\n", VERSION);
+   fprintf(stderr, "Dawn Admin CLI v%s\n\n", VERSION_NUMBER);
    fprintf(stderr, "Usage: %s <command> [options]\n\n", prog);
    fprintf(stderr, "Commands:\n");
    fprintf(stderr, "  ping                              Test connection to daemon\n");

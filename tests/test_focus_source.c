@@ -685,7 +685,8 @@ static void test_utf8_safe_cap(void) {
  *    counter-based proxy returns to zero each iteration.  Smoke-test;
  *    valgrind locally is the real audit. */
 static void test_memory_ownership_cycle(void) {
-   const char *texts[] = { "cycle text" };
+   /* static: s_fake still points at it when the test returns (GCC 13 -Wdangling-pointer) */
+   static const char *texts[] = { "cycle text" };
 
    register_fake("memory_fact", FOCUS_SOURCE_INTERNAL, false);
    s_fake[0].candidate_count = 1;

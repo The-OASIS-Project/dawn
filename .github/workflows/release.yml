@@ -1,5 +1,6 @@
 # Release pipeline — builds the Tier-1 (Raspberry Pi, Debian trixie arm64)
-# satellite binaries and publishes them to a GitHub Release.
+# satellite binaries and the x86-64 daemon .debs (Ubuntu 24.04 and 26.04), and publishes
+# both to one GitHub Release with one SHA256SUMS.
 #
 # Why arm64-native: the satellite must link the Pi's runtime (libwebsockets
 # .so.19 / glibc); an x86 build won't load on the Pi.  We use a GitHub-hosted
@@ -15,8 +16,8 @@
 # on GHCR so build-pi.sh can pull it.  If absent, build-pi.sh falls back to
 # building it from Dockerfile.pibase (correct, but slow on a fresh runner).
 #
-# Server (daemon) binaries are intentionally NOT built here (Jetson/CUDA can't
-# build on hosted runners; x86 server-mode deferred) — daemon is a local build.
+# The daemon is packaged for x86-64 only (CPU build; packaging/deb/).  Jetson
+# builds stay local: CUDA on Jetson can't build on hosted runners.
 
 name: Release binaries
 
@@ -24,7 +25,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: # manual run builds + validates the pipeline; publishes only on a tag
+  workflow_dispatch: # manual run builds + validates the pipeline; only a tag push publishes
 
 permissions:
   contents: read
@@ -33,8 +34,6 @@ jobs:
   client-arm64:
     name: Tier-1 satellite (trixie arm64)
     runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write # create the release + upload assets (tag runs only)
     steps:
       - name: Checkout (with submodules — whisper.cpp is needed for the full build)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,29 +44,128 @@ jobs:
         run: SAT_BUILD=full ./dawn_satellite/build-pi.sh
 
       - name: Build .deb (Tier-1 installer)
-        run: |
-          set -euo pipefail
-          # Tag vX.Y.Z → deb version X.Y.Z; manual dispatch falls back to git describe.
-          ver="${GITHUB_REF_NAME#v}"
-          DEB_VERSION="$ver" ./dawn_satellite/package-deb.sh
+        # The tag names the release; the package carries the satellite's own version
+        # (satellite_version.h), dated ~git on a manual run (packaging/deb_common.sh).
+        env:
+          DEB_RELEASE: ${{ github.ref_type == 'tag' && '1' || '' }}
+        run: ./dawn_satellite/package-deb.sh
 
-      - name: Stage artifacts + checksums
+      - name: Stage artifacts
         run: |
           set -euo pipefail
           mkdir -p dist
           cp dawn_satellite/build-pi/dawn_satellite          dist/
           cp dawn_satellite/build-pi/dawn-satellite-launch    dist/
           cp dawn_satellite/build-pi/dawn-satellite_*.deb     dist/
-          ( cd dist && sha256sum dawn_satellite dawn-satellite-launch dawn-satellite_*.deb > SHA256SUMS )
-          echo "--- release artifacts ---"; ls -l dist; cat dist/SHA256SUMS
 
-      - name: Publish to GitHub Release (tag pushes only)
-        if: github.ref_type == 'tag'
+      - name: Upload artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: satellite-arm64
+          path: dist/
+          if-no-files-found: error
+
+  server-amd64:
+    name: Daemon .deb (Ubuntu ${{ matrix.ubuntu }} amd64)
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    env:
+      UBUNTU: ${{ matrix.ubuntu }}
+    steps:
+      - name: Checkout (with submodules — whisper.cpp is built into the package)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Build .deb (ubuntu:${{ matrix.ubuntu }} container)
+        # The tag names the release; the package carries the daemon's own version
+        # (include/version.h), dated ~git on a manual run (packaging/deb_common.sh).
         env:
-          GH_TOKEN: ${{ github.token }}
+          DEB_RELEASE: ${{ github.ref_type == 'tag' && '1' || '' }}
+        run: ./packaging/deb/build-deb.sh
+
+      - name: Check (lintian, then install, start, upgrade, reboot, purge under systemd in ubuntu:${{ matrix.ubuntu }})
+        run: ./packaging/deb/check-deb.sh "$(ls build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb)"
+
+      - name: Stage artifacts
         run: |
           set -euo pipefail
-          assets="$(ls dist/dawn_satellite dist/dawn-satellite-launch dist/dawn-satellite_*.deb dist/SHA256SUMS)"
-          # Create the release if it doesn't exist yet; otherwise update its assets.
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes $assets \
-            || gh release upload "$GITHUB_REF_NAME" $assets --clobber
+          mkdir -p dist
+          cp build-deb/dawn_*+ubuntu"$UBUNTU"_amd64.deb dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: server-amd64-${{ matrix.ubuntu }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [client-arm64, server-amd64]
+    # A push, not a manual run started on a tag (also ref_type tag): those only validate.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release + upload assets
+    steps:
+      - name: Checkout (Dockerfile only — the pinned fork commits)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: Dockerfile
+          sparse-checkout-cone-mode: false
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Source of the bundled espeak-ng fork (GPLv3 §6)
+        run: |
+          set -euo pipefail
+          # The daemon .deb bundles the rhasspy espeak-ng fork (GPL-3) as a binary,
+          # built at the Dockerfile's pinned commit; its source goes beside it.
+          # (MuPDF, AGPL, is Ubuntu's own: linked statically on 24.04, where the
+          # .deb's Built-Using names its source package, and shared on 26.04.)
+          commit="$(sed -n 's/^ARG ESPEAK_COMMIT=//p' Dockerfile)"
+          [ -n "$commit" ] || { echo "no ESPEAK_COMMIT in Dockerfile" >&2; exit 1; }
+          curl -fsSL --proto '=https' -o "dist/espeak-ng-$commit.tar.gz" \
+            "https://github.com/rhasspy/espeak-ng/archive/$commit.tar.gz"
+
+      - name: No package version published twice
+        # A tag cut without bumping a component's version (include/version.h,
+        # satellite_version.h), or a re-run of this tag after its packages were
+        # uploaded, would republish that version with new contents, and apt would
+        # treat everyone's upgrade as already done.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          published="$(gh api --paginate "repos/$GH_REPO/releases" --jq '.[].assets[].name')"
+          for f in dist/*.deb; do
+            if grep -qxF "${f##*/}" <<<"$published"; then
+              echo "${f##*/} is already published: bump that component's version" >&2
+              exit 1
+            fi
+          done
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          ( cd dist && sha256sum * > SHA256SUMS )
+          echo "--- release artifacts ---"; ls -l dist; cat dist/SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Create the release if it doesn't exist yet; otherwise add to it (the check
+          # above stops a .deb from being replaced).
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/* \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber

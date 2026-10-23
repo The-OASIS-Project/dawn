@@ -739,6 +739,7 @@ static const char *SCHEMA_SQL =
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 — tri-state TTS override (briefings) */
     "  deliver_to TEXT,"                      /* v54 — messaging channel for fan-out (optional) */
     "  briefing_instructions TEXT," /* v84 — per-briefing summarization steering (optional) */
+    "  zone TEXT,"                  /* v111 — the zone fire_at was placed in */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire ON scheduled_events(status, fire_at);"

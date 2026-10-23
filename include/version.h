@@ -23,6 +23,6 @@
 #define VERSION_H
 
 #define APP_NAME "Dawn"
-#define VERSION_NUMBER "2.0.0"
+#define VERSION_NUMBER "2.1.0"
 
 #endif  // VERSION_H

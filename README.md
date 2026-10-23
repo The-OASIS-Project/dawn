@@ -256,6 +256,7 @@ Choose the guide that matches your deployment:
 
 | Deployment | Guide | Description |
 |------------|-------|-------------|
+| **Ubuntu package** | [docs/INSTALL_UBUNTU_PACKAGE.md](docs/INSTALL_UBUNTU_PACKAGE.md) | Ubuntu 24.04 / 26.04 on x86-64: `apt install` the release `.deb`, no compiling |
 | **Docker** | [docs/GETTING_STARTED_SERVER.md — Docker](docs/GETTING_STARTED_SERVER.md#docker-quickstart) | Fastest path — pull and run with Docker (CPU or CUDA) |
 | **Jetson / Embedded** | [GETTING_STARTED.md](GETTING_STARTED.md) | Full setup with local microphone, speaker, wake word, and GPU |
 | **x86_64 Server** | [docs/GETTING_STARTED_SERVER.md](docs/GETTING_STARTED_SERVER.md) | WebUI + satellite connections, no local audio hardware needed |
@@ -292,6 +293,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 |----------|-------------|
 | **[GETTING_STARTED.md](GETTING_STARTED.md)** | Jetson / embedded installation and setup guide |
 | **[docs/GETTING_STARTED_SERVER.md](docs/GETTING_STARTED_SERVER.md)** | x86_64 server mode setup guide |
+| **[docs/INSTALL_UBUNTU_PACKAGE.md](docs/INSTALL_UBUNTU_PACKAGE.md)** | Installing, upgrading and removing the Ubuntu `.deb` |
 | **[docs/CLOUD_DEPLOYMENT.md](docs/CLOUD_DEPLOYMENT.md)** | Cloud deployment architecture and status |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | System architecture, data flow, and threading model |
 | **[CODING_STYLE_GUIDE.md](CODING_STYLE_GUIDE.md)** | Code formatting and development standards |

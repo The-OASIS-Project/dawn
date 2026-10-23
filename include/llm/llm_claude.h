@@ -42,8 +42,10 @@ struct llm_tool_response;
  * #define CLAUDE_MODEL "claude-opus-4-20250514"       // Most capable
  */
 
-/* Claude API version header value */
-#define CLAUDE_API_VERSION "2023-06-01"
+/* Claude API version header value.  OpenRouter's Messages endpoint accepts it but
+ * does not pass it to Anthropic (verified 2026-10-22), so behavior new in this
+ * version can't be counted on there. */
+#define CLAUDE_API_VERSION "2026-10-21"
 
 /* Max tokens for completion */
 #define CLAUDE_MAX_TOKENS 4096

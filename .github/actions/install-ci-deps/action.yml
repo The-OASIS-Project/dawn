@@ -9,12 +9,39 @@ description: Install the apt packages DAWN's ci-preset build needs.
 runs:
   using: composite
   steps:
+    # The downloaded .deb files are kept in the Actions cache, so a slow Ubuntu
+    # mirror doesn't eat the job's time (one run spent 15 of fuzz's 20 minutes
+    # downloading at 28 kB/s).  The key changes with this file (the package
+    # list) and weekly, so the cache picks up updated packages; a new key starts
+    # from the newest older cache and downloads only what changed.
+    - name: Cache key parts
+      id: key
+      shell: bash
+      run: |
+        echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+        echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore downloaded packages
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/.cache/dawn-apt
+        key: apt-${{ runner.os }}-${{ steps.key.outputs.image }}-${{ hashFiles('.github/actions/install-ci-deps/action.yml') }}-${{ steps.key.outputs.week }}
+        restore-keys: |
+          apt-${{ runner.os }}-${{ steps.key.outputs.image }}-${{ hashFiles('.github/actions/install-ci-deps/action.yml') }}-
+          apt-${{ runner.os }}-${{ steps.key.outputs.image }}-
+
     - name: Install packages
       shell: bash
       run: |
         # The runner image's Google Chrome apt repository is often unreachable and
         # would fail apt-get update; DAWN doesn't need it.
         sudo rm -f /etc/apt/sources.list.d/*google-chrome*
+        mkdir -p ~/.cache/dawn-apt
+        # Seeded as partial downloads: apt checks each against the signed index's
+        # hash and downloads it again if it doesn't match (a .deb placed in
+        # archives/ itself would be trusted by its size alone).
+        sudo mkdir -p /var/cache/apt/archives/partial
+        sudo cp ~/.cache/dawn-apt/*.deb /var/cache/apt/archives/partial/ 2>/dev/null || true
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           cmake build-essential pkg-config \
@@ -26,3 +53,7 @@ runs:
           libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev libjpeg-dev \
           libical-dev libgmime-3.0-dev \
           libstemmer-dev
+        # Keep only what this install used (verified into archives/); anything
+        # it didn't need is left in partial/ and dropped.
+        rm -f ~/.cache/dawn-apt/*.deb
+        cp /var/cache/apt/archives/*.deb ~/.cache/dawn-apt/ 2>/dev/null || true

@@ -7,6 +7,14 @@ Tested on Ubuntu 24.04 LTS (x86_64) with NVIDIA GPU (optional).
 
 ---
 
+## Ubuntu Package (.deb)
+
+On Ubuntu 24.04 or 26.04 (x86-64), each release has a ready-made package of the CPU server build:
+nothing to compile. See **[INSTALL_UBUNTU_PACKAGE.md](INSTALL_UBUNTU_PACKAGE.md)**. To build the
+package yourself, see `packaging/deb/README.md`.
+
+---
+
 ## Docker Quickstart
 
 The fastest way to run DAWN on any Linux system. Docker handles all dependencies — no manual compilation needed.
@@ -293,6 +301,7 @@ make -C build-server-debug -j$(nproc)
 | `default` | Full release build |
 | `server` | Server-only release (no local audio required) |
 | `server-debug` | Server-only with debug symbols |
+| `deb` | `server` installed to `/usr` (libraries in `/usr/lib/dawn`) with portable (AVX2) ggml — the Ubuntu package's build |
 | `local` | Local-only (no WebUI) |
 | `full` | Full release build |
 
@@ -330,8 +339,29 @@ ssl_cert_path = "ssl/dawn-chain.crt"
 ssl_key_path = "ssl/dawn.key"
 ```
 
-For browser access, you'll need to accept the self-signed certificate or install the CA
-(`ssl/ca.crt`) in your browser's trust store.
+For browser access, trust the CA (`ssl/ca.crt`) as below.
+
+### Trusting the DAWN CA
+
+DAWN's certificate is signed by a CA made for your install: `ssl/ca.crt` from
+`generate_ssl_cert.sh`, or `/etc/dawn/ssl/ca.crt` with the Ubuntu package. Copy it to each device
+you use DAWN from (`scp`, a USB stick, ...) and trust it there once; until you do, browsers warn and
+won't allow the microphone. Menu names vary between versions.
+
+- **Debian, Ubuntu, Raspberry Pi OS (system, curl, satellites):**
+  `sudo cp ca.crt /usr/local/share/ca-certificates/dawn-ca.crt && sudo update-ca-certificates`.
+  Firefox and Chrome on Linux keep their own lists; import it in the browser too.
+- **Firefox (any OS):** Settings → Privacy & Security → Certificates → View Certificates →
+  Authorities → Import, and tick "Trust this CA to identify websites".
+- **Chrome / Edge on Linux:** Settings → Privacy and security → Security → Manage certificates →
+  import it as a trusted authority.
+- **macOS (Safari, Chrome):**
+  `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt`.
+- **Windows (Edge, Chrome):** in an administrator prompt, `certutil -addstore -f Root ca.crt`.
+- **Android:** Settings → Security → Encryption & credentials → Install a certificate → CA certificate.
+- **iPhone / iPad:** open the file (AirDrop or mail) and install the profile in Settings, then turn
+  it on under General → About → Certificate Trust Settings.
+- **Satellites:** set `ca_cert_path` to it ([DAP2_SATELLITE.md](DAP2_SATELLITE.md)).
 
 ---
 

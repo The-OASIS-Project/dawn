@@ -372,7 +372,7 @@ static void test_sms_verify(void) {
    TEST_ASSERT_EQUAL_INT(MESSAGING_UNKNOWN_CHANNEL,
                          messaging_engine_verify_channel(s_user_b, id, digits));
    char wrong[7];
-   snprintf(wrong, sizeof(wrong), "%06d", (atoi(digits) + 1) % 1000000);
+   snprintf(wrong, sizeof(wrong), "%06u", ((unsigned)atoi(digits) + 1) % 1000000u);
    TEST_ASSERT_EQUAL_INT(MESSAGING_BAD_CODE, messaging_engine_verify_channel(s_user_a, id, wrong));
    TEST_ASSERT_EQUAL_INT(MESSAGING_SUCCESS, messaging_engine_verify_channel(s_user_a, id, digits));
    TEST_ASSERT_EQUAL_INT(2, __atomic_load_n(&s_channels_changed, __ATOMIC_SEQ_CST));
@@ -406,7 +406,7 @@ static void test_sms_limits(void) {
    char digits[7];
    last_code(digits);
    char wrong[7];
-   snprintf(wrong, sizeof(wrong), "%06d", (atoi(digits) + 1) % 1000000);
+   snprintf(wrong, sizeof(wrong), "%06u", ((unsigned)atoi(digits) + 1) % 1000000u);
    int64_t id = channel_id_of(s_user_a, "sms", "+15550002222");
    for (int i = 0; i < 10; i++) {
       TEST_ASSERT_EQUAL_INT(MESSAGING_BAD_CODE,

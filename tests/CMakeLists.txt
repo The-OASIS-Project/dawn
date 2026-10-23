@@ -147,6 +147,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_calendar.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -1015,10 +1016,7 @@ dawn_add_unit_test(test_document_extract
    INCLUDES ${SRC_ROOT}/include
    LABEL   ci)
 if(MUPDF_FOUND)
-   target_link_libraries(test_document_extract PRIVATE
-       ${MUPDF_LIB} ${MUPDF_THIRD_LIB}
-       mujs gumbo openjp2 jbig2dec jpeg
-       ${HARFBUZZ_LIB} ${FREETYPE2_LIBRARIES} z m)
+   target_link_libraries(test_document_extract PRIVATE ${MUPDF_LIBRARIES} m)
    target_compile_definitions(test_document_extract PRIVATE HAVE_MUPDF)
 else()
    target_link_libraries(test_document_extract PRIVATE m)

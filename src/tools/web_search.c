@@ -519,7 +519,7 @@ static void parse_results_array(struct json_object *results_array,
 
    free(host_counts);
 
-   if (accepted_count == 0) {
+   if (accepted_count <= 0) {
       free(temp_results);
       return;
    }

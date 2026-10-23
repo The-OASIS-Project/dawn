@@ -10,14 +10,12 @@ ROLLBACK="$DATA_DIR/ota/rollback/dawn_satellite"
 
 case "$1" in
    configure)
-      # 1. System user/group.
-      if ! getent group dawn >/dev/null; then
-         addgroup --system dawn
-      fi
-      if ! getent passwd dawn >/dev/null; then
-         adduser --system --ingroup dawn --home "$DATA_DIR" --no-create-home \
-            --shell /usr/sbin/nologin --gecos "DAWN satellite" dawn
-      fi
+      # 1. System user/group.  Unconditional: a no-op for an existing system user
+      #    and group, and a failed install, not a service running as someone's
+      #    login, for a person named dawn.
+      addgroup --quiet --system dawn
+      adduser --quiet --system --ingroup dawn --home "$DATA_DIR" --no-create-home \
+         --shell /usr/sbin/nologin --gecos "DAWN satellite" dawn
       # Hardware-access groups (best-effort; some may not exist on a given host).
       for g in audio video render input; do
          if getent group "$g" >/dev/null 2>&1; then

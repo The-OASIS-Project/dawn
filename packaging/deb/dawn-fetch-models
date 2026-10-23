@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# dawn-fetch-models: download the models the DAWN daemon needs that are too big to
+# ship in its package, into /var/lib/dawn/models:
+#
+#   whisper.cpp/ggml-base.en.bin            Whisper base.en speech recognition (MIT)
+#   embeddings/bge-small-en-v1.5-int8.onnx  memory and document search (MIT)
+#   embeddings/vocab.txt                    its tokenizer vocabulary
+#
+# Each file is pinned to a Hugging Face revision and checked against its SHA-256;
+# a file already present with the right checksum is skipped.  dawn-models.service
+# runs this before dawn's first start; run it by hand with
+#   sudo dawn-fetch-models
+# It always works as the dawn user: /var/lib/dawn/models belongs to dawn, and root
+# following a link planted there could write or chown anywhere.
+set -eu
+
+if [ "$(id -u)" -eq 0 ]; then
+   exec setpriv --reuid=dawn --regid=dawn --init-groups -- "$0" "$@"
+fi
+
+MODELS_DIR="${MODELS_DIR:-/var/lib/dawn/models}"
+HF=https://huggingface.co
+
+die() {
+   echo "dawn-fetch-models: $*" >&2
+   exit 1
+}
+
+# fetch <url> <path under MODELS_DIR> <sha256>
+fetch() {
+   dest="$MODELS_DIR/$2"
+   if [ -f "$dest" ] && echo "$3  $dest" | sha256sum -c --status; then
+      echo "  have $2"
+      return
+   fi
+   mkdir -p "$(dirname "$dest")"
+   echo "  get  $2"
+   curl -fL --proto '=https' --retry 3 -o "$dest.part" "$1" ||
+      { rm -f "$dest.part"; die "download failed: $1"; }
+   echo "$3  $dest.part" | sha256sum -c --status ||
+      { rm -f "$dest.part"; die "checksum mismatch: $2"; }
+   mv -f "$dest.part" "$dest"
+}
+
+command -v curl >/dev/null 2>&1 || die "curl is required"
+
+fetch "$HF/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin" \
+   whisper.cpp/ggml-base.en.bin a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
+fetch "$HF/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/onnx/model_int8.onnx" \
+   embeddings/bge-small-en-v1.5-int8.onnx bf64d05457cb391fa88d045faf5927a15ea36d96228ddf23ea970087afdc1197
+fetch "$HF/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/vocab.txt" \
+   embeddings/vocab.txt 07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3
+
+echo "Models are in $MODELS_DIR."

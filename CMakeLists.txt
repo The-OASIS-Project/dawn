@@ -7,6 +7,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# The C is written to gnu17 (the default through GCC 14).  Stated, not inherited:
+# GCC 15 defaults to C23, which removes ATOMIC_VAR_INIT and makes strchr() and
+# friends return const for const input.
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # -Wswitch here (before the whisper subdirectory) so it also covers the vendored
 # ggml/whisper tree; full -Wall for DAWN's own code is enabled further below, AFTER
@@ -270,20 +275,33 @@ if(NOT SODIUM_FOUND)
 endif()
 
 # Document extraction libraries (PDF, DOCX support for document upload)
-# MuPDF: PDF text extraction (AGPL-3.0, GPL-compatible; dual-licensed AGPL/commercial)
-# MuPDF ships as two static libraries: libmupdf.a + libmupdf-third.a (bundled freetype/zlib/etc)
+# MuPDF: PDF text extraction (AGPL-3.0, GPL-compatible; dual-licensed AGPL/commercial).
+# Ubuntu 24.04 and earlier ship it as two static libraries (libmupdf.a +
+# libmupdf-third.a) whose dependencies must be linked too; 26.04 ships a shared
+# libmupdf.so that brings its own.  MUPDF_LIBRARIES is what to link, either way.
 find_library(MUPDF_LIB mupdf)
 find_library(MUPDF_THIRD_LIB mupdf-third)
 pkg_check_modules(MUPDF_PC mupdf)
 if(MUPDF_LIB AND MUPDF_THIRD_LIB)
+    pkg_check_modules(FREETYPE2 REQUIRED freetype2)
+    pkg_check_modules(HARFBUZZ harfbuzz)
+    if(HARFBUZZ_FOUND)
+        set(HARFBUZZ_LIB ${HARFBUZZ_LIBRARIES})
+    else()
+        find_library(HARFBUZZ_LIB NAMES harfbuzz)
+    endif()
+    set(MUPDF_LIBRARIES ${MUPDF_LIB} ${MUPDF_THIRD_LIB} mujs gumbo openjp2 jbig2dec jpeg
+        ${HARFBUZZ_LIB} ${FREETYPE2_LIBRARIES} z)
+elseif(MUPDF_LIB AND MUPDF_PC_FOUND)
+    set(MUPDF_LIBRARIES ${MUPDF_LIB})
+endif()
+if(MUPDF_LIBRARIES)
     set(MUPDF_FOUND TRUE)
     if(MUPDF_PC_FOUND)
         include_directories(${MUPDF_PC_INCLUDE_DIRS})
     endif()
     add_definitions(-DHAVE_MUPDF)
-    message(STATUS "MuPDF: Found (PDF document extraction enabled)")
-    message(STATUS "  libmupdf: ${MUPDF_LIB}")
-    message(STATUS "  libmupdf-third: ${MUPDF_THIRD_LIB}")
+    message(STATUS "MuPDF: Found (PDF document extraction enabled): ${MUPDF_LIB}")
 else()
     set(MUPDF_FOUND FALSE)
     message(WARNING "MuPDF not found - PDF document extraction disabled")
@@ -317,6 +335,16 @@ endif()
 pkg_check_modules(LIBICAL REQUIRED libical)
 include_directories(${LIBICAL_INCLUDE_DIRS})
 message(STATUS "libical: Found (${LIBICAL_VERSION})")
+
+# libstemmer (Snowball): Porter2 stemming for the memory subsystem's BM25 keyword
+# index, linked as plain `stemmer` by the daemon and its tests.  It ships no
+# pkg-config file, so check here instead of failing mid-build on libstemmer.h.
+find_path(STEMMER_INCLUDE_DIR libstemmer.h)
+find_library(STEMMER_LIB stemmer)
+if(NOT STEMMER_INCLUDE_DIR OR NOT STEMMER_LIB)
+    message(FATAL_ERROR "libstemmer not found. Install with: sudo apt install libstemmer-dev")
+endif()
+message(STATUS "libstemmer: Found (${STEMMER_LIB})")
 
 # Tool subsystem - compile-time tool configuration
 # Provides options to enable/disable individual tools
@@ -981,6 +1009,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v108.c
     src/auth/auth_db_migrations_v109.c
     src/auth/auth_db_migrations_v110.c
+    src/auth/auth_db_migrations_v111.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
@@ -1287,22 +1316,8 @@ endif()
 
 # Conditionally link document extraction libraries (MuPDF, libzip, libxml2)
 if(MUPDF_FOUND)
-    # MuPDF ships only static libs on Ubuntu 22.04. All transitive deps must be linked.
-    # Deps from: pkg-config --libs --static mupdf (plus harfbuzz for text shaping)
-    pkg_check_modules(FREETYPE2 REQUIRED freetype2)
-    pkg_check_modules(HARFBUZZ harfbuzz)
-    if(HARFBUZZ_FOUND)
-        set(HARFBUZZ_LIB ${HARFBUZZ_LIBRARIES})
-    else()
-        # Fallback: find_library without hardcoded arch paths
-        find_library(HARFBUZZ_LIB NAMES harfbuzz)
-    endif()
-    target_link_libraries(dawn
-        ${MUPDF_LIB} ${MUPDF_THIRD_LIB}
-        mujs gumbo openjp2 jbig2dec jpeg
-        ${HARFBUZZ_LIB} ${FREETYPE2_LIBRARIES} z)
+    target_link_libraries(dawn ${MUPDF_LIBRARIES})
     message(STATUS "Linking MuPDF (PDF extraction)")
-    message(STATUS "  harfbuzz: ${HARFBUZZ_LIB}")
 endif()
 if(LIBZIP_FOUND AND LIBXML2_FOUND)
     target_link_libraries(dawn ${LIBZIP_LIBRARIES} ${LIBXML2_LIBRARIES})

@@ -1,0 +1,20 @@
+Package: dawn
+Version: @VERSION@
+Architecture: amd64
+Maintainer: @MAINTAINER@
+Installed-Size: @INSTALLED_SIZE@
+Depends: @SHLIB_DEPS@, adduser, ca-certificates, curl, mosquitto, openssl, tzdata
+Built-Using: @BUILT_USING@
+Section: sound
+Priority: optional
+Homepage: https://github.com/The-OASIS-Project/dawn
+Description: voice assistant daemon (server, CPU build)
+ The DAWN assistant's daemon: speech recognition (Whisper), speech synthesis
+ (Piper), cloud or local language models, memory, tools, and the WebUI and
+ DAP2 satellite server on port 3000.  Server build: no local microphone or
+ speaker; you talk to it from the WebUI or a satellite.
+ .
+ Runs as the dawn system user (dawn.service), with its private libraries in
+ /usr/lib/dawn, configuration in /etc/dawn and data in /var/lib/dawn.
+ Speech-recognition and embedding models are downloaded on first start
+ (dawn-models.service).  Needs an x86-64-v3 CPU (AVX2).
