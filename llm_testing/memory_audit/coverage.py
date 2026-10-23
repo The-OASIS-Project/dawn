@@ -165,7 +165,8 @@ def run(a, by_id, tier_of):
     print(f"{'total':9s} n={n:4d}  " + "  ".join(f"{c} {total[c]}" for c in cols if total[c]) +
           f"  ({loss})")
     if missing_kind:
-        print("not covered by kind: " + ", ".join(f"{k} {c}" for k, c in missing_kind.most_common()))
+        print("not covered by kind: "
+              + ", ".join(f"{k} {c}" for k, c in missing_kind.most_common()))
     if unclassified:
         print(f"{unclassified} A facts unclassified (classify A first)")
     print(f"judge tokens in {usage['in']} out {usage['out']}")

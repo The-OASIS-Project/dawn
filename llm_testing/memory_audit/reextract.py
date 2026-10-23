@@ -18,6 +18,7 @@
 
 import json
 import os
+import pathlib
 import re
 import select
 import sqlite3
@@ -37,7 +38,7 @@ def pick_conversations(db, user_id, n, since, min_messages):
     """Up to n recent conversations, taken in turn from each origin (webui,
     voice, messaging...) so one surface doesn't fill the set.  Private and
     background-job conversations are left out."""
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = sqlite3.connect(pathlib.Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     rows = con.execute(
         "SELECT id, origin FROM conversations WHERE user_id = ? AND is_private = 0 "
         "AND job_status IS NULL AND message_count >= ? AND created_at >= ? "
@@ -120,14 +121,16 @@ class Bench:
 def scratch_facts(db_path):
     """Live facts from the saved scratch DB.  Extraction stores each fact with
     its conversation's time, so created_at is already the conversation's."""
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = sqlite3.connect(pathlib.Path(db_path).resolve().as_uri() + "?mode=ro",
+                          uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
         "SELECT id, fact_text, source, created_at, confidence, expires_at, "
         "source_conversation_id FROM memory_facts WHERE superseded_by IS NULL "
         "ORDER BY id").fetchall()
     con.close()
-    return [{"id": r["id"], "text": r["fact_text"], "source": r["source"], "created_at": r["created_at"],
+    return [{"id": r["id"], "text": r["fact_text"], "source": r["source"],
+             "created_at": r["created_at"],
              "date": time.strftime("%Y-%m-%d", time.gmtime(r["created_at"])),
              "confidence": r["confidence"], "expires_at": r["expires_at"],
              "access_count": 0, "last_cited": None,

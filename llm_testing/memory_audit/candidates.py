@@ -17,6 +17,7 @@
 #
 # License: GPLv3, same as DAWN.
 
+import pathlib
 import sqlite3
 
 MEMORY_SUPERSEDED_REPLACED = 1  # memory_facts.superseded_kind (include/memory/memory_db.h)
@@ -132,7 +133,7 @@ SIGNALS = (forgotten, replaced, corrections, unused_memory, dismissed_alerts)
 
 
 def collect(db, user):
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = sqlite3.connect(pathlib.Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         return [s(con, user) for s in SIGNALS]
     finally:
@@ -146,7 +147,8 @@ def render(signals, max_ids):
         if s["ids"]:
             shown = ", ".join(str(i) for i in s["ids"][:max_ids])
             more = len(s["ids"]) - max_ids
-            lines.append(f"  ids ({len(s['ids'])}): {shown}" + (f" ... +{more}" if more > 0 else ""))
+            lines.append(f"  ids ({len(s['ids'])}): {shown}"
+                         + (f" ... +{more}" if more > 0 else ""))
         if s["note"]:
             lines.append(f"  {s['note']}")
     return "\n".join(lines)

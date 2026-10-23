@@ -16,35 +16,38 @@ This is not a changelog: git history and the pull requests cover everything else
 
 **What changed.** `[memory.focus_injection] enabled` now defaults to true: each turn
 retrieves the memories, documents and calendar events relevant to it and adds them to the
-turn, marking documents and calendar events as outside text. This includes voice devices (satellites and the local microphone), so a reply spoken in
-a shared room may mention what it retrieved, such as health or family details.
+turn, marking documents and calendar events as outside text. This includes voice devices
+(satellites and the local microphone), so a reply spoken in a shared room may mention what it
+retrieved, such as health or family details.
 
 **What you need to do.** If others share a room with a voice device, turn it off in
-Settings → Memory System → Per-Turn Context Injection (or set `enabled = false`). If you have ever
-saved settings from the WebUI, your `dawn.toml` already says `enabled = false` under
-`[memory.focus_injection]` and keeps it off; turn it on in the same place to get the new
-default.
+Settings → Memory System → Per-Turn Context Injection (or set `enabled = false`). Turning it off
+reduces, doesn't remove, what a voice device can say: the memory tool and the standing USER
+MEMORY block remain. If you have ever saved settings from the WebUI, your `dawn.toml` already
+says `enabled = false` under `[memory.focus_injection]` and keeps it off; turn it on in the same
+place to get the new default.
 
 ---
 
 ## 2026-10-22 — The built-in persona is new
 
 **What changed.** The built-in persona is new and longer (values, then tone). A custom
-`[persona]` or a replace-mode personal persona is unaffected; an append-mode one now adds to the
-new text.
+`[persona]` (Settings → Default Persona) or a replace-mode personal persona is unaffected; an
+append-mode one now adds to the new text.
 
-**What you need to do.** If a personal persona appends to the built-in one (My Settings →
-Persona, append mode), read it again on top of the new text and trim anything that now repeats
-or contradicts it.
+**What you need to do.** If a personal persona appends to the built-in one (My Settings → AI
+Persona, *Add to base persona*), read it again on top of the new text (*Show full* under Base
+Persona shows it) and trim anything that now repeats or contradicts it.
 
 ---
 
 ## 2026-10-22 — Fact categories retired: `category_threshold` and `recategorize-all` are gone
 
 **What changed.** DAWN no longer sorts memory facts into categories (personal, professional,
-health, ...). Nothing used them: search and ranking ignored them and the Memory panel never showed them. The setting
-that tuned the automatic sorting, `[memory.embeddings] category_threshold`, is ignored, and the
-`dawn-admin memory recategorize-all` command is removed.
+health, ...). Nothing used them: search and ranking ignored them and the Memory panel never
+showed a fact's category. The setting that tuned the automatic sorting,
+`[memory.embeddings] category_threshold`, is ignored, and the `dawn-admin memory
+recategorize-all` command is removed.
 
 **What you need to do.** If your `dawn.toml` sets `category_threshold`, delete the line: DAWN
 logs at startup that it is retired and ignored (a settings save from the WebUI also drops it).

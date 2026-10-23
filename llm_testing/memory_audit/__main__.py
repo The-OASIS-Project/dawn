@@ -4,18 +4,18 @@
 # An audit of what memory extraction has stored for a user: which facts are worth
 # keeping and which kinds of unwanted fact extraction produces.
 #
-#   sample    stratified sample (or --all) of a user's live facts -> JSONL
-#   label     name each sampled fact's kind by hand; the reference for the models
-#   classify  a model classifies a sample against the rubric
-#   compare   a classification (or two) against the hand labels
-#   report    counts by kind, month and use for a classification
-#   examples  print facts of one kind (shows fact text: for the user, not for logs)
-#   reextract run DAWN's extraction on chosen stored conversations into a scratch
-#             database, so a prompt variant can be measured on the same input
+#   sample     stratified sample (or --all) of a user's live facts -> JSONL
+#   label      name each sampled fact's kind by hand; the reference for the models
+#   classify   a model classifies a sample against the rubric
+#   compare    a classification (or two) against the hand labels
+#   report     counts by kind, month and use for a classification
+#   examples   print facts of one kind (shows fact text: for the user, not for logs)
+#   reextract  run DAWN's extraction on chosen stored conversations into a scratch
+#              database, so a prompt variant can be measured on the same input
 #   candidates counts and conversation ids where memory may have gone wrong,
-#             for the owner to write memory eval cases from (prints no text)
-#   coverage  how many of run A's facts (by tier) run B also stored, judged by a
-#             model per conversation: covered / partial / missing (counts only)
+#              for the owner to write memory eval cases from (prints no text)
+#   coverage   how many of run A's facts (by tier) run B also stored, judged by a
+#              model per conversation: covered / partial / missing (counts only)
 #
 # Privacy: everything read or written lives under llm_testing/memory_audit/data/
 # (ignored by git).  Only `label` and `examples` print fact text; the others
@@ -26,6 +26,7 @@
 import argparse
 import json
 import os
+import pathlib
 import random
 import re
 import sqlite3
@@ -68,7 +69,7 @@ def _assistant_name():
 # --------------------------------------------------------------------------- sample
 
 def _live_facts(db, user_id):
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = sqlite3.connect(pathlib.Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
         "SELECT id, fact_text, source, created_at, confidence, expires_at, "
@@ -78,7 +79,8 @@ def _live_facts(db, user_id):
     out = []
     for r in rows:
         out.append({
-            "id": r["id"], "text": r["fact_text"], "source": r["source"], "created_at": r["created_at"],
+            "id": r["id"], "text": r["fact_text"], "source": r["source"],
+            "created_at": r["created_at"],
             "date": time.strftime("%Y-%m-%d", time.gmtime(r["created_at"])),
             "confidence": r["confidence"], "expires_at": r["expires_at"],
             "access_count": r["access_count"] or 0, "last_cited": r["last_cited"],
@@ -469,7 +471,10 @@ def main(argv=None):
     s.add_argument("a_set", help="run A's facts, e.g. reextract_<label>_facts.jsonl")
     s.add_argument("b_set", help="run B's facts")
     s.add_argument("--a-class", default="",
-                   help="A's classification (default: classify's output name for a_set)")
+                   help="A's classification (default: classify's output name for a_set "
+                        "under --class-model)")
+    s.add_argument("--class-model", default="",
+                   help="the model that classified a_set (default: --model)")
     s.add_argument("--tiers", default="semantic,pointer,episodic", help="A tiers to judge")
     s.add_argument("--model", default="claude:claude-haiku-5-5")
     s.add_argument("--endpoint", default="")
@@ -479,7 +484,7 @@ def main(argv=None):
 
     a = p.parse_args(argv)
     if a.cmd == "coverage":
-        a.a_class = a.a_class or _class_name(a.model, a.a_set, "kind")
+        a.a_class = a.a_class or _class_name(a.class_model or a.model, a.a_set, "kind")
         if not os.path.exists(_data(a.a_class)):
             raise SystemExit(f"classification file not found: {_data(a.a_class)}")
         coverage.run(a, _by_id, _tier)

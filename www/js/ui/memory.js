@@ -650,7 +650,7 @@
             </div>
             <div class="memory-item-meta">
                <span class="memory-item-confidence ${confidenceClass}">${confidencePercent}%</span>
-               <span class="memory-item-source">${escapeHtml(fact.kind || fact.source || 'unknown')}</span>
+               ${renderKind(fact.kind || KIND_WORDS[fact.source] || fact.source)}
                <span class="memory-item-date">${dateStr}</span>
             </div>
          </div>
@@ -681,6 +681,21 @@
       }
    }
 
+   /* How a memory is known, in the words facts and preferences share. */
+   const KIND_WORDS = { explicit: 'told', inferred: 'inferred', import: 'imported' };
+   const KIND_TITLES = {
+      told: 'You told me this',
+      inferred: 'Learned from a conversation',
+      imported: 'Imported',
+      noted: 'From one of your notes',
+   };
+
+   function renderKind(word) {
+      const shown = word || 'unknown';
+      const title = KIND_TITLES[shown] ? ` title="${KIND_TITLES[shown]}"` : '';
+      return `<span class="memory-item-source"${title}>${escapeHtml(shown)}</span>`;
+   }
+
    function renderPreferenceItem(pref) {
       const confidence = pref.confidence || 0;
       let confidenceClass = 'confidence-low';
@@ -703,7 +718,7 @@
             <div class="memory-item-value">${escapeHtml(pref.value)}</div>
             <div class="memory-item-meta">
                <span class="memory-item-confidence ${confidenceClass}">${confidencePercent}%</span>
-               <span class="memory-item-source">${escapeHtml(pref.source || 'unknown')}</span>
+               ${renderKind(KIND_WORDS[pref.source] || pref.source)}
                <span class="memory-item-date">${dateStr}</span>
                ${pref.reinforcement_count > 1 ? `<span>${pref.reinforcement_count}x</span>` : ''}
             </div>

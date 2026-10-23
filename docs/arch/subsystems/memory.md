@@ -291,9 +291,9 @@ Full rationale, research citations, and risk model: [atlas/dawn/memory/INJECTION
 enabled = true
 context_budget_tokens = 800
 session_timeout_minutes = 15
-extraction_provider = "claude"         # "local", "openai", "claude", "openrouter"
-extraction_model = "claude-haiku-5-5"  # Model for extraction
-extraction_effort = "medium"           # "off", "low", "medium", "high"
+extraction_provider = "local"          # "local", "openai", "claude", "openrouter"
+extraction_model = "qwen2.5:7b"        # Model for extraction
+extraction_effort = "off"              # "off", "low", "medium", "high"
 
 [memory.embeddings]
 provider = "onnx"         # "onnx" (default), "ollama", "openai"
@@ -345,10 +345,10 @@ weight_recency = 0.30      # Recency contribution
 
 The memory viewer provides a browser-based interface for inspecting and managing all memory types:
 
-- **Tabs**: Facts, Preferences, Summaries, Graph (entities), Contacts
+- **Tabs**: Facts, Preferences, Summaries, Graph (entities), Contacts; facts and preferences show how each is known (told / inferred / imported / noted)
 - **Stats bar**: real-time counts for each memory type including contacts; entity counts now reflect equivalence-class totals across canonical + aliases (Bundle 2, May 2026)
 - **Search**: filter memories by keyword across all tabs
-- **Graph tab**: entity cards with type badges, expandable relations (→ outgoing, ← incoming), contact count badge on person entities, two-click entity merge (select source → click target → confirm — defaults to soft `alias_link`; operator hardens via dawn-admin). Entity `first_seen` / `last_seen` now span the original conversation timespan instead of "today" (Bug 2 follow-up to Bundle 1 — `memory_db_entity_upsert_at()` accepts `first_seen` / `last_seen` overrides so reextract preserves natural temporal spread).
+- **Graph tab**: entity cards with type badges, expandable relations (→ outgoing, ← incoming), contact count badge on person entities, two-click entity merge (select source → click target → confirm — defaults to soft `alias_link`). Entity `first_seen` / `last_seen` now span the original conversation timespan instead of "today" (Bug 2 follow-up to Bundle 1 — `memory_db_entity_upsert_at()` accepts `first_seen` / `last_seen` overrides so reextract preserves natural temporal spread).
 - **Suggested-Merges panel** (Phase 2, May 2026): pending entity-merge proposals from `memory_entity_merge_proposals`. Approve writes the soft alias via `memory_db_entity_alias_link()`; reject just stamps `resolved_at`.
 - **Memory-icon dot indicator** (Phase 2): mirrors the music-playing dot pattern, pulses 0.5s out of phase, lights when proposals are pending, `prefers-reduced-motion` carve-out suppresses both this dot's pulse and the music dot's pulse. First click while pending auto-routes to the Graph tab with a 600 ms accent-glow flash so the user's eye lands on why they're not on Facts; subsequent clicks respect whichever tab they had active.
 - **Contacts tab**: contact cards with field_type/label badges, hover-reveal edit/delete, search, pagination. Add/edit modal with entity typeahead. Cross-linked from Graph tab person entities.
