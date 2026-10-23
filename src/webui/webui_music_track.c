@@ -113,17 +113,7 @@ static int music_install_decoder(session_music_state_t *state, audio_decoder_t *
 
 /* A history entry's queue position: the copy of path nearest its hint */
 static int queue_find(void *ctx, const char *path, int hint) {
-   user_music_queue_t *uq = (user_music_queue_t *)ctx;
-   if (hint >= 0 && hint < uq->queue_length && strcmp(uq->queue[hint].path, path) == 0) {
-      return hint; /* still where it was: the nearest copy */
-   }
-   int best = -1;
-   for (int i = 0; i < uq->queue_length; i++) {
-      if (strcmp(uq->queue[i].path, path) == 0 && (best < 0 || abs(i - hint) < abs(best - hint))) {
-         best = i;
-      }
-   }
-   return best;
+   return music_queue_find((const user_music_queue_t *)ctx, path, hint);
 }
 
 /* Another tab replaced the queue since this session picked its track */
@@ -220,7 +210,7 @@ static int shuffle_next(session_music_state_t *state,
 
 static void *prefetch_thread(void *arg) {
    session_music_state_t *state = (session_music_state_t *)arg;
-   char path[WEBUI_MUSIC_PATH_MAX];
+   char path[MUSIC_PATH_MAX];
    pthread_mutex_lock(&state->state_mutex);
    snprintf(path, sizeof(path), "%s", state->prefetch_path);
    pthread_mutex_unlock(&state->state_mutex);
@@ -287,7 +277,7 @@ static void prefetch_drop(session_music_state_t *state) {
  */
 static void prefetch_plan(session_music_state_t *state) {
    user_music_queue_t *uq = state->shared_queue;
-   char next_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
+   char next_path[MUSIC_PATH_MAX] = { 0 };
 
    /* A stop must find no helper it didn't cancel */
    if (atomic_load(&state->stop_requested)) {
@@ -520,7 +510,7 @@ music_advance_t webui_music_advance(session_music_state_t *state,
 bool webui_music_run_pending_open(session_music_state_t *state,
                                   ws_connection_t *conn,
                                   int *failures) {
-   char path[WEBUI_MUSIC_PATH_MAX];
+   char path[MUSIC_PATH_MAX];
    pthread_mutex_lock(&state->state_mutex);
    if (!state->pending_path[0]) {
       pthread_mutex_unlock(&state->state_mutex);

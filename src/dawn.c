@@ -60,6 +60,7 @@
 #include "audio/audio_decoder.h"
 #include "audio/flac_playback.h"
 #include "audio/music_db.h"
+#include "audio/music_queue.h"
 #include "audio/music_scanner.h"
 #include "audio/plex_db.h"
 #include "core/attention/attention.h"
@@ -2181,6 +2182,9 @@ int main(int argc, char *argv[]) {
       snprintf(music_db_path, sizeof(music_db_path), "%s/music.db",
                g_config.paths.data_dir_resolved);
       if (music_db_init(music_db_path) == 0) {
+         if (music_queue_init(music_db_path) != SUCCESS) {
+            OLOG_WARNING("Music queue store failed to open; queues won't be kept");
+         }
          // Register available music source providers before starting scanner
          music_scanner_register_source(plex_db_get_provider());
 
@@ -4335,6 +4339,8 @@ server_shutdown:
       worker_pool_shutdown();
    }
 #endif
+   /* After every player that holds a queue is gone */
+   music_queue_shutdown();
 
    /* Cleanup session manager AFTER WebUI shutdown so WebSocket sessions are released */
    session_manager_cleanup();

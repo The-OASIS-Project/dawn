@@ -37,6 +37,7 @@
 #include "audio/audio_decoder.h"
 #include "audio/music_db.h"
 #include "audio/music_nav.h"
+#include "audio/music_queue.h"
 #include "audio/resampler.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
@@ -103,47 +104,6 @@ extern const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT];
  * ============================================================================= */
 
 /**
- * @brief Repeat mode for music playback
- */
-typedef enum {
-   MUSIC_REPEAT_NONE = 0,
-   MUSIC_REPEAT_ALL = 1,
-   MUSIC_REPEAT_ONE = 2,
-} music_repeat_mode_t;
-
-/**
- * @brief Queue entry for a music track
- */
-typedef struct {
-   char path[WEBUI_MUSIC_PATH_MAX];
-   char title[WEBUI_MUSIC_STRING_MAX];
-   char artist[WEBUI_MUSIC_STRING_MAX];
-   char album[WEBUI_MUSIC_STRING_MAX];
-   uint32_t duration_sec;
-} music_queue_entry_t;
-
-/**
- * @brief Shared per-user music queue
- *
- * Contains the queue entries and playback modes (shuffle/repeat) that
- * are shared across all browser tabs for the same authenticated user.
- * Protected by queue_mutex. For unauthenticated/satellite sessions,
- * each connection gets its own instance (not shared).
- */
-typedef struct user_music_queue user_music_queue_t;
-struct user_music_queue {
-   int user_id;
-   pthread_mutex_t queue_mutex;
-   int ref_count;
-   uint32_t generation;    /**< Monotonic counter, incremented on every queue mutation */
-   uint32_t replace_epoch; /**< Bumped when the queue is replaced or cleared (play history) */
-   music_queue_entry_t queue[WEBUI_MUSIC_MAX_QUEUE];
-   int queue_length;
-   bool shuffle;
-   music_repeat_mode_t repeat_mode;
-};
-
-/**
  * @brief Per-connection music streaming state
  *
  * Each WebSocket connection has its own playback state (position, decoder,
@@ -187,7 +147,7 @@ typedef struct {
     *  resolved or by webui_music_clear_track().  A stop that interrupts the
     *  open leaves it to whoever stopped the thread: a new request overwrites
     *  it, clear_track drops it. */
-   char pending_path[WEBUI_MUSIC_PATH_MAX];
+   char pending_path[MUSIC_PATH_MAX];
    bool pending_auto;      /**< Report the outcome as a natural advance */
    uint32_t pending_seq;   /**< Ticket of the request the slot belongs to */
    uint32_t open_seq;      /**< Last ticket issued (state_mutex) */
@@ -207,7 +167,7 @@ typedef struct {
     *  when a track starts, joined before the stream thread exits).  Used when
     *  that path is opened next; closed otherwise. */
    audio_decoder_t *prefetched;
-   char prefetch_path[WEBUI_MUSIC_PATH_MAX]; /**< What's prefetched or prefetching */
+   char prefetch_path[MUSIC_PATH_MAX]; /**< What's prefetched or prefetching */
    /** What this session played: previous under shuffle walks back through
     *  it.  A shuffle pick planned for next is its forward entry, so
     *  auto-advance and next play what was prefetched.  Written under
@@ -574,14 +534,6 @@ char *webui_volume_execute_tool(ws_connection_t *conn,
  * All honor the queue_mutex -> state_mutex lock order.
  * ============================================================================= */
 
-/** Per-item outcome from webui_music_queue_apply_paths(). */
-typedef enum {
-   QUEUE_APPLY_ADDED = 0, /**< Resolved and appended */
-   QUEUE_APPLY_DUPLICATE, /**< Already present in queue (append mode) */
-   QUEUE_APPLY_NOT_FOUND, /**< Invalid path or not in the music DB */
-   QUEUE_APPLY_FULL,      /**< Queue at WEBUI_MUSIC_MAX_QUEUE */
-} queue_apply_outcome_t;
-
 /**
  * @brief Append (or replace) queue tracks by path
  *
@@ -601,7 +553,7 @@ int webui_music_queue_apply_paths(session_music_state_t *state,
                                   const char *const *paths,
                                   int n,
                                   bool replace,
-                                  queue_apply_outcome_t *outcomes);
+                                  music_queue_outcome_t *outcomes);
 
 /**
  * @brief Remove the queue entry at a 0-based index

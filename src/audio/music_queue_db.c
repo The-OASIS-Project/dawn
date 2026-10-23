@@ -21,14 +21,14 @@
  * Music Queue DB Persistence - SQLite save/load for per-user music queues
  */
 
-#include "webui/webui_music_queue_db.h"
+#include "audio/music_queue_db.h"
 
 #include <sqlite3.h>
 #include <string.h>
 
+#include "audio/music_queue.h"
 #include "core/path_utils.h"
 #include "logging.h"
-#include "webui/webui_music_internal.h"
 
 static sqlite3 *s_db = NULL;
 
@@ -251,7 +251,7 @@ int music_queue_db_load(int user_id, user_music_queue_t *uq) {
    }
    sqlite3_bind_int(sel_stmt, 1, user_id);
 
-   while (sqlite3_step(sel_stmt) == SQLITE_ROW && uq->queue_length < WEBUI_MUSIC_MAX_QUEUE) {
+   while (sqlite3_step(sel_stmt) == SQLITE_ROW && uq->queue_length < MUSIC_QUEUE_MAX) {
       music_queue_entry_t *entry = &uq->queue[uq->queue_length];
 
       const char *path = (const char *)sqlite3_column_text(sel_stmt, 0);
