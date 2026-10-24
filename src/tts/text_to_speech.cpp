@@ -505,9 +505,15 @@ void *tts_thread_function(void *arg) {
                       tts_playback_state = TTS_PLAYBACK_IDLE;
                       audioBuffer.clear();
                       OLOG_WARNING("Emptying TTS queue.");
+                      /* Other threads push while this one empties it (the main
+                       * loop says "Hello." right after asking for the discard):
+                       * the queue is only ever touched under its lock.  Order:
+                       * tts_mutex, then tts_queue_mutex. */
+                      pthread_mutex_lock(&tts_queue_mutex);
                       while (!tts_queue.empty()) {
                          tts_queue.pop();
                       }
+                      pthread_mutex_unlock(&tts_queue_mutex);
 
 #ifdef ENABLE_AEC
                       // Increment sequence counter to signal any in-flight playback
