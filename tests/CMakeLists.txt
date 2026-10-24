@@ -1614,6 +1614,14 @@ dawn_add_unit_test(test_music_nav
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_music_queue
+   SOURCES test_music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/core/path_utils.c
+   LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_text_filter
    SOURCES test_text_filter.c
            ${SRC_ROOT}/src/core/text_filter.c

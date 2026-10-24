@@ -21,14 +21,14 @@
  * Music Queue DB Persistence - Save/load per-user music queues to SQLite
  */
 
-#ifndef WEBUI_MUSIC_QUEUE_DB_H
-#define WEBUI_MUSIC_QUEUE_DB_H
+#ifndef MUSIC_QUEUE_DB_H
+#define MUSIC_QUEUE_DB_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Forward declaration — full type in webui_music_internal.h */
+/* Full type in audio/music_queue.h */
 struct user_music_queue;
 
 /**
@@ -98,4 +98,4 @@ int music_queue_db_delete_user(int user_id);
 }
 #endif
 
-#endif /* WEBUI_MUSIC_QUEUE_DB_H */
+#endif /* MUSIC_QUEUE_DB_H */

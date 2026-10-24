@@ -47,7 +47,6 @@
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_internal.h"
-#include "webui/webui_music_queue_db.h"
 #include "webui/webui_music_server.h"
 #include "webui/webui_server.h"
 
@@ -82,8 +81,8 @@ const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT] = {
 /** Position update interval in milliseconds */
 #define POSITION_UPDATE_INTERVAL_MS 1000
 
-/* Types (music_queue_entry_t, session_music_state_t, user_music_queue_t)
- * are in webui_music_internal.h */
+/* session_music_state_t is in webui_music_internal.h; the queue types are in
+ * audio/music_queue.h */
 
 /**
  * @brief Pick a random queue index different from the current one.
@@ -113,18 +112,6 @@ static webui_music_config_t s_config = {
 };
 static atomic_int s_active_streams = 0;
 
-/* =============================================================================
- * Shared User Queue Registry
- *
- * Authenticated users share a single queue across all their browser tabs.
- * Unauthenticated/satellite sessions get a per-connection queue (not shared).
- * ============================================================================= */
-
-#define MAX_USER_QUEUES 32
-static user_music_queue_t *s_user_queues[MAX_USER_QUEUES];
-static int s_user_queue_count = 0;
-static pthread_mutex_t s_user_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 /* Serializes the music-server thread's access to conn->music_state (report_buffer,
  * write_pending, set_stream_wsi, clear_stream_wsi) against webui_music_session_cleanup(), which
  * frees the state on the main WS thread. Without it, a dedicated-socket callback can dereference
@@ -132,119 +119,6 @@ static pthread_mutex_t s_user_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
  * ordinary tab close; hot on the ~32ms buffer-report path). Lock order: this is acquired BEFORE
  * state->write_mutex, never the reverse. */
 static pthread_mutex_t s_music_teardown_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/**
- * @brief Find or create a shared queue for an authenticated user
- *
- * @param user_id Must be > 0 (authenticated). Returns NULL for <= 0.
- * @return Shared queue with ref_count incremented, or NULL on failure.
- */
-static user_music_queue_t *find_or_create_user_queue(int user_id) {
-   if (user_id <= 0) {
-      return NULL;
-   }
-
-   pthread_mutex_lock(&s_user_queues_mutex);
-
-   /* Look for existing queue */
-   for (int i = 0; i < s_user_queue_count; i++) {
-      if (s_user_queues[i] && s_user_queues[i]->user_id == user_id) {
-         s_user_queues[i]->ref_count++;
-         pthread_mutex_unlock(&s_user_queues_mutex);
-         return s_user_queues[i];
-      }
-   }
-
-   /* Not found — try to create new, evicting zero-refcount entries if full */
-   if (s_user_queue_count >= MAX_USER_QUEUES) {
-      /* Evict first zero-refcount entry to make room */
-      bool evicted = false;
-      for (int i = 0; i < s_user_queue_count; i++) {
-         if (s_user_queues[i] && s_user_queues[i]->ref_count == 0) {
-            OLOG_INFO("WebUI music: Evicting idle queue for user %d", s_user_queues[i]->user_id);
-            pthread_mutex_destroy(&s_user_queues[i]->queue_mutex);
-            free(s_user_queues[i]);
-            /* Compact array */
-            for (int j = i; j < s_user_queue_count - 1; j++) {
-               s_user_queues[j] = s_user_queues[j + 1];
-            }
-            s_user_queues[--s_user_queue_count] = NULL;
-            evicted = true;
-            break;
-         }
-      }
-      if (!evicted) {
-         OLOG_ERROR("WebUI music: User queue registry full (%d), all in use", MAX_USER_QUEUES);
-         pthread_mutex_unlock(&s_user_queues_mutex);
-         return NULL;
-      }
-   }
-
-   user_music_queue_t *uq = calloc(1, sizeof(user_music_queue_t));
-   if (!uq) {
-      pthread_mutex_unlock(&s_user_queues_mutex);
-      return NULL;
-   }
-
-   uq->user_id = user_id;
-   pthread_mutex_init(&uq->queue_mutex, NULL);
-   uq->ref_count = 1;
-   uq->generation = 0;
-
-   /* Restore from DB */
-   music_queue_db_load(user_id, uq);
-
-   s_user_queues[s_user_queue_count++] = uq;
-   pthread_mutex_unlock(&s_user_queues_mutex);
-
-   OLOG_INFO("WebUI music: Created shared queue for user %d (%d tracks restored)", user_id,
-             uq->queue_length);
-   return uq;
-}
-
-/**
- * @brief Release a reference to a shared user queue
- */
-static void release_user_queue(user_music_queue_t *uq) {
-   if (!uq) {
-      return;
-   }
-   pthread_mutex_lock(&s_user_queues_mutex);
-   uq->ref_count--;
-   pthread_mutex_unlock(&s_user_queues_mutex);
-   /* Queue stays alive in registry for next connection */
-}
-
-/**
- * @brief Create a per-connection (non-shared) queue for unauthenticated sessions
- */
-static user_music_queue_t *create_private_queue(void) {
-   user_music_queue_t *uq = calloc(1, sizeof(user_music_queue_t));
-   if (!uq) {
-      return NULL;
-   }
-   uq->user_id = 0;
-   pthread_mutex_init(&uq->queue_mutex, NULL);
-   uq->ref_count = 1;
-   uq->generation = 0;
-   return uq;
-}
-
-/**
- * @brief Free all shared user queues (called from webui_music_cleanup)
- */
-static void cleanup_all_user_queues(void) {
-   pthread_mutex_lock(&s_user_queues_mutex);
-   for (int i = 0; i < s_user_queue_count; i++) {
-      if (s_user_queues[i]) {
-         pthread_mutex_destroy(&s_user_queues[i]->queue_mutex);
-         free(s_user_queues[i]);
-         s_user_queues[i] = NULL;
-      }
-   }
-   s_user_queue_count = 0;
-   pthread_mutex_unlock(&s_user_queues_mutex);
-}
 
 /* =============================================================================
  * Helper Functions
@@ -1030,16 +904,6 @@ int webui_music_init(void) {
       OLOG_WARNING("WebUI music: Music database not initialized - library features unavailable");
    }
 
-   /* Initialize queue persistence DB */
-   {
-      char queue_db_path[512];
-      snprintf(queue_db_path, sizeof(queue_db_path), "%s/music.db",
-               g_config.paths.data_dir_resolved);
-      if (music_queue_db_init(queue_db_path) != 0) {
-         OLOG_WARNING("WebUI music: Queue DB init failed — queue persistence unavailable");
-      }
-   }
-
    /* Initialize Plex client if configured (for download/scrobble support) */
    if (plex_client_is_configured()) {
       if (plex_client_init() != 0) {
@@ -1070,12 +934,6 @@ void webui_music_cleanup(void) {
       usleep(100000); /* 100ms */
       pthread_mutex_lock(&s_music_mutex);
    }
-
-   /* Clean up shared user queues */
-   cleanup_all_user_queues();
-
-   /* Clean up queue persistence DB */
-   music_queue_db_cleanup();
 
    /* Clean up Plex client */
    plex_client_cleanup();
@@ -1120,19 +978,15 @@ int webui_music_session_init(ws_connection_t *conn) {
    state->write_ring_count = 0;
    state->write_drop_count = 0;
 
-   /* Get or create shared queue */
-   user_music_queue_t *uq = find_or_create_user_queue(conn->auth_user_id);
+   /* The user's shared queue (a private one when not signed in) */
+   user_music_queue_t *uq = music_queue_acquire(conn->auth_user_id);
    if (!uq) {
-      /* Unauthenticated or satellite — create private queue */
-      uq = create_private_queue();
-      if (!uq) {
-         OLOG_ERROR("WebUI music: Failed to allocate private queue");
-         pthread_mutex_destroy(&state->state_mutex);
-         pthread_mutex_destroy(&state->write_mutex);
-         pthread_mutex_destroy(&state->control_mutex);
-         free(state);
-         return 1;
-      }
+      OLOG_ERROR("WebUI music: Failed to allocate queue");
+      pthread_mutex_destroy(&state->state_mutex);
+      pthread_mutex_destroy(&state->write_mutex);
+      pthread_mutex_destroy(&state->control_mutex);
+      free(state);
+      return 1;
    }
    state->shared_queue = uq;
    state->queue_index = 0;
@@ -1143,7 +997,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    state->resample_accum = malloc(state->resample_accum_size * sizeof(int16_t));
    if (!state->resample_accum) {
       OLOG_ERROR("WebUI music: Failed to allocate resample buffer");
-      release_user_queue(state->shared_queue);
+      music_queue_release(state->shared_queue);
       pthread_mutex_destroy(&state->state_mutex);
       pthread_mutex_destroy(&state->write_mutex);
       pthread_mutex_destroy(&state->control_mutex);
@@ -1155,7 +1009,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    /* Create encoder */
    if (webui_music_configure_encoder(state, state->quality) != 0) {
       free(state->resample_accum);
-      release_user_queue(state->shared_queue);
+      music_queue_release(state->shared_queue);
       pthread_mutex_destroy(&state->state_mutex);
       pthread_mutex_destroy(&state->write_mutex);
       pthread_mutex_destroy(&state->control_mutex);
@@ -1250,17 +1104,8 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
 
    pthread_mutex_unlock(&state->state_mutex);
 
-   /* Release shared queue reference */
-   if (state->shared_queue) {
-      if (state->shared_queue->user_id <= 0) {
-         /* Private (non-shared) queue — free it */
-         pthread_mutex_destroy(&state->shared_queue->queue_mutex);
-         free(state->shared_queue);
-      } else {
-         release_user_queue(state->shared_queue);
-      }
-      state->shared_queue = NULL;
-   }
+   music_queue_release(state->shared_queue);
+   state->shared_queue = NULL;
 
    pthread_cond_destroy(&state->decoder_idle_cond);
    pthread_cond_destroy(&state->open_cond);

@@ -38,6 +38,7 @@
 #include <stdint.h>
 
 /* Include webui_internal.h for ws_connection_t definition */
+#include "audio/music_queue.h"
 #include "webui/webui_internal.h"
 
 #ifdef __cplusplus
@@ -54,18 +55,6 @@ struct json_object;
 /** Audio buffer size for streaming (20ms at 48kHz stereo) */
 #define WEBUI_MUSIC_FRAME_SAMPLES 960
 #define WEBUI_MUSIC_FRAME_MS 20
-
-/** Maximum playlist size per session */
-#define WEBUI_MUSIC_MAX_QUEUE 250
-
-/**
- * Maximum path length for music files (matches MUSIC_DB_PATH_MAX for consistency).
- * Queue memory: 250 entries × ~1.4KB each ≈ 342KB per session — negligible vs model memory.
- */
-#define WEBUI_MUSIC_PATH_MAX 1024
-
-/** Maximum string length for title/artist/album (truncation acceptable for display) */
-#define WEBUI_MUSIC_STRING_MAX 128
 
 /* =============================================================================
  * Quality Tiers
@@ -100,10 +89,10 @@ typedef enum {
  * @brief Music track metadata
  */
 typedef struct {
-   char path[WEBUI_MUSIC_PATH_MAX];
-   char title[WEBUI_MUSIC_STRING_MAX];
-   char artist[WEBUI_MUSIC_STRING_MAX];
-   char album[WEBUI_MUSIC_STRING_MAX];
+   char path[MUSIC_PATH_MAX];
+   char title[MUSIC_STRING_MAX];
+   char artist[MUSIC_STRING_MAX];
+   char album[MUSIC_STRING_MAX];
    uint32_t duration_sec;
    uint32_t sample_rate;
    uint8_t channels;
