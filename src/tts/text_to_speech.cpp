@@ -22,6 +22,7 @@
 
 #include "tts/text_to_speech.h"
 
+#include <json-c/json.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,8 @@
 #include "audio/audio_capture_thread.h"
 #include "audio/audio_converter.h"
 #include "config/dawn_config.h"
+#include "core/dawn_events.h"
+#include "core/text_filter.h"
 #include "dawn.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -370,8 +373,14 @@ static int openPlaybackDevice(const char *pcm_device) {
  * @brief Thread-safe queue for text-to-speech requests.
  */
 /* An empty std::queue's constructor does not allocate */
+/* A sentence to speak, and the expression it opens with ("" for none),
+ * published when its playback starts. */
+struct tts_item {
+   std::string text;
+   std::string expression;
+};
 // NOLINTNEXTLINE(cert-err58-cpp)
-std::queue<std::string> tts_queue;
+std::queue<tts_item> tts_queue;
 
 /**
  * @brief Mutex for synchronizing access to the text-to-speech queue.
@@ -437,9 +446,15 @@ void *tts_thread_function(void *arg) {
       }
 
       // Retrieve text from the queue
-      std::string inputText = tts_queue.front();
+      std::string inputText = std::move(tts_queue.front().text);
+      std::string expression = std::move(tts_queue.front().expression);
       tts_queue.pop();
       pthread_mutex_unlock(&tts_queue_mutex);
+
+      /* What it says goes on dawn/events only when it reaches a speaker (server
+       * mode synthesizes alarms with no playback device). */
+      const bool announce = tts_handle.playback_handle != NULL;
+      bool started = false;
 
       // Process text-to-speech
       SynthesisResult result;
@@ -453,6 +468,20 @@ void *tts_thread_function(void *arg) {
       textToAudio(
           tts_handle.config, tts_handle.voice, inputText, audioBuffer, result, tts_stop_processing,
           [&]() {
+             /* Piper calls this once per phrase it synthesizes; the item started
+              * on the first. */
+             if (announce && !started) {
+                started = true;
+                if (!expression.empty()) {
+                   struct json_object *fields = json_object_new_object();
+                   if (fields) {
+                      json_object_object_add(fields, "name",
+                                             json_object_new_string(expression.c_str()));
+                   }
+                   dawn_events_publish("expression", fields);
+                }
+                dawn_events_publish("speaking_start", NULL);
+             }
              pthread_mutex_lock(&tts_mutex);
              tts_playback_state = TTS_PLAYBACK_PLAY;
 #ifdef ENABLE_AEC
@@ -703,6 +732,17 @@ void *tts_thread_function(void *arg) {
              pthread_mutex_unlock(&tts_mutex);
           });
 
+      /* One end per item, however its playback ended: drained, discarded by a
+       * wake word, or stopped. */
+      if (started) {
+         struct json_object *fields = json_object_new_object();
+         if (fields) {
+            json_object_object_add(fields, "interrupted",
+                                   json_object_new_boolean(tts_stop_processing.load()));
+         }
+         dawn_events_publish("speaking_end", fields);
+      }
+
       // Record TTS timing metrics after synthesis completes
       if (result.inferSeconds > 0 && !tts_stop_processing.load()) {
          double tts_time_ms = result.inferSeconds * 1000.0;
@@ -850,18 +890,31 @@ void initialize_text_to_speech(char *pcm_device) {
  * @param text The text to be converted to speech.
  */
 void text_to_speech(const char *text) {
+   text_to_speech_expr(text, NULL);
+}
+
+void text_to_speech_expr(const char *text, const char *expression) {
    if (!tts_handle.is_initialized) {
       OLOG_WARNING("TTS not yet initialized — dropping speech request");
       return;
    }
 
    assert(text != nullptr && "Received a null pointer");
-   std::string inputText = preprocess_text_for_tts(std::string(text));
+   /* Whatever reaches the speaker (a tool's text too) never speaks a tag; one
+    * the caller didn't take out opens this text on the robot. */
+   std::string raw(text);
+   char found[EMOTE_NAME_MAX];
+   text_filter_emote_strip(&raw[0], found, sizeof(found));
+   raw.resize(strlen(raw.c_str()));
+   if (expression == nullptr && found[0] != '\0') {
+      expression = found;
+   }
+   std::string inputText = preprocess_text_for_tts(raw);
    OLOG_DEBUG("TTS preprocessed: \"%.200s\"", inputText.c_str());
 
    // Add text to the processing queue
    pthread_mutex_lock(&tts_queue_mutex);
-   tts_queue.push(inputText);
+   tts_queue.push({ std::move(inputText), expression ? expression : "" });
    pthread_cond_signal(&tts_queue_cond);
    pthread_mutex_unlock(&tts_queue_mutex);
 }

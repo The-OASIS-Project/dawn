@@ -1620,8 +1620,8 @@ dawn_add_unit_test(test_text_filter
    LIBS    unity
    LABEL   ci)
 
-# HUD presence and re-subscribing on every MQTT connect; libmosquitto and the
-# HUD side effects are stubs in the test.
+# Peer presence (hud, reachy) and re-subscribing on every MQTT connect;
+# libmosquitto and the HUD side effects are stubs in the test.
 dawn_add_unit_test(test_component_status
    SOURCES test_component_status.c
            ${SRC_ROOT}/src/core/component_status.c

@@ -1,0 +1,100 @@
+# reachy-bridge configuration.  Angles in degrees, distances in mm, times in
+# seconds.  Postures and the motion amounts are first guesses: tune them on the
+# robot.  MQTT credentials are NOT here: set REACHY_BRIDGE_MQTT_USER and
+# REACHY_BRIDGE_MQTT_PASSWORD in ~/.config/reachy-bridge/env (mode 600).
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+tls = false
+# ca_file = "/etc/mosquitto/certs/ca.crt"   # with tls = true (port 8883)
+
+[daemon]
+port = 8000
+
+[clips]
+dataset = "pollen-robotics/reachy-mini-emotions-library"
+
+[timing]
+mixer_hz = 50
+posture_smoothing = 0.12     # fraction of the way to the new posture per tick
+listen_hold_s = 6.0          # stay attentive this long after the wake word
+speaking_hold_s = 0.6        # bridges the gap while the next sentence is synthesized
+expression_min_gap_s = 1.5
+clip_max_s = 2.5
+clip_fade_in_s = 0.25
+clip_fade_out_s = 0.4
+offline_grace_s = 5.0        # robot gone this long before DAWN is told
+
+[neutral]
+antennas_deg = [-10.0, 10.0] # [right, left]; the SDK's resting position
+
+# Offsets from neutral for each thing DAWN can be doing.
+[posture.idle]
+xyz_mm = [0, 0, 0]
+rpy_deg = [0, 0, 0]
+antennas_deg = [0, 0]
+
+[posture.listening]
+xyz_mm = [0, 0, 6]
+rpy_deg = [0, -6, 0]
+antennas_deg = [10, -10]     # upright
+
+[posture.thinking]
+xyz_mm = [0, 0, 2]
+rpy_deg = [6, -3, 0]
+antennas_deg = [-5, 25]      # one up, one out
+
+[posture.speaking]
+xyz_mm = [0, 0, 4]
+rpy_deg = [0, -2, 0]
+antennas_deg = [5, -5]
+
+[idle]
+breath_period_s = 5.0
+breath_z_mm = 1.5
+breath_pitch_deg = 1.0
+antenna_period_s = 11.0
+antenna_drift_deg = 4.0
+listening_damp = 0.15        # stillness reads as attention
+speaking_damp = 0.4
+doze_after_s = 1800
+doze_damp = 0.2
+
+[gaze]
+poll_hz = 10
+max_yaw_deg = 45
+window_max_s = 4.0          # stop listening for direction this long after speech began
+hold_s = 8.0
+return_s = 2.0
+
+[speech]
+monitor_source = "@DEFAULT_MONITOR@"   # or "<DAWN's playback sink>.monitor"
+gain = 6.0
+attack = 0.5
+release = 0.15
+wobble_hz = 3.0
+z_mm = 3.0
+roll_deg = 3.0
+pitch_deg = 4.0
+yaw_deg = 2.0
+
+[limits]                     # hard clamps on everything the mixer sends
+xyz_mm = [10, 10, 15]
+rpy_deg = [25, 25, 60]
+antenna_deg = 60
+
+# DAWN's expression vocabulary -> a move from the clips dataset, scaled down
+# so a big gesture fits under speech.  Names must match EMOTE_NAMES in
+# include/core/text_filter.h; others are ignored.
+[expressions]
+happy = { move = "cheerful1", scale = 0.5 }
+excited = { move = "enthusiastic2", scale = 0.5 }
+curious = { move = "curious1", scale = 0.6 }
+surprised = { move = "amazed1", scale = 0.5 }
+confused = { move = "confused1", scale = 0.6 }
+concerned = { move = "anxiety1", scale = 0.4 }
+sad = { move = "downcast1", scale = 0.5 }
+apologetic = { move = "displeased1", scale = 0.3 }
+calm = { move = "calming1", scale = 0.5 }
+tired = { move = "exhausted1", scale = 0.4 }

@@ -21,7 +21,7 @@
  * Component Status (Keepalive) System
  *
  * Provides bidirectional presence detection between OASIS components.
- * Dawn publishes to dawn/status, subscribes to hud/status.
+ * Dawn publishes to dawn/status, subscribes to hud/status and reachy/status.
  * Uses MQTT LWT for immediate disconnect detection and periodic
  * heartbeat for network resilience.
  */
@@ -42,6 +42,7 @@ extern "C" {
 
 #define STATUS_TOPIC_DAWN "dawn/status"
 #define STATUS_TOPIC_HUD "hud/status"
+#define STATUS_TOPIC_REACHY "reachy/status"
 
 #define STATUS_HEARTBEAT_INTERVAL_SEC 30
 #define STATUS_TIMEOUT_SEC 90 /* 3x heartbeat interval */
@@ -96,7 +97,7 @@ void component_status_shutdown(void);
 /**
  * @brief Handle incoming status message
  *
- * Call from on_message when topic matches STATUS_TOPIC_HUD.
+ * Call from on_message for STATUS_TOPIC_HUD and STATUS_TOPIC_REACHY.
  *
  * @param topic MQTT topic
  * @param payload Message payload (JSON)
@@ -123,6 +124,15 @@ bool component_status_is_hud_online(void);
  * @return Seconds since last status message, or -1 if never received
  */
 int component_status_get_hud_age(void);
+
+/**
+ * @brief Check if an expressive body (Reachy Mini bridge) is currently online
+ *
+ * Same rule as the HUD: an online status received and not timed out.
+ *
+ * @return true if the bridge is online, false otherwise
+ */
+bool component_status_is_reachy_online(void);
 
 #ifdef __cplusplus
 }

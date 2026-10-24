@@ -70,6 +70,7 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
    /* The tags DAWN reads out of a reply come out next, before the reply is
     * defused: what stripping removes can't join a marker back together after
     * it was checked. */
+   text_filter_emote_strip(clean, NULL, 0); /* [emote:…] first: removing one joins its neighbours */
    text_filter_command_strip(clean, false); /* complete response: leave an orphan <command> */
    text_filter_cited_strip(clean);          /* <cited>…</cited> (always removed) */
 

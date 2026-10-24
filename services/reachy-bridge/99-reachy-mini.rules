@@ -1,0 +1,5 @@
+# Reachy Mini Lite: let members of plugdev reach the microphone array's USB
+# control interface (direction of arrival) without root.  The motor serial
+# port (1a86:55d3, a CH343) is /dev/ttyACM*, already group dialout.
+SUBSYSTEM=="usb", ATTR{idVendor}=="38fb", ATTR{idProduct}=="1001", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="2886", ATTR{idProduct}=="001a", MODE="0660", GROUP="plugdev"

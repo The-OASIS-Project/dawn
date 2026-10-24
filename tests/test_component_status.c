@@ -16,8 +16,8 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * component_status: HUD presence and re-subscribing on every MQTT connect.  libmosquitto and the
- * HUD side effects are stubs here.
+ * component_status: peer presence (hud, reachy) and re-subscribing on every
+ * MQTT connect.  libmosquitto and the HUD side effects are stubs here.
  */
 
 #include <stdbool.h>
@@ -31,6 +31,7 @@
 /* ── stubs ──────────────────────────────────────────────────────────────── */
 
 static int s_subscribed_hud;
+static int s_subscribed_reachy;
 static int s_published_online;
 static int s_tools_refreshed;
 static int s_discovery_requested;
@@ -41,6 +42,8 @@ int mosquitto_subscribe(struct mosquitto *mosq, int *mid, const char *sub, int q
    (void)qos;
    if (strcmp(sub, STATUS_TOPIC_HUD) == 0) {
       s_subscribed_hud++;
+   } else if (strcmp(sub, STATUS_TOPIC_REACHY) == 0) {
+      s_subscribed_reachy++;
    }
    return MOSQ_ERR_SUCCESS;
 }
@@ -115,6 +118,7 @@ static void deliver(const char *topic, const char *status) {
 
 void setUp(void) {
    s_subscribed_hud = 0;
+   s_subscribed_reachy = 0;
    s_published_online = 0;
    s_tools_refreshed = 0;
    s_discovery_requested = 0;
@@ -130,12 +134,24 @@ static void test_every_connect_subscribes_and_says_online(void) {
     * client's session is clean, so the broker forgot the subscriptions). */
    TEST_ASSERT_EQUAL_INT(0, component_status_init(s_mosq));
    TEST_ASSERT_EQUAL_INT(1, s_subscribed_hud);
+   TEST_ASSERT_EQUAL_INT(1, s_subscribed_reachy);
    TEST_ASSERT_EQUAL_INT(1, s_published_online);
+}
+
+static void test_reachy_presence_has_no_hud_side_effects(void) {
+   TEST_ASSERT_FALSE(component_status_is_reachy_online());
+   deliver(STATUS_TOPIC_REACHY, "online");
+   TEST_ASSERT_TRUE(component_status_is_reachy_online());
+   deliver(STATUS_TOPIC_REACHY, "offline");
+   TEST_ASSERT_FALSE(component_status_is_reachy_online());
+   TEST_ASSERT_EQUAL_INT(0, s_tools_refreshed);
+   TEST_ASSERT_EQUAL_INT(0, s_discovery_requested);
 }
 
 static void test_hud_change_refreshes_tools_once(void) {
    deliver(STATUS_TOPIC_HUD, "online");
    TEST_ASSERT_TRUE(component_status_is_hud_online());
+   TEST_ASSERT_FALSE(component_status_is_reachy_online());
    TEST_ASSERT_EQUAL_INT(1, s_tools_refreshed);
    TEST_ASSERT_EQUAL_INT(1, s_discovery_requested);
 
@@ -150,10 +166,10 @@ static void test_hud_change_refreshes_tools_once(void) {
 
 static void test_bad_messages_ignored(void) {
    component_status_handle_message("other/status", "{\"status\":\"online\"}", 19);
-   component_status_handle_message(STATUS_TOPIC_HUD, "not json", 8);
-   component_status_handle_message(STATUS_TOPIC_HUD,
+   component_status_handle_message(STATUS_TOPIC_REACHY, "not json", 8);
+   component_status_handle_message(STATUS_TOPIC_REACHY,
                                    "{\"msg_type\":\"event\",\"status\":\"online\"}", 38);
-   TEST_ASSERT_FALSE(component_status_is_hud_online());
+   TEST_ASSERT_FALSE(component_status_is_reachy_online());
 }
 
 int main(void) {
@@ -161,6 +177,7 @@ int main(void) {
    /* The first connect starts the heartbeat thread; the tests are reconnects. */
    component_status_init(s_mosq);
    RUN_TEST(test_every_connect_subscribes_and_says_online);
+   RUN_TEST(test_reachy_presence_has_no_hud_side_effects);
    RUN_TEST(test_hud_change_refreshes_tools_once);
    RUN_TEST(test_bad_messages_ignored);
    component_status_shutdown();

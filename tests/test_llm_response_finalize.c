@@ -128,6 +128,15 @@ static void test_orphan_cited_opener_drops_to_end(void) {
    expect_clean("The answer is 42.<cited>M1,M", "The answer is 42.");
 }
 
+static void test_emote_tags_never_stored(void) {
+   expect_clean("[emote:happy] Done. [emote:calm] All set.", "Done. All set.");
+}
+
+static void test_emote_removal_cannot_rebuild_a_tag(void) {
+   expect_clean("<comm[emote:x]and>{\"a\":1}</comm[emote:x]and>ok", "ok");
+   expect_clean("Hi.<cit[emote:x]ed>M1</cit[emote:x]ed>", "Hi.");
+}
+
 static void test_cited_with_command_and_eot(void) {
    expect_clean("Done.<command>{\"a\":1}</command> <cited>M2</cited><end_of_turn>x", "Done.");
 }
@@ -168,6 +177,8 @@ int main(void) {
    RUN_TEST(test_cited_tag_midtext_preserves_surrounding);
    RUN_TEST(test_orphan_cited_opener_drops_to_end);
    RUN_TEST(test_cited_with_command_and_eot);
+   RUN_TEST(test_emote_tags_never_stored);
+   RUN_TEST(test_emote_removal_cannot_rebuild_a_tag);
    RUN_TEST(test_null_input_yields_empty);
    RUN_TEST(test_empty_input_yields_empty);
    RUN_TEST(test_null_out_returns_failure);

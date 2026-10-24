@@ -295,7 +295,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
       OLOG_INFO("Subscribed to \"%s\" MQTT.", APPLICATION_NAME);
    }
 
-   /* Component status, every connect (subscribes to hud/status, publishes dawn/status) */
+   /* Component status, every connect (subscribes to the peers' status, publishes dawn/status) */
    if (component_status_init(mosq) != 0) {
       OLOG_WARNING("Component status initialization failed");
    }
@@ -597,8 +597,8 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
       OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
    }
 
-   /* Check for component status messages (hud/status) */
-   if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0) {
+   /* Check for component status messages (hud/status, reachy/status) */
+   if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0 || strcmp(msg->topic, STATUS_TOPIC_REACHY) == 0) {
       component_status_handle_message(msg->topic, (const char *)msg->payload, msg->payloadlen);
       return;
    }

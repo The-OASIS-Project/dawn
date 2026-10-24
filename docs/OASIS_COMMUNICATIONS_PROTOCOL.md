@@ -1,4 +1,4 @@
-# OASIS Communications Protocol (OCP) v1.4
+# OASIS Communications Protocol (OCP) v1.5
 
 A standardized messaging protocol for inter-component communication within The OASIS Project.
 
@@ -265,7 +265,8 @@ Components must echo the exact `request_id` received - no modification.
 | `hud` | Commands and events to Mirage HUD | Dawn | Mirage |
 | `hud/status` | Mirage presence (online/offline) | Mirage | Dawn |
 | `hud/discovery/#` | HUD capability discovery | Mirage | Dawn |
-| `dawn/status` | Dawn presence (online/offline) | Dawn | Mirage |
+| `dawn/status` | Dawn presence (online/offline) | Dawn | Mirage, Reachy bridge |
+| `dawn/events` | What Dawn's voice interface is doing (see below) | Dawn | Reachy bridge |
 | `echo/cmd` | Commands to Echo modem daemon | Dawn | Echo |
 | `echo/events` | Unsolicited events from Echo (calls, SMS) | Echo | Dawn |
 | `echo/response` | Command responses from Echo | Echo | Dawn |
@@ -273,9 +274,39 @@ Components must echo the exact `request_id` received - no modification.
 | `echo/telemetry` | Modem metrics (signal, registration) | Echo | Dawn, Mirage |
 | `stat/telemetry` | System telemetry (battery, CPU, fan) | Stat | Mirage |
 | `stat/status` | Stat presence (online/offline) | Stat | Dawn, Mirage |
+| `reachy/status` | Reachy Mini bridge presence (online/offline) | Reachy bridge | Dawn |
 | `oasis/broadcast` | System-wide announcements | Any | All components |
 
 Responses are sent to the topic associated with the requesting component.
+
+### Voice Interface Events (`dawn/events`)
+
+Dawn publishes what its voice interface is doing, for components that give it
+a body or a face.  QoS 0, not retained: a subscriber that starts mid-session
+learns the state from the next event.  Every message is an event:
+
+```json
+{
+  "device": "dawn",
+  "msg_type": "event",
+  "event": "state_change",
+  "surface": "local",
+  "timestamp": 1729700000000,
+  "state": "PROCESS_COMMAND"
+}
+```
+
+| `event` | Fields | Meaning |
+|---------|--------|---------|
+| `state_change` | `state`: `SILENCE`, `WAKEWORD_LISTEN`, `COMMAND_RECORDING`, `PROCESS_COMMAND` | The voice state machine changed state (`PROCESS_COMMAND` while a reply is being generated) |
+| `wake_word` | `with_command`: bool | The wake word was heard (no `state_change` marks this) |
+| `speaking_start` | — | Speech started playing on the local speaker |
+| `speaking_end` | `interrupted`: bool | That speech finished, or was cut off |
+| `expression` | `name`: one of `happy`, `excited`, `curious`, `surprised`, `confused`, `concerned`, `sad`, `apologetic`, `calm`, `tired` | The sentence starting now carries this emotion |
+
+`surface` names the interface the event came from; only `local` (Dawn's own
+microphone and speaker) publishes today.  `state_change` is also published on
+`hud`, unchanged, for Mirage.
 
 ## Protocol Rules
 
@@ -788,6 +819,8 @@ These fields are reserved for future use:
 - [x] AI state publish: add `event` field, `msg_type: "event"`, `timestamp` (ms)
 - [x] Phone service: timestamps in milliseconds via `ocp_get_timestamp_ms()`
 - [x] MQTT-only tool publish: add `timestamp` (ms)
+- [x] Voice interface events on `dawn/events` (`msg_type: "event"`, `surface`)
+- [x] Subscribe to `reachy/status`; peer status topics re-subscribed on every connect
 
 ### Echo (Modem Daemon)
 - [x] Response format: `device`, `action`, `request_id`, `status`, nested `error`
@@ -806,6 +839,11 @@ These fields are reserved for future use:
 - [x] Publish on `stat/telemetry` topic
 - [x] Status messages on `stat/status`: `device`, `msg_type: "status"`, `status`, `timestamp`
 - [x] LWT with `msg_type: "status"`, `timestamp: 0`
+
+### Reachy Mini Bridge
+- [x] Status messages on `reachy/status`: `device: "reachy"`, `msg_type: "status"`, `status`, `timestamp` (ms)
+- [x] LWT with `msg_type: "status"`, `timestamp: 0`; heartbeat every 30 seconds
+- [x] Subscribe to `dawn/events` and `dawn/status`; act only on `device: "dawn"` events
 
 ### Future Components
 - [ ] Implement OCP handling from the start (request/response, events, status)
@@ -854,3 +892,4 @@ These fields are reserved for future use:
 | 1.2 | 2026-01-30 | Added Discovery Messages section for capability advertisement. Defined `msg_type` values: discovery, discovery_request. Standardized topic pattern `<component>/discovery/<capability>`. |
 | 1.3 | 2026-01-30 | Added Component Status (Keepalive) section. Defined MQTT LWT for immediate disconnect detection. Defined periodic heartbeat (30s publish, 90s timeout). Added `msg_type: status` with online/offline values. Standardized topic pattern `<component>/status`. |
 | 1.4 | 2026-04 | Added Event Message type with `event` field (distinct from `action` — indicative vs imperative). Promoted `msg_type` from future to standard field with required/recommended guidance per topic type. Added `telemetry` message type. Codified minimum required fields for Component Status messages. Added Echo and Stat topics to Topic Conventions. Added Echo and Stat to Implementation Checklist. Updated all examples to use millisecond timestamps. |
+| 1.5 | 2026-10 | Added `dawn/events` (voice interface events: state, wake word, speaking, expression) and `reachy/status` (Reachy Mini bridge presence). |

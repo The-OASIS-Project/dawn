@@ -27,6 +27,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* =============================================================================
  * Command Tag Constants
  *
@@ -265,5 +269,59 @@ void text_filter_cited_normalize(char *text);
  *           than a truncated tag, so it is not destroyed.
  */
 void text_filter_command_strip(char *text, bool truncate_orphan);
+
+/* =============================================================================
+ * Expression Tags
+ *
+ * `[emote:curious]` at the start of a sentence, written by the model on the
+ * local voice surface while an expressive body is present (the
+ * EXPRESSION_DIRECTIVE).  The tag is taken out of each spoken sentence (its
+ * name goes to TTS, which publishes it as the sentence starts playing) and out
+ * of the finished reply, so it is never spoken, shown or stored.
+ * ============================================================================= */
+
+#define EMOTE_TAG_OPEN "[emote:"
+#define EMOTE_TAG_OPEN_LEN 7
+#define EMOTE_NAME_MAX 24 /* Longest name accepted inside a tag, plus margin */
+#define EMOTE_TAG_SPAN 48 /* A "]" this far past the opener closes a malformed tag */
+
+/* The vocabulary: the prompt lists it and the strip accepts only these. */
+#define EMOTE_NAMES(X) \
+   X(happy)            \
+   X(excited)          \
+   X(curious)          \
+   X(surprised)        \
+   X(confused)         \
+   X(concerned)        \
+   X(sad)              \
+   X(apologetic)       \
+   X(calm)             \
+   X(tired)
+#define EMOTE_NAME_AS_TEXT(name) " " #name
+#define EMOTE_NAMES_TEXT EMOTE_NAMES(EMOTE_NAME_AS_TEXT) /* " happy excited ..." */
+
+/**
+ * @brief Strip every `[emote:<name>]` tag from complete text, in place.
+ *
+ * A tag is the opener (any case), a name of letters, `_` or `-` (optionally
+ * spaced, any case), and `]`; one space after it goes too.  What the model gets
+ * slightly wrong ("[emote: happy, curious]", an unknown name) is removed as
+ * well, with no name, so it is never spoken: anything the opener starts that a
+ * `]` closes on the same line within EMOTE_TAG_SPAN.  Otherwise it is text.
+ *
+ * Strip these BEFORE <command> and <cited>: removing one can join the text
+ * around it, and the later strips must see the result.
+ *
+ * @param text      NUL-terminated, mutable C string. NULL is tolerated (no-op).
+ * @param name_out  Receives the first vocabulary name found, lower-case, or ""
+ *                  (may be NULL when the name isn't wanted)
+ * @param name_size Size of @p name_out (at least EMOTE_NAME_MAX)
+ * @return true when a vocabulary name was found
+ */
+bool text_filter_emote_strip(char *text, char *name_out, size_t name_size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* TEXT_FILTER_H */

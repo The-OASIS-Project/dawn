@@ -168,6 +168,15 @@
    "one short question. Say a factorial in words (\"52 factorial\"), not "        \
    "\"52!\", so it's read correctly."
 
+// The local voice surface while an expressive body (a Reachy Mini) is present.
+// The tag is stripped before speech and storage (text_filter_emote_strip).
+#define EXPRESSION_DIRECTIVE                                                                    \
+   "You have a small robot body here that shows emotion as you speak. To show "                 \
+   "one, begin a sentence with " EMOTE_TAG_OPEN "NAME], where NAME is one of:" EMOTE_NAMES_TEXT \
+   ". The tag is never spoken or shown. Use it only where the "                                 \
+   "feeling is real and worth showing: most replies need one or none, and never "               \
+   "more than one per sentence."
+
 // Spoken-output directive for WebUI voice turns.  The whole prose reply is read
 // aloud, but the screen is available for silent visual aids (render_visual tool /
 // images), so this is softer than the satellite/local variant.
