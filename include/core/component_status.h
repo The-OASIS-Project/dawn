@@ -64,8 +64,9 @@ int component_status_set_lwt(struct mosquitto *mosq);
 /**
  * @brief Initialize status system after MQTT connect
  *
- * Call from on_connect callback. Publishes online status, subscribes to
- * peer status topics, and starts heartbeat timer.
+ * Call from on_connect callback, on every connect. Publishes online status
+ * and subscribes to peer status topics each time; starts the heartbeat timer
+ * on the first.
  *
  * @param mosq MQTT client instance
  * @return 0 on success, non-zero on failure

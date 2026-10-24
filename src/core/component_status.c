@@ -205,14 +205,10 @@ int component_status_init(struct mosquitto *mosq) {
 
    pthread_mutex_lock(&s_status_mutex);
 
-   if (s_initialized) {
-      pthread_mutex_unlock(&s_status_mutex);
-      return 0;
-   }
-
-   s_mosq = mosq;
-
-   /* Subscribe to HUD status */
+   /* Every connect, not just the first: the client's session is clean, so the
+    * broker forgets the subscription when the connection drops, and a dropped
+    * connection publishes our "offline" will, which stands until we say
+    * "online" again. */
    int rc = mosquitto_subscribe(mosq, NULL, STATUS_TOPIC_HUD, 1);
    if (rc != MOSQ_ERR_SUCCESS) {
       OLOG_ERROR("Failed to subscribe to %s: %s", STATUS_TOPIC_HUD, mosquitto_strerror(rc));
@@ -221,11 +217,17 @@ int component_status_init(struct mosquitto *mosq) {
    }
    OLOG_INFO("Subscribed to %s", STATUS_TOPIC_HUD);
 
-   /* Publish online status */
    if (publish_status(mosq, "online", true) != 0) {
       pthread_mutex_unlock(&s_status_mutex);
       return 1;
    }
+
+   if (s_initialized) {
+      pthread_mutex_unlock(&s_status_mutex);
+      return 0;
+   }
+
+   s_mosq = mosq;
 
    /* Start heartbeat thread */
    s_heartbeat_running = true;

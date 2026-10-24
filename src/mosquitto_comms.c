@@ -295,7 +295,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
       OLOG_INFO("Subscribed to \"%s\" MQTT.", APPLICATION_NAME);
    }
 
-   /* Initialize component status (subscribes to hud/status, publishes dawn/status) */
+   /* Component status, every connect (subscribes to hud/status, publishes dawn/status) */
    if (component_status_init(mosq) != 0) {
       OLOG_WARNING("Component status initialization failed");
    }
@@ -333,6 +333,10 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
    /* Initialize HUD discovery (subscribes to hud/discovery/# and requests state) */
    if (hud_discovery_init(mosq) != 0) {
       OLOG_WARNING("HUD discovery initialization failed - using defaults");
+   } else if (component_status_is_hud_online()) {
+      /* A reconnect while the HUD was up: it may have restarted while we were
+       * away, and its status alone (still "online") wouldn't ask again. */
+      hud_discovery_request_update(mosq);
    }
 }
 
