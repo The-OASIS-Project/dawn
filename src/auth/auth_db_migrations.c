@@ -1124,8 +1124,9 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     * between migration blocks, so a `>= 11` guard here would incorrectly skip
     * the column add on v10-or-earlier DBs. ALTER TABLE errors (e.g. if the
     * column already exists on a concurrent path) are logged and swallowed, so
-    * the migration is idempotent. */
-   if (current_version < 36) {
+    * the migration is idempotent.  A fresh database (current_version 0) already
+    * has the column from SCHEMA_SQL. */
+   if (current_version > 0 && current_version < 36) {
       const char *v36_sql =
           "ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT DEFAULT NULL;";
       rc = sqlite3_exec(s_db.db, v36_sql, NULL, NULL, &errmsg);
@@ -2803,8 +2804,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     * P1 completeness critic) gets it from the row, not by joining the observe-event
     * stream.  Base SCHEMA_SQL already carries the column; this ALTER back-fills an
     * existing v75 DB.  Gated `< 76` so it runs on fresh installs too, where base
-    * already added it and the duplicate-column error is expected + tolerated (mirrors
-    * the v36 reasoning_effort pattern). */
+    * already added it and the duplicate-column error is expected + tolerated. */
    bool v76_ok = (current_version >= 76);
    if (current_version < 76) {
       rc = sqlite3_exec(s_db.db, "ALTER TABLE research_questions ADD COLUMN resolution_reason TEXT",

@@ -2303,12 +2303,13 @@ int main(int argc, char *argv[]) {
             OLOG_INFO("MQTT authentication configured for user: %s", g_secrets.mqtt_username);
          }
       } else {
-         /* SECURITY WARNING: MQTT running without authentication */
-         OLOG_WARNING("========================================");
-         OLOG_WARNING("MQTT SECURITY WARNING: No authentication configured!");
-         OLOG_WARNING("Anyone on the network can send commands to DAWN.");
-         OLOG_WARNING("Configure mqtt_username/mqtt_password in secrets.toml");
-         OLOG_WARNING("========================================");
+         /* Who can reach the broker is its own configuration, not DAWN's to know: a
+          * broker on localhost (Ubuntu's mosquitto by default) is reachable only from
+          * this machine. */
+         OLOG_WARNING("MQTT security: no username set (mqtt_username/mqtt_password in "
+                      "secrets.toml), so unless the broker requires client certificates, any "
+                      "client that can reach broker %s can send DAWN commands",
+                      g_config.mqtt.broker);
       }
 
       /* Without TLS, what crosses the network to a broker on another machine
