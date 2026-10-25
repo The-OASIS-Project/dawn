@@ -473,6 +473,8 @@ void *tts_thread_function(void *arg) {
              if (announce && !started) {
                 started = true;
                 if (!expression.empty()) {
+                   /* The only record of it: the tag never reaches the history. */
+                   OLOG_INFO("expression %s: \"%.48s\"", expression.c_str(), inputText.c_str());
                    struct json_object *fields = json_object_new_object();
                    if (fields) {
                       json_object_object_add(fields, "name",
