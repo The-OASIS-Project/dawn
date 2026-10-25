@@ -331,7 +331,7 @@ class Mixer:
         self.neutral_antennas = np.radians(np.array(cfg["neutral"]["antennas_deg"], dtype=float))
         self.postures = {k: pose_from_table(v) for k, v in cfg["posture"].items()}
         self.current = Pose()
-        self.clip = None  # (move, started, duration, scale)
+        self.clip = None  # [move, started, end (s into the clip), scale]
         self.awake = None  # unknown until the first decision
         self.speech_sent = True  # clear what an earlier mixer may have left
 
@@ -359,9 +359,16 @@ class Mixer:
         except Exception as e:
             log.warning("expression %s: move %s not found: %s", name, spec["move"], e)
             return
-        duration = min(move.duration, self.cfg["timing"]["clip_max_s"])
-        self.clip = (move, time.monotonic(), duration, spec.get("scale", 1.0))
-        log.info("expression %s (%s, %.1fs)", name, spec["move"], duration)
+        self.clip = [move, time.monotonic(), move.duration, spec.get("scale", 1.0)]
+        log.info("expression %s (%s, up to %.1fs)", name, spec["move"], move.duration)
+
+    def end_clip(self) -> None:
+        """Fade the clip out now, once it has had its minimum hold (its sentence's
+        speech may not have started yet when it does)."""
+        _, started, end, _ = self.clip
+        age = time.monotonic() - started
+        if age >= self.cfg["timing"].get("clip_min_s", 1.0):
+            self.clip[2] = min(end, age + self.cfg["timing"]["clip_fade_out_s"])
 
     def clip_pose(self, base: Pose) -> Pose:
         move, started, duration, scale = self.clip
@@ -439,8 +446,12 @@ class Mixer:
             if self.awake:
                 t = tick - t0
                 mode = self.dawn.mode()
-                # A clip plays out (cutting one off would jump the head); only the
-                # newest of those waiting meanwhile is worth showing.
+                # An expression lasts while she speaks, up to its clip's length.  A
+                # newer one fades it out first (cutting it off would jump the head);
+                # only the newest of those waiting is worth showing.
+                if self.clip is not None and (mode != "speaking" or
+                                              not self.dawn.expressions.empty()):
+                    self.end_clip()
                 if self.clip is None:
                     name = None
                     while True:
