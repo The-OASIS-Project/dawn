@@ -285,20 +285,36 @@ void text_filter_command_strip(char *text, bool truncate_orphan);
 #define EMOTE_NAME_MAX 24 /* Longest name accepted inside a tag, plus margin */
 #define EMOTE_TAG_SPAN 48 /* A "]" this far past the opener closes a malformed tag */
 
-/* The vocabulary: the prompt lists it and the strip accepts only these. */
-#define EMOTE_NAMES(X) \
-   X(happy)            \
-   X(excited)          \
-   X(curious)          \
-   X(surprised)        \
-   X(confused)         \
-   X(concerned)        \
-   X(sad)              \
-   X(apologetic)       \
-   X(calm)             \
-   X(tired)
+/* The vocabulary: the prompt lists it and the strip accepts only these.  Feelings
+ * are how FRIDAY feels, spread over what a viewer can read on a low-DoF body
+ * (positive or negative, calm or excited); acts are what she is doing in the
+ * sentence.  The robot bridge maps each name to moves in its own config
+ * (services/reachy-bridge/reachy-bridge.toml); tests/check_reachy_vocab_mirror.sh
+ * keeps the two in step. */
+#define EMOTE_FEELINGS(X) \
+   X(happy)               \
+   X(excited)             \
+   X(calm)                \
+   X(curious)             \
+   X(surprised)           \
+   X(confused)            \
+   X(concerned)           \
+   X(sad)                 \
+   X(frustrated)
+#define EMOTE_ACTS(X) \
+   X(nod)             \
+   X(no)              \
+   X(unsure)          \
+   X(done)            \
+   X(thinking)        \
+   X(greeting)        \
+   X(grateful)        \
+   X(laugh)           \
+   X(oops)
+#define EMOTE_NAMES(X) EMOTE_FEELINGS(X) EMOTE_ACTS(X)
 #define EMOTE_NAME_AS_TEXT(name) " " #name
-#define EMOTE_NAMES_TEXT EMOTE_NAMES(EMOTE_NAME_AS_TEXT) /* " happy excited ..." */
+#define EMOTE_FEELINGS_TEXT EMOTE_FEELINGS(EMOTE_NAME_AS_TEXT) /* " happy excited ..." */
+#define EMOTE_ACTS_TEXT EMOTE_ACTS(EMOTE_NAME_AS_TEXT)         /* " nod no ..." */
 
 /**
  * @brief Strip every `[emote:<name>]` tag from complete text, in place.

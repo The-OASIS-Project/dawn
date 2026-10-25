@@ -46,6 +46,10 @@ import numpy as np
 import paho.mqtt.client as mqtt
 from scipy.spatial.transform import Rotation
 
+# The bridge's own modules sit beside it (python -I leaves its directory off sys.path).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import expression  # noqa: E402
+
 from reachy_mini import ReachyMini
 from reachy_mini.io.protocol import SetSpeechOffsetsCmd
 from reachy_mini.media.audio_doa import AudioDoA
@@ -101,6 +105,15 @@ def pose_from_table(t: dict) -> Pose:
 def pose_from_matrix(head: np.ndarray, antennas, neutral_antennas: np.ndarray) -> Pose:
     rpy = Rotation.from_matrix(head[:3, :3]).as_euler("xyz", degrees=True)
     return Pose(head[:3, 3] * 1000.0, rpy, np.asarray(antennas, dtype=float) - neutral_antennas)
+
+
+@dataclass
+class Clip:
+    move: object  # a RecordedMove
+    name: str     # the move's name, for the log
+    started: float
+    end: float    # seconds into the clip; shortened when it fades out early
+    scale: float
 
 
 def ease(t: float) -> float:
@@ -385,7 +398,9 @@ class Mixer:
         self.neutral_antennas = np.radians(np.array(cfg["neutral"]["antennas_deg"], dtype=float))
         self.postures = {k: pose_from_table(v) for k, v in cfg["posture"].items()}
         self.current = Pose()
-        self.clip = None  # [move, started, end (s into the clip), scale]
+        self.clip: Clip | None = None
+        self.clip_weight = 0.0  # how much of the clip is showing (its fades)
+        self.picker = expression.MovePicker()
         self.awake = None  # unknown until the first decision
         self.speech_sent = True  # clear what an earlier mixer may have left
 
@@ -405,45 +420,48 @@ class Mixer:
     def start_clip(self, name: str) -> None:
         if self.moves is None:
             return
-        spec = self.cfg["expressions"][name]
-        if not isinstance(spec, dict) or "move" not in spec:
-            log.warning("expression %s: no move in [expressions]", name)
-            return
+        spec = self.cfg["expressions"][name]  # normalized: every move exists
+        move_name = self.picker.pick(spec["moves"])
         try:
-            move = self.moves.get(spec["move"])
+            move = self.moves.get(move_name)
         except Exception as e:
-            log.warning("expression %s: move %s not found: %s", name, spec["move"], e)
+            log.warning("expression %s: move %s failed to load: %s", name, move_name, e)
             return
-        self.clip = [move, time.monotonic(), move.duration, spec.get("scale", 1.0)]
-        log.info("expression %s (%s, up to %.1fs)", name, spec["move"], move.duration)
+        self.clip = Clip(move, move_name, time.monotonic(), move.duration, spec["scale"])
+        log.info("expression %s (%s, up to %.1fs)", name, move_name, move.duration)
 
     def end_clip(self) -> None:
         """Fade the clip out now, once it has had its minimum hold (its sentence's
         speech may not have started yet when it does)."""
-        _, started, end, _ = self.clip
-        age = time.monotonic() - started
+        age = time.monotonic() - self.clip.started
         if age >= self.cfg["timing"].get("clip_min_s", 1.0):
-            self.clip[2] = min(end, age + self.cfg["timing"]["clip_fade_out_s"])
+            self.clip.end = min(self.clip.end, age + self.cfg["timing"]["clip_fade_out_s"])
 
     def clip_pose(self, base: Pose) -> Pose:
-        move, started, duration, scale = self.clip
-        age = time.monotonic() - started
-        if age >= duration:
+        clip = self.clip
+        age = time.monotonic() - clip.started
+        if age >= clip.end:
+            # How much of each clip gets shown, to judge whether picking moves
+            # by sentence length is worth it.
+            log.info("clip %s played %.1f of %.1f s", clip.name, clip.end, clip.move.duration)
             self.clip = None
+            self.clip_weight = 0.0
             return base
-        head, antennas, _ = move.evaluate(min(age, move.duration - 1e-3))
-        pose = pose_from_matrix(head, antennas, self.neutral_antennas).scaled(scale)
+        head, antennas, _ = clip.move.evaluate(min(age, clip.move.duration - 1e-3))
+        pose = pose_from_matrix(head, antennas, self.neutral_antennas).scaled(clip.scale)
         fade_in = self.cfg["timing"]["clip_fade_in_s"]
         fade_out = self.cfg["timing"]["clip_fade_out_s"]
-        w = min(ease(age / fade_in), ease((duration - age) / fade_out))
+        self.clip_weight = min(ease(age / fade_in), ease((clip.end - age) / fade_out))
         # On top of the posture and gaze: the head stays on the speaker.
-        return base + pose.scaled(w)
+        return base + pose.scaled(self.clip_weight)
 
     def speech_offsets(self, mode: str, t: float) -> list[float]:
         if mode != "speaking":
             return [0.0] * 6
         s = self.cfg["speech"]
-        level = self.speech.level
+        # Quieter under a clip, so the gesture reads (reachy-animation does the same).
+        sway = self.cfg["moments"]["clip_sway"]  # checked in main()
+        level = self.speech.level * (1.0 - (1.0 - sway) * self.clip_weight)
         wobble = math.sin(2 * math.pi * t * s["wobble_hz"])
         return [
             0.0,
@@ -470,6 +488,7 @@ class Mixer:
             return
         self.awake = awake
         self.clip = None
+        self.clip_weight = 0.0
         self.current = Pose()
         self.dawn.drain_expressions()
         self.mini.client.send_command(SetSpeechOffsetsCmd(offsets=[0.0] * 6))
@@ -659,17 +678,22 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
-    dawn = DawnState(cfg)
-    doa = DoaTracker(cfg)
-    speech = SpeechEnvelope(cfg)
-    link = Link(cfg, dawn, doa)
-    link.start()
-
     moves = None
     try:
         moves = RecordedMoves(cfg["clips"]["dataset"])
     except Exception as e:
         log.warning("expression clips unavailable (%s): expressions are ignored", e)
+    # Before anything reads it: only names with a move the library has.
+    cfg["expressions"] = expression.normalize_expressions(
+        cfg["expressions"], moves.list_moves() if moves else None)
+    cfg.setdefault("moments", {})
+    cfg["moments"]["clip_sway"] = expression.clip_sway(cfg["moments"])
+
+    dawn = DawnState(cfg)
+    doa = DoaTracker(cfg)
+    speech = SpeechEnvelope(cfg)
+    link = Link(cfg, dawn, doa)
+    link.start()
 
     threads = [threading.Thread(target=doa.run, args=(stop,), daemon=True),
                threading.Thread(target=speech.run, args=(stop,), daemon=True)]

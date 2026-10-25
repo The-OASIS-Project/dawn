@@ -6,7 +6,7 @@
 #
 # Installs:
 #   ~/.local/share/reachy-bridge/venv        uv-managed CPython 3.12 + reachy-mini
-#   ~/.local/share/reachy-bridge/reachy_bridge.py
+#   ~/.local/share/reachy-bridge/{reachy_bridge,expression}.py
 #   ~/.config/reachy-bridge/reachy-bridge.toml   (kept if it exists)
 #   ~/.config/reachy-bridge/env                  (MQTT credentials, mode 600)
 #   ~/.config/systemd/user/{reachy-mini-daemon,reachy-bridge}.service
@@ -54,7 +54,7 @@ uv python install "$PYTHON_VERSION"
 [ -d "$SHARE_DIR/venv" ] || uv venv --python "$PYTHON_VERSION" "$SHARE_DIR/venv"
 uv pip install --python "$SHARE_DIR/venv/bin/python" -r "$SCRIPT_DIR/requirements.txt"
 
-install -m 644 "$SCRIPT_DIR/reachy_bridge.py" "$SHARE_DIR/reachy_bridge.py"
+install -m 644 "$SCRIPT_DIR/reachy_bridge.py" "$SCRIPT_DIR/expression.py" "$SHARE_DIR/"
 if [ -f "$CONFIG_DIR/reachy-bridge.toml" ]; then
    log "Keeping existing $CONFIG_DIR/reachy-bridge.toml (new defaults: $SCRIPT_DIR/reachy-bridge.toml)"
 else

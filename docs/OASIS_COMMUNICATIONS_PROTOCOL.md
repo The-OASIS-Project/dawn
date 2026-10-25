@@ -302,7 +302,7 @@ learns the state from the next event.  Every message is an event:
 | `wake_word` | `with_command`: bool | The wake word was heard (no `state_change` marks this) |
 | `speaking_start` | — | Speech started playing on the local speaker |
 | `speaking_end` | `interrupted`: bool | That speech finished, or was cut off |
-| `expression` | `name`: one of `happy`, `excited`, `curious`, `surprised`, `confused`, `concerned`, `sad`, `apologetic`, `calm`, `tired` | The sentence starting now carries this emotion |
+| `expression` | `name`: one of DAWN's expression names (`EMOTE_FEELINGS` and `EMOTE_ACTS` in `include/core/text_filter.h`) | The sentence starting now carries this feeling or act |
 
 `surface` names the interface the event came from; only `local` (Dawn's own
 microphone and speaker) publishes today.  `state_change` is also published on

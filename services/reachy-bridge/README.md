@@ -18,7 +18,7 @@ dawn ──MQTT dawn/events──► reachy-bridge ──ws 127.0.0.1:8000──
 | `wake_word` | perks up, turns toward the speaker (direction of arrival) |
 | `PROCESS_COMMAND` | thinking pose |
 | `speaking_start` … `speaking_end` | speaking pose, head moves with the speech level |
-| `expression` (`[emote:name]` in the reply) | a scaled-down clip from Pollen's emotions library |
+| `expression` (`[emote:name]` in the reply) | a scaled-down clip from Pollen's emotions library, picked at random from the name's list (never the same twice running) |
 
 While the bridge reports `reachy/status` online, DAWN tells the model on the
 local surface that it can use `[emote:name]` tags. No `dawn.toml` setting is
@@ -43,6 +43,11 @@ journalctl --user -u reachy-bridge -f
 
 Postures, motion amounts and the expression map live in
 `~/.config/reachy-bridge/reachy-bridge.toml`. Restart the bridge after an edit.
+
+`install.sh` keeps an existing config. When the expression vocabulary changes
+(DAWN's `EMOTE_FEELINGS`/`EMOTE_ACTS`), compare yours with the shipped
+`reachy-bridge.toml` and copy the `[expressions]` table across; names DAWN sends
+that your config lacks are logged once and do nothing.
 
 ## Notes
 

@@ -443,7 +443,15 @@ static void test_emote_strip_first_known_name_wins(void) {
 
 static void test_emote_strip_unknown_name_removed_not_reported(void) {
    expect_emote("[emote:smug] Sure.", "Sure.", "");
-   expect_emote("[emote:smug] Sure. [emote:tired] Night.", "Sure. Night.", "tired");
+   expect_emote("[emote:smug] Sure. [emote:nod] Right.", "Sure. Right.", "nod");
+   /* A name from before the vocabulary changed is removed, not reported. */
+   expect_emote("[emote:apologetic] Sorry.", "Sorry.", "");
+}
+
+static void test_emote_strip_acts(void) {
+   expect_emote("[emote:no] I can't do that.", "I can't do that.", "no");
+   expect_emote("[emote:done] All set.", "All set.", "done");
+   expect_emote("[emote:Unsure] Hard to say.", "Hard to say.", "unsure");
 }
 
 static void test_emote_strip_tag_only(void) {
@@ -532,6 +540,7 @@ int main(void) {
    RUN_TEST(test_emote_strip_spaced_and_cased);
    RUN_TEST(test_emote_strip_first_known_name_wins);
    RUN_TEST(test_emote_strip_unknown_name_removed_not_reported);
+   RUN_TEST(test_emote_strip_acts);
    RUN_TEST(test_emote_strip_tag_only);
    RUN_TEST(test_emote_strip_malformed_removed_unnamed);
    RUN_TEST(test_emote_strip_opener_any_case);

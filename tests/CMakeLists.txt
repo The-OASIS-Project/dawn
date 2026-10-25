@@ -2828,6 +2828,26 @@ add_test(NAME check_swap_eligible_types_mirror
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_swap_eligible_types_mirror PROPERTIES LABELS "ci")
 
+# DAWN's expression vocabulary (EMOTE_FEELINGS/EMOTE_ACTS in text_filter.h) and
+# the Reachy Mini bridge's move map (reachy-bridge.toml) must name the same
+# expressions; the bridge, being Python, can't check the C header itself.
+add_test(NAME check_reachy_vocab_mirror
+         COMMAND bash ${SRC_ROOT}/tests/check_reachy_vocab_mirror.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_reachy_vocab_mirror PROPERTIES LABELS "ci")
+
+# The bridge's robot-free expression logic (services/reachy-bridge/expression.py),
+# standard library only.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+   add_test(NAME test_reachy_expression
+            COMMAND ${Python3_EXECUTABLE} -I ${SRC_ROOT}/tests/test_reachy_expression.py
+            WORKING_DIRECTORY ${SRC_ROOT})
+   set_tests_properties(test_reachy_expression PROPERTIES LABELS "ci")
+else()
+   message(STATUS "python3 not found: test_reachy_expression is not registered")
+endif()
+
 # SECTION_CATEGORIES in schema.js is the settings render gate — a section absent
 # from it is invisible in the UI no matter how correctly it is wired everywhere
 # else.  `[attention]` and `[jobs]` both shipped that way before this guard.

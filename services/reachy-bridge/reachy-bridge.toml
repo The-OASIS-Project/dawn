@@ -85,17 +85,32 @@ xyz_mm = [10, 10, 15]
 rpy_deg = [25, 25, 60]
 antenna_deg = 60
 
-# DAWN's expression vocabulary -> a move from the clips dataset, scaled down
-# so a big gesture fits under speech.  Names must match EMOTE_NAMES in
-# include/core/text_filter.h; others are ignored.
+[moments]
+clip_sway = 0.3              # speech motion under a playing expression (1.0 = unchanged)
+
+# DAWN's expression vocabulary -> moves from the clips dataset, picked at random
+# (never the one just played; none of the last three while others remain).  Names must match EMOTE_FEELINGS and
+# EMOTE_ACTS in include/core/text_filter.h (tests/check_reachy_vocab_mirror.sh
+# checks); a move the library lacks is skipped with a warning.  scale shrinks a
+# big gesture to fit under speech.
 [expressions]
-happy = { move = "cheerful1", scale = 0.5 }
-excited = { move = "enthusiastic2", scale = 0.5 }
-curious = { move = "curious1", scale = 0.6 }
-surprised = { move = "amazed1", scale = 0.5 }
-confused = { move = "confused1", scale = 0.6 }
-concerned = { move = "anxiety1", scale = 0.4 }
-sad = { move = "downcast1", scale = 0.5 }
-apologetic = { move = "displeased1", scale = 0.3 }
-calm = { move = "calming1", scale = 0.5 }
-tired = { move = "exhausted1", scale = 0.4 }
+# Feelings: positive or negative, calm or excited.
+happy = { moves = ["cheerful1", "enthusiastic2"], scale = 0.5 }
+excited = { moves = ["enthusiastic1", "success2"], scale = 0.5 }
+calm = { moves = ["calming1", "serenity1", "relief1"], scale = 0.5 }
+curious = { moves = ["inquiring1", "inquiring2", "inquiring3"], scale = 0.6 }
+surprised = { moves = ["surprised1", "surprised2", "amazed1"], scale = 0.5 }
+confused = { moves = ["confused1", "incomprehensible2", "lost1"], scale = 0.6 }
+concerned = { moves = ["anxiety1"], scale = 0.4 }
+sad = { moves = ["downcast1", "sad2"], scale = 0.5 }
+frustrated = { moves = ["frustrated1", "irritated1"], scale = 0.4 }
+# Acts: what FRIDAY is doing in the sentence.
+nod = { moves = ["understanding1", "understanding2", "yes1", "helpful1"], scale = 0.7 }
+no = { moves = ["no1", "displeased2", "no_excited1"], scale = 0.6 }
+unsure = { moves = ["uncertain1", "indifferent1"], scale = 0.6 }
+done = { moves = ["success1", "proud3"], scale = 0.6 }
+thinking = { moves = ["thoughtful1", "thoughtful2"], scale = 0.6 }
+greeting = { moves = ["welcoming1", "welcoming2"], scale = 0.7 }
+grateful = { moves = ["grateful1", "helpful2"], scale = 0.6 }
+laugh = { moves = ["laughing1", "laughing2"], scale = 0.5 }
+oops = { moves = ["oops1", "oops2"], scale = 0.6 }
