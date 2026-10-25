@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "core/text_filter.h"
 #include "dawn_error.h"
@@ -70,7 +71,12 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
    /* The tags DAWN reads out of a reply come out next, before the reply is
     * defused: what stripping removes can't join a marker back together after
     * it was checked. */
-   text_filter_emote_strip(clean, NULL, 0); /* [emote:…] first: removing one joins its neighbours */
+   /* [emote:…] first (removing one joins its neighbours), and only on the local
+    * voice surface: the one told to write them.  Elsewhere it is text (a reply
+    * explaining the feature, a quoted message). */
+   if (session != NULL && session->type == SESSION_TYPE_LOCAL) {
+      text_filter_emote_strip(clean, NULL, 0);
+   }
    text_filter_command_strip(clean, false); /* complete response: leave an orphan <command> */
    text_filter_cited_strip(clean);          /* <cited>…</cited> (always removed) */
 
