@@ -21,11 +21,12 @@ idle_hz = 15                 # when only breathing; any event from DAWN wakes it
 posture_smoothing = 0.12     # fraction of the way to the new posture per tick
 listen_hold_s = 6.0          # stay attentive this long after the wake word
 speaking_hold_s = 0.6        # bridges the gap while the next sentence is synthesized
+speaking_max_s = 60.0        # a sentence with no speaking_end ends after this
 expression_min_gap_s = 1.5
 clip_min_s = 1.0             # an expression holds at least this long, then lasts while she speaks
 clip_fade_in_s = 0.25
 clip_fade_out_s = 0.4
-offline_grace_s = 5.0        # robot gone this long before DAWN is told
+offline_grace_s = 5.0        # a drop this short isn't passed on: robot gone (to DAWN), DAWN gone (to the robot)
 
 [neutral]
 antennas_deg = [-10.0, 10.0] # [right, left]; the SDK's resting position

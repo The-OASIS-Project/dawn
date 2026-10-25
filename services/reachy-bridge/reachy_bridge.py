@@ -122,6 +122,8 @@ class DawnState:
         self.listening_until = 0.0
         self.speaking = False
         self.speaking_end_at = 0.0
+        self.speaking_since = 0.0
+        self.offline_since = 0.0
         self.last_activity = time.monotonic()  # a turn or speech: keeps the robot awake
         self.expressions: "queue.Queue[str]" = queue.Queue(maxsize=4)
         self.last_expression = 0.0
@@ -134,11 +136,22 @@ class DawnState:
         with self.lock:
             if online and not self.dawn_online:
                 self.last_activity = time.monotonic()  # DAWN starting wakes it
+            if not online and self.dawn_online:
+                self.offline_since = time.monotonic()
             self.dawn_online = online
             self.state = "SILENCE"
             self.speaking = False
             self.listening_until = 0.0
+        self.drain_expressions()
         self.changed.set()
+
+    def drain_expressions(self) -> None:
+        """Expressions waiting belong to speech that is over."""
+        while True:
+            try:
+                self.expressions.get_nowait()
+            except queue.Empty:
+                return
 
     def handle(self, msg: dict, doa: "DoaTracker") -> None:
         self.apply(msg, doa)
@@ -166,6 +179,7 @@ class DawnState:
                 doa.aim_from_window()
             elif event == "speaking_start":
                 self.speaking = True
+                self.speaking_since = now
                 self.last_activity = now  # an alarm or announcement wakes it
             elif event == "speaking_end":
                 self.speaking = False
@@ -192,7 +206,10 @@ class DawnState:
         """Awake while DAWN is online and something happened in the last
         sleep_after_s.  Speech near the mic alone (WAKEWORD_LISTEN: the TV,
         people talking) doesn't count, or it would never sleep."""
-        if not self.dawn_online:
+        # Briefly offline counts as online: a quick reconnect (its will says
+        # offline, then online again) shouldn't put it through a sleep and wake.
+        if (not self.dawn_online and
+                time.monotonic() - self.offline_since >= self.cfg["timing"]["offline_grace_s"]):
             return False
         if self.mode() != "idle":
             return True
@@ -203,6 +220,11 @@ class DawnState:
         now = time.monotonic()
         with self.lock:
             hold = self.cfg["timing"]["speaking_hold_s"]
+            # A speaking_end that never came (DAWN's link dropped mid-sentence;
+            # the events aren't retained) ends with the sentence that set it.
+            if self.speaking and now - self.speaking_since > self.cfg["timing"].get("speaking_max_s", 60):
+                self.speaking = False
+                self.speaking_end_at = now
             if self.speaking or now - self.speaking_end_at < hold:
                 return "speaking"
             if self.state == "PROCESS_COMMAND":
@@ -384,6 +406,9 @@ class Mixer:
         if self.moves is None:
             return
         spec = self.cfg["expressions"][name]
+        if not isinstance(spec, dict) or "move" not in spec:
+            log.warning("expression %s: no move in [expressions]", name)
+            return
         try:
             move = self.moves.get(spec["move"])
         except Exception as e:
@@ -446,6 +471,7 @@ class Mixer:
         self.awake = awake
         self.clip = None
         self.current = Pose()
+        self.dawn.drain_expressions()
         self.mini.client.send_command(SetSpeechOffsetsCmd(offsets=[0.0] * 6))
         self.speech_sent = False
         # The daemon starts with torque off; asleep, the robot rests in its sleep
@@ -475,9 +501,16 @@ class Mixer:
         t0 = last = time.monotonic()
         while not stop.is_set():
             tick = time.monotonic()
-            dt, last = tick - last, tick
+            # Capped at the slow tick: a stall (a slow call) must not turn into one
+            # big step of the smoothing, which would snap the head.
+            dt, last = min(tick - last, slow), tick
             self.dawn.changed.clear()
+            was_awake = self.awake
             self.set_awake(self.dawn.awake_wanted())
+            if self.awake != was_awake:
+                # Waking blocked ~2.5 s in the wake-up move: start timing afresh.
+                tick = last = time.monotonic()
+                dt = fast
             period = slow
             if self.awake:
                 t = tick - t0
@@ -517,6 +550,9 @@ class Mixer:
                            abs(gaze) < 0.05 and self.current.close_to(target))
                 period = slow if settled else fast
             self.dawn.changed.wait(max(0.0, period - (time.monotonic() - tick)))
+            # Woken early by an event, still never faster than mixer_hz (a flood
+            # of messages can't drive the robot faster).
+            stop.wait(max(0.0, fast - (time.monotonic() - tick)))
         # The only motion sender puts it to sleep on the way out.
         self.set_awake(False)
 
