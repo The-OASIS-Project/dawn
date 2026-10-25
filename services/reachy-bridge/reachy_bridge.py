@@ -411,12 +411,17 @@ class Mixer:
         self.current = Pose()
         self.mini.client.send_command(SetSpeechOffsetsCmd(offsets=[0.0] * 6))
         self.speech_sent = False
+        # The daemon starts with torque off; asleep, the robot rests in its sleep
+        # pose without it (no motors energized all night).  enable_motors pins
+        # the targets to the present pose, so nothing jumps.
         if awake:
             log.info("waking up")
+            self.mini.enable_motors()
             self.mini.wake_up()
         else:
             log.info("going to sleep")
             self.mini.goto_sleep()
+            self.mini.disable_motors()
 
     def run(self, stop: threading.Event) -> None:
         try:
