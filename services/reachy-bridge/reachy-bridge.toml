@@ -65,7 +65,7 @@ doze_damp = 0.2
 poll_hz = 10
 max_yaw_deg = 45
 window_max_s = 4.0          # stop listening for direction this long after speech began
-hold_s = 8.0
+hold_s = 8.0                 # keep looking this long after the turn ends
 return_s = 2.0
 
 [speech]

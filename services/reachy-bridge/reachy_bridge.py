@@ -259,12 +259,19 @@ class DoaTracker:
                         del self.window[:-50]
             stop.wait(period)
 
-    def yaw(self) -> float:
+    def yaw(self, engaged: bool) -> float:
+        """The gaze: held through the turn the wake word began (@p engaged: DAWN is
+        listening, thinking or speaking), then hold_s more, then back to centre.
+        Only a gaze still held is extended: speech with no wake word of its own
+        (an alarm) doesn't swing the head back to an old bearing."""
         with self.lock:
-            age = time.monotonic() - self.gaze_at
+            now = time.monotonic()
+            age = now - self.gaze_at
             hold = self.cfg["gaze"]["hold_s"]
             fade = self.cfg["gaze"]["return_s"]
             if age < hold:
+                if engaged:
+                    self.gaze_at = now
                 return self.gaze_yaw
             return self.gaze_yaw * (1.0 - ease((age - hold) / fade))
 
@@ -462,7 +469,8 @@ class Mixer:
                     if name is not None:
                         self.start_clip(name)
 
-                target = self.postures[mode] + Pose(rpy=np.array([0.0, 0.0, self.doa.yaw()]))
+                gaze = self.doa.yaw(engaged=mode != "idle")
+                target = self.postures[mode] + Pose(rpy=np.array([0.0, 0.0, gaze]))
                 self.current = Pose.lerp(self.current, target, smooth)
                 pose = self.current + self.idle(t, mode)
                 if self.clip is not None:
