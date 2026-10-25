@@ -477,11 +477,12 @@ static char *emote_tag_end(char *s, char name[EMOTE_NAME_MAX]) {
    }
    if (*p != ']') {
       name[0] = '\0';
-      const char *limit = s + EMOTE_TAG_OPEN_LEN + EMOTE_TAG_SPAN;
-      while (p < limit && *p != '\0' && *p != ']' && *p != '\n' && *p != '[') {
+      const size_t limit = EMOTE_TAG_OPEN_LEN +
+                           EMOTE_TAG_SPAN; /* offsets: no pointer past the end */
+      while ((size_t)(p - s) < limit && *p != '\0' && *p != ']' && *p != '\n' && *p != '[') {
          p++;
       }
-      if (p >= limit || *p != ']') {
+      if ((size_t)(p - s) >= limit || *p != ']') {
          return NULL;
       }
    }
