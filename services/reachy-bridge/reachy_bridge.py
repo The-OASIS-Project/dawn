@@ -122,8 +122,7 @@ class DawnState:
         self.listening_until = 0.0
         self.speaking = False
         self.speaking_end_at = 0.0
-        self.last_wake = time.monotonic()
-        self.wake_at = 0.0
+        self.last_activity = time.monotonic()  # a turn or speech: keeps the robot awake
         self.expressions: "queue.Queue[str]" = queue.Queue(maxsize=4)
         self.last_expression = 0.0
         self.unknown_names: set[str] = set()
@@ -133,6 +132,8 @@ class DawnState:
         """DAWN came or went: nothing it said before still holds (a crash mid-reply
         never sends speaking_end)."""
         with self.lock:
+            if online and not self.dawn_online:
+                self.last_activity = time.monotonic()  # DAWN starting wakes it
             self.dawn_online = online
             self.state = "SILENCE"
             self.speaking = False
@@ -153,17 +154,19 @@ class DawnState:
                         "SILENCE", "WAKEWORD_LISTEN", "COMMAND_RECORDING", "PROCESS_COMMAND"):
                     return
                 self.state = state
+                if state == "PROCESS_COMMAND":
+                    self.last_activity = now  # a typed command wakes it too
                 if state == "WAKEWORD_LISTEN":
                     doa.open_window()
                 elif state == "COMMAND_RECORDING":
                     self.listening_until = now + self.cfg["timing"]["listen_hold_s"]
             elif event == "wake_word":
-                self.last_wake = now
-                self.wake_at = now
+                self.last_activity = now
                 self.listening_until = now + self.cfg["timing"]["listen_hold_s"]
                 doa.aim_from_window()
             elif event == "speaking_start":
                 self.speaking = True
+                self.last_activity = now  # an alarm or announcement wakes it
             elif event == "speaking_end":
                 self.speaking = False
                 self.speaking_end_at = now
@@ -184,6 +187,16 @@ class DawnState:
                     self.expressions.put_nowait(name)
                 except queue.Full:
                     pass
+
+    def awake_wanted(self) -> bool:
+        """Awake while DAWN is online and something happened in the last
+        sleep_after_s.  Speech near the mic alone (WAKEWORD_LISTEN: the TV,
+        people talking) doesn't count, or it would never sleep."""
+        if not self.dawn_online:
+            return False
+        if self.mode() != "idle":
+            return True
+        return time.monotonic() - self.last_activity < self.cfg["idle"].get("sleep_after_s", 900)
 
     def mode(self) -> str:
         """idle / listening / thinking / speaking, with the speaking gaps debounced."""
@@ -359,8 +372,6 @@ class Mixer:
     def idle(self, t: float, mode: str) -> Pose:
         i = self.cfg["idle"]
         damp = {"listening": i["listening_damp"], "speaking": i["speaking_damp"]}.get(mode, 1.0)
-        if time.monotonic() - self.dawn.last_wake > i["doze_after_s"]:
-            damp *= i["doze_damp"]
         breathe = math.sin(2 * math.pi * t / i["breath_period_s"])
         drift = math.sin(2 * math.pi * t / i["antenna_period_s"])
         return Pose(
@@ -466,7 +477,7 @@ class Mixer:
             tick = time.monotonic()
             dt, last = tick - last, tick
             self.dawn.changed.clear()
-            self.set_awake(self.dawn.dawn_online)
+            self.set_awake(self.dawn.awake_wanted())
             period = slow
             if self.awake:
                 t = tick - t0

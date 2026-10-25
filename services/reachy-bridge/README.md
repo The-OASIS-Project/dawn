@@ -14,6 +14,7 @@ dawn ──MQTT dawn/events──► reachy-bridge ──ws 127.0.0.1:8000──
 | DAWN | Robot |
 |---|---|
 | `dawn/status` offline / online | asleep / awake |
+| 15 minutes with no turn and nothing said | asleep; the wake word, DAWN speaking or a typed command wakes it (speech near the mic alone doesn't) |
 | `wake_word` | perks up, turns toward the speaker (direction of arrival) |
 | `PROCESS_COMMAND` | thinking pose |
 | `speaking_start` … `speaking_end` | speaking pose, head moves with the speech level |

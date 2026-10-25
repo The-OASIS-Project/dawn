@@ -59,8 +59,7 @@ antenna_period_s = 11.0
 antenna_drift_deg = 4.0
 listening_damp = 0.15        # stillness reads as attention
 speaking_damp = 0.4
-doze_after_s = 1800
-doze_damp = 0.2
+sleep_after_s = 900          # asleep after this long with no turn and nothing said
 
 [gaze]
 poll_hz = 10
