@@ -17,6 +17,7 @@ dataset = "pollen-robotics/reachy-mini-emotions-library"
 
 [timing]
 mixer_hz = 50
+idle_hz = 15                 # when only breathing; any event from DAWN wakes it at once
 posture_smoothing = 0.12     # fraction of the way to the new posture per tick
 listen_hold_s = 6.0          # stay attentive this long after the wake word
 speaking_hold_s = 0.6        # bridges the gap while the next sentence is synthesized

@@ -83,6 +83,12 @@ class Pose:
     def lerp(a: "Pose", b: "Pose", t: float) -> "Pose":
         return a.scaled(1.0 - t) + b.scaled(t)
 
+    def close_to(self, other: "Pose") -> bool:
+        """Within what the servos can show (about 0.1 degree, a tenth of a mm)."""
+        return (np.max(np.abs(self.xyz - other.xyz)) < 0.05 and
+                np.max(np.abs(self.rpy - other.rpy)) < 0.05 and
+                np.max(np.abs(self.antennas - other.antennas)) < 0.001)
+
 
 def pose_from_table(t: dict) -> Pose:
     return Pose(
@@ -121,6 +127,7 @@ class DawnState:
         self.expressions: "queue.Queue[str]" = queue.Queue(maxsize=4)
         self.last_expression = 0.0
         self.unknown_names: set[str] = set()
+        self.changed = threading.Event()  # wakes the mixer: a slow tick never delays a reaction
 
     def reset(self, online: bool) -> None:
         """DAWN came or went: nothing it said before still holds (a crash mid-reply
@@ -130,8 +137,13 @@ class DawnState:
             self.state = "SILENCE"
             self.speaking = False
             self.listening_until = 0.0
+        self.changed.set()
 
     def handle(self, msg: dict, doa: "DoaTracker") -> None:
+        self.apply(msg, doa)
+        self.changed.set()
+
+    def apply(self, msg: dict, doa: "DoaTracker") -> None:
         event = msg.get("event")
         now = time.monotonic()
         with self.lock:
@@ -444,12 +456,18 @@ class Mixer:
             log.exception("mixer stopped")
 
     def loop(self, stop: threading.Event) -> None:
-        period = 1.0 / self.cfg["timing"]["mixer_hz"]
-        smooth = self.cfg["timing"]["posture_smoothing"]
-        t0 = time.monotonic()
+        timing = self.cfg["timing"]
+        rate = timing["mixer_hz"]
+        fast = 1.0 / rate
+        slow = 1.0 / timing.get("idle_hz", 15)
+        smooth = timing["posture_smoothing"]  # per tick at mixer_hz
+        t0 = last = time.monotonic()
         while not stop.is_set():
             tick = time.monotonic()
+            dt, last = tick - last, tick
+            self.dawn.changed.clear()
             self.set_awake(self.dawn.dawn_online)
+            period = slow
             if self.awake:
                 t = tick - t0
                 mode = self.dawn.mode()
@@ -471,7 +489,8 @@ class Mixer:
 
                 gaze = self.doa.yaw(engaged=mode != "idle")
                 target = self.postures[mode] + Pose(rpy=np.array([0.0, 0.0, gaze]))
-                self.current = Pose.lerp(self.current, target, smooth)
+                # Smoothing by elapsed time, so the slow idle tick changes nothing.
+                self.current = Pose.lerp(self.current, target, 1.0 - (1.0 - smooth)**(dt * rate))
                 pose = self.current + self.idle(t, mode)
                 if self.clip is not None:
                     pose = self.clip_pose(pose)
@@ -481,7 +500,12 @@ class Mixer:
                 if any(offsets) or self.speech_sent:
                     self.mini.client.send_command(SetSpeechOffsetsCmd(offsets=offsets))
                     self.speech_sent = any(offsets)
-            stop.wait(max(0.0, period - (time.monotonic() - tick)))
+                # Only breathing (nothing else left to move): the slow tick is
+                # enough for motion this small and slow.
+                settled = (mode == "idle" and self.clip is None and not self.speech_sent and
+                           abs(gaze) < 0.05 and self.current.close_to(target))
+                period = slow if settled else fast
+            self.dawn.changed.wait(max(0.0, period - (time.monotonic() - tick)))
         # The only motion sender puts it to sleep on the way out.
         self.set_awake(False)
 
