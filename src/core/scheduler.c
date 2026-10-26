@@ -26,6 +26,7 @@
 
 #include "core/scheduler.h"
 
+#include <ctype.h>
 #include <json-c/json.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -423,9 +424,21 @@ static int scheduled_call_value(const tool_metadata_t *meta,
                                 size_t value_len,
                                 char *err,
                                 size_t err_len) {
-   struct json_object *args = json_tokener_parse(stored);
+   /* Only a value that is a JSON object as a whole: plain text that starts with
+    * one ("{...} more words", "{...}::field::v") keeps its tail. */
+   const size_t len = strlen(stored);
+   struct json_tokener *tok = json_tokener_new();
+   struct json_object *args = tok ? json_tokener_parse_ex(tok, stored, (int)len) : NULL;
+   size_t end = 0;
+   if (tok) {
+      end = json_tokener_get_parse_end(tok);
+      json_tokener_free(tok);
+   }
+   while (end < len && isspace((unsigned char)stored[end])) {
+      end++;
+   }
    int rc = SUCCESS;
-   if (args && json_object_is_type(args, json_type_object)) {
+   if (args && end == len && json_object_is_type(args, json_type_object)) {
       rc = tool_pack_args(meta, args, NULL, 0, value, value_len, NULL, 0, err, err_len);
    } else {
       snprintf(value, value_len, "%s", stored);
