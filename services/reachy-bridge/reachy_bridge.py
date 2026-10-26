@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.request
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -62,6 +63,7 @@ STATUS_TOPIC = "reachy/status"
 EVENTS_TOPIC = "dawn/events"
 DAWN_STATUS_TOPIC = "dawn/status"
 HEARTBEAT_SEC = 30
+HEALTHY_S = 10.0  # connected this long: the daemon is really back
 MAX_PAYLOAD = 4096  # DAWN's events are a few hundred bytes
 VERSION = "0.1.0"
 
@@ -253,6 +255,8 @@ class DawnState:
 
 
 class DoaTracker:
+    REOPEN_S = 5.0
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.lock = threading.Lock()
@@ -263,14 +267,25 @@ class DoaTracker:
         self.gaze_yaw = 0.0  # degrees, left positive
         self.gaze_at = 0.0
         self.doa = None
+        self.doa_down_logged = False
+        self.next_open = 0.0
+        self.open()
+
+    def open(self) -> None:
+        """Open the mic array's direction reading.  Switching the robot off resets
+        the array (it stays on USB power), which leaves an open handle dead, so this
+        runs again after any failed read; at most every REOPEN_S."""
+        self.next_open = time.monotonic() + self.REOPEN_S
         try:
-            self.doa = AudioDoA()
-            if not self.doa.available:
-                log.warning("DoA: no ReSpeaker found; gaze stays centred")
-                self.doa = None
-        except Exception as e:  # pyusb permissions, firmware
-            log.warning("DoA unavailable: %s", e)
-            self.doa = None
+            doa = AudioDoA()
+            if not doa.available:
+                doa = None
+        except Exception:  # pyusb permissions, firmware, the device mid-reset
+            doa = None
+        self.doa = doa
+        if doa is None and not self.doa_down_logged:
+            log.warning("DoA: no ReSpeaker reachable; gaze stays centred until it is")
+            self.doa_down_logged = True
 
     def open_window(self) -> None:
         with self.lock:
@@ -294,8 +309,6 @@ class DoaTracker:
             log.info("gaze: %.0f deg from %d readings", self.gaze_yaw, len(self.window))
 
     def run(self, stop: threading.Event) -> None:
-        if self.doa is None:
-            return
         period = 1.0 / self.cfg["gaze"]["poll_hz"]
         window_max = self.cfg["gaze"]["window_max_s"]
         while not stop.is_set():
@@ -306,10 +319,26 @@ class DoaTracker:
             if time.monotonic() - self.window_opened > window_max:
                 self.active.clear()  # speech that held no wake word
                 continue
+            if self.doa is None:
+                if time.monotonic() >= self.next_open:
+                    self.open()
+                if self.doa is None:
+                    stop.wait(period)
+                    continue
             try:
                 reading = self.doa.get_DoA()
+                if self.doa_down_logged:  # a good read, not just an open
+                    log.info("DoA: ReSpeaker reachable again")
+                    self.doa_down_logged = False
             except Exception as e:
-                log.warning("DoA read failed: %s", e)
+                if not self.doa_down_logged:
+                    log.warning("DoA read failed (%s); reopening", e)
+                    self.doa_down_logged = True
+                try:
+                    self.doa.close()
+                except Exception:
+                    pass
+                self.doa = None
                 reading = None
             if reading is not None:
                 angle, speech = reading
@@ -577,6 +606,53 @@ class Mixer:
 
 
 # --------------------------------------------------------------------------
+# Recovery: the daemon stays in its error state once the motors stop answering
+# (the robot switched off), so powering it back on does nothing until it restarts
+# --------------------------------------------------------------------------
+
+
+class DaemonRecovery:
+    FIRST_S = 10.0
+    MAX_S = 60.0
+
+    def __init__(self, port: int):
+        self.base = f"http://127.0.0.1:{port}/api/daemon"
+        self.backoff = self.FIRST_S
+        self.next_try = 0.0
+        self.down_logged = False
+
+    def connected(self) -> None:
+        if self.down_logged:
+            log.info("Reachy Mini daemon back")
+        self.backoff, self.next_try, self.down_logged = self.FIRST_S, 0.0, False
+
+    def failed(self, error: Exception) -> None:
+        if not self.down_logged:  # once per outage, not every 2 s
+            log.error("Reachy Mini: %s", error)
+            self.down_logged = True
+
+    def maybe_restart(self) -> None:
+        """Ask a daemon stuck in its error state to restart, backing off from FIRST_S
+        to MAX_S while the robot stays off (each restart retries the motors)."""
+        now = time.monotonic()
+        if now < self.next_try:
+            return
+        self.next_try = now + self.backoff
+        self.backoff = min(self.backoff * 2.0, self.MAX_S)
+        try:
+            with urllib.request.urlopen(self.base + "/status", timeout=2) as r:
+                state = json.load(r).get("state")
+            if state != "error":
+                return
+            req = urllib.request.Request(self.base + "/restart", method="POST")
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+            log.info("Reachy Mini daemon in error (motors off?): asked it to restart")
+        except Exception as e:  # daemon not running (systemd restarts it) or busy
+            log.debug("daemon recovery: %s", e)
+
+
+# --------------------------------------------------------------------------
 # MQTT: DAWN's events in, our status out
 # --------------------------------------------------------------------------
 
@@ -702,12 +778,14 @@ def main() -> int:
 
     grace = cfg["timing"]["offline_grace_s"]
     down_since = None
+    recovery = DaemonRecovery(cfg["daemon"]["port"])
     while not stop.is_set():
         try:
             with ReachyMini(connection_mode="localhost_only", media_backend="no_media",
                             port=cfg["daemon"]["port"]) as mini:
                 log.info("connected to the Reachy Mini daemon")
                 down_since = None
+                connected_at = time.monotonic()
                 link.publish_status(True)
                 mixer = Mixer(cfg, mini, dawn, doa, speech, moves)
                 last_beat = time.monotonic()
@@ -715,15 +793,21 @@ def main() -> int:
                 mixer_thread.start()
                 while not stop.is_set() and mixer_thread.is_alive():
                     stop.wait(1)
+                    # Healthy only once it has held: a daemon that accepts and then
+                    # fails again mustn't reset the restart backoff each time.
+                    if connected_at and time.monotonic() - connected_at >= HEALTHY_S:
+                        recovery.connected()
+                        connected_at = 0.0
                     if time.monotonic() - last_beat >= HEARTBEAT_SEC:
                         link.publish_status(True)
                         last_beat = time.monotonic()
                 if stop.is_set():
                     mixer_thread.join()  # it puts the robot to sleep itself
         except Exception as e:
-            log.error("Reachy Mini: %s", e)
+            recovery.failed(e)
         if stop.is_set():
             break
+        recovery.maybe_restart()
         # A transient drop (the XVF3800 wedging, a daemon restart) shouldn't flap
         # DAWN's prompt: say offline only if it stays down.
         now = time.monotonic()
