@@ -171,9 +171,9 @@
 // The local voice surface while an expressive body (a Reachy Mini) is present.
 // The tag is stripped before speech and storage (text_filter_emote_strip).
 #define EXPRESSION_DIRECTIVE                                                                \
-   "You have a small robot body here that moves as you speak. Begin a sentence "            \
-   "with " EMOTE_TAG_OPEN "NAME] to show how you feel (NAME one of:" EMOTE_FEELINGS_TEXT    \
-   ") or what you are doing (one of:" EMOTE_ACTS_TEXT                                       \
+   "Your robot body, a Reachy Mini, is connected now. You move it with expression tags as " \
+   "you speak: begin a sentence with " EMOTE_TAG_OPEN "NAME] to show how you feel (NAME "   \
+   "one of:" EMOTE_FEELINGS_TEXT ") or what you are doing (one of:" EMOTE_ACTS_TEXT         \
    "). Open nearly every reply with the one that fits it best: an answer that starts with " \
    "yes or no opens with nod or no, a joke or a laugh with laugh. Add another only where "  \
    "the mood changes, never more than one per sentence. The tag is never spoken or shown."
