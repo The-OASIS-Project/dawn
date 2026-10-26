@@ -35,9 +35,11 @@
 #include <unistd.h>
 
 #include "core/ocp_helpers.h"
+#include "core/session_manager.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "prompts.h"
 #include "tools/hud_discovery.h"
 #include "version.h"
 
@@ -66,6 +68,10 @@ typedef struct {
    bool online;
    time_t last_seen;
 } peer_t;
+
+/* The body has been online since DAWN started: only then is its coming back news
+ * (at start-up the standing directions say it). */
+static bool s_reachy_seen = false;
 
 static peer_t s_peers[PEER_COUNT] = {
    [PEER_HUD] = { STATUS_TOPIC_HUD, "HUD", false, 0 },
@@ -137,6 +143,20 @@ static void hud_changed(void) {
 }
 
 /**
+ * @brief The robot body came or went: the voice surface's next turn is told
+ *
+ * The standing directions change too, but only by leaving the expression
+ * directive out, which the model doesn't read as "the body is gone"; this says
+ * it once, in the next turn's context.
+ */
+static void reachy_changed(bool online, bool was_seen) {
+   if (online && !was_seen) {
+      return;
+   }
+   session_post_notice(session_get_local(), online ? REACHY_BACK_NOTICE : REACHY_GONE_NOTICE);
+}
+
+/**
  * @brief Mark peers whose heartbeat stopped offline
  *
  * Only the HUD has anything to do when that happens; the rest are read when
@@ -144,6 +164,7 @@ static void hud_changed(void) {
  */
 static void check_peer_timeouts(void) {
    bool hud_lost = false;
+   bool reachy_lost = false;
    time_t now = time(NULL);
 
    pthread_mutex_lock(&s_status_mutex);
@@ -154,12 +175,16 @@ static void check_peer_timeouts(void) {
                       (long)(now - peer->last_seen));
          peer->online = false;
          hud_lost = hud_lost || i == PEER_HUD;
+         reachy_lost = reachy_lost || i == PEER_REACHY;
       }
    }
    pthread_mutex_unlock(&s_status_mutex);
 
    if (hud_lost) {
       hud_changed();
+   }
+   if (reachy_lost) {
+      reachy_changed(false, true);
    }
 }
 
@@ -305,6 +330,7 @@ void component_status_shutdown(void) {
    pthread_mutex_lock(&s_status_mutex);
    s_initialized = false;
    s_mosq = NULL;
+   s_reachy_seen = false;
    for (int i = 0; i < PEER_COUNT; i++) {
       s_peers[i].online = false;
       s_peers[i].last_seen = 0;
@@ -372,6 +398,10 @@ void component_status_handle_message(const char *topic, const char *payload, int
    /* Update state */
    pthread_mutex_lock(&s_status_mutex);
    bool was_online = s_peers[id].online;
+   bool was_seen = s_reachy_seen;
+   if (id == PEER_REACHY && is_online) {
+      s_reachy_seen = true;
+   }
    s_peers[id].online = is_online;
    if (is_online) {
       s_peers[id].last_seen = time(NULL);
@@ -385,6 +415,9 @@ void component_status_handle_message(const char *topic, const char *payload, int
                 timestamp == 0 ? "yes" : "no");
    }
 
+   if (id == PEER_REACHY && is_online != was_online) {
+      reachy_changed(is_online, was_seen);
+   }
    if (id != PEER_HUD || is_online == was_online) {
       return;
    }

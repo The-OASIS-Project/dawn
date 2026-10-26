@@ -178,6 +178,15 @@
    "yes or no opens with nod or no, a joke or a laugh with laugh. Add another only where "  \
    "the mood changes, never more than one per sentence. The tag is never spoken or shown."
 
+// Told to the local voice surface's next turn when the robot body goes or comes
+// back (component_status.c); the expression directive leaves or returns with it.
+#define REACHY_GONE_NOTICE                                                       \
+   "Your robot body just went offline (switched off or disconnected): it can't " \
+   "move now, so write no " EMOTE_TAG_OPEN "...] tags until it is back."
+#define REACHY_BACK_NOTICE                                                      \
+   "Your robot body is connected again: open your replies with " EMOTE_TAG_OPEN \
+   "...] tags as before."
+
 // Spoken-output directive for WebUI voice turns.  The whole prose reply is read
 // aloud, but the screen is available for silent visual aids (render_visual tool /
 // images), so this is softer than the satellite/local variant.

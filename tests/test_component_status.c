@@ -26,6 +26,8 @@
 #include <string.h>
 
 #include "core/component_status.h"
+#include "core/session_manager.h"
+#include "prompts.h"
 #include "unity.h"
 
 /* ── stubs ──────────────────────────────────────────────────────────────── */
@@ -35,6 +37,8 @@ static int s_subscribed_reachy;
 static int s_published_online;
 static int s_tools_refreshed;
 static int s_discovery_requested;
+static char s_last_notice[512];
+static int s_notices;
 
 int mosquitto_subscribe(struct mosquitto *mosq, int *mid, const char *sub, int qos) {
    (void)mosq;
@@ -100,6 +104,16 @@ void llm_tools_invalidate_cache(void) {
 void invalidate_system_instructions(void) {
 }
 
+session_t *session_get_local(void) {
+   return NULL; /* the stub below records the notice; no session needed */
+}
+
+void session_post_notice(session_t *session, const char *text) {
+   (void)session;
+   snprintf(s_last_notice, sizeof(s_last_notice), "%s", text);
+   s_notices++;
+}
+
 void hud_discovery_request_update(struct mosquitto *mosq) {
    (void)mosq;
    s_discovery_requested++;
@@ -122,6 +136,8 @@ void setUp(void) {
    s_published_online = 0;
    s_tools_refreshed = 0;
    s_discovery_requested = 0;
+   s_notices = 0;
+   s_last_notice[0] = '\0';
 }
 
 void tearDown(void) {
@@ -142,10 +158,29 @@ static void test_reachy_presence_has_no_hud_side_effects(void) {
    TEST_ASSERT_FALSE(component_status_is_reachy_online());
    deliver(STATUS_TOPIC_REACHY, "online");
    TEST_ASSERT_TRUE(component_status_is_reachy_online());
+   TEST_ASSERT_EQUAL_INT(0, s_notices); /* the first time: the directive says it */
    deliver(STATUS_TOPIC_REACHY, "offline");
    TEST_ASSERT_FALSE(component_status_is_reachy_online());
+   TEST_ASSERT_EQUAL_INT(1, s_notices);
    TEST_ASSERT_EQUAL_INT(0, s_tools_refreshed);
    TEST_ASSERT_EQUAL_INT(0, s_discovery_requested);
+}
+
+static void test_reachy_going_and_coming_back_is_told(void) {
+   /* Seen online first (whatever ran before), then the transitions under test. */
+   deliver(STATUS_TOPIC_REACHY, "online");
+   deliver(STATUS_TOPIC_REACHY, "offline");
+   deliver(STATUS_TOPIC_REACHY, "online");
+   s_notices = 0;
+   deliver(STATUS_TOPIC_REACHY, "offline");
+   TEST_ASSERT_EQUAL_INT(1, s_notices);
+   TEST_ASSERT_EQUAL_STRING(REACHY_GONE_NOTICE, s_last_notice);
+   deliver(STATUS_TOPIC_REACHY, "offline"); /* no change: nothing more */
+   TEST_ASSERT_EQUAL_INT(1, s_notices);
+   deliver(STATUS_TOPIC_REACHY, "online");
+   TEST_ASSERT_EQUAL_INT(2, s_notices);
+   TEST_ASSERT_EQUAL_STRING(REACHY_BACK_NOTICE, s_last_notice);
+   deliver(STATUS_TOPIC_REACHY, "offline");
 }
 
 static void test_hud_change_refreshes_tools_once(void) {
@@ -178,6 +213,7 @@ int main(void) {
    component_status_init(s_mosq);
    RUN_TEST(test_every_connect_subscribes_and_says_online);
    RUN_TEST(test_reachy_presence_has_no_hud_side_effects);
+   RUN_TEST(test_reachy_going_and_coming_back_is_told);
    RUN_TEST(test_hud_change_refreshes_tools_once);
    RUN_TEST(test_bad_messages_ignored);
    component_status_shutdown();
