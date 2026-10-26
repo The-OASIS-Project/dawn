@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import paho.mqtt.client as mqtt
+import websockets.exceptions
 from scipy.spatial.transform import Rotation
 
 # The bridge's own modules sit beside it (python -I leaves its directory off sys.path).
@@ -537,6 +538,10 @@ class Mixer:
     def run(self, stop: threading.Event) -> None:
         try:
             self.loop(stop)
+        # The daemon went away: the robot switched off (the SDK's ConnectionError) or a
+        # daemon restart (its websocket's ConnectionClosed).
+        except (ConnectionError, websockets.exceptions.ConnectionClosed) as e:
+            log.warning("mixer stopped: %s", e)
         except Exception:
             log.exception("mixer stopped")
 
