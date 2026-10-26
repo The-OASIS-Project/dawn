@@ -412,6 +412,28 @@ int scheduler_emit_alert(int user_id,
  * Scheduled Task Execution
  * ============================================================================= */
 
+/* A scheduled call's stored value, as its tool's callback takes it.  A value
+ * stored as a JSON object is the call's arguments, as the model writes them in a
+ * live call, and is turned into the value the same way, so a tool's named
+ * fields (a history's range) reach it.  The stored action, not one in the JSON,
+ * is what runs: it is the one the schedulability check passed. */
+static int scheduled_call_value(const tool_metadata_t *meta,
+                                const char *stored,
+                                char *value,
+                                size_t value_len,
+                                char *err,
+                                size_t err_len) {
+   struct json_object *args = json_tokener_parse(stored);
+   int rc = SUCCESS;
+   if (args && json_object_is_type(args, json_type_object)) {
+      rc = tool_pack_args(meta, args, NULL, 0, value, value_len, NULL, 0, err, err_len);
+   } else {
+      snprintf(value, value_len, "%s", stored);
+   }
+   json_object_put(args);
+   return rc;
+}
+
 /**
  * @brief Execute a scheduled task by calling its tool callback
  *
@@ -461,7 +483,12 @@ static int scheduler_execute_task(sched_event_t *event) {
              event->tool_action, event->tool_value);
 
    char value_buf[SCHED_TOOL_VALUE_MAX];
-   snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
+   if (scheduled_call_value(meta, event->tool_value, value_buf, sizeof(value_buf), sched_err,
+                            sizeof(sched_err)) != SUCCESS) {
+      OLOG_WARNING("scheduler: task %lld (%s): %s", (long long)event->id, event->tool_name,
+                   sched_err);
+      return FAILURE;
+   }
 
    /* Publish the scheduled-origin context so the callback resolves the real
     * event owner (not the user-1 fallback) and so action-level schedulability
@@ -832,7 +859,14 @@ static void *briefing_thread_func(void *arg) {
             continue;
          }
          char value_buf[SCHED_TOOL_VALUE_MAX];
-         snprintf(value_buf, sizeof(value_buf), "%s", steps[i].tool_value);
+         if (scheduled_call_value(step_meta, steps[i].tool_value, value_buf, sizeof(value_buf),
+                                  err_buf, sizeof(err_buf)) != SUCCESS) {
+            OLOG_WARNING("scheduler: briefing %lld step %d (%s): %s", (long long)event->id, i + 1,
+                         steps[i].tool_name, err_buf);
+            strbuf_appendf(&combined, "## Step %d (%s): [unavailable: %s]\n\n", i + 1,
+                           steps[i].tool_name, err_buf);
+            continue;
+         }
          int should_respond = 0;
          /* Called directly, not through llm_tools_execute: its result is
           * neutralized here the same way (text from anywhere, headed for an
@@ -929,7 +963,12 @@ static void *briefing_thread_func(void *arg) {
       }
 
       char value_buf[SCHED_TOOL_VALUE_MAX];
-      snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
+      char value_err[160];
+      if (scheduled_call_value(meta, event->tool_value, value_buf, sizeof(value_buf), value_err,
+                               sizeof(value_err)) != SUCCESS) {
+         OLOG_ERROR("scheduler: briefing %lld: %s", (long long)event->id, value_err);
+         goto fail;
+      }
       int should_respond = 0;
       /* Called directly, as a briefing step is (see above). */
       tool_result = llm_context_neutralize_owned(
