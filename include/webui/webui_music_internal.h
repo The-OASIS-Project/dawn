@@ -188,10 +188,6 @@ typedef struct {
    bool prefetch_running;       /**< Stream thread only */
    atomic_bool prefetch_cancel; /**< Aborts the helper's download */
 
-   /* Thread synchronization for safe shutdown */
-   pthread_cond_t decoder_idle_cond; /**< Signaled when decoder is not busy */
-   atomic_bool shutdown_ack;         /**< Thread acknowledged shutdown request */
-
    /* Encoder */
    OpusEncoder *encoder;   /**< Opus encoder (quality-specific) */
    resampler_t *resampler; /**< Source rate -> 48kHz resampler */
@@ -203,7 +199,6 @@ typedef struct {
 
    /* Decoder */
    audio_decoder_t *decoder; /**< Current file decoder */
-   atomic_bool decoder_busy; /**< True while decoder is being read */
 
    /* Playback state */
    bool playing;                      /**< True if playback in progress */
@@ -489,11 +484,6 @@ void webui_music_stop_streaming(session_music_state_t *state);
  * @pre control_mutex held
  */
 int webui_music_start_streaming(session_music_state_t *state);
-
-/**
- * @brief Wait for the decoder to become idle.
- */
-bool wait_decoder_idle(session_music_state_t *state, int timeout_ms);
 
 /**
  * @brief Pick a random queue index different from the current one.
