@@ -54,7 +54,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **music_source.c/h**: Music source abstraction layer
    - `music_source_provider_t` callback interface for pluggable sources
    - Source name/prefix helpers (`music_source_name()`, `music_source_path_prefix()`)
-   - Path-to-source detection (`music_source_from_path()`)
+   - Path-to-source detection (`music_source_from_path()`), and `music_source_is_remote()`
+     (downloaded before it plays: prefetched, and its server can be unreachable)
 
 - **plex_db.c/h**: Plex-to-unified-DB sync layer
    - Fetches all Plex tracks via `plex_client_list_all_tracks()`

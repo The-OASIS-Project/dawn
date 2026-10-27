@@ -107,8 +107,6 @@ static int music_install_decoder(session_music_state_t *state, audio_decoder_t *
    return SUCCESS;
 }
 
-/* ---- Plex prefetch ------------------------------------------------------ */
-
 /* ---- Play history (queue_mutex, then state_mutex, held) ----------------- */
 
 /* A history entry's queue position: the copy of path nearest its hint */
@@ -206,6 +204,8 @@ static bool history_record(session_music_state_t *state, user_music_queue_t *uq,
    return music_history_record(history_of(state, uq), uq->queue[index].path, index);
 }
 
+/* ---- Remote-source prefetch -------------------------------------------- */
+
 static void *prefetch_thread(void *arg) {
    session_music_state_t *state = (session_music_state_t *)arg;
    char path[MUSIC_PATH_MAX];
@@ -270,7 +270,7 @@ static void prefetch_drop(session_music_state_t *state) {
 
 /*
  * After a track starts: plan the one that follows, and start downloading it
- * if it's on Plex.  Repeat-one replays the current track, so nothing is
+ * if it's from a remote source.  Repeat-one replays the current track, so nothing is
  * planned.  Prefetch errors are never reported; the real open reports them.
  */
 static void prefetch_plan(session_music_state_t *state) {
@@ -302,7 +302,7 @@ static void prefetch_plan(session_music_state_t *state) {
    }
    /* A different track than any earlier prefetch (or none): drop that one */
    prefetch_drop(state);
-   if (!next_path[0] || music_source_from_path(next_path) != MUSIC_SOURCE_PLEX) {
+   if (!next_path[0] || !music_source_is_remote(music_source_from_path(next_path))) {
       return;
    }
 
@@ -362,7 +362,7 @@ static uint32_t set_pending(session_music_state_t *state, const char *path, bool
    state->pending_seq = ++state->open_seq;
    /* A prefetched track opens at once: no download to show */
    bool prefetched = state->prefetched && strcmp(state->prefetch_path, path) == 0;
-   state->loading = music_source_from_path(path) == MUSIC_SOURCE_PLEX && !prefetched;
+   state->loading = music_source_is_remote(music_source_from_path(path)) && !prefetched;
    return state->pending_seq;
 }
 
@@ -448,7 +448,7 @@ music_advance_t webui_music_advance(session_music_state_t *state,
       pthread_mutex_unlock(&state->state_mutex);
       pthread_mutex_unlock(&uq->queue_mutex);
 
-      /* A Plex track downloads first: tell the client (tagged, so it applies
+      /* A remote track downloads first: tell the client (tagged, so it applies
        * once the ended track's buffered audio has played) */
       if (loading) {
          webui_music_send_state_impl(conn, state, true);
@@ -528,18 +528,19 @@ bool webui_music_run_pending_open(session_music_state_t *state,
    }
    pthread_mutex_unlock(&state->state_mutex);
 
-   /* Auto-advance: skip it, unless every queued track is on an unreachable
-    * Plex server (each would wait out the same connect timeout) */
+   /* Auto-advance: skip it, unless every queued track is from the same
+    * unreachable server (each would wait out the same connect timeout) */
    user_music_queue_t *uq = state->shared_queue;
+   music_source_t source = music_source_from_path(path);
    pthread_mutex_lock(&uq->queue_mutex);
-   bool queue_has_local = false;
-   for (int i = 0; i < uq->queue_length && !queue_has_local; i++) {
-      queue_has_local = music_source_from_path(uq->queue[i].path) != MUSIC_SOURCE_PLEX;
+   bool queue_has_other = !unreachable; /* only an unreachable server stops it */
+   for (int i = 0; i < uq->queue_length && !queue_has_other; i++) {
+      queue_has_other = music_source_from_path(uq->queue[i].path) != source;
    }
    bool repeat_one = uq->repeat_mode == MUSIC_REPEAT_ONE;
    pthread_mutex_unlock(&uq->queue_mutex);
 
-   if (unreachable && !queue_has_local) {
+   if (unreachable && !queue_has_other) {
       pthread_mutex_lock(&state->state_mutex);
       state->playing = false;
       pthread_mutex_unlock(&state->state_mutex);
