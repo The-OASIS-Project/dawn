@@ -400,7 +400,8 @@ void llm_init(const char *cloud_provider_override) {
    if (!openai_available && !claude_available && !gemini_available && !openrouter_available) {
       OLOG_WARNING("No cloud LLM providers configured (check secrets.toml)");
       current_cloud_provider = CLOUD_PROVIDER_NONE;
-      llm_set_type(LLM_LOCAL);
+      /* The type is set by dawn.c after this returns, as on the keyed path below.  Not
+       * llm_set_type() here: it announces the change aloud, before TTS is up. */
       return;
    }
 
