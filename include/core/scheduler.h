@@ -48,12 +48,23 @@ extern "C" {
 /**
  * @brief Initialize the scheduler subsystem
  *
- * Creates the condvar with CLOCK_MONOTONIC, generates alarm chime PCM,
- * and starts the background scheduler thread.
+ * Creates the condvar with CLOCK_MONOTONIC and generates alarm chime PCM.
+ * The thread is started by scheduler_start().
  *
  * @return 0 on success, non-zero on error
  */
 int scheduler_init(void);
+
+/**
+ * @brief Start the scheduler thread, once the daemon has finished starting
+ *
+ * Its first pass recovers missed events and fires them through TTS, the WebUI,
+ * MQTT and the tools, so it runs only after all of them are up.  No-op when
+ * the scheduler is disabled or already started.
+ *
+ * @return SUCCESS, or FAILURE if the thread couldn't be created
+ */
+int scheduler_start(void);
 
 /**
  * @brief Shut down the scheduler

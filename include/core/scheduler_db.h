@@ -368,9 +368,10 @@ int scheduler_db_clear_missed(int64_t id, int user_id);
 
 /**
  * @brief Get the next fire_at time for pending events
- * @return Next fire_at timestamp, or 0 if no pending events
+ * @param next_out Next fire_at timestamp, or 0 if no pending events
+ * @return SCHED_DB_SUCCESS, or SCHED_DB_FAILURE when the database can't be read
  */
-time_t scheduler_db_next_fire_time(void);
+int scheduler_db_next_fire_time(time_t *next_out);
 
 /**
  * @brief Get all events that should fire now (fire_at <= now, status=pending/snoozed)

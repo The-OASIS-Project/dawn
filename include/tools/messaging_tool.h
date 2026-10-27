@@ -29,11 +29,11 @@ extern "C" {
 /**
  * @brief Register the messaging LLM tool with the tool registry.
  *
- * Called from `tools_register_all()` at tool-init time.  Initializes
- * the messaging engine via `messaging_engine_init()` and conditionally
- * registers the Telegram driver (when `telegram_bot_token` is set in
- * secrets.toml) and the SMS driver (always — ECHO owns the modem
- * connection lifecycle).  See `docs/MESSAGING_CHANNELS_DESIGN.md` §3.
+ * Called from `tools_register_all()`.  The tool's init starts the messaging
+ * engine (`messaging_engine_init()`) and the SMS driver (always — ECHO owns
+ * the modem connection lifecycle); its start, once the daemon is up, registers
+ * the Telegram/Discord/Slack drivers whose tokens are set in secrets.toml.
+ * See `docs/MESSAGING_CHANNELS_DESIGN.md` §3.
  *
  * @return SUCCESS on successful registration, FAILURE on engine init
  *         or registry failure.  Driver registration failures are
@@ -52,11 +52,12 @@ int messaging_tool_register(void);
  * never tears down a running driver, so rotating or removing a token remains
  * daemon-restart-to-apply (live teardown would join a long-poll listener and the
  * engine has no clean per-driver unregister path).  Safe to call on any secrets
- * save — already-running drivers are skipped.
+ * save — already-running drivers are skipped.  Before the tool's start phase it
+ * does nothing: the start registers every driver whose token is set.
  *
  * @note Thread safety: typically called from the lws service thread (set_secrets).
  *       The shared registration state is mutex-guarded, so it is safe even if it
- *       races the one-time init-thread registration.
+ *       races the start phase.
  */
 void messaging_tool_refresh_drivers(void);
 

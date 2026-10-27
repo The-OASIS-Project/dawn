@@ -400,11 +400,9 @@ static void *recovery_thread_func(void *arg) {
 
    OLOG_INFO("memory_recovery: thread started");
 
-   /* Initial startup pass — give the daemon a beat to finish booting before
-    * we start hammering the LLM with extraction work. */
-   for (int i = 0; i < 30 && s_running; i++) {
-      sleep(1);
-   }
+   /* Startup pass: the thread is started after storage, the LLM and the WebUI
+    * are up.  It runs at a lower priority, and only on conversations idle past
+    * the threshold. */
    if (s_running) {
       memory_recovery_run_pass(NULL, NULL);
    }

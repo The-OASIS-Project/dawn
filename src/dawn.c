@@ -71,6 +71,7 @@
 #include "core/embedding_engine.h"
 #include "core/endpointer.h"
 #include "core/prompt_builder.h"
+#include "core/scheduler.h"
 #include "core/tz.h"
 #ifdef ENABLE_WEBUI
 #include "core/job_manager.h" /* jobs run only with the WebUI (their delivery) */
@@ -110,11 +111,9 @@
 #include "tools/tool_registry.h"
 #include "tools/tools_init.h"
 #ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
-#include "auth/auth_db_mcp.h"
 #include "tools/mcp_bridge.h"
 #endif
 #ifdef DAWN_ENABLE_CODE_PROJECTS
-#include "tools/code_project_namemap.h"
 #include "tools/code_project_service.h"
 #endif
 #include "tts/text_to_speech.h"
@@ -2061,6 +2060,51 @@ int main(int argc, char *argv[]) {
       safe_strscpy(pcm_playback_device, g_config.audio.playback_device);
    }
 
+   // Initialize metrics system (before anything records, and before LLM so config is tracked)
+   if (metrics_init() != 0) {
+      OLOG_WARNING("Failed to initialize metrics system - continuing without metrics");
+   }
+
+   /* Storage, before anything that can use it: tools start threads, MQTT and
+    * the WebUI take input.  The database opens (and migrates) here, before any
+    * other thread exists.  data_dir_resolved was tilde-expanded at startup. */
+   const char *expanded_data_dir = g_config.paths.data_dir_resolved;
+   char auth_db_path[CONFIG_PATH_MAX + 16];
+   snprintf(auth_db_path, sizeof(auth_db_path), "%s/auth.db", expanded_data_dir);
+   bool auth_db_ready = (auth_db_init(auth_db_path) == AUTH_DB_SUCCESS);
+   if (!auth_db_ready) {
+      OLOG_ERROR("Failed to initialize database - memory system disabled");
+      OLOG_ERROR("  Hint: Check file permissions on %s", expanded_data_dir);
+   }
+
+#ifdef ENABLE_AUTH
+   bool auth_crypto_ok = (auth_crypto_init() == AUTH_CRYPTO_SUCCESS);
+   if (!auth_crypto_ok) {
+      OLOG_ERROR("Failed to initialize auth crypto - authentication disabled");
+   } else {
+      /* Initialize image storage (depends on auth_db for metadata) */
+      image_store_config_t img_config = {
+         .max_size = (size_t)g_config.images.max_size_mb * 1024 * 1024,
+         .max_per_user = g_config.images.max_per_user,
+         .retention_days = g_config.images.retention_days,
+         .cache_size_mb = g_config.images.cache_size_mb,
+         .data_dir = expanded_data_dir,
+      };
+      if (image_store_init(&img_config) != IMAGE_STORE_SUCCESS) {
+         OLOG_WARNING("Failed to initialize image store - vision uploads disabled");
+      }
+
+      /* Initialize document-original storage (shares the blob store with images).
+       * Always initialize, even when originals are disabled, so the maintenance
+       * sweep and account-deletion purge can still reclaim files left over from a
+       * previously-enabled period.  New writes are gated on `originals_enabled`
+       * at the upload path, not here. */
+      if (document_originals_init(&g_config.documents, expanded_data_dir) != 0) {
+         OLOG_WARNING("Failed to initialize document original store - originals not retained");
+      }
+   }
+#endif
+
    // Initialize tool registry (modular tool system)
    // Graceful degradation: continue without tools if init fails
    bool tools_available = true;
@@ -2099,6 +2143,27 @@ int main(int argc, char *argv[]) {
 
    // Initialize context management (token tracking, auto-summarization)
    llm_context_init();
+
+   /* The LLM type, before anything can run a turn; it's announced once TTS is
+    * up: CLI override > config file > auto-detect. */
+   llm_type_t boot_llm_type = LLM_LOCAL;
+   if (llm_type_override != LLM_UNDEFINED) {
+      boot_llm_type = llm_type_override;
+   } else if (strcmp(g_config.llm.type, "cloud") == 0) {
+      boot_llm_type = LLM_CLOUD;
+   } else if (strcmp(g_config.llm.type, "local") == 0) {
+      boot_llm_type = LLM_LOCAL;
+   } else if (llm_check_connection(strcmp(g_config.llm.cloud.provider, "openrouter") == 0
+                                       ? "https://openrouter.ai"
+                                       : "https://api.openai.com",
+                                   4)) {
+      boot_llm_type = LLM_CLOUD;
+   }
+   /* Cloud without its API key stays unset: run on local until the announce
+    * below says why. */
+   if (llm_set_type_quiet(boot_llm_type) != 0) {
+      llm_set_type_quiet(LLM_LOCAL);
+   }
 
    // Force early initialization of system instructions before any threads start.
    // This ensures thread-safe access since the buffers are built once and cached.
@@ -2145,6 +2210,72 @@ int main(int argc, char *argv[]) {
    // The local session starts a new context: its first turn freezes the
    // prompt it runs under (session_prefix.c).
    session_clear_history(local_session);
+
+   /* Storage-backed state, before MQTT and the WebUI take input: the local
+    * owner, watches, interrupted jobs, OTA releases, embeddings. */
+   /* The local mic belongs to whoever the Local Device (the speaker) is assigned
+    * to on the satellite page; unassigned, to the default voice user.  This
+    * requests it; the voice loop applies it. */
+   if (auth_db_ready) {
+      satellite_mapping_t local_map;
+      if (satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &local_map) == AUTH_DB_SUCCESS) {
+         session_request_local_owner(local_map.user_id);
+      }
+   }
+
+   /* SAGE proactive attention: load per-user watches + seed the safety set on
+    * first run (needs auth_db open; before the WebUI can list or edit them).
+    * Master switch [attention] enabled gates whether the heartbeat tick actually
+    * evaluates + delivers. */
+   if (auth_db_ready) {
+      attention_init();
+   }
+
+   /* Background-job session pool (needs session_manager up so it can register
+    * its resolver hook).  Gated on [jobs] enabled; non-fatal on failure.  Jobs
+    * deliver their results through the WebUI, so they run only in WebUI builds
+    * (and the job tools are registered only there). */
+#ifdef ENABLE_WEBUI
+   if (g_config.jobs.enabled) {
+      if (job_manager_init() != SUCCESS) {
+         OLOG_WARNING("job_manager init failed - background jobs disabled");
+      } else {
+         job_reinvoke_init(); /* register the reinvoke_parent processor */
+      }
+   }
+#endif
+
+   /* OTA subsystem (after the DB is ready — it reconciles device state — and
+    * before the WebUI, which reads the releases it scans).
+    * Non-fatal: a failure just leaves OTA serving disabled. */
+   if (ota_init() != SUCCESS) {
+      OLOG_WARNING("OTA init failed - over-the-air updates disabled");
+   }
+#ifdef ENABLE_WEBUI
+   /* Wire the fleet-rollout orchestrator's delivery to the WS push path (keeps
+    * ota_rollout free of the webui dependency — it calls back through this).
+    * Without WebUI there is no delivery transport, so a rollout simply refuses
+    * to start ("No delivery transport registered"). */
+   ota_rollout_set_push_fn(webui_ota_push);
+#endif
+
+   /* Initialize memory embeddings (non-fatal — falls back to keyword search) */
+   if (g_config.memory.enabled && g_config.memory.embedding_provider[0] != '\0') {
+      if (memory_embeddings_init() != 0) {
+         OLOG_WARNING("Memory embeddings init failed - semantic search disabled");
+      } else {
+         /* Recompute takes priority: if the model changed, re-index before backfilling.
+          * If no recompute is needed, fall through to the normal backfill. */
+         if (memory_embed_recompute_start() != 0) {
+            OLOG_WARNING("Embedding recompute worker failed to start");
+         }
+         /* Every user's un-embedded facts, not just the voice user's.  If the
+          * re-index above is running, the sweep is parked until it completes. */
+         if (g_config.memory.embedding_backfill_on_startup) {
+            memory_embeddings_request_backfill_all();
+         }
+      }
+   }
 
 
    // Initialize audio backend (runtime selection between ALSA and PulseAudio)
@@ -2385,8 +2516,8 @@ int main(int argc, char *argv[]) {
          OLOG_INFO("Connected to local MQTT server.\n");
       }
 
-      /* Start processing MQTT events. */
-      mosquitto_loop_start(mosq);
+      /* Its loop, which reads and dispatches what arrives, starts with the
+       * other inputs once the daemon is up. */
 
       /* Make MQTT available for command processing (WebUI, worker pool) */
       worker_pool_set_mosq(mosq);
@@ -2481,29 +2612,12 @@ mqtt_disabled:
    // so this covers every thread.
    signal(SIGPIPE, SIG_IGN);
 
-   // Initialize metrics system (before LLM so config is tracked)
-   if (metrics_init() != 0) {
-      OLOG_WARNING("Failed to initialize metrics system - continuing without metrics");
-   }
 
    // Initialize search summarizer
    search_summarizer_init(&summarizer_config);
 
-   // Set LLM type: CLI override > config file > auto-detect
-   if (llm_type_override != LLM_UNDEFINED) {
-      llm_set_type(llm_type_override);
-   } else if (strcmp(g_config.llm.type, "cloud") == 0) {
-      llm_set_type(LLM_CLOUD);
-   } else if (strcmp(g_config.llm.type, "local") == 0) {
-      llm_set_type(LLM_LOCAL);
-   } else if (llm_check_connection(strcmp(g_config.llm.cloud.provider, "openrouter") == 0
-                                       ? "https://openrouter.ai"
-                                       : "https://api.openai.com",
-                                   4)) {
-      llm_set_type(LLM_CLOUD);
-   } else {
-      llm_set_type(LLM_LOCAL);
-   }
+   /* The LLM type was set at startup; now that TTS is up, say it. */
+   llm_set_type(boot_llm_type);
 
    /* Initialize worker pool for WebUI/satellite audio processing */
 #ifdef ENABLE_WEBUI
@@ -2534,138 +2648,8 @@ mqtt_disabled:
    }
 #endif
 
-   /* Initialize database (needed for memory system in all modes).
-    * data_dir_resolved was tilde-expanded once at startup (Step 4b). */
-   const char *expanded_data_dir = g_config.paths.data_dir_resolved;
-   char auth_db_path[CONFIG_PATH_MAX + 16];
-   snprintf(auth_db_path, sizeof(auth_db_path), "%s/auth.db", expanded_data_dir);
-   bool auth_db_ready = (auth_db_init(auth_db_path) == AUTH_DB_SUCCESS);
-   if (!auth_db_ready) {
-      OLOG_ERROR("Failed to initialize database - memory system disabled");
-      OLOG_ERROR("  Hint: Check file permissions on %s", expanded_data_dir);
-   }
-
-#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
-   /* Bootstrap MCP access: grant every admin access to each CONFIGURED MCP server
-    * so operators have the bridged tools out of the box. This must run AFTER
-    * auth_db_init (the DB has to be open) — the bridge init in tools_register_all()
-    * runs much earlier in startup, so the grant cannot live there. Keying on
-    * configured (not merely connected) servers means admin access doesn't depend
-    * on whether the server was up at boot. */
-   if (auth_db_ready) {
-      for (int i = 0; i < g_config.mcp.server_count; i++) {
-         /* Skip disabled servers and empty aliases: config only requires
-          * alias/url when the server is enabled, so granting unconditionally
-          * could insert an access row with an empty alias. */
-         if (!g_config.mcp.servers[i].enabled || g_config.mcp.servers[i].alias[0] == '\0') {
-            continue;
-         }
-         auth_db_mcp_grant_all_admins(g_config.mcp.servers[i].alias);
-      }
-   }
-
-#ifdef DAWN_ENABLE_CODE_PROJECTS
-   /* Build the cbm name-translation map (clean project name <-> cbm path slug)
-    * now that the DB is open AND cbm is connected (it came up during
-    * tools_register_all). This is the REAL startup capture: the call inside
-    * mcp_bridge_init() runs before auth_db_init(), so code_project_db can't be
-    * read there and the map would stay empty until the first index — leaving the
-    * LLM to use raw cbm slugs after a plain restart. Harmless no-op if cbm wasn't
-    * up at boot; mcp_bridge_ensure_connected() rebuilds it on lazy reconnect. */
-   if (auth_db_ready) {
-      code_project_namemap_capture();
-   }
-#endif
-#endif
-
-   /* The local mic belongs to whoever the Local Device (the speaker) is assigned
-    * to on the satellite page; unassigned, to the default voice user. */
-   if (auth_db_ready) {
-      satellite_mapping_t local_map;
-      if (satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &local_map) == AUTH_DB_SUCCESS) {
-         session_request_local_owner(local_map.user_id);
-      }
-   }
-
-   /* SAGE proactive attention: load per-user watches + seed the safety set on
-    * first run (needs auth_db open).  Master switch [attention] enabled gates
-    * whether the heartbeat tick actually evaluates + delivers. */
-   if (auth_db_ready) {
-      attention_init();
-   }
-
-   /* Background-job session pool (needs session_manager up so it can register
-    * its resolver hook).  Gated on [jobs] enabled; non-fatal on failure.  Jobs
-    * deliver their results through the WebUI, so they run only in WebUI builds
-    * (and the job tools are registered only there). */
-#ifdef ENABLE_WEBUI
-   if (g_config.jobs.enabled) {
-      if (job_manager_init() != SUCCESS) {
-         OLOG_WARNING("job_manager init failed - background jobs disabled");
-      } else {
-         job_reinvoke_init(); /* register the reinvoke_parent processor */
-      }
-   }
-#endif
-
-   /* OTA subsystem (after the DB is ready — it reconciles device state).
-    * Non-fatal: a failure just leaves OTA serving disabled. */
-   if (ota_init() != SUCCESS) {
-      OLOG_WARNING("OTA init failed - over-the-air updates disabled");
-   }
-#ifdef ENABLE_WEBUI
-   /* Wire the fleet-rollout orchestrator's delivery to the WS push path (keeps
-    * ota_rollout free of the webui dependency — it calls back through this).
-    * Without WebUI there is no delivery transport, so a rollout simply refuses
-    * to start ("No delivery transport registered"). */
-   ota_rollout_set_push_fn(webui_ota_push);
-#endif
-
-   /* Initialize memory embeddings (non-fatal — falls back to keyword search) */
-   if (g_config.memory.enabled && g_config.memory.embedding_provider[0] != '\0') {
-      if (memory_embeddings_init() != 0) {
-         OLOG_WARNING("Memory embeddings init failed - semantic search disabled");
-      } else {
-         /* Recompute takes priority: if the model changed, re-index before backfilling.
-          * If no recompute is needed, fall through to the normal backfill. */
-         if (memory_embed_recompute_start() != 0) {
-            OLOG_WARNING("Embedding recompute worker failed to start");
-         }
-         /* Every user's un-embedded facts, not just the voice user's.  If the
-          * re-index above is running, the sweep is parked until it completes. */
-         if (g_config.memory.embedding_backfill_on_startup) {
-            memory_embeddings_request_backfill_all();
-         }
-      }
-   }
-
 #ifdef ENABLE_AUTH
-   /* Initialize auth subsystem AFTER database is ready.
-    * Order: crypto -> admin socket -> maintenance (per architecture review) */
-   if (auth_crypto_init() != AUTH_CRYPTO_SUCCESS) {
-      OLOG_ERROR("Failed to initialize auth crypto - authentication disabled");
-   } else {
-      /* Initialize image storage (depends on auth_db for metadata) */
-      image_store_config_t img_config = {
-         .max_size = (size_t)g_config.images.max_size_mb * 1024 * 1024,
-         .max_per_user = g_config.images.max_per_user,
-         .retention_days = g_config.images.retention_days,
-         .cache_size_mb = g_config.images.cache_size_mb,
-         .data_dir = expanded_data_dir,
-      };
-      if (image_store_init(&img_config) != IMAGE_STORE_SUCCESS) {
-         OLOG_WARNING("Failed to initialize image store - vision uploads disabled");
-      }
-
-      /* Initialize document-original storage (shares the blob store with images).
-       * Always initialize, even when originals are disabled, so the maintenance
-       * sweep and account-deletion purge can still reclaim files left over from a
-       * previously-enabled period.  New writes are gated on `originals_enabled`
-       * at the upload path, not here. */
-      if (document_originals_init(&g_config.documents, expanded_data_dir) != 0) {
-         OLOG_WARNING("Failed to initialize document original store - originals not retained");
-      }
-
+   if (auth_crypto_ok) {
       /* Initialize admin socket for dawn-admin CLI communication */
       if (admin_socket_init() != 0) {
          OLOG_WARNING("Failed to initialize admin socket - CLI management disabled");
@@ -2682,6 +2666,20 @@ mqtt_disabled:
       }
    }
 #endif
+
+   /* Everything is up: start the inputs that take messages the moment they
+    * connect.  MQTT's loop and the tools (messaging's listeners, with their
+    * backlog) first, then the scheduler, whose first pass fires missed events
+    * through them, TTS and the WebUI. */
+   if (mosq) {
+      mosquitto_loop_start(mosq);
+   }
+   if (tools_available && tool_registry_start_tools() != 0) {
+      OLOG_WARNING("Tool start failed - some tools may be unavailable");
+   }
+   if (scheduler_start() != SUCCESS) {
+      OLOG_WARNING("Scheduler failed to start - alarms, timers and reminders disabled");
+   }
 
    // Main loop
    if (server_mode) {
