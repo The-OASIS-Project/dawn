@@ -928,7 +928,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       if (!sms_saved) {
          OLOG_ERROR("phone_service: SMS not saved; left on the SIM at index %d", sms_index);
       } else if (sms_index >= 0) {
-         char idx_str[8];
+         char idx_str[12]; /* any int */
          snprintf(idx_str, sizeof(idx_str), "%d", sms_index);
          if (publish_echo_cmd("delete_sms", idx_str, "fire_and_forget", NULL) != 0) {
             OLOG_WARNING("phone_service: failed to send delete_sms for index %d", sms_index);
