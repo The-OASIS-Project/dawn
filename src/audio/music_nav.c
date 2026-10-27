@@ -16,7 +16,7 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * A music player's play history (see music_nav.h).
+ * A music player's play history and the rule for what plays next (see music_nav.h).
  */
 
 #include "audio/music_nav.h"
@@ -87,6 +87,15 @@ void music_history_push(music_history_t *h, const char *path, int hint) {
    }
 }
 
+bool music_history_record(music_history_t *h, const char *path, int hint) {
+   const char *current = music_history_current(h);
+   if (current && strcmp(current, path) == 0) {
+      return false;
+   }
+   music_history_push(h, path, hint);
+   return true;
+}
+
 void music_history_plan(music_history_t *h, const char *path, int hint) {
    (void)append_after_current(h, path, hint);
 }
@@ -117,5 +126,189 @@ int music_history_step(music_history_t *h,
 void music_history_drop_current(music_history_t *h) {
    if (h->pos >= 0) {
       remove_at(h, h->pos);
+   }
+}
+
+/* ---- What plays next ---------------------------------------------------- */
+
+/* A random position other than exclude (-1 for none) */
+static int random_index(int exclude, int length, unsigned int *seed) {
+   if (length <= 1) {
+      return exclude;
+   }
+   int index;
+   do {
+      index = rand_r(seed) % length;
+   } while (index == exclude);
+   return index;
+}
+
+static bool record(music_history_t *h, const music_nav_queue_t *q, int index) {
+   return music_history_record(h, q->path_at(q->ctx, index), index);
+}
+
+/* Under shuffle: the history's next entry, else a new random pick other than
+ * pos, recorded (length > 1) */
+static int shuffle_next(music_history_t *h,
+                        const music_nav_queue_t *q,
+                        int pos,
+                        unsigned int *seed) {
+   int next = music_history_step(h, true, true, q->find, q->ctx);
+   if (next < 0) {
+      next = random_index(pos, q->length, seed);
+      music_history_push(h, q->path_at(q->ctx, next), next);
+   }
+   return next;
+}
+
+static void pick_auto(music_history_t *h,
+                      const music_nav_queue_t *q,
+                      const music_nav_request_t *rq,
+                      unsigned int *seed,
+                      music_nav_pick_t *out) {
+   int len = q->length;
+   int next = rq->pos;
+   bool repeat_one = q->repeat_one && rq->pos >= 0;
+   bool recorded = false;
+
+   if (len == 0) {
+      out->result = MUSIC_NAV_STOP_END;
+      return;
+   } else if (rq->track_failed && repeat_one) {
+      out->result = MUSIC_NAV_STOP_REPEAT_FAILED;
+      return;
+   } else if (rq->failures >= len) {
+      out->result = MUSIC_NAV_STOP_ALL_FAILED;
+      return;
+   } else if (rq->failures >= MUSIC_NAV_MAX_FAILED) {
+      out->result = MUSIC_NAV_STOP_TOO_MANY;
+      return;
+   } else if (repeat_one) {
+      /* Replay the same track */
+   } else if (q->shuffle && rq->failures > 0) {
+      /* Step past a failure in order: random picks can repeat, so a few
+       * playable tracks could go untried before the cap is reached */
+      next = (next + 1 + len) % len;
+   } else if (q->shuffle) {
+      if (len > 1) {
+         next = shuffle_next(h, q, next, seed);
+         recorded = true;
+      }
+   } else if (++next >= len) {
+      if (!q->repeat_all) {
+         out->result = MUSIC_NAV_STOP_END;
+         return;
+      }
+      next = 0;
+   }
+
+   if (next < 0 || next >= len) {
+      /* The queue shrank under a repeat-one or stale position, or nothing
+       * above picked from it (shuffle with one track, not held) */
+      next = 0;
+   }
+   out->result = MUSIC_NAV_PLAY;
+   out->index = next;
+   /* A replay of the current track adds nothing */
+   out->fresh = recorded || record(h, q, next);
+}
+
+static void pick_user(music_history_t *h,
+                      const music_nav_queue_t *q,
+                      const music_nav_request_t *rq,
+                      unsigned int *seed,
+                      music_nav_pick_t *out) {
+   int len = q->length;
+   int pos = rq->pos;
+   if (len == 0) {
+      return;
+   }
+   if (q->shuffle && rq->dir == MUSIC_NAV_PREVIOUS) {
+      /* Back through what played, whatever the queue's size: nothing earlier
+       * is nothing earlier, not a wrap */
+      int back = music_history_step(h, false, rq->commit, q->find, q->ctx);
+      if (back >= 0) {
+         out->result = MUSIC_NAV_PLAY;
+         out->index = back;
+      }
+      return;
+   }
+   if (q->shuffle && len > 1) {
+      out->result = MUSIC_NAV_PLAY;
+      out->index = rq->commit ? shuffle_next(h, q, pos, seed) : -1;
+      return;
+   }
+   /* -1 (the queue doesn't hold the track): next is its top, nothing is before it */
+   if (pos > len - 1) {
+      pos = len - 1; /* removes left the position past the end */
+   }
+   int next = -1;
+   if (rq->dir == MUSIC_NAV_NEXT && pos < len - 1) {
+      next = pos + 1;
+   } else if (rq->dir == MUSIC_NAV_PREVIOUS && pos > 0) {
+      next = pos - 1;
+   } else if (q->repeat_all) {
+      next = rq->dir == MUSIC_NAV_NEXT ? 0 : len - 1;
+   }
+   if (next < 0) {
+      return;
+   }
+   if (rq->commit) {
+      (void)record(h, q, next);
+   }
+   out->result = MUSIC_NAV_PLAY;
+   out->index = next;
+}
+
+static void pick_plan(music_history_t *h,
+                      const music_nav_queue_t *q,
+                      const music_nav_request_t *rq,
+                      unsigned int *seed,
+                      music_nav_pick_t *out) {
+   int len = q->length;
+   int next = -1;
+   if (len == 0 || q->repeat_one) {
+      return; /* repeat-one replays the current track: nothing to plan */
+   }
+   if (q->shuffle && len > 1) {
+      /* The history's next entry, else a new pick planned as that entry, so
+       * next and auto-advance play the track planned here */
+      next = music_history_step(h, true, false, q->find, q->ctx);
+      if (next < 0) {
+         next = random_index(rq->pos, len, seed);
+         music_history_plan(h, q->path_at(q->ctx, next), next);
+      }
+   } else if (q->shuffle) {
+      return; /* a single track under shuffle: nothing follows */
+   } else if (rq->pos + 1 < len) {
+      next = rq->pos + 1;
+   } else if (q->repeat_all) {
+      next = 0;
+   } else {
+      return;
+   }
+   out->result = MUSIC_NAV_PLAY;
+   out->index = next;
+}
+
+void music_nav_pick(music_history_t *h,
+                    const music_nav_queue_t *q,
+                    const music_nav_request_t *rq,
+                    unsigned int *seed,
+                    music_nav_pick_t *out) {
+   out->result = MUSIC_NAV_NONE;
+   out->index = -1;
+   out->fresh = false;
+   music_history_sync(h, q->epoch);
+   switch (rq->reason) {
+      case MUSIC_NAV_AUTO:
+         pick_auto(h, q, rq, seed, out);
+         break;
+      case MUSIC_NAV_USER:
+         pick_user(h, q, rq, seed, out);
+         break;
+      case MUSIC_NAV_PLAN:
+         pick_plan(h, q, rq, seed, out);
+         break;
    }
 }

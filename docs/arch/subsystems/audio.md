@@ -37,6 +37,11 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
      unlinked once open) or a local open
    - The WebUI stream adds its own sample-rate and channel limits on top
 
+- **music_nav.c/h**: What a player plays next, shared by every player
+   - A play history (back and forward under shuffle), in memory, cleared when the queue is replaced or cleared
+   - `music_nav_pick()`: end of queue, repeat-all/one, failure caps (`MUSIC_NAV_MAX_FAILED`),
+     shuffle; pure, the caller holds its queue's lock
+
 - **music_db.c/h**: Unified music metadata database
    - SQLite-based cache for artist/title/album/genre tags with source tracking
    - Multi-source support (local files + Plex) via `music_source_t` enum

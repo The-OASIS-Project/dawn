@@ -84,21 +84,6 @@ const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT] = {
 /* session_music_state_t is in webui_music_internal.h; the queue types are in
  * audio/music_queue.h */
 
-/**
- * @brief Pick a random queue index different from the current one.
- *
- * Uses rand_r() with the provided seed for thread-safety.
- */
-int webui_music_pick_random_index(int current_index, int queue_length, unsigned int *shuffle_seed) {
-   if (queue_length <= 1)
-      return current_index;
-   int idx;
-   do {
-      idx = rand_r(shuffle_seed) % queue_length;
-   } while (idx == current_index);
-   return idx;
-}
-
 /* =============================================================================
  * Module State
  * ============================================================================= */
